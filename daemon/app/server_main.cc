@@ -838,6 +838,9 @@ int main(int argc, char** argv) {
     if (promo.has_demotion_drain_timeout()) {
       opts.promotion.demotion_drain_timeout = duration_to_millis(promo.demotion_drain_timeout());
     }
+    if (promo.max_concurrency() > 0) {
+      opts.promotion.max_concurrency = promo.max_concurrency();
+    }
   }
 
   if (opts.cpu_shared_memory_enabled) {
@@ -895,7 +898,7 @@ int main(int argc, char** argv) {
     };
     auto st = comm_mgr->initialize_with_config_and_pools(p2p_host, p2p_port, cfg.communicator(), std::move(pools));
     if (!st.ok()) {
-      LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
+      LOG(FATAL) << "Failed to initialize communication engine: " << st.message();
     } else {
       const uint16_t actual_port = comm_mgr->listen_port();
       if (actual_port != 0) {
@@ -993,6 +996,7 @@ int main(int argc, char** argv) {
   daemon_opts.handle_lease_max_mints_per_second = cfg.lifecycle().handle_leases().max_mints_per_second();
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
+  daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);
   const auto& post_seal = cfg.post_seal();
   daemon_opts.post_seal_policy.migrate_views = post_seal.migrate_views();
   daemon_opts.post_seal_policy.migrate_transpose_only = post_seal.migrate_transpose_only();
@@ -1118,6 +1122,7 @@ int main(int argc, char** argv) {
       lopts.advertise_host = cfg.server().advertise().host();
     }
     lopts.p2p_port = p2p_port;
+    lopts.max_concurrency = std::max<uint32_t>(1, daemon_opts.max_concurrency);
     if (cfg.high_availability().has_heartbeat_interval()) {
       const auto& d = cfg.high_availability().heartbeat_interval();
       lopts.heartbeat_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);

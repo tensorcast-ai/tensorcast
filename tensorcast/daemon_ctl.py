@@ -64,6 +64,14 @@ from tensorcast.types import (
 
 logger = init_logger(__name__)
 
+# gRPC unary/stream default max message size is 4 MiB unless explicitly raised.
+# Leave headroom for protobuf envelope fields to avoid borderline RESOURCE_EXHAUSTED.
+_GRPC_DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+_FEED_VIEW_CHUNK_HEADROOM_BYTES = 64 * 1024
+_FEED_VIEW_CHUNK_SAFE_MAX_BYTES = (
+    _GRPC_DEFAULT_MAX_MESSAGE_BYTES - _FEED_VIEW_CHUNK_HEADROOM_BYTES
+)
+
 # -----------------------------------------------------------------------------
 # Client-side diagnostics (process-scoped)
 # -----------------------------------------------------------------------------
@@ -389,24 +397,55 @@ class DaemonCtl:
 
         cur_method = method
         last_err: Exception | None = None
+        total_start = time.monotonic()
         for attempt in range(retries + 1):
+            call_timeout: float | int | None = timeout
+            if timeout is not None:
+                total_budget_s = max(0.0, float(timeout))
+                elapsed_total_s = time.monotonic() - total_start
+                remaining_s = total_budget_s - elapsed_total_s
+                if remaining_s <= 0.0:
+                    logger.warning(
+                        "client_rpc_budget_exhausted method=%s addr=%s attempts=%d total_budget_s=%.3f elapsed_total_s=%.3f",
+                        method_path or resolved_name or "<callable>",
+                        self.server_address,
+                        int(attempt),
+                        total_budget_s,
+                        elapsed_total_s,
+                    )
+                    break
+                call_timeout = max(0.001, remaining_s)
             if attempt > 0 and resolved_name:
                 # Rebind the method on the (potentially) refreshed stub
                 reb = getattr(self.stub, resolved_name, None)
                 if reb is not None:
                     cur_method = reb
+            attempt_start = time.monotonic()
             try:
-                return cur_method(request, timeout=timeout)
+                response = cur_method(request, timeout=call_timeout)
+                elapsed_attempt_s = time.monotonic() - attempt_start
+                if elapsed_attempt_s >= 30.0:
+                    logger.info(
+                        "client_rpc_slow method=%s addr=%s attempt=%d timeout_s=%.3f elapsed_s=%.3f",
+                        method_path or resolved_name or "<callable>",
+                        self.server_address,
+                        int(attempt),
+                        float(call_timeout) if call_timeout is not None else -1.0,
+                        elapsed_attempt_s,
+                    )
+                return response
             except grpc.RpcError as e:  # noqa: BLE001
                 last_err = e
                 code = e.code()
+                elapsed_attempt_s = time.monotonic() - attempt_start
+                elapsed_total_s = time.monotonic() - total_start
                 if span is not None:
                     with suppress(Exception):
                         span.record_exception(e)
                         span.set_attribute("rpc.grpc.status_code", str(code.name))
                         span.set_attribute("retry.attempt", int(attempt))
                 # Retry on transient errors
-                if (
+                should_retry = (
                     code
                     in (
                         grpc.StatusCode.UNAVAILABLE,
@@ -415,13 +454,52 @@ class DaemonCtl:
                         grpc.StatusCode.DEADLINE_EXCEEDED,
                     )
                     and attempt < retries
-                ):
+                )
+                if should_retry:
+                    # Keep the whole unary call bounded by the original timeout
+                    # instead of granting each retry a full timeout window.
+                    if timeout is not None:
+                        total_budget_s = max(0.0, float(timeout))
+                        remaining_after_failure_s = total_budget_s - elapsed_total_s
+                        if remaining_after_failure_s <= 0.0:
+                            logger.warning(
+                                "client_rpc_retry_suppressed method=%s code=%s addr=%s attempt=%d elapsed_attempt_s=%.3f elapsed_total_s=%.3f total_budget_s=%.3f",
+                                method_path or resolved_name or "<callable>",
+                                str(getattr(code, "name", code)),
+                                self.server_address,
+                                int(attempt),
+                                elapsed_attempt_s,
+                                elapsed_total_s,
+                                total_budget_s,
+                            )
+                            break
                     # best-effort method name for logging
                     mname = method_path or resolved_name or "<callable>"
                     _inc_rpc_retry(self.server_address, str(mname), attempt + 1, code)
                     self._refresh_channel()
                     time.sleep(0.05 + random.random() * 0.1)
                     continue
+                expected_business_codes = {
+                    grpc.StatusCode.NOT_FOUND,
+                    grpc.StatusCode.ALREADY_EXISTS,
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    grpc.StatusCode.PERMISSION_DENIED,
+                    grpc.StatusCode.UNAUTHENTICATED,
+                }
+                log_fn = (
+                    logger.debug if code in expected_business_codes else logger.warning
+                )
+                log_fn(
+                    "client_rpc_failed method=%s code=%s addr=%s attempt=%d elapsed_attempt_s=%.3f elapsed_total_s=%.3f retries=%d",
+                    method_path or resolved_name or "<callable>",
+                    str(getattr(code, "name", code)),
+                    self.server_address,
+                    int(attempt),
+                    elapsed_attempt_s,
+                    elapsed_total_s,
+                    int(retries),
+                )
                 break
         assert last_err is not None
         raise last_err
@@ -659,6 +737,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
+        timeout_s: float = 600.0,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         if not isinstance(selection, common_pb2.ArtifactSelection):
@@ -699,7 +778,7 @@ class DaemonCtl:
                     self._unary_call(
                         self.stub_v2.MaterializeIntoTarget,
                         request,
-                        timeout=60,
+                        timeout=float(timeout_s),
                         span=span,
                         retries=1,
                     )
@@ -737,6 +816,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
+        timeout_s: float = 600.0,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         from tensorcast.api.store.mapped_binding import normalize_copy_plan
@@ -808,7 +888,7 @@ class DaemonCtl:
                     self._unary_call(
                         self.stub_v2.MaterializeIntoMappedTarget,
                         request,
-                        timeout=60,
+                        timeout=float(timeout_s),
                         span=span,
                         retries=1,
                     )
@@ -2134,21 +2214,26 @@ class DaemonCtl:
         registration_id: str,
         data: bytes | bytearray | memoryview,
         *,
-        chunk_bytes: int = 4 * 1024 * 1024,
+        chunk_bytes: int = _FEED_VIEW_CHUNK_SAFE_MAX_BYTES,
+        base_offset: int = 0,
     ) -> bool:
         mv = memoryview(data)
+        safe_chunk_bytes = min(
+            int(_FEED_VIEW_CHUNK_SAFE_MAX_BYTES),
+            max(1, int(chunk_bytes)),
+        )
 
         def _iter():
-            offset = 0
-            while offset < mv.nbytes:
-                chunk = mv[offset : offset + chunk_bytes]
+            relative_offset = 0
+            while relative_offset < mv.nbytes:
+                chunk = mv[relative_offset : relative_offset + safe_chunk_bytes]
                 req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
                     registration_id=registration_id
                 )
-                req.view_chunk.view_offset = int(offset)
+                req.view_chunk.view_offset = int(base_offset + relative_offset)
                 req.view_chunk.data = bytes(chunk)
                 yield req
-                offset += len(chunk)
+                relative_offset += len(chunk)
 
         try:
             self._unary_call(

@@ -150,7 +150,8 @@ absl::Status stale_local_route_status(std::string_view artifact_id) {
 }
 
 bool should_retry_source_selection(const absl::Status& status) {
-  return absl::IsUnavailable(status) || absl::IsNotFound(status) || absl::IsFailedPrecondition(status);
+  return absl::IsUnavailable(status) || absl::IsNotFound(status) || absl::IsFailedPrecondition(status) ||
+      absl::IsDeadlineExceeded(status);
 }
 
 std::optional<std::chrono::steady_clock::time_point> resolve_request_deadline(const MaterializeHints& hints) {
@@ -235,12 +236,18 @@ bool should_log_reselection_attempt(int reselection_attempt) {
 absl::Status source_reselection_exhausted_status(
     std::string_view artifact_id,
     int reselection_attempt,
-    const std::optional<std::chrono::steady_clock::time_point>& deadline) {
+    const std::optional<std::chrono::steady_clock::time_point>& deadline,
+    const absl::Status& terminal_status) {
   const std::chrono::milliseconds remaining = remaining_request_budget(deadline);
   if (remaining != std::chrono::milliseconds::max() && remaining < kMinReselectionBudget) {
     return absl::DeadlineExceededError(
         absl::StrCat(
             "source reselection deadline exhausted for artifact_id=", artifact_id, " attempts=", reselection_attempt));
+  }
+  if (absl::IsNotFound(terminal_status)) {
+    return absl::NotFoundError(
+        absl::StrCat(
+            "source reselection budget exhausted for artifact_id=", artifact_id, " attempts=", reselection_attempt));
   }
   return absl::UnavailableError(
       absl::StrCat(
@@ -380,12 +387,35 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     const std::chrono::milliseconds remaining = remaining_request_budget(request_deadline);
     if (remaining != std::chrono::milliseconds::max() && remaining < kMinReselectionBudget) {
       had_transport_request = true;
-      transport_or = source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline);
+      transport_or =
+          source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
       break;
     }
     transport_or = request_transport();
     had_transport_request = true;
     if (!transport_or.ok()) {
+      last_p2p_status = transport_or.status();
+      if (can_retry_source_selection(
+              last_p2p_status, reselection_attempt, request_deadline, max_reselection_attempts)) {
+        reselection_attempt += 1;
+        record_source_reselection_attempt("request_transport_failure", view_id.has_value(), reselection_attempt);
+        if (should_log_reselection_attempt(reselection_attempt)) {
+          const std::chrono::milliseconds retry_remaining = remaining_request_budget(request_deadline);
+          const std::string remaining_label = retry_remaining == std::chrono::milliseconds::max()
+              ? "unbounded"
+              : std::to_string(retry_remaining.count());
+          LOG(WARNING) << "Retrying source selection after transport request failure: artifact_id=" << artifact_id
+                       << " attempt=" << reselection_attempt << "/" << max_reselection_attempts
+                       << " remaining_budget_ms=" << remaining_label << " status=" << last_p2p_status;
+        }
+        continue;
+      }
+      if (should_retry_source_selection(last_p2p_status)) {
+        last_p2p_status =
+            source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
+        record_source_reselection_exhausted("request_transport_failure", view_id.has_value(), reselection_attempt);
+        transport_or = last_p2p_status;
+      }
       break;
     }
     const auto& session = *transport_or;
@@ -415,7 +445,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         }
         continue;
       }
-      last_p2p_status = source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline);
+      last_p2p_status =
+          source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
       record_source_reselection_exhausted("local_route", view_id.has_value(), reselection_attempt);
       break;
     }
@@ -489,7 +520,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       continue;
     }
     if (should_retry_source_selection(last_p2p_status)) {
-      last_p2p_status = source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline);
+      last_p2p_status =
+          source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
       record_source_reselection_exhausted("p2p_load_failure", view_id.has_value(), reselection_attempt);
     }
     break;

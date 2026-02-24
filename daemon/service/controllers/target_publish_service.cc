@@ -2,6 +2,7 @@
 
 #include "daemon/service/controllers/target_publish_service.h"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
@@ -246,7 +247,7 @@ grpc::Status TargetPublishService::publish_target_replica(
       record.canonical_index_json,
       /*encoding=*/"json",
       /*schema_version=*/"v3",
-      /*max_concurrency=*/1,
+      /*max_concurrency=*/std::max<uint32_t>(1, d_.max_concurrency),
       /*verification_json=*/std::nullopt,
       view_id.empty() ? std::nullopt : std::optional<std::string_view>(view_id));
   if (!replica_id_or.ok()) {

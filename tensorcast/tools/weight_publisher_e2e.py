@@ -12,9 +12,9 @@ Scenarios:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
-import shutil
 import sys
 import threading
 import time
@@ -23,13 +23,32 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
-from safetensors.torch import save_file
 
 import tensorcast as tc
 from tensorcast import FallbackOptions
+from tensorcast.api.store import CopyPlanEntry, Range
 from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.runtime import get_context as get_store_context
 from tensorcast.tools.weight_publisher import WeightPublisher, WeightPublisherConfig
+
+SUPPORTED_PAYLOAD_MODES = {"probe", "version_fill", "tp_ranked"}
+SUPPORTED_RECEIVER_APPLY_MODES = {
+    "tensor_dict",
+    "binding_swap",
+    "tp_bind_into_swap",
+    "tp4_bind_into_swap",
+}
+
+TP4_COL_BLOCK_ROWS = 4
+TP4_COL_WIDTH = 8
+TP4_ROW_HEIGHT = 8
+TP4_ROW_BLOCK_COLS = 4
+FLOAT32_BYTES = 4
+TP_RANKED_SOURCE_ELEMS_LIMIT = (1 << 31) - 1
+TP_FULL_VALIDATION_MAX_BYTES = 4 * 1024**3
+TP_SAMPLED_VALIDATION_POINTS = 4096
+RECEIVER_PROGRESS_LOG_INTERVAL_S = 10.0
+RECEIVER_RESOLVE_SLOW_THRESHOLD_MS = 1000.0
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -49,7 +68,9 @@ class PublishEvent:
     key: str
     artifact_id: str
     export_dir: str
+    publish_device: str
     published_at_s: float
+    publish_latency_s: float
 
 
 @dataclass(frozen=True)
@@ -59,6 +80,26 @@ class ReceiveEvent:
     artifact_id: str
     received_at_s: float
     materialize_latency_s: float
+    apply_mode: str
+    apply_operation: str
+    pointer_stable: bool | None
+
+
+class VersionDroppedError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        version: int,
+        key: str,
+        artifact_id: str,
+        message: str,
+        newer_version: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.version = int(version)
+        self.key = str(key)
+        self.artifact_id = str(artifact_id)
+        self.newer_version = int(newer_version) if newer_version is not None else None
 
 
 def _ensure_positive(name: str, value: int) -> int:
@@ -71,6 +112,53 @@ def _ensure_non_negative(name: str, value: int) -> int:
     if value < 0:
         raise ValueError(f"{name} must be >= 0, got {value}")
     return value
+
+
+def _ensure_non_negative_float(name: str, value: float) -> float:
+    if value < 0.0:
+        raise ValueError(f"{name} must be >= 0, got {value}")
+    return float(value)
+
+
+def _read_process_rss_bytes() -> int | None:
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if not line.startswith("VmRSS:"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                return None
+            return int(parts[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def _read_cuda_allocated_bytes(device: str) -> int | None:
+    if not str(device).startswith("cuda:"):
+        return None
+    if not torch.cuda.is_available():
+        return None
+    try:
+        index = int(str(device).split(":", 1)[1])
+        return int(torch.cuda.memory_allocated(index))
+    except Exception:
+        return None
+
+
+def _publish_memory_log(*, stage: str, version: int, publish_device: str) -> None:
+    rss_bytes = _read_process_rss_bytes()
+    cuda_bytes = _read_cuda_allocated_bytes(publish_device)
+    tokens = [
+        "[publisher][mem]",
+        f"stage={stage}",
+        f"version={version}",
+    ]
+    if rss_bytes is not None:
+        tokens.append(f"rss_gib={float(rss_bytes) / float(1024**3):.2f}")
+    if cuda_bytes is not None:
+        tokens.append(f"cuda_alloc_gib={float(cuda_bytes) / float(1024**3):.2f}")
+    print(" ".join(tokens), flush=True)
 
 
 def _build_key(*, model_name: str, key_template: str, version: int) -> str:
@@ -92,15 +180,179 @@ def _materialization_device(requested: str) -> str:
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
-def _prepare_export_dir(
+def _publisher_device(requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+        return "cpu"
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def _normalize_payload_mode(payload_mode: str) -> str:
+    mode = str(payload_mode).strip()
+    if mode not in SUPPORTED_PAYLOAD_MODES:
+        raise ValueError(
+            f"unsupported payload_mode={mode!r}, "
+            f"allowed={sorted(SUPPORTED_PAYLOAD_MODES)}"
+        )
+    return mode
+
+
+def _tp_rank_value(*, version: int, rank: int) -> float:
+    return float(version) + (float(rank) / 10.0)
+
+
+def _normalize_tp_total_bytes(tp_total_bytes: int) -> int:
+    value = int(tp_total_bytes)
+    if value < 0:
+        raise ValueError(f"tp_total_bytes must be >= 0, got {value}")
+    return value
+
+
+def _tp_ranked_chunk_elems(
     *,
-    run_root: Path,
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> list[int]:
+    total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+    if total_bytes == 0:
+        return []
+    bytes_per_rank_elem = FLOAT32_BYTES * 2 * int(tp_world_size)
+    if total_bytes % bytes_per_rank_elem != 0:
+        raise ValueError(
+            "tp_total_bytes must be divisible by "
+            f"{bytes_per_rank_elem} for tp_world_size={tp_world_size}, got {total_bytes}"
+        )
+    total_rank_elems = total_bytes // bytes_per_rank_elem
+    max_rank_elems_per_chunk = TP_RANKED_SOURCE_ELEMS_LIMIT // int(tp_world_size)
+    if max_rank_elems_per_chunk <= 0:
+        raise ValueError(
+            f"invalid tp_world_size for chunk planning: tp_world_size={tp_world_size}"
+        )
+    chunks: list[int] = []
+    remaining = int(total_rank_elems)
+    while remaining > 0:
+        chunk = min(remaining, max_rank_elems_per_chunk)
+        chunks.append(int(chunk))
+        remaining -= int(chunk)
+    return chunks
+
+
+def _tp_col_tensor_name(chunk_index: int) -> str:
+    return f"tp_col_weight_{chunk_index}"
+
+
+def _tp_row_tensor_name(chunk_index: int) -> str:
+    return f"tp_row_weight_{chunk_index}"
+
+
+def _tp_rank_col_target_name(chunk_index: int) -> str:
+    return f"rank_col_weight_{chunk_index}"
+
+
+def _tp_rank_row_target_name(chunk_index: int) -> str:
+    return f"rank_row_weight_{chunk_index}"
+
+
+def _build_tp_ranked_publish_tensors(
+    *,
     version: int,
-) -> Path:
-    export_dir = run_root / "exports" / f"v{version:05d}"
-    if export_dir.exists():
-        shutil.rmtree(export_dir)
-    export_dir.mkdir(parents=True, exist_ok=True)
+    device: str,
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> dict[str, torch.Tensor]:
+    _ensure_positive("tp_world_size", tp_world_size)
+    normalized_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+    if normalized_total_bytes > 0:
+        tensors: dict[str, torch.Tensor] = {}
+        chunk_elems = _tp_ranked_chunk_elems(
+            tp_world_size=tp_world_size,
+            tp_total_bytes=normalized_total_bytes,
+        )
+        for chunk_index, rank_block_elems in enumerate(chunk_elems):
+            col_name = _tp_col_tensor_name(chunk_index)
+            row_name = _tp_row_tensor_name(chunk_index)
+            tp_col_weight = torch.empty(
+                (tp_world_size, rank_block_elems),
+                dtype=torch.float32,
+                device=device,
+            )
+            tp_row_weight = torch.empty(
+                (1, tp_world_size * rank_block_elems),
+                dtype=torch.float32,
+                device=device,
+            )
+            for rank in range(tp_world_size):
+                expected = _tp_rank_value(version=version, rank=rank)
+                row_start = rank * rank_block_elems
+                row_end = row_start + rank_block_elems
+                tp_col_weight[rank : rank + 1, :].fill_(expected)
+                tp_row_weight[:, row_start:row_end].fill_(expected)
+            tensors[col_name] = tp_col_weight
+            tensors[row_name] = tp_row_weight
+        return tensors
+
+    tp_col_weight = torch.empty(
+        (tp_world_size * TP4_COL_BLOCK_ROWS, TP4_COL_WIDTH),
+        dtype=torch.float32,
+        device=device,
+    )
+    tp_row_weight = torch.empty(
+        (TP4_ROW_HEIGHT, tp_world_size * TP4_ROW_BLOCK_COLS),
+        dtype=torch.float32,
+        device=device,
+    )
+    for rank in range(tp_world_size):
+        expected = _tp_rank_value(version=version, rank=rank)
+        col_start = rank * TP4_COL_BLOCK_ROWS
+        col_end = col_start + TP4_COL_BLOCK_ROWS
+        row_start = rank * TP4_ROW_BLOCK_COLS
+        row_end = row_start + TP4_ROW_BLOCK_COLS
+        tp_col_weight[col_start:col_end, :].fill_(expected)
+        tp_row_weight[:, row_start:row_end].fill_(expected)
+    return {
+        "tp_col_weight": tp_col_weight,
+        "tp_row_weight": tp_row_weight,
+    }
+
+
+def _build_publish_tensors(
+    *,
+    version: int,
+    device: str,
+    payload_mode: str,
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> dict[str, torch.Tensor]:
+    mode = _normalize_payload_mode(payload_mode)
+    if mode == "tp_ranked":
+        return _build_tp_ranked_publish_tensors(
+            version=version,
+            device=device,
+            tp_world_size=tp_world_size,
+            tp_total_bytes=tp_total_bytes,
+        )
+    if mode == "version_fill":
+        return {
+            "version_marker": torch.full(
+                (1,),
+                int(version),
+                dtype=torch.int64,
+                device=device,
+            ),
+            "weight_probe": torch.full(
+                (4, 4),
+                float(version),
+                dtype=torch.float32,
+                device=device,
+            ),
+            "rolling_checksum": torch.full(
+                (3,),
+                int(version),
+                dtype=torch.int64,
+                device=device,
+            ),
+        }
 
     version_marker = torch.tensor([version], dtype=torch.int64)
     weight_probe = torch.arange(16, dtype=torch.float32).reshape(4, 4) + float(version)
@@ -110,23 +362,428 @@ def _prepare_export_dir(
         [checksum_seed, checksum_seed + 1, checksum_seed + 2],
         dtype=torch.int64,
     )
+    return {
+        "version_marker": version_marker.to(device=device),
+        "weight_probe": weight_probe.to(device=device),
+        "rolling_checksum": rolling_checksum.to(device=device),
+    }
 
-    save_file(
-        {
-            "version_marker": version_marker,
-            "weight_probe": weight_probe,
-            "rolling_checksum": rolling_checksum,
-        },
-        str(export_dir / "model.safetensors"),
+
+def _assert_tensor_all_equals(
+    *,
+    name: str,
+    tensor: torch.Tensor,
+    expected_int: int,
+    expected_float: float,
+) -> None:
+    cpu_tensor = tensor.detach().cpu()
+    if cpu_tensor.numel() == 0:
+        raise AssertionError(f"{name} is empty")
+    if cpu_tensor.dtype.is_floating_point:
+        expected = torch.tensor(expected_float, dtype=cpu_tensor.dtype)
+    else:
+        expected = torch.tensor(expected_int, dtype=cpu_tensor.dtype)
+    if bool(torch.all(cpu_tensor == expected).item()):
+        return
+    first = cpu_tensor.reshape(-1)[0].item()
+    raise AssertionError(
+        f"{name} contains unexpected value: expected={expected.item()}, actual_first={first}"
     )
-    return export_dir
 
 
-def _validate_payload(*, version: int, tensors: dict[str, torch.Tensor]) -> None:
+def _assert_tensor_allclose_scalar(
+    *,
+    name: str,
+    tensor: torch.Tensor,
+    expected: float,
+    atol: float = 1e-6,
+    rtol: float = 1e-6,
+) -> None:
+    detached = tensor.detach()
+    if detached.numel() == 0:
+        raise AssertionError(f"{name} is empty")
+    expected_tensor = torch.tensor(
+        float(expected),
+        dtype=detached.dtype,
+        device=detached.device,
+    )
+    if bool(torch.allclose(detached, expected_tensor, atol=atol, rtol=rtol)):
+        return
+    actual = float(detached.reshape(-1)[0].item())
+    raise AssertionError(
+        f"{name} scalar mismatch: expected={expected}, actual_first={actual}"
+    )
+
+
+def _build_sample_indices(
+    *,
+    total: int,
+    points: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if total <= 0:
+        raise ValueError(f"total must be > 0, got {total}")
+    if points <= 0:
+        raise ValueError(f"points must be > 0, got {points}")
+    if points == 1:
+        return torch.zeros((1,), dtype=torch.long, device=device)
+    # Use integer math to avoid float rounding drift on large tensors.
+    base = torch.arange(points, dtype=torch.long, device=device)
+    return (base * (total - 1)) // (points - 1)
+
+
+def _assert_tensor_sampled_allclose_scalar(
+    *,
+    name: str,
+    tensor: torch.Tensor,
+    expected: float,
+    sample_points: int = TP_SAMPLED_VALIDATION_POINTS,
+    atol: float = 1e-6,
+    rtol: float = 1e-6,
+) -> None:
+    detached = tensor.detach()
+    if detached.numel() == 0:
+        raise AssertionError(f"{name} is empty")
+    flat = detached.reshape(-1)
+    total = int(flat.numel())
+    points = min(total, max(1, int(sample_points)))
+    if points >= total:
+        _assert_tensor_allclose_scalar(
+            name=name,
+            tensor=detached,
+            expected=expected,
+            atol=atol,
+            rtol=rtol,
+        )
+        return
+    indices = _build_sample_indices(total=total, points=points, device=flat.device)
+    sampled = flat.index_select(0, indices)
+    expected_tensor = torch.tensor(
+        float(expected),
+        dtype=sampled.dtype,
+        device=sampled.device,
+    )
+    if bool(torch.allclose(sampled, expected_tensor, atol=atol, rtol=rtol)):
+        return
+    actual = float(sampled.reshape(-1)[0].item())
+    raise AssertionError(
+        f"{name} sampled scalar mismatch: expected={expected}, actual_first_sample={actual}"
+    )
+
+
+def _validate_tp_ranked_payload(
+    *,
+    version: int,
+    tensors: dict[str, torch.Tensor],
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> None:
+    normalized_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+    if normalized_total_bytes > 0:
+        chunk_elems = _tp_ranked_chunk_elems(
+            tp_world_size=tp_world_size,
+            tp_total_bytes=normalized_total_bytes,
+        )
+        expected = {
+            name
+            for index in range(len(chunk_elems))
+            for name in (_tp_col_tensor_name(index), _tp_row_tensor_name(index))
+        }
+        missing = expected - set(tensors)
+        if missing:
+            raise AssertionError(
+                f"missing tensors in tp_ranked payload: {sorted(missing)}"
+            )
+        for chunk_index, rank_block_elems in enumerate(chunk_elems):
+            col_name = _tp_col_tensor_name(chunk_index)
+            row_name = _tp_row_tensor_name(chunk_index)
+            tp_col_weight = tensors[col_name]
+            tp_row_weight = tensors[row_name]
+            expected_col_shape = (tp_world_size, rank_block_elems)
+            expected_row_shape = (1, tp_world_size * rank_block_elems)
+            if tuple(tp_col_weight.shape) != expected_col_shape:
+                raise AssertionError(
+                    f"{col_name} shape mismatch: "
+                    f"expected={expected_col_shape}, actual={tuple(tp_col_weight.shape)}"
+                )
+            if tuple(tp_row_weight.shape) != expected_row_shape:
+                raise AssertionError(
+                    f"{row_name} shape mismatch: "
+                    f"expected={expected_row_shape}, actual={tuple(tp_row_weight.shape)}"
+                )
+            for rank in range(tp_world_size):
+                expected_value = _tp_rank_value(version=version, rank=rank)
+                row_start = rank * rank_block_elems
+                row_end = row_start + rank_block_elems
+                _assert_tensor_allclose_scalar(
+                    name=f"{col_name}[rank={rank}]",
+                    tensor=tp_col_weight[rank : rank + 1, :],
+                    expected=expected_value,
+                )
+                _assert_tensor_allclose_scalar(
+                    name=f"{row_name}[rank={rank}]",
+                    tensor=tp_row_weight[:, row_start:row_end],
+                    expected=expected_value,
+                )
+        return
+
+    expected = {"tp_col_weight", "tp_row_weight"}
+    missing = expected - set(tensors)
+    if missing:
+        raise AssertionError(f"missing tensors in tp_ranked payload: {sorted(missing)}")
+    tp_col_weight = tensors["tp_col_weight"]
+    tp_row_weight = tensors["tp_row_weight"]
+    expected_col_shape = (tp_world_size * TP4_COL_BLOCK_ROWS, TP4_COL_WIDTH)
+    expected_row_shape = (TP4_ROW_HEIGHT, tp_world_size * TP4_ROW_BLOCK_COLS)
+    if tuple(tp_col_weight.shape) != expected_col_shape:
+        raise AssertionError(
+            "tp_col_weight shape mismatch: "
+            f"expected={expected_col_shape}, actual={tuple(tp_col_weight.shape)}"
+        )
+    if tuple(tp_row_weight.shape) != expected_row_shape:
+        raise AssertionError(
+            "tp_row_weight shape mismatch: "
+            f"expected={expected_row_shape}, actual={tuple(tp_row_weight.shape)}"
+        )
+    for rank in range(tp_world_size):
+        expected_value = _tp_rank_value(version=version, rank=rank)
+        col_start = rank * TP4_COL_BLOCK_ROWS
+        col_end = col_start + TP4_COL_BLOCK_ROWS
+        row_start = rank * TP4_ROW_BLOCK_COLS
+        row_end = row_start + TP4_ROW_BLOCK_COLS
+        _assert_tensor_allclose_scalar(
+            name=f"tp_col_weight[rank={rank}]",
+            tensor=tp_col_weight[col_start:col_end, :],
+            expected=expected_value,
+        )
+        _assert_tensor_allclose_scalar(
+            name=f"tp_row_weight[rank={rank}]",
+            tensor=tp_row_weight[:, row_start:row_end],
+            expected=expected_value,
+        )
+
+
+def _build_tp4_rank_copy_plan(
+    *,
+    rank: int,
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> tuple[CopyPlanEntry, ...]:
+    normalized_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+    if normalized_total_bytes > 0:
+        entries: list[CopyPlanEntry] = []
+        chunk_elems = _tp_ranked_chunk_elems(
+            tp_world_size=tp_world_size,
+            tp_total_bytes=normalized_total_bytes,
+        )
+        for chunk_index, rank_block_elems in enumerate(chunk_elems):
+            row_start = rank * rank_block_elems
+            row_end = row_start + rank_block_elems
+            entries.append(
+                CopyPlanEntry(
+                    ckpt_name=_tp_col_tensor_name(chunk_index),
+                    ckpt_range=Range(dim=0, start=rank, end=rank + 1),
+                    dst_name=_tp_rank_col_target_name(chunk_index),
+                    dst_range=Range(dim=0, start=0, end=1),
+                )
+            )
+            entries.append(
+                CopyPlanEntry(
+                    ckpt_name=_tp_row_tensor_name(chunk_index),
+                    ckpt_range=Range(dim=1, start=row_start, end=row_end),
+                    dst_name=_tp_rank_row_target_name(chunk_index),
+                    dst_range=Range(dim=1, start=0, end=rank_block_elems),
+                )
+            )
+        return tuple(entries)
+
+    col_start = rank * TP4_COL_BLOCK_ROWS
+    col_end = col_start + TP4_COL_BLOCK_ROWS
+    row_start = rank * TP4_ROW_BLOCK_COLS
+    row_end = row_start + TP4_ROW_BLOCK_COLS
+    return (
+        CopyPlanEntry(
+            ckpt_name="tp_col_weight",
+            ckpt_range=Range(dim=0, start=col_start, end=col_end),
+            dst_name="rank_col_weight",
+            dst_range=Range(dim=0, start=0, end=TP4_COL_BLOCK_ROWS),
+        ),
+        CopyPlanEntry(
+            ckpt_name="tp_row_weight",
+            ckpt_range=Range(dim=1, start=row_start, end=row_end),
+            dst_name="rank_row_weight",
+            dst_range=Range(dim=1, start=0, end=TP4_ROW_BLOCK_COLS),
+        ),
+    )
+
+
+def _allocate_tp4_rank_targets(
+    *,
+    device: str,
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> dict[str, torch.Tensor]:
+    normalized_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+    if normalized_total_bytes > 0:
+        targets: dict[str, torch.Tensor] = {}
+        chunk_elems = _tp_ranked_chunk_elems(
+            tp_world_size=tp_world_size,
+            tp_total_bytes=normalized_total_bytes,
+        )
+        for chunk_index, rank_block_elems in enumerate(chunk_elems):
+            targets[_tp_rank_col_target_name(chunk_index)] = torch.empty(
+                (1, rank_block_elems),
+                dtype=torch.float32,
+                device=device,
+            )
+            targets[_tp_rank_row_target_name(chunk_index)] = torch.empty(
+                (1, rank_block_elems),
+                dtype=torch.float32,
+                device=device,
+            )
+        return targets
+
+    return {
+        "rank_col_weight": torch.empty(
+            (TP4_COL_BLOCK_ROWS, TP4_COL_WIDTH),
+            dtype=torch.float32,
+            device=device,
+        ),
+        "rank_row_weight": torch.empty(
+            (TP4_ROW_HEIGHT, TP4_ROW_BLOCK_COLS),
+            dtype=torch.float32,
+            device=device,
+        ),
+    }
+
+
+def _validate_tp4_rank_targets(
+    *,
+    version: int,
+    rank: int,
+    tensors: dict[str, torch.Tensor],
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> None:
+    normalized_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+    use_sampled_validation = normalized_total_bytes > TP_FULL_VALIDATION_MAX_BYTES
+    if normalized_total_bytes > 0:
+        chunk_elems = _tp_ranked_chunk_elems(
+            tp_world_size=tp_world_size,
+            tp_total_bytes=normalized_total_bytes,
+        )
+        expected = {
+            name
+            for index in range(len(chunk_elems))
+            for name in (
+                _tp_rank_col_target_name(index),
+                _tp_rank_row_target_name(index),
+            )
+        }
+        missing = expected - set(tensors)
+        if missing:
+            raise AssertionError(f"missing rank tensors: {sorted(missing)}")
+        expected_value = _tp_rank_value(version=version, rank=rank)
+        for chunk_index, rank_block_elems in enumerate(chunk_elems):
+            col_name = _tp_rank_col_target_name(chunk_index)
+            row_name = _tp_rank_row_target_name(chunk_index)
+            col_tensor = tensors[col_name]
+            row_tensor = tensors[row_name]
+            expected_shape = (1, rank_block_elems)
+            if tuple(col_tensor.shape) != expected_shape:
+                raise AssertionError(
+                    f"{col_name} shape mismatch: "
+                    f"expected={expected_shape}, actual={tuple(col_tensor.shape)}"
+                )
+            if tuple(row_tensor.shape) != expected_shape:
+                raise AssertionError(
+                    f"{row_name} shape mismatch: "
+                    f"expected={expected_shape}, actual={tuple(row_tensor.shape)}"
+                )
+            if use_sampled_validation:
+                _assert_tensor_sampled_allclose_scalar(
+                    name=f"{col_name}[rank={rank}]",
+                    tensor=col_tensor,
+                    expected=expected_value,
+                )
+                _assert_tensor_sampled_allclose_scalar(
+                    name=f"{row_name}[rank={rank}]",
+                    tensor=row_tensor,
+                    expected=expected_value,
+                )
+            else:
+                _assert_tensor_allclose_scalar(
+                    name=f"{col_name}[rank={rank}]",
+                    tensor=col_tensor,
+                    expected=expected_value,
+                )
+                _assert_tensor_allclose_scalar(
+                    name=f"{row_name}[rank={rank}]",
+                    tensor=row_tensor,
+                    expected=expected_value,
+                )
+        return
+
+    expected = {"rank_col_weight", "rank_row_weight"}
+    missing = expected - set(tensors)
+    if missing:
+        raise AssertionError(f"missing rank tensors: {sorted(missing)}")
+    expected_value = _tp_rank_value(version=version, rank=rank)
+    _assert_tensor_allclose_scalar(
+        name=f"rank_col_weight[rank={rank}]",
+        tensor=tensors["rank_col_weight"],
+        expected=expected_value,
+    )
+    _assert_tensor_allclose_scalar(
+        name=f"rank_row_weight[rank={rank}]",
+        tensor=tensors["rank_row_weight"],
+        expected=expected_value,
+    )
+
+
+def _validate_payload(
+    *,
+    version: int,
+    tensors: dict[str, torch.Tensor],
+    payload_mode: str,
+    tp_world_size: int,
+    tp_total_bytes: int,
+) -> None:
+    mode = _normalize_payload_mode(payload_mode)
+    if mode == "tp_ranked":
+        _validate_tp_ranked_payload(
+            version=version,
+            tensors=tensors,
+            tp_world_size=tp_world_size,
+            tp_total_bytes=tp_total_bytes,
+        )
+        return
+
     expected = {"version_marker", "weight_probe", "rolling_checksum"}
     missing = expected - set(tensors)
     if missing:
         raise AssertionError(f"missing tensors in payload: {sorted(missing)}")
+
+    if mode == "version_fill":
+        _assert_tensor_all_equals(
+            name="version_marker",
+            tensor=tensors["version_marker"],
+            expected_int=int(version),
+            expected_float=float(version),
+        )
+        _assert_tensor_all_equals(
+            name="weight_probe",
+            tensor=tensors["weight_probe"],
+            expected_int=int(version),
+            expected_float=float(version),
+        )
+        _assert_tensor_all_equals(
+            name="rolling_checksum",
+            tensor=tensors["rolling_checksum"],
+            expected_int=int(version),
+            expected_float=float(version),
+        )
+        return
 
     marker = int(tensors["version_marker"].reshape(-1)[0].cpu().item())
     if marker != version:
@@ -160,21 +817,50 @@ class WeightUpdatePublisher:
         run_root: Path,
         check_poll_interval_s: float,
         check_timeout_s: float,
+        strict_drop_check: bool,
+        payload_mode: str,
+        tp_world_size: int,
+        tp_total_bytes: int,
+        publish_device: str,
     ) -> None:
         self._model_name = model_name
         self._key_template = key_template
         self._run_root = run_root
         self._check_poll_interval_s = check_poll_interval_s
         self._check_timeout_s = check_timeout_s
+        self._strict_drop_check = bool(strict_drop_check)
+        self._publish_device = _publisher_device(str(publish_device))
+        self._check_device = _materialization_device("auto")
+        self._payload_mode = _normalize_payload_mode(payload_mode)
+        self._tp_world_size = _ensure_positive("tp_world_size", tp_world_size)
+        self._tp_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+        if self._tp_total_bytes > 0 and self._payload_mode != "tp_ranked":
+            raise ValueError("tp_total_bytes requires payload_mode=tp_ranked")
+        gc_drain_timeout_s = (
+            120.0
+            if self._payload_mode == "tp_ranked"
+            and self._tp_total_bytes > TP_FULL_VALIDATION_MAX_BYTES
+            else 30.0
+        )
         self._config = WeightPublisherConfig(
             model_name=model_name,
             keep_last=keep_last,
             history_path=str(history_path),
+            policy="pinned",
+            overflow_policy="reject",
             key_template=key_template,
             trigger_reload=False,
             verify_key_mapping=True,
-            from_disk_verify_checksums=True,
             wait_persistence=False,
+            gc_drain_timeout_s=gc_drain_timeout_s,
+            gc_require_drained=True,
+            pre_publish_trim_enabled=(
+                self._payload_mode == "tp_ranked"
+                and self._tp_total_bytes > 0
+                and int(keep_last) > 0
+            ),
+            pre_publish_keep_last=max(0, int(keep_last) - 1),
+            stage_on_gpu=False,
         )
         self._publisher = WeightPublisher(self._config)
 
@@ -202,19 +888,57 @@ class WeightUpdatePublisher:
         version: int,
         events: list[PublishEvent],
     ) -> PublishEvent:
-        export_dir = _prepare_export_dir(run_root=self._run_root, version=version)
         key = _build_key(
             model_name=self._model_name,
             key_template=self._key_template,
             version=version,
         )
-        artifact_id = self._publisher.publish_from_disk(export_dir, version=version)
+        publish_device = self._publish_device
+        _publish_memory_log(
+            stage="before_build",
+            version=version,
+            publish_device=publish_device,
+        )
+        tensors = _build_publish_tensors(
+            version=version,
+            device=publish_device,
+            payload_mode=self._payload_mode,
+            tp_world_size=self._tp_world_size,
+            tp_total_bytes=self._tp_total_bytes,
+        )
+        _publish_memory_log(
+            stage="after_build",
+            version=version,
+            publish_device=publish_device,
+        )
+        publish_start = time.monotonic()
+        artifact_id = self._publisher.publish(tensors, version=version)
+        publish_latency_s = time.monotonic() - publish_start
+        _publish_memory_log(
+            stage="after_publish",
+            version=version,
+            publish_device=publish_device,
+        )
+        # Release publisher-side source tensors before retention checks so
+        # large payloads do not stay resident across GC polling.
+        del tensors
+        if self._tp_total_bytes > TP_FULL_VALIDATION_MAX_BYTES and str(
+            publish_device
+        ).startswith("cpu"):
+            gc.collect()
+        _publish_memory_log(
+            stage="after_source_release",
+            version=version,
+            publish_device=publish_device,
+        )
         event = PublishEvent(
             version=version,
             key=key,
             artifact_id=artifact_id,
-            export_dir=str(export_dir),
+            export_dir=f"in_memory://{publish_device}",
+            publish_device=publish_device,
             published_at_s=time.time(),
+            publish_latency_s=publish_latency_s,
         )
         events.append(event)
         self._verify_retention_window(events=events)
@@ -223,6 +947,7 @@ class WeightUpdatePublisher:
             f"version={version}",
             f"key={key}",
             f"artifact_id={artifact_id}",
+            f"publish_latency_s={publish_latency_s:.3f}",
             flush=True,
         )
         return event
@@ -232,17 +957,28 @@ class WeightUpdatePublisher:
         if keep_last <= 0 or not events:
             return
         kept_versions = {event.version for event in events[-keep_last:]}
+        heavy_materialization_probe = (
+            self._strict_drop_check
+            or self._tp_total_bytes <= TP_FULL_VALIDATION_MAX_BYTES
+            or self._payload_mode != "tp_ranked"
+        )
         for event in events:
             self._wait_key_mapping_state(
                 key=event.key,
                 expected_artifact_id=event.artifact_id,
             )
             expected_materializable = event.version in kept_versions
-            self._wait_materialization_state(
-                key=event.key,
-                version=event.version,
-                expected_materializable=expected_materializable,
-            )
+            if expected_materializable or self._strict_drop_check:
+                if heavy_materialization_probe:
+                    self._wait_materialization_state(
+                        key=event.key,
+                        version=event.version,
+                        expected_materializable=expected_materializable,
+                    )
+                self._wait_artifact_registry_state(
+                    artifact_id=event.artifact_id,
+                    expected_exists=expected_materializable,
+                )
 
     def _probe_artifact_exists(self, artifact_id: str) -> bool:
         try:
@@ -283,16 +1019,22 @@ class WeightUpdatePublisher:
             artifact = resolve_artifact(key=key).with_fallback(
                 self._fallback_for_checks()
             )
-            tensors = artifact.tensor_dict(device="cpu")
-            _validate_payload(version=version, tensors=tensors)
+            tensors = artifact.tensor_dict(device=self._check_device)
+            _validate_payload(
+                version=version,
+                tensors=tensors,
+                payload_mode=self._payload_mode,
+                tp_world_size=self._tp_world_size,
+                tp_total_bytes=self._tp_total_bytes,
+            )
             return True
         except Exception:
             return False
 
     def _fallback_for_checks(self) -> FallbackOptions:
         return FallbackOptions(
-            prefer="auto",
-            allow_p2p=True,
+            prefer="local",
+            allow_p2p=False,
             allow_disk=True,
             verify_checksums=False,
         )
@@ -317,6 +1059,25 @@ class WeightUpdatePublisher:
             f"expected_materializable={expected_materializable}, last_materializable={last_state}"
         )
 
+    def _wait_artifact_registry_state(
+        self,
+        *,
+        artifact_id: str,
+        expected_exists: bool,
+    ) -> None:
+        deadline = time.monotonic() + self._check_timeout_s
+        last_exists: bool | None = None
+        while time.monotonic() < deadline:
+            exists = self._probe_artifact_exists(artifact_id)
+            last_exists = exists
+            if exists == expected_exists:
+                return
+            time.sleep(self._check_poll_interval_s)
+        raise AssertionError(
+            f"artifact registry retention mismatch: artifact_id={artifact_id}, "
+            f"expected_exists={expected_exists}, last_exists={last_exists}"
+        )
+
 
 class WeightUpdateReceiver:
     def __init__(
@@ -328,18 +1089,71 @@ class WeightUpdateReceiver:
         per_version_timeout_s: float,
         fallback_prefer: str,
         materialize_device: str,
+        apply_mode: str,
+        allow_version_skip: bool,
+        payload_mode: str,
+        tp_world_size: int,
+        tp_device_base_index: int,
+        tp_total_bytes: int,
+        tp_materialize_deadline_s: float,
     ) -> None:
         self._model_name = model_name
         self._key_template = key_template
         self._poll_interval_s = poll_interval_s
         self._per_version_timeout_s = per_version_timeout_s
+        fallback_mode = str(fallback_prefer).strip()
+        allow_p2p = fallback_mode in {"auto", "p2p"}
+        allow_disk = fallback_mode in {"auto", "disk", "local"}
         self._fallback = FallbackOptions(
-            prefer=fallback_prefer,  # pyright: ignore[reportArgumentType]
-            allow_p2p=True,
-            allow_disk=True,
+            prefer=fallback_mode,  # pyright: ignore[reportArgumentType]
+            allow_p2p=allow_p2p,
+            allow_disk=allow_disk,
             verify_checksums=False,
         )
         self._materialize_device = _materialization_device(materialize_device)
+        self._apply_mode = str(apply_mode).strip()
+        self._allow_version_skip = bool(allow_version_skip)
+        self._payload_mode = _normalize_payload_mode(payload_mode)
+        self._tp_world_size = _ensure_positive("tp_world_size", tp_world_size)
+        self._tp_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
+        self._tp_materialize_deadline_s = _ensure_non_negative_float(
+            "tp_materialize_deadline_s",
+            float(tp_materialize_deadline_s),
+        )
+        self._tp_device_base_index = _ensure_non_negative(
+            "tp_device_base_index",
+            tp_device_base_index,
+        )
+        if self._tp_total_bytes > 0 and self._payload_mode != "tp_ranked":
+            raise ValueError("tp_total_bytes requires payload_mode=tp_ranked")
+        if self._apply_mode not in SUPPORTED_RECEIVER_APPLY_MODES:
+            raise ValueError(f"unsupported receiver apply mode: {self._apply_mode}")
+        if (
+            self._apply_mode == "binding_swap"
+            and not self._materialize_device.startswith("cuda:")
+        ):
+            raise ValueError("binding_swap mode requires a CUDA materialization device")
+        if self._apply_mode in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
+            if self._apply_mode == "tp4_bind_into_swap" and self._tp_world_size != 4:
+                raise ValueError(
+                    f"tp4_bind_into_swap requires tp_world_size=4, got {self._tp_world_size}"
+                )
+            if self._payload_mode != "tp_ranked":
+                raise ValueError(
+                    f"{self._apply_mode} requires payload_mode=tp_ranked"
+                )
+            if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+                raise ValueError(f"{self._apply_mode} requires real CUDA backend")
+            if not torch.cuda.is_available():
+                raise ValueError(f"{self._apply_mode} requires CUDA devices")
+        self._binding: Any | None = None
+        self._binding_ptrs: dict[str, int] | None = None
+        self._tp_bindings: dict[int, Any] = {}
+        self._tp_binding_ptrs: dict[int, dict[str, int]] = {}
+        self._progress_log_interval_s = RECEIVER_PROGRESS_LOG_INTERVAL_S
+        self._resolve_slow_threshold_ms = RECEIVER_RESOLVE_SLOW_THRESHOLD_MS
+        self._last_resolve_log_state = ""
+        self._last_resolve_log_mono = 0.0
 
     def receive_versions(
         self,
@@ -360,7 +1174,34 @@ class WeightUpdateReceiver:
                 key_template=self._key_template,
                 version=version,
             )
-            event = self._wait_one(version=version, key=key)
+            try:
+                event = self._wait_one(
+                    version=version,
+                    key=key,
+                    max_version=start_version + num_versions - 1,
+                )
+            except VersionDroppedError as dropped:
+                if not self._allow_version_skip:
+                    raise RuntimeError(
+                        "receiver observed dropped version while version skip is disabled: "
+                        f"version={dropped.version}, key={dropped.key}, "
+                        f"artifact_id={dropped.artifact_id}, "
+                        f"newer_version={dropped.newer_version}"
+                    ) from dropped
+                print(
+                    "[receiver] skipped",
+                    f"version={dropped.version}",
+                    f"key={dropped.key}",
+                    f"artifact_id={dropped.artifact_id}",
+                    (
+                        f"newer_version={dropped.newer_version}"
+                        if dropped.newer_version is not None
+                        else "newer_version=n/a"
+                    ),
+                    "reason=version_deregistered",
+                    flush=True,
+                )
+                continue
             if previous_artifact_id == event.artifact_id:
                 raise AssertionError(
                     f"artifact_id reused across versions: version={version}, artifact_id={event.artifact_id}"
@@ -375,38 +1216,624 @@ class WeightUpdateReceiver:
                 f"key={key}",
                 f"artifact_id={event.artifact_id}",
                 f"latency_s={event.materialize_latency_s:.3f}",
+                f"mode={event.apply_mode}",
+                f"op={event.apply_operation}",
+                (
+                    f"pointer_stable={event.pointer_stable}"
+                    if event.pointer_stable is not None
+                    else "pointer_stable=n/a"
+                ),
                 flush=True,
             )
         return events
 
-    def _wait_one(self, *, version: int, key: str) -> ReceiveEvent:
-        deadline = time.monotonic() + self._per_version_timeout_s
+    def _wait_one(self, *, version: int, key: str, max_version: int) -> ReceiveEvent:
+        if self._apply_mode in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
+            return self._wait_one_tp4_binding(
+                version=version,
+                key=key,
+                max_version=max_version,
+            )
+        if self._apply_mode == "binding_swap":
+            return self._wait_one_binding(
+                version=version, key=key, max_version=max_version
+            )
+        return self._wait_one_tensor_dict(
+            version=version, key=key, max_version=max_version
+        )
+
+    def _maybe_log_resolve(
+        self,
+        *,
+        key: str,
+        status: str,
+        latency_ms: float,
+        artifact_id: str | None,
+        error_detail: str | None,
+    ) -> None:
+        now = time.monotonic()
+        should_emit = (
+            status != self._last_resolve_log_state
+            or latency_ms >= self._resolve_slow_threshold_ms
+            or (now - self._last_resolve_log_mono) >= self._progress_log_interval_s
+        )
+        if not should_emit:
+            return
+        tokens = [
+            "[receiver][resolve]",
+            f"status={status}",
+            f"key={key}",
+            f"latency_ms={latency_ms:.1f}",
+        ]
+        if artifact_id:
+            tokens.append(f"artifact_id={artifact_id}")
+        if error_detail:
+            compact_error = str(error_detail).replace("\n", " ").strip()
+            if len(compact_error) > 200:
+                compact_error = compact_error[:200] + "..."
+            tokens.append(f"error={compact_error}")
+        print(" ".join(tokens), flush=True)
+        self._last_resolve_log_state = status
+        self._last_resolve_log_mono = now
+
+    def _maybe_log_wait_progress(
+        self,
+        *,
+        mode: str,
+        version: int,
+        key: str,
+        start_monotonic: float,
+        deadline: float,
+        last_state: str,
+        last_error: Exception | None,
+        next_log_at: float,
+    ) -> float:
+        now = time.monotonic()
+        if now < next_log_at:
+            return next_log_at
+        error_text = "none"
+        if last_error is not None:
+            compact_error = str(last_error).replace("\n", " ").strip()
+            if len(compact_error) > 200:
+                compact_error = compact_error[:200] + "..."
+            error_text = f"{type(last_error).__name__}:{compact_error}"
+        print(
+            "[receiver][wait]",
+            f"mode={mode}",
+            f"version={version}",
+            f"key={key}",
+            f"state={last_state}",
+            f"elapsed_s={now - start_monotonic:.1f}",
+            f"remaining_s={max(0.0, deadline - now):.1f}",
+            f"last_error={error_text}",
+            flush=True,
+        )
+        return now + self._progress_log_interval_s
+
+    def _resolve_artifact_for_key(self, *, key: str) -> Any | None:
+        artifact_id = self._resolve_artifact_id_for_key(key=key)
+        if not artifact_id:
+            return None
+        return resolve_artifact(artifact_id=artifact_id).with_fallback(self._fallback)
+
+    def _resolve_artifact_id_for_key(self, *, key: str) -> str | None:
+        started = time.monotonic()
+        try:
+            mapping = get_store_context().ensure_client().resolve_key_mapping(key)
+            artifact_id = str(mapping.artifact_id or "").strip()
+            latency_ms = (time.monotonic() - started) * 1000.0
+            if not artifact_id:
+                self._maybe_log_resolve(
+                    key=key,
+                    status="empty",
+                    latency_ms=latency_ms,
+                    artifact_id=None,
+                    error_detail=None,
+                )
+                return None
+            self._maybe_log_resolve(
+                key=key,
+                status="ok",
+                latency_ms=latency_ms,
+                artifact_id=artifact_id,
+                error_detail=None,
+            )
+            return artifact_id
+        except Exception as exc:  # noqa: BLE001
+            latency_ms = (time.monotonic() - started) * 1000.0
+            if _is_not_found_error(exc):
+                self._maybe_log_resolve(
+                    key=key,
+                    status="not_found",
+                    latency_ms=latency_ms,
+                    artifact_id=None,
+                    error_detail=str(exc),
+                )
+                return None
+            self._maybe_log_resolve(
+                key=key,
+                status="error",
+                latency_ms=latency_ms,
+                artifact_id=None,
+                error_detail=f"{type(exc).__name__}:{exc}",
+            )
+            raise
+
+    def _probe_artifact_exists(self, *, artifact_id: str) -> bool:
+        try:
+            return bool(resolve_artifact(artifact_id=artifact_id).exists())
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found_error(exc):
+                return False
+            raise
+
+    def _probe_version_materializable(self, *, version: int) -> bool:
+        key = _build_key(
+            model_name=self._model_name,
+            key_template=self._key_template,
+            version=version,
+        )
+        try:
+            artifact = self._resolve_artifact_for_key(key=key)
+            if artifact is None:
+                return False
+            tensors = artifact.tensor_dict(device=self._materialize_device)
+            _validate_payload(
+                version=version,
+                tensors=tensors,
+                payload_mode=self._payload_mode,
+                tp_world_size=self._tp_world_size,
+                tp_total_bytes=self._tp_total_bytes,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _find_newer_materializable_version(
+        self,
+        *,
+        version: int,
+        max_version: int,
+    ) -> int | None:
+        for candidate in range(version + 1, max_version + 1):
+            if self._probe_version_materializable(version=candidate):
+                return candidate
+        return None
+
+    def _wait_one_tensor_dict(
+        self,
+        *,
+        version: int,
+        key: str,
+        max_version: int,
+    ) -> ReceiveEvent:
+        start_monotonic = time.monotonic()
+        deadline = start_monotonic + self._per_version_timeout_s
         last_error: Exception | None = None
+        last_state = "key_mapping_absent"
+        next_log_at = start_monotonic
 
         while time.monotonic() < deadline:
             try:
-                artifact = resolve_artifact(key=key).with_fallback(self._fallback)
-                if not artifact.exists():
+                artifact = self._resolve_artifact_for_key(key=key)
+                if artifact is None:
+                    last_state = "key_mapping_absent"
+                    next_log_at = self._maybe_log_wait_progress(
+                        mode="tensor_dict",
+                        version=version,
+                        key=key,
+                        start_monotonic=start_monotonic,
+                        deadline=deadline,
+                        last_state=last_state,
+                        last_error=last_error,
+                        next_log_at=next_log_at,
+                    )
                     time.sleep(self._poll_interval_s)
                     continue
                 start = time.monotonic()
                 tensors = artifact.tensor_dict(device=self._materialize_device)
                 latency_s = time.monotonic() - start
-                _validate_payload(version=version, tensors=tensors)
+                _validate_payload(
+                    version=version,
+                    tensors=tensors,
+                    payload_mode=self._payload_mode,
+                    tp_world_size=self._tp_world_size,
+                    tp_total_bytes=self._tp_total_bytes,
+                )
                 return ReceiveEvent(
                     version=version,
                     key=key,
                     artifact_id=artifact.artifact_id,
                     received_at_s=time.time(),
                     materialize_latency_s=latency_s,
+                    apply_mode="tensor_dict",
+                    apply_operation="materialize",
+                    pointer_stable=None,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                if _is_not_found_error(exc):
+                    artifact_id = self._resolve_artifact_id_for_key(key=key)
+                    newer_version = self._find_newer_materializable_version(
+                        version=version,
+                        max_version=max_version,
+                    )
+                    if artifact_id and newer_version is not None:
+                        raise VersionDroppedError(
+                            version=version,
+                            key=key,
+                            artifact_id=artifact_id,
+                            message=(
+                                "target version already deregistered before receiver applied it"
+                            ),
+                            newer_version=newer_version,
+                        ) from exc
+                last_state = "materialize_failed"
+                next_log_at = self._maybe_log_wait_progress(
+                    mode="tensor_dict",
+                    version=version,
+                    key=key,
+                    start_monotonic=start_monotonic,
+                    deadline=deadline,
+                    last_state=last_state,
+                    last_error=last_error,
+                    next_log_at=next_log_at,
+                )
                 time.sleep(self._poll_interval_s)
 
         raise TimeoutError(
-            f"receiver timeout for version={version}, key={key}, last_error={last_error}"
+            "receiver timeout "
+            f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
         )
+
+    def _wait_one_binding(
+        self,
+        *,
+        version: int,
+        key: str,
+        max_version: int,
+    ) -> ReceiveEvent:
+        start_monotonic = time.monotonic()
+        deadline = start_monotonic + self._per_version_timeout_s
+        last_error: Exception | None = None
+        last_state = "key_mapping_absent"
+        next_log_at = start_monotonic
+
+        while time.monotonic() < deadline:
+            try:
+                artifact = self._resolve_artifact_for_key(key=key)
+                if artifact is None:
+                    last_state = "key_mapping_absent"
+                    next_log_at = self._maybe_log_wait_progress(
+                        mode="binding_swap",
+                        version=version,
+                        key=key,
+                        start_monotonic=start_monotonic,
+                        deadline=deadline,
+                        last_state=last_state,
+                        last_error=last_error,
+                        next_log_at=next_log_at,
+                    )
+                    time.sleep(self._poll_interval_s)
+                    continue
+                start = time.monotonic()
+                pointer_stable: bool | None = None
+                apply_operation = "swap"
+                if self._binding is None:
+                    self._binding = artifact.bind(
+                        device=self._materialize_device,
+                        packing="byte_space",
+                    )
+                    self._binding_ptrs = {
+                        name: tensor.data_ptr()
+                        for name, tensor in self._binding.tensors.items()
+                    }
+                    pointer_stable = True
+                    apply_operation = "bind"
+                else:
+                    if self._binding_ptrs is None:
+                        raise AssertionError("binding pointer baseline is missing")
+                    self._binding.swap(artifact)
+                    latest_ptrs = {
+                        name: tensor.data_ptr()
+                        for name, tensor in self._binding.tensors.items()
+                    }
+                    if set(latest_ptrs) != set(self._binding_ptrs):
+                        raise AssertionError(
+                            "binding tensor set changed across swap: "
+                            f"before={sorted(self._binding_ptrs.keys())}, "
+                            f"after={sorted(latest_ptrs.keys())}"
+                        )
+                    pointer_stable = True
+                    for name, expected_ptr in self._binding_ptrs.items():
+                        actual_ptr = latest_ptrs.get(name)
+                        if actual_ptr != expected_ptr:
+                            pointer_stable = False
+                            raise AssertionError(
+                                "binding pointer changed across swap: "
+                                f"name={name}, before={expected_ptr}, after={actual_ptr}"
+                            )
+                latency_s = time.monotonic() - start
+                active_tensors = dict(self._binding.tensors)
+                _validate_payload(
+                    version=version,
+                    tensors=active_tensors,
+                    payload_mode=self._payload_mode,
+                    tp_world_size=self._tp_world_size,
+                    tp_total_bytes=self._tp_total_bytes,
+                )
+                return ReceiveEvent(
+                    version=version,
+                    key=key,
+                    artifact_id=str(self._binding.artifact_id),
+                    received_at_s=time.time(),
+                    materialize_latency_s=latency_s,
+                    apply_mode="binding_swap",
+                    apply_operation=apply_operation,
+                    pointer_stable=pointer_stable,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if _is_not_found_error(exc):
+                    artifact_id = self._resolve_artifact_id_for_key(key=key)
+                    newer_version = self._find_newer_materializable_version(
+                        version=version,
+                        max_version=max_version,
+                    )
+                    if artifact_id and newer_version is not None:
+                        raise VersionDroppedError(
+                            version=version,
+                            key=key,
+                            artifact_id=artifact_id,
+                            message=(
+                                "target version already deregistered before receiver applied it"
+                            ),
+                            newer_version=newer_version,
+                        ) from exc
+                last_state = "binding_apply_failed"
+                next_log_at = self._maybe_log_wait_progress(
+                    mode="binding_swap",
+                    version=version,
+                    key=key,
+                    start_monotonic=start_monotonic,
+                    deadline=deadline,
+                    last_state=last_state,
+                    last_error=last_error,
+                    next_log_at=next_log_at,
+                )
+                time.sleep(self._poll_interval_s)
+
+        raise TimeoutError(
+            "receiver timeout for binding mode "
+            f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
+        )
+
+    def _tp_rank_device(self, rank: int) -> str:
+        return f"cuda:{self._tp_device_base_index + rank}"
+
+    def _make_tp_materialize_ctx(self, *, remaining_s: float) -> Any | None:
+        if self._tp_materialize_deadline_s <= 0.0:
+            return None
+        bounded_s = min(self._tp_materialize_deadline_s, max(0.001, float(remaining_s)))
+        return tc.context(
+            qos="interactive",
+            deadline_ms=max(1, int(bounded_s * 1000.0)),
+        )
+
+    def _apply_tp4_rank(
+        self,
+        *,
+        version: int,
+        rank: int,
+        artifact: Any,
+        ctx: Any | None,
+    ) -> tuple[str, bool]:
+        binding = self._tp_bindings.get(rank)
+        if binding is None:
+            target_tensors = _allocate_tp4_rank_targets(
+                device=self._tp_rank_device(rank),
+                tp_world_size=self._tp_world_size,
+                tp_total_bytes=self._tp_total_bytes,
+            )
+            bind_kwargs: dict[str, Any] = {}
+            if ctx is not None:
+                bind_kwargs["ctx"] = ctx
+            binding = artifact.bind_into(
+                target_tensors=target_tensors,
+                mapping=_build_tp4_rank_copy_plan(
+                    rank=rank,
+                    tp_world_size=self._tp_world_size,
+                    tp_total_bytes=self._tp_total_bytes,
+                ),
+                packing="byte_space",
+                **bind_kwargs,
+            )
+            self._tp_bindings[rank] = binding
+            self._tp_binding_ptrs[rank] = {
+                name: tensor.data_ptr() for name, tensor in binding.tensors.items()
+            }
+            _validate_tp4_rank_targets(
+                version=version,
+                rank=rank,
+                tensors=dict(binding.tensors),
+                tp_world_size=self._tp_world_size,
+                tp_total_bytes=self._tp_total_bytes,
+            )
+            return ("bind_into", True)
+
+        pointer_baseline = self._tp_binding_ptrs.get(rank)
+        if pointer_baseline is None:
+            raise AssertionError(f"missing pointer baseline for rank={rank}")
+        if ctx is None:
+            binding.swap(artifact)
+        else:
+            binding.swap(artifact, ctx=ctx)
+        latest_ptrs = {
+            name: tensor.data_ptr() for name, tensor in binding.tensors.items()
+        }
+        if set(latest_ptrs) != set(pointer_baseline):
+            raise AssertionError(
+                "tp4 tensor set changed across swap: "
+                f"rank={rank}, before={sorted(pointer_baseline.keys())}, "
+                f"after={sorted(latest_ptrs.keys())}"
+            )
+        for name, expected_ptr in pointer_baseline.items():
+            actual_ptr = latest_ptrs.get(name)
+            if actual_ptr != expected_ptr:
+                raise AssertionError(
+                    "tp4 pointer changed across swap: "
+                    f"rank={rank}, name={name}, before={expected_ptr}, after={actual_ptr}"
+                )
+        _validate_tp4_rank_targets(
+            version=version,
+            rank=rank,
+            tensors=dict(binding.tensors),
+            tp_world_size=self._tp_world_size,
+            tp_total_bytes=self._tp_total_bytes,
+        )
+        return ("swap", True)
+
+    def _wait_one_tp4_binding(
+        self,
+        *,
+        version: int,
+        key: str,
+        max_version: int,
+    ) -> ReceiveEvent:
+        start_monotonic = time.monotonic()
+        deadline = start_monotonic + self._per_version_timeout_s
+        last_error: Exception | None = None
+        last_state = "key_mapping_absent"
+        next_log_at = start_monotonic
+
+        while time.monotonic() < deadline:
+            try:
+                artifact = self._resolve_artifact_for_key(key=key)
+                if artifact is None:
+                    last_state = "key_mapping_absent"
+                    next_log_at = self._maybe_log_wait_progress(
+                        mode=self._apply_mode,
+                        version=version,
+                        key=key,
+                        start_monotonic=start_monotonic,
+                        deadline=deadline,
+                        last_state=last_state,
+                        last_error=last_error,
+                        next_log_at=next_log_at,
+                    )
+                    time.sleep(self._poll_interval_s)
+                    continue
+                start = time.monotonic()
+                pointer_stable = True
+                operation = "swap"
+                artifact_id: str | None = None
+                for rank in range(self._tp_world_size):
+                    rank_start = time.monotonic()
+                    rank_remaining_s = max(0.001, deadline - time.monotonic())
+                    rank_ctx = self._make_tp_materialize_ctx(
+                        remaining_s=rank_remaining_s
+                    )
+                    print(
+                        "[receiver][tp]",
+                        f"version={version}",
+                        f"rank={rank}",
+                        f"device={self._tp_rank_device(rank)}",
+                        "phase=start",
+                        f"deadline_s={rank_remaining_s:.3f}",
+                        flush=True,
+                    )
+                    rank_operation, rank_pointer_stable = self._apply_tp4_rank(
+                        version=version,
+                        rank=rank,
+                        artifact=artifact,
+                        ctx=rank_ctx,
+                    )
+                    if rank_operation == "bind_into":
+                        operation = "bind_into"
+                    if not rank_pointer_stable:
+                        pointer_stable = False
+                    binding = self._tp_bindings.get(rank)
+                    if binding is None:
+                        raise AssertionError(f"tp4 binding missing for rank={rank}")
+                    current_artifact_id = str(binding.artifact_id)
+                    if artifact_id is None:
+                        artifact_id = current_artifact_id
+                    elif artifact_id != current_artifact_id:
+                        raise AssertionError(
+                            "tp4 ranks resolved different artifact ids: "
+                            f"first={artifact_id}, rank={rank}, current={current_artifact_id}"
+                        )
+                    print(
+                        "[receiver][tp]",
+                        f"version={version}",
+                        f"rank={rank}",
+                        f"device={self._tp_rank_device(rank)}",
+                        "phase=done",
+                        f"op={rank_operation}",
+                        f"latency_ms={(time.monotonic() - rank_start) * 1000.0:.1f}",
+                        f"pointer_stable={rank_pointer_stable}",
+                        flush=True,
+                    )
+                latency_s = time.monotonic() - start
+                if artifact_id is None:
+                    raise AssertionError("tp4 artifact_id is empty after apply")
+                return ReceiveEvent(
+                    version=version,
+                    key=key,
+                    artifact_id=artifact_id,
+                    received_at_s=time.time(),
+                    materialize_latency_s=latency_s,
+                    apply_mode=self._apply_mode,
+                    apply_operation=operation,
+                    pointer_stable=pointer_stable,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if _is_not_found_error(exc):
+                    artifact_id = self._resolve_artifact_id_for_key(key=key)
+                    newer_version = self._find_newer_materializable_version(
+                        version=version,
+                        max_version=max_version,
+                    )
+                    if artifact_id and newer_version is not None:
+                        raise VersionDroppedError(
+                            version=version,
+                            key=key,
+                            artifact_id=artifact_id,
+                            message=(
+                                "target version already deregistered before receiver applied it"
+                            ),
+                            newer_version=newer_version,
+                        ) from exc
+                last_state = "tp_binding_apply_failed"
+                next_log_at = self._maybe_log_wait_progress(
+                    mode=self._apply_mode,
+                    version=version,
+                    key=key,
+                    start_monotonic=start_monotonic,
+                    deadline=deadline,
+                    last_state=last_state,
+                    last_error=last_error,
+                    next_log_at=next_log_at,
+                )
+                time.sleep(self._poll_interval_s)
+
+        raise TimeoutError(
+            "receiver timeout for tp binding mode "
+            f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
+        )
+
+    def close(self) -> None:
+        binding = self._binding
+        self._binding = None
+        self._binding_ptrs = None
+        if binding is not None:
+            binding.close()
+        tp_bindings = list(self._tp_bindings.values())
+        self._tp_bindings.clear()
+        self._tp_binding_ptrs.clear()
+        for rank_binding in tp_bindings:
+            rank_binding.close()
 
 
 def _init_tensorcast(args: argparse.Namespace) -> None:
@@ -468,6 +1895,29 @@ def _write_summary(path: Path | None, payload: dict[str, Any]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _write_ready_file(path: str | None, payload: dict[str, Any]) -> None:
+    if not path:
+        return
+    ready_path = Path(path).expanduser().resolve()
+    ready_path.parent.mkdir(parents=True, exist_ok=True)
+    ready_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _maybe_hold_after_finish(args: argparse.Namespace, *, mode: str) -> None:
+    hold_s = max(0.0, float(args.hold_after_finish_s))
+    if hold_s <= 0:
+        return
+    print(
+        f"[{mode}] hold_after_finish_s={hold_s:.1f}, "
+        "keep runtime alive for external probes",
+        flush=True,
+    )
+    time.sleep(hold_s)
+
+
 def _build_publisher_runner(
     args: argparse.Namespace,
     *,
@@ -487,6 +1937,11 @@ def _build_publisher_runner(
         run_root=run_root,
         check_poll_interval_s=float(args.poll_interval_s),
         check_timeout_s=float(args.retention_timeout_s),
+        strict_drop_check=bool(args.strict_retention_drop_check),
+        payload_mode=str(args.payload_mode),
+        tp_world_size=int(args.tp_world_size),
+        tp_total_bytes=int(args.tp_total_bytes),
+        publish_device=str(args.publish_device),
     )
 
 
@@ -502,6 +1957,13 @@ def _build_receiver_runner(
         per_version_timeout_s=float(args.receiver_timeout_s),
         fallback_prefer=str(args.fallback_prefer),
         materialize_device=str(args.materialize_device),
+        apply_mode=str(args.receiver_apply_mode),
+        allow_version_skip=bool(args.allow_version_skip),
+        payload_mode=str(args.payload_mode),
+        tp_world_size=int(args.tp_world_size),
+        tp_device_base_index=int(args.tp_device_base_index),
+        tp_total_bytes=int(args.tp_total_bytes),
+        tp_materialize_deadline_s=float(args.tp_materialize_deadline_s),
     )
 
 
@@ -524,6 +1986,11 @@ def _run_publisher(args: argparse.Namespace) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "keep_last": int(args.keep_last),
+            "strict_retention_drop_check": bool(args.strict_retention_drop_check),
+            "payload_mode": str(args.payload_mode),
+            "tp_world_size": int(args.tp_world_size),
+            "tp_total_bytes": int(args.tp_total_bytes),
+            "publish_device": _publisher_device(str(args.publish_device)),
             "run_root": str(run_root),
             "published": _to_jsonable(events),
         }
@@ -533,6 +2000,7 @@ def _run_publisher(args: argparse.Namespace) -> int:
             else run_root / "publisher_summary.json"
         )
         _write_summary(output, summary)
+        _maybe_hold_after_finish(args, mode="publisher")
         return 0
     finally:
         tc.shutdown()
@@ -540,9 +2008,25 @@ def _run_publisher(args: argparse.Namespace) -> int:
 
 def _run_receiver(args: argparse.Namespace) -> int:
     _init_tensorcast(args)
+    receiver: WeightUpdateReceiver | None = None
     try:
         model_name = _resolve_model_name(args, run_root=None)
         receiver = _build_receiver_runner(args, model_name=model_name)
+        _write_ready_file(
+            str(args.ready_file) if args.ready_file else None,
+            {
+                "mode": "receiver",
+                "model_name": model_name,
+                "receiver_apply_mode": str(args.receiver_apply_mode),
+                "payload_mode": str(args.payload_mode),
+                "tp_world_size": int(args.tp_world_size),
+                "tp_total_bytes": int(args.tp_total_bytes),
+                "tp_device_base_index": int(args.tp_device_base_index),
+                "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
+                "pid": os.getpid(),
+                "ready_at_s": time.time(),
+            },
+        )
         events = receiver.receive_versions(
             start_version=int(args.start_version),
             num_versions=int(args.num_versions),
@@ -553,6 +2037,12 @@ def _run_receiver(args: argparse.Namespace) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "materialize_device": _materialization_device(str(args.materialize_device)),
+            "receiver_apply_mode": str(args.receiver_apply_mode),
+            "payload_mode": str(args.payload_mode),
+            "tp_world_size": int(args.tp_world_size),
+            "tp_total_bytes": int(args.tp_total_bytes),
+            "tp_device_base_index": int(args.tp_device_base_index),
+            "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
             "received": _to_jsonable(events),
         }
         output = (
@@ -561,13 +2051,17 @@ def _run_receiver(args: argparse.Namespace) -> int:
             else None
         )
         _write_summary(output, summary)
+        _maybe_hold_after_finish(args, mode="receiver")
         return 0
     finally:
+        if receiver is not None:
+            receiver.close()
         tc.shutdown()
 
 
 def _run_single_host(args: argparse.Namespace) -> int:
     _init_tensorcast(args)
+    receiver: WeightUpdateReceiver | None = None
     try:
         run_root = _resolve_run_root(args)
         model_name = _resolve_model_name(args, run_root=run_root)
@@ -575,6 +2069,21 @@ def _run_single_host(args: argparse.Namespace) -> int:
             args, run_root=run_root, model_name=model_name
         )
         receiver = _build_receiver_runner(args, model_name=model_name)
+        _write_ready_file(
+            str(args.ready_file) if args.ready_file else None,
+            {
+                "mode": "single-host",
+                "model_name": model_name,
+                "receiver_apply_mode": str(args.receiver_apply_mode),
+                "payload_mode": str(args.payload_mode),
+                "tp_world_size": int(args.tp_world_size),
+                "tp_total_bytes": int(args.tp_total_bytes),
+                "tp_device_base_index": int(args.tp_device_base_index),
+                "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
+                "pid": os.getpid(),
+                "ready_at_s": time.time(),
+            },
+        )
 
         receiver_holder: dict[str, Any] = {"events": None, "error": None}
         ack_condition = threading.Condition()
@@ -606,6 +2115,8 @@ def _run_single_host(args: argparse.Namespace) -> int:
                 )
             except Exception as exc:  # noqa: BLE001
                 receiver_holder["error"] = exc
+            finally:
+                receiver.close()
 
         worker = threading.Thread(
             target=_receiver_worker,
@@ -661,6 +2172,14 @@ def _run_single_host(args: argparse.Namespace) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "keep_last": int(args.keep_last),
+            "strict_retention_drop_check": bool(args.strict_retention_drop_check),
+            "receiver_apply_mode": str(args.receiver_apply_mode),
+            "payload_mode": str(args.payload_mode),
+            "tp_world_size": int(args.tp_world_size),
+            "tp_total_bytes": int(args.tp_total_bytes),
+            "tp_device_base_index": int(args.tp_device_base_index),
+            "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
+            "publish_device": _publisher_device(str(args.publish_device)),
             "run_root": str(run_root),
             "published": _to_jsonable(published),
             "received": _to_jsonable(received),
@@ -671,8 +2190,11 @@ def _run_single_host(args: argparse.Namespace) -> int:
             else run_root / "single_host_summary.json"
         )
         _write_summary(output, summary)
+        _maybe_hold_after_finish(args, mode="single-host")
         return 0
     finally:
+        if receiver is not None:
+            receiver.close()
         tc.shutdown()
 
 
@@ -746,6 +2268,16 @@ def _add_common_stream_args(
     parser.add_argument("--poll-interval-s", type=float, default=0.5)
     parser.add_argument("--receiver-timeout-s", type=float, default=120.0)
     parser.add_argument(
+        "--payload-mode",
+        choices=sorted(SUPPORTED_PAYLOAD_MODES),
+        default="probe",
+        help=(
+            "Payload generator/validator mode. "
+            "'version_fill' enforces all tensor elements equal to version. "
+            "'tp_ranked' publishes TP-sharded source tensors with rank-tagged values."
+        ),
+    )
+    parser.add_argument(
         "--fallback-prefer",
         choices=["auto", "local", "p2p", "disk"],
         default="auto",
@@ -754,6 +2286,71 @@ def _add_common_stream_args(
         "--materialize-device",
         default="auto",
         help="Receiver materialization device: auto/cpu/cuda:0...",
+    )
+    parser.add_argument(
+        "--receiver-apply-mode",
+        choices=sorted(SUPPORTED_RECEIVER_APPLY_MODES),
+        default="tensor_dict",
+        help=(
+            "Receiver apply path: tensor_dict materialization, or "
+            "Binding-based in-place update via binding.swap. "
+            "'tp_bind_into_swap' runs TP rank-local bind_into/swap updates with copy plans. "
+            "'tp4_bind_into_swap' is kept as a strict tp_world_size=4 alias."
+        ),
+    )
+    parser.add_argument(
+        "--tp-world-size",
+        type=int,
+        default=1,
+        help="Tensor-parallel world size for tp_ranked/tp_bind_into_swap modes.",
+    )
+    parser.add_argument(
+        "--tp-total-bytes",
+        type=int,
+        default=0,
+        help=(
+            "Total tp_ranked payload bytes across all published tensors. "
+            "0 keeps the default tiny TP payload."
+        ),
+    )
+    parser.add_argument(
+        "--tp-device-base-index",
+        type=int,
+        default=0,
+        help="CUDA device base index for TP ranks (rank i uses cuda:{base+i}).",
+    )
+    parser.add_argument(
+        "--tp-materialize-deadline-s",
+        type=float,
+        default=600.0,
+        help=(
+            "RPC deadline for TP bind_into/swap path in seconds. "
+            "Use larger values for large multi-node payloads."
+        ),
+    )
+    parser.add_argument(
+        "--publish-device",
+        default="auto",
+        help="Publisher tensor device: auto/cpu/cuda:<index>.",
+    )
+    parser.add_argument(
+        "--allow-version-skip",
+        action="store_true",
+        help=(
+            "Allow receiver to skip a version if that version is already deregistered "
+            "before it can be applied."
+        ),
+    )
+    parser.add_argument(
+        "--hold-after-finish-s",
+        type=float,
+        default=0.0,
+        help="Keep runtime alive for external probes before shutdown.",
+    )
+    parser.add_argument(
+        "--ready-file",
+        default=None,
+        help="Optional readiness marker path written after role init.",
     )
     parser.add_argument(
         "--output-json",
@@ -766,6 +2363,15 @@ def _add_publisher_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--publish-interval-s", type=float, default=2.0)
     parser.add_argument("--keep-last", type=int, default=2)
     parser.add_argument("--retention-timeout-s", type=float, default=30.0)
+    parser.add_argument(
+        "--strict-retention-drop-check",
+        action="store_true",
+        help=(
+            "When set, assert dropped versions are immediately non-materializable "
+            "and absent from registry. For distributed runs with lagging receivers, "
+            "leave this disabled and validate via external cluster probes."
+        ),
+    )
     parser.add_argument(
         "--weights-root",
         default="/tmp/tensorcast_weight_publisher_e2e",

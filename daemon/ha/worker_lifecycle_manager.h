@@ -47,6 +47,8 @@ class WorkerLifecycleManager {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     // Capability directory bitset for Global Store registration/heartbeats.
     uint64_t capability_flags{0};
+    // Per-replica max transport concurrency reported to GS during state sync.
+    uint32_t max_concurrency{4};
   };
 
   WorkerLifecycleManager(
@@ -161,6 +163,12 @@ class WorkerLifecycleManager {
   std::thread monitor_thread_;
   std::mutex retired_threads_mu_;
   std::vector<std::thread> retired_threads_;
+
+  // Cache last reported per-replica chunk states to avoid full periodic
+  // re-publication when nothing changed.
+  std::mutex chunk_sync_state_mu_;
+  absl::flat_hash_map<store::loading::ReplicaKey, std::vector<int32_t>, store::loading::ReplicaKeyHash>
+      chunk_sync_last_states_;
 
   // Lightweight metrics/counters for observability
   std::atomic<uint64_t> hb_success_{0};

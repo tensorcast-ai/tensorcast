@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 #pragma once
 
 #include <atomic>
@@ -82,6 +82,7 @@ class Channel {
   void set_transport(communicator::transport::mtcp_transport_t t);
   void mtcp_request_started();
   void mtcp_request_finished();
+  [[nodiscard]] int mtcp_active_requests() const;
   void del_transport(const std::string& local_dev_name, const std::string& remote_dev_name);
 
   misc::result_t close();

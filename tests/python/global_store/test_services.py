@@ -148,6 +148,96 @@ class TestServices:
             worker_repo.find_by_id(stale.worker_id, include_inactive=True) is None
         )
 
+    def test_worker_service_registration_reclaims_active_endpoint_takeover(
+        self, services
+    ):
+        """A new daemon can take over an active endpoint row after unclean exit."""
+        worker_service = services["worker"]
+        worker_repo = worker_service.worker_repository
+
+        previous = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_prev",
+                node_id="node_prev",
+                node_address="192.168.1.30",
+                grpc_port=50091,
+                p2p_port=50092,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        successor = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_next",
+                node_id="node_next",
+                node_address="192.168.1.30",
+                grpc_port=50091,
+                p2p_port=50093,
+                mem_pool_total_size=2048,
+                mem_pool_available_size=2048,
+            )
+        )
+
+        assert successor.worker_id != previous.worker_id
+        assert successor.daemon_id == "daemon_next"
+        assert successor.node_address == "192.168.1.30"
+        assert successor.grpc_port == 50091
+        assert successor.p2p_port == 50093
+        assert (
+            worker_repo.find_by_id(previous.worker_id, include_inactive=True) is None
+        )
+
+    def test_worker_service_registration_daemon_rebind_reclaims_active_endpoint(
+        self, services
+    ):
+        """Stable daemon_id rebind can reclaim an active endpoint row."""
+        worker_service = services["worker"]
+        worker_repo = worker_service.worker_repository
+
+        stable = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_stable_rebind",
+                node_id="node_a",
+                node_address="192.168.1.40",
+                grpc_port=50101,
+                p2p_port=50102,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        blocker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_blocker",
+                node_id="node_b",
+                node_address="192.168.1.41",
+                grpc_port=50111,
+                p2p_port=50112,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+
+        rebound = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_stable_rebind",
+                node_id="node_c",
+                node_address="192.168.1.41",
+                grpc_port=50111,
+                p2p_port=50113,
+                mem_pool_total_size=2048,
+                mem_pool_available_size=2048,
+            )
+        )
+
+        assert rebound.worker_id == stable.worker_id
+        assert rebound.daemon_id == "daemon_stable_rebind"
+        assert rebound.node_address == "192.168.1.41"
+        assert rebound.grpc_port == 50111
+        assert rebound.p2p_port == 50113
+        assert (
+            worker_repo.find_by_id(blocker.worker_id, include_inactive=True) is None
+        )
+
     def test_worker_service_validation(self, services):
         """Test worker validation."""
         worker_service = services["worker"]

@@ -19,9 +19,11 @@ class KeyMappingRpcHandler:
         self,
         *,
         key_mapping_repository: KeyMappingRepository,
+        alias_cache_ttl_seconds: int,
         logger,
     ) -> None:
         self._key_mapping_repository = key_mapping_repository
+        self._alias_cache_ttl_seconds = max(0, int(alias_cache_ttl_seconds))
         self._logger = logger
 
     def upsert_key_mapping(
@@ -92,7 +94,7 @@ class KeyMappingRpcHandler:
             cache_ttl_seconds = 30
             kind = (row.get("kind") or "IMMUTABLE").upper()
             if kind == "ALIAS":
-                cache_ttl_seconds = 0
+                cache_ttl_seconds = self._alias_cache_ttl_seconds
             else:
                 ttl_seconds = row.get("ttl_seconds")
                 if ttl_seconds is not None:

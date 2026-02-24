@@ -64,6 +64,8 @@ cfg = WeightPublisherConfig(
     wait_persistence=True,          # default
     keep_last=2,                    # keep rollback window
     history_path="/tmp/weights_history.json",
+    pre_publish_trim_enabled=True,  # large-model OOM guard (optional)
+    pre_publish_keep_last=1,        # with keep_last=2: trim to 1 before put
     trigger_reload=False,           # publish only
 )
 
@@ -179,6 +181,16 @@ When `keep_last > 0`, the publisher records `(version, artifact_id)` in
 `history_path` and calls `tensorcast.deregister_artifact(...)` for versions
 older than the most recent `keep_last`.
 
+For large models, you can also enable pre-publish trimming:
+
+- `pre_publish_trim_enabled=true`: trim old versions before calling `put(...)`.
+- `pre_publish_keep_last` (default `keep_last-1`): versions to keep *before* publish.
+
+This bounds publish-time overlap (for example, avoids transient 3-version overlap
+when `keep_last=2`) and reduces OOM risk in long-running publisher processes.
+Trade-off: if publish fails after pre-trim, rollback window may be temporarily
+smaller until a successful publish restores the target window.
+
 Retention semantics are intentionally:
 
 - **Version keys are append-only**: old key mappings are kept.
@@ -202,23 +214,35 @@ A dedicated E2E harness is available at:
 It models two independent roles:
 
 - `publisher`: continuously publishes new weight versions through
-  `WeightPublisher.publish_from_disk(...)`.
+  `WeightPublisher.publish(...)` (CUDA/CPU tensor dict -> local stable DRAM).
 - `receiver`: continuously receives and validates versioned weights by key.
+  It supports two apply modes:
+  - `tensor_dict` (default): materialize each version via `artifact.tensor_dict(...)`.
+  - `binding_swap`: create one `Binding` and update versions via
+    `binding.swap(...)`, which models online inference weight hot-swap.
 
 ### Single-host scenario (local)
 
 Run both roles concurrently in one process:
 
 ```bash
-uv run -m tensorcast.tools.weight_publisher_e2e single-host \
-  --init-mode auto \
-  --global-store-mode start \
-  --allow-gs-fallback \
+source .venv/bin/activate
+tensorcast-cli daemon start \
+  --config examples/config/store_daemon_config_cross_host_bench.yaml \
+  --global-store-mode connect \
+  --global-store-address <GS_ADDR>
+
+python ./tensorcast/tools/weight_publisher_e2e.py single-host \
+  --init-mode connect \
+  --connect-address 127.0.0.1:50052 \
   --start-version 1 \
   --num-versions 3 \
   --keep-last 2 \
   --publish-interval-s 2 \
-  --receiver-timeout-s 120
+  --receiver-timeout-s 120 \
+  --receiver-apply-mode binding_swap
+
+tensorcast-cli daemon stop
 ```
 
 This validates all required behaviors in one run:
@@ -238,40 +262,102 @@ Use two nodes (or two daemons) connected to the same Global Store:
 1. Start Global Store.
 2. Start daemon on node A (publisher side), connect it to the Global Store.
 3. Start daemon on node B (receiver side), connect it to the same Global Store.
-4. Run `publisher` role on node A.
-5. Run `receiver` role on node B.
+4. Run `publisher` role on node A (`--init-mode connect --connect-address 127.0.0.1:50052`).
+5. Run `receiver` role on node B (`--init-mode connect --connect-address 127.0.0.1:50052`).
 
 Example:
 
 ```bash
 # Node A (publisher)
-uv run -m tensorcast.tools.weight_publisher_e2e publisher \
+source .venv/bin/activate
+tensorcast-cli daemon start \
+  --config examples/config/store_daemon_config_cross_host_bench.yaml \
+  --global-store-mode connect \
+  --global-store-address <GS_ADDR>
+
+python ./tensorcast/tools/weight_publisher_e2e.py publisher \
   --init-mode connect \
-  --connect-address <NODE_A_DAEMON_ADDR> \
+  --connect-address 127.0.0.1:50052 \
   --model-name wp-e2e-dist \
   --start-version 1 \
-  --num-versions 3 \
+  --num-versions 6 \
   --keep-last 2 \
   --publish-interval-s 3 \
-  --receiver-timeout-s 180
+  --receiver-timeout-s 180 \
+  --retention-timeout-s 90
 ```
 
 ```bash
 # Node B (receiver)
-uv run -m tensorcast.tools.weight_publisher_e2e receiver \
+source .venv/bin/activate
+tensorcast-cli daemon start \
+  --config examples/config/store_daemon_config_cross_host_bench.yaml \
+  --global-store-mode connect \
+  --global-store-address <GS_ADDR>
+
+python ./tensorcast/tools/weight_publisher_e2e.py receiver \
   --init-mode connect \
-  --connect-address <NODE_B_DAEMON_ADDR> \
+  --connect-address 127.0.0.1:50052 \
   --model-name wp-e2e-dist \
   --start-version 1 \
-  --num-versions 3 \
+  --num-versions 6 \
   --receiver-timeout-s 180 \
-  --fallback-prefer p2p
+  --fallback-prefer p2p \
+  --materialize-device cuda:0 \
+  --receiver-apply-mode binding_swap
+```
+
+```bash
+# Cleanup (both nodes)
+source .venv/bin/activate
+tensorcast-cli daemon stop
 ```
 
 Distributed checklist:
 
 - Use the same `model_name`, `start_version`, and `num_versions` on both roles.
 - Keep publisher and receiver running concurrently so receiver can observe each update.
+- App SDK only connects to local daemon in this workflow (`127.0.0.1:50052`).
 - For retention validation, inspect publisher summary: with `keep_last=2` and
   `v1..v3`, `v1` should remain key-resolvable but become non-materializable,
   while `v2`/`v3` remain materializable.
+- For cluster-level replica checks, use `--hold-after-finish-s` to keep receiver
+  daemons alive briefly after completion, then query GS metadata
+  (`ClusterRuntimeService.BatchGetReplicaCounts`).
+
+## Multi-host Suite (brainctl)
+
+For staged scale-out (`2-node -> 3-node`) with `binding.swap` updates and
+retention checks, use:
+
+- `examples/cross_host/cross_host_weight_publisher_runner.py` (single case runner)
+- `examples/cross_host/run_multihost_weight_publisher_suite.sh` (suite entry)
+
+Example:
+
+```bash
+source .venv/bin/activate
+
+export TC_WP_PUBLISHER_PROC=<PUBLISHER_PROCESS_ID>
+export TC_WP_RECEIVER_PROCS=<RECEIVER1_PROCESS_ID>,<RECEIVER2_PROCESS_ID>
+export TC_GS_ADDR=<GS_IP>:50051
+export TC_PUBLISH_INTERVAL_S=60
+export TC_RECEIVER_TIMEOUT_S=95
+export TC_MAX_PUBLISH_TO_APPLY_S=30
+export TC_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
+export TC_SCALE_NUM_VERSIONS=10
+export TC_LONG_RUN_ENABLE=1
+export TC_LONG_RUN_NUM_VERSIONS=20
+export TC_LONG_RUN_TARGET_DURATION_S=900
+export TC_PROGRESS_POLL_S=10
+
+bash examples/cross_host/run_multihost_weight_publisher_suite.sh
+```
+
+Timeout guidance:
+
+- `TC_RECEIVER_TIMEOUT_S` must be larger than publish interval.  
+  Example: with `TC_PUBLISH_INTERVAL_S=60`, use `TC_RECEIVER_TIMEOUT_S>=95`.
+- Keep end-to-end update SLA strict with `TC_MAX_PUBLISH_TO_APPLY_S` (default `30`).
+- Suite prints periodic `[progress]` heartbeats (poll interval controlled by
+  `TC_PROGRESS_POLL_S`) so long-running cases can be observed in real time.

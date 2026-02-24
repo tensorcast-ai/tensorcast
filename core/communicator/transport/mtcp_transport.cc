@@ -437,7 +437,7 @@ misc::result_t MTcpTransport::recv(const read_request_t& msg) {
   }
 
   VLOG(1) << "[MTcpTransport::recv] Queueing read request: key=" << msg->get_key()
-          << " bytes=" << msg->get_local_tensor()->get_bytes();
+          << " bytes=" << msg->get_local_tensor()->get_bytes() << " stage_hint=" << msg->mtcp_stage_unit_hint_bytes();
   recv_queue_.push(msg, true, -1);
   return misc::SUCCESS;
 }
@@ -967,7 +967,8 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     return;
   }
 
-  size_t stage_unit = gpu_memory_stager_->get_chunk_size();
+  size_t stage_unit = window->stage_unit_bytes > 0 ? static_cast<size_t>(window->stage_unit_bytes)
+                                                   : gpu_memory_stager_->get_chunk_size();
   if (stage_unit == 0) {
     stage_unit = memory_pool_->slice_bytes();
   }
@@ -1004,7 +1005,7 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
 
     VLOG(1) << "[MTCP send] enqueue window=" << window->window_seq << " segment=" << seg.metadata.segment_idx
             << " offset=" << seg.metadata.offset << " bytes=" << seg.bytes << " lane=" << task_index
-            << " lanes_to_use=" << lanes_to_use << " conn_count=" << conn_count_;
+            << " lanes_to_use=" << lanes_to_use << " conn_count=" << conn_count_ << " stage_unit_bytes=" << stage_unit;
 
     if (task_index >= conn_count_ || tasks_[task_index] == nullptr) {
       LOG(WARNING) << "[MTcpTransport::process_stage_window] task unavailable idx=" << task_index
@@ -1141,21 +1142,26 @@ void MTcpTransport::recv_loop() {
     auto bytes = tensor->get_bytes();
     const uint64_t request_base_offset = msg->remote_offset_;
 
-    size_t stager_chunk_bytes = gpu_memory_stager_->get_chunk_size();
-    ABSL_CHECK_GT(stager_chunk_bytes, 0) << "MTcpTransport::recv_loop: stager_chunk_bytes must be > 0";
+    uint64_t stage_unit = msg->mtcp_stage_unit_hint_bytes();
+    if (stage_unit == 0) {
+      stage_unit = gpu_memory_stager_->get_chunk_size();
+    }
+    if (stage_unit == 0) {
+      stage_unit = memory_pool_->slice_bytes();
+    }
+    ABSL_CHECK_GT(stage_unit, 0) << "MTcpTransport::recv_loop: stage_unit must be > 0";
     const int lanes_to_use =
-        compute_active_lanes_internal(bytes, stager_chunk_bytes, conn_count_, buffers_per_flow_limit_);
+        compute_active_lanes_internal(bytes, static_cast<size_t>(stage_unit), conn_count_, buffers_per_flow_limit_);
 
     VLOG(2) << "[mtcp_lane] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
             << " lanes_to_use=" << lanes_to_use << " buffers_per_flow_limit=" << buffers_per_flow_limit_
-            << " stager_chunk_bytes=" << stager_chunk_bytes << " request_base_offset=" << request_base_offset;
+            << " stage_unit_bytes=" << stage_unit << " request_base_offset=" << request_base_offset;
 
     VLOG(1) << "[MTcpTransport::recv_loop] key=" << msg->get_key() << " bytes=" << bytes
             << " conn_count=" << conn_count_ << " lanes_to_use=" << lanes_to_use
-            << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stager_chunk_bytes=" << stager_chunk_bytes
+            << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stage_unit_bytes=" << stage_unit
             << " request_base_offset=" << request_base_offset;
 
-    const uint64_t stage_unit = stager_chunk_bytes;
     const uint64_t network_segment_bytes = stage_unit;
 
     struct PendingChunkResult {

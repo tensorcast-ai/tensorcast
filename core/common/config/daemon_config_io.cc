@@ -399,6 +399,11 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     }
   }
 
+  auto* promo = cfg->mutable_promotion();
+  if (promo->max_concurrency() == 0) {
+    promo->set_max_concurrency(4);
+  }
+
   // Lifecycle defaults (durations left at 0s unless specified)
   auto* lf = cfg->mutable_lifecycle();
   if (lf->gpu_memory_limit_fraction() <= 0.0)

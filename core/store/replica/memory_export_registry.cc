@@ -344,6 +344,12 @@ absl::Status MemoryExportRegistry::unexport_chunks(
     }
   }
 
+  if (!first_error.ok()) {
+    LOG(WARNING) << "unexport_chunks: artifact_id=" << key.artifact_id << " location=" << loc_str(info.location)
+                 << " preserve_export_record=1 error=" << first_error;
+    return first_error;
+  }
+
   // Erase record and drop leases (by dropping tokens)
   {
     std::lock_guard<std::mutex> lock(records_mu_);
@@ -366,9 +372,9 @@ absl::Status MemoryExportRegistry::unexport_chunks(
   }
 
   LOG(INFO) << "unexport_chunks: artifact_id=" << key.artifact_id << " location=" << loc_str(info.location)
-            << " status=" << (first_error.ok() ? "OK" : first_error.message());
+            << " status=OK";
 
-  return first_error.ok() ? absl::OkStatus() : first_error;
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::store::replica

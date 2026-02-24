@@ -65,6 +65,12 @@ class WorkerControlReducerConfig(BaseModel):
     coalesce_window_ms: int = 50
 
 
+class KeyMappingPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    alias_cache_ttl_ms: int = 1000
+
+
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
 
@@ -86,6 +92,7 @@ class GlobalStoreConfig(BaseModel):
     memory_tier_snapshot_max_rows: int = 200
     memory_tier_publish_interval_ms: int = 5000  # Daemon publish hint
     worker_control_reducer: WorkerControlReducerConfig = WorkerControlReducerConfig()
+    key_mapping_policy: KeyMappingPolicyConfig = KeyMappingPolicyConfig()
 
     # Server settings
     listen_host: str = "127.0.0.1"
@@ -197,6 +204,7 @@ class GlobalStoreConfig(BaseModel):
         snapshot_max_rows = 200
         publish_interval_ms = 5000
         reducer_cfg = WorkerControlReducerConfig()
+        key_mapping_policy = KeyMappingPolicyConfig()
         if pb.worker_policy.HasField("memory_tiers"):
             mt = pb.worker_policy.memory_tiers
             snapshot_retention_ms = (
@@ -225,6 +233,16 @@ class GlobalStoreConfig(BaseModel):
                     if reducer_pb.HasField("coalesce_window")
                     else reducer_cfg.coalesce_window_ms,
                 ),
+            )
+        if pb.worker_policy.HasField("key_mapping"):
+            key_mapping_pb = pb.worker_policy.key_mapping
+            alias_cache_ttl_ms = (
+                _dur_ms(key_mapping_pb.alias_cache_ttl)
+                if key_mapping_pb.HasField("alias_cache_ttl")
+                else key_mapping_policy.alias_cache_ttl_ms
+            )
+            key_mapping_policy = KeyMappingPolicyConfig(
+                alias_cache_ttl_ms=max(0, alias_cache_ttl_ms),
             )
 
         # Limits
@@ -299,6 +317,7 @@ class GlobalStoreConfig(BaseModel):
             memory_tier_snapshot_max_rows=max(0, snapshot_max_rows),
             memory_tier_publish_interval_ms=max(0, publish_interval_ms),
             worker_control_reducer=reducer_cfg,
+            key_mapping_policy=key_mapping_policy,
             listen_host=listen_host or "127.0.0.1",
             listen_port=listen_port if listen_port >= 0 else 0,
             advertise_host=advertise_host,

@@ -259,8 +259,15 @@ class GlobalStoreServicer(
             datetime_to_timestamp=datetime_to_timestamp,
             logger=logger,
         )
+        alias_cache_ttl_ms = max(
+            0, int(self.config.key_mapping_policy.alias_cache_ttl_ms)
+        )
+        alias_cache_ttl_seconds = (
+            0 if alias_cache_ttl_ms == 0 else max(1, (alias_cache_ttl_ms + 999) // 1000)
+        )
         self.key_mapping_rpc_handler = KeyMappingRpcHandler(
             key_mapping_repository=self.key_mapping_repository,
+            alias_cache_ttl_seconds=alias_cache_ttl_seconds,
             logger=logger,
         )
         self.artifact_index_rpc_handler = ArtifactIndexRpcHandler(
@@ -387,6 +394,15 @@ class GlobalStoreServicer(
 
     def _rebuild_runtime_services_and_handlers(self) -> None:
         """Rebuild services/handlers that depend on mutable worker/replica repositories."""
+        previous_worker_service = getattr(self, "worker_service", None)
+        if previous_worker_service is not None:
+            try:
+                previous_worker_service.close()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to close previous WorkerService during runtime rebuild"
+                )
+
         reducer = getattr(self, "worker_control_reducer", None)
         if reducer is None:
             reducer_config = self.config.worker_control_reducer

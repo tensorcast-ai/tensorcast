@@ -219,6 +219,16 @@ ReplicaLoadController::~ReplicaLoadController() noexcept {
     release_gpu_resources_locked();
     VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Destructor finished.";
   }
+
+  // Ensure UMA releases the CPU arena/GPU allocations for this replica key.
+  // Some CPU release paths only transition state to UNALLOCATED for safety
+  // during in-flight operations; the destructor is the final ownership boundary
+  // where we can reclaim underlying mappings.
+  absl::Status release_status = memory_coordinator_->release(replica_key_);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    LOG(WARNING) << "ReplicaLoadController(" << id_copy
+                 << "): UMA release during destructor failed: " << release_status;
+  }
 }
 
 uint64_t ReplicaLoadController::get_artifact_size() const noexcept {

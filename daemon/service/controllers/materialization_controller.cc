@@ -58,6 +58,7 @@ MaterializationController::MaterializationController(Dep d)
               .shutdown_signal = d.shutdown_signal,
               .identity = d.identity,
               .global_store_client = d.global_store_client,
+              .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
               .external_target_verification_enabled = d.external_target_verification_enabled,
               .storage_path = d.storage_path,

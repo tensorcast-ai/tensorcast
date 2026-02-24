@@ -184,6 +184,10 @@ class StoreEngine {
       std::string_view registration_id,
       uint64_t view_offset,
       absl::Span<const std::byte> data);
+  absl::Status ingest_registration_chunk(
+      std::string_view registration_id,
+      uint64_t offset,
+      absl::Span<const std::byte> data);
 
   absl::StatusOr<uint64_t> get_view_registration_ingested_bytes(std::string_view registration_id);
 
@@ -324,7 +328,9 @@ class StoreEngine {
   // Key-mapping wrappers delegating to Global Store client. These
   // avoid exposing the client to callers and ensure we always use the Engine's
   // configured Global Store connection.
-  absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view key);
+  absl::StatusOr<components::KeyMapping> resolve_key_mapping(
+      std::string_view key,
+      const components::RpcOptions& rpc_options = components::RpcOptions{});
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,

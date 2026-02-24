@@ -76,6 +76,8 @@ struct DaemonOptions {
   bool cpu_shared_memory_enabled{false};
   // Enable verification for MaterializeIntoTarget external target writes.
   bool external_target_verification_enabled{false};
+  // Max concurrent transport requests per registered memory replica.
+  uint32_t max_concurrency{4};
 
   // API behavior flags
   // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable

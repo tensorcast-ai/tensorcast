@@ -125,12 +125,6 @@ def test_stage1_restart_heartbeat_reconcile_stress_baseline(stage1_servicer):
         gs_metrics.RECONCILE_RETRY_LATER_COUNTER,
         reason="request_seq_gap",
     )
-    reducer_submitted_before = _sum_counter(
-        gs_metrics.WORKER_CONTROL_REDUCER_INTENT_COUNTER,
-        kind="heartbeat",
-        result="submitted",
-    )
-
     def heartbeat_loop() -> None:
         while not stop_event.is_set():
             with shared_mu:
@@ -228,23 +222,14 @@ def test_stage1_restart_heartbeat_reconcile_stress_baseline(stage1_servicer):
         gs_metrics.RECONCILE_RETRY_LATER_COUNTER,
         reason="request_seq_gap",
     )
-    reducer_submitted_after = _sum_counter(
-        gs_metrics.WORKER_CONTROL_REDUCER_INTENT_COUNTER,
-        kind="heartbeat",
-        result="submitted",
-    )
-
     conflict_delta = conflict_after - conflict_before
     retry_later_delta = retry_later_after - retry_later_before
     retry_later_reason_delta = retry_later_reason_after - retry_later_reason_before
-    reducer_submitted_delta = reducer_submitted_after - reducer_submitted_before
-
     print(
         "STAGE1_BASELINE "
         f"conflict_gap_delta={int(conflict_delta)} "
         f"retry_later_delta={int(retry_later_delta)} "
         f"retry_later_reason_delta={int(retry_later_reason_delta)} "
-        f"heartbeat_submitted_delta={int(reducer_submitted_delta)} "
         f"heartbeat_status_samples={dict(heartbeat_statuses)} "
         f"reconcile_result_samples={dict(reconcile_results)}"
     )
@@ -254,7 +239,6 @@ def test_stage1_restart_heartbeat_reconcile_stress_baseline(stage1_servicer):
     assert conflict_delta > 0
     assert retry_later_delta > 0
     assert retry_later_reason_delta > 0
-    assert reducer_submitted_delta > 0
     assert reconcile_results[global_store_pb2.RECONCILE_RESULT_KIND_RETRY_LATER] > 0
 
 

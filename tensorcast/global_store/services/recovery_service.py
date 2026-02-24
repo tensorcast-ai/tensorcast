@@ -6,7 +6,9 @@ Recovery service for Global Store high availability.
 Handles state recovery after failures, worker rediscovery, and state synchronization.
 """
 
+import threading
 import time
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from tensorcast.global_store.exceptions import (
@@ -42,6 +44,22 @@ logger = init_logger(__name__)
 ReplicaKey = tuple[str, str, str, str, int]
 
 
+@dataclass(frozen=True)
+class _ReplicaEpoch:
+    replica_count: int
+    max_updated_epoch_us: int
+
+
+@dataclass(frozen=True)
+class _ReconcileNoopCacheEntry:
+    generation: int
+    request_seq: int
+    state_version: int
+    state_checksum: str
+    inventory_fingerprint: str
+    replica_epoch: _ReplicaEpoch
+
+
 class RecoveryService:
     """Service for handling Global Store recovery and state synchronization."""
 
@@ -60,6 +78,8 @@ class RecoveryService:
         # Recovery state tracking
         self.recovery_in_progress = False
         self.last_recovery_time = 0
+        self._reconcile_noop_cache_mu = threading.Lock()
+        self._reconcile_noop_cache: dict[str, _ReconcileNoopCacheEntry] = {}
 
     def initiate_recovery(self) -> bool:
         """
@@ -199,6 +219,127 @@ class RecoveryService:
                 logger.warning(f"Failed to transfer replica {replica.replica_id}: {e}")
                 self.replica_repository.mark_unavailable(replica.replica_id)
 
+    @staticmethod
+    def _inventory_fingerprint(inventory: list[common_pb2.ReplicaInfo]) -> str:
+        entries: list[tuple] = []
+        for replica in inventory:
+            mem = replica.memory_info
+            view_id = (
+                mem.byte_space.id
+                if mem.HasField("byte_space")
+                and mem.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+                else ""
+            )
+            transport_export_state = 0
+            transport_export_generation = 0
+            transport_remote_keys: tuple[str, ...] = ()
+            transport_buffer_sizes: tuple[int, ...] = ()
+            transport_verification_json = ""
+            if mem.HasField("transport"):
+                transport_export_state = int(mem.transport.export_state)
+                transport_export_generation = int(mem.transport.export_generation)
+                transport_remote_keys = tuple(mem.transport.remote_memory_keys)
+                transport_buffer_sizes = tuple(mem.transport.buffer_sizes)
+                transport_verification_json = mem.transport.verification_json
+            entries.append(
+                (
+                    replica.ref.artifact_id,
+                    view_id,
+                    mem.node_id,
+                    mem.node_address,
+                    int(mem.node_port),
+                    int(mem.memory_type),
+                    int(mem.device_id),
+                    int(mem.memory_size),
+                    bool(replica.stats.is_available),
+                    tuple(mem.remote_memory_keys),
+                    tuple(mem.buffer_sizes),
+                    mem.verification_json,
+                    transport_export_state,
+                    transport_export_generation,
+                    transport_remote_keys,
+                    transport_buffer_sizes,
+                    transport_verification_json,
+                )
+            )
+        entries.sort()
+        state_str = "\n".join(str(entry) for entry in entries)
+        hash_val = 0xCBF29CE484222325
+        fnv_prime = 0x100000001B3
+        for b in state_str.encode():
+            hash_val ^= b
+            hash_val = (hash_val * fnv_prime) & 0xFFFFFFFFFFFFFFFF
+        return f"{hash_val:016x}"
+
+    def _read_reconcile_noop_cache(
+        self, worker_id: str
+    ) -> _ReconcileNoopCacheEntry | None:
+        with self._reconcile_noop_cache_mu:
+            return self._reconcile_noop_cache.get(worker_id)
+
+    def _write_reconcile_noop_cache(
+        self, *, worker_id: str, entry: _ReconcileNoopCacheEntry
+    ) -> None:
+        with self._reconcile_noop_cache_mu:
+            self._reconcile_noop_cache[worker_id] = entry
+
+    def _try_cached_replay_or_stale(
+        self,
+        *,
+        worker_id: str,
+        generation: int,
+        request_seq: int,
+    ) -> (
+        tuple[
+            global_store_pb2.ReconcileResultKind,
+            int,
+            str,
+            list[global_store_pb2.StateChange],
+            list[common_pb2.ReplicaInfo],
+            int,
+        ]
+        | None
+    ):
+        cached = self._read_reconcile_noop_cache(worker_id)
+        if cached is None:
+            return None
+        if int(generation) != int(cached.generation):
+            return None
+        if int(request_seq) == int(cached.request_seq):
+            if (
+                self.worker_repository.find_by_id(worker_id, include_inactive=False)
+                is None
+            ):
+                with self._reconcile_noop_cache_mu:
+                    self._reconcile_noop_cache.pop(worker_id, None)
+                return None
+            return (
+                global_store_pb2.RECONCILE_RESULT_KIND_NOOP,
+                int(cached.state_version),
+                cached.state_checksum,
+                [],
+                [],
+                0,
+            )
+        if int(request_seq) < int(cached.request_seq):
+            if (
+                self.worker_repository.find_by_id(worker_id, include_inactive=False)
+                is None
+            ):
+                with self._reconcile_noop_cache_mu:
+                    self._reconcile_noop_cache.pop(worker_id, None)
+                return None
+            inc_control_plane_conflict(scope="reconcile_request_stale")
+            return (
+                global_store_pb2.RECONCILE_RESULT_KIND_IGNORED_STALE,
+                int(cached.state_version),
+                cached.state_checksum,
+                [],
+                [],
+                0,
+            )
+        return None
+
     def reconcile_worker_state(
         self,
         *,
@@ -221,6 +362,20 @@ class RecoveryService:
             worker_id=worker_id,
             daemon_id=daemon_id,
         )
+        fast_start = time.time()
+        cached_terminal = self._try_cached_replay_or_stale(
+            worker_id=worker_id,
+            generation=generation,
+            request_seq=request_seq,
+        )
+        if cached_terminal is not None:
+            inc_reconcile_result(
+                result_kind=global_store_pb2.ReconcileResultKind.Name(
+                    cached_terminal[0]
+                )
+            )
+            observe_state_sync(time.time() - fast_start, success=True)
+            return cached_terminal
 
         def _is_transient_tx_conflict(exc: Exception) -> bool:
             message = str(exc).lower()
@@ -363,6 +518,16 @@ class RecoveryService:
                 result_kind=global_store_pb2.ReconcileResultKind.Name(result_kind)
             )
 
+        normalized_request_kind = request_kind
+        if (
+            normalized_request_kind
+            == global_store_pb2.RECONCILE_REQUEST_KIND_UNSPECIFIED
+        ):
+            normalized_request_kind = global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT
+        inventory_fingerprint = ""
+        if normalized_request_kind == global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT:
+            inventory_fingerprint = self._inventory_fingerprint(inventory)
+
         _start = time.time()
         try:
             with self.worker_repository.transaction() as cursor:
@@ -388,10 +553,22 @@ class RecoveryService:
                 persisted_generation, persisted_request_seq = (
                     self.worker_repository.get_reconcile_cursor(worker_id, cursor)
                 )
-
-                global_replicas = self.replica_repository.get_replicas_by_worker_atomic(
-                    worker_id, cursor
+                replica_epoch = _ReplicaEpoch(
+                    *self.replica_repository.get_worker_replica_epoch_atomic(
+                        worker_id, cursor
+                    )
                 )
+                global_replicas: list[Replica] | None = None
+
+                def _ensure_global_replicas() -> list[Replica]:
+                    nonlocal global_replicas
+                    if global_replicas is None:
+                        global_replicas = (
+                            self.replica_repository.get_replicas_by_worker_atomic(
+                                worker_id, cursor
+                            )
+                        )
+                    return global_replicas
 
                 if (
                     daemon_id
@@ -400,7 +577,7 @@ class RecoveryService:
                 ):
                     expected_replicas = [
                         self._convert_replica_to_proto(replica)
-                        for replica in global_replicas
+                        for replica in _ensure_global_replicas()
                     ]
                     inc_control_plane_conflict(scope="reconcile_daemon_mismatch")
                     observe_state_sync(time.time() - _start, success=True)
@@ -463,7 +640,7 @@ class RecoveryService:
                 if generation > persisted_generation:
                     expected_replicas = [
                         self._convert_replica_to_proto(replica)
-                        for replica in global_replicas
+                        for replica in _ensure_global_replicas()
                     ]
                     inc_control_plane_conflict(scope="reconcile_generation_future")
                     observe_state_sync(time.time() - _start, success=True)
@@ -493,14 +670,65 @@ class RecoveryService:
                         100,
                     )
 
-                if request_kind == global_store_pb2.RECONCILE_REQUEST_KIND_UNSPECIFIED:
-                    request_kind = global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT
+                if (
+                    normalized_request_kind
+                    == global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT
+                    and request_seq == persisted_request_seq + 1
+                ):
+                    cached = self._read_reconcile_noop_cache(worker_id)
+                    if (
+                        cached is not None
+                        and int(cached.generation) == int(generation)
+                        and int(cached.request_seq) == int(persisted_request_seq)
+                        and int(cached.state_version) == int(current_version)
+                        and cached.state_checksum == current_checksum
+                        and cached.inventory_fingerprint == inventory_fingerprint
+                        and cached.replica_epoch == replica_epoch
+                    ):
+                        result_kind = global_store_pb2.RECONCILE_RESULT_KIND_NOOP
+                        new_version = int(current_version)
+                        new_checksum = current_checksum
+                        state_changes: list[global_store_pb2.StateChange] = []
+                        self.worker_repository.update_reconcile_cursor(
+                            worker_id,
+                            generation=generation,
+                            request_seq=request_seq,
+                            state_version=new_version,
+                            state_checksum=new_checksum,
+                            last_reconcile_result=global_store_pb2.ReconcileResultKind.Name(
+                                result_kind
+                            ),
+                            cursor=cursor,
+                        )
+                        self._write_reconcile_noop_cache(
+                            worker_id=worker_id,
+                            entry=_ReconcileNoopCacheEntry(
+                                generation=int(generation),
+                                request_seq=int(request_seq),
+                                state_version=new_version,
+                                state_checksum=new_checksum,
+                                inventory_fingerprint=inventory_fingerprint,
+                                replica_epoch=replica_epoch,
+                            ),
+                        )
+                        observe_state_sync(time.time() - _start, success=True)
+                        _record_result(result_kind)
+                        return (
+                            result_kind,
+                            new_version,
+                            new_checksum,
+                            state_changes,
+                            [],
+                            0,
+                        )
 
                 force_full_sync = (
-                    request_kind == global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT
+                    normalized_request_kind
+                    == global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT
                 )
+                resolved_global_replicas = _ensure_global_replicas()
                 state_changes = self._compute_state_changes(
-                    inventory, global_replicas, force_full_sync
+                    inventory, resolved_global_replicas, force_full_sync
                 )
                 if state_changes:
                     adds = 0
@@ -549,7 +777,9 @@ class RecoveryService:
                     )
                 else:
                     new_version = current_version
-                    new_checksum = self._compute_state_checksum(global_replicas)
+                    new_checksum = self._compute_state_checksum(
+                        resolved_global_replicas
+                    )
                     result_kind = global_store_pb2.RECONCILE_RESULT_KIND_NOOP
                     if current_checksum != new_checksum:
                         self.worker_repository.update_state_checksum(
@@ -566,6 +796,26 @@ class RecoveryService:
                         result_kind
                     ),
                     cursor=cursor,
+                )
+
+                if state_changes:
+                    final_replica_epoch = _ReplicaEpoch(
+                        *self.replica_repository.get_worker_replica_epoch_atomic(
+                            worker_id, cursor
+                        )
+                    )
+                else:
+                    final_replica_epoch = replica_epoch
+                self._write_reconcile_noop_cache(
+                    worker_id=worker_id,
+                    entry=_ReconcileNoopCacheEntry(
+                        generation=int(generation),
+                        request_seq=int(request_seq),
+                        state_version=int(new_version),
+                        state_checksum=new_checksum,
+                        inventory_fingerprint=inventory_fingerprint,
+                        replica_epoch=final_replica_epoch,
+                    ),
                 )
 
             observe_state_sync(time.time() - _start, success=True)

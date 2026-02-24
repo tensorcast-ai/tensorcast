@@ -130,6 +130,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
     uint32_t window_seq = 0;
     bool final_window = false;
     uint64_t total_bytes = 0;
+    uint64_t stage_unit_bytes = 0;
     std::vector<StageSendSegment> segments;
     std::shared_ptr<std::atomic<int>> pending_segments;
     std::function<void()> on_window_complete;

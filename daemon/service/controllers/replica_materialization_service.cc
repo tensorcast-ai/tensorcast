@@ -195,19 +195,26 @@ absl::StatusOr<store::loading::ReplicaHandle> retry_materialize_from_shared_disk
 std::chrono::milliseconds resolve_materialization_request_budget(
     const grpc::ServerContext& server_context,
     const v2::MaterializeReplicaRequest& req) {
-  constexpr std::chrono::milliseconds kDefaultBudget{30000};
-  constexpr std::chrono::milliseconds kHardCap{300000};
-  const std::chrono::milliseconds user_budget = req.pinned_allocation_timeout_ms() > 0
+  using clock = std::chrono::system_clock;
+  constexpr std::chrono::milliseconds kDefaultBudget{600000};
+  constexpr std::chrono::milliseconds kHardCap{1800000};
+  const std::chrono::milliseconds requested_budget = req.pinned_allocation_timeout_ms() > 0
       ? std::chrono::milliseconds(req.pinned_allocation_timeout_ms())
       : kDefaultBudget;
-  const std::chrono::milliseconds clamped = ClampToDeadline(server_context, user_budget, kHardCap);
-  if (clamped.count() > 0) {
-    return clamped;
+  std::chrono::milliseconds effective_budget = std::min(requested_budget, kHardCap);
+  const auto grpc_deadline = server_context.deadline();
+  if (grpc_deadline != clock::time_point::max()) {
+    const auto now = clock::now();
+    if (grpc_deadline <= now) {
+      return std::chrono::milliseconds(0);
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(grpc_deadline - now);
+    if (remaining.count() <= 0) {
+      return std::chrono::milliseconds(1);
+    }
+    effective_budget = std::min(effective_budget, remaining);
   }
-  if (req.pinned_allocation_timeout_ms() <= 0) {
-    return kDefaultBudget;
-  }
-  return clamped;
+  return effective_budget.count() > 0 ? effective_budget : std::chrono::milliseconds(1);
 }
 
 } // namespace

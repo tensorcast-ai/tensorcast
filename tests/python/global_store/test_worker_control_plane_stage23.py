@@ -93,7 +93,7 @@ def test_stage2_worker_ops_share_daemon_lane(servicer, test_context, monkeypatch
         first_key_by_kind.setdefault(kind, worker_key)
 
     assert first_key_by_kind["register"] == expected_key
-    assert first_key_by_kind["heartbeat"] == expected_key
+    assert "heartbeat" not in first_key_by_kind
     assert first_key_by_kind["reconcile"] == expected_key
     assert first_key_by_kind["unregister"] == expected_key
 
@@ -163,3 +163,100 @@ def test_stage2_cleanup_submits_per_worker_intent(repositories):
         "daemon:stage23-cleanup-daemon-b",
     }
     assert "__maintenance_workers__" not in maintenance_keys
+
+
+def test_stage2_heartbeat_write_throttle_reduces_duplicate_persists(
+    servicer, test_context, monkeypatch
+):
+    daemon_id = "daemon-stage23-heartbeat-throttle"
+    register_response = servicer.RegisterWorker(
+        global_store_pb2.RegisterWorkerRequest(
+            node_id="stage23-heartbeat-node",
+            daemon_id=daemon_id,
+            node_address="192.168.4.20",
+            grpc_port=9151,
+            p2p_port=9152,
+            mem_pool_total_size=8 * 1024 * 1024 * 1024,
+            mem_pool_available_size=8 * 1024 * 1024 * 1024,
+        ),
+        test_context,
+    )
+    assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+    repository = servicer.worker_service.worker_repository
+    original_batch_update_heartbeats = repository.batch_update_heartbeats
+    batch_calls = {"count": 0, "rows": 0}
+
+    def _wrapped_batch_update_heartbeats(
+        updates: list[tuple[str, int, bool, int | None]],
+    ) -> int:
+        batch_calls["count"] += 1
+        batch_calls["rows"] += len(updates)
+        return original_batch_update_heartbeats(updates)
+
+    monkeypatch.setattr(
+        repository,
+        "batch_update_heartbeats",
+        _wrapped_batch_update_heartbeats,
+    )
+
+    for _ in range(8):
+        heartbeat_response = servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=register_response.worker_id,
+                mem_pool_available_size=7 * 1024 * 1024 * 1024,
+                accepting_new_requests=True,
+                state_version=1,
+                daemon_id=daemon_id,
+            ),
+            test_context,
+        )
+        assert heartbeat_response.status == global_store_pb2.Status.STATUS_OK
+
+    servicer.worker_service.flush_heartbeats()
+    # Multiple identical heartbeats in a short window should collapse into a
+    # smaller number of buffered rows flushed to storage.
+    assert batch_calls["count"] >= 1
+    assert batch_calls["rows"] < 8
+
+
+def test_stage2_cleanup_flushes_pending_heartbeats_before_timeout(repositories):
+    _ensure_config()
+    worker_service = WorkerService(
+        repositories["worker"],
+        repositories["replica"],
+    )
+    worker = Worker(
+        worker_id="stage23-cleanup-flush-worker",
+        daemon_id="stage23-cleanup-flush-daemon",
+        node_id="stage23-cleanup-flush-node",
+        node_address="10.2.0.1",
+        grpc_port=5201,
+        p2p_port=6201,
+        mem_pool_total_size=4096,
+        mem_pool_available_size=4096,
+    )
+    repositories["worker"].create_or_update(worker)
+
+    cursor = repositories["worker"].get_cursor()
+    cursor.execute(
+        """
+        UPDATE worker_liveness
+        SET last_heartbeat = now() - INTERVAL '10 minutes'
+        WHERE worker_id = ?
+        """,
+        [worker.worker_id],
+    )
+
+    assert (
+        worker_service.heartbeat(
+            worker_id=worker.worker_id,
+            mem_pool_available_size=3072,
+            accepting_new_requests=True,
+            capability_flags=0,
+        )
+        is True
+    )
+    cleaned = worker_service.cleanup_inactive_workers()
+    assert cleaned == []
+    worker_service.close()

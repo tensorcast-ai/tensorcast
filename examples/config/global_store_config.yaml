@@ -71,6 +71,9 @@ worker_policy:
     snapshot_max_rows: 200
     # Publish interval hint for daemons; lower improves freshness but adds write load.
     publish_interval: 5s
+  key_mapping:
+    # Alias-key cache TTL returned by ResolveKeyMapping; keep short to limit polling storms.
+    alias_cache_ttl: 1s
 
 # v2 limits and retention policies.
 limits:

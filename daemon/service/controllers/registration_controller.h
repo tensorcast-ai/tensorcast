@@ -34,6 +34,7 @@ class RegistrationController {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     gsl::not_null<SessionLifecycleManager*> lifecycle;
     IpcRegionRegistry& regions;
+    uint32_t max_concurrency{4};
   };
 
   explicit RegistrationController(Dep d) : d_(std::move(d)) {}

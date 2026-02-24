@@ -15,6 +15,8 @@ logger = init_logger(__name__)
 class ChunkDirectoryRepository(BaseRepository):
     """Repository for managing chunk directory entries."""
 
+    _UPSERT_BATCH_SIZE = 256
+
     def batch_update_chunk_states(
         self,
         worker_id: str,
@@ -40,30 +42,62 @@ class ChunkDirectoryRepository(BaseRepository):
 
         try:
             try:
-                # Use ON CONFLICT DO UPDATE to perform atomic upsert on composite PK
-                for update in updates:
-                    cursor.execute(
-                        """
+                # Use set-based upserts to reduce lock hold time and RPC tail latency.
+                for start in range(0, len(updates), self._UPSERT_BATCH_SIZE):
+                    batch = updates[start : start + self._UPSERT_BATCH_SIZE]
+                    placeholders = ", ".join(["(?, ?, ?, ?, ?, ?)"] * len(batch))
+                    sql = f"""
                         INSERT INTO chunk_directory (
-                            artifact_id, chunk_idx, node_id, device_uuid, replica,
-                            chunk_state, last_update_time, node_load_ratio
-                        ) VALUES (?, ?, ?, ?, ?, ?, now(), 0.0)
+                            artifact_id,
+                            chunk_idx,
+                            node_id,
+                            device_uuid,
+                            replica,
+                            chunk_state,
+                            last_update_time,
+                            node_load_ratio
+                        )
+                        SELECT
+                            staged.artifact_id,
+                            staged.chunk_idx,
+                            staged.node_id,
+                            staged.device_uuid,
+                            staged.replica,
+                            staged.chunk_state,
+                            now(),
+                            0.0
+                        FROM (VALUES {placeholders})
+                            AS staged(
+                                artifact_id,
+                                chunk_idx,
+                                node_id,
+                                device_uuid,
+                                replica,
+                                chunk_state
+                            )
                         ON CONFLICT (artifact_id, device_uuid, replica, chunk_idx, node_id)
                         DO UPDATE SET
                             chunk_state = EXCLUDED.chunk_state,
                             last_update_time = now(),
                             node_load_ratio = EXCLUDED.node_load_ratio
-                        """,
-                        (
-                            update.artifact_id,
-                            update.chunk_idx,
-                            node_id,
-                            update.device_uuid,
-                            update.replica,
-                            update.state,
-                        ),
+                    """
+                    params: list[int | str] = []
+                    for update in batch:
+                        params.extend(
+                            [
+                                update.artifact_id,
+                                int(update.chunk_idx),
+                                node_id,
+                                update.device_uuid,
+                                int(update.replica),
+                                int(update.state),
+                            ]
+                        )
+                    cursor.execute(
+                        sql,
+                        params,
                     )
-                    updates_applied += 1
+                    updates_applied += len(batch)
 
                 logger.info(
                     f"Applied {updates_applied} chunk state updates from worker {worker_id}"

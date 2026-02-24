@@ -5,6 +5,9 @@
 import grpc
 from google.protobuf import duration_pb2
 
+from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config.settings import get_config, set_config
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
@@ -121,7 +124,7 @@ def test_resolve_key_mapping_ttl_then_alias_sets_cache_policy(servicer, test_con
     )
     assert resolve_after_resp.status == global_store_pb2.Status.STATUS_OK
     assert resolve_after_resp.artifact_id == "aid-stable-2"
-    assert resolve_after_resp.cache_ttl_seconds == 0
+    assert resolve_after_resp.cache_ttl_seconds == 1
 
 
 def test_swap_key_mapping_generation_mismatch_returns_error(servicer, test_context):
@@ -154,3 +157,45 @@ def test_revoke_key_mapping_not_found(servicer, test_context):
         test_context,
     )
     assert resp.status == global_store_pb2.Status.STATUS_NOT_FOUND
+
+
+def test_resolve_key_mapping_alias_cache_ttl_can_be_configured(test_context):
+    try:
+        original_config = get_config()
+    except RuntimeError:
+        original_config = None
+    set_config(
+        GlobalStoreConfig(
+            key_mapping_policy={"alias_cache_ttl_ms": 3000},
+        )
+    )
+    servicer = GlobalStoreServicer()
+    try:
+        upsert_resp = servicer.UpsertKeyMapping(
+            global_store_pb2.UpsertKeyMappingRequest(
+                key="model:alias-config",
+                artifact_id="aid-alias-config-1",
+            ),
+            test_context,
+        )
+        assert upsert_resp.status == global_store_pb2.Status.STATUS_OK
+
+        swap_resp = servicer.SwapKeyMapping(
+            global_store_pb2.SwapKeyMappingRequest(
+                key="model:alias-config",
+                new_artifact_id="aid-alias-config-2",
+            ),
+            type(test_context)(),
+        )
+        assert swap_resp.status == global_store_pb2.Status.STATUS_OK
+
+        resolve_resp = servicer.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key="model:alias-config"),
+            type(test_context)(),
+        )
+        assert resolve_resp.status == global_store_pb2.Status.STATUS_OK
+        assert resolve_resp.cache_ttl_seconds == 3
+    finally:
+        servicer.worker_service.close()
+        if original_config is not None:
+            set_config(original_config)

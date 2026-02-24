@@ -45,6 +45,24 @@ tensorcast-cli daemon stop
 tensorcast-cli global stop
 ```
 
+### Multi-host Daemon Orchestration (Required)
+
+For cross-host tests (including WeightPublisher and fanout benchmarks), use the
+following daemon orchestration rules:
+
+- Assign a unique local daemon listen/connect port per node (or per role process)
+  and keep it stable for the whole case. Do not reuse a single default port
+  across all roles.
+- Manage daemon lifecycle explicitly in the runner:
+  - Pre-clean stale daemon sessions/processes before starting a case.
+  - Start daemon with an explicit session id and verify ready status before
+    launching role workloads.
+  - Stop the same explicit session during teardown (including failure paths).
+- Do not rely on implicit SDK auto-create startup in multi-host tests; role
+  scripts should connect to a known local daemon endpoint.
+- Keep SDK connectivity local-only on each node: app processes connect to their
+  own node-local daemon address, never directly to a remote daemon or GS.
+
 ## Architecture Overview
 
 ### Runtime Topology

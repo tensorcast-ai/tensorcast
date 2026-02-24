@@ -2,15 +2,46 @@
 
 #include "daemon/service/controllers/key_mapping_controller.h"
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/time/time.h"
 #include "daemon/util/status_utils.h"
 
 namespace tensorcast::daemon {
 
 using status_utils::to_grpc_status;
+
+namespace {
+
+constexpr absl::Duration kResolveKeyMappingFallbackTimeout = absl::Seconds(5);
+constexpr uint32_t kResolveKeyMappingMaxRetries = 0;
+
+absl::StatusOr<store::components::RpcOptions> make_resolve_key_mapping_rpc_options(grpc::ServerContext& ctx) {
+  store::components::RpcOptions options;
+  options.max_retries = kResolveKeyMappingMaxRetries;
+  options.cancel_check = [&ctx]() { return ctx.IsCancelled(); };
+
+  const auto grpc_deadline = ctx.deadline();
+  if (grpc_deadline == std::chrono::system_clock::time_point::max()) {
+    options.timeout = kResolveKeyMappingFallbackTimeout;
+    return options;
+  }
+
+  const auto now = std::chrono::system_clock::now();
+  if (grpc_deadline <= now) {
+    return absl::DeadlineExceededError("ResolveKeyMapping request deadline already exceeded");
+  }
+
+  const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(grpc_deadline - now).count();
+  options.timeout = absl::Milliseconds(std::max<int64_t>(1, remaining_ms));
+  return options;
+}
+
+} // namespace
 
 std::optional<store::components::KeyMapping> KeyMappingController::lookup_local_cache(std::string_view key) const {
   if (key.empty()) {
@@ -115,6 +146,9 @@ grpc::Status KeyMappingController::resolve_key_mapping(
   auto& span = rctx.span();
   span->SetAttribute("tc.key", req.key());
 
+  if (rctx.server_context().IsCancelled()) {
+    return {grpc::StatusCode::CANCELLED, "request cancelled"};
+  }
   if (req.key().empty()) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
   }
@@ -130,9 +164,16 @@ grpc::Status KeyMappingController::resolve_key_mapping(
     return grpc::Status::OK;
   }
 
-  auto mapping_or = d_.engine.resolve_key_mapping(req.key());
+  auto rpc_options_or = make_resolve_key_mapping_rpc_options(rctx.server_context());
+  if (!rpc_options_or.ok()) {
+    return to_grpc_status(rpc_options_or.status());
+  }
+  auto mapping_or = d_.engine.resolve_key_mapping(req.key(), *rpc_options_or);
   if (!mapping_or.ok()) {
     return to_grpc_status(mapping_or.status());
+  }
+  if (rctx.server_context().IsCancelled()) {
+    return {grpc::StatusCode::CANCELLED, "request cancelled"};
   }
   const auto& m = *mapping_or;
   update_local_cache(req.key(), m);

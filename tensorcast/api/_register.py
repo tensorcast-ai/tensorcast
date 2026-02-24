@@ -782,8 +782,6 @@ def make_plan_model(
 ) -> CoalescedPlan | LeasePlan | StableDramPlan:
     plan_type: PlanType = options.plan
     if plan_type is PlanType.DRAM_STABLE:
-        if not options.stage_on_gpu:
-            raise InvalidPlan("dram_stable with stage_on_gpu=false is not implemented")
         return StableDramPlan(
             kind="dram_stable",
             stage_on_gpu=options.stage_on_gpu,
@@ -874,7 +872,57 @@ class _StableDramUploader:
         if not isinstance(handshake, StableDramHandshake):
             raise TensorCastError("Unexpected handshake type for dram_stable plan")
         if not handshake.staging_cuda_ipc_handle:
-            raise TensorCastError("dram_stable requires a staging CUDA IPC handle")
+            offsets_for_device = layout.offsets.get(int(ctx.device_id), {})
+            if not offsets_for_device:
+                raise TensorCastError(
+                    f"No layout offsets found for device {ctx.device_id}"
+                )
+            ordered_names = sorted(
+                offsets_for_device.keys(),
+                key=lambda tensor_name: int(offsets_for_device[tensor_name]),
+            )
+            ctl = handle.client
+            total_streamed_bytes = 0
+            for name in ordered_names:
+                if cancel_event and cancel_event.is_set():
+                    raise CancelledError
+                if name not in artifact:
+                    raise TensorCastError(
+                        f"Tensor '{name}' missing from registration payload"
+                    )
+                if name not in ctx.tensor_source_index:
+                    raise TensorCastError(
+                        f"Tensor '{name}' missing from canonical source index"
+                    )
+                _, expected_bytes = ctx.tensor_source_index[name]
+                canonical_offset = int(offsets_for_device[name])
+                local = artifact[name].detach()
+                if local.device.type != "cpu":
+                    local = local.to(torch.device("cpu"), non_blocking=False)
+                local = local.contiguous()
+                actual_bytes = int(local.numel()) * int(local.element_size())
+                if actual_bytes != int(expected_bytes):
+                    raise TensorCastError(
+                        f"Tensor '{name}' byte size mismatch: expected {int(expected_bytes)}, got {actual_bytes}"
+                    )
+                payload_view = memoryview(local.view(torch.uint8).numpy()).cast("B")
+                ok = ctl.feed_register_artifact_view_chunks(
+                    handle.registration_id,
+                    payload_view,
+                    base_offset=canonical_offset,
+                )
+                if not ok:
+                    raise FeedFailed(
+                        f"FeedRegisterArtifactStream(stable_dram_cpu) failed for tensor '{name}'"
+                    )
+                total_streamed_bytes += int(expected_bytes)
+            logger.info(
+                "stable_dram upload path=cpu_stream registration_id=%s tensors=%d total_bytes=%d",
+                handle.registration_id,
+                len(ordered_names),
+                total_streamed_bytes,
+            )
+            return artifact
         base_ptr = get_cuda_memory_ptr(ctx.device_id, handshake.staging_cuda_ipc_handle)
         dest_state_dict = restore_tensors(
             ctx.tensor_meta_index,
@@ -906,6 +954,12 @@ class _StableDramUploader:
         if cancel_event and cancel_event.is_set():
             raise CancelledError
         torch.cuda.synchronize(ctx.device_id)
+        logger.info(
+            "stable_dram upload path=staging_gpu registration_id=%s tensors=%d total_bytes=%d",
+            handle.registration_id,
+            len(artifact),
+            int(layout.total_size),
+        )
         return dest_state_dict
 
 
@@ -1133,8 +1187,6 @@ def _register_artifact_core(
         plan_model = make_plan_model(options, layout.total_size)
 
     # Plan input-mode constraints
-    if plan_type is PlanType.DRAM_STABLE and not options.stage_on_gpu:
-        raise InvalidPlan("dram_stable with stage_on_gpu=false is not implemented")
     if plan_type is PlanType.VRAM_LEASED and ctx.input_mode != "cuda":
         raise DeviceMismatch(
             "vram_leased plan requires CUDA tensors (device_id must be inferred)"

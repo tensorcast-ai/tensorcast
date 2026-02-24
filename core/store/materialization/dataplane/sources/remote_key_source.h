@@ -2,11 +2,14 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
+
 #include "gsl/pointers"
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
@@ -22,6 +25,15 @@ class RemoteKeySource : public SeekableSource {
     std::string ip; // Remote peer IP
     uint16_t port = 0; // Remote peer port
     uint64_t total_size = 0; // Aggregate size across all keys
+    // Request-level budget propagated from RPC/request scope. When >0, all
+    // remote read waits are bounded by this budget.
+    std::chrono::milliseconds request_budget{0};
+    // Poll interval while waiting for communicator read futures.
+    std::chrono::milliseconds wait_slice{std::chrono::seconds(5)};
+    // Periodic stalled-read diagnostics cadence.
+    std::chrono::milliseconds stalled_log_interval{std::chrono::seconds(30)};
+    // Optional artifact id used only for diagnostics.
+    std::string artifact_id;
   };
 
   explicit RemoteKeySource(Options options);
@@ -45,7 +57,17 @@ class RemoteKeySource : public SeekableSource {
       const DirectWriteGrant& grant) override;
 
  private:
+  absl::StatusOr<communicator::transport::read_result_t> await_read_result(
+      communicator::transport::future_read_result_t& future,
+      std::string_view key,
+      uint64_t remote_offset,
+      size_t bytes);
+  std::chrono::milliseconds remaining_request_budget() const;
+
   Options options_;
+  std::chrono::steady_clock::time_point request_start_{std::chrono::steady_clock::now()};
+  std::chrono::steady_clock::time_point last_stalled_log_{request_start_};
+  std::chrono::steady_clock::time_point last_cost_log_{request_start_};
   size_t current_key_index_ = 0;
   size_t current_key_offset_ = 0;
   size_t total_bytes_read_ = 0;

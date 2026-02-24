@@ -645,6 +645,10 @@ void PersistenceManager::set_storage_path(std::filesystem::path storage_root) {
   storage_root_ = std::move(storage_root);
 }
 
+void PersistenceManager::set_max_concurrency(uint32_t max_concurrency) {
+  max_concurrency_.store(std::max<uint32_t>(1, max_concurrency), std::memory_order_relaxed);
+}
+
 absl::Status PersistenceManager::ack_and_register_remote(
     const PersistenceTaskState& task,
     const PersistenceShardState& shard,
@@ -677,7 +681,7 @@ absl::Status PersistenceManager::ack_and_register_remote(
       device,
       common::memory::MemoryLocation::CPU,
       shard.size_bytes,
-      /*max_concurrency=*/1);
+      max_concurrency_.load(std::memory_order_relaxed));
   if (!reg_or.ok()) {
     return reg_or.status();
   }

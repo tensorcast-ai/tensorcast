@@ -48,6 +48,7 @@ class MaterializationController {
     common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    uint32_t max_concurrency{4};
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     common::CapabilityTokenManager* capability_tokens{nullptr};

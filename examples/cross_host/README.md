@@ -5,10 +5,12 @@
 - `cross_host_matrix_runner.py`：统一矩阵 runner（负责重启两侧 daemon、循环 put/get、收集结果、清理 artifact）。
 - `cross_host_fanout_runner.py`：多机 fanout/cascade runner（验证“get 节点成为新 P2P 源”，并支持 wave 并发扩容性能测试）。
 - `cross_host_chaos_runner.py`：chaos 编排 runner（按 event spec 定时注入故障，输出可回放 timeline，并支持 expected-failure pass 语义）。
+- `cross_host_weight_publisher_runner.py`：多机权重发布 runner（publisher 连续发布，receiver 通过 `binding.swap` 持续更新，含 `keep_last` 去注册验证）。
 - `cross_host_put_once.py`：单轮 put helper。
 - `cross_host_get_once.py`：单轮 get helper（含可见性等待与 comm bytes delta 采样）。
 - `cross_host_deregister_once.py`：单轮 deregister helper（`wait=true`，用于验证释放收敛）。
 - `run_multihost_chaos_suite.sh`：统一 chaos 执行入口（含 brainctl preflight/predict/launch/cleanup 元数据输出）。
+- `run_multihost_weight_publisher_suite.sh`：WeightPublisher 多机套件入口（single-host 功能验证 -> 2 节点 -> 3 节点）。
 
 ## 1. 前置条件
 
@@ -287,6 +289,49 @@ Notes:
   - `<out-root>/<run-label>/schemas/` (small/medium/large schemas)
   - `<out-root>/<run-label>/results/` (per-phase runs + gate artifacts + phase gate review)
   - `<out-root>/<run-label>/meta/launcher_meta.json` (full launcher metadata)
+
+## 2.5 WeightPublisher Multi-host (binding.swap)
+
+入口脚本：`examples/cross_host/run_multihost_weight_publisher_suite.sh`
+
+```bash
+source .venv/bin/activate
+
+export TC_WP_PUBLISHER_PROC=<PUBLISHER_PROCESS_ID>
+export TC_WP_RECEIVER_PROCS=<RECEIVER1_PROCESS_ID>,<RECEIVER2_PROCESS_ID>
+export TC_GS_ADDR=<GS_IP>:50051
+export TC_PUBLISH_INTERVAL_S=60
+export TC_RECEIVER_TIMEOUT_S=95
+export TC_MAX_PUBLISH_TO_APPLY_S=30
+export TC_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
+export TC_SCALE_NUM_VERSIONS=10
+export TC_LONG_RUN_ENABLE=1
+export TC_LONG_RUN_NUM_VERSIONS=20
+export TC_LONG_RUN_TARGET_DURATION_S=900
+export TC_PROGRESS_POLL_S=10
+
+# 可选：本地 SDK 连接地址（默认 127.0.0.1:50052）
+# export TC_DAEMON_CONNECT_ADDRESS=127.0.0.1:50052
+
+bash examples/cross_host/run_multihost_weight_publisher_suite.sh
+```
+
+流程与判定：
+1. 在 publisher 节点先执行 single-host 功能烟测（`tensor_dict`）。
+2. 执行 2 节点 case（1 publisher + 1 receiver）。
+3. 若 receiver>=2，再执行 3 节点 case（1 publisher + 2 receivers）。
+4. 验证点包括：
+- receiver 通过 `binding.swap` 连续更新，首版 `bind`，后续全是 `swap`；
+- pointer 稳定（swap 后 `data_ptr` 不变）；
+- `keep_last=2` 时旧版本去注册后不可物化；
+- 通过 GS RPC `BatchGetReplicaCounts` 审计，旧版本副本计数回到 0，且有副本的版本数不超过 2。
+- runner 显式管理每台机器的 daemon 生命周期，role/probe 均通过 `tc.init(mode="connect", address=127.0.0.1:50052)` 仅连接本地 daemon。
+- 建议将 `TC_RECEIVER_TIMEOUT_S` 设为大于发布间隔（例如 `publish=60s` 时用 `timeout=95s`），并通过
+  `TC_MAX_PUBLISH_TO_APPLY_S=30` 约束“发布到应用”的时延上限。
+- 深度压测可通过 `TC_SCALE_RECEIVER_COUNTS` 扩大到 32 worker 规模（1 publisher + 31 receivers），并用
+  `TC_SCALE_NUM_VERSIONS`/`TC_LONG_RUN_NUM_VERSIONS` 与 `TC_LONG_RUN_TARGET_DURATION_S`
+  组合出 10/20 版本、最长约 15 分钟的长跑 case。
+- 运行中会周期打印 `[progress]` 聚合状态，便于外部 `tail -f`/log poll 观察实时进展。
 
 ## 3. 输出说明
 

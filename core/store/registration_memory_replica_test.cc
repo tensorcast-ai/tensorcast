@@ -102,8 +102,8 @@ TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine
   REQUIRE(commit.device_id == 0);
   REQUIRE(commit.size_bytes == size_bytes);
 
-  // Validate the instance exists and has a GPU pointer
-  ReplicaKey key{.artifact_id = artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
+  // Commit canonicalizes to mi2; lookups should use the committed artifact id.
+  ReplicaKey key{.artifact_id = commit.artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
   auto gpu_ptr_or = store.get_replica_gpu_ptr(key);
   REQUIRE(gpu_ptr_or.ok());
   REQUIRE(gpu_ptr_or.value() != 0);

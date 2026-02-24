@@ -403,6 +403,7 @@ class InplaceSlot:
             preference, source_policy = self._resolve_source_policy(resolved._fallback)
             artifact_id = resolved._ensure_identified()
             client = self._runtime.ensure_client()
+            rpc_timeout_s = _ctx_timeout_s(ctx)
             attempt = 0
             response = None
             region_layout = None
@@ -429,6 +430,7 @@ class InplaceSlot:
                         copy_plan=self._copy_plan,
                         dst_tensors=self._tensors,
                         operation_id=operation_id,
+                        timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
                 except Exception as exc:  # noqa: BLE001
                     self._dirty = True
@@ -506,6 +508,7 @@ class InplaceSlot:
         preference, source_policy = self._resolve_source_policy(resolved._fallback)
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
+        rpc_timeout_s = _ctx_timeout_s(ctx)
         publish_checked = False
         attempt = 0
         response = None
@@ -548,6 +551,7 @@ class InplaceSlot:
                     preference=preference,
                     source_policy=source_policy,
                     operation_id=operation_id,
+                    timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._dirty = True

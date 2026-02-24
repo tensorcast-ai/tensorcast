@@ -175,6 +175,7 @@ class PersistenceManager {
   void set_local_node_id(std::string node_id);
   void set_global_store_client(store::components::IGlobalStoreClient* client);
   void set_storage_path(std::filesystem::path storage_root);
+  void set_max_concurrency(uint32_t max_concurrency);
 
   [[nodiscard]] bool is_spill_evictable(
       absl::string_view artifact_id,
@@ -242,6 +243,7 @@ class PersistenceManager {
   store::components::IGlobalStoreClient* global_store_{nullptr}; // Not owned.
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
   size_t artifact_chunk_bytes_;
+  std::atomic<uint32_t> max_concurrency_{4};
   std::string local_node_id_;
   BackgroundScheduler* scheduler_; // Not owned.
   std::chrono::milliseconds tick_interval_;

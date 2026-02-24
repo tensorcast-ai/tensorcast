@@ -39,6 +39,10 @@ class RegistrationBackend {
       std::string_view registration_id,
       uint64_t view_offset,
       absl::Span<const std::byte> data);
+  absl::Status ingest_registration_chunk(
+      std::string_view registration_id,
+      uint64_t offset,
+      absl::Span<const std::byte> data);
   absl::StatusOr<uint64_t> get_view_ingested_bytes(std::string_view registration_id) const;
   absl::StatusOr<uint64_t> get_registration_gpu_ptr(std::string_view registration_id) const;
 
@@ -52,6 +56,9 @@ class RegistrationBackend {
   static void release_replica_memory(
       const std::shared_ptr<replica::Replica>& replica,
       common::memory::MemoryLocation location);
+  void erase_pending_registry_alias(
+      const PendingRegistrationContext& entry,
+      std::optional<loading::ReplicaKey> keep_key = std::nullopt);
   void record_pending_gauge(size_t pending_count) const;
   void record_commit_latency(const PendingRegistrationContext& ctx, std::string_view status) const;
 
