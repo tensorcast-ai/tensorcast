@@ -62,6 +62,20 @@ def _is_not_found_error(exc: Exception) -> bool:
     )
 
 
+def _compact_error_text(exc: Exception) -> str:
+    compact = str(exc).replace("\n", " ").strip()
+    if len(compact) > 200:
+        compact = compact[:200] + "..."
+    return f"{type(exc).__name__}:{compact}"
+
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    if isinstance(exc, torch.OutOfMemoryError):
+        return True
+    message = str(exc).lower()
+    return "cuda" in message and "out of memory" in message
+
+
 @dataclass(frozen=True)
 class PublishEvent:
     version: int
@@ -1150,6 +1164,7 @@ class WeightUpdateReceiver:
         self._binding_ptrs: dict[str, int] | None = None
         self._tp_bindings: dict[int, Any] = {}
         self._tp_binding_ptrs: dict[int, dict[str, int]] = {}
+        self._tp_pending_targets: dict[int, dict[str, torch.Tensor]] = {}
         self._progress_log_interval_s = RECEIVER_PROGRESS_LOG_INTERVAL_S
         self._resolve_slow_threshold_ms = RECEIVER_RESOLVE_SLOW_THRESHOLD_MS
         self._last_resolve_log_state = ""
@@ -1285,18 +1300,13 @@ class WeightUpdateReceiver:
         start_monotonic: float,
         deadline: float,
         last_state: str,
-        last_error: Exception | None,
+        last_error: str | None,
         next_log_at: float,
     ) -> float:
         now = time.monotonic()
         if now < next_log_at:
             return next_log_at
-        error_text = "none"
-        if last_error is not None:
-            compact_error = str(last_error).replace("\n", " ").strip()
-            if len(compact_error) > 200:
-                compact_error = compact_error[:200] + "..."
-            error_text = f"{type(last_error).__name__}:{compact_error}"
+        error_text = "none" if last_error is None else last_error
         print(
             "[receiver][wait]",
             f"mode={mode}",
@@ -1409,7 +1419,7 @@ class WeightUpdateReceiver:
     ) -> ReceiveEvent:
         start_monotonic = time.monotonic()
         deadline = start_monotonic + self._per_version_timeout_s
-        last_error: Exception | None = None
+        last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
 
@@ -1451,7 +1461,12 @@ class WeightUpdateReceiver:
                     pointer_stable=None,
                 )
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
+                last_error = _compact_error_text(exc)
+                if _is_cuda_oom_error(exc):
+                    raise RuntimeError(
+                        "receiver encountered CUDA OOM in tensor_dict path "
+                        f"version={version}, key={key}, detail={last_error}"
+                    ) from exc
                 if _is_not_found_error(exc):
                     artifact_id = self._resolve_artifact_id_for_key(key=key)
                     newer_version = self._find_newer_materializable_version(
@@ -1495,7 +1510,7 @@ class WeightUpdateReceiver:
     ) -> ReceiveEvent:
         start_monotonic = time.monotonic()
         deadline = start_monotonic + self._per_version_timeout_s
-        last_error: Exception | None = None
+        last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
 
@@ -1573,7 +1588,12 @@ class WeightUpdateReceiver:
                     pointer_stable=pointer_stable,
                 )
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
+                last_error = _compact_error_text(exc)
+                if _is_cuda_oom_error(exc):
+                    raise RuntimeError(
+                        "receiver encountered CUDA OOM in binding_swap path "
+                        f"version={version}, key={key}, detail={last_error}"
+                    ) from exc
                 if _is_not_found_error(exc):
                     artifact_id = self._resolve_artifact_id_for_key(key=key)
                     newer_version = self._find_newer_materializable_version(
@@ -1630,28 +1650,43 @@ class WeightUpdateReceiver:
     ) -> tuple[str, bool]:
         binding = self._tp_bindings.get(rank)
         if binding is None:
-            target_tensors = _allocate_tp4_rank_targets(
-                device=self._tp_rank_device(rank),
-                tp_world_size=self._tp_world_size,
-                tp_total_bytes=self._tp_total_bytes,
-            )
+            target_tensors = self._tp_pending_targets.get(rank)
+            if target_tensors is None:
+                try:
+                    target_tensors = _allocate_tp4_rank_targets(
+                        device=self._tp_rank_device(rank),
+                        tp_world_size=self._tp_world_size,
+                        tp_total_bytes=self._tp_total_bytes,
+                    )
+                except Exception:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    raise
+                self._tp_pending_targets[rank] = target_tensors
             bind_kwargs: dict[str, Any] = {}
             if ctx is not None:
                 bind_kwargs["ctx"] = ctx
-            binding = artifact.bind_into(
-                target_tensors=target_tensors,
-                mapping=_build_tp4_rank_copy_plan(
-                    rank=rank,
-                    tp_world_size=self._tp_world_size,
-                    tp_total_bytes=self._tp_total_bytes,
-                ),
-                packing="byte_space",
-                **bind_kwargs,
-            )
+            try:
+                binding = artifact.bind_into(
+                    target_tensors=target_tensors,
+                    mapping=_build_tp4_rank_copy_plan(
+                        rank=rank,
+                        tp_world_size=self._tp_world_size,
+                        tp_total_bytes=self._tp_total_bytes,
+                    ),
+                    packing="byte_space",
+                    **bind_kwargs,
+                )
+            except Exception:
+                # Keep preallocated rank targets across retries so transient
+                # resolve/materialize races do not repeatedly allocate tens of
+                # GiBs and trigger allocator-driven OOM.
+                raise
             self._tp_bindings[rank] = binding
             self._tp_binding_ptrs[rank] = {
                 name: tensor.data_ptr() for name, tensor in binding.tensors.items()
             }
+            self._tp_pending_targets.pop(rank, None)
             _validate_tp4_rank_targets(
                 version=version,
                 rank=rank,
@@ -1702,7 +1737,7 @@ class WeightUpdateReceiver:
     ) -> ReceiveEvent:
         start_monotonic = time.monotonic()
         deadline = start_monotonic + self._per_version_timeout_s
-        last_error: Exception | None = None
+        last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
 
@@ -1788,7 +1823,12 @@ class WeightUpdateReceiver:
                     pointer_stable=pointer_stable,
                 )
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
+                last_error = _compact_error_text(exc)
+                if _is_cuda_oom_error(exc):
+                    raise RuntimeError(
+                        "receiver encountered CUDA OOM in tp_bind_into_swap path "
+                        f"version={version}, key={key}, detail={last_error}"
+                    ) from exc
                 if _is_not_found_error(exc):
                     artifact_id = self._resolve_artifact_id_for_key(key=key)
                     newer_version = self._find_newer_materializable_version(
@@ -1834,6 +1874,12 @@ class WeightUpdateReceiver:
         self._tp_binding_ptrs.clear()
         for rank_binding in tp_bindings:
             rank_binding.close()
+        pending_targets = list(self._tp_pending_targets.values())
+        self._tp_pending_targets.clear()
+        for tensors in pending_targets:
+            tensors.clear()
+        if pending_targets and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _init_tensorcast(args: argparse.Namespace) -> None:

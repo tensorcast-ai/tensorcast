@@ -267,6 +267,9 @@ class GlobalStoreServicer(
         )
         self.key_mapping_rpc_handler = KeyMappingRpcHandler(
             key_mapping_repository=self.key_mapping_repository,
+            artifact_repository=self.artifacts_repo,
+            artifact_index_repository=self.artifact_indices,
+            multibase_sha256_to_hex=multibase_sha256_to_hex,
             alias_cache_ttl_seconds=alias_cache_ttl_seconds,
             logger=logger,
         )

@@ -595,16 +595,29 @@ def start_remote_daemon(
     if cluster_id:
         start_args.append(f"--set meta.cluster_token={shlex.quote(cluster_id)}")
     start_args.append("--json")
+    start_expr = " ".join(start_args)
     start_cmd = [
         "set -euo pipefail",
         f"cd {shlex.quote(repo_root)}",
         "source .venv/bin/activate",
         "export LD_LIBRARY_PATH=/data/cuda/compat:${LD_LIBRARY_PATH:-}",
-        "tensorcast-cli daemon stop --force >/dev/null 2>&1 || true",
+        (
+            "if command -v timeout >/dev/null 2>&1; then "
+            "timeout 30s tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; "
+            "else tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; fi"
+        ),
         "for pid in $(pgrep -f '[t]ensorcast_daemon --config=' || true); do kill -TERM \"$pid\" >/dev/null 2>&1 || true; done",
         "sleep 1",
-        f"tensorcast-cli daemon stop --session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true",
-        " ".join(start_args),
+        (
+            "if command -v timeout >/dev/null 2>&1; then "
+            f"timeout 30s tensorcast-cli daemon stop --session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true; "
+            f"else tensorcast-cli daemon stop --session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true; fi"
+        ),
+        (
+            "if command -v timeout >/dev/null 2>&1; then "
+            f"timeout 180s {start_expr} || true; "
+            f"else {start_expr} || true; fi"
+        ),
         f"tensorcast-cli daemon status --session {shlex.quote(daemon_session)} --json",
     ]
     output = run_remote(
@@ -623,14 +636,32 @@ def stop_remote_daemon(
     daemon_session: str,
     timeout_sec: float,
 ) -> None:
+    daemon_pattern = shlex.quote(
+        f"sessions/{daemon_session}/session/effective_daemon_config.yaml"
+    )
     stop_cmd = [
-        "set -euo pipefail",
+        "set +e",
         f"cd {shlex.quote(repo_root)}",
         "source .venv/bin/activate",
         (
-            "tensorcast-cli daemon stop "
-            f"--session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true"
+            "if command -v timeout >/dev/null 2>&1; then "
+            "timeout 30s tensorcast-cli daemon stop "
+            f"--session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true; "
+            "else tensorcast-cli daemon stop "
+            f"--session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true; fi"
         ),
+        (
+            f"for pid in $(pgrep -f -- {daemon_pattern} || true); do "
+            'kill -TERM "$pid" >/dev/null 2>&1 || true; '
+            "done"
+        ),
+        "sleep 1",
+        (
+            f"for pid in $(pgrep -f -- {daemon_pattern} || true); do "
+            'kill -KILL "$pid" >/dev/null 2>&1 || true; '
+            "done"
+        ),
+        "exit 0",
     ]
     run_remote(
         process_id,
@@ -652,7 +683,11 @@ def preclean_remote_role_processes(
         "sleep 1",
         "pkill -KILL -f '[w]eight_publisher_e2e.py' >/dev/null 2>&1 || true",
         "source .venv/bin/activate >/dev/null 2>&1 || true",
-        "tensorcast-cli daemon stop --force >/dev/null 2>&1 || true",
+        (
+            "if command -v timeout >/dev/null 2>&1; then "
+            "timeout 30s tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; "
+            "else tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; fi"
+        ),
         "pkill -TERM -f '[t]ensorcast_daemon --config=' >/dev/null 2>&1 || true",
         "sleep 1",
         "pkill -KILL -f '[t]ensorcast_daemon --config=' >/dev/null 2>&1 || true",
