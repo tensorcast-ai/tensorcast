@@ -38,6 +38,8 @@ service ClusterRuntimeService {
   rpc WaitReplicaDrain(WaitReplicaDrainRequest) returns (WaitReplicaDrainResponse) {}
   // V2 with pagination and filtering
   rpc ListReplicasV2(ListReplicasV2Request) returns (ListReplicasV2Response) {}
+  // Batch replica counts by artifact id for audit and observability.
+  rpc BatchGetReplicaCounts(BatchGetReplicaCountsRequest) returns (BatchGetReplicaCountsResponse) {}
 
   // Replica transport
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
@@ -899,6 +901,21 @@ message ListReplicasV2Request {
 message ListReplicasV2Response {
   repeated ArtifactReplicaRecord replicas = 1;
   tensorcast.common.v1.PageInfo page_info = 2;
+}
+
+message ArtifactReplicaCountRecord {
+  string artifact_id = 1;
+  uint32 replica_count = 2;
+  uint32 available_count = 3;
+}
+
+message BatchGetReplicaCountsRequest {
+  repeated string artifact_ids = 1;
+}
+
+message BatchGetReplicaCountsResponse {
+  Status status = 1;
+  repeated ArtifactReplicaCountRecord counts = 2;
 }
 
 // ========== Placement & Persistence ==========

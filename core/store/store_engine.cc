@@ -155,6 +155,7 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       .promotion_manager = promotion_manager_.get(),
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .pinned_memory_timeout = pinned_memory_timeout_,
+      .max_concurrency = options_.promotion.max_concurrency,
       .replica_factory = {},
   });
   runtime::IngestionRuntime::Config ingestion_config{
@@ -667,8 +668,10 @@ absl::Status StoreEngine::unregister_replica_from_global_store(std::string_view 
 // Key-mapping wrappers
 // ═══════════════════════════════════════════════════════════════════════════
 
-absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::string_view key) {
-  return metadata_gateway_->resolve_key_mapping(key);
+absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(
+    std::string_view key,
+    const components::RpcOptions& rpc_options) {
+  return metadata_gateway_->resolve_key_mapping(key, rpc_options);
 }
 
 absl::StatusOr<components::KeyMappingSwapResult> StoreEngine::swap_key_mapping(
@@ -748,6 +751,13 @@ absl::Status StoreEngine::ingest_view_registration_chunk(
     uint64_t view_offset,
     absl::Span<const std::byte> data) {
   return metadata_gateway_->ingest_view_chunk(registration_id, view_offset, data);
+}
+
+absl::Status StoreEngine::ingest_registration_chunk(
+    std::string_view registration_id,
+    uint64_t offset,
+    absl::Span<const std::byte> data) {
+  return metadata_gateway_->ingest_registration_chunk(registration_id, offset, data);
 }
 
 absl::StatusOr<uint64_t> StoreEngine::get_view_registration_ingested_bytes(std::string_view registration_id) {

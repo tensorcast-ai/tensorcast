@@ -73,6 +73,14 @@ class ReadRequest {
     expected_completions_.fetch_add(n);
   }
 
+  void set_mtcp_stage_unit_hint_bytes(uint64_t bytes) {
+    mtcp_stage_unit_hint_bytes_.store(bytes, std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] uint64_t mtcp_stage_unit_hint_bytes() const {
+    return mtcp_stage_unit_hint_bytes_.load(std::memory_order_relaxed);
+  }
+
   void enqueue_completion_bytes(uint32_t bytes) {
     absl::MutexLock lk(&ack_mu_);
     completion_bytes_queue_.push_back(bytes);
@@ -164,6 +172,7 @@ class ReadRequest {
   read_result_t status_;
   uint64_t remote_offset_;
   int16_t rail_id_;
+  std::atomic<uint64_t> mtcp_stage_unit_hint_bytes_{0};
 
   // Number of expected RDMA READ completions for this request
   std::atomic<int> expected_completions_{0};

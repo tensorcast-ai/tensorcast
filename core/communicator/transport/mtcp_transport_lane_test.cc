@@ -3,6 +3,7 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -44,6 +45,25 @@ std::vector<int> CollectGpuLaneAssignments(
   }
 
   return lanes;
+}
+
+std::array<uint64_t, 32> CollectLaneBytes(
+    uint64_t request_offset,
+    uint64_t total_bytes,
+    uint64_t segment_bytes,
+    uint64_t stage_unit,
+    int lanes_to_use) {
+  std::array<uint64_t, 32> lane_bytes{};
+  uint64_t offset = 0;
+  while (offset < total_bytes) {
+    const uint64_t chunk = std::min<uint64_t>(segment_bytes, total_bytes - offset);
+    const int lane = testing_ns::compute_gpu_lane_for_subchunk(request_offset + offset, 0, stage_unit, lanes_to_use);
+    REQUIRE(lane >= 0);
+    REQUIRE(lane < static_cast<int>(lane_bytes.size()));
+    lane_bytes[static_cast<size_t>(lane)] += chunk;
+    offset += chunk;
+  }
+  return lane_bytes;
 }
 
 } // namespace
@@ -105,4 +125,36 @@ TEST_CASE("MTcpTransport lane mapping respects request base offset", "[mtcp_tran
   }
 
   REQUIRE(lanes == std::vector<int>({8, 9, 10, 11, 12, 13}));
+}
+
+TEST_CASE("MTcpTransport lane byte totals stay aligned with shared stage unit", "[mtcp_transport]") {
+  constexpr uint64_t kTotalBytes = 536870908; // 512MiB - 4
+  constexpr uint64_t kRequestOffset = 44560285680ULL; // intentionally unaligned to 16MiB
+  constexpr uint64_t kStageUnit = 4ULL * 1024 * 1024;
+  constexpr int kLanesToUse = 16;
+
+  const auto sender =
+      CollectLaneBytes(kRequestOffset, kTotalBytes, /*segment_bytes=*/kStageUnit, kStageUnit, kLanesToUse);
+  const auto receiver =
+      CollectLaneBytes(kRequestOffset, kTotalBytes, /*segment_bytes=*/kStageUnit, kStageUnit, kLanesToUse);
+
+  REQUIRE(sender == receiver);
+}
+
+TEST_CASE("MTcpTransport lane byte totals diverge with stage-unit mismatch", "[mtcp_transport]") {
+  constexpr uint64_t kTotalBytes = 536870908; // 512MiB - 4
+  constexpr uint64_t kRequestOffset = 44560285680ULL; // intentionally unaligned to 16MiB
+  constexpr uint64_t kSenderSegmentBytes = 4ULL * 1024 * 1024;
+  constexpr uint64_t kSenderStageUnit = 16ULL * 1024 * 1024;
+  constexpr uint64_t kReceiverStageUnit = 16ULL * 1024 * 1024;
+  constexpr int kLanesToUse = 16;
+
+  const auto sender = CollectLaneBytes(
+      kRequestOffset, kTotalBytes, /*segment_bytes=*/kSenderSegmentBytes, kSenderStageUnit, kLanesToUse);
+  const auto receiver = CollectLaneBytes(
+      kRequestOffset, kTotalBytes, /*segment_bytes=*/kReceiverStageUnit, kReceiverStageUnit, kLanesToUse);
+
+  REQUIRE(sender != receiver);
+  REQUIRE(sender[14] == receiver[14] + 4);
+  REQUIRE(sender[15] + 4 == receiver[15]);
 }

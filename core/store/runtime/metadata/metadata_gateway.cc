@@ -37,8 +37,11 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
  public:
   GlobalStoreRegistrationPublisher(
       gsl::not_null<RuntimeContext*> runtime_context,
-      std::shared_ptr<components::IGlobalStoreClient>* override_slot)
-      : runtime_context_(runtime_context), override_slot_(override_slot) {}
+      std::shared_ptr<components::IGlobalStoreClient>* override_slot,
+      uint32_t max_concurrency)
+      : runtime_context_(runtime_context),
+        override_slot_(override_slot),
+        max_concurrency_(std::max<uint32_t>(1, max_concurrency)) {}
 
   absl::Status publish_registration(const RegistrationPublication& publication) override {
     auto client_or = get_connected_client();
@@ -76,7 +79,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
         publication.tensor_index_data,
         publication.encoding,
         publication.schema_version,
-        /*max_concurrency=*/1,
+        max_concurrency_,
         publication.verification_json,
         publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
         descriptor,
@@ -114,6 +117,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
 
   gsl::not_null<RuntimeContext*> runtime_context_;
   std::shared_ptr<components::IGlobalStoreClient>* override_slot_;
+  uint32_t max_concurrency_{4};
 };
 
 } // namespace
@@ -125,8 +129,10 @@ MetadataGateway::MetadataGateway(Config config)
       event_publisher_(runtime_context_->event_publisher()),
       artifact_chunk_bytes_(config.artifact_chunk_bytes),
       pinned_memory_timeout_(config.pinned_memory_timeout),
+      max_concurrency_(std::max<uint32_t>(1, config.max_concurrency)),
       replica_factory_(config.replica_factory ? config.replica_factory : make_default_replica_factory()) {
-  registration_publisher_ = std::make_unique<GlobalStoreRegistrationPublisher>(runtime_context_, &override_client_);
+  registration_publisher_ =
+      std::make_unique<GlobalStoreRegistrationPublisher>(runtime_context_, &override_client_, max_concurrency_);
   registration_backend_ = std::make_unique<RegistrationBackend>(
       make_registration_resources(),
       replica_factory_,
@@ -237,6 +243,7 @@ absl::Status MetadataGateway::register_replica(
       key.device,
       loc,
       *size_or,
+      max_concurrency_,
       key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
       publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
   if (register_or.ok()) {
@@ -271,12 +278,14 @@ absl::Status MetadataGateway::unregister_replica(std::string_view artifact_id, i
       artifact_id, worker_id(), common::memory::MemoryLocation::GPU, static_cast<uint32_t>(device_id));
 }
 
-absl::StatusOr<components::KeyMapping> MetadataGateway::resolve_key_mapping(std::string_view key) const {
+absl::StatusOr<components::KeyMapping> MetadataGateway::resolve_key_mapping(
+    std::string_view key,
+    const components::RpcOptions& rpc_options) const {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
   }
-  return (*client_or)->resolve_key_mapping(key);
+  return (*client_or)->resolve_key_mapping_with_options(key, rpc_options);
 }
 
 absl::StatusOr<std::string> MetadataGateway::get_canonical_index(std::string_view artifact_id) const {
@@ -402,6 +411,16 @@ absl::Status MetadataGateway::ingest_view_chunk(
     return absl::FailedPreconditionError("registration backend is not initialized");
   }
   return registration_backend_->ingest_view_chunk(registration_id, view_offset, data);
+}
+
+absl::Status MetadataGateway::ingest_registration_chunk(
+    std::string_view registration_id,
+    uint64_t offset,
+    absl::Span<const std::byte> data) {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->ingest_registration_chunk(registration_id, offset, data);
 }
 
 absl::StatusOr<uint64_t> MetadataGateway::get_view_ingested_bytes(std::string_view registration_id) const {

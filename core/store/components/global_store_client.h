@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,9 @@ struct RpcOptions {
   std::optional<absl::Duration> timeout;
   std::optional<uint32_t> max_retries;
   std::optional<absl::Duration> retry_backoff;
+  // Optional cancellation predicate inherited from upstream callers.
+  // When provided, RPC retries/backoff should stop as soon as it returns true.
+  std::function<bool()> cancel_check;
 };
 
 struct StateSyncToken {
@@ -483,6 +487,13 @@ class IGlobalStoreClient {
 
   virtual absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key) = 0;
 
+  virtual absl::StatusOr<KeyMapping> resolve_key_mapping_with_options(
+      std::string_view key,
+      const RpcOptions& rpc_options) {
+    (void)rpc_options;
+    return resolve_key_mapping(key);
+  }
+
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
   virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
@@ -774,6 +785,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::vector<ChunkStateUpdate>& updates) override;
 
   absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key) override;
+  absl::StatusOr<KeyMapping> resolve_key_mapping_with_options(std::string_view key, const RpcOptions& rpc_options)
+      override;
 
   absl::Status upsert_key_mapping(
       std::string_view key,

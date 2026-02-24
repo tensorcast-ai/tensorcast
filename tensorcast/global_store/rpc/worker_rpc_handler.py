@@ -201,26 +201,6 @@ class WorkerRpcHandler:
                     reconcile_generation=int(reconcile_generation),
                 )
 
-            existing = self._worker_service.find_worker_by_address(
-                worker.node_address, worker.grpc_port
-            )
-            if (
-                existing
-                and existing.node_id != worker.node_id
-                and existing.inactive_at is None
-            ):
-                self._logger.error(
-                    "Registration conflict: %s:%d already owned by worker_id=%s (node=%s); attempted by node=%s.",
-                    worker.node_address,
-                    worker.grpc_port,
-                    existing.worker_id,
-                    existing.node_id,
-                    worker.node_id,
-                )
-                return global_store_pb2.RegisterWorkerResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
             registered = self._worker_service.register_worker(worker)
             with bind_tx_context(
                 source="worker_rpc_handler",

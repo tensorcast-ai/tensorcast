@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from collections.abc import Sequence
 from contextlib import contextmanager
 from time import monotonic
@@ -62,6 +64,76 @@ GRPC_SERVER_HANDLING_LATENCY_SECONDS = Histogram(
         float("inf"),
     ),
 )
+
+GRPC_SERVER_INFLIGHT_GAUGE = Gauge(
+    "tc_grpc_server_inflight_requests",
+    "Current number of in-flight gRPC requests on the Global Store.",
+)
+
+GRPC_SERVER_INFLIGHT_PEAK_GAUGE = Gauge(
+    "tc_grpc_server_inflight_peak_requests",
+    "Peak in-flight gRPC requests observed within the latest telemetry window.",
+)
+
+CONTROL_PLANE_EXECUTOR_MAX_THREADS = Gauge(
+    "tc_control_plane_executor_max_threads",
+    "Configured max workers for the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_LIVE_THREADS = Gauge(
+    "tc_control_plane_executor_live_threads",
+    "Current number of live threads in the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_BUSY_THREADS = Gauge(
+    "tc_control_plane_executor_busy_threads",
+    "Estimated busy threads in the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_IDLE_THREADS = Gauge(
+    "tc_control_plane_executor_idle_threads",
+    "Estimated idle thread capacity in the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_QUEUE_DEPTH = Gauge(
+    "tc_control_plane_executor_queue_depth",
+    "Current work-queue depth in the Global Store control-plane executor.",
+)
+
+
+class _InFlightTracker:
+    """Track current and peak in-flight requests between telemetry snapshots."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current = 0
+        self._peak = 0
+
+    def increment(self) -> int:
+        with self._lock:
+            self._current += 1
+            if self._current > self._peak:
+                self._peak = self._current
+            return self._current
+
+    def decrement(self) -> int:
+        with self._lock:
+            if self._current > 0:
+                self._current -= 1
+            if self._peak < self._current:
+                self._peak = self._current
+            return self._current
+
+    def snapshot(self) -> tuple[int, int]:
+        with self._lock:
+            current = max(0, int(self._current))
+            peak = max(current, int(self._peak))
+            # Keep current as the next baseline and reset window peak.
+            self._peak = current
+            return current, peak
+
+
+_INFLIGHT_TRACKER = _InFlightTracker()
 
 ACTIVE_WORKERS_GAUGE = Gauge(
     "tc_active_workers",
@@ -280,6 +352,35 @@ WORKER_CONTROL_REDUCER_INTENT_COUNTER = Counter(
     "tc_worker_control_reducer_intents_total",
     "Total worker control reducer intents by shard/kind/result.",
     labelnames=("shard", "kind", "result"),
+)
+
+WORKER_HEARTBEAT_BUFFER_PENDING_GAUGE = Gauge(
+    "tc_worker_heartbeat_buffer_pending",
+    "Current number of workers with pending heartbeat updates in the buffer.",
+)
+
+WORKER_HEARTBEAT_FLUSH_BATCH_SIZE = Histogram(
+    "tc_worker_heartbeat_flush_batch_size",
+    "Batch size for buffered heartbeat flush operations.",
+    buckets=(
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        float("inf"),
+    ),
+)
+
+WORKER_HEARTBEAT_FLUSH_UPDATES_COUNTER = Counter(
+    "tc_worker_heartbeat_flush_updates_total",
+    "Total buffered heartbeat updates handled by flush path.",
+    labelnames=("result",),  # result=batched|fallback|dropped
 )
 
 RECONCILE_RESULT_COUNTER = Counter(
@@ -551,6 +652,22 @@ def inc_worker_control_reducer_intent(
     ).inc(count)
 
 
+def set_worker_heartbeat_buffer_pending(*, pending_workers: int) -> None:
+    WORKER_HEARTBEAT_BUFFER_PENDING_GAUGE.set(max(0, int(pending_workers)))
+
+
+def observe_worker_heartbeat_flush_batch_size(*, batch_size: int) -> None:
+    if batch_size <= 0:
+        return
+    WORKER_HEARTBEAT_FLUSH_BATCH_SIZE.observe(int(batch_size))
+
+
+def inc_worker_heartbeat_flush_updates(*, result: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    WORKER_HEARTBEAT_FLUSH_UPDATES_COUNTER.labels(result=result).inc(count)
+
+
 def inc_reconcile_result(*, result_kind: str, count: int = 1) -> None:
     if count <= 0:
         return
@@ -583,6 +700,107 @@ def inc_idempotency_replay_conflict(*, operation_kind: str, count: int = 1) -> N
     IDEMPOTENCY_REPLAY_COUNTER.labels(
         operation_kind=operation_kind, result="payload_conflict"
     ).inc(count)
+
+
+# ---------------------------------------------------------------------------
+# Control-plane executor observability
+# ---------------------------------------------------------------------------
+
+
+def _safe_queue_size(work_queue: object) -> int:
+    if work_queue is None:
+        return 0
+    try:
+        if isinstance(work_queue, queue.Queue):
+            return max(0, int(work_queue.qsize()))
+        qsize_fn = getattr(work_queue, "qsize", None)
+        if callable(qsize_fn):
+            return max(0, int(qsize_fn()))
+    except NotImplementedError:
+        return 0
+    except Exception:  # noqa: BLE001
+        return 0
+    return 0
+
+
+class ThreadPoolTelemetryReporter:
+    """Background sampler for ThreadPoolExecutor occupancy metrics."""
+
+    def __init__(
+        self,
+        *,
+        executor: object,
+        poll_interval_s: float = 1.0,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._executor = executor
+        self._poll_interval_s = max(0.1, float(poll_interval_s))
+        self._logger = logger or logging.getLogger(__name__)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="gs-control-plane-metrics",
+            daemon=True,
+        )
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        self._started = False
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._sample_once()
+            except Exception:  # noqa: BLE001
+                self._logger.debug(
+                    "control plane executor metrics sampling failed", exc_info=True
+                )
+            self._stop_event.wait(self._poll_interval_s)
+
+    def _sample_once(self) -> None:
+        max_workers = int(max(0, int(getattr(self._executor, "_max_workers", 0))))
+        threads = getattr(self._executor, "_threads", None)
+        live_threads = len(threads) if threads is not None else 0
+        queue_depth = _safe_queue_size(getattr(self._executor, "_work_queue", None))
+        inflight_current, inflight_peak = _INFLIGHT_TRACKER.snapshot()
+        GRPC_SERVER_INFLIGHT_GAUGE.set(inflight_current)
+        GRPC_SERVER_INFLIGHT_PEAK_GAUGE.set(inflight_peak)
+        busy_threads = min(
+            max_workers if max_workers > 0 else live_threads,
+            inflight_peak,
+        )
+        idle_threads = max(0, max_workers - busy_threads) if max_workers > 0 else 0
+
+        CONTROL_PLANE_EXECUTOR_MAX_THREADS.set(max_workers)
+        CONTROL_PLANE_EXECUTOR_LIVE_THREADS.set(max(0, int(live_threads)))
+        CONTROL_PLANE_EXECUTOR_QUEUE_DEPTH.set(queue_depth)
+        CONTROL_PLANE_EXECUTOR_BUSY_THREADS.set(max(0, int(busy_threads)))
+        CONTROL_PLANE_EXECUTOR_IDLE_THREADS.set(max(0, int(idle_threads)))
+
+
+def start_thread_pool_telemetry(
+    *,
+    executor: object,
+    poll_interval_s: float = 1.0,
+    logger: logging.Logger | None = None,
+) -> ThreadPoolTelemetryReporter:
+    reporter = ThreadPoolTelemetryReporter(
+        executor=executor,
+        poll_interval_s=poll_interval_s,
+        logger=logger,
+    )
+    reporter.start()
+    return reporter
 
 
 # ---------------------------------------------------------------------------
@@ -632,11 +850,28 @@ class PrometheusInterceptor(grpc.ServerInterceptor):
         """Wrap a unary-unary RPC handler to collect metrics."""
 
         def wrapper(request, context):
-            with _record_rpc_metrics(method):
+            start_time = monotonic()
+            response = None
+            code_name = grpc.StatusCode.OK.name
+            inflight_after_inc = _INFLIGHT_TRACKER.increment()
+            GRPC_SERVER_INFLIGHT_GAUGE.set(inflight_after_inc)
+            try:
                 response = inner(request, context)
                 code = context.code() or grpc.StatusCode.OK
-                GRPC_SERVER_HANDLED_COUNTER.labels(method=method, code=code.name).inc()
+                code_name = code.name
                 return response
+            except Exception:  # noqa: BLE001
+                code = context.code() or grpc.StatusCode.UNKNOWN
+                code_name = code.name
+                raise
+            finally:
+                duration = monotonic() - start_time
+                GRPC_SERVER_HANDLING_LATENCY_SECONDS.labels(method=method).observe(
+                    duration
+                )
+                GRPC_SERVER_HANDLED_COUNTER.labels(method=method, code=code_name).inc()
+                inflight_after_dec = _INFLIGHT_TRACKER.decrement()
+                GRPC_SERVER_INFLIGHT_GAUGE.set(inflight_after_dec)
 
         return wrapper
 
@@ -667,7 +902,8 @@ def start_metrics_http_server(port: int, addr: str = "") -> int:
 
     try:
         server = start_http_server(port, addr=addr)
-        actual_port = getattr(server, "server_port", None) or port
+        httpd = server[0] if isinstance(server, tuple) and server else server
+        actual_port = getattr(httpd, "server_port", None) or port
         return int(actual_port)
     except OSError as exc:
         logging.getLogger(__name__).warning(

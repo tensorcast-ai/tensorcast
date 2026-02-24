@@ -47,3 +47,29 @@ TEST_CASE("ReplicaLoadController binds UMA allocation to canonical device key", 
   CHECK(layout_or->artifact_bytes == artifact_size);
   CHECK(layout_or->artifact_chunk_bytes == tensorcast::common::consts::kArtifactChunkDefault);
 }
+
+TEST_CASE("ReplicaLoadController destructor releases UMA allocation", "[replica][uma][lifecycle]") {
+  const uint64_t artifact_size = 64 * 1024; // 64 KiB CPU replica
+  auto pinned_pool = std::make_shared<PinnedBufferPool>(
+      /*total_bytes=*/512 * 1024, /*chunk_bytes=*/tensorcast::common::consts::kArtifactChunkDefault);
+  auto async_runtime = std::make_shared<AsyncRuntime>();
+  const DeviceKey cpu_device{DeviceType::CPU, -1, ""};
+
+  auto controller = std::make_shared<ReplicaLoadController>(
+      "cpu_artifact_for_uma_lifecycle",
+      cpu_device,
+      pinned_pool,
+      async_runtime,
+      tensorcast::common::consts::kArtifactChunkDefault,
+      /*max_buffer_bytes=*/256 * 1024,
+      std::chrono::milliseconds::zero(),
+      /*streaming_buffer_chunks=*/16,
+      artifact_size);
+
+  const auto key = controller->replica_key();
+  auto uma = controller->memory_authority();
+  REQUIRE(uma->has_allocation(key));
+
+  controller.reset();
+  CHECK_FALSE(uma->has_allocation(key));
+}

@@ -1058,6 +1058,7 @@ void ReplicaRuntime::teardown_replica_memory(
       LOG(WARNING) << "Failed to disable remote access for " << key << " at " << location_name << ": "
                    << unexport_status;
       errors->push_back(unexport_status);
+      return;
     }
 
     absl::Status release_status = replica->release_memory(location);

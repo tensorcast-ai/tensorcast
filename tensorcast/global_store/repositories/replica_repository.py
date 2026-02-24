@@ -1033,6 +1033,42 @@ class ReplicaRepository(BaseRepository):
         """Convenience helper to list replicas for a given content-addressed artifact_id."""
         return self.find_by_filters(artifact_id=artifact_id, view_id=view_id)
 
+    def count_replicas_by_artifact_ids(
+        self, artifact_ids: list[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Return {artifact_id: (replica_count, available_count)} for the requested ids."""
+        normalized_ids = [str(artifact_id).strip() for artifact_id in artifact_ids]
+        requested_ids = [artifact_id for artifact_id in normalized_ids if artifact_id]
+        if not requested_ids:
+            return {}
+
+        unique_ids = list(dict.fromkeys(requested_ids))
+        placeholders = ", ".join("?" for _ in unique_ids)
+        cursor = self.get_cursor()
+        try:
+            rows = cursor.execute(
+                f"""
+                SELECT
+                    artifact_id,
+                    COUNT(*) AS replica_count,
+                    COALESCE(SUM(CASE WHEN is_available THEN 1 ELSE 0 END), 0) AS available_count
+                FROM artifact_replicas
+                WHERE artifact_id IN ({placeholders})
+                GROUP BY artifact_id
+                """,
+                unique_ids,
+            ).fetchall()
+        finally:
+            cursor.close()
+
+        counts = dict.fromkeys(unique_ids, (0, 0))
+        for row in rows:
+            artifact_id = str(row[0])
+            replica_count = int(row[1])
+            available_count = int(row[2])
+            counts[artifact_id] = (replica_count, available_count)
+        return counts
+
     def find_by_filters(
         self,
         artifact_id: str | None = None,
@@ -1225,6 +1261,29 @@ class ReplicaRepository(BaseRepository):
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()
         return [self._row_to_model(row, columns) for row in rows]
+
+    def get_worker_replica_epoch_atomic(
+        self, worker_id: str, cursor
+    ) -> tuple[int, int]:
+        """Return a compact epoch for detecting worker-replica set changes.
+
+        The epoch combines:
+        - row count for the worker
+        - max(updated_at) in microseconds since epoch
+        """
+        row = cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS replica_count,
+                CAST(COALESCE(MAX(EXTRACT(epoch FROM updated_at) * 1000000), 0) AS BIGINT) AS max_updated_epoch_us
+            FROM artifact_replicas
+            WHERE worker_id = ?
+            """,
+            [worker_id],
+        ).fetchone()
+        if row is None:
+            return 0, 0
+        return int(row[0] or 0), int(row[1] or 0)
 
     def update_worker_id(self, replica_id: UUID, new_worker_id: str) -> bool:
         """Update the worker_id for a replica."""

@@ -24,6 +24,7 @@ class TargetPublishService {
     WorkerIdentityStore& identity;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     common::CapabilityTokenManager* capability_tokens{nullptr};
+    uint32_t max_concurrency{4};
   };
 
   explicit TargetPublishService(Dep d);

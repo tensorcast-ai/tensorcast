@@ -33,6 +33,7 @@ class MetadataGateway {
     runtime::ReplicaPromotionManager* promotion_manager;
     size_t artifact_chunk_bytes;
     std::chrono::milliseconds pinned_memory_timeout;
+    uint32_t max_concurrency{4};
     ReplicaFactory replica_factory;
   };
 
@@ -54,7 +55,9 @@ class MetadataGateway {
       std::string_view publish_context_id = {});
   absl::Status unregister_replica(std::string_view artifact_id, int device_id);
 
-  absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view key) const;
+  absl::StatusOr<components::KeyMapping> resolve_key_mapping(
+      std::string_view key,
+      const components::RpcOptions& rpc_options = components::RpcOptions{}) const;
   absl::StatusOr<std::string> get_canonical_index(std::string_view artifact_id) const;
   absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id)
       const;
@@ -75,6 +78,10 @@ class MetadataGateway {
   absl::Status ingest_view_chunk(
       std::string_view registration_id,
       uint64_t view_offset,
+      absl::Span<const std::byte> data);
+  absl::Status ingest_registration_chunk(
+      std::string_view registration_id,
+      uint64_t offset,
       absl::Span<const std::byte> data);
   [[nodiscard]] absl::StatusOr<uint64_t> get_view_ingested_bytes(std::string_view registration_id) const;
 
@@ -119,6 +126,7 @@ class MetadataGateway {
   std::unique_ptr<RegistrationBackend> registration_backend_;
   size_t artifact_chunk_bytes_{0};
   std::chrono::milliseconds pinned_memory_timeout_{0};
+  uint32_t max_concurrency_{4};
   ReplicaFactory replica_factory_;
   mutable absl::Mutex publish_context_mu_;
   mutable absl::flat_hash_map<std::string, PublishContextRecord> publish_contexts_ ABSL_GUARDED_BY(publish_context_mu_);

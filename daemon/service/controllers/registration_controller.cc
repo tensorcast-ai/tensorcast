@@ -449,14 +449,24 @@ grpc::Status process_feed_requests(
     } else if (req.has_view_chunk()) {
       const std::string& payload = req.view_chunk().data();
       absl::Span<const std::byte> bytes(reinterpret_cast<const std::byte*>(payload.data()), payload.size());
-      auto ingest_status = dep.engine.ingest_view_registration_chunk(reg_id, req.view_chunk().view_offset(), bytes);
+      const uint64_t view_offset = req.view_chunk().view_offset();
+      absl::Status ingest_status;
+      if (have_meta && current_meta.plan == RegistrationManager::RegPlan::STABLE_DRAM && !current_meta.stage_on_gpu &&
+          !current_meta.view_registration) {
+        ingest_status = dep.engine.ingest_registration_chunk(reg_id, view_offset, bytes);
+      } else {
+        ingest_status = dep.engine.ingest_view_registration_chunk(reg_id, view_offset, bytes);
+      }
       if (!ingest_status.ok()) {
         return to_grpc_status(ingest_status);
       }
       record_view_bytes_metric(static_cast<double>(payload.size()));
-      auto ingested_or = dep.engine.get_view_registration_ingested_bytes(reg_id);
-      if (ingested_or.ok()) {
-        dep.reg.update_view_ingested_bytes(reg_id, *ingested_or);
+      if (!(have_meta && current_meta.plan == RegistrationManager::RegPlan::STABLE_DRAM && !current_meta.stage_on_gpu &&
+            !current_meta.view_registration)) {
+        auto ingested_or = dep.engine.get_view_registration_ingested_bytes(reg_id);
+        if (ingested_or.ok()) {
+          dep.reg.update_view_ingested_bytes(reg_id, *ingested_or);
+        }
       }
     } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
       // allow metadata-only payloads
@@ -964,7 +974,7 @@ grpc::Status commit_piece_view_registration(
       stable_index_json,
       /*encoding=*/"json",
       /*schema_version=*/"v3",
-      /*max_concurrency=*/1,
+      /*max_concurrency=*/std::max<uint32_t>(1, dep.max_concurrency),
       /*verification_json=*/std::nullopt,
       std::optional<std::string_view>(meta.view_id));
   if (!replica_id_or.ok()) {
@@ -1412,9 +1422,6 @@ grpc::Status begin_coalesced_or_stable_registration(
     reg.plan = store::runtime::metadata::RegistrationPlan::kStableDram;
     reg.stable_dram.stage_on_gpu = meta.stage_on_gpu;
     reg.stable_dram.release_gpu_on_commit = meta.release_gpu_on_commit;
-    if (!meta.stage_on_gpu) {
-      return {StatusCode::UNIMPLEMENTED, "dram_stable with stage_on_gpu=false is not implemented"};
-    }
   }
   auto begin_or = dep.engine.begin_register_artifact(reg);
   if (!begin_or.ok()) {
@@ -1425,7 +1432,9 @@ grpc::Status begin_coalesced_or_stable_registration(
   auto handle_view = out.cuda_ipc_handle_bytes.as_string_view();
   if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
     auto* hs = resp.mutable_stable_dram();
-    hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
+    if (meta.stage_on_gpu) {
+      hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
+    }
   } else {
     auto* hs = resp.mutable_coalesced();
     hs->set_daemon_ipc_handle(handle_view.data(), handle_view.size());

@@ -15,7 +15,13 @@ from typing import Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, field_validator
 
 import tensorcast
-from tensorcast.api._config import OverflowPolicy, StorePolicy, StorePolicyProfile
+from tensorcast.api._config import (
+    OverflowPolicy,
+    PlanType,
+    RegisterArtifactOptions,
+    StorePolicy,
+    StorePolicyProfile,
+)
 from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.types import PersistenceStatusResult, TensorDict
 
@@ -86,6 +92,12 @@ class WeightPublisherConfig(BaseModel):
     model_overrides: Mapping[str, object] | None = None
     gc_wait: bool = True
     gc_drain_timeout_s: float | None = 30.0
+    gc_require_drained: bool = True
+    pre_publish_trim_enabled: bool = False
+    pre_publish_keep_last: int | None = None
+    # For DRAM_STABLE publish, default to direct CPU streaming into replica
+    # memory. This avoids daemon-side full-size GPU staging.
+    stage_on_gpu: bool = False
 
     @field_validator("model_name")
     @classmethod
@@ -101,6 +113,16 @@ class WeightPublisherConfig(BaseModel):
         keep = int(str(value).strip())
         if keep < 0:
             raise ValueError("keep_last must be >= 0")
+        return keep
+
+    @field_validator("pre_publish_keep_last")
+    @classmethod
+    def _validate_pre_publish_keep_last(cls, value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        keep = int(str(value).strip())
+        if keep < 0:
+            raise ValueError("pre_publish_keep_last must be >= 0")
         return keep
 
     @field_validator("policy", mode="before")
@@ -145,14 +167,21 @@ class WeightPublisher:
     def publish(self, tensors: TensorDict, *, version: int) -> str:
         if version < 0:
             raise ValueError("version must be >= 0")
+        self._maybe_trim_before_publish(version=version)
         artifact_key = self._build_key(version)
         requested_id = self._new_artifact_id(version)
         policy = self._build_policy()
+        register_options = RegisterArtifactOptions(
+            plan=PlanType.DRAM_STABLE,
+            stage_on_gpu=bool(self._config.stage_on_gpu),
+            release_gpu_on_commit=True,
+        )
         registered = tensorcast.put(
             tensors,
             artifact_id=requested_id,
             key=artifact_key,
             policy=policy,
+            options=register_options,
         )
         artifact_id = registered.artifact_id
 
@@ -180,6 +209,7 @@ class WeightPublisher:
         """
         if version < 0:
             raise ValueError("version must be >= 0")
+        self._maybe_trim_before_publish(version=version)
         artifact_key = self._build_key(version)
         artifact = tensorcast.from_disk(
             str(hf_dir),
@@ -336,28 +366,87 @@ class WeightPublisher:
                 poll_interval_s=float(self._config.stepcast_ack_poll_interval_s),
             )
 
+    def _maybe_trim_before_publish(self, *, version: int) -> None:
+        if not self._config.pre_publish_trim_enabled:
+            return
+        keep = self._effective_pre_publish_keep_last()
+        history = self._load_history()
+        if not history:
+            return
+        kept = self._apply_retention(
+            history=history,
+            keep=keep,
+            reason=f"pre_publish(version={version})",
+        )
+        logger.info(
+            "pre_publish trim applied: version=%s keep=%s kept_versions=%s",
+            version,
+            keep,
+            [ver for ver, _ in kept],
+        )
+
+    def _effective_pre_publish_keep_last(self) -> int:
+        if self._config.pre_publish_keep_last is not None:
+            return int(self._config.pre_publish_keep_last)
+        keep = int(self._config.keep_last)
+        return max(0, keep - 1)
+
     def _gc_old_artifacts(self, version: int, latest_artifact_id: str) -> None:
         keep = self._config.keep_last
         if keep <= 0:
             return
         history = self._load_history()
         history.append((version, latest_artifact_id))
+        self._apply_retention(
+            history=history,
+            keep=int(keep),
+            reason=f"post_publish(version={version})",
+        )
+
+    def _apply_retention(
+        self,
+        *,
+        history: Sequence[tuple[int, str]],
+        keep: int,
+        reason: str,
+    ) -> list[tuple[int, str]]:
+        clamped_keep = max(0, int(keep))
         by_version = {ver: artifact_id for ver, artifact_id in history if artifact_id}
         ordered = sorted(by_version.items(), key=lambda item: item[0], reverse=True)
-        to_keep = ordered[:keep]
-        to_drop = ordered[keep:]
+        to_keep = ordered[:clamped_keep] if clamped_keep > 0 else []
+        to_drop = ordered[clamped_keep:]
         for _, artifact_id in to_drop:
             # Retention policy intentionally keeps key mappings append-only.
             # keep_last only controls replica/shared-disk residency.
             try:
-                tensorcast.deregister_artifact(
+                outcome = tensorcast.deregister_artifact(
                     artifact_id,
                     wait=self._config.gc_wait,
                     drain_timeout_s=self._config.gc_drain_timeout_s,
                 )
+                logger.info(
+                    "deregister reason=%s artifact_id=%s drained=%s removed=%s released_region_ids=%s message=%s",
+                    reason,
+                    artifact_id,
+                    bool(outcome.drained),
+                    bool(outcome.removed),
+                    list(outcome.released_region_ids),
+                    outcome.message,
+                )
+                if (
+                    self._config.gc_wait
+                    and self._config.gc_require_drained
+                    and not bool(outcome.drained)
+                ):
+                    raise RuntimeError(
+                        "deregister did not drain in gc_wait mode: "
+                        f"artifact_id={artifact_id}, message={outcome.message}"
+                    )
             except Exception:
                 logger.exception("deregister failed: %s", artifact_id)
+                raise
         self._store_history(to_keep)
+        return list(to_keep)
 
     def _load_history(self) -> list[tuple[int, str]]:
         path = self._history_path

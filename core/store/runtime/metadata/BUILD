@@ -37,6 +37,7 @@ sc_cc_library(
         ":metadata_types",
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_verification_lib",
+        "//core/common:host_memory_lib",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:trace_macros_lib",

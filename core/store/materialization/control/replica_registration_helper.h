@@ -22,6 +22,7 @@ class ReplicaRegistrationHelper {
       const DeviceKey& device,
       common::memory::MemoryLocation location,
       uint64_t size_bytes,
+      uint32_t max_concurrency = 4,
       std::optional<std::string_view> view_id = std::nullopt,
       std::optional<std::string_view> client_request_id = std::nullopt);
 };

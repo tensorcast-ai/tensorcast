@@ -30,12 +30,20 @@ message MemoryTierPolicy {
   google.protobuf.Duration publish_interval = 3;
 }
 
+message KeyMappingPolicy {
+  // Cache TTL returned for alias-style key mappings. Keep this short to reduce
+  // polling pressure while preserving near-real-time updates. 0 disables alias
+  // caching.
+  google.protobuf.Duration alias_cache_ttl = 1;
+}
+
 message WorkerPolicy {
   google.protobuf.Duration heartbeat_timeout = 1;
   google.protobuf.Duration cleanup_interval = 2;
   google.protobuf.Duration default_heartbeat_interval = 3;
   MemoryTierPolicy memory_tiers = 4;
   WorkerControlReducerPolicy control_reducer = 5;
+  KeyMappingPolicy key_mapping = 6;
 }
 
 message WorkerControlReducerPolicy {

@@ -1140,7 +1140,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     if (!entry.verification_json.empty()) {
       transport->set_verification_json(entry.verification_json);
     }
-    rep.mutable_stats()->set_max_concurrency(1);
+    rep.mutable_stats()->set_max_concurrency(std::max<uint32_t>(1, opts_.max_concurrency));
     // Reconcile current_requests with active PID refs tracked by the service
     rep.mutable_stats()->set_current_requests(static_cast<uint32_t>(ports_.retire_gates.ref_count_for(entry.key)));
     rep.mutable_stats()->set_is_available(entry.is_available);
@@ -1603,11 +1603,30 @@ void WorkerLifecycleManager::chunk_sync_loop() {
   try {
     while (!stop_.load()) {
       std::vector<store::components::ChunkStateUpdate> updates;
+      absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> seen_keys;
       for (const auto& info : engine_->get_all_replicas_info()) {
         if (info.gpu_state == common::memory::MemoryLocation::NONE)
           continue;
         // Use UMA-backed per-device states to reflect actual GPU residency
         auto states = engine_->get_chunk_states_for_device(info.artifact_id, info.gpu_device_id);
+        seen_keys.insert(info.key);
+        std::vector<int32_t> state_codes;
+        state_codes.reserve(states.size());
+        for (const auto state : states) {
+          state_codes.push_back(static_cast<int32_t>(state));
+        }
+        bool should_publish = false;
+        {
+          std::lock_guard<std::mutex> lock(chunk_sync_state_mu_);
+          auto it = chunk_sync_last_states_.find(info.key);
+          if (it == chunk_sync_last_states_.end() || it->second != state_codes) {
+            chunk_sync_last_states_[info.key] = std::move(state_codes);
+            should_publish = true;
+          }
+        }
+        if (!should_publish) {
+          continue;
+        }
         updates.reserve(updates.size() + states.size());
         for (size_t i = 0; i < states.size(); ++i) {
           store::components::ChunkStateUpdate u;
@@ -1617,6 +1636,18 @@ void WorkerLifecycleManager::chunk_sync_loop() {
           u.device_uuid = info.key.device.uuid;
           u.replica = 0;
           updates.push_back(std::move(u));
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(chunk_sync_state_mu_);
+        for (auto it = chunk_sync_last_states_.begin(); it != chunk_sync_last_states_.end();) {
+          if (seen_keys.contains(it->first)) {
+            ++it;
+            continue;
+          }
+          auto erase_it = it;
+          ++it;
+          chunk_sync_last_states_.erase(erase_it);
         }
       }
       if (!updates.empty()) {

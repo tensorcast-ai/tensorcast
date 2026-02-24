@@ -162,6 +162,10 @@ Workers must provide a stable `daemon_id` (auto-generated and persisted when omi
 primary identity for upserts so a daemon can restart or change advertised address/port without losing its logical
 identity. `worker_id` remains an assigned row identifier; `ListActiveWorkers` returns both `worker_id` and `daemon_id`.
 
+When a new daemon registration arrives for an endpoint (`node_address:grpc_port`) that is still occupied by an older row,
+Global Store performs endpoint takeover: the previous endpoint owner is reclaimed and the new registration becomes authoritative
+without waiting for heartbeat timeout cleanup. This avoids restart races after unclean daemon exits.
+
 Inactive workers remain in the registry with `inactive_at` set so routing can filter them while avoiding delete/update conflicts.
 
 **Design decision: batched heartbeats.** Workers send heartbeats every ~5 seconds. Writing each immediately would create unnecessary database load. Instead, `WorkerService` buffers heartbeats in memory and a background thread flushes batches every ~100ms. This trades sub-second staleness for dramatically reduced write amplification.
@@ -442,9 +446,12 @@ worker_policy:
   memory_tiers:
     snapshot_retention: "600s"
     snapshot_max_rows: 200
+  key_mapping:
+    alias_cache_ttl: "1s"
 ```
 
 `server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `database.db_file` is null/empty, the CLI leaves it unset and the Global Store uses in-memory DuckDB. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
+`worker_policy.key_mapping.alias_cache_ttl` controls the `ResolveKeyMapping` cache TTL returned for alias-style mappings; keep it short to reduce polling pressure.
 
 ## Extending the Global Store
 

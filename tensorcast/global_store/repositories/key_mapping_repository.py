@@ -8,6 +8,7 @@ ttl_seconds, generation, kind, created_at, updated_at)
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Optional
 
 from tensorcast.global_store.repositories.base import BaseRepository
@@ -15,6 +16,65 @@ from tensorcast.global_store.repositories.base import BaseRepository
 
 class KeyMappingRepository(BaseRepository):
     """Data access for the `key_mappings` table."""
+
+    def __init__(self, connection):
+        super().__init__(connection)
+        self._cache_lock = threading.RLock()
+        # None means a negative cache entry (key not found).
+        self._cache: dict[str, dict[str, Any] | None] = {}
+
+    def _cache_get(self, key: str) -> tuple[bool, dict[str, Any] | None]:
+        with self._cache_lock:
+            if key not in self._cache:
+                return False, None
+            cached = self._cache[key]
+            if cached is None:
+                return True, None
+            return True, dict(cached)
+
+    def _cache_set(self, key: str, value: dict[str, Any] | None) -> None:
+        with self._cache_lock:
+            self._cache[key] = None if value is None else dict(value)
+
+    def _cache_delete(self, key: str) -> None:
+        with self._cache_lock:
+            self._cache.pop(key, None)
+
+    @staticmethod
+    def _row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "key": row[0],
+            "artifact_id": row[1],
+            "replica_uuid": row[2],
+            "daemon_address": row[3],
+            "ttl_seconds": row[4],
+            "generation": row[5],
+            "kind": row[6],
+            "created_at": row[7],
+            "updated_at": row[8],
+        }
+
+    def _select_row(self, cursor, key: str) -> dict[str, Any] | None:
+        row = cursor.execute(
+            """
+            SELECT key, artifact_id, replica_uuid, daemon_address, ttl_seconds, generation, kind, created_at, updated_at
+            FROM key_mappings WHERE key = ?
+            """,
+            [key],
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_dict(row)
+
+    def _refresh_cache_from_cursor(
+        self,
+        *,
+        cursor,
+        key: str,
+    ) -> dict[str, Any] | None:
+        row = self._select_row(cursor, key)
+        self._cache_set(key, row)
+        return row
 
     def upsert(
         self,
@@ -45,32 +105,23 @@ class KeyMappingRepository(BaseRepository):
                 """,
                 [key, artifact_id, replica_uuid, daemon_address, ttl_seconds],
             )
+            self._refresh_cache_from_cursor(cursor=cursor, key=key)
         finally:
             cursor.close()
 
     def get(self, key: str) -> Optional[dict[str, Any]]:
+        hit, cached = self._cache_get(key)
+        if hit:
+            return cached
+
         cursor = self.get_cursor()
         try:
-            row = cursor.execute(
-                """
-                SELECT key, artifact_id, replica_uuid, daemon_address, ttl_seconds, generation, kind, created_at, updated_at
-                FROM key_mappings WHERE key = ?
-                """,
-                [key],
-            ).fetchone()
-            if not row:
+            row = self._select_row(cursor, key)
+            if row is None:
+                self._cache_set(key, None)
                 return None
-            return {
-                "key": row[0],
-                "artifact_id": row[1],
-                "replica_uuid": row[2],
-                "daemon_address": row[3],
-                "ttl_seconds": row[4],
-                "generation": row[5],
-                "kind": row[6],
-                "created_at": row[7],
-                "updated_at": row[8],
-            }
+            self._cache_set(key, row)
+            return row
         finally:
             cursor.close()
 
@@ -93,6 +144,7 @@ class KeyMappingRepository(BaseRepository):
             ).fetchone()
             if not row:
                 if expected_artifact_id or expected_generation is not None:
+                    self._cache_set(key, None)
                     return {
                         "ok": False,
                         "artifact_id": None,
@@ -107,6 +159,7 @@ class KeyMappingRepository(BaseRepository):
                     """,
                     [key, new_artifact_id],
                 )
+                self._refresh_cache_from_cursor(cursor=cursor, key=key)
                 return {
                     "ok": True,
                     "artifact_id": new_artifact_id,
@@ -118,6 +171,7 @@ class KeyMappingRepository(BaseRepository):
             current_generation = int(row[2])
             current_kind = row[3]
             if expected_artifact_id and expected_artifact_id != current_artifact_id:
+                self._refresh_cache_from_cursor(cursor=cursor, key=key)
                 return {
                     "ok": False,
                     "artifact_id": current_artifact_id,
@@ -128,6 +182,7 @@ class KeyMappingRepository(BaseRepository):
                 expected_generation is not None
                 and expected_generation != current_generation
             ):
+                self._refresh_cache_from_cursor(cursor=cursor, key=key)
                 return {
                     "ok": False,
                     "artifact_id": current_artifact_id,
@@ -138,13 +193,14 @@ class KeyMappingRepository(BaseRepository):
                 if current_kind != "ALIAS":
                     cursor.execute(
                         """
-                        UPDATE key_mappings
-                        SET kind = 'ALIAS', updated_at = now()
-                        WHERE key = ?
-                        """,
+                    UPDATE key_mappings
+                    SET kind = 'ALIAS', updated_at = now()
+                    WHERE key = ?
+                    """,
                         [key],
                     )
                     current_kind = "ALIAS"
+                self._refresh_cache_from_cursor(cursor=cursor, key=key)
                 return {
                     "ok": True,
                     "artifact_id": current_artifact_id,
@@ -160,6 +216,7 @@ class KeyMappingRepository(BaseRepository):
                 """,
                 [new_artifact_id, new_generation, key],
             )
+            self._refresh_cache_from_cursor(cursor=cursor, key=key)
             return {
                 "ok": True,
                 "artifact_id": new_artifact_id,
@@ -178,6 +235,8 @@ class KeyMappingRepository(BaseRepository):
                 is not None
             )
             if not exists:
+                self._cache_set(key, None)
                 return False
             cursor.execute("DELETE FROM key_mappings WHERE key = ?", [key])
+            self._cache_set(key, None)
             return True

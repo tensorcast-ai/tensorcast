@@ -3,10 +3,11 @@
 """Tests for Global Store configuration management."""
 
 import pytest
+import yaml
+from google.protobuf.json_format import ParseError
 from pydantic import ValidationError
 
 from tensorcast.global_store.config import GlobalStoreConfig
-import yaml
 
 
 class TestConfiguration:
@@ -18,6 +19,7 @@ class TestConfiguration:
         assert config.port == 50051
         assert config.max_workers == 10
         assert config.heartbeat_timeout_ms == 30000
+        assert config.key_mapping_policy.alias_cache_ttl_ms == 1000
         assert config.db_file is None
 
     def test_config_from_file(self, tmp_path):
@@ -48,7 +50,7 @@ class TestConfiguration:
         cfg = {"server": {"listen": {"port": "invalid"}}}
         p = tmp_path / "cfg.yaml"
         p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        with pytest.raises(Exception):
+        with pytest.raises(ParseError):
             _ = GlobalStoreConfig.from_file(str(p))
 
     def test_config_zero_max_workers(self, tmp_path):
@@ -76,6 +78,7 @@ class TestConfiguration:
                 "heartbeat_timeout": "45s",
                 "cleanup_interval": "90s",
                 "default_heartbeat_interval": "7s",
+                "key_mapping": {"alias_cache_ttl": "2s"},
             },
         }
         p = tmp_path / "cfg.yaml"
@@ -87,6 +90,7 @@ class TestConfiguration:
         assert config.heartbeat_timeout_ms == 45000
         assert config.cleanup_interval_ms == 90000
         assert config.default_heartbeat_interval_ms == 7000
+        assert config.key_mapping_policy.alias_cache_ttl_ms == 2000
         # Fields not present in file remain defaults
         assert config.optimize_interval_ms == 3_600_000
         assert config.metrics_port == 8000

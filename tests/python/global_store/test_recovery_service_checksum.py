@@ -369,6 +369,85 @@ def test_reconcile_replay_is_idempotent_and_stale_lower_seq_is_ignored(repositor
     assert stale[0] == global_store_pb2.RECONCILE_RESULT_KIND_IGNORED_STALE
 
 
+def test_snapshot_noop_fast_path_uses_cache_and_short_circuits_replay(
+    repositories, monkeypatch
+):
+    recovery = _make_recovery_service(repositories)
+    worker_id = "worker-noop-fast-path"
+    repositories["worker"].create_or_update(
+        Worker(
+            worker_id=worker_id,
+            daemon_id="daemon-noop-fast-path",
+            node_id="node-noop-fast-path",
+            node_address="10.0.0.31",
+            grpc_port=50051,
+            p2p_port=65090,
+            mem_pool_total_size=2048,
+            mem_pool_available_size=2048,
+        )
+    )
+    inventory = [
+        _make_inventory_replica(
+            artifact_id="artifact-noop-fast-path",
+            node_id="node-noop-fast-path",
+            node_address="10.0.0.31",
+            node_port=50051,
+            memory_type=common_pb2.MEMORY_TYPE_GPU,
+            device_id=0,
+            memory_size=4096,
+            is_available=True,
+        )
+    ]
+
+    first = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=1,
+        inventory=inventory,
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+        daemon_id="daemon-noop-fast-path",
+    )
+    assert first[0] == global_store_pb2.RECONCILE_RESULT_KIND_APPLIED
+
+    def _fail_global_replica_scan(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("fast NOOP should not scan replicas")
+
+    monkeypatch.setattr(
+        recovery.replica_repository,
+        "get_replicas_by_worker_atomic",
+        _fail_global_replica_scan,
+    )
+
+    second = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=2,
+        inventory=inventory,
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+        daemon_id="daemon-noop-fast-path",
+    )
+    assert second[0] == global_store_pb2.RECONCILE_RESULT_KIND_NOOP
+
+    def _fail_transaction(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("replay should be served from cache without transaction")
+
+    monkeypatch.setattr(recovery.worker_repository, "transaction", _fail_transaction)
+    replay = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=2,
+        inventory=inventory,
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+        daemon_id="daemon-noop-fast-path",
+    )
+    assert replay[0] == global_store_pb2.RECONCILE_RESULT_KIND_NOOP
+
+
 def test_endpoint_drift_triggers_update(repositories):
     recovery = _make_recovery_service(repositories)
     worker_id = "worker-endpoint"

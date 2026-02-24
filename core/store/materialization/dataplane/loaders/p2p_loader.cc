@@ -103,7 +103,10 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       .buffer_sizes = source_.buf_sizes,
       .ip = source_.ip,
       .port = source_.port,
-      .total_size = source_.size_bytes};
+      .total_size = source_.size_bytes,
+      .request_budget = source_.request_budget,
+      .artifact_id = source_.artifact_id,
+  };
   auto remote_src = std::make_shared<store::loader::RemoteKeySource>(src_opts);
 
   // Optional disk fallback via configured directory

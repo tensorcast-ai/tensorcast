@@ -211,6 +211,11 @@ std::vector<store::loading::ReplicaKey> resolve_retire_replica_keys(
   } else if (drained_key.has_value()) {
     const DeviceType type = drained_key->device_id < 0 ? DeviceType::CPU : DeviceType::GPU;
     fallback_device = store::DeviceKey{.type = type, .ordinal = drained_key->device_id, .uuid = ""};
+  } else {
+    // Stateless deregister may not carry lease/device hints. Publisher-side replicas
+    // are CPU-stable by default; probe canonical CPU key so local memory can retire
+    // instead of becoming metadata-only tombstones.
+    fallback_device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
   if (fallback_device.has_value()) {
     out.push_back(

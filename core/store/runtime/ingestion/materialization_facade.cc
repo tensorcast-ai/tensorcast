@@ -1449,7 +1449,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   };
 
   auto gs_client = config_.runtime_context->global_store_client();
+  auto comm_manager = config_.runtime_context->communication_manager();
   const bool gs_connected = gs_client && gs_client->is_connected();
+  const bool comm_enabled = comm_manager && comm_manager->is_enabled();
   const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
   const bool allow_p2p = hints.allow_p2p;
@@ -1486,6 +1488,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
+  if (allow_p2p && !comm_enabled && (!allow_disk || !has_disk_source || prefer_p2p)) {
+    return absl::FailedPreconditionError("Communication not enabled");
+  }
 
   if (allow_p2p && gs_connected && !hints.artifact_id.empty()) {
     auto transport_or = gs_client->request_replica_transport(
@@ -1510,6 +1515,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         }
       } else {
         P2PSource p2p_src;
+        p2p_src.comm_engine = gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+            comm_manager->get_shared_engine()};
         p2p_src.size_bytes = remote.memory_size;
         p2p_src.ip = remote.node_address;
         p2p_src.port = static_cast<uint16_t>(remote.node_port);
@@ -1519,6 +1526,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        p2p_src.request_budget = hints.request_budget;
+        p2p_src.artifact_id = hints.artifact_id;
         if (has_disk_source && allow_disk && !prefer_p2p) {
           p2p_src.fallback_disk_dir = disk_source->path.string();
         }
@@ -1809,7 +1818,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   };
 
   auto gs_client = config_.runtime_context->global_store_client();
+  auto comm_manager = config_.runtime_context->communication_manager();
   const bool gs_connected = gs_client && gs_client->is_connected();
+  const bool comm_enabled = comm_manager && comm_manager->is_enabled();
   const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
   const bool allow_p2p = hints.allow_p2p;
@@ -1846,6 +1857,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
+  if (allow_p2p && !comm_enabled && (!allow_disk || !has_disk_source || prefer_p2p)) {
+    return absl::FailedPreconditionError("Communication not enabled");
+  }
 
   if (allow_p2p && gs_connected && !hints.artifact_id.empty()) {
     auto transport_or = gs_client->request_replica_transport(
@@ -1870,6 +1884,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         }
       } else {
         P2PSource p2p_src;
+        p2p_src.comm_engine = gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+            comm_manager->get_shared_engine()};
         p2p_src.size_bytes = remote.memory_size;
         p2p_src.ip = remote.node_address;
         p2p_src.port = static_cast<uint16_t>(remote.node_port);
@@ -1879,6 +1895,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        p2p_src.request_budget = hints.request_budget;
+        p2p_src.artifact_id = hints.artifact_id;
         if (has_disk_source && allow_disk && !prefer_p2p) {
           p2p_src.fallback_disk_dir = disk_source->path.string();
         }

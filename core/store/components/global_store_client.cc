@@ -3,6 +3,7 @@
 #include "core/store/components/global_store_client.h"
 
 #include <unistd.h>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -1769,6 +1770,11 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   }
 
   global_store::RequestReplicaTransportResponse response;
+  RpcOptions rpc_opts;
+  if (wait_timeout_ms > 0) {
+    // Align gRPC deadline with server-side long-poll wait budget.
+    rpc_opts.timeout = absl::Milliseconds(wait_timeout_ms) + absl::Seconds(1);
+  }
 
   auto status = execute_rpc_with_retry(
       request,
@@ -1776,7 +1782,8 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
       [this](auto* ctx, const auto& req, auto* resp) {
         return cluster_runtime_stub_->RequestReplicaTransport(ctx, req, resp);
       },
-      "RequestReplicaTransport");
+      "RequestReplicaTransport",
+      rpc_opts);
 
   if (!status.ok()) {
     return status;
@@ -1785,6 +1792,14 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   if (response.status() != global_store::STATUS_OK) {
     if (response.status() == global_store::STATUS_NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("No available replicas for replica: %s", artifact_id));
+    }
+    if (response.status() == global_store::STATUS_TIMED_OUT) {
+      return absl::DeadlineExceededError(
+          absl::StrFormat(
+              "RequestReplicaTransport timed out while waiting for source assignment: artifact=%s source=%s timeout_ms=%u",
+              artifact_id,
+              source_node_id,
+              wait_timeout_ms));
     }
     return absl::InternalError(
         absl::StrFormat(
@@ -1834,6 +1849,11 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   requested_space->set_id(std::string(view_id));
 
   global_store::RequestReplicaTransportResponse response;
+  RpcOptions rpc_opts;
+  if (wait_timeout_ms > 0) {
+    // Align gRPC deadline with server-side long-poll wait budget.
+    rpc_opts.timeout = absl::Milliseconds(wait_timeout_ms) + absl::Seconds(1);
+  }
 
   auto status = execute_rpc_with_retry(
       request,
@@ -1841,7 +1861,8 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
       [this](auto* ctx, const auto& req, auto* resp) {
         return cluster_runtime_stub_->RequestReplicaTransport(ctx, req, resp);
       },
-      "RequestReplicaTransport(view)");
+      "RequestReplicaTransport(view)",
+      rpc_opts);
 
   if (!status.ok()) {
     return status;
@@ -1851,6 +1872,16 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
     if (response.status() == global_store::STATUS_NOT_FOUND) {
       return absl::NotFoundError(
           absl::StrFormat("No available replicas for view transport: %s view_id=%s", artifact_id, view_id));
+    }
+    if (response.status() == global_store::STATUS_TIMED_OUT) {
+      return absl::DeadlineExceededError(
+          absl::StrFormat(
+              "RequestReplicaTransport(view) timed out while waiting for source assignment: artifact=%s view_id=%s "
+              "source=%s timeout_ms=%u",
+              artifact_id,
+              view_id,
+              source_node_id,
+              wait_timeout_ms));
     }
     return absl::InternalError(
         absl::StrFormat(
@@ -2166,12 +2197,30 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
   const absl::Duration timeout = rpc_options.timeout.value_or(config_.rpc_timeout);
   const uint32_t max_retries = rpc_options.max_retries.value_or(config_.max_retries);
   const absl::Duration retry_backoff = rpc_options.retry_backoff.value_or(config_.retry_backoff);
+  constexpr absl::Duration kCancelAwareAttemptSlice = absl::Seconds(1);
+  constexpr absl::Duration kCancelableSleepSlice = absl::Milliseconds(50);
+  if (timeout <= absl::ZeroDuration()) {
+    return absl::DeadlineExceededError(absl::StrFormat("RPC %s timeout budget exhausted", method_name));
+  }
+  const absl::Time overall_deadline = absl::Now() + timeout;
   static thread_local std::mt19937_64 rng{std::random_device{}()};
   absl::Status final_error =
       absl::UnavailableError(absl::StrFormat("RPC %s failed after %d retries", method_name, max_retries + 1));
   for (uint32_t attempt = 0; attempt <= max_retries; ++attempt) {
+    if (rpc_options.cancel_check && rpc_options.cancel_check()) {
+      return absl::CancelledError(absl::StrFormat("RPC %s cancelled before attempt %d", method_name, attempt + 1));
+    }
+    const absl::Duration remaining_budget = overall_deadline - absl::Now();
+    if (remaining_budget <= absl::ZeroDuration()) {
+      return absl::DeadlineExceededError(absl::StrFormat("RPC %s timeout budget exhausted", method_name));
+    }
+    absl::Duration attempt_timeout = remaining_budget;
+    if (rpc_options.cancel_check) {
+      attempt_timeout = std::min(attempt_timeout, kCancelAwareAttemptSlice);
+    }
+    const auto attempt_timeout_ns = std::max<int64_t>(1, absl::ToInt64Nanoseconds(attempt_timeout));
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(timeout)));
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::nanoseconds(attempt_timeout_ns));
     if (!config_.cluster_token.empty()) {
       context.AddMetadata("x-tensorcast-cluster-token", config_.cluster_token);
     }
@@ -2225,10 +2274,23 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
       // Jitter within +/- 50%
       double jitter = std::uniform_real_distribution<double>(0.5, 1.5)(rng);
       auto jittered = absl::Milliseconds(static_cast<int64_t>(absl::ToInt64Milliseconds(base) * jitter));
+      const absl::Duration remaining_for_backoff = overall_deadline - absl::Now();
+      if (remaining_for_backoff <= absl::ZeroDuration()) {
+        return absl::DeadlineExceededError(absl::StrFormat("RPC %s timeout budget exhausted", method_name));
+      }
+      jittered = std::min(jittered, remaining_for_backoff);
       LOG(WARNING) << "RPC " << method_name << " failed (attempt " << attempt + 1 << "/" << max_retries + 1
                    << ", tx_conflict=" << (tx_conflict ? "true" : "false") << "): " << status.error_message()
                    << ". Retrying in " << absl::ToInt64Milliseconds(jittered) << "ms";
-      std::this_thread::sleep_for(std::chrono::milliseconds(absl::ToInt64Milliseconds(jittered)));
+      absl::Duration sleep_remaining = jittered;
+      while (sleep_remaining > absl::ZeroDuration()) {
+        if (rpc_options.cancel_check && rpc_options.cancel_check()) {
+          return absl::CancelledError(absl::StrFormat("RPC %s cancelled during retry backoff", method_name));
+        }
+        const absl::Duration sleep_step = std::min(sleep_remaining, kCancelableSleepSlice);
+        std::this_thread::sleep_for(std::chrono::milliseconds(absl::ToInt64Milliseconds(sleep_step)));
+        sleep_remaining -= sleep_step;
+      }
     }
     final_error = mapped_error;
   }
@@ -2379,6 +2441,12 @@ absl::StatusOr<StateSyncResult> GlobalStoreClient::reconcile_worker_state(
 // ========== Key Mapping ==========
 
 absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_view key) {
+  return resolve_key_mapping_with_options(key, RpcOptions{});
+}
+
+absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping_with_options(
+    std::string_view key,
+    const RpcOptions& rpc_options) {
   global_store::ResolveKeyMappingRequest request;
   request.set_key(std::string(key));
 
@@ -2390,7 +2458,8 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_vi
       [this](auto* ctx, const auto& req, auto* resp) {
         return artifact_catalog_stub_->ResolveKeyMapping(ctx, req, resp);
       },
-      "ResolveKeyMapping");
+      "ResolveKeyMapping",
+      rpc_options);
 
   if (!status.ok()) {
     return status;

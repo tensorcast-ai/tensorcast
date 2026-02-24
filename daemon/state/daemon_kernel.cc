@@ -93,6 +93,7 @@ DaemonKernel::DaemonKernel(
       options_.persistence_log_path);
   if (persistence_mgr_) {
     persistence_mgr_->set_storage_path(options_.storage_path);
+    persistence_mgr_->set_max_concurrency(options_.max_concurrency);
   }
   engine_->set_stable_cache_spill_evictable([this](const auto& key, const auto& policy) {
     if (!persistence_mgr_) {

@@ -250,6 +250,11 @@ class ClusterRuntimeRpcServicerMixin:
     def ListReplicasV2(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.replica_lifecycle_rpc_handler.list_replicas_v2(request, context)
 
+    def BatchGetReplicaCounts(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.replica_lifecycle_rpc_handler.batch_get_replica_counts(
+            request, context
+        )
+
     def RequestReplicaTransport(
         self, request: Any, context: grpc.ServicerContext
     ) -> Any:

@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,6 +47,12 @@ struct P2PSource {
   // (e.g., tensor.data_0, tensor.data_1, ...). When non-empty, P2PLoader
   // will mux remote source with this disk source for resilience.
   std::string fallback_disk_dir;
+
+  // Request-level budget propagated from upper layers (e.g., RPC deadline).
+  // Remote source reads should fail fast when this budget is exhausted.
+  std::chrono::milliseconds request_budget{0};
+  // Optional artifact id used for diagnostics in remote source logs.
+  std::string artifact_id;
 
   std::shared_ptr<communicator::engine::Communicator> comm_engine;
 };

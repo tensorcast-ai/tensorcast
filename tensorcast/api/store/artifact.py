@@ -875,6 +875,7 @@ class Artifact:
 
         client = runtime.ensure_client()
         operation_id = uuid.uuid4().hex
+        rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             response = None
             region_layout = None
@@ -903,6 +904,7 @@ class Artifact:
                         preference=preference,
                         source_policy=source_policy,
                         operation_id=operation_id,
+                        timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
                 except Exception as exc:  # noqa: BLE001
                     error = map_materialization_error(exc)
@@ -1131,6 +1133,7 @@ class Artifact:
 
         client = runtime.ensure_client()
         operation_id = uuid.uuid4().hex
+        rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             response = None
             region_layout = None
@@ -1155,6 +1158,7 @@ class Artifact:
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
                         operation_id=operation_id,
+                        timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
                 except Exception as exc:  # noqa: BLE001
                     message = str(exc)

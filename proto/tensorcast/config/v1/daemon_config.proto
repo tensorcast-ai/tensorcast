@@ -148,6 +148,9 @@ message Promotion {
   PromotionPolicy policy = 1;
   bool require_verified = 2;
   google.protobuf.Duration demotion_drain_timeout = 3;
+  // Max concurrent transport requests allowed per registered memory replica in
+  // Global Store. Set to 1 to force per-replica P2P serialization.
+  uint32 max_concurrency = 4;
 }
 
 message PinnedMemory {

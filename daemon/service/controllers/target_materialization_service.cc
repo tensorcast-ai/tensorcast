@@ -188,13 +188,22 @@ struct TargetMaterializationCommonContext {
 };
 
 std::chrono::milliseconds resolve_target_request_budget(const grpc::ServerContext& server_context) {
-  constexpr std::chrono::milliseconds kDefaultBudget{30000};
-  constexpr std::chrono::milliseconds kHardCap{300000};
-  const std::chrono::milliseconds clamped = ClampToDeadline(server_context, kDefaultBudget, kHardCap);
-  if (clamped.count() > 0) {
-    return clamped;
+  using clock = std::chrono::system_clock;
+  constexpr std::chrono::milliseconds kDefaultBudget{600000};
+  constexpr std::chrono::milliseconds kHardCap{1800000};
+  const auto grpc_deadline = server_context.deadline();
+  if (grpc_deadline != clock::time_point::max()) {
+    const auto now = clock::now();
+    if (grpc_deadline <= now) {
+      return std::chrono::milliseconds(0);
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(grpc_deadline - now);
+    if (remaining.count() <= 0) {
+      return std::chrono::milliseconds(1);
+    }
+    return std::min(remaining, kHardCap);
   }
-  return kDefaultBudget;
+  return std::min(kDefaultBudget, kHardCap);
 }
 
 template <typename RequestT>
@@ -298,6 +307,7 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
               .identity = d_.identity,
               .global_store_client = d_.global_store_client,
               .capability_tokens = d_.capability_tokens,
+              .max_concurrency = d_.max_concurrency,
           }) {
   if (!d_.storage_path.empty()) {
     std::error_code ec;

@@ -455,12 +455,19 @@ class WorkerRepository(BaseRepository):
                 )
             return True
 
-    def batch_update_heartbeats(self, updates: list[tuple[str, int, bool]]) -> int:
+    def batch_update_heartbeats(
+        self, updates: list[tuple[str, int, bool, int | None]]
+    ) -> int:
         """
         Batch update worker heartbeats and statuses with update-first semantics.
 
         Args:
-            updates: List of (worker_id, mem_pool_available_size, accepting_new_requests).
+            updates: List of (
+                worker_id,
+                mem_pool_available_size,
+                accepting_new_requests,
+                capability_flags,
+            ).
 
         Returns:
             Number of successfully updated workers.
@@ -470,16 +477,28 @@ class WorkerRepository(BaseRepository):
 
         # Build VALUES clause dynamically –  one tuple per update
         # DuckDB supports `UPDATE … FROM (VALUES …) AS alias(col1,col2,…)` pattern.
-        placeholders = ", ".join(["(?, ?, ?)"] * len(updates))
+        placeholders = ", ".join(["(?, ?, ?, ?)"] * len(updates))
         values_sql = f"VALUES {placeholders}"
 
         # Flatten parameters for executemany-style substitution
         params: list = []
-        for worker_id, mem_pool_available_size, accepting_new_requests in updates:
-            params.extend([worker_id, mem_pool_available_size, accepting_new_requests])
+        for (
+            worker_id,
+            mem_pool_available_size,
+            accepting_new_requests,
+            capability_flags,
+        ) in updates:
+            params.extend(
+                [
+                    worker_id,
+                    mem_pool_available_size,
+                    accepting_new_requests,
+                    int(capability_flags) if capability_flags is not None else None,
+                ]
+            )
 
         update_sql = f"""
-            WITH upd(worker_id, mem_pool_available_size, accepting_new_requests) AS (
+            WITH upd(worker_id, mem_pool_available_size, accepting_new_requests, capability_flags) AS (
                 {values_sql}
             ),
             active AS (
@@ -487,7 +506,7 @@ class WorkerRepository(BaseRepository):
                     workers.worker_id,
                     upd.mem_pool_available_size,
                     upd.accepting_new_requests,
-                    COALESCE(worker_liveness.capability_flags, 0) AS capability_flags
+                    COALESCE(upd.capability_flags, worker_liveness.capability_flags, 0) AS capability_flags
                 FROM upd
                 JOIN workers
                   ON workers.worker_id = upd.worker_id
@@ -499,14 +518,14 @@ class WorkerRepository(BaseRepository):
             SET last_heartbeat = GREATEST(worker_liveness.last_heartbeat, now()),
                 mem_pool_available_size = active.mem_pool_available_size,
                 accepting_new_requests = active.accepting_new_requests,
-                capability_flags = COALESCE(worker_liveness.capability_flags, active.capability_flags),
+                capability_flags = active.capability_flags,
                 updated_at = now()
             FROM active
             WHERE worker_liveness.worker_id = active.worker_id
             RETURNING worker_liveness.worker_id
         """
         insert_sql = f"""
-            WITH upd(worker_id, mem_pool_available_size, accepting_new_requests) AS (
+            WITH upd(worker_id, mem_pool_available_size, accepting_new_requests, capability_flags) AS (
                 {values_sql}
             ),
             active AS (
@@ -514,7 +533,7 @@ class WorkerRepository(BaseRepository):
                     workers.worker_id,
                     upd.mem_pool_available_size,
                     upd.accepting_new_requests,
-                    COALESCE(worker_liveness.capability_flags, 0) AS capability_flags
+                    COALESCE(upd.capability_flags, worker_liveness.capability_flags, 0) AS capability_flags
                 FROM upd
                 JOIN workers
                   ON workers.worker_id = upd.worker_id
@@ -552,7 +571,7 @@ class WorkerRepository(BaseRepository):
             RETURNING worker_id
         """
 
-        worker_ids = [worker_id for worker_id, _, _ in updates]
+        worker_ids = [worker_id for worker_id, _, _, _ in updates]
         unique_worker_ids = list(dict.fromkeys(worker_ids))
         seen_worker_ids: set[str] = set()
         duplicate_worker_ids: set[str] = set()

@@ -1255,12 +1255,17 @@ TEST_CASE(
   REQUIRE(handle.replica_key.view_id.has_value());
   CHECK(handle.replica_key.view_id.value() == "view-weights-narrow");
 
-  REQUIRE(gs_stub->view_requests.size() == 1);
-  CHECK(gs_stub->view_requests[0] == "view-weights-narrow");
-  CHECK(gs_stub->replica_requests.size() <= 1);
-  if (!gs_stub->replica_requests.empty()) {
-    CHECK(gs_stub->replica_requests[0] == canonical_artifact_id);
-  }
+  REQUIRE_FALSE(gs_stub->view_requests.empty());
+  CHECK(std::all_of(gs_stub->view_requests.begin(), gs_stub->view_requests.end(), [](const std::string& view_id) {
+    return view_id == "view-weights-narrow";
+  }));
+  REQUIRE_FALSE(gs_stub->replica_requests.empty());
+  CHECK(
+      std::all_of(
+          gs_stub->replica_requests.begin(), gs_stub->replica_requests.end(), [&](const std::string& artifact_id) {
+            return artifact_id == canonical_artifact_id;
+          }));
+  CHECK(gs_stub->replica_requests.size() == gs_stub->view_requests.size());
   REQUIRE(gs_stub->registered_replicas.size() == 1);
   CHECK(gs_stub->registered_replicas[0] == canonical_artifact_id);
   REQUIRE(gs_stub->recorded_views.size() == 1);

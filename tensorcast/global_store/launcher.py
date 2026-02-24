@@ -25,7 +25,9 @@ from tensorcast.global_store.launch_config import (
 from tensorcast.global_store.memory_tier_grpc_service import MemoryTierGrpcServicer
 from tensorcast.global_store.metrics import (
     PrometheusInterceptor,
+    ThreadPoolTelemetryReporter,
     start_metrics_http_server,
+    start_thread_pool_telemetry,
 )
 from tensorcast.global_store.repositories.memory_tier_lease_repository import (
     MemoryTierLeaseRepository,
@@ -58,6 +60,7 @@ class StartedGlobalStore:
     advertise_port: int
     advertise_source: str
     metrics_port: int
+    control_plane_reporter: ThreadPoolTelemetryReporter | None = None
 
 
 def _resolve_route_ip(target_host: str, target_port: int) -> str | None:
@@ -161,8 +164,17 @@ def start_global_store_server(
         config.metrics_port, addr=config.listen_host or ""
     )
 
+    executor = futures.ThreadPoolExecutor(
+        max_workers=config.max_workers,
+        thread_name_prefix="gs-control-plane",
+    )
+    control_plane_reporter = start_thread_pool_telemetry(
+        executor=executor,
+        poll_interval_s=1.0,
+        logger=logger,
+    )
     server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=config.max_workers),
+        executor,
         interceptors=[PrometheusInterceptor()],
     )
     register_global_store_servicers(server, servicer)
@@ -239,6 +251,7 @@ def start_global_store_server(
         advertise_port=advertise_port,
         advertise_source=advertise_source,
         metrics_port=metrics_port,
+        control_plane_reporter=control_plane_reporter,
     )
 
 
@@ -263,6 +276,9 @@ def run_global_store(
     except KeyboardInterrupt:
         logger.info("Shutting down Global Store server...")
         started.server.stop(grace=5)
+    finally:
+        if started.control_plane_reporter is not None:
+            started.control_plane_reporter.stop()
 
 
 __all__ = [

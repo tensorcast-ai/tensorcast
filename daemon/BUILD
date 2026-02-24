@@ -794,6 +794,7 @@ sc_cc_library(
         ":status_utils",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time",
     ],
 )
 

@@ -177,6 +177,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .async_runtime = app->kernel_->async_runtime(),
       .identity = app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
+      .max_concurrency = app->options_.daemon_options.max_concurrency,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .handle_leases = app->kernel_->handle_leases(),
       .capability_tokens = app->kernel_->capability_tokens(),
@@ -196,6 +197,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .regions = app->kernel_->region_registry(),
+      .max_concurrency = app->options_.daemon_options.max_concurrency,
   };
   app->registration_controller_ = std::make_unique<RegistrationController>(rdep);
 

@@ -505,6 +505,118 @@ class TestGRPCService:
         assert sum(1 for _ in list_response.replicas) == 1
         assert list_response.replicas[0].artifact_id == artifact_id
 
+    def test_batch_get_replica_counts(self, servicer, test_context, memory_info):
+        worker_one = servicer.RegisterWorker(
+            global_store_pb2.RegisterWorkerRequest(
+                node_id="batch-count-node-1",
+                node_address="192.168.10.1",
+                grpc_port=8101,
+                p2p_port=8201,
+                mem_pool_total_size=10000000000,
+                mem_pool_available_size=9000000000,
+                daemon_id="batch-count-daemon-1",
+            ),
+            test_context,
+        ).worker_id
+        worker_two = servicer.RegisterWorker(
+            global_store_pb2.RegisterWorkerRequest(
+                node_id="batch-count-node-2",
+                node_address="192.168.10.2",
+                grpc_port=8102,
+                p2p_port=8202,
+                mem_pool_total_size=10000000000,
+                mem_pool_available_size=9000000000,
+                daemon_id="batch-count-daemon-2",
+            ),
+            test_context,
+        ).worker_id
+
+        artifact_one = "batch-count-artifact-1"
+        artifact_two = "batch-count-artifact-2"
+        artifact_three = "batch-count-artifact-3"
+
+        mem_info_worker_one = common_pb2.MemoryInfo()
+        mem_info_worker_one.CopyFrom(memory_info)
+        mem_info_worker_one.node_id = "batch-count-node-1"
+        mem_info_worker_one.node_address = "192.168.10.1"
+        mem_info_worker_one.node_port = 8201
+        mem_info_worker_one.device_id = 0
+
+        mem_info_worker_two = common_pb2.MemoryInfo()
+        mem_info_worker_two.CopyFrom(memory_info)
+        mem_info_worker_two.node_id = "batch-count-node-2"
+        mem_info_worker_two.node_address = "192.168.10.2"
+        mem_info_worker_two.node_port = 8202
+        mem_info_worker_two.device_id = 1
+
+        register_one = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_one,
+                mem_info=mem_info_worker_one,
+                max_concurrency=2,
+                worker_id=worker_one,
+            ),
+            test_context,
+        )
+        assert register_one.status == global_store_pb2.Status.STATUS_OK
+
+        register_two = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_two,
+                mem_info=mem_info_worker_one,
+                max_concurrency=2,
+                worker_id=worker_one,
+            ),
+            test_context,
+        )
+        assert register_two.status == global_store_pb2.Status.STATUS_OK
+
+        register_three = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_two,
+                mem_info=mem_info_worker_two,
+                max_concurrency=2,
+                worker_id=worker_two,
+            ),
+            test_context,
+        )
+        assert register_three.status == global_store_pb2.Status.STATUS_OK
+
+        mark_unavailable = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id=artifact_two,
+                replica_id=register_two.replica_id,
+            ),
+            test_context,
+        )
+        assert mark_unavailable.status == global_store_pb2.Status.STATUS_OK
+        assert mark_unavailable.updated is True
+
+        response = servicer.BatchGetReplicaCounts(
+            global_store_pb2.BatchGetReplicaCountsRequest(
+                artifact_ids=[
+                    artifact_one,
+                    artifact_two,
+                    artifact_three,
+                    artifact_one,
+                ]
+            ),
+            test_context,
+        )
+        assert response.status == global_store_pb2.Status.STATUS_OK
+        assert [row.artifact_id for row in response.counts] == [
+            artifact_one,
+            artifact_two,
+            artifact_three,
+        ]
+        counts = {
+            row.artifact_id: (int(row.replica_count), int(row.available_count))
+            for row in response.counts
+        }
+        assert counts[artifact_one] == (1, 1)
+        assert counts[artifact_two] == (2, 1)
+        assert counts[artifact_three] == (0, 0)
+
     def test_request_artifact_replica_transport(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -966,6 +1078,44 @@ class TestGRPCService:
         assert info.daemon_id == "daemon_stable"
         assert info.node_address == "192.168.1.11"
         assert info.grpc_port == 8005
+
+    def test_worker_registration_endpoint_takeover_with_new_daemon_id(
+        self, servicer, test_context
+    ):
+        """New daemon registration should replace stale endpoint ownership."""
+        request1 = global_store_pb2.RegisterWorkerRequest(
+            node_id="node_prev",
+            daemon_id="daemon_prev",
+            node_address="192.168.1.50",
+            grpc_port=8050,
+            p2p_port=8051,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+        )
+        response1 = servicer.RegisterWorker(request1, test_context)
+        assert response1.status == global_store_pb2.Status.STATUS_OK
+
+        request2 = global_store_pb2.RegisterWorkerRequest(
+            node_id="node_next",
+            daemon_id="daemon_next",
+            node_address="192.168.1.50",
+            grpc_port=8050,
+            p2p_port=8052,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=7000000000,
+        )
+        response2 = servicer.RegisterWorker(request2, test_context)
+        assert response2.status == global_store_pb2.Status.STATUS_OK
+        assert response2.worker_id != response1.worker_id
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(include_unavailable=True),
+            test_context,
+        )
+        info_by_id = {w.worker_id: w for w in list_response.workers}
+        assert response1.worker_id not in info_by_id
+        assert response2.worker_id in info_by_id
+        assert info_by_id[response2.worker_id].daemon_id == "daemon_next"
 
     def test_worker_heartbeat(self, servicer, test_context):
         """Test worker heartbeat functionality"""

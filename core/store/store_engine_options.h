@@ -137,6 +137,7 @@ struct StoreEngineOptions {
     PromotionPolicy policy{PromotionPolicy::kNever};
     bool require_verified{false};
     std::chrono::milliseconds demotion_drain_timeout{0};
+    uint32_t max_concurrency{4};
   };
 
   PromotionOptions promotion{};

@@ -3,14 +3,17 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "catch2/catch_test_macros.hpp"
+#include "core/common/memory/host_memory.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
@@ -18,6 +21,7 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/memory_tier_budget.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 #include "core/store/runtime/context/runtime_context.h"
@@ -31,7 +35,9 @@
 
 using tensorcast::DeviceType;
 using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::set_host_memory_available_override_for_testing;
 using tensorcast::store::DeviceKey;
+using tensorcast::store::MemoryTierBudget;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::loading::InlineBufferSource;
 using tensorcast::store::loading::ReplicaKey;
@@ -44,6 +50,7 @@ using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::metadata::ArtifactRegistration;
 using tensorcast::store::runtime::metadata::MetadataGateway;
 using tensorcast::store::runtime::metadata::RegistrationBackend;
+using tensorcast::store::runtime::metadata::RegistrationPlan;
 using tensorcast::store::runtime::metadata::RegistrationPublication;
 using tensorcast::store::runtime::metadata::RegistrationPublisher;
 using tensorcast::store::runtime::metadata::RegistrationResources;
@@ -585,6 +592,143 @@ TEST_CASE("RegistrationBackend commits publish to MetadataGateway", "[registrati
   CHECK(publication.size_bytes == reg.total_size_bytes);
   CHECK(publication.device.type == DeviceType::GPU);
   CHECK(publication.device.ordinal == reg.device_id);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable begin guard rejects when host memory is too low without reusable stable capacity",
+    "[registration_backend][memory_guard]") {
+  RegistrationBackendHarness harness;
+  set_host_memory_available_override_for_testing(16ULL * 1024ULL * 1024ULL * 1024ULL);
+  auto reset_override = absl::MakeCleanup([] { set_host_memory_available_override_for_testing(std::nullopt); });
+
+  auto backend = harness.make_backend();
+  auto reg = MakeRegistration(/*total_bytes=*/64ULL * 1024ULL * 1024ULL * 1024ULL);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.schema_version = "invalid-schema";
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE_FALSE(begin_or.ok());
+  CHECK(begin_or.status().code() == absl::StatusCode::kResourceExhausted);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable begin guard accounts for reusable stable capacity before checking host headroom",
+    "[registration_backend][memory_guard]") {
+  RegistrationBackendHarness harness;
+  auto budget = std::make_shared<MemoryTierBudget>(
+      /*stable_total_bytes=*/256ULL * 1024ULL * 1024ULL * 1024ULL,
+      /*preemptible_total_bytes=*/0);
+  REQUIRE(budget->try_acquire_stable(64ULL * 1024ULL * 1024ULL * 1024ULL).ok());
+  harness.resources.memory_tier_budget = budget;
+
+  set_host_memory_available_override_for_testing(16ULL * 1024ULL * 1024ULL * 1024ULL);
+  auto reset_override = absl::MakeCleanup([] { set_host_memory_available_override_for_testing(std::nullopt); });
+
+  auto backend = harness.make_backend();
+  auto reg = MakeRegistration(/*total_bytes=*/64ULL * 1024ULL * 1024ULL * 1024ULL);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.schema_version = "invalid-schema";
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE_FALSE(begin_or.ok());
+  CHECK(begin_or.status().code() == absl::StatusCode::kInvalidArgument);
+}
+
+TEST_CASE("RegistrationBackend commit cleans pending mem_reg alias from ReplicaRegistry", "[registration_backend]") {
+  SKIP_IF_NO_CUDA();
+
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/32);
+  reg.client_artifact_id = "cgid:registration-backend-alias-cleanup";
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+  CHECK(harness.replica_registry->size() == 1);
+  CHECK(harness.replica_registry->find_by_artifact(reg.artifact_id).size() == 1);
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  CHECK(harness.replica_registry->size() == 1);
+  CHECK(harness.replica_registry->find_by_artifact(reg.artifact_id).empty());
+  CHECK(harness.replica_registry->find_by_artifact(commit_or->artifact_id).size() == 1);
+}
+
+TEST_CASE("RegistrationBackend abort cleans pending mem_reg alias from ReplicaRegistry", "[registration_backend]") {
+  SKIP_IF_NO_CUDA();
+
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/32);
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+  CHECK(harness.replica_registry->size() == 1);
+
+  auto abort_status = backend.abort(begin_or->registration_id);
+  REQUIRE(abort_status.ok());
+  CHECK(harness.replica_registry->size() == 0);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram stage_on_gpu=false supports streamed CPU ingestion",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  auto gpu_ptr_or = backend.get_registration_gpu_ptr(begin_or->registration_id);
+  REQUIRE_FALSE(gpu_ptr_or.ok());
+
+  std::array<std::byte, 16> payload{};
+  for (size_t index = 0; index < payload.size(); ++index) {
+    payload[index] = static_cast<std::byte>(index + 1);
+  }
+  auto ingest_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  CHECK(commit_or->device.type == DeviceType::CPU);
+  CHECK(commit_or->size_bytes == reg.total_size_bytes);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion requires contiguous complete bytes",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::byte, 8> chunk{};
+  auto non_contiguous_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/4, absl::MakeConstSpan(chunk));
+  REQUIRE_FALSE(non_contiguous_status.ok());
+  CHECK(non_contiguous_status.code() == absl::StatusCode::kFailedPrecondition);
+
+  auto ingest_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(chunk));
+  REQUIRE(ingest_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE_FALSE(commit_or.ok());
+  CHECK(commit_or.status().code() == absl::StatusCode::kFailedPrecondition);
 }
 
 TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][runtime]") {

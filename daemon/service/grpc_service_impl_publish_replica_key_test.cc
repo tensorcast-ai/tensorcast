@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -63,6 +64,13 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::Glo
     return it->second;
   }
 
+  absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping_with_options(
+      std::string_view key,
+      const tensorcast::store::components::RpcOptions& rpc_options) override {
+    last_resolve_rpc_options = rpc_options;
+    return resolve_key_mapping(key);
+  }
+
   absl::Status upsert_key_mapping(std::string_view key, std::string_view artifact_id, absl::Duration) override {
     tensorcast::store::components::KeyMapping mapping;
     mapping.artifact_id = std::string(artifact_id);
@@ -81,6 +89,7 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::Glo
   int resolve_calls{0};
   std::string last_key;
   std::string last_artifact_id;
+  std::optional<tensorcast::store::components::RpcOptions> last_resolve_rpc_options;
 
  private:
   std::unordered_map<std::string, tensorcast::store::components::KeyMapping> mappings_;
@@ -214,4 +223,41 @@ TEST_CASE("ResolveKeyMapping cache keeps newer generation on stale local mutatio
   REQUIRE(resolve_cached_status.ok());
   REQUIRE(resolve_cached_resp.artifact_id() == "mi2:new");
   REQUIRE(resolve_cached_resp.generation() == 10);
+}
+
+TEST_CASE("ResolveKeyMapping forwards bounded upstream rpc options", "[daemon][key-mapping]") {
+  const auto root = test_root();
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  const auto storage_root = root / "storage_root";
+  std::filesystem::create_directories(storage_root);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_root));
+  auto gs_client = std::make_shared<KeyMappingGlobalStoreClient>();
+  gs_client->set_mapping("key-budget", "mi2:budget", /*generation=*/1, /*ttl_seconds=*/0);
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::ResolveKeyMappingRequest resolve_req;
+  resolve_req.set_key("key-budget");
+  grpc::ServerContext resolve_ctx;
+  tensorcast::daemon::v2::ResolveKeyMappingResponse resolve_resp;
+  auto resolve_status = svc.ResolveKeyMapping(&resolve_ctx, &resolve_req, &resolve_resp);
+  REQUIRE(resolve_status.ok());
+  REQUIRE(resolve_resp.artifact_id() == "mi2:budget");
+  REQUIRE(gs_client->last_resolve_rpc_options.has_value());
+  REQUIRE(gs_client->last_resolve_rpc_options->timeout.has_value());
+  REQUIRE(*gs_client->last_resolve_rpc_options->timeout <= absl::Seconds(5));
+  REQUIRE(*gs_client->last_resolve_rpc_options->timeout > absl::ZeroDuration());
+  REQUIRE(gs_client->last_resolve_rpc_options->max_retries.has_value());
+  REQUIRE(*gs_client->last_resolve_rpc_options->max_retries == 0);
+  REQUIRE(static_cast<bool>(gs_client->last_resolve_rpc_options->cancel_check));
 }

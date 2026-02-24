@@ -219,6 +219,12 @@ class ArtifactService:
             memory_type=memory_type,
         )
 
+    def batch_get_replica_counts(
+        self, artifact_ids: list[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Return replica and available counts keyed by artifact_id."""
+        return self.replica_repository.count_replicas_by_artifact_ids(artifact_ids)
+
     def mark_unavailable_by_worker(self, worker_id: str) -> None:
         """Mark all replicas for a worker as unavailable."""
         self.replica_repository.mark_unavailable_by_worker(worker_id)

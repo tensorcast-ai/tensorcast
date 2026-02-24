@@ -20,6 +20,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
 #include "core/common/memory/cuda_memory.h"
+#include "core/common/memory/host_memory.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/eviction_service.h"
@@ -35,6 +36,7 @@
 #include "core/store/materialization/dataplane/verification/verification_utils.h"
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
+#include "core/store/memory_tier_budget.h"
 #include "core/store/view_utils.h"
 #include "nlohmann/json.hpp"
 #include "tensorcast/global_store/v1/global_store.pb.h"
@@ -42,6 +44,9 @@
 namespace tensorcast::store::runtime::metadata {
 
 namespace {
+
+constexpr uint64_t kBytesPerGiB = 1024ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kStableBeginMinHeadroomBytes = 2ULL * kBytesPerGiB;
 
 uint64_t sum_view_write_bytes(const loader::ViewWritePlan& write_plan) {
   uint64_t total = 0;
@@ -83,6 +88,47 @@ std::vector<CanonicalRange> canonical_ranges_from_write_plan(const loader::ViewW
     }
   }
   return merged;
+}
+
+absl::Status enforce_stable_begin_runtime_memory_guard(
+    uint64_t artifact_size_bytes,
+    const std::shared_ptr<MemoryTierBudget>& memory_tier_budget) {
+  auto available_or = common::memory::detect_host_memory_available_bytes();
+  if (!available_or.ok()) {
+    VLOG(1) << "stable begin runtime memory guard skipped: " << available_or.status();
+    return absl::OkStatus();
+  }
+
+  uint64_t reusable_stable_bytes = 0;
+  if (memory_tier_budget != nullptr) {
+    const auto budget = memory_tier_budget->snapshot();
+    reusable_stable_bytes = budget.stable_total_bytes > budget.stable_used_bytes
+        ? (budget.stable_total_bytes - budget.stable_used_bytes)
+        : 0;
+  }
+  const uint64_t bytes_requiring_new_allocation =
+      artifact_size_bytes > reusable_stable_bytes ? (artifact_size_bytes - reusable_stable_bytes) : 0;
+  const uint64_t guard_headroom = std::max<uint64_t>(kStableBeginMinHeadroomBytes, artifact_size_bytes / 10U);
+  const uint64_t required_available = bytes_requiring_new_allocation + guard_headroom;
+  if (*available_or >= required_available) {
+    return absl::OkStatus();
+  }
+
+  return absl::ResourceExhaustedError(
+      absl::StrCat(
+          "insufficient available host memory for stable registration begin: available_bytes=",
+          *available_or,
+          ", required_bytes=",
+          required_available,
+          " (artifact_bytes=",
+          artifact_size_bytes,
+          ", reusable_stable_bytes=",
+          reusable_stable_bytes,
+          ", allocation_bytes=",
+          bytes_requiring_new_allocation,
+          ", headroom_bytes=",
+          guard_headroom,
+          "). rejecting begin to avoid daemon OOM"));
 }
 
 std::vector<components::CanonicalRange> to_component_ranges(const std::vector<CanonicalRange>& ranges) {
@@ -363,10 +409,13 @@ struct RegistrationBackend::PendingRegistrationContext {
   bool enable_p2p{true};
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
   std::shared_ptr<replica::Replica> replica;
+  loading::ReplicaKey pending_registry_key;
   void* gpu_ptr{nullptr};
   cudaIpcMemHandle_t ipc_handle{};
   std::unique_ptr<common::memory::GpuDeviceMemory> staging_gpu;
   StableDramOptions stable_dram;
+  uint64_t stream_ingested_bytes{0};
+  uint64_t stream_chunk_count{0};
   std::optional<components::StableDramCachePolicy> stable_cache_policy;
   std::chrono::steady_clock::time_point expiry_time;
   std::chrono::steady_clock::time_point begin_time;
@@ -402,12 +451,12 @@ RegistrationBackend::RegistrationBackend(
       memory_tier_budget_(std::move(resources.memory_tier_budget)),
       memory_tier_config_(resources.memory_tier_config),
       promotion_manager_(resources.promotion_manager),
-      byte_mapping_config_(resources.byte_mapping_config),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       streaming_buffer_chunks_(std::max<size_t>(1, streaming_buffer_chunks)),
-      publisher_(publisher) {
+      publisher_(publisher),
+      byte_mapping_config_(resources.byte_mapping_config) {
   ABSL_CHECK(replica_factory_) << "ReplicaFactory must be provided";
   ABSL_CHECK(async_runtime_ != nullptr) << "RegistrationResources.async_runtime is required";
 }
@@ -430,8 +479,11 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   if (reg.device_id < 0) {
     return absl::InvalidArgumentError("device_id must be >= 0");
   }
-  if (stable_dram && !reg.stable_dram.stage_on_gpu) {
-    return absl::UnimplementedError("stable_dram stage_on_gpu=false is not implemented");
+  if (stable_dram) {
+    auto guard_status = enforce_stable_begin_runtime_memory_guard(reg.total_size_bytes, memory_tier_budget_);
+    if (!guard_status.ok()) {
+      return guard_status;
+    }
   }
   if (!reg.schema_version.empty() && reg.schema_version != "v3") {
     return absl::InvalidArgumentError(
@@ -654,6 +706,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   entry->schema_version = reg.schema_version;
   entry->encoding = reg.encoding;
   entry->enable_p2p = reg.enable_p2p;
+  entry->pending_registry_key = inst_key;
   if (reg.ttl_ms > 0) {
     entry->expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(reg.ttl_ms);
   }
@@ -662,6 +715,8 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   entry->ipc_handle = ipc_handle;
   entry->staging_gpu = std::move(staging_gpu);
   entry->stable_dram = reg.stable_dram;
+  entry->stream_ingested_bytes = 0;
+  entry->stream_chunk_count = 0;
   entry->stable_cache_policy = reg.stable_cache_policy;
   entry->plan =
       stable_dram ? PendingRegistrationContext::Plan::kStableDram : PendingRegistrationContext::Plan::kCoalesced;
@@ -734,6 +789,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   if (expired_entry) {
     record_pending_gauge(pending_size_after_expire);
     record_commit_latency(*expired_entry, "expired");
+    erase_pending_registry_alias(*expired_entry);
     const auto location = expired_entry->plan == PendingRegistrationContext::Plan::kStableDram
         ? common::memory::MemoryLocation::CPU
         : common::memory::MemoryLocation::GPU;
@@ -813,6 +869,18 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       if (!sync_status.ok()) {
         return sync_status;
       }
+      LOG(INFO) << "Stable DRAM commit path=staging_gpu bytes=" << entry->size_bytes
+                << " device_id=" << entry->device_id;
+    } else if (entry->stream_ingested_bytes != entry->size_bytes) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "stable_dram stream ingestion incomplete: expected=",
+              entry->size_bytes,
+              " got=",
+              entry->stream_ingested_bytes));
+    } else {
+      LOG(INFO) << "Stable DRAM commit path=cpu_stream bytes=" << entry->size_bytes
+                << " chunks=" << entry->stream_chunk_count;
     }
   }
 
@@ -963,6 +1031,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (reuse_existing) {
+    erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
     const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
         ? common::memory::MemoryLocation::CPU
         : common::memory::MemoryLocation::GPU;
@@ -1383,6 +1452,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   size_t pending_size_after = 0;
+  erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
   erase_pending(registration_id, &pending_size_after);
   record_pending_gauge(pending_size_after);
 
@@ -1524,6 +1594,44 @@ absl::Status RegistrationBackend::ingest_view_chunk(
   return absl::OkStatus();
 }
 
+absl::Status RegistrationBackend::ingest_registration_chunk(
+    std::string_view registration_id,
+    uint64_t offset,
+    absl::Span<const std::byte> data) {
+  if (data.empty()) {
+    return absl::OkStatus();
+  }
+  auto entry = lookup_pending(registration_id);
+  if (!entry) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  if (entry->plan != PendingRegistrationContext::Plan::kStableDram || entry->stable_dram.stage_on_gpu) {
+    return absl::FailedPreconditionError("registration chunk ingestion requires stable_dram stage_on_gpu=false");
+  }
+  if (entry->view_state) {
+    return absl::FailedPreconditionError("registration chunk ingestion is unavailable for view-enabled registrations");
+  }
+  if (offset != entry->stream_ingested_bytes) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "registration chunk offset must be contiguous: expected=", entry->stream_ingested_bytes, " got=", offset));
+  }
+  if (offset > entry->size_bytes || data.size() > entry->size_bytes - offset) {
+    return absl::OutOfRangeError(
+        absl::StrCat(
+            "registration chunk out of range: offset=", offset, " bytes=", data.size(), " total=", entry->size_bytes));
+  }
+  const auto cpu_ptrs = entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
+  if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+    return absl::FailedPreconditionError("CPU pointer unavailable for registration chunk ingestion");
+  }
+  auto* dst = static_cast<std::byte*>(cpu_ptrs[0]) + static_cast<size_t>(offset);
+  std::memcpy(dst, data.data(), data.size());
+  entry->stream_ingested_bytes += data.size();
+  entry->stream_chunk_count += 1;
+  return absl::OkStatus();
+}
+
 absl::StatusOr<uint64_t> RegistrationBackend::get_view_ingested_bytes(std::string_view registration_id) const {
   auto entry = lookup_pending(registration_id);
   if (!entry) {
@@ -1557,6 +1665,7 @@ absl::Status RegistrationBackend::abort(std::string_view registration_id) {
   }
   record_pending_gauge(pending_size_after);
   record_commit_latency(*entry, "aborted");
+  erase_pending_registry_alias(*entry);
   const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
       ? common::memory::MemoryLocation::CPU
       : common::memory::MemoryLocation::GPU;
@@ -1618,6 +1727,33 @@ void RegistrationBackend::release_replica_memory(
   absl::Status st = replica->release_memory(location);
   if (!st.ok()) {
     VLOG(1) << "release_memory(" << static_cast<int>(location) << ") failed: " << st;
+  }
+}
+
+void RegistrationBackend::erase_pending_registry_alias(
+    const PendingRegistrationContext& entry,
+    std::optional<loading::ReplicaKey> keep_key) {
+  const auto& pending_key = entry.pending_registry_key;
+  if (pending_key.artifact_id.empty()) {
+    return;
+  }
+  if (keep_key.has_value() && pending_key == *keep_key) {
+    return;
+  }
+
+  auto removed = replica_registry_->erase(pending_key);
+  if (!removed.has_value()) {
+    VLOG(2) << "RegistrationBackend: pending alias already absent registration_id=" << entry.registration_id
+            << " key=" << pending_key;
+    return;
+  }
+
+  if (entry.replica && removed->second.get() != entry.replica.get()) {
+    LOG(WARNING) << "RegistrationBackend: pending alias key mapped to unexpected replica registration_id="
+                 << entry.registration_id << " key=" << pending_key;
+  } else {
+    VLOG(1) << "RegistrationBackend: removed pending alias registration_id=" << entry.registration_id
+            << " key=" << pending_key;
   }
 }
 

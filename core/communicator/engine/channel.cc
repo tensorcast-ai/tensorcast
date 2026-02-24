@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <sstream>
 #include <utility>
@@ -110,6 +110,10 @@ void Channel::mtcp_request_finished() {
   }
 }
 
+int Channel::mtcp_active_requests() const {
+  return mtcp_active_requests_.load(std::memory_order_acquire);
+}
+
 misc::result_t Channel::close() {
   if (control_ != nullptr) {
     control_->close();
@@ -134,6 +138,12 @@ void Channel::record_expire(uint64_t now) {
 
 bool Channel::is_expired(uint64_t now) const {
   if (expired_time_ == 0) {
+    return false;
+  }
+  if (mtcp_active_requests() > 0) {
+    return false;
+  }
+  if (flow_state_ != nullptr && flow_state_->registry.size() > 0) {
     return false;
   }
   return now > expired_time_;

@@ -353,3 +353,46 @@ class ReplicaLifecycleRpcHandler:
             return global_store_pb2.ListReplicasV2Response(
                 page_info=common_pb2.PageInfo(next_page_token="", total_size=0)
             )
+
+    def batch_get_replica_counts(
+        self,
+        request: global_store_pb2.BatchGetReplicaCountsRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.BatchGetReplicaCountsResponse:
+        """Batch replica counts keyed by artifact_id."""
+        try:
+            requested_ids = [
+                artifact_id.strip()
+                for artifact_id in request.artifact_ids
+                if artifact_id.strip()
+            ]
+            unique_ids = list(dict.fromkeys(requested_ids))
+            if not unique_ids:
+                return global_store_pb2.BatchGetReplicaCountsResponse(
+                    status=global_store_pb2.Status.STATUS_OK,
+                    counts=[],
+                )
+
+            counts = self._artifact_service.batch_get_replica_counts(unique_ids)
+            records = []
+            for artifact_id in unique_ids:
+                replica_count, available_count = counts.get(artifact_id, (0, 0))
+                records.append(
+                    global_store_pb2.ArtifactReplicaCountRecord(
+                        artifact_id=artifact_id,
+                        replica_count=int(replica_count),
+                        available_count=int(available_count),
+                    )
+                )
+            return global_store_pb2.BatchGetReplicaCountsResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                counts=records,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.exception("Error in BatchGetReplicaCounts")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.BatchGetReplicaCountsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR,
+                counts=[],
+            )
