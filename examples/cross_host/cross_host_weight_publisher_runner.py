@@ -504,17 +504,39 @@ def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
 
 def extract_last_json_object(output: str) -> dict[str, Any]:
     text = str(output).strip()
-    decoder = json.JSONDecoder()
+    if not text:
+        raise RuntimeError("failed to find json object in empty output")
     last_object: dict[str, Any] | None = None
-    for index, char in enumerate(text):
-        if char != "{":
+
+    # Fast path for newline-delimited JSON where each object fits on one line.
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate:
             continue
         try:
-            loaded, _ = decoder.raw_decode(text[index:])
+            loaded = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if isinstance(loaded, dict):
             last_object = loaded
+    if last_object is not None:
+        return last_object
+
+    # Fallback for pretty-printed/mixed output: decode top-level objects in order.
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        start = text.find("{", index)
+        if start < 0:
+            break
+        try:
+            loaded, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(loaded, dict):
+            last_object = loaded
+        index = start + max(1, end)
     if last_object is not None:
         return last_object
     raise RuntimeError(f"failed to find json object in output:\n{output}")
@@ -601,12 +623,7 @@ def start_remote_daemon(
         f"cd {shlex.quote(repo_root)}",
         "source .venv/bin/activate",
         "export LD_LIBRARY_PATH=/data/cuda/compat:${LD_LIBRARY_PATH:-}",
-        (
-            "if command -v timeout >/dev/null 2>&1; then "
-            "timeout 30s tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; "
-            "else tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; fi"
-        ),
-        "for pid in $(pgrep -f '[t]ensorcast_daemon --config=' || true); do kill -TERM \"$pid\" >/dev/null 2>&1 || true; done",
+        "for pid in $(pgrep -f '[t]ensorcast_daemon --config' || true); do kill -TERM \"$pid\" >/dev/null 2>&1 || true; done",
         "sleep 1",
         (
             "if command -v timeout >/dev/null 2>&1; then "
@@ -615,8 +632,8 @@ def start_remote_daemon(
         ),
         (
             "if command -v timeout >/dev/null 2>&1; then "
-            f"timeout 180s {start_expr} || true; "
-            f"else {start_expr} || true; fi"
+            f"timeout 180s {start_expr}; "
+            f"else {start_expr}; fi"
         ),
         f"tensorcast-cli daemon status --session {shlex.quote(daemon_session)} --json",
     ]
@@ -626,6 +643,25 @@ def start_remote_daemon(
         timeout_sec=max(60.0, timeout_sec),
     )
     status = extract_last_json_object(output)
+    daemon_status = status.get("daemon")
+    if not isinstance(daemon_status, dict):
+        raise RuntimeError(
+            "daemon status payload missing daemon field: "
+            f"process={process_id}, session={daemon_session}, payload={status}"
+        )
+    daemon_pid = daemon_status.get("pid")
+    daemon_address = daemon_status.get("address")
+    daemon_p2p_address = daemon_status.get("p2p_address")
+    if (
+        daemon_pid is None
+        or daemon_address is None
+        or daemon_p2p_address is None
+        or status.get("started_at") is None
+    ):
+        raise RuntimeError(
+            "daemon failed to start or did not report ready status: "
+            f"process={process_id}, session={daemon_session}, status={status}"
+        )
     return status
 
 
@@ -688,9 +724,9 @@ def preclean_remote_role_processes(
             "timeout 30s tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; "
             "else tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; fi"
         ),
-        "pkill -TERM -f '[t]ensorcast_daemon --config=' >/dev/null 2>&1 || true",
+        "pkill -TERM -f '[t]ensorcast_daemon --config' >/dev/null 2>&1 || true",
         "sleep 1",
-        "pkill -KILL -f '[t]ensorcast_daemon --config=' >/dev/null 2>&1 || true",
+        "pkill -KILL -f '[t]ensorcast_daemon --config' >/dev/null 2>&1 || true",
         "exit 0",
     ]
     run_remote(

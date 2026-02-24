@@ -163,11 +163,18 @@ class WeightPublisher:
     def __init__(self, config: WeightPublisherConfig) -> None:
         self._config = config
         self._history_path = Path(config.history_path) if config.history_path else None
+        self._last_publish_breakdown_s: dict[str, float] = {}
+
+    def last_publish_breakdown_s(self) -> dict[str, float]:
+        return dict(self._last_publish_breakdown_s)
 
     def publish(self, tensors: TensorDict, *, version: int) -> str:
         if version < 0:
             raise ValueError("version must be >= 0")
+        total_start = time.monotonic()
+        pre_trim_start = time.monotonic()
         self._maybe_trim_before_publish(version=version)
+        pre_publish_trim_s = time.monotonic() - pre_trim_start
         artifact_key = self._build_key(version)
         requested_id = self._new_artifact_id(version)
         policy = self._build_policy()
@@ -176,6 +183,7 @@ class WeightPublisher:
             stage_on_gpu=bool(self._config.stage_on_gpu),
             release_gpu_on_commit=True,
         )
+        put_start = time.monotonic()
         registered = tensorcast.put(
             tensors,
             artifact_id=requested_id,
@@ -183,21 +191,54 @@ class WeightPublisher:
             policy=policy,
             options=register_options,
         )
+        put_s = time.monotonic() - put_start
         artifact_id = registered.artifact_id
 
+        wait_persistence_s = 0.0
         if self._config.wait_persistence:
+            persistence_start = time.monotonic()
             self._wait_for_persistence(registered.persistence_task_id, artifact_id)
+            wait_persistence_s = time.monotonic() - persistence_start
 
+        verify_key_mapping_s = 0.0
         if self._config.verify_key_mapping:
+            verify_start = time.monotonic()
             self._wait_for_key_mapping(
                 artifact_key=artifact_key,
                 expected_artifact_id=str(artifact_id),
             )
+            verify_key_mapping_s = time.monotonic() - verify_start
 
+        trigger_reload_s = 0.0
         if self._config.trigger_reload:
+            reload_start = time.monotonic()
             self._trigger_reload(version)
+            trigger_reload_s = time.monotonic() - reload_start
 
+        gc_start = time.monotonic()
         self._gc_old_artifacts(version, artifact_id)
+        gc_s = time.monotonic() - gc_start
+        total_s = time.monotonic() - total_start
+        self._last_publish_breakdown_s = {
+            "pre_publish_trim_s": float(pre_publish_trim_s),
+            "put_s": float(put_s),
+            "wait_persistence_s": float(wait_persistence_s),
+            "verify_key_mapping_s": float(verify_key_mapping_s),
+            "trigger_reload_s": float(trigger_reload_s),
+            "gc_s": float(gc_s),
+            "total_s": float(total_s),
+        }
+        logger.info(
+            "publish_breakdown version=%s key=%s artifact_id=%s pre_trim_s=%.3f put_s=%.3f verify_key_s=%.3f gc_s=%.3f total_s=%.3f",
+            version,
+            artifact_key,
+            artifact_id,
+            pre_publish_trim_s,
+            put_s,
+            verify_key_mapping_s,
+            gc_s,
+            total_s,
+        )
         return artifact_id
 
     def publish_from_disk(self, hf_dir: str | Path, *, version: int) -> str:
@@ -209,26 +250,49 @@ class WeightPublisher:
         """
         if version < 0:
             raise ValueError("version must be >= 0")
+        total_start = time.monotonic()
+        pre_trim_start = time.monotonic()
         self._maybe_trim_before_publish(version=version)
+        pre_publish_trim_s = time.monotonic() - pre_trim_start
         artifact_key = self._build_key(version)
+        from_disk_start = time.monotonic()
         artifact = tensorcast.from_disk(
             str(hf_dir),
             key=artifact_key,
             verify_checksums=bool(self._config.from_disk_verify_checksums),
         )
+        from_disk_s = time.monotonic() - from_disk_start
         artifact_id = getattr(artifact, "artifact_id", "") or ""
 
+        verify_key_mapping_s = 0.0
         if self._config.verify_key_mapping:
+            verify_start = time.monotonic()
             self._wait_for_key_mapping(
                 artifact_key=artifact_key,
                 expected_artifact_id=str(artifact_id),
             )
+            verify_key_mapping_s = time.monotonic() - verify_start
 
+        trigger_reload_s = 0.0
         if self._config.trigger_reload:
+            reload_start = time.monotonic()
             self._trigger_reload(version)
+            trigger_reload_s = time.monotonic() - reload_start
 
+        gc_s = 0.0
         if artifact_id:
+            gc_start = time.monotonic()
             self._gc_old_artifacts(version, artifact_id)
+            gc_s = time.monotonic() - gc_start
+        total_s = time.monotonic() - total_start
+        self._last_publish_breakdown_s = {
+            "pre_publish_trim_s": float(pre_publish_trim_s),
+            "from_disk_s": float(from_disk_s),
+            "verify_key_mapping_s": float(verify_key_mapping_s),
+            "trigger_reload_s": float(trigger_reload_s),
+            "gc_s": float(gc_s),
+            "total_s": float(total_s),
+        }
         return artifact_id
 
     def _build_key(self, version: int) -> str:

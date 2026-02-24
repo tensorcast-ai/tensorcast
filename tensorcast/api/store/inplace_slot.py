@@ -15,6 +15,7 @@ from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
 from tensorcast.api.store.mapped_binding import (
     CopyPlanEntry,
+    compute_mapped_view_id,
     validate_copy_plan,
     view_narrow_ranges,
 )
@@ -351,12 +352,6 @@ class InplaceSlot:
         publish_owner_pid: int | None = None,
     ) -> None:
         self._ensure_open()
-        if publish and self._copy_plan is not None:
-            raise ArtifactError(
-                "publish is not supported for mapped binding in v1",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
         resolved = self._resolve_artifact(artifact)
         store, _, pipeline = resolved._require_components()
         if store is not self._store:
@@ -389,6 +384,19 @@ class InplaceSlot:
                 view_spec_proto = resolved._view_spec.proto
             elif self._view_spec is not None and self._view_spec.tensors:
                 view_spec_proto = self._view_spec
+            selection_index_bytes = bytes(canonical_index_bytes)
+            if view_spec_proto is not None and view_spec_proto.tensors:
+                selection_index_bytes = compute_selected_index_bytes(
+                    canonical_index_bytes=canonical_index_bytes,
+                    view_spec=view_spec_proto,
+                    tensor_names=None,
+                )
+            elif (
+                resolved._view_metadata is not None
+                and resolved._view_metadata.view_index_bytes
+                and not str(resolved._view_metadata.view_id).startswith("mapped:v1:")
+            ):
+                selection_index_bytes = bytes(resolved._view_metadata.view_index_bytes)
 
             selection_order = self._selection_names if self._selection_names else None
             operation_id = operation_id or uuid.uuid4().hex
@@ -404,6 +412,13 @@ class InplaceSlot:
             artifact_id = resolved._ensure_identified()
             client = self._runtime.ensure_client()
             rpc_timeout_s = _ctx_timeout_s(ctx)
+            source_view_id = resolved._mapped_source_view_id(self._runtime)
+            mapped_view_id = compute_mapped_view_id(
+                canonical_index_bytes=canonical_index_bytes,
+                source_view_id=source_view_id,
+                plan=self._copy_plan,
+                target_tensors=self._tensors,
+            )
             attempt = 0
             response = None
             region_layout = None
@@ -412,6 +427,8 @@ class InplaceSlot:
                     target=self._tensors,
                     device_id=self._device_id,
                     selection_order=selection_order,
+                    mapped_view_id=mapped_view_id,
+                    selection_index_bytes=selection_index_bytes,
                 )
                 self._ensure_layout_match(region_layout)
                 try:
@@ -486,6 +503,13 @@ class InplaceSlot:
                 target_write_token=getattr(response, "target_write_token", None),
                 fallback=resolved._fallback,
             )
+            if publish:
+                self._publish_with_operation_id(
+                    operation_id,
+                    ctx=ctx,
+                    ttl_ms=publish_ttl_ms,
+                    owner_pid=publish_owner_pid,
+                )
             return
         view_spec_proto = None
         if resolved._view_spec is not None and not resolved._view_spec.is_identity:

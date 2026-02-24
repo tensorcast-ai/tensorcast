@@ -111,7 +111,11 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
-  enforces full dst coverage with no overlaps, and is local-only (publish is rejected).
+  enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
+- Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
+  mint `target_write_token` for mapped writes, and publish routes through a VIEW
+  byte-space id derived from canonical index + source view identity + copy plan +
+  target layout.
 - View compatibility for mapped binding is narrow-only: transpose/permutation views
   are rejected and copy-plan ranges are expressed in canonical coordinates.
 - `binding.swap(artifact_or_ref, publish=False, activate_key=None, ...)` performs

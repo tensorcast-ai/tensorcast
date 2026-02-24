@@ -523,7 +523,8 @@ ReplicaHandle MaterializationService::build_handle(
   } else {
     auto uma = replica->get_memory_manager().memory_authority();
     if (uma) {
-      auto region_or = uma->get_cpu_memfd_region(handle.replica_key);
+      const loading::ReplicaKey& allocation_key = replica->replica_key();
+      auto region_or = uma->get_cpu_memfd_region(allocation_key);
       if (region_or.ok()) {
         handle.cpu_memfd_region = loading::CpuMemfdRegion{
             .fd = region_or->fd,

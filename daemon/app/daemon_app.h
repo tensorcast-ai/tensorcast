@@ -31,6 +31,8 @@ class DaemonApp {
     std::string listen_addr;
     std::shared_ptr<grpc::ServerCredentials> credentials;
     int max_concurrent_streams{0};
+    int max_send_message_length{64 * 1024 * 1024};
+    int max_receive_message_length{64 * 1024 * 1024};
     std::optional<int> keepalive_time_ms;
     std::optional<int> keepalive_timeout_ms;
     std::optional<int> max_connection_idle_ms;

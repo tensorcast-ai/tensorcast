@@ -752,12 +752,14 @@ Status build_mapped_target_materialization_plan(
   plan.logical_total_size = mapped_layout.logical_total_size;
 
   ResolveViewSpecErrorReason resolve_view_reason = ResolveViewSpecErrorReason::kUnknown;
-  auto view_spec_or = resolve_mapped_view_spec(req, resolved_artifact_id, engine, &resolve_view_reason);
-  if (!view_spec_or.ok()) {
+  auto resolved_view_or = resolve_mapped_view_spec(req, resolved_artifact_id, engine, &resolve_view_reason);
+  if (!resolved_view_or.ok()) {
     record_error(record_result, resolve_view_spec_error_reason(resolve_view_reason));
-    return to_grpc_status(view_spec_or.status());
+    return to_grpc_status(resolved_view_or.status());
   }
-  plan.view_spec = std::move(*view_spec_or);
+  auto resolved_view = std::move(*resolved_view_or);
+  plan.view_spec = std::move(resolved_view.view_spec);
+  std::optional<std::string> request_view_id = std::move(resolved_view.request_view_id);
   std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
   std::optional<std::string> resolved_view_id;
 
@@ -778,7 +780,7 @@ Status build_mapped_target_materialization_plan(
     }
     plan.view_plan = std::move(*view_plan_or);
     if (plan.view_plan->is_identity) {
-      if (!selection.view_id().empty()) {
+      if (request_view_id.has_value()) {
         record_error(record_result, "view_identity_mismatch");
         return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires a non-identity view spec"};
       }
@@ -787,12 +789,15 @@ Status build_mapped_target_materialization_plan(
       if (!view_id_or.ok()) {
         return to_grpc_status(view_id_or.status());
       }
-      if (!selection.view_id().empty() && selection.view_id() != *view_id_or) {
+      if (request_view_id.has_value() && *request_view_id != *view_id_or) {
         record_error(record_result, "view_id_mismatch");
         return {StatusCode::INVALID_ARGUMENT, "selection.view_id does not match selection.view_spec"};
       }
       resolved_view_id = *view_id_or;
     }
+  } else if (request_view_id.has_value()) {
+    // selection.view_id without metadata-backed view_spec is treated as opaque mapped byte space identity.
+    resolved_view_id = *request_view_id;
   }
 
   std::string source_index_json = plan.canonical_index_json;
@@ -816,9 +821,21 @@ Status build_mapped_target_materialization_plan(
   plan.copy_plan = std::move(*copy_plan_or);
   plan.copy_plan.map.total_bytes = plan.logical_total_size;
 
+  PreparedTargetStorageLayout prepared_storage_layout;
+  auto storage_layout_status = build_target_storage_layout(req.target_layout(), record_result, prepared_storage_layout);
+  if (!storage_layout_status.ok()) {
+    return storage_layout_status;
+  }
+  auto storage_span_status = validate_storage_span_matches_index(
+      prepared_storage_layout.total_storage_bytes, plan.logical_total_size, record_result);
+  if (!storage_span_status.ok()) {
+    return storage_span_status;
+  }
+
   const bool needs_view_index = resolved_view_id.has_value();
   const tensorcast::common::v1::ViewSpec* resolved_view_spec =
-      (resolved_view_id.has_value() && view_spec_proto.has_value()) ? &*view_spec_proto : nullptr;
+      (plan.view_plan.has_value() && !plan.view_plan->is_identity && view_spec_proto.has_value()) ? &*view_spec_proto
+                                                                                                  : nullptr;
   auto selection_identity_status = selection_validation::validate_hashes_and_build_resolved_selection(
       selection,
       resolved_artifact_id,
@@ -834,6 +851,8 @@ Status build_mapped_target_materialization_plan(
     record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
     return selection_identity_status;
   }
+  plan.publish_storages = std::move(prepared_storage_layout.publish_storages);
+  plan.publish_segments = std::move(prepared_storage_layout.publish_segments);
   return Status::OK;
 }
 

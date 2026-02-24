@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Mapping, Sequence
@@ -36,6 +37,7 @@ TargetTensors = Mapping[str, torch.Tensor]
 
 
 _COPY_PLAN_VERSION = 1
+_MAPPED_VIEW_ID_VERSION = 1
 
 
 def copy_plan_to_json(plan: CopyPlan) -> str:
@@ -119,6 +121,77 @@ def normalize_copy_plan(plan: Sequence[object]) -> tuple[CopyPlanEntry, ...]:
             retryable=False,
         )
     return tuple(entries)
+
+
+def compute_mapped_view_id(
+    *,
+    canonical_index_bytes: bytes,
+    source_view_id: str | None,
+    plan: CopyPlan,
+    target_tensors: TargetTensors,
+) -> str:
+    canonical_bytes = bytes(canonical_index_bytes or b"")
+    if not canonical_bytes:
+        raise ArtifactError(
+            "canonical_index_bytes are required to compute mapped view_id",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    if not target_tensors:
+        raise ArtifactError(
+            "target_tensors must be non-empty to compute mapped view_id",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    normalized = normalize_copy_plan(plan)
+    copy_plan_payload = sorted(
+        (_entry_to_dict(entry) for entry in normalized),
+        key=lambda item: (
+            str(item["ckpt_name"]),
+            str(item["dst_name"]),
+            int(item["ckpt_range"]["dim"]) if item["ckpt_range"] else -1,
+            int(item["ckpt_range"]["start"]) if item["ckpt_range"] else -1,
+            int(item["ckpt_range"]["end"]) if item["ckpt_range"] else -1,
+            int(item["dst_range"]["dim"]) if item["dst_range"] else -1,
+            int(item["dst_range"]["start"]) if item["dst_range"] else -1,
+            int(item["dst_range"]["end"]) if item["dst_range"] else -1,
+        ),
+    )
+
+    target_specs: list[dict[str, object]] = []
+    normalized_targets = {str(name): tensor for name, tensor in target_tensors.items()}
+    for name in sorted(normalized_targets):
+        tensor = normalized_targets[name]
+        if not isinstance(tensor, torch.Tensor):
+            raise ArtifactError(
+                f"target_tensors['{name}'] must be a torch.Tensor",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        target_specs.append(
+            {
+                "name": name,
+                "dtype": str(tensor.dtype),
+                "shape": [int(v) for v in tensor.shape],
+                "stride": [int(v) for v in tensor.stride()],
+                "logical_length": int(tensor.numel()) * int(tensor.element_size()),
+            }
+        )
+
+    payload = {
+        "version": _MAPPED_VIEW_ID_VERSION,
+        "kind": "mapped_binding",
+        "canonical_index_sha256": hashlib.sha256(canonical_bytes).hexdigest(),
+        "source_view_id": str(source_view_id or ""),
+        "copy_plan": copy_plan_payload,
+        "targets": target_specs,
+    }
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    digest = hashlib.sha256(payload_bytes).hexdigest()
+    return f"mapped:v{_MAPPED_VIEW_ID_VERSION}:{digest}"
 
 
 def validate_copy_plan(

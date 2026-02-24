@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include "absl/status/status.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 
@@ -39,15 +40,14 @@ std::string_view resolve_view_spec_error_reason(ResolveViewSpecErrorReason reaso
   }
 }
 
-absl::StatusOr<std::optional<ViewSpec>> resolve_mapped_view_spec(
+absl::StatusOr<ResolvedMappedViewSpec> resolve_mapped_view_spec(
     const v2::MaterializeIntoMappedTargetRequest& req,
     std::string_view resolved_artifact_id,
     store::StoreEngine& engine,
     ResolveViewSpecErrorReason* reason) {
   set_reason(reason, ResolveViewSpecErrorReason::kUnknown);
 
-  std::optional<ViewSpec> view_spec;
-  std::optional<std::string> request_view_id;
+  ResolvedMappedViewSpec resolved;
 
   if (!req.has_selection()) {
     return absl::InvalidArgumentError("selection is required");
@@ -59,18 +59,22 @@ absl::StatusOr<std::optional<ViewSpec>> resolve_mapped_view_spec(
       set_reason(reason, ResolveViewSpecErrorReason::kViewSpecInvalid);
       return spec_or.status();
     }
-    view_spec = std::move(*spec_or);
+    resolved.view_spec = std::move(*spec_or);
   }
   if (!selection.view_id().empty()) {
-    request_view_id = selection.view_id();
+    resolved.request_view_id = selection.view_id();
   }
 
-  if (!request_view_id.has_value() || view_spec.has_value()) {
-    return view_spec;
+  if (!resolved.request_view_id.has_value() || resolved.view_spec.has_value()) {
+    return resolved;
   }
 
-  auto view_meta_or = engine.get_view_metadata(std::string(resolved_artifact_id), *request_view_id);
+  auto view_meta_or = engine.get_view_metadata(std::string(resolved_artifact_id), *resolved.request_view_id);
   if (!view_meta_or.ok()) {
+    if (absl::IsNotFound(view_meta_or.status()) || absl::IsUnimplemented(view_meta_or.status())) {
+      // Opaque mapped view_id is allowed even when control-plane metadata is absent.
+      return resolved;
+    }
     set_reason(reason, ResolveViewSpecErrorReason::kViewMetaMissing);
     return view_meta_or.status();
   }
@@ -79,9 +83,8 @@ absl::StatusOr<std::optional<ViewSpec>> resolve_mapped_view_spec(
     set_reason(reason, ResolveViewSpecErrorReason::kViewParseFailed);
     return spec_or.status();
   }
-  view_spec = std::move(*spec_or);
-
-  return view_spec;
+  resolved.view_spec = std::move(*spec_or);
+  return resolved;
 }
 
 } // namespace tensorcast::daemon::materialization_mapped_view_spec

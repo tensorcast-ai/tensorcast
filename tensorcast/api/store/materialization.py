@@ -1349,6 +1349,8 @@ class MaterializationPipeline:
         target: Mapping[str, torch.Tensor],
         device_id: int,
         selection_order: Sequence[str] | None = None,
+        mapped_view_id: str | None = None,
+        selection_index_bytes: bytes | None = None,
     ) -> _RegionBackedLayout:
         if not target:
             raise ArtifactError(
@@ -1478,9 +1480,16 @@ class MaterializationPipeline:
                 )
             storage_specs.append((group, length))
 
+        resolved_mapped_view_id = str(mapped_view_id or "").strip()
+        needs_view_index = bool(resolved_mapped_view_id)
+
         layout = store_daemon_pb2.TargetLayout(
             layout_kind=store_daemon_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
-            index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
+            index_kind=(
+                store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
+                if needs_view_index
+                else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
+            ),
             tensor_spec_kind=store_daemon_pb2.TargetLayout.TENSOR_SPEC_KIND_OFFSETS,
         )
 
@@ -1551,17 +1560,26 @@ class MaterializationPipeline:
             avbs_hash="",
         )
         index_bytes = canonical_index_to_bytes(index)
+        resolved_selection_index_bytes = (
+            bytes(selection_index_bytes)
+            if selection_index_bytes is not None
+            else index_bytes
+        )
         layout.logical_layout_hash = compute_logical_layout_hash(
             index_bytes=index_bytes,
-            needs_view_index=False,
+            needs_view_index=needs_view_index,
         )
+        if resolved_mapped_view_id:
+            layout.view_id = resolved_mapped_view_id
 
         return _RegionBackedLayout(
             layout=layout,
             region_ids=tuple(region_ids),
             logical_total_size=logical_total_size,
-            view_index_bytes=None,
-            view_id=None,
+            view_index_bytes=(
+                resolved_selection_index_bytes if needs_view_index else None
+            ),
+            view_id=resolved_mapped_view_id or None,
             selection_names=selection_names,
             view_subset_hash=None,
         )

@@ -15,6 +15,7 @@ from threading import RLock
 from typing import (
     TYPE_CHECKING,
     Any,
+    Iterable,
     Iterator,
     Literal,
     Mapping,
@@ -64,13 +65,11 @@ from tensorcast.types import (
 
 logger = init_logger(__name__)
 
-# gRPC unary/stream default max message size is 4 MiB unless explicitly raised.
-# Leave headroom for protobuf envelope fields to avoid borderline RESOURCE_EXHAUSTED.
-_GRPC_DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+# Raise message limits for large stable_dram CPU-stream uploads.
+_DEFAULT_GRPC_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+_DEFAULT_FEED_VIEW_CHUNK_BYTES = 4 * 1024 * 1024
 _FEED_VIEW_CHUNK_HEADROOM_BYTES = 64 * 1024
-_FEED_VIEW_CHUNK_SAFE_MAX_BYTES = (
-    _GRPC_DEFAULT_MAX_MESSAGE_BYTES - _FEED_VIEW_CHUNK_HEADROOM_BYTES
-)
+_DEFAULT_FEED_PROGRESS_LOG_INTERVAL_BYTES = 0
 
 # -----------------------------------------------------------------------------
 # Client-side diagnostics (process-scoped)
@@ -153,6 +152,64 @@ def _parse_env_int(name: str, default: int, *, min_value: int) -> int:
         )
         return default
     return value
+
+
+@lru_cache(maxsize=1)
+def _grpc_max_send_message_bytes() -> int:
+    return _parse_env_int(
+        "TENSORCAST_GRPC_MAX_SEND_MESSAGE_BYTES",
+        default=_DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+        min_value=1024 * 1024,
+    )
+
+
+@lru_cache(maxsize=1)
+def _grpc_max_receive_message_bytes() -> int:
+    return _parse_env_int(
+        "TENSORCAST_GRPC_MAX_RECEIVE_MESSAGE_BYTES",
+        default=_DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+        min_value=1024 * 1024,
+    )
+
+
+@lru_cache(maxsize=1)
+def _feed_view_chunk_safe_max_bytes() -> int:
+    configured_chunk = _parse_env_int(
+        "TENSORCAST_FEED_VIEW_CHUNK_BYTES",
+        default=_DEFAULT_FEED_VIEW_CHUNK_BYTES,
+        min_value=1,
+    )
+    safe_cap = (
+        min(
+            _grpc_max_send_message_bytes(),
+            _grpc_max_receive_message_bytes(),
+        )
+        - _FEED_VIEW_CHUNK_HEADROOM_BYTES
+    )
+    if safe_cap <= 0:
+        return 1
+    return min(configured_chunk, safe_cap)
+
+
+@lru_cache(maxsize=1)
+def _feed_view_stream_timeout_seconds() -> float | None:
+    timeout_s = _parse_env_float(
+        "TENSORCAST_FEED_VIEW_TIMEOUT_SECONDS",
+        default=0.0,
+        min_value=0.0,
+    )
+    if timeout_s == 0.0:
+        return None
+    return timeout_s
+
+
+@lru_cache(maxsize=1)
+def _feed_view_progress_log_interval_bytes() -> int:
+    return _parse_env_int(
+        "TENSORCAST_FEED_PROGRESS_LOG_INTERVAL_BYTES",
+        default=_DEFAULT_FEED_PROGRESS_LOG_INTERVAL_BYTES,
+        min_value=0,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -343,7 +400,11 @@ class DaemonCtl:
             default=1,
             min_value=0,
         )
+        max_send_message_length = _grpc_max_send_message_bytes()
+        max_receive_message_length = _grpc_max_receive_message_bytes()
         return [
+            ("grpc.max_send_message_length", max_send_message_length),
+            ("grpc.max_receive_message_length", max_receive_message_length),
             ("grpc.keepalive_time_ms", keepalive_time_ms),
             ("grpc.keepalive_timeout_ms", keepalive_timeout_ms),
             ("grpc.keepalive_permit_without_calls", keepalive_permit_without_calls),
@@ -2214,34 +2275,119 @@ class DaemonCtl:
         registration_id: str,
         data: bytes | bytearray | memoryview,
         *,
-        chunk_bytes: int = _FEED_VIEW_CHUNK_SAFE_MAX_BYTES,
+        chunk_bytes: int | None = None,
         base_offset: int = 0,
+        timeout_s: float | None = None,
     ) -> bool:
-        mv = memoryview(data)
-        safe_chunk_bytes = min(
-            int(_FEED_VIEW_CHUNK_SAFE_MAX_BYTES),
-            max(1, int(chunk_bytes)),
+        return self.feed_register_artifact_view_spans(
+            registration_id,
+            ((int(base_offset), data),),
+            chunk_bytes=chunk_bytes,
+            timeout_s=timeout_s,
         )
 
+    def _resolve_feed_view_chunk_bytes(self, requested_chunk_bytes: int | None) -> int:
+        safe_limit = int(_feed_view_chunk_safe_max_bytes())
+        if requested_chunk_bytes is None:
+            return safe_limit
+        return min(safe_limit, max(1, int(requested_chunk_bytes)))
+
+    def feed_register_artifact_view_spans(
+        self,
+        registration_id: str,
+        spans: Iterable[tuple[int, bytes | bytearray | memoryview]],
+        *,
+        chunk_bytes: int | None = None,
+        timeout_s: float | None = None,
+    ) -> bool:
+        safe_chunk_bytes = self._resolve_feed_view_chunk_bytes(chunk_bytes)
+        resolved_timeout = (
+            _feed_view_stream_timeout_seconds()
+            if timeout_s is None
+            else (None if float(timeout_s) == 0.0 else float(timeout_s))
+        )
+        progress_interval_bytes = _feed_view_progress_log_interval_bytes()
+        emitted_bytes = 0
+        emitted_chunks = 0
+        next_progress_log_bytes = (
+            progress_interval_bytes if progress_interval_bytes > 0 else 0
+        )
+        stream_start = time.monotonic()
+
         def _iter():
-            relative_offset = 0
-            while relative_offset < mv.nbytes:
-                chunk = mv[relative_offset : relative_offset + safe_chunk_bytes]
-                req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
-                    registration_id=registration_id
-                )
-                req.view_chunk.view_offset = int(base_offset + relative_offset)
-                req.view_chunk.data = bytes(chunk)
-                yield req
-                relative_offset += len(chunk)
+            nonlocal emitted_bytes, emitted_chunks, next_progress_log_bytes
+            for base_offset, data in spans:
+                mv = memoryview(data)
+                relative_offset = 0
+                while relative_offset < mv.nbytes:
+                    chunk = mv[relative_offset : relative_offset + safe_chunk_bytes]
+                    req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+                        registration_id=registration_id
+                    )
+                    req.view_chunk.view_offset = int(base_offset + relative_offset)
+                    req.view_chunk.data = chunk.tobytes()
+                    emitted_chunks += 1
+                    emitted_bytes += int(len(chunk))
+                    if (
+                        next_progress_log_bytes > 0
+                        and emitted_bytes >= next_progress_log_bytes
+                    ):
+                        elapsed_s = max(1e-6, time.monotonic() - stream_start)
+                        gib = emitted_bytes / float(1024**3)
+                        logger.info(
+                            "feed_register_artifact_stream progress "
+                            "registration_id=%s chunks=%d bytes=%d "
+                            "elapsed_s=%.3f avg_gibps=%.3f",
+                            registration_id,
+                            emitted_chunks,
+                            emitted_bytes,
+                            elapsed_s,
+                            gib / elapsed_s,
+                        )
+                        next_progress_log_bytes += progress_interval_bytes
+                    yield req
+                    relative_offset += len(chunk)
 
         try:
             self._unary_call(
-                self.stub.FeedRegisterArtifactStream, _iter(), timeout=30.0, retries=0
+                self.stub.FeedRegisterArtifactStream,
+                _iter(),
+                timeout=resolved_timeout,
+                retries=0,
             )
+            if progress_interval_bytes > 0:
+                elapsed_s = max(1e-6, time.monotonic() - stream_start)
+                gib = emitted_bytes / float(1024**3)
+                logger.info(
+                    "feed_register_artifact_stream done "
+                    "registration_id=%s chunks=%d bytes=%d elapsed_s=%.3f avg_gibps=%.3f",
+                    registration_id,
+                    emitted_chunks,
+                    emitted_bytes,
+                    elapsed_s,
+                    gib / elapsed_s,
+                )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifactStream(view) failed: {e}")
+            if progress_interval_bytes > 0:
+                elapsed_s = max(1e-6, time.monotonic() - stream_start)
+                gib = emitted_bytes / float(1024**3)
+                logger.error(
+                    "FeedRegisterArtifactStream(view) failed: %s "
+                    "(registration_id=%s chunks=%d bytes=%d elapsed_s=%.3f avg_gibps=%.3f)",
+                    e,
+                    registration_id,
+                    emitted_chunks,
+                    emitted_bytes,
+                    elapsed_s,
+                    gib / elapsed_s,
+                )
+            else:
+                logger.error(
+                    "FeedRegisterArtifactStream(view) failed: %s (registration_id=%s)",
+                    e,
+                    registration_id,
+                )
             return False
 
     def keep_alive_registered_artifact(

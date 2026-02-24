@@ -39,7 +39,8 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
   } else {
     auto uma = ctx.replica->get_memory_manager().memory_authority();
     if (uma) {
-      auto region_or = uma->get_cpu_memfd_region(handle.replica_key);
+      const loading::ReplicaKey& allocation_key = ctx.replica->replica_key();
+      auto region_or = uma->get_cpu_memfd_region(allocation_key);
       if (region_or.ok()) {
         handle.cpu_memfd_region = loading::CpuMemfdRegion{
             .fd = region_or->fd,
@@ -51,8 +52,8 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
                   << " size_bytes=" << region_or->size_bytes << " offset_bytes=" << region_or->offset_bytes;
         }
       } else if (ctx.options != nullptr && ctx.options->cpu_shared_memory_enabled) {
-        LOG(WARNING) << "HandleStage: cpu_shared_memory_enabled but get_cpu_memfd_region failed for key="
-                     << handle.replica_key << ": " << region_or.status();
+        LOG(WARNING) << "HandleStage: cpu_shared_memory_enabled but get_cpu_memfd_region failed for allocation_key="
+                     << allocation_key << " (request_key=" << handle.replica_key << "): " << region_or.status();
       }
     } else if (ctx.options != nullptr && ctx.options->cpu_shared_memory_enabled) {
       LOG(WARNING) << "HandleStage: cpu_shared_memory_enabled but UMA is unavailable for key=" << handle.replica_key;

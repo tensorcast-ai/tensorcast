@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -49,6 +50,8 @@ using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
 
 namespace {
+
+constexpr std::uint64_t kFeedStreamProgressLogIntervalBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 
 void EraseRegistrationRegionRefs(
     RegistrationManager& registration_manager,
@@ -386,6 +389,10 @@ grpc::Status process_feed_requests(
   std::string reg_id;
   RegistrationManager::RegMeta current_meta;
   bool have_meta = false;
+  const absl::Time stream_start = absl::Now();
+  std::uint64_t streamed_view_bytes = 0;
+  std::uint64_t streamed_view_chunks = 0;
+  std::uint64_t next_progress_log_bytes = kFeedStreamProgressLogIntervalBytes;
   while (next_request(&req)) {
     if (reg_id.empty()) {
       reg_id = req.registration_id();
@@ -450,6 +457,7 @@ grpc::Status process_feed_requests(
       const std::string& payload = req.view_chunk().data();
       absl::Span<const std::byte> bytes(reinterpret_cast<const std::byte*>(payload.data()), payload.size());
       const uint64_t view_offset = req.view_chunk().view_offset();
+      const std::uint64_t payload_bytes = static_cast<std::uint64_t>(payload.size());
       absl::Status ingest_status;
       if (have_meta && current_meta.plan == RegistrationManager::RegPlan::STABLE_DRAM && !current_meta.stage_on_gpu &&
           !current_meta.view_registration) {
@@ -467,6 +475,22 @@ grpc::Status process_feed_requests(
         if (ingested_or.ok()) {
           dep.reg.update_view_ingested_bytes(reg_id, *ingested_or);
         }
+      }
+      streamed_view_bytes += payload_bytes;
+      streamed_view_chunks += 1;
+      if (streamed_view_bytes >= next_progress_log_bytes) {
+        const absl::Duration elapsed = absl::Now() - stream_start;
+        const double elapsed_s = std::max(1e-6, absl::ToDoubleSeconds(elapsed));
+        const double gib = static_cast<double>(streamed_view_bytes) / static_cast<double>(1ULL << 30);
+        LOG(INFO) << absl::StrFormat(
+            "feed_stream progress source=%s registration_id=%s chunks=%d bytes=%d elapsed_s=%.3f avg_gibps=%.3f",
+            source_label,
+            reg_id,
+            static_cast<long long>(streamed_view_chunks),
+            static_cast<long long>(streamed_view_bytes),
+            elapsed_s,
+            gib / elapsed_s);
+        next_progress_log_bytes += kFeedStreamProgressLogIntervalBytes;
       }
     } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
       // allow metadata-only payloads
@@ -560,6 +584,21 @@ grpc::Status process_feed_requests(
       }
     }
   }
+
+  if (streamed_view_chunks > 0) {
+    const absl::Duration elapsed = absl::Now() - stream_start;
+    const double elapsed_s = std::max(1e-6, absl::ToDoubleSeconds(elapsed));
+    const double gib = static_cast<double>(streamed_view_bytes) / static_cast<double>(1ULL << 30);
+    LOG(INFO) << absl::StrFormat(
+        "feed_stream done source=%s registration_id=%s chunks=%d bytes=%d elapsed_s=%.3f avg_gibps=%.3f",
+        source_label,
+        reg_id,
+        static_cast<long long>(streamed_view_chunks),
+        static_cast<long long>(streamed_view_bytes),
+        elapsed_s,
+        gib / elapsed_s);
+  }
+
   return Status::OK;
 }
 

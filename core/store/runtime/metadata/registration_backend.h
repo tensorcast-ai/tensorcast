@@ -71,6 +71,7 @@ class RegistrationBackend {
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
   std::optional<MemoryTierConfig> memory_tier_config_;
+  bool cpu_shared_memory_enabled_{false};
   ReplicaPromotionManager* promotion_manager_{nullptr};
   ReplicaFactory replica_factory_;
   size_t artifact_chunk_bytes_{0};
