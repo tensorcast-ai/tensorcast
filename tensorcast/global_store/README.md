@@ -452,6 +452,7 @@ worker_policy:
 
 `server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `database.db_file` is null/empty, the CLI leaves it unset and the Global Store uses in-memory DuckDB. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
 `worker_policy.key_mapping.alias_cache_ttl` controls the `ResolveKeyMapping` cache TTL returned for alias-style mappings; keep it short to reduce polling pressure.
+`UpsertKeyMapping`/`SwapKeyMapping` require descriptor readiness: target `artifact_id` must already resolve to canonical index bytes (`GetArtifactIndexById` path). If artifact row or index bytes are missing, RPC returns `FAILED_PRECONDITION`.
 
 ## Extending the Global Store
 

@@ -8,7 +8,32 @@ from google.protobuf import duration_pb2
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
+
+
+def _register_artifact_with_index(
+    *,
+    servicer,
+    context_factory,
+    artifact_id: str,
+    worker_id: str,
+    mem_info: common_pb2.MemoryInfo,
+) -> None:
+    index_data = f'{{"{artifact_id}":[0,4,[1],[1],"float32",0]}}'.encode("utf-8")
+    register_resp = servicer.RegisterReplica(
+        global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=mem_info,
+            max_concurrency=1,
+            worker_id=worker_id,
+            tensor_index_data=index_data,
+            encoding="json",
+            schema_version="v3",
+        ),
+        context_factory(),
+    )
+    assert register_resp.status == global_store_pb2.Status.STATUS_OK
 
 
 def test_upsert_and_get_artifact_binding_round_trip(servicer, test_context):
@@ -66,7 +91,26 @@ def test_upsert_artifact_binding_conflict_returns_failed_precondition(
     assert "artifact binding conflict" in (conflict_context.details or "")
 
 
-def test_upsert_key_mapping_conflict_exposes_reason(servicer, test_context):
+def test_upsert_key_mapping_conflict_exposes_reason(
+    servicer,
+    test_context,
+    memory_info,
+    registered_worker,
+):
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-1",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-2",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
     create_resp = servicer.UpsertKeyMapping(
         global_store_pb2.UpsertKeyMappingRequest(
             key="model:latest",
@@ -89,7 +133,26 @@ def test_upsert_key_mapping_conflict_exposes_reason(servicer, test_context):
     assert conflict_context.code is None
 
 
-def test_resolve_key_mapping_ttl_then_alias_sets_cache_policy(servicer, test_context):
+def test_resolve_key_mapping_ttl_then_alias_sets_cache_policy(
+    servicer,
+    test_context,
+    memory_info,
+    registered_worker,
+):
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-stable-1",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-stable-2",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
     upsert_req = global_store_pb2.UpsertKeyMappingRequest(
         key="model:stable",
         artifact_id="aid-stable-1",
@@ -127,7 +190,26 @@ def test_resolve_key_mapping_ttl_then_alias_sets_cache_policy(servicer, test_con
     assert resolve_after_resp.cache_ttl_seconds == 1
 
 
-def test_swap_key_mapping_generation_mismatch_returns_error(servicer, test_context):
+def test_swap_key_mapping_generation_mismatch_returns_error(
+    servicer,
+    test_context,
+    memory_info,
+    registered_worker,
+):
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-canary-1",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-canary-2",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
     upsert_resp = servicer.UpsertKeyMapping(
         global_store_pb2.UpsertKeyMappingRequest(
             key="model:canary",
@@ -159,6 +241,54 @@ def test_revoke_key_mapping_not_found(servicer, test_context):
     assert resp.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
 
+def test_upsert_key_mapping_requires_artifact_index_ready(servicer, test_context):
+    upsert_resp = servicer.UpsertKeyMapping(
+        global_store_pb2.UpsertKeyMappingRequest(
+            key="model:missing-index",
+            artifact_id="aid-missing-index",
+        ),
+        test_context,
+    )
+    assert upsert_resp.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "artifact/index not ready" in (test_context.details or "")
+
+
+def test_swap_key_mapping_requires_artifact_index_ready(
+    servicer,
+    test_context,
+    memory_info,
+    registered_worker,
+):
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-ready",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
+    upsert_resp = servicer.UpsertKeyMapping(
+        global_store_pb2.UpsertKeyMappingRequest(
+            key="model:swap-missing-index",
+            artifact_id="aid-ready",
+        ),
+        type(test_context)(),
+    )
+    assert upsert_resp.status == global_store_pb2.Status.STATUS_OK
+
+    swap_context = type(test_context)()
+    swap_resp = servicer.SwapKeyMapping(
+        global_store_pb2.SwapKeyMappingRequest(
+            key="model:swap-missing-index",
+            new_artifact_id="aid-missing-index",
+        ),
+        swap_context,
+    )
+    assert swap_resp.status == global_store_pb2.Status.STATUS_ERROR
+    assert swap_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "artifact/index not ready" in (swap_context.details or "")
+
+
 def test_resolve_key_mapping_alias_cache_ttl_can_be_configured(test_context):
     try:
         original_config = get_config()
@@ -171,6 +301,50 @@ def test_resolve_key_mapping_alias_cache_ttl_can_be_configured(test_context):
     )
     servicer = GlobalStoreServicer()
     try:
+        worker_ctx = type(test_context)()
+        worker_resp = servicer.RegisterWorker(
+            global_store_pb2.RegisterWorkerRequest(
+                node_id="alias-cache-worker",
+                node_address="192.168.66.10",
+                grpc_port=8111,
+                p2p_port=8112,
+                mem_pool_total_size=1024 * 1024 * 1024,
+                mem_pool_available_size=1024 * 1024 * 1024,
+                daemon_id="daemon_alias_cache_worker",
+            ),
+            worker_ctx,
+        )
+        assert worker_resp.status == global_store_pb2.Status.STATUS_OK
+        worker_id = worker_resp.worker_id
+        mem_info = common_pb2.MemoryInfo(
+            node_id="alias-cache-worker",
+            node_address="192.168.66.10",
+            node_port=8111,
+            memory_size=1024 * 1024,
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+            device_id=0,
+        )
+        transport = mem_info.transport
+        transport.export_state = (
+            common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+        )
+        transport.export_generation = 1
+        transport.remote_memory_keys.append("alias-cache-rkey")
+        transport.buffer_sizes.append(mem_info.memory_size)
+        _register_artifact_with_index(
+            servicer=servicer,
+            context_factory=type(test_context),
+            artifact_id="aid-alias-config-1",
+            worker_id=worker_id,
+            mem_info=mem_info,
+        )
+        _register_artifact_with_index(
+            servicer=servicer,
+            context_factory=type(test_context),
+            artifact_id="aid-alias-config-2",
+            worker_id=worker_id,
+            mem_info=mem_info,
+        )
         upsert_resp = servicer.UpsertKeyMapping(
             global_store_pb2.UpsertKeyMappingRequest(
                 key="model:alias-config",

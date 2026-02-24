@@ -766,3 +766,79 @@
 3. 说明：
    - 这两项为当前分支内在回归项，不影响本报告主线多机 benchmark 结果判定；
    - 后续需单独按“预期行为 vs 断言口径”做根因收敛与修复（优先判定是框架语义变化还是测试口径过时）。
+
+### 9.14 最新主线续跑：TP8 + 320GB + `keep_last=1`（3 receivers，2026-02-24）
+
+执行：
+
+1. case：`tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1`
+2. 结果文件：
+   - `/data/tc_cross_20260224/results_weight_publisher_mainline_tp8/tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1-1771924003/tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1.json`
+3. 关键参数：
+   - `tp_world_size=8`
+   - `tp_total_bytes=343597383680`（320GiB）
+   - `receiver_apply_mode=tp_bind_into_swap`
+   - `keep_last=1`
+   - `publish_interval_s=600`
+   - `poll_interval_s=1.5`
+   - `daemon_heartbeat_interval=60s`
+   - `daemon_periodic_sync_interval=60s`
+   - daemon transport `max_concurrency=1`
+   - `publish_device=cpu`
+4. 资源：
+   - publisher：`ws-7681b3683947089e-worker-t9dp7`
+   - receivers：
+     - `ws-7681b3683947089e-worker-ns65h`
+     - `ws-7681b3683947089e-worker-zcbmn`
+     - `ws-7681b3683947089e-worker-p8zjr`
+   - GS：`100.99.211.131:50051`（`max_workers=32`，干净重启）
+
+结果：
+
+1. `passed=true`
+2. 稳定性：
+   - `all_receivers_completed=true`
+   - `receiver_skips_present=false`
+   - `binding_pointer_stable=true`
+   - `receiver_mode_consistent=true`
+3. 保留窗口与回收：
+   - `keep_last=1` 生效，最终仅保留版本 `v2`
+   - GS RPC 审计通过：
+     - `old_versions_released=true`
+     - `replica_versions_within_window=true`
+     - `replica_version_count_within_limit=true`
+4. 性能：
+   - publish latency mean `351.768s`（p95 `360.648s`）
+   - apply latency mean `354.972s`（p95 `417.571s`）
+   - publish->apply p95 `453.327s`
+
+时延拆解（本轮）：
+
+1. publisher 版本节拍：
+   - `v1 -> v2` 的 `published_at` 间隔 `993.725s`
+   - 主要由 `publish_interval(600s) + publish_latency(~352s)` 叠加形成。
+2. receiver 的 `v2` 等待与传输：
+   - `key_mapping_absent` 最大等待（3 个 receiver）分别约 `527.2s / 517.4s / 548.2s`。
+   - key 可见后，8 rank `swap` 总耗时分别约 `153246ms / 373979ms / 421511ms`。
+3. 结论：
+   - 本轮没有跳版；
+   - 主要耗时由“下一版本尚未发布时的等待 + TP8 串行 rank swap”构成。
+
+新增异常证据（需框架侧继续根治）：
+
+1. `v1` 阶段，3 个 receiver 均出现同类窗口：
+   - key 已能解析到 `artifact_id`，
+   - 但紧接着 `Artifact id ... was not found by StoreDaemon`（每节点 5 次），随后才进入 `bind_into` 成功。
+2. `v2` 阶段未复现该现象，表现为纯 `key_mapping_absent -> key 可见 -> swap`。
+3. 推断：
+   - 首版发布路径与后续 swap 路径在“key 可见性门禁”上存在语义差异；
+   - 当前首版 key 可能先于 artifact/index 完整就绪对外可见，触发短暂不一致窗口。
+
+后续建议（owner 视角）：
+
+1. 框架层：
+   - 将“index ready 后才允许 key 可见”的门禁统一到首版发布链路（不仅是 swap 链路）。
+2. 可观测性：
+   - 增加结构化延迟指标：`key_visible_at`、`index_ready_at`、`first_resolve_success_at`，直接量化窗口时长。
+3. 调度策略：
+   - 大权重场景建议从固定 `publish_interval` 过渡到“receiver 全量 ACK 后再发下一版”的手动/半自动驱动，减少纯等待时间并避免阈值误配。

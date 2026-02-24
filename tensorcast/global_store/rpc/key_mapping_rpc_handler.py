@@ -4,8 +4,14 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 import grpc
 
+from tensorcast.global_store.repositories.artifact_index_repository import (
+    ArtifactIndexRepository,
+)
+from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
 from tensorcast.global_store.repositories.key_mapping_repository import (
     KeyMappingRepository,
 )
@@ -19,12 +25,32 @@ class KeyMappingRpcHandler:
         self,
         *,
         key_mapping_repository: KeyMappingRepository,
+        artifact_repository: ArtifactRepository,
+        artifact_index_repository: ArtifactIndexRepository,
+        multibase_sha256_to_hex: Callable[[str], str | None],
         alias_cache_ttl_seconds: int,
         logger,
     ) -> None:
         self._key_mapping_repository = key_mapping_repository
+        self._artifact_repository = artifact_repository
+        self._artifact_index_repository = artifact_index_repository
+        self._multibase_sha256_to_hex = multibase_sha256_to_hex
         self._alias_cache_ttl_seconds = max(0, int(alias_cache_ttl_seconds))
         self._logger = logger
+
+    def _artifact_index_ready(self, artifact_id: str) -> tuple[bool, str]:
+        row = self._artifact_repository.get(artifact_id)
+        if not row:
+            return False, "artifact row missing"
+        index_multihash = str(row.get("index_multihash") or "").strip()
+        if not index_multihash:
+            return False, "artifact.index_multihash missing"
+        index_key = self._multibase_sha256_to_hex(index_multihash)
+        if not index_key:
+            return False, "artifact.index_multihash invalid"
+        if self._artifact_index_repository.get(index_key) is None:
+            return False, f"artifact_indices missing index_key={index_key}"
+        return True, ""
 
     def upsert_key_mapping(
         self,
@@ -48,6 +74,20 @@ class KeyMappingRpcHandler:
                     status=global_store_pb2.Status.STATUS_ERROR,
                     conflict_reason=f"key already mapped to {existing.get('artifact_id')}",
                 )
+            if not existing:
+                ready, reason = self._artifact_index_ready(artifact_id)
+                if not ready:
+                    detail = (
+                        "artifact/index not ready for key mapping upsert: "
+                        f"artifact_id={artifact_id}, reason={reason}"
+                    )
+                    self._logger.warning(detail)
+                    context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                    context.set_details(detail)
+                    return global_store_pb2.UpsertKeyMappingResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR,
+                        conflict_reason=detail,
+                    )
 
             ttl_seconds = None
             if request.HasField("ttl"):
@@ -139,6 +179,18 @@ class KeyMappingRpcHandler:
                 if request.HasField("expected_generation")
                 else None
             )
+            ready, reason = self._artifact_index_ready(new_artifact_id)
+            if not ready:
+                detail = (
+                    "artifact/index not ready for key mapping swap: "
+                    f"artifact_id={new_artifact_id}, reason={reason}"
+                )
+                self._logger.warning(detail)
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(detail)
+                return global_store_pb2.SwapKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
             result = self._key_mapping_repository.swap(
                 key=key,
                 new_artifact_id=new_artifact_id,
