@@ -35,6 +35,7 @@
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/local_stable_tier_service.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/service/controllers/registration_storage_mapping_utils.h"
 #include "daemon/state/store_policy_resolver.h"
 #include "daemon/util/status_utils.h"
@@ -55,8 +56,17 @@ constexpr std::uint64_t kFeedStreamProgressLogIntervalBytes = 8ULL * 1024ULL * 1
 
 void EraseRegistrationRegionRefs(
     RegistrationManager& registration_manager,
+    HandleLeaseRegistry* handle_leases,
     IpcRegionRegistry& registry,
     std::string_view registration_id) {
+  auto meta_opt = registration_manager.get_meta(std::string(registration_id));
+  if (handle_leases != nullptr && meta_opt.has_value() && !meta_opt->stable_dram_publish_lease_token.empty()) {
+    auto release_status = handle_leases->release(meta_opt->stable_dram_publish_lease_token);
+    if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+      LOG(WARNING) << "release stable_dram publish lease failed for registration_id=" << registration_id << ": "
+                   << release_status;
+    }
+  }
   auto refs = registration_manager.erase_all_for(std::string(registration_id));
   release_region_refs(registry, refs);
 }
@@ -72,6 +82,27 @@ tensorcast::common::v1::ArtifactIdKind ToProtoKind(tensorcast::common::ArtifactI
     default:
       return ProtoKind::ARTIFACT_ID_KIND_UNSPECIFIED;
   }
+}
+
+void release_stable_publish_lease_if_any(
+    RegistrationController::Dep& dep,
+    RegistrationManager::RegMeta& meta,
+    std::string_view registration_id) {
+  if (meta.stable_dram_publish_lease_token.empty()) {
+    return;
+  }
+  if (dep.handle_leases == nullptr) {
+    LOG(WARNING) << "stable_dram publish lease exists but handle lease registry is unavailable; registration_id="
+                 << registration_id;
+    meta.stable_dram_publish_lease_token.clear();
+    return;
+  }
+  auto release_status = dep.handle_leases->release(meta.stable_dram_publish_lease_token);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    LOG(WARNING) << "release stable_dram publish lease failed for registration_id=" << registration_id << ": "
+                 << release_status;
+  }
+  meta.stable_dram_publish_lease_token.clear();
 }
 
 using materialization_policy::compute_view_id_from_spec;
@@ -491,6 +522,30 @@ grpc::Status process_feed_requests(
             elapsed_s,
             gib / elapsed_s);
         next_progress_log_bytes += kFeedStreamProgressLogIntervalBytes;
+      }
+    } else if (req.has_stable_dram_write_progress()) {
+      if (!(have_meta && current_meta.plan == RegistrationManager::RegPlan::STABLE_DRAM && !current_meta.stage_on_gpu &&
+            !current_meta.view_registration)) {
+        return {
+            StatusCode::FAILED_PRECONDITION,
+            "stable_dram write progress requires non-view stable_dram stage_on_gpu=false"};
+      }
+      std::uint64_t acked_bytes = 0;
+      std::uint64_t acked_ranges = 0;
+      for (const auto& range : req.stable_dram_write_progress().ranges()) {
+        const uint64_t canonical_offset = range.canonical_offset();
+        const uint64_t length = range.length();
+        auto ingest_status = dep.engine.ingest_registration_written_range(reg_id, canonical_offset, length);
+        if (!ingest_status.ok()) {
+          return to_grpc_status(ingest_status);
+        }
+        acked_bytes += length;
+        acked_ranges += 1;
+      }
+      if (acked_bytes > 0) {
+        record_view_bytes_metric(static_cast<double>(acked_bytes));
+        streamed_view_bytes += acked_bytes;
+        streamed_view_chunks += acked_ranges;
       }
     } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
       // allow metadata-only payloads
@@ -1111,7 +1166,7 @@ grpc::Status commit_piece_view_registration(
 
   lip_rollback.release();
   replica_rollback.release();
-  EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+  EraseRegistrationRegionRefs(dep.reg, dep.handle_leases, dep.regions, registration_id);
   rctx.mark_success();
   return Status::OK;
 }
@@ -1132,7 +1187,7 @@ grpc::Status validate_piece_assembly_not_sealed(
     if (!abort_status.ok()) {
       LOG(WARNING) << "abort_registered_artifact failed after sealed binding: " << abort_status;
     }
-    EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+    EraseRegistrationRegionRefs(dep.reg, dep.handle_leases, dep.regions, registration_id);
     return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
   }
   return Status::OK;
@@ -1149,7 +1204,7 @@ grpc::Status commit_lease_registration(
     return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
   }
   if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
-    EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+    EraseRegistrationRegionRefs(dep.reg, dep.handle_leases, dep.regions, registration_id);
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
@@ -1232,7 +1287,7 @@ grpc::Status commit_lease_registration(
   auto local_stable_status = apply_local_stable_tier(
       dep.engine, dep.lip, dep.regions, meta, out.artifact_id, out.id_kind, out.total_size, local_stable, [&]() {
         (void)dep.lip.revoke_by_registration_id(registration_id);
-        EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+        EraseRegistrationRegionRefs(dep.reg, dep.handle_leases, dep.regions, registration_id);
       });
   if (!local_stable_status.ok()) {
     return to_grpc_status(local_stable_status);
@@ -1263,7 +1318,7 @@ grpc::Status commit_lease_registration(
   }
   LOG(INFO) << "Registered memory replica: " << out.artifact_id
             << " plan=vram_leased(in_place) device=gpu:" << meta.device_id << " size=" << out.total_size << "B";
-  EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+  EraseRegistrationRegionRefs(dep.reg, dep.handle_leases, dep.regions, registration_id);
   rctx.mark_success();
   return Status::OK;
 }
@@ -1274,6 +1329,13 @@ grpc::Status commit_engine_registration(
     const std::string& registration_id,
     RegistrationManager::RegMeta meta,
     v2::CommitRegisteredArtifactResponse& resp) {
+  // Release temporary publish handle lease before commit admission so stable
+  // budget is not double-counted (publish guard lease + stable cache lease).
+  release_stable_publish_lease_if_any(dep, meta, registration_id);
+  if (dep.reg.has_meta(registration_id)) {
+    dep.reg.set_meta(registration_id, meta);
+  }
+
   auto commit_or = dep.engine.commit_registered_artifact(registration_id);
   if (!commit_or.ok()) {
     return to_grpc_status(commit_or.status());
@@ -1328,21 +1390,28 @@ grpc::Status commit_engine_registration(
   }
 
   auto* local_stable = resp.mutable_local_stable_tier();
-  auto local_stable_status = apply_local_stable_tier(
-      dep.engine, dep.lip, dep.regions, meta, out.artifact_id, out.id_kind, out.size_bytes, local_stable, [&]() {
-        if (!out.existed) {
-          store::loading::ReplicaKey base_key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
-          (void)dep.engine.unload_replica(base_key);
-          auto unreg_status = dep.engine.unregister_replica_from_global_store(out.artifact_id, out.device.ordinal);
-          if (!unreg_status.ok()) {
-            LOG(WARNING) << "unregister_replica_from_global_store failed after must local stable failure: artifact_id="
-                         << out.artifact_id << " dev=" << out.device.ordinal << ": " << unreg_status;
+  if (out.stable_cache_admitted) {
+    local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
+    local_stable->set_message("local stable tier admitted during stable_dram commit");
+  } else {
+    auto local_stable_status = apply_local_stable_tier(
+        dep.engine, dep.lip, dep.regions, meta, out.artifact_id, out.id_kind, out.size_bytes, local_stable, [&]() {
+          if (!out.existed) {
+            store::loading::ReplicaKey base_key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
+            (void)dep.engine.unload_replica(base_key);
+            auto unreg_status = dep.engine.unregister_replica_from_global_store(out.artifact_id, out.device.ordinal);
+            if (!unreg_status.ok()) {
+              LOG(WARNING)
+                  << "unregister_replica_from_global_store failed after must local stable failure: artifact_id="
+                  << out.artifact_id << " dev=" << out.device.ordinal << ": " << unreg_status;
+            }
           }
-        }
-        dep.reg.erase_meta(registration_id);
-      });
-  if (!local_stable_status.ok()) {
-    return to_grpc_status(local_stable_status);
+          release_stable_publish_lease_if_any(dep, meta, registration_id);
+          dep.reg.erase_meta(registration_id);
+        });
+    if (!local_stable_status.ok()) {
+      return to_grpc_status(local_stable_status);
+    }
   }
 
   if (out.existed) {
@@ -1438,6 +1507,59 @@ grpc::Status apply_begin_view_registration(
   return Status::OK;
 }
 
+void maybe_attach_stable_dram_cpu_publish_handle(
+    RegistrationController::Dep& dep,
+    const std::string& registration_id,
+    RegistrationManager::RegMeta& meta,
+    v2::StableDramHandshake* hs) {
+  if (hs == nullptr || meta.stage_on_gpu || meta.view_registration || meta.owner_pid <= 0) {
+    return;
+  }
+  if (dep.handle_leases == nullptr) {
+    VLOG(1) << "stable_dram cpu publish handle unavailable: handle leases disabled";
+    return;
+  }
+
+  auto memfd_or = dep.engine.get_registration_cpu_memfd_info(registration_id);
+  if (!memfd_or.ok()) {
+    VLOG(1) << "stable_dram cpu publish handle unavailable for registration_id=" << registration_id << ": "
+            << memfd_or.status();
+    return;
+  }
+  const auto& memfd = *memfd_or;
+  if (memfd.fd < 0 || memfd.size_bytes == 0) {
+    VLOG(1) << "stable_dram cpu publish handle unavailable for registration_id=" << registration_id
+            << ": invalid memfd descriptor";
+    return;
+  }
+
+  auto chunks_or =
+      materialization_replica_handle::build_export_chunks_for_replica(dep.engine, memfd.replica_key, memfd.size_bytes);
+  if (!chunks_or.ok()) {
+    LOG(WARNING) << "stable_dram cpu publish failed to build export chunks for registration_id=" << registration_id
+                 << ": " << chunks_or.status();
+    return;
+  }
+
+  HandleLeaseRegistry::CpuMemfdDescriptor memfd_desc{
+      .fd = memfd.fd,
+      .size_bytes = memfd.size_bytes,
+      .offset_bytes = memfd.offset_bytes,
+  };
+  auto token_or = dep.handle_leases->mint_cpu_memfd_lease(memfd.replica_key, meta.owner_pid, memfd_desc, *chunks_or);
+  if (!token_or.ok()) {
+    LOG(WARNING) << "stable_dram cpu publish failed to mint memfd lease for registration_id=" << registration_id << ": "
+                 << token_or.status();
+    return;
+  }
+
+  auto* publish = hs->mutable_publish_cpu_memfd();
+  publish->set_size_bytes(memfd.size_bytes);
+  publish->set_offset_bytes(memfd.offset_bytes);
+  hs->set_publish_cpu_memfd_lease_token(*token_or);
+  meta.stable_dram_publish_lease_token = *token_or;
+}
+
 grpc::Status begin_coalesced_or_stable_registration(
     RegistrationController::Dep& dep,
     RpcContext& rctx,
@@ -1473,6 +1595,8 @@ grpc::Status begin_coalesced_or_stable_registration(
     auto* hs = resp.mutable_stable_dram();
     if (meta.stage_on_gpu) {
       hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
+    } else {
+      maybe_attach_stable_dram_cpu_publish_handle(dep, out.registration_id, meta, hs);
     }
   } else {
     auto* hs = resp.mutable_coalesced();
@@ -1744,7 +1868,7 @@ grpc::Status RegistrationController::abort(
   auto st = d_.engine.abort_registered_artifact(req.registration_id());
   if (!st.ok())
     return to_grpc_status(st);
-  EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
+  EraseRegistrationRegionRefs(d_.reg, d_.handle_leases, d_.regions, req.registration_id());
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto counter = meter->CreateDoubleCounter("tc_register_abort_total");
@@ -1770,7 +1894,7 @@ grpc::Status RegistrationController::revoke(
                    << abort_status;
     }
   }
-  EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
+  EraseRegistrationRegionRefs(d_.reg, d_.handle_leases, d_.regions, req.registration_id());
 
   if (meta_opt.has_value() && meta_opt->joined_existing) {
     const auto& m = *meta_opt;

@@ -406,6 +406,150 @@ class TestRepositories:
         assert selected.node_id == "node_high_cap"
         assert selected.current_requests == 2
 
+    def test_replica_re_registration_does_not_reset_inflight_counter(
+        self, repositories
+    ):
+        """Replica metadata refresh must preserve transport in-flight counters."""
+        replica_repo = repositories["replica"]
+        worker_repo = repositories["worker"]
+
+        worker = Worker(
+            worker_id="worker_re_register_counter",
+            daemon_id="daemon_re_register_counter",
+            node_id="node_re_register_counter",
+            node_address="192.168.20.1",
+            grpc_port=50301,
+            p2p_port=50302,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+            accepting_new_requests=True,
+        )
+        worker_repo.create(worker)
+        assert (
+            worker_repo.update_heartbeat("worker_re_register_counter", 1024, True)
+            is True
+        )
+
+        artifact_id = "counter_preserve_artifact"
+        replica = Replica(
+            artifact_id=artifact_id,
+            node_id="node_re_register_counter",
+            node_address="192.168.20.1",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            remote_memory_keys=["rk_counter"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            max_concurrency=1,
+            worker_id="worker_re_register_counter",
+        )
+        created = replica_repo.create(replica)
+
+        first = replica_repo.find_available_for_transport(
+            artifact_id, heartbeat_timeout_seconds=60
+        )
+        assert first.replica is not None
+        assert first.replica.replica_id == created.replica_id
+        assert first.replica.current_requests == 1
+
+        refreshed = Replica(
+            artifact_id=artifact_id,
+            node_id="node_re_register_counter",
+            node_address="192.168.20.1",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            remote_memory_keys=["rk_counter"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            max_concurrency=1,
+            worker_id="worker_re_register_counter",
+            current_requests=0,
+        )
+        replica_repo.create_or_update(refreshed)
+
+        second = replica_repo.find_available_for_transport(
+            artifact_id, heartbeat_timeout_seconds=60
+        )
+        assert second.replica is None
+
+        replica_repo.decrement_requests(created.replica_id)
+        third = replica_repo.find_available_for_transport(
+            artifact_id, heartbeat_timeout_seconds=60
+        )
+        assert third.replica is not None
+        assert third.replica.replica_id == created.replica_id
+
+    def test_transport_prefers_new_idle_source_for_diffusion(self, repositories):
+        """When load is equal, never-assigned new source should be selected first."""
+        replica_repo = repositories["replica"]
+        worker_repo = repositories["worker"]
+
+        worker = Worker(
+            worker_id="worker_diffusion_tie_break",
+            daemon_id="daemon_diffusion_tie_break",
+            node_id="node_diffusion_tie_break",
+            node_address="192.168.21.1",
+            grpc_port=50311,
+            p2p_port=50312,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+            accepting_new_requests=True,
+        )
+        worker_repo.create(worker)
+        assert (
+            worker_repo.update_heartbeat("worker_diffusion_tie_break", 1024, True)
+            is True
+        )
+
+        artifact_id = "diffusion_tie_break_artifact"
+        old_source = Replica(
+            artifact_id=artifact_id,
+            node_id="node_old_source",
+            node_address="192.168.21.2",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            remote_memory_keys=["rk_old"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            max_concurrency=2,
+            worker_id="worker_diffusion_tie_break",
+        )
+        old_created = replica_repo.create(old_source)
+        first_claim = replica_repo.find_available_for_transport(
+            artifact_id, heartbeat_timeout_seconds=60
+        )
+        assert first_claim.replica is not None
+        assert first_claim.replica.replica_id == old_created.replica_id
+        replica_repo.decrement_requests(old_created.replica_id)
+
+        new_source = Replica(
+            artifact_id=artifact_id,
+            node_id="node_new_source",
+            node_address="192.168.21.3",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=1,
+            remote_memory_keys=["rk_new"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            max_concurrency=2,
+            worker_id="worker_diffusion_tie_break",
+        )
+        new_created = replica_repo.create(new_source)
+
+        next_claim = replica_repo.find_available_for_transport(
+            artifact_id, heartbeat_timeout_seconds=60
+        )
+        assert next_claim.replica is not None
+        assert next_claim.replica.replica_id == new_created.replica_id
+
     def test_artifact_replica_no_available_for_transport(self, repositories):
         """Test when no replicas are available for transport."""
         replica_repo = repositories["replica"]

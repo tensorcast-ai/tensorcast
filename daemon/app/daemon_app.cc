@@ -196,6 +196,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .identity = &app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
+      .handle_leases = app->kernel_->handle_leases(),
       .regions = app->kernel_->region_registry(),
       .max_concurrency = app->options_.daemon_options.max_concurrency,
   };

@@ -391,6 +391,14 @@ absl::StatusOr<uint64_t> MetadataGateway::get_registration_gpu_ptr(std::string_v
   return registration_backend_->get_registration_gpu_ptr(registration_id);
 }
 
+absl::StatusOr<RegistrationCpuMemfdInfo> MetadataGateway::get_registration_cpu_memfd_info(
+    std::string_view registration_id) const {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->get_registration_cpu_memfd_info(registration_id);
+}
+
 absl::Status MetadataGateway::ingest_view_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
@@ -409,6 +417,16 @@ absl::Status MetadataGateway::ingest_registration_chunk(
     return absl::FailedPreconditionError("registration backend is not initialized");
   }
   return registration_backend_->ingest_registration_chunk(registration_id, offset, data);
+}
+
+absl::Status MetadataGateway::ingest_registration_written_range(
+    std::string_view registration_id,
+    uint64_t offset,
+    uint64_t length) {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->ingest_registration_written_range(registration_id, offset, length);
 }
 
 absl::StatusOr<uint64_t> MetadataGateway::get_view_ingested_bytes(std::string_view registration_id) const {

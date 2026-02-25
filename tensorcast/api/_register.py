@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import array
 import atexit
 import contextlib
+import fcntl
 import json
 import logging
+import mmap
 import os
+import socket
+import struct
 import threading
 import time
 import weakref
@@ -98,6 +103,80 @@ class RegistrationResult:
 
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
+    0: "ok",
+    1: "not_found",
+    2: "failed_precondition",
+    3: "permission_denied",
+    4: "internal",
+}
+
+
+def _ensure_fd_cloexec(fd: int) -> None:
+    flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+    fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+
+
+def _request_cpu_memfd_fd(
+    *,
+    local_handle_socket_path: str,
+    lease_token: bytes,
+) -> int:
+    if not local_handle_socket_path:
+        raise TensorCastError("Local handle socket path is required for CPU memfd")
+    if not lease_token:
+        raise TensorCastError("Daemon returned empty lease_token for CPU memfd")
+    if len(lease_token) > 1024:
+        raise TensorCastError("lease_token too large for local handle protocol")
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1.0)
+        try:
+            sock.connect(local_handle_socket_path)
+        except OSError as exc:
+            raise TensorCastError(
+                f"Failed to connect LocalHandle socket at {local_handle_socket_path}"
+            ) from exc
+        msg = bytes([1]) + struct.pack("=I", len(lease_token)) + lease_token
+        try:
+            sock.sendall(msg)
+        except OSError as exc:
+            raise TensorCastError("LocalHandle GetCpuMemfdFd send failed") from exc
+
+        recv_flags = getattr(socket, "MSG_CMSG_CLOEXEC", 0)
+        try:
+            data, ancdata, _, _ = sock.recvmsg(
+                1, socket.CMSG_SPACE(struct.calcsize("i")), recv_flags
+            )
+        except (OSError, TimeoutError) as exc:
+            raise TensorCastError("LocalHandle GetCpuMemfdFd recv failed") from exc
+        if not data:
+            raise TensorCastError("Local handle server returned empty response")
+        code = int(data[0])
+        if code != 0:
+            label = _LOCAL_HANDLE_RESP_LABELS.get(code, f"unknown({code})")
+            raise TensorCastError(f"LocalHandle GetCpuMemfdFd failed: {label}")
+
+        recv_fds: list[int] = []
+        for level, ctype, cmsg_data in ancdata:
+            if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
+                fds = array.array("i")
+                fds.frombytes(cmsg_data)
+                recv_fds.extend(int(fd) for fd in fds)
+
+        if not recv_fds:
+            raise TensorCastError(
+                "LocalHandle GetCpuMemfdFd returned no file descriptor"
+            )
+
+        fd = recv_fds[0]
+        for extra_fd in recv_fds[1:]:
+            with contextlib.suppress(OSError):
+                os.close(extra_fd)
+        _ensure_fd_cloexec(fd)
+        return fd
+
 
 _DEFAULT_FEED_VIEW_UPLOAD_WORKERS = 1
 _DEFAULT_FEED_VIEW_CHUNK_BYTES_SINGLE_WORKER = 4 * 1024 * 1024
@@ -956,16 +1035,177 @@ class _StableDramUploader:
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, StableDramHandshake):
             raise TensorCastError("Unexpected handshake type for dram_stable plan")
-        if not handshake.staging_cuda_ipc_handle:
-            offsets_for_device = layout.offsets.get(int(ctx.device_id), {})
-            if not offsets_for_device:
+        offsets_for_device = layout.offsets.get(int(ctx.device_id), {})
+        if not offsets_for_device:
+            raise TensorCastError(f"No layout offsets found for device {ctx.device_id}")
+        ordered_names = sorted(
+            offsets_for_device.keys(),
+            key=lambda tensor_name: int(offsets_for_device[tensor_name]),
+        )
+
+        def _prepare_tensor_payload(name: str) -> tuple[int, int, torch.Tensor, float]:
+            if cancel_event and cancel_event.is_set():
+                raise CancelledError
+            tensor_prepare_start = time.monotonic()
+            if name not in artifact:
                 raise TensorCastError(
-                    f"No layout offsets found for device {ctx.device_id}"
+                    f"Tensor '{name}' missing from registration payload"
                 )
-            ordered_names = sorted(
-                offsets_for_device.keys(),
-                key=lambda tensor_name: int(offsets_for_device[tensor_name]),
+            if name not in ctx.tensor_source_index:
+                raise TensorCastError(
+                    f"Tensor '{name}' missing from canonical source index"
+                )
+            _, expected_bytes = ctx.tensor_source_index[name]
+            canonical_offset = int(offsets_for_device[name])
+            local = artifact[name].detach()
+            if local.device.type != "cpu":
+                local = local.to(torch.device("cpu"), non_blocking=False)
+            local = local.contiguous()
+            actual_bytes = int(local.numel()) * int(local.element_size())
+            if actual_bytes != int(expected_bytes):
+                raise TensorCastError(
+                    f"Tensor '{name}' byte size mismatch: expected {int(expected_bytes)}, got {actual_bytes}"
+                )
+            prepare_elapsed_s = time.monotonic() - tensor_prepare_start
+            return canonical_offset, int(expected_bytes), local, prepare_elapsed_s
+
+        if (
+            handshake.publish_cpu_memfd_size_bytes > 0
+            and handshake.publish_cpu_memfd_lease_token
+        ):
+            ctl = handle.client
+            server_config = ctl.get_server_config()
+            if not server_config.cpu_shared_memory_enabled:
+                raise TensorCastError(
+                    "Daemon cpu_shared_memory_enabled is false for stable_dram cpu memfd publish"
+                )
+            if not server_config.local_handle_socket_path:
+                raise TensorCastError(
+                    "Daemon local_handle_socket_path is missing for stable_dram cpu memfd publish"
+                )
+            fd = _request_cpu_memfd_fd(
+                local_handle_socket_path=server_config.local_handle_socket_path,
+                lease_token=handshake.publish_cpu_memfd_lease_token,
             )
+            map_size = int(handshake.publish_cpu_memfd_size_bytes)
+            if map_size <= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise TensorCastError(
+                    "stable_dram cpu memfd publish handle has empty size"
+                )
+            map_offset = int(handshake.publish_cpu_memfd_offset_bytes)
+            if map_offset < 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise TensorCastError(
+                    "stable_dram cpu memfd publish handle has invalid offset"
+                )
+
+            page_size = int(mmap.PAGESIZE)
+            aligned_offset = (map_offset // page_size) * page_size
+            offset_delta = map_offset - aligned_offset
+            map_len = map_size + offset_delta
+            if map_len <= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise TensorCastError(
+                    "stable_dram cpu memfd publish map length is invalid"
+                )
+
+            ranges: list[tuple[int, int]] = []
+            total_streamed_bytes = 0
+            stream_start = time.monotonic()
+            try:
+                with mmap.mmap(
+                    fd,
+                    map_len,
+                    flags=mmap.MAP_SHARED,
+                    prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                    offset=aligned_offset,
+                ) as mapped_region:
+                    mapped = memoryview(mapped_region)[
+                        offset_delta : offset_delta + map_size
+                    ]
+                    try:
+                        for name in ordered_names:
+                            (
+                                canonical_offset,
+                                expected_bytes,
+                                local_tensor,
+                                prepare_elapsed_s,
+                            ) = _prepare_tensor_payload(name)
+                            if (
+                                canonical_offset > map_size
+                                or expected_bytes > map_size - canonical_offset
+                            ):
+                                raise TensorCastError(
+                                    f"Tensor '{name}' publish range out of bounds: offset={canonical_offset}, bytes={expected_bytes}, map_size={map_size}"
+                                )
+                            logger.info(
+                                "stable_dram upload tensor_ready "
+                                "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
+                                handle.registration_id,
+                                name,
+                                expected_bytes,
+                                prepare_elapsed_s,
+                            )
+                            copy_start = time.monotonic()
+                            src_bytes = local_tensor.view(torch.uint8).view(-1)
+                            dst_slice = mapped[
+                                canonical_offset : canonical_offset + expected_bytes
+                            ]
+                            try:
+                                dst_tensor = torch.frombuffer(
+                                    dst_slice,
+                                    dtype=torch.uint8,
+                                    count=expected_bytes,
+                                )
+                                if int(src_bytes.numel()) != int(dst_tensor.numel()):
+                                    raise TensorCastError(
+                                        f"Tensor '{name}' byte view size mismatch during cpu memfd publish"
+                                    )
+                                dst_tensor.copy_(src_bytes, non_blocking=False)
+                                del dst_tensor
+                            finally:
+                                dst_slice.release()
+                            copy_elapsed_s = time.monotonic() - copy_start
+                            logger.info(
+                                "stable_dram upload tensor_done "
+                                "registration_id=%s tensor=%s bytes=%d copy_s=%.3f",
+                                handle.registration_id,
+                                name,
+                                expected_bytes,
+                                copy_elapsed_s,
+                            )
+                            total_streamed_bytes += expected_bytes
+                            ranges.append((canonical_offset, expected_bytes))
+                    finally:
+                        mapped.release()
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+
+            ok = ctl.feed_register_artifact_stable_dram_write_ranges(
+                handle.registration_id,
+                ranges,
+            )
+            if not ok:
+                raise FeedFailed(
+                    "FeedRegisterArtifactStream(stable_dram_write_progress) failed during cpu memfd publish"
+                )
+            stream_elapsed_s = time.monotonic() - stream_start
+            logger.info(
+                "stable_dram upload path=cpu_memfd_publish registration_id=%s tensors=%d ranges=%d total_bytes=%d stream_seconds=%.3f",
+                handle.registration_id,
+                len(ordered_names),
+                len(ranges),
+                total_streamed_bytes,
+                stream_elapsed_s,
+            )
+            return artifact
+
+        if not handshake.staging_cuda_ipc_handle:
             ctl = handle.client
             total_streamed_bytes = 0
             stream_start = time.monotonic()
@@ -978,43 +1218,8 @@ class _StableDramUploader:
             )
             stream_span_bytes = _stable_dram_feed_stream_span_bytes()
 
-            def _prepare_tensor_payload(
-                name: str,
-            ) -> tuple[int, int, memoryview, float]:
-                if cancel_event and cancel_event.is_set():
-                    raise CancelledError
-                tensor_prepare_start = time.monotonic()
-                if name not in artifact:
-                    raise TensorCastError(
-                        f"Tensor '{name}' missing from registration payload"
-                    )
-                if name not in ctx.tensor_source_index:
-                    raise TensorCastError(
-                        f"Tensor '{name}' missing from canonical source index"
-                    )
-                _, expected_bytes = ctx.tensor_source_index[name]
-                canonical_offset = int(offsets_for_device[name])
-                local = artifact[name].detach()
-                if local.device.type != "cpu":
-                    local = local.to(torch.device("cpu"), non_blocking=False)
-                local = local.contiguous()
-                actual_bytes = int(local.numel()) * int(local.element_size())
-                if actual_bytes != int(expected_bytes):
-                    raise TensorCastError(
-                        f"Tensor '{name}' byte size mismatch: expected {int(expected_bytes)}, got {actual_bytes}"
-                    )
-                payload_view = memoryview(local.view(torch.uint8).numpy()).cast("B")
-                prepare_elapsed_s = time.monotonic() - tensor_prepare_start
-                return (
-                    canonical_offset,
-                    int(expected_bytes),
-                    payload_view,
-                    prepare_elapsed_s,
-                )
-
             def _upload_one_span(
-                canonical_offset: int,
-                payload_view: memoryview,
+                canonical_offset: int, payload_view: memoryview
             ) -> int:
                 ok = ctl.feed_register_artifact_view_spans(
                     handle.registration_id,
@@ -1035,9 +1240,12 @@ class _StableDramUploader:
                         (
                             canonical_offset,
                             expected_bytes,
-                            payload_view,
+                            local_tensor,
                             prepare_elapsed_s,
                         ) = _prepare_tensor_payload(name)
+                        payload_view = memoryview(
+                            local_tensor.view(torch.uint8).numpy()
+                        ).cast("B")
                         logger.info(
                             "stable_dram upload tensor_ready "
                             "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
@@ -1074,9 +1282,12 @@ class _StableDramUploader:
                     (
                         canonical_offset,
                         expected_bytes,
-                        payload_view,
+                        local_tensor,
                         prepare_elapsed_s,
                     ) = _prepare_tensor_payload(name)
+                    payload_view = memoryview(
+                        local_tensor.view(torch.uint8).numpy()
+                    ).cast("B")
                     logger.info(
                         "stable_dram upload tensor_ready "
                         "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",

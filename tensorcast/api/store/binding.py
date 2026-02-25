@@ -91,7 +91,7 @@ class Binding:
             runtime.ensure_client(), self._publish_ttl_ms
         )
         if publish:
-            self._publish(ctx=ctx)
+            self.publish_replica(ctx=ctx)
 
     def __enter__(self) -> "Binding":
         return self
@@ -154,7 +154,7 @@ class Binding:
         self._stop_keepalive()
         self._slot.close()
 
-    def _publish(self, *, ctx: CallContext | None = None) -> None:
+    def publish_replica(self, *, ctx: CallContext | None = None) -> None:
         self._slot.publish_replica(ttl_ms=self._publish_ttl_ms, ctx=ctx)
         self._start_keepalive()
 

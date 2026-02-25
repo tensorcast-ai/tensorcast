@@ -23,8 +23,16 @@ class _FakeBinding:
     def swap(self, *_: object, **__: object) -> None:
         return None
 
+    def publish_replica(self, *_: object, **__: object) -> None:
+        return None
+
     def close(self) -> None:
         return None
+
+
+class _FakeBindingPublishFail(_FakeBinding):
+    def publish_replica(self, *_: object, **__: object) -> None:
+        raise RuntimeError("target_write_token missing; daemon publish not available")
 
 
 class _FailingArtifact:
@@ -40,6 +48,16 @@ class _SuccessfulArtifact:
         **_: object,
     ) -> _FakeBinding:
         return _FakeBinding(target_tensors)
+
+
+class _SuccessfulArtifactPublishFail:
+    def bind_into(
+        self,
+        *,
+        target_tensors: dict[str, _FakeTensor],
+        **_: object,
+    ) -> _FakeBinding:
+        return _FakeBindingPublishFail(target_tensors)
 
 
 def test_tp_bind_retry_reuses_preallocated_targets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,3 +105,40 @@ def test_tp_bind_retry_reuses_preallocated_targets(monkeypatch: pytest.MonkeyPat
     assert alloc_calls["count"] == 1
     assert 0 not in receiver._tp_pending_targets
     assert 0 in receiver._tp_bindings
+
+
+def test_tp_bind_publish_failure_is_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receiver = e2e.WeightUpdateReceiver.__new__(e2e.WeightUpdateReceiver)
+    receiver._tp_bindings = {}
+    receiver._tp_binding_ptrs = {}
+    receiver._tp_pending_targets = {}
+    receiver._tp_world_size = 4
+    receiver._tp_total_bytes = 40 * 1024**3
+    receiver._tp_device_base_index = 0
+
+    monkeypatch.setattr(
+        e2e,
+        "_allocate_tp4_rank_targets",
+        lambda **_: {
+            "rank_col_weight_0": _FakeTensor(101),
+            "rank_row_weight_0": _FakeTensor(202),
+        },
+    )
+    monkeypatch.setattr(e2e, "_build_tp4_rank_copy_plan", lambda **_: ())
+    monkeypatch.setattr(e2e, "_validate_tp4_rank_targets", lambda **_: None)
+
+    op, pointer_stable = receiver._apply_tp4_rank(
+        version=1,
+        rank=0,
+        artifact=_SuccessfulArtifactPublishFail(),
+        ctx=None,
+    )
+
+    assert op == "bind_into"
+    assert pointer_stable is True
+    captured = capsys.readouterr().out
+    assert "publish=skipped" in captured
+    assert "target_write_token missing" in captured

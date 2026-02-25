@@ -601,6 +601,7 @@ TEST_CASE("MaterializationFacade AUTO view route falls back to canonical transpo
 
   loading::MaterializeHints hints;
   hints.artifact_id = "cgid:artifact_view_route_fallback";
+  hints.transport_wait_timeout = std::chrono::milliseconds(5000);
   loading::VariantIdentity variant;
   variant.canonical_artifact_id = hints.artifact_id;
   variant.view_id = "view:tp0";
@@ -635,6 +636,11 @@ TEST_CASE("MaterializationFacade AUTO view route falls back to canonical transpo
   CHECK(gs_client->view_requests.size() == 1);
   CHECK(gs_client->view_requests.front() == "view:tp0");
   CHECK(gs_client->replica_requests.size() == 1);
+  REQUIRE(gs_client->view_request_wait_timeouts_ms.size() == 1);
+  REQUIRE(gs_client->replica_request_wait_timeouts_ms.size() == 1);
+  CHECK(gs_client->view_request_wait_timeouts_ms.front() > 0);
+  CHECK(gs_client->view_request_wait_timeouts_ms.front() < gs_client->replica_request_wait_timeouts_ms.front());
+  CHECK(gs_client->replica_request_wait_timeouts_ms.front() == 5000);
 
   const auto& invocation = harness.fake_pipeline->p2p_invocations().front();
   REQUIRE(invocation.hints.variant.has_value());

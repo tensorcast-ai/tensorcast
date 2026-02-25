@@ -1641,6 +1641,31 @@ class WeightUpdateReceiver:
             deadline_ms=max(1, int(bounded_s * 1000.0)),
         )
 
+    def _maybe_publish_tp_binding(
+        self,
+        *,
+        binding: Any,
+        version: int,
+        rank: int,
+        phase: str,
+        ctx: Any | None,
+    ) -> None:
+        publish_kwargs: dict[str, Any] = {}
+        if ctx is not None:
+            publish_kwargs["ctx"] = ctx
+        try:
+            binding.publish_replica(**publish_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[receiver][tp]",
+                f"version={version}",
+                f"rank={rank}",
+                f"phase={phase}",
+                "publish=skipped",
+                f"reason={_compact_error_text(exc)}",
+                flush=True,
+            )
+
     def _apply_tp4_rank(
         self,
         *,
@@ -1695,15 +1720,22 @@ class WeightUpdateReceiver:
                 tp_world_size=self._tp_world_size,
                 tp_total_bytes=self._tp_total_bytes,
             )
+            self._maybe_publish_tp_binding(
+                binding=binding,
+                version=version,
+                rank=rank,
+                phase="bind_into",
+                ctx=ctx,
+            )
             return ("bind_into", True)
 
         pointer_baseline = self._tp_binding_ptrs.get(rank)
         if pointer_baseline is None:
             raise AssertionError(f"missing pointer baseline for rank={rank}")
-        if ctx is None:
-            binding.swap(artifact)
-        else:
-            binding.swap(artifact, ctx=ctx)
+        swap_kwargs: dict[str, Any] = {"publish": False}
+        if ctx is not None:
+            swap_kwargs["ctx"] = ctx
+        binding.swap(artifact, **swap_kwargs)
         latest_ptrs = {
             name: tensor.data_ptr() for name, tensor in binding.tensors.items()
         }
@@ -1726,6 +1758,13 @@ class WeightUpdateReceiver:
             tensors=dict(binding.tensors),
             tp_world_size=self._tp_world_size,
             tp_total_bytes=self._tp_total_bytes,
+        )
+        self._maybe_publish_tp_binding(
+            binding=binding,
+            version=version,
+            rank=rank,
+            phase="swap",
+            ctx=ctx,
         )
         return ("swap", True)
 

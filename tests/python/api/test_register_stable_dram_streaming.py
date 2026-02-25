@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,12 +17,20 @@ from tensorcast.api._register import (
     _StableDramUploader,
     make_plan_model,
 )
-from tensorcast.types import StableDramHandshake
+from tensorcast.types import ServerConfig, StableDramHandshake
 
 
 class _FakeDaemonCtl:
     def __init__(self) -> None:
         self.calls: list[dict[str, int]] = []
+        self.range_calls: list[list[tuple[int, int]]] = []
+        self.server_config = ServerConfig(
+            tx_slice_bytes=0,
+            mem_pool_size=0,
+            artifact_chunk_bytes=0,
+            local_handle_socket_path="/tmp/tensorcast-test-local-handle.sock",
+            cpu_shared_memory_enabled=True,
+        )
 
     def feed_register_artifact_view_spans(
         self,
@@ -41,6 +52,22 @@ class _FakeDaemonCtl:
                 }
             )
         return True
+
+    def feed_register_artifact_stable_dram_write_ranges(
+        self,
+        registration_id: str,
+        ranges: Any,
+        *,
+        timeout_s: float | None = None,
+    ) -> bool:
+        del registration_id, timeout_s
+        self.range_calls.append(
+            [(int(offset), int(length)) for offset, length in ranges]
+        )
+        return True
+
+    def get_server_config(self) -> ServerConfig:
+        return self.server_config
 
 
 @dataclass
@@ -70,7 +97,10 @@ def test_stable_dram_uploader_streams_cpu_chunks_when_no_staging_handle() -> Non
     # Source index offsets are not canonical upload offsets; force non-canonical
     # values to ensure uploader always uses layout offsets for stream base_offset.
     for name, (_, size_bytes) in tuple(ctx.tensor_source_index.items()):
-        ctx.tensor_source_index[name] = (140_000_000_000_000 + int(size_bytes), size_bytes)
+        ctx.tensor_source_index[name] = (
+            140_000_000_000_000 + int(size_bytes),
+            size_bytes,
+        )
 
     offsets_for_device = layout.offsets.get(0, {})
     expected = sorted(
@@ -79,7 +109,9 @@ def test_stable_dram_uploader_streams_cpu_chunks_when_no_staging_handle() -> Non
     )
 
     fake_ctl = _FakeDaemonCtl()
-    handle = _FakeRegisteredArtifact(registration_id="reg-stable-stream", client=fake_ctl)
+    handle = _FakeRegisteredArtifact(
+        registration_id="reg-stable-stream", client=fake_ctl
+    )
     uploader = _StableDramUploader()
     handshake = StableDramHandshake(staging_cuda_ipc_handle=b"")
 
@@ -95,7 +127,75 @@ def test_stable_dram_uploader_streams_cpu_chunks_when_no_staging_handle() -> Non
     assert result is artifact
     got = sorted((call["base_offset"], call["nbytes"]) for call in fake_ctl.calls)
     assert got == expected
-    assert all(call["registration_id"] == "reg-stable-stream" for call in fake_ctl.calls)
+    assert all(
+        call["registration_id"] == "reg-stable-stream" for call in fake_ctl.calls
+    )
+
+
+def test_stable_dram_uploader_uses_cpu_memfd_publish_when_handshake_has_memfd(
+    monkeypatch: Any,
+) -> None:
+    artifact = {
+        "a": torch.arange(8, dtype=torch.float32),
+        "b": torch.arange(6, dtype=torch.float16).reshape(2, 3),
+    }
+    ctx, layout, _ = _prepare_build(artifact, device_id=0)
+    offsets_for_device = layout.offsets.get(0, {})
+    expected_ranges = sorted(
+        (int(offsets_for_device[name]), int(ctx.tensor_source_index[name][1]))
+        for name in artifact
+    )
+
+    fd_path: str | None = None
+    if hasattr(os, "memfd_create"):
+        fd = os.memfd_create("tc_stable_dram_upload_test")
+    else:  # pragma: no cover - Linux has memfd_create; fallback for portability.
+        fd, fd_path = tempfile.mkstemp(prefix="tc_stable_dram_upload_")
+    try:
+        os.ftruncate(fd, int(layout.total_size) + 4096)
+        monkeypatch.setattr(
+            "tensorcast.api._register._request_cpu_memfd_fd",
+            lambda *, local_handle_socket_path, lease_token: os.dup(fd),
+        )
+
+        fake_ctl = _FakeDaemonCtl()
+        handle = _FakeRegisteredArtifact(
+            registration_id="reg-stable-memfd", client=fake_ctl
+        )
+        uploader = _StableDramUploader()
+        handshake = StableDramHandshake(
+            staging_cuda_ipc_handle=b"",
+            publish_cpu_memfd_size_bytes=int(layout.total_size) + 4096,
+            publish_cpu_memfd_offset_bytes=0,
+            publish_cpu_memfd_lease_token=b"lease-token",
+        )
+
+        result = uploader.upload(
+            artifact=artifact,
+            ctx=ctx,
+            layout=layout,
+            handle=handle,
+            handshake=handshake,
+            cancel_event=None,
+        )
+
+        assert result is artifact
+        assert fake_ctl.range_calls
+        actual_ranges = sorted(fake_ctl.range_calls[0])
+        assert actual_ranges == expected_ranges
+
+        for name, (_base_offset, expected_bytes) in ctx.tensor_source_index.items():
+            local = artifact[name].detach().cpu().contiguous()
+            expected_payload = bytes(memoryview(local.view(torch.uint8).numpy()))
+            assert len(expected_payload) == int(expected_bytes)
+            mapped_offset = int(offsets_for_device[name])
+            actual_payload = os.pread(fd, int(expected_bytes), mapped_offset)
+            assert actual_payload == expected_payload
+    finally:
+        os.close(fd)
+        if fd_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(fd_path)
 
 
 def test_stable_dram_uploader_uses_1mb_chunk_with_concurrent_workers(
@@ -111,7 +211,9 @@ def test_stable_dram_uploader_uses_1mb_chunk_with_concurrent_workers(
     ctx, layout, _ = _prepare_build(artifact, device_id=0)
 
     fake_ctl = _FakeDaemonCtl()
-    handle = _FakeRegisteredArtifact(registration_id="reg-stable-stream", client=fake_ctl)
+    handle = _FakeRegisteredArtifact(
+        registration_id="reg-stable-stream", client=fake_ctl
+    )
     uploader = _StableDramUploader()
     handshake = StableDramHandshake(staging_cuda_ipc_handle=b"")
 
@@ -131,6 +233,12 @@ def test_stable_dram_uploader_uses_1mb_chunk_with_concurrent_workers(
 
 def test_stable_dram_upload_workers_auto_tune_without_env(monkeypatch: Any) -> None:
     monkeypatch.delenv("TENSORCAST_FEED_VIEW_UPLOAD_WORKERS", raising=False)
-    assert _stable_dram_feed_upload_workers(total_bytes=1 * 1024**3, tensor_count=6) == 1
-    assert _stable_dram_feed_upload_workers(total_bytes=8 * 1024**3, tensor_count=6) == 4
-    assert _stable_dram_feed_upload_workers(total_bytes=40 * 1024**3, tensor_count=6) == 8
+    assert (
+        _stable_dram_feed_upload_workers(total_bytes=1 * 1024**3, tensor_count=6) == 1
+    )
+    assert (
+        _stable_dram_feed_upload_workers(total_bytes=8 * 1024**3, tensor_count=6) == 4
+    )
+    assert (
+        _stable_dram_feed_upload_workers(total_bytes=40 * 1024**3, tensor_count=6) == 8
+    )

@@ -34,6 +34,7 @@ using tensorcast::store::loading::ReplicaTarget;
 namespace {
 
 constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
+constexpr uint32_t kViewTransportProbeTimeoutMs = 1000;
 constexpr int kMaxReselectionAttemptsWithoutBudget = 64;
 constexpr std::chrono::milliseconds kMinReselectionBudget{1};
 constexpr std::chrono::milliseconds kMinReselectionBackoff{50};
@@ -200,6 +201,13 @@ uint32_t effective_transport_wait_timeout_ms(
   return std::max<uint32_t>(1, clamp_timeout_to_u32_ms(timeout));
 }
 
+uint32_t view_transport_probe_timeout_ms(uint32_t transport_wait_timeout_ms) {
+  if (transport_wait_timeout_ms == 0) {
+    return 0;
+  }
+  return std::min(transport_wait_timeout_ms, kViewTransportProbeTimeoutMs);
+}
+
 bool can_retry_source_selection(
     const absl::Status& status,
     int reselection_attempt,
@@ -346,6 +354,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     if (wait_timeout_ms == 0) {
       return absl::DeadlineExceededError(absl::StrCat("transport wait budget exhausted for artifact_id=", artifact_id));
     }
+    const uint32_t view_probe_timeout_ms = view_transport_probe_timeout_ms(wait_timeout_ms);
     used_canonical_transport_fallback = false;
     view_transport_status = absl::OkStatus();
     if (view_id.has_value()) {
@@ -356,12 +365,14 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           local_identity_.node_address,
           local_identity_.p2p_port,
           target_device,
-          wait_timeout_ms);
+          view_probe_timeout_ms);
       if (!view_transport_or.ok() &&
-          (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()))) {
+          (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
+           absl::IsDeadlineExceeded(view_transport_or.status()))) {
         view_transport_status = view_transport_or.status();
         LOG(INFO) << "request_view_transport unavailable for artifact_id=" << artifact_id << " view_id=" << *view_id
-                  << "; retrying canonical transport route";
+                  << " within probe_timeout_ms=" << view_probe_timeout_ms
+                  << "; retrying canonical transport route with wait_timeout_ms=" << wait_timeout_ms;
         auto canonical_transport_or = gs_client_->request_replica_transport(
             artifact_id,
             local_identity_.node_id,

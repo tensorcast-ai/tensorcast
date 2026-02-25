@@ -155,6 +155,7 @@ class StoreEngine {
 
   using ArtifactRegistration = runtime::metadata::ArtifactRegistration;
   using RegistrationBeginResult = runtime::metadata::RegistrationBeginResult;
+  using RegistrationCpuMemfdInfo = runtime::metadata::RegistrationCpuMemfdInfo;
 
   /**
    * @brief Begin registering an in-memory tensor dict replica.
@@ -167,6 +168,7 @@ class StoreEngine {
   // This is intended for daemon-internal copy paths; external clients must use
   // the CUDA IPC handle returned by begin_register_artifact().
   absl::StatusOr<uint64_t> get_registration_gpu_ptr(std::string_view registration_id) const;
+  absl::StatusOr<RegistrationCpuMemfdInfo> get_registration_cpu_memfd_info(std::string_view registration_id) const;
 
   // CPU registration path removed
 
@@ -188,6 +190,7 @@ class StoreEngine {
       std::string_view registration_id,
       uint64_t offset,
       absl::Span<const std::byte> data);
+  absl::Status ingest_registration_written_range(std::string_view registration_id, uint64_t offset, uint64_t length);
 
   absl::StatusOr<uint64_t> get_view_registration_ingested_bytes(std::string_view registration_id);
 
