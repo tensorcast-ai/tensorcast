@@ -741,6 +741,11 @@ absl::StatusOr<uint64_t> StoreEngine::get_registration_gpu_ptr(std::string_view 
   return metadata_gateway_->get_registration_gpu_ptr(registration_id);
 }
 
+absl::StatusOr<StoreEngine::RegistrationCpuMemfdInfo> StoreEngine::get_registration_cpu_memfd_info(
+    std::string_view registration_id) const {
+  return metadata_gateway_->get_registration_cpu_memfd_info(registration_id);
+}
+
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(
     std::string_view registration_id) {
   return metadata_gateway_->commit_registration(registration_id);
@@ -758,6 +763,13 @@ absl::Status StoreEngine::ingest_registration_chunk(
     uint64_t offset,
     absl::Span<const std::byte> data) {
   return metadata_gateway_->ingest_registration_chunk(registration_id, offset, data);
+}
+
+absl::Status StoreEngine::ingest_registration_written_range(
+    std::string_view registration_id,
+    uint64_t offset,
+    uint64_t length) {
+  return metadata_gateway_->ingest_registration_written_range(registration_id, offset, length);
 }
 
 absl::StatusOr<uint64_t> StoreEngine::get_view_registration_ingested_bytes(std::string_view registration_id) {

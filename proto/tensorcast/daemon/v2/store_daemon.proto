@@ -792,6 +792,8 @@ message LeaseHandshake {}
 
 message StableDramHandshake {
   bytes staging_cuda_ipc_handle = 1;
+  CpuMemfdHandle publish_cpu_memfd = 2;
+  bytes publish_cpu_memfd_lease_token = 3;
 }
 
 // Stream variants must not reuse unary messages per lint
@@ -800,6 +802,7 @@ message FeedRegisterArtifactStreamRequest {
   oneof feed {
     LeaseSegments lease_segments = 11;
     ViewUploadChunk view_chunk = 12;
+    StableDramWriteProgress stable_dram_write_progress = 13;
   }
   // Optional deduplicated storage table and tensor alias metadata. Clients send
   // these fields when using the unified registration flow; legacy clients omit them.
@@ -812,6 +815,16 @@ message ViewUploadChunk {
   uint64 canonical_offset = 1;
   uint64 view_offset = 2;
   bytes data = 3;
+}
+
+message StableDramWriteProgress {
+  repeated StableDramWrittenRange ranges = 1;
+  bool upload_complete = 2;
+}
+
+message StableDramWrittenRange {
+  uint64 canonical_offset = 1;
+  uint64 length = 2;
 }
 
 message LeaseSegments {

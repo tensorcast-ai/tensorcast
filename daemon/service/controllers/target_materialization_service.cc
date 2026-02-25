@@ -510,6 +510,11 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
+  // bind/swap target materialization should become reusable sources so
+  // subsequent peers can diffuse fan-out instead of contending on the
+  // original publisher. This is still policy-gated by daemon promotion
+  // controls and GS routing limits.
+  hints.export_policy = store::loading::ExportPolicy::kForce;
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
@@ -806,6 +811,11 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
+  // bind/swap target materialization should become reusable sources so
+  // subsequent peers can diffuse fan-out instead of contending on the
+  // original publisher. This is still policy-gated by daemon promotion
+  // controls and GS routing limits.
+  hints.export_policy = store::loading::ExportPolicy::kForce;
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }

@@ -145,8 +145,15 @@ grpc::Status TargetPublishService::publish_target_replica(
     }
   }
 
-  if (!scope.selection().tensor_names().empty() || !scope.selection().view_subset_hash().empty()) {
-    return {StatusCode::FAILED_PRECONDITION, "selection is not publishable (packed or subset)"};
+  const bool has_subset_selection =
+      !scope.selection().tensor_names().empty() || !scope.selection().view_subset_hash().empty();
+  const bool view_scoped_byte_space =
+      normalized_scope.kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW && !normalized_scope.id().empty();
+  if (has_subset_selection && !view_scoped_byte_space) {
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        "selection is not publishable (packed or subset requires view byte-space)",
+    };
   }
   if (scope.selection().artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id missing from target_write_token"};

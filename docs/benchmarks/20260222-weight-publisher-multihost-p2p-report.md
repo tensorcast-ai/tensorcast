@@ -1100,3 +1100,337 @@
    - publish：`put_s=41.302s`（`publish_latency_s=41.305s`，`stream_seconds=38.338s`）
    - receiver `tensor_dict(cpu)` 成功：`materialize_latency_s=4.131s`，payload 校验通过
    - daemon 告警计数：`cpu_target but engine handle missing cpu_memfd_region = 0`
+
+### 9.19 0082 CPU Shared Memory Direct Publish 验证（2026-02-25）
+
+目标：
+
+1. 验证 0082 新路径在真实 worker 上的正确性与性能收益。
+2. 口径固定为同机、同参数，仅切换 daemon `engine.cpu_shared_memory.enabled`：
+   - `false`：旧 `cpu_stream` payload 路径
+   - `true`：新 `cpu_memfd_publish` 直写路径
+
+环境与参数：
+
+1. worker：
+   - `ws-7681b3683947089e-worker-djjw2`（4GB/40GB A/B）
+   - `ws-7681b3683947089e-worker-m7fmp`（320GB 修复后复跑）
+2. 本地 GS + 本地 daemon（显式 session 生命周期管理）
+3. 公共参数：
+   - `payload_mode=tp_ranked`
+   - `tp_world_size=8`
+   - `keep_last=1`
+   - `publish_device=cpu`
+   - `TENSORCAST_FEED_VIEW_UPLOAD_WORKERS=4`
+   - `TENSORCAST_FEED_VIEW_CHUNK_BYTES=4MB`
+4. 结果根目录：
+   - `/data/tc_cross_20260225/publish_only_0082`
+
+#### 9.19.1 publish-only A/B（4GB + 40GB）
+
+case（r2）：
+
+1. `tp8-4gb-stream-c4m-w4-r2`
+2. `tp8-4gb-memfd-c4m-w4-r2`
+3. `tp8-40gb-stream-c4m-w4-r2`
+4. `tp8-40gb-memfd-c4m-w4-r2`
+
+实测结果：
+
+| Case | 上传路径 | `publish_latency_s` | `put_s` | `stream_seconds` | `put_bw` (GiB/s) |
+|---|---|---:|---:|---:|---:|
+| `tp8-4gb-stream-c4m-w4-r2` | `cpu_stream` | `4.164` | `4.162` | `3.793` | `0.961` |
+| `tp8-4gb-memfd-c4m-w4-r2` | `cpu_memfd_publish` | `2.564` | `2.562` | `0.669` | `1.561` |
+| `tp8-40gb-stream-c4m-w4-r2` | `cpu_stream` | `41.975` | `41.972` | `39.170` | `0.953` |
+| `tp8-40gb-memfd-c4m-w4-r2` | `cpu_memfd_publish` | `25.560` | `25.558` | `7.783` | `1.565` |
+
+对比结论（同参数）：
+
+1. 4GB：
+   - `put_s`：`4.162s -> 2.562s`（降低约 `38.4%`）
+2. 40GB：
+   - `put_s`：`41.972s -> 25.558s`（降低约 `39.1%`）
+   - `publish_latency_s`：`41.975s -> 25.560s`（降低约 `39.1%`）
+3. 日志显示路径切换符合预期：
+   - baseline：`stable_dram upload path=cpu_stream ...`
+   - 0082：`stable_dram upload path=cpu_memfd_publish ...`
+
+#### 9.19.2 正确性验证（single-host）
+
+case：
+
+1. `tp8-4gb-singlehost-memfd-correctness-r1`
+2. summary：
+   - `/data/tc_cross_20260225/publish_only_0082/tp8-4gb-singlehost-memfd-correctness-r1/single_host_summary.json`
+
+关键结果：
+
+1. 上传路径确认：
+   - `stable_dram upload path=cpu_memfd_publish ... stream_seconds=0.678`
+2. receiver 结果：
+   - `apply_mode=tensor_dict`
+   - `apply_operation=materialize`
+   - `materialize_latency_s=0.082`
+3. publish 结果：
+   - `publish_latency_s=2.540`
+   - `put_s=2.538`
+4. 修复后复验（r2）：
+   - case：`tp8-4gb-singlehost-memfd-correctness-r2-1771972682`
+   - summary：`/data/tc_cross_20260225/publish_only_0082/tp8-4gb-singlehost-memfd-correctness-r2-1771972682/single_host_summary.json`
+   - `publish_latency_s=1.060`，`materialize_latency_s=0.035`
+
+#### 9.19.3 320GB 同参数复跑（修复后）
+
+复跑背景：
+
+1. 320GB memfd 首轮失败样例：
+   - `/data/tc_cross_20260225/publish_only_0082/tp8-320gb-memfd-c4m-w4-r3`
+   - 错误：`CommitRegisteredArtifact failed: Insufficient stable bytes: requested=343597383680 used=343597383680 total=343597383680`
+2. 根因：
+   - publish 阶段的临时 handle lease 已占用 stable budget；
+   - commit 阶段再次做 stable cache admit，发生同一 payload 的双计费冲突。
+3. 修复：
+   - 在 `registration_controller` 的 commit 流程中，先释放 publish lease 再 commit；
+   - 增加 `stable_cache_admitted` 返回信号，避免重复走本地 stable tier admission。
+
+修复后复跑：
+
+1. case：
+   - `tp8-320gb-memfd-c4m-w4-r4-fix-1771972466`
+2. 结果目录：
+   - `/data/tc_cross_20260225/publish_only_0082/tp8-320gb-memfd-c4m-w4-r4-fix-1771972466`
+3. 关键日志：
+   - `stable_dram upload path=cpu_memfd_publish ... stream_seconds=77.234`
+   - 未出现 `RESOURCE_EXHAUSTED` / `Insufficient stable bytes`
+
+对比（同参数，publish-only，TP8/320GB）：
+
+| Case | 上传路径 | `publish_latency_s` | `put_s` | `stream_seconds` | `put_bw` (GiB/s) |
+|---|---|---:|---:|---:|---:|
+| `tp8-320gb-stream-c4m-w4-r1` | `cpu_stream` | `333.275` | `333.272` | `311.533` | `0.960` |
+| `tp8-320gb-memfd-c4m-w4-r4-fix` | `cpu_memfd_publish` | `77.685` | `77.681` | `77.234` | `4.119` |
+
+量化收益：
+
+1. `put_s`：`333.272s -> 77.681s`（降低约 `76.7%`）
+2. `put_bw`：`0.960 -> 4.119 GiB/s`（约 `4.29x`）
+3. `stream_seconds`：`311.533s -> 77.234s`（降低约 `75.2%`）
+
+结论：
+
+1. 0082 的 CPU shared-memory direct publish 路径在当前验证域内正确性通过。
+2. 相比 stream payload 路径，publish 性能有稳定、显著提升（4GB 与 40GB 一致）。
+3. 320GB 同参数复跑已完成且修复生效；后续重点转为“与理论 copy-bound 的残余差距”分析与优化。
+
+#### 9.19.4 回到主报告口径的跨机 40GB 复测（2026-02-25）
+
+目标：
+
+1. 按 `docs/benchmarks/20260222-weight-publisher-multihost-p2p-report.md` 的 runner 口径验证 0082 在跨机链路上的收益与正确性。
+2. 同参数对比 stream baseline 与 memfd publish。
+
+拓扑与参数（两组一致）：
+
+1. GS（本地控制机）：`100.97.246.95:50051`
+2. publisher：`ws-7681b3683947089e-worker-wx4zv`（1 GPU）
+3. receiver：`ws-7681b3683947089e-worker-wl6dz`（8 GPU）
+4. 关键参数：
+   - `payload_mode=tp_ranked`
+   - `tp_world_size=8`
+   - `tp_total_bytes=42949672960`（40GiB）
+   - `num_versions=2`
+   - `keep_last=1`
+   - `receiver_apply_mode=tp_bind_into_swap`
+   - `publish_interval_s=60`
+   - `poll_interval_s=1.5`
+   - `max_concurrency=1`
+5. 产物：
+   - stream：
+     `/tmp/tc_cross_20260225/results_weight_publisher_mainline_tp8_40gb/tp8-40gb-r1-v2-stream-hb60-p1p5-mc1-k1-r4-1771975029-1771975030/tp8-40gb-r1-v2-stream-hb60-p1p5-mc1-k1-r4-1771975029.json`
+   - memfd：
+     `/tmp/tc_cross_20260225/results_weight_publisher_mainline_tp8_40gb/tp8-40gb-r1-v2-memfd-hb60-p1p5-mc1-k1-r4-1771974795-1771974795/tp8-40gb-r1-v2-memfd-hb60-p1p5-mc1-k1-r4-1771974795.json`
+
+对比结果（同口径）：
+
+| 指标 | stream（publisher `cpu_shared_memory=false`） | memfd（`cpu_shared_memory=true`） | 变化 |
+|---|---:|---:|---:|
+| publish latency mean | `46.428s` | `13.258s` | `-71.4%` |
+| publish `put_s` mean | `44.681s` | `10.788s` | `-75.9%` |
+| publish `put_bw`（40GiB/put_mean） | `0.895 GiB/s` | `3.708 GiB/s` | `4.14x` |
+| `v2` 8-rank `swap` 总耗时 | `6139.9ms` | `8056.7ms` | `+31.2%` |
+| receiver 版本完成 | `v1/v2` 完成 | `v1/v2` 完成 | 一致 |
+| pointer stable | `true` | `true` | 一致 |
+
+结论：
+
+1. 0082 的核心收益在 publish 路径，跨机同口径下仍显著（`put_s` 约 `-75.9%`，带宽约 `4.14x`）。
+2. 正确性通过：`v1 bind_into` + `v2 swap` 均成功，receiver 无 skip，pointer stable。
+3. 两组 runner 顶层 `passed=false` 均来自 `cluster_probe` 即时窗口（旧版在探针瞬时仍可 materialize）；`global_store_probe` 的保留窗口检查均通过（`old_versions_released=true`、窗口约束通过）。
+4. 执行过程中的问题已收敛：
+   - 首次尝试用 1-GPU receiver 跑 `tp_world_size=8` 会触发 `invalid device ordinal`，已改为 8-GPU receiver；
+   - stream baseline 在未限制 feed view 参数时曾出现 `FeedRegisterArtifactStream ... Transport closed`，本轮固定 `TENSORCAST_FEED_VIEW_UPLOAD_WORKERS=4` 与 `TENSORCAST_FEED_VIEW_CHUNK_BYTES=4MB` 后稳定完成。
+
+### 9.20 TP4 40GB 三核心点复核与扩散副本量化（2026-02-25）
+
+本节补充你关注的三个核心问题，并量化“扩散 source replica”带来的收益。
+
+实验产物：
+
+1. 修复前（扩散未稳定命中）：
+   - `/data/tc_cross_20260226/results_weight_publisher_tp40_mainline/tp4-40gb-r2-v2-diffuse-r4-1772008102/tp4-40gb-r2-v2-diffuse-r4.json`
+2. 修复后（扩散稳定命中）：
+   - `/data/tc_cross_20260226/results_weight_publisher_tp40_mainline/tp4-40gb-r2-v2-diffuse-r5-1772009900/tp4-40gb-r2-v2-diffuse-r5.json`
+3. GS 日志：
+   - `/home/luoyuchu/.tensorcast/hosts/dev-yuchu-f4e87681d632408599afcebe24c1da20/global_sessions/gs-tp40-restart-1771995490/logs/global_store.out`
+
+#### 9.20.1 三核心点当前结论
+
+1. `v2 publish -> receiver key 可见/传输启动`：已达到“近实时”  
+   - 通过 `publish_to_apply - apply_latency` 反推，`r5` 的两侧 receiver 间隔约 `-0.61s ~ -0.20s`；
+   - 该负值来自跨机 `time.time()` 时钟偏差，按绝对值看均在 `<1s`，可视为 publish 完成后几乎立即进入传输。
+2. 慢 rank `swap` 尾延迟：已显著收敛  
+   - `v2` 单 rank 最慢从 `49,852.3ms` 降到 `13,295.4ms`（`-73.3%`）。
+   - `v2` 8-rank 总耗时从 `106,824.8ms` 降到 `42,930.0ms`（`-59.8%`）。
+3. view source 扩散稳定性：已验证生效  
+   - `v2` 的实际 source replica 数从 `1` 提升到 `3`（`+200%`）。
+   - 修复后 `wait_timeout_ms` 从历史的 `2e5~4e5ms` 级降为 `1000ms`（短探测后快速回退 canonical）。
+
+#### 9.20.2 扩散 replica 量化（同参数 r4 vs r5）
+
+| 指标 | `r4`（修复前） | `r5`（修复后） | 变化 |
+|---|---:|---:|---:|
+| publish latency mean | `16.386s` | `16.551s` | `+1.0%` |
+| apply latency mean | `49.840s` | `33.436s` | `-32.9%` |
+| publish->apply p95 | `74.706s` | `45.979s` | `-38.5%` |
+| `v2 swap` 8-rank 总耗时 | `106,824.8ms` | `42,930.0ms` | `-59.8%` |
+| `v2 swap` 最慢单 rank | `49,852.3ms` | `13,295.4ms` | `-73.3%` |
+| `v2` unique source replicas | `1` | `3` | `+200%` |
+
+`v2 publish` 后各 receiver 的关键链路耗时（更符合本轮目标口径）：
+
+| Case | Receiver | `v2 publish -> key可见/传输启动`* | `v2 artifact传输+apply` | `v2 publish -> apply完成` |
+|---|---|---:|---:|---:|
+| `r4` | `ws-...-48knv` | `-0.341s` | `80.093s` | `79.753s` |
+| `r4` | `ws-...-zx68g` | `-0.522s` | `26.732s` | `26.210s` |
+| `r5` | `ws-...-48knv` | `-0.198s` | `23.259s` | `23.061s` |
+| `r5` | `ws-...-zx68g` | `-0.606s` | `19.672s` | `19.066s` |
+
+\* 通过 `publish_to_apply - apply_latency` 反推；负值来自跨机时钟偏差，可按“约 0s”解释。
+
+按“发布完成后集群收敛时间（max receiver）”看，`r4 -> r5` 从 `79.753s` 降至 `23.061s`（`-71.1%`）。
+
+`r5` 的 `v2` source 命中分布（按 GS `Transport requested ... replica` 计数）：
+
+1. `16974f99-529c-4ce3-bf93-09cc4d9978e3`：`6` 次
+2. `7c7d3852-f31a-4b6b-ac11-3dead92f59ea`：`1` 次
+3. `d3e9a28c-288b-419d-aa4a-ce9dbe604dcd`：`1` 次
+
+结论：
+
+1. 扩散 source 已从“语义存在但易被长等待阻塞”变成“稳定可命中并能摊薄尾延迟”。
+2. 以本轮关注口径看，`v2 publish` 后 key 可见与传输启动已是近实时（`<1s` 量级）。
+3. 当前收益主要体现在 artifact 传输与慢 rank 收敛路径；publish 本身基本不受该修复影响。
+
+### 9.21 队列主导尾延迟根因收敛与修复后复测（TP4/TP8 40GB，2026-02-25）
+
+这一轮进一步聚焦“尾延迟主要来自排队还是传输本身”，并在 GS 调度侧做根因修复。
+
+#### 9.21.1 根因（代码级）
+
+问题点落在 `tensorcast/global_store/repositories/replica_repository.py`：
+
+1. 在 `create(...)` 与 `create_or_update_atomic(...)` 中，注册副本时对 `replica_counters` 使用了 upsert 覆盖；
+2. 覆盖行为会把 `current_requests` 与 `last_assigned_at` 重写为“注册时的值”（常见为 `0` 和 `now()`）；
+3. 在 mapped source 快速扩散场景中，这会周期性“洗白”热 source 的真实负载，导致调度器错误地继续把请求打到同一 source，形成无序排队和尾延迟放大。
+
+修复策略：
+
+1. 注册副本时仅“确保计数行存在”，不再覆盖已有 `current_requests/last_assigned_at`；
+2. 新建计数行时把 `last_assigned_at` 初始化为 epoch，保证新扩散 source 在同负载 tie-break 下可优先吃到首个请求。
+
+对应回归测试：
+
+1. `tests/python/global_store/test_repositories.py::test_replica_re_registration_does_not_reset_inflight_counter`
+2. `tests/python/global_store/test_repositories.py::test_transport_prefers_new_idle_source_for_diffusion`
+
+#### 9.21.2 TP4 40GB 修复后复测（r6）
+
+实验产物：
+
+1. case：`tp4-40gb-r2-v2-diffuse-r6`
+2. 结果：
+   `/data/tc_cross_20260226/results_weight_publisher_tp40_mainline/tp4-40gb-r2-v2-diffuse-r6-1772012463/tp4-40gb-r2-v2-diffuse-r6.json`
+3. 对比基线：`r5`（同节 9.20）
+
+关键对比（`r5 -> r6`）：
+
+| 指标 | `r5` | `r6` | 变化 |
+|---|---:|---:|---:|
+| publish latency mean | `16.551s` | `12.246s` | `-26.0%` |
+| apply latency mean | `33.436s` | `12.341s` | `-63.1%` |
+| publish->apply p95 | `45.979s` | `13.256s` | `-71.2%` |
+| `v2` 集群收敛（max receiver publish->apply） | `23.061s` | `10.839s` | `-53.0%` |
+| `v2` 最慢 receiver `artifact传输+apply` | `23.259s` | `11.902s` | `-48.8%` |
+| `v2` 最慢单 rank swap | `13,295.4ms` | `5,061.3ms` | `-61.9%` |
+
+`v2 publish` 后 receiver 关键链路（r6）：
+
+| Receiver | `v2 publish -> key可见/传输启动`* | `v2 artifact传输+apply` | `v2 publish -> apply完成` |
+|---|---:|---:|---:|
+| `ws-...-8gr7q` | `-0.871s` | `10.336s` | `9.465s` |
+| `ws-...-vfnl9` | `-1.062s` | `11.902s` | `10.839s` |
+
+\* 通过 `publish_to_apply - apply_latency` 反推；负值来自跨机时钟偏差，可按“约 0s”理解。
+
+source 命中（`v2`）：
+
+1. `e2734928-...`：`7` 次
+2. `861b85c4-...`：`1` 次
+
+#### 9.21.3 TP8 40GB 复测（r6，同修复代码）
+
+实验产物：
+
+1. case：`tp8-40gb-r2-v2-diffuse-r6`
+2. 结果：
+   `/data/tc_cross_20260226/results_weight_publisher_tp40_mainline/tp8-40gb-r2-v2-diffuse-r6-1772012928/tp8-40gb-r2-v2-diffuse-r6.json`
+
+整体指标：
+
+| 指标 | 数值 |
+|---|---:|
+| publish latency mean | `12.810s` |
+| apply latency mean | `12.789s` |
+| publish->apply p95 | `14.517s` |
+
+`v2 publish` 后 receiver 关键链路：
+
+| Receiver | `v2 publish -> key可见/传输启动`* | `v2 artifact传输+apply` | `v2 publish -> apply完成` |
+|---|---:|---:|---:|
+| `ws-...-8gr7q` | `-0.930s` | `9.966s` | `9.037s` |
+| `ws-...-vfnl9` | `-1.524s` | `11.739s` | `10.215s` |
+
+\* 同样按 `publish_to_apply - apply_latency` 反推，负值来自跨机时钟偏差。
+
+`v2` source 命中分布（16 次请求）：
+
+1. `ca3de91a-...`：`12`
+2. `f48f7b91-...`：`1`
+3. `b004fc7c-...`：`1`
+4. `68a49d57-...`：`1`
+5. `528bb503-...`：`1`
+
+#### 9.21.4 队列 vs 传输：本轮判断
+
+结论：尾延迟仍以“队列等待”为主，不是单次传输吞吐瓶颈。
+
+证据：
+
+1. GS 日志显示 `max_concurrency=1` 下 canonical source 在 `v2` 内被连续命中（TP4 `7/8`、TP8 `12/16`），形成串行服务链；
+2. 单次 rank swap 多数在 `0.5s~2.0s`，但慢 receiver 的总耗时接近多个 rank 串行叠加；
+3. TP8 中尽管已经注册出 `17` 个 source replica，真正被命中的只有 `5` 个，说明“可注册 source”到“可被调度 source”之间仍有显著门槛（view/可导出状态/时序窗口）。
+
+当前状态：
+
+1. 修复后延迟已显著收敛（TP4/TP8 都在 `~10-11s` 级完成 `v2` 集群收敛）；
+2. 但 canonical source 仍承担多数请求，说明后续仍需继续优化“多 source 的可用性转化与调度利用率”。

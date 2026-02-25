@@ -83,6 +83,13 @@ struct RegistrationBeginResult {
   uint64_t size_bytes{0};
 };
 
+struct RegistrationCpuMemfdInfo {
+  loading::ReplicaKey replica_key;
+  int fd{-1};
+  uint64_t size_bytes{0};
+  uint64_t offset_bytes{0};
+};
+
 struct RegistrationCommitResult {
   std::string registration_id;
   std::string artifact_id;
@@ -90,6 +97,7 @@ struct RegistrationCommitResult {
   DeviceKey device;
   uint64_t size_bytes{0};
   bool existed{false};
+  bool stable_cache_admitted{false};
   std::string index_multihash;
   std::string data_multihash;
   std::string schema_version;

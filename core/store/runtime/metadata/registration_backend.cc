@@ -476,6 +476,7 @@ absl::StatusOr<std::vector<CanonicalToViewSpan>> canonical_spans_for_tensor(
 
 struct RegistrationBackend::PendingRegistrationContext {
   enum class Plan : uint8_t { kCoalesced = 0, kStableDram = 1 };
+  enum class StableCpuIngestMode : uint8_t { kUnset = 0, kStreamMemcpy = 1, kRangeAckOnly = 2 };
 
   mutable std::mutex stream_ingest_mu;
   std::string registration_id;
@@ -503,6 +504,7 @@ struct RegistrationBackend::PendingRegistrationContext {
   uint64_t stream_inflight_chunks{0};
   uint64_t stream_memcpy_nanos{0};
   std::map<uint64_t, uint64_t> stream_ingested_ranges;
+  StableCpuIngestMode stable_cpu_ingest_mode{StableCpuIngestMode::kUnset};
   std::optional<components::StableDramCachePolicy> stable_cache_policy;
   std::chrono::steady_clock::time_point expiry_time;
   std::chrono::steady_clock::time_point begin_time;
@@ -816,6 +818,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   entry->stream_chunk_count = 0;
   entry->stream_inflight_chunks = 0;
   entry->stream_memcpy_nanos = 0;
+  entry->stable_cpu_ingest_mode = PendingRegistrationContext::StableCpuIngestMode::kUnset;
   entry->stable_cache_policy = reg.stable_cache_policy;
   entry->plan =
       stable_dram ? PendingRegistrationContext::Plan::kStableDram : PendingRegistrationContext::Plan::kCoalesced;
@@ -979,6 +982,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       size_t stream_range_count = 0;
       uint64_t stream_prefix_bytes = 0;
       bool stream_cover_full_span = false;
+      PendingRegistrationContext::StableCpuIngestMode stream_mode =
+          PendingRegistrationContext::StableCpuIngestMode::kUnset;
       {
         std::lock_guard<std::mutex> lock(entry->stream_ingest_mu);
         stream_ingested_bytes = entry->stream_ingested_bytes;
@@ -989,14 +994,14 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         stream_range_count = entry->stream_ingested_ranges.size();
         stream_prefix_bytes = ingested_prefix_bytes(entry->stream_ingested_ranges);
         stream_cover_full_span = ingested_ranges_cover_full_span(entry->stream_ingested_ranges, entry->size_bytes);
+        stream_mode = entry->stable_cpu_ingest_mode;
       }
-      if (stream_ingested_bytes != entry->size_bytes || stream_copied_bytes != entry->size_bytes ||
-          stream_inflight_chunks != 0 || !stream_cover_full_span) {
+      if (stream_mode == PendingRegistrationContext::StableCpuIngestMode::kUnset) {
         return absl::FailedPreconditionError(
             absl::StrCat(
-                "stable_dram stream ingestion incomplete: expected=",
+                "stable_dram ingestion missing: expected=",
                 entry->size_bytes,
-                " got=",
+                " acked=",
                 stream_ingested_bytes,
                 " copied=",
                 stream_copied_bytes,
@@ -1007,12 +1012,49 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
                 " ranges=",
                 stream_range_count));
       }
-      const double memcpy_seconds = static_cast<double>(stream_memcpy_nanos) / 1e9;
-      const double memcpy_gibps = memcpy_seconds > 0.0
-          ? (static_cast<double>(entry->size_bytes) / static_cast<double>(1ULL << 30)) / memcpy_seconds
-          : 0.0;
-      LOG(INFO) << "Stable DRAM commit path=cpu_stream bytes=" << entry->size_bytes << " chunks=" << stream_chunk_count
-                << " memcpy_s=" << memcpy_seconds << " memcpy_gibps=" << memcpy_gibps;
+      if (stream_mode == PendingRegistrationContext::StableCpuIngestMode::kStreamMemcpy) {
+        if (stream_ingested_bytes != entry->size_bytes || stream_copied_bytes != entry->size_bytes ||
+            stream_inflight_chunks != 0 || !stream_cover_full_span) {
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "stable_dram stream ingestion incomplete: expected=",
+                  entry->size_bytes,
+                  " got=",
+                  stream_ingested_bytes,
+                  " copied=",
+                  stream_copied_bytes,
+                  " inflight=",
+                  stream_inflight_chunks,
+                  " prefix=",
+                  stream_prefix_bytes,
+                  " ranges=",
+                  stream_range_count));
+        }
+        const double memcpy_seconds = static_cast<double>(stream_memcpy_nanos) / 1e9;
+        const double memcpy_gibps = memcpy_seconds > 0.0
+            ? (static_cast<double>(entry->size_bytes) / static_cast<double>(1ULL << 30)) / memcpy_seconds
+            : 0.0;
+        LOG(INFO) << "Stable DRAM commit path=cpu_stream bytes=" << entry->size_bytes
+                  << " chunks=" << stream_chunk_count << " memcpy_s=" << memcpy_seconds
+                  << " memcpy_gibps=" << memcpy_gibps;
+      } else {
+        if (stream_ingested_bytes != entry->size_bytes || stream_inflight_chunks != 0 || !stream_cover_full_span) {
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "stable_dram cpu_memfd publish incomplete: expected=",
+                  entry->size_bytes,
+                  " acked=",
+                  stream_ingested_bytes,
+                  " inflight=",
+                  stream_inflight_chunks,
+                  " prefix=",
+                  stream_prefix_bytes,
+                  " ranges=",
+                  stream_range_count));
+        }
+        LOG(INFO) << "Stable DRAM commit path=cpu_memfd_publish bytes=" << entry->size_bytes
+                  << " ranges=" << stream_chunk_count;
+      }
     }
   }
 
@@ -1143,6 +1185,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .view_id = view_id, .device = dev_key, .replica = 0};
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
   bool reuse_existing = false;
+  bool stable_cache_admitted = false;
   if (allow_idempotent) {
     if (auto existing_or = replica_registry_->find(mi2_key); existing_or.ok()) {
       reuse_existing = true;
@@ -1179,6 +1222,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.device = dev_key;
     result.size_bytes = entry->size_bytes;
     result.existed = true;
+    result.stable_cache_admitted = false;
     result.index_multihash = index_multihash;
     result.data_multihash = data_multihash;
     result.schema_version = entry->schema_version;
@@ -1200,6 +1244,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       release_replica_memory(entry->replica, common::memory::MemoryLocation::CPU);
       return admit_or.status();
     }
+    stable_cache_admitted = admit_or->admitted && !admit_or->skipped;
   }
 
   std::vector<std::string> remote_keys;
@@ -1595,6 +1640,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   result.device = device;
   result.size_bytes = entry->size_bytes;
   result.existed = false;
+  result.stable_cache_admitted = stable_cache_admitted;
   result.index_multihash = index_multihash;
   result.data_multihash = data_multihash;
   result.schema_version = entry->schema_version;
@@ -1754,6 +1800,11 @@ absl::Status RegistrationBackend::ingest_registration_chunk(
   const auto chunk_size = static_cast<uint64_t>(data.size());
   {
     std::lock_guard<std::mutex> lock(entry->stream_ingest_mu);
+    if (entry->stable_cpu_ingest_mode == PendingRegistrationContext::StableCpuIngestMode::kRangeAckOnly) {
+      return absl::FailedPreconditionError(
+          "registration chunk ingestion cannot mix with stable_dram written-range mode");
+    }
+    entry->stable_cpu_ingest_mode = PendingRegistrationContext::StableCpuIngestMode::kStreamMemcpy;
     auto range_status = add_non_overlapping_ingested_range(
         entry->stream_ingested_ranges, offset, chunk_size, &entry->stream_ingested_bytes);
     if (!range_status.ok()) {
@@ -1775,6 +1826,51 @@ absl::Status RegistrationBackend::ingest_registration_chunk(
     ABSL_CHECK(entry->stream_inflight_chunks > 0);
     entry->stream_inflight_chunks -= 1;
   }
+  return absl::OkStatus();
+}
+
+absl::Status RegistrationBackend::ingest_registration_written_range(
+    std::string_view registration_id,
+    uint64_t offset,
+    uint64_t length) {
+  if (length == 0) {
+    return absl::OkStatus();
+  }
+  auto entry = lookup_pending(registration_id);
+  if (!entry) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  if (entry->plan != PendingRegistrationContext::Plan::kStableDram || entry->stable_dram.stage_on_gpu) {
+    return absl::FailedPreconditionError(
+        "registration written-range ingestion requires stable_dram stage_on_gpu=false");
+  }
+  if (entry->view_state) {
+    return absl::FailedPreconditionError(
+        "registration written-range ingestion is unavailable for view-enabled registrations");
+  }
+  if (offset > entry->size_bytes || length > entry->size_bytes - offset) {
+    return absl::OutOfRangeError(
+        absl::StrCat(
+            "registration written-range out of range: offset=",
+            offset,
+            " length=",
+            length,
+            " total=",
+            entry->size_bytes));
+  }
+
+  std::lock_guard<std::mutex> lock(entry->stream_ingest_mu);
+  if (entry->stable_cpu_ingest_mode == PendingRegistrationContext::StableCpuIngestMode::kStreamMemcpy) {
+    return absl::FailedPreconditionError(
+        "registration written-range ingestion cannot mix with stable_dram cpu_stream mode");
+  }
+  entry->stable_cpu_ingest_mode = PendingRegistrationContext::StableCpuIngestMode::kRangeAckOnly;
+  auto range_status =
+      add_non_overlapping_ingested_range(entry->stream_ingested_ranges, offset, length, &entry->stream_ingested_bytes);
+  if (!range_status.ok()) {
+    return range_status;
+  }
+  entry->stream_chunk_count += 1;
   return absl::OkStatus();
 }
 
@@ -1801,6 +1897,32 @@ absl::StatusOr<uint64_t> RegistrationBackend::get_registration_gpu_ptr(std::stri
     return absl::FailedPreconditionError("registration has no GPU pointer");
   }
   return reinterpret_cast<uint64_t>(entry->gpu_ptr);
+}
+
+absl::StatusOr<RegistrationCpuMemfdInfo> RegistrationBackend::get_registration_cpu_memfd_info(
+    std::string_view registration_id) const {
+  auto entry = lookup_pending(registration_id);
+  if (!entry) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  if (entry->plan != PendingRegistrationContext::Plan::kStableDram || entry->stable_dram.stage_on_gpu) {
+    return absl::FailedPreconditionError("registration has no stable_dram cpu memory");
+  }
+  auto uma = entry->replica->get_memory_manager().memory_authority();
+  if (uma == nullptr) {
+    return absl::FailedPreconditionError("unified memory authority is unavailable");
+  }
+  auto region_or = uma->get_cpu_memfd_region(entry->pending_registry_key);
+  if (!region_or.ok()) {
+    return region_or.status();
+  }
+  const auto& region = *region_or;
+  RegistrationCpuMemfdInfo info;
+  info.replica_key = entry->pending_registry_key;
+  info.fd = region.fd;
+  info.size_bytes = region.size_bytes;
+  info.offset_bytes = region.offset_bytes;
+  return info;
 }
 
 absl::Status RegistrationBackend::abort(std::string_view registration_id) {

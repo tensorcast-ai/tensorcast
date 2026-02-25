@@ -35,6 +35,7 @@ class RegistrationManager {
     bool lease_in_place{false};
     bool stage_on_gpu{true};
     bool release_gpu_on_commit{true};
+    std::string stable_dram_publish_lease_token;
     std::string index_key_hex;
     std::string index_data;
     tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};

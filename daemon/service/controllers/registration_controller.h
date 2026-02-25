@@ -12,6 +12,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/ref_tracker.h"
@@ -33,6 +34,7 @@ class RegistrationController {
     gsl::not_null<WorkerIdentityStore*> identity;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     gsl::not_null<SessionLifecycleManager*> lifecycle;
+    HandleLeaseRegistry* handle_leases{nullptr};
     IpcRegionRegistry& regions;
     uint32_t max_concurrency{4};
   };

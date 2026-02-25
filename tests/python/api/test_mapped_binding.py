@@ -383,3 +383,60 @@ def test_mapped_binding_swap_publish_calls_publish_target_replica(
     byte_space = publish_call["byte_space"]
     assert byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
     assert byte_space.id
+
+
+@pytest.mark.requires_cuda_or_fake
+def test_mapped_binding_bind_publish_calls_publish_target_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA tensors unavailable; mapped binding requires torch CUDA")
+
+    index_bytes = _make_index_bytes()
+    client = _FakeMappedClient(index_bytes)
+    runtime = _FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+
+    import tensorcast.api._device as device_mod
+    import tensorcast.api.store as store_mod
+
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
+
+    dst_tensors = {
+        "a": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+        "b": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+    }
+    plan = [
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=0, end=4),
+            dst_name="a",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=4, end=8),
+            dst_name="b",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+    ]
+
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    binding = artifact1.bind_into(dst_tensors, mapping=plan)
+    assert not client.publish_calls
+
+    binding.publish_replica()
+    assert len(client.publish_calls) == 1
+    publish_call = client.publish_calls[0]
+    byte_space = publish_call["byte_space"]
+    assert byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+    assert byte_space.id

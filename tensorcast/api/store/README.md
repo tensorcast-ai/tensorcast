@@ -110,6 +110,9 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
 - `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
   executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
+- `binding.publish_replica(ctx=...)` publishes the current bound layout without
+  performing a swap. Use this when bind/swap should stay `publish=False` but you
+  still want routable replicas after a successful apply.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
   enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can

@@ -228,5 +228,49 @@ TEST_CASE(
   }
 }
 
+TEST_CASE(
+    "MaterializeOrchestrator probes view transport briefly before canonical fallback",
+    "[store][materialize][reselection][view_fallback]") {
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->connected = true;
+  gs_client->allow_view_transport = false;
+  gs_client->allow_replica_transport = true;
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-view-fallback", "node-remote", "10.4.4.2", 50032, common::memory::MemoryLocation::GPU, 0));
+
+  FakeMaterializationBackend backend;
+  MaterializeHints hints;
+  hints.artifact_id = "artifact-view-fallback-probe";
+  hints.allow_p2p = true;
+  hints.allow_disk = false;
+  hints.transport_wait_timeout = std::chrono::milliseconds(5000);
+  loading::VariantIdentity variant;
+  variant.canonical_artifact_id = hints.artifact_id;
+  variant.view_id = std::string("view:tp0");
+  hints.variant = std::move(variant);
+
+  components::WorkerIdentity local_identity{
+      .node_id = "node-local",
+      .node_address = "10.4.4.1",
+      .p2p_port = 50031,
+  };
+  MaterializeOrchestrator orchestrator(
+      gsl::not_null<MaterializationBackend*>{&backend},
+      gsl::not_null<components::IGlobalStoreClient*>{gs_client.get()},
+      local_identity);
+
+  auto result = orchestrator.run("artifact-view-fallback-probe", make_gpu_target(0), hints, std::nullopt);
+  REQUIRE(result.ok());
+  REQUIRE(backend.register_calls == 1);
+  REQUIRE(backend.p2p_attempts.size() == 1);
+  REQUIRE(gs_client->view_requests.size() == 1);
+  REQUIRE(gs_client->replica_requests.size() == 1);
+  REQUIRE(gs_client->view_request_wait_timeouts_ms.size() == 1);
+  REQUIRE(gs_client->replica_request_wait_timeouts_ms.size() == 1);
+  CHECK(gs_client->view_request_wait_timeouts_ms.front() > 0);
+  CHECK(gs_client->view_request_wait_timeouts_ms.front() < gs_client->replica_request_wait_timeouts_ms.front());
+  CHECK(gs_client->replica_request_wait_timeouts_ms.front() == 5000);
+}
+
 } // namespace
 } // namespace tensorcast::store::materialization::control

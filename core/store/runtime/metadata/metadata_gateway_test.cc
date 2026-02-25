@@ -703,6 +703,61 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "RegistrationBackend stable_dram stage_on_gpu=false supports cpu_memfd written-range ingestion",
+    "[registration_backend][stable_dram][cpu_memfd]") {
+  RegistrationBackendHarness harness;
+  harness.resources.cpu_shared_memory_enabled = true;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  auto memfd_or = backend.get_registration_cpu_memfd_info(begin_or->registration_id);
+  REQUIRE(memfd_or.ok());
+  CHECK(memfd_or->fd >= 0);
+  CHECK(memfd_or->size_bytes >= reg.total_size_bytes);
+
+  auto tail_status = backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/8, /*length=*/8);
+  REQUIRE(tail_status.ok());
+
+  auto head_status = backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/0, /*length=*/8);
+  REQUIRE(head_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  CHECK(commit_or->device.type == DeviceType::CPU);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram written-range ingestion rejects overlap",
+    "[registration_backend][stable_dram][cpu_memfd]") {
+  RegistrationBackendHarness harness;
+  harness.resources.cpu_shared_memory_enabled = true;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  auto first_status = backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/0, /*length=*/8);
+  REQUIRE(first_status.ok());
+
+  auto overlap_status =
+      backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/4, /*length=*/8);
+  REQUIRE_FALSE(overlap_status.ok());
+  CHECK(overlap_status.code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE(
     "RegistrationBackend stable_dram streamed ingestion propagates cpu_shared_memory_enabled to replicas",
     "[registration_backend][stable_dram][cpu_memfd]") {
   RegistrationBackendHarness harness;

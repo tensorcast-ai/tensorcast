@@ -1286,9 +1286,11 @@ sc_cc_library(
     srcs = ["service/controllers/registration_controller.cc"],
     hdrs = ["service/controllers/registration_controller.h"],
     deps = [
+        ":handle_lease_registry_lib",
         ":lip_manager_lib",
         ":local_stable_tier_service_lib",
         ":materialization_policy_utils_lib",
+        ":materialization_replica_handle_utils_lib",
         ":ref_tracker_hdr",
         ":registration_manager_lib",
         ":registration_storage_mapping_utils_lib",

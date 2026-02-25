@@ -123,6 +123,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .identity = &kernel->worker_identity_store(),
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
+      .handle_leases = kernel->handle_leases(),
       .regions = kernel->region_registry(),
   };
   auto registration_controller = std::make_unique<RegistrationController>(rdep);

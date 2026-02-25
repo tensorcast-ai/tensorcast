@@ -1719,10 +1719,22 @@ class DaemonCtl:
             elif resp.HasField("lease"):
                 handshake = LeaseHandshake()
             elif resp.HasField("stable_dram"):
+                publish_size = 0
+                publish_offset = 0
+                if resp.stable_dram.HasField("publish_cpu_memfd"):
+                    publish_size = int(resp.stable_dram.publish_cpu_memfd.size_bytes)
+                    publish_offset = int(
+                        resp.stable_dram.publish_cpu_memfd.offset_bytes
+                    )
                 handshake = StableDramHandshake(
                     staging_cuda_ipc_handle=bytes(
                         resp.stable_dram.staging_cuda_ipc_handle
-                    )
+                    ),
+                    publish_cpu_memfd_size_bytes=publish_size,
+                    publish_cpu_memfd_offset_bytes=publish_offset,
+                    publish_cpu_memfd_lease_token=bytes(
+                        resp.stable_dram.publish_cpu_memfd_lease_token
+                    ),
                 )
             else:
                 # Should not happen
@@ -2388,6 +2400,71 @@ class DaemonCtl:
                     e,
                     registration_id,
                 )
+            return False
+
+    def feed_register_artifact_stable_dram_write_ranges(
+        self,
+        registration_id: str,
+        ranges: Iterable[tuple[int, int]],
+        *,
+        timeout_s: float | None = None,
+    ) -> bool:
+        resolved_timeout = (
+            _feed_view_stream_timeout_seconds()
+            if timeout_s is None
+            else (None if float(timeout_s) == 0.0 else float(timeout_s))
+        )
+        max_ranges_per_request = 1024
+
+        def _iter():
+            req: store_daemon_pb2.FeedRegisterArtifactStreamRequest | None = None
+            ranges_in_req = 0
+            for canonical_offset, length in ranges:
+                offset_value = int(canonical_offset)
+                length_value = int(length)
+                if offset_value < 0:
+                    raise ValueError(
+                        f"stable_dram write range offset must be >= 0, got {offset_value}"
+                    )
+                if length_value < 0:
+                    raise ValueError(
+                        f"stable_dram write range length must be >= 0, got {length_value}"
+                    )
+                if length_value == 0:
+                    continue
+                if req is None:
+                    req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+                        registration_id=registration_id
+                    )
+                    ranges_in_req = 0
+                dst = req.stable_dram_write_progress.ranges.add()
+                dst.canonical_offset = offset_value
+                dst.length = length_value
+                ranges_in_req += 1
+                if ranges_in_req >= max_ranges_per_request:
+                    yield req
+                    req = None
+            if req is None:
+                req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+                    registration_id=registration_id
+                )
+            req.stable_dram_write_progress.upload_complete = True
+            yield req
+
+        try:
+            self._unary_call(
+                self.stub.FeedRegisterArtifactStream,
+                _iter(),
+                timeout=resolved_timeout,
+                retries=0,
+            )
+            return True
+        except grpc.RpcError as e:  # noqa: BLE001
+            logger.error(
+                "FeedRegisterArtifactStream(stable_dram_write_progress) failed: %s (registration_id=%s)",
+                e,
+                registration_id,
+            )
             return False
 
     def keep_alive_registered_artifact(

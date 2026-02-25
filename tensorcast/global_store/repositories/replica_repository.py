@@ -634,14 +634,13 @@ class ReplicaRepository(BaseRepository):
                 ],
             )
 
-            # Ensure corresponding counter record exists (atomic upsert)
+            # Ensure corresponding counter record exists without resetting
+            # in-flight transport counters on re-registration.
             cursor.execute(
                 """
                 INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
-                VALUES (?, ?, now())
-                ON CONFLICT (replica_id) DO UPDATE SET
-                    current_requests = EXCLUDED.current_requests,
-                    last_assigned_at = now()
+                VALUES (?, ?, TIMESTAMP '1970-01-01 00:00:00')
+                ON CONFLICT (replica_id) DO NOTHING
                 """,
                 [str(replica.replica_id), replica.current_requests],
             )
@@ -809,14 +808,13 @@ class ReplicaRepository(BaseRepository):
                 ],
             )
 
-        # Ensure corresponding counter record exists (atomic upsert)
+        # Ensure corresponding counter record exists without clobbering
+        # active request counters or assignment history.
         cursor.execute(
             """
             INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
-            VALUES (?, ?, now())
-            ON CONFLICT (replica_id) DO UPDATE SET
-                current_requests = EXCLUDED.current_requests,
-                last_assigned_at = now()
+            VALUES (?, ?, TIMESTAMP '1970-01-01 00:00:00')
+            ON CONFLICT (replica_id) DO NOTHING
             """,
             [str(replica.replica_id), replica.current_requests],
         )

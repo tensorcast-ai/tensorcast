@@ -57,6 +57,7 @@ using materialization::control::MaterializeOrchestrator;
 namespace {
 
 constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
+constexpr uint32_t kViewTransportProbeTimeoutMs = 1000;
 
 bool is_local_identity(const components::WorkerIdentity& local) {
   return !local.node_id.empty() || !local.node_address.empty();
@@ -104,6 +105,13 @@ uint32_t resolve_transport_wait_timeout_ms(
 
 uint32_t resolve_transport_wait_timeout_ms(const loading::MaterializeHints& hints) {
   return resolve_transport_wait_timeout_ms(hints.transport_wait_timeout, hints.request_budget);
+}
+
+uint32_t resolve_view_transport_probe_timeout_ms(uint32_t wait_timeout_ms) {
+  if (wait_timeout_ms == 0) {
+    return 0;
+  }
+  return std::min(wait_timeout_ms, kViewTransportProbeTimeoutMs);
 }
 
 absl::Status stale_local_route_status(std::string_view artifact_id) {
@@ -1898,6 +1906,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     bool used_canonical_transport_fallback = false;
     auto request_transport = [&]() -> absl::StatusOr<components::TransportSession> {
       const uint32_t wait_timeout_ms = resolve_transport_wait_timeout_ms(hints);
+      const uint32_t view_probe_timeout_ms = resolve_view_transport_probe_timeout_ms(wait_timeout_ms);
       used_canonical_transport_fallback = false;
       if (requested_view_id.has_value()) {
         auto view_transport_or = gs_client->request_view_transport(
@@ -1907,11 +1916,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             local_identity.node_address,
             local_identity.p2p_port,
             target_device,
-            wait_timeout_ms);
+            view_probe_timeout_ms);
         if (!view_transport_or.ok() &&
-            (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()))) {
+            (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
+             absl::IsDeadlineExceeded(view_transport_or.status()))) {
           LOG(INFO) << "request_view_transport unavailable for artifact_id=" << hints.artifact_id
-                    << " view_id=" << *requested_view_id << "; retrying canonical transport route";
+                    << " view_id=" << *requested_view_id << " within probe_timeout_ms=" << view_probe_timeout_ms
+                    << "; retrying canonical transport route with wait_timeout_ms=" << wait_timeout_ms;
           used_canonical_transport_fallback = true;
           return gs_client->request_replica_transport(
               hints.artifact_id,

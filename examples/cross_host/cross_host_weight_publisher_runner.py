@@ -10,6 +10,7 @@ import atexit
 import concurrent.futures
 import json
 import re
+import secrets
 import shlex
 import statistics
 import subprocess
@@ -588,6 +589,7 @@ def start_remote_daemon(
     heartbeat_interval: str,
     periodic_sync_interval: str,
     max_concurrency: int,
+    capability_token_secret: str,
     timeout_sec: float,
 ) -> dict[str, Any]:
     _, daemon_port = daemon_connect_address.split(":", 1)
@@ -599,6 +601,8 @@ def start_remote_daemon(
         f"--global-store-address {shlex.quote(gs_addr)}",
         f"--set daemon_id={shlex.quote(daemon_id)}",
         "--set high_availability.enabled=true",
+        "--set capability_tokens.active.version=1",
+        f"--set capability_tokens.active.secret={shlex.quote(capability_token_secret)}",
         (
             "--set high_availability.heartbeat_interval="
             f"{shlex.quote(str(heartbeat_interval).strip())}"
@@ -1571,6 +1575,7 @@ def main(argv: list[str]) -> int:
         raise ValueError("daemon-p2p-port-base must be > 0")
 
     run_tag = f"{int(time.time())}"
+    capability_token_secret = secrets.token_hex(32)
     run_id = f"{args.case_name}-{run_tag}"
     cluster_id = str(args.cluster_id).strip() or (discover_global_cluster_token() or "")
     out_dir = Path(str(args.out_dir)).resolve()
@@ -1732,6 +1737,7 @@ def main(argv: list[str]) -> int:
             heartbeat_interval=str(args.daemon_heartbeat_interval),
             periodic_sync_interval=str(args.daemon_periodic_sync_interval),
             max_concurrency=int(args.max_concurrency),
+            capability_token_secret=capability_token_secret,
             timeout_sec=120.0,
         )
 

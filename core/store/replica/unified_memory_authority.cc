@@ -1524,7 +1524,12 @@ absl::StatusOr<std::shared_ptr<void>> UnifiedMemoryAuthority::CpuArena::pin_chun
       return absl::OutOfRangeError("Chunk index out of range");
     }
     alloc.chunk_records[idx].pin_refcnt += 1;
-    if (SystemCapabilities::instance().mlock_enabled()) {
+    // memfd-backed CPU exports are shared mappings. Calling mlock on every
+    // exported chunk can force eager page-in of very large regions and explode
+    // cgroup RSS during publish begin. Stable lease + pin refcounts already
+    // provide correctness/liveness guarantees for these ranges, so skip mlock
+    // on memfd-backed regions and keep pinning logical-only.
+    if (SystemCapabilities::instance().mlock_enabled() && alloc.cpu_region.memfd < 0) {
       void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(idx) * chunk_bytes_;
       if (::mlock(addr, chunk_bytes_) == 0) {
         if (idx >= alloc.mlock_refcnt.size()) {

@@ -73,10 +73,18 @@ def _normalize_view_id(view_id: str | None) -> str:
 
 
 def _selection_publishable(
-    *, selection_names: Sequence[str], view_subset_hash: bytes | None
+    *,
+    selection_names: Sequence[str],
+    view_subset_hash: bytes | None,
+    view_id: str,
 ) -> bool:
     subset_hash = view_subset_hash or b""
-    return not selection_names and subset_hash == b""
+    # Full canonical selections are always publishable. For packed/subset
+    # selections, require a stable view_id so publication is scoped to that
+    # byte-space instead of canonical routing.
+    if not selection_names and subset_hash == b"":
+        return True
+    return bool(view_id)
 
 
 def _is_region_error(error: ArtifactError) -> bool:
@@ -278,6 +286,7 @@ class InplaceSlot:
         if not _selection_publishable(
             selection_names=self._selection_names,
             view_subset_hash=self._view_subset_hash,
+            view_id=self._view_id,
         ):
             raise ArtifactError(
                 "Slot selection is not publishable (packed or subset)",
@@ -554,6 +563,7 @@ class InplaceSlot:
                 if not _selection_publishable(
                     selection_names=region_layout.selection_names,
                     view_subset_hash=region_layout.view_subset_hash,
+                    view_id=_normalize_view_id(region_layout.view_id),
                 ):
                     raise ArtifactError(
                         "Slot selection is not publishable (packed or subset)",

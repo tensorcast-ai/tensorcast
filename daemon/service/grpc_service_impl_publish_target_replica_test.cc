@@ -79,6 +79,24 @@ tensorcast::common::v1::TargetWriteScope make_scope(
   return scope;
 }
 
+tensorcast::common::v1::TargetWriteScope make_view_subset_scope(
+    std::string write_id,
+    std::string artifact_id,
+    std::string device_uuid,
+    int owner_pid) {
+  auto scope = make_scope(
+      std::move(write_id),
+      std::move(artifact_id),
+      std::move(device_uuid),
+      owner_pid,
+      /*publishable=*/false);
+  scope.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+  scope.mutable_byte_space()->set_id("mapped:v1:rank0");
+  scope.mutable_selection()->set_view_id("mapped:v1:rank0");
+  scope.mutable_selection()->set_view_subset_hash("subset-hash");
+  return scope;
+}
+
 std::string mint_token(
     const tensorcast::common::CapabilityTokenManager& manager,
     std::string_view issuer,
@@ -155,4 +173,33 @@ TEST_CASE("PublishTargetReplica rejects packed selections", "[daemon][publish]")
 
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+TEST_CASE("PublishTargetReplica allows packed selection for view byte-space", "[daemon][publish]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness = make_harness(engine, gs);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = getpid();
+  const auto scope = make_view_subset_scope("write-3", "artifact-3", "gpu-0", owner_pid);
+  const std::string token = mint_token(*tokens, "daemon-test", scope);
+
+  auto record = make_record_from_scope(scope);
+  harness->materialization_controller().insert_target_write_for_testing(std::move(record));
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
+  tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
+  req.set_target_write_token(token);
+  req.mutable_byte_space()->CopyFrom(scope.byte_space());
+  req.set_owner_pid(owner_pid);
+
+  auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
+  REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(st.error_message() == "target_write_token has empty segments");
+  REQUIRE(resp.lease_id().empty());
+  REQUIRE(resp.replica_id().empty());
+  REQUIRE(gs->registered_replicas.empty());
 }
