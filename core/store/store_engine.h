@@ -97,8 +97,8 @@ class StoreEngine {
       const loader::ByteRangeMap& mapping,
       std::string_view canonical_index_json,
       uint64_t generation,
-      const loading::MaterializeHints& hints = {},
-      std::optional<loading::DiskSource> disk_source = std::nullopt);
+      const loading::MaterializeHints& hints,
+      std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,

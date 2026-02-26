@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Mapping
@@ -60,6 +61,17 @@ from tensorcast.api.store.views import (
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
+
+
+def _uses_fake_cuda_backend() -> bool:
+    backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
+    if backend == "fake":
+        return True
+    with contextlib.suppress(Exception):
+        from tensorcast._C import is_fake_cuda
+
+        return bool(is_fake_cuda())
+    return False
 
 
 class RegistrationPipeline:
@@ -490,7 +502,7 @@ class RegistrationPipeline:
             )
         # `put` always requires a CUDA device for staging and IPC; fail early to
         # produce a clearer error than a deeper runtime path.
-        if saw_cpu and not torch.cuda.is_available():
+        if saw_cpu and not torch.cuda.is_available() and not _uses_fake_cuda_backend():
             raise ArtifactError(
                 "put requires CUDA to be available for staging CPU tensors",
                 status_code="FAILED_PRECONDITION",

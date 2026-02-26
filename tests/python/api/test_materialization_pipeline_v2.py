@@ -341,7 +341,7 @@ def test_disk_fallback_verify_flag_passed():
         return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions.for_disk("/tmp/artifact", verify=False)
+    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
     pipeline.get(artifact_id="aid", fallback=fallback)
     runtime.close()
 
@@ -361,14 +361,14 @@ def test_disk_fallback_allows_local_replica_source():
         )
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions.for_disk("/tmp/artifact", verify=False)
+    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
     result = pipeline.get(artifact_id="aid", fallback=fallback)
     runtime.close()
 
     assert torch.equal(result["a"], torch.ones(1))
 
 
-def test_disk_path_hint_prefers_disk_without_fallback():
+def test_prefer_disk_sets_source_policy():
     runtime = _RuntimeStub()
     views = ViewOrchestrator(runtime)
     pipeline = MaterializationPipeline(runtime, views)
@@ -376,27 +376,28 @@ def test_disk_path_hint_prefers_disk_without_fallback():
 
     def fake_materialize(**kwargs):
         captured["preference"] = kwargs.get("preference")
-        captured["disk_path_hint"] = kwargs.get("disk_path_hint")
+        source_policy = kwargs.get("source_policy")
+        captured["allow_disk"] = (
+            bool(source_policy.allow_disk) if source_policy is not None else None
+        )
         captured["artifact_id"] = kwargs.get("artifact_id")
         return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
 
     pipeline.set_materialize_fn(fake_materialize)
     materialized, _ = pipeline.materialize_subset(
-        artifact_id=None,
+        artifact_id="aid",
         key=None,
         device=0,
-        fallback=None,
+        fallback=FallbackOptions(prefer="disk"),
         tensor_names=None,
-        disk_path_hint="/tmp/artifact",
     )
     runtime.close()
 
-    assert captured["disk_path_hint"] == "/tmp/artifact"
     assert (
         captured["preference"]
         == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     )
-    assert runtime.client.resolve_calls == [("/tmp/artifact", True)]
+    assert captured["allow_disk"] is True
     assert materialized.replica_uuid == "disk"
 
 

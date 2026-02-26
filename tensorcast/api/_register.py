@@ -77,6 +77,17 @@ from tensorcast.types import (
 DEFAULT_ALIGN = 1
 
 
+def _uses_fake_cuda_backend() -> bool:
+    backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
+    if backend == "fake":
+        return True
+    with contextlib.suppress(Exception):
+        from tensorcast._C import is_fake_cuda
+
+        return bool(is_fake_cuda())
+    return False
+
+
 @dataclass
 class RegistrationResult:
     """Unified result for registration APIs.
@@ -1069,6 +1080,10 @@ class _StableDramUploader:
             prepare_elapsed_s = time.monotonic() - tensor_prepare_start
             return canonical_offset, int(expected_bytes), local, prepare_elapsed_s
 
+        # Fake CUDA tests run without a real CUDA driver, so CPU artifacts must
+        # stream directly instead of staging through torch.cuda copies.
+        force_cpu_stream = ctx.input_mode == "cpu" and _uses_fake_cuda_backend()
+
         if (
             handshake.publish_cpu_memfd_size_bytes > 0
             and handshake.publish_cpu_memfd_lease_token
@@ -1205,7 +1220,7 @@ class _StableDramUploader:
             )
             return artifact
 
-        if not handshake.staging_cuda_ipc_handle:
+        if force_cpu_stream or not handshake.staging_cuda_ipc_handle:
             ctl = handle.client
             total_streamed_bytes = 0
             stream_start = time.monotonic()

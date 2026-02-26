@@ -17,6 +17,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"

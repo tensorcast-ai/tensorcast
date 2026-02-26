@@ -50,4 +50,11 @@ absl::StatusOr<bool> LipBridge::try_satisfy_from_lip(
   return true;
 }
 
+bool LipBridge::has_active_on_device(
+    absl::string_view artifact_id,
+    int device_id,
+    std::optional<absl::string_view> view_id) const {
+  return lip_.has_active_on_device(artifact_id, device_id, view_id);
+}
+
 } // namespace tensorcast::daemon

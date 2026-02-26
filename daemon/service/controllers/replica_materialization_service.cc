@@ -445,6 +445,13 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     }
     return subset_hash_status;
   }
+  const bool selection_requests_view = selection.has_view_spec() || !selection.view_id().empty();
+  const bool selection_requests_subset = !selection_names.empty() || !view_subset_hash.empty();
+  if (has_artifact && dev.type == DeviceType::GPU && !selection_requests_view && !selection_requests_subset &&
+      d_.lip.has_active_on_device(resolved_artifact_id, dev.ordinal)) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::FAILED_PRECONDITION, "lease_in_place not supported for same device_id consumers"};
+  }
 
   // View identity handling
   std::optional<ViewSpec> view_spec;
@@ -503,7 +510,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (!has_artifact) {
       return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires artifact_id for routing"};
     }
-    auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, selection.view_id());
+    auto view_meta_or = d_.engine.get_view_metadata(index_source_artifact_id, selection.view_id());
     if (!view_meta_or.ok()) {
       return to_grpc_status(view_meta_or.status());
     }

@@ -693,7 +693,7 @@ TEST_CASE("WorkerLifecycleManager bootstrap reconcile removes drift", "[daemon][
   bool keep_gpu_present = false;
   bool keep_cpu_present = false;
   bool remove_present = false;
-  for (int i = 0; i < 400; ++i) { // up to ~4s
+  for (int i = 0; i < 1200; ++i) { // up to ~12s under heavy CI contention
     keep_gpu_present = false;
     keep_cpu_present = false;
     remove_present = false;

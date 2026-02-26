@@ -167,7 +167,7 @@ TEST_CASE("Handle lease TTL expiry invalidates LocalHandle tokens", "[daemon][lo
 
   auto materialize = [&](const std::string& replica_uuid) -> std::string {
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
-    req.set_artifact_id(artifact_id);
+    req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
     req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);

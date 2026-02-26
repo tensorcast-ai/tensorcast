@@ -392,10 +392,7 @@ absl::StatusOr<LipFastPathResult> try_satisfy_lip_fast_path(
     return session_status;
   }
   if (!satisfied.ok()) {
-    if (!absl::IsFailedPrecondition(satisfied.status())) {
-      return satisfied.status();
-    }
-    return outcome;
+    return satisfied.status();
   }
   if (!*satisfied) {
     return outcome;

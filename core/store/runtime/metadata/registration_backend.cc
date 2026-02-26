@@ -1186,6 +1186,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
   bool reuse_existing = false;
   bool stable_cache_admitted = false;
+  bool key_already_exists = false;
   if (allow_idempotent) {
     if (auto existing_or = replica_registry_->find(mi2_key); existing_or.ok()) {
       reuse_existing = true;
@@ -1195,6 +1196,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     absl::Status emplace_status =
         replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry->replica});
     if (absl::IsAlreadyExists(emplace_status)) {
+      key_already_exists = true;
       if (allow_idempotent) {
         reuse_existing = true;
       } else {
@@ -1232,6 +1234,11 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     return result;
   }
 
+  // Piece/view retries may hit an existing logical key. The newly ingested
+  // replica is transient in that case, so avoid publishing fresh transport
+  // keys that would become stale once this commit scope ends.
+  const bool skip_transport_publication = key_already_exists && entry->view_state != nullptr;
+
   if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
       stable_cache_manager_) {
     components::StableDramCacheManager::AdmissionRequest admit_request;
@@ -1250,7 +1257,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
   std::optional<ExportRegistration> export_registration;
-  if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
+  if (!skip_transport_publication && entry->enable_p2p && communication_manager_ &&
+      communication_manager_->is_enabled()) {
     const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
         ? common::memory::MemoryLocation::CPU
         : common::memory::MemoryLocation::GPU;
@@ -1639,7 +1647,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   result.device_id = entry->device_id;
   result.device = device;
   result.size_bytes = entry->size_bytes;
-  result.existed = false;
+  result.existed = skip_transport_publication;
   result.stable_cache_admitted = stable_cache_admitted;
   result.index_multihash = index_multihash;
   result.data_multihash = data_multihash;
@@ -1687,7 +1695,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  if (publisher_) {
+  if (publisher_ && !skip_transport_publication) {
     RegistrationPublication publication{
         .artifact_id = entry->artifact_id,
         .device = device,

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import uuid
 import weakref
-from hashlib import sha256
 from typing import Any
 
 import tensorcast as tc
 from tensorcast.api._materialize import MaterializationPayload
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.common.selection_identity import (
-    compute_logical_layout_hash,
     compute_selection_hash,
 )
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -99,20 +97,16 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
     op = artifact.prefetch(device="cuda:0", ctx=ctx)
 
     daemon_id = store._runtime.daemon_id
-    idempotency_key_hex = sha256(ctx.idempotency_key.encode("utf-8")).hexdigest()
     selection_hash = compute_selection_hash(
         view_id="",
         view_subset_hash=None,
     ).hex()
-    logical_layout_hash = compute_logical_layout_hash(
-        index_bytes=b"{}", needs_view_index=False
-    ).hex()
     action_fingerprint = (
-        f"prefetch|daemon={daemon_id}|artifact=aid|layout={logical_layout_hash}|selection={selection_hash}"
+        f"prefetch|daemon={daemon_id}|selection={selection_hash}"
         f"|device=0|lease=NO_LEASE|v1"
     )
     ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
-    expected = str(uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}"))
+    expected = str(uuid.uuid5(ns, f"{ctx.idempotency_key}|{action_fingerprint}"))
 
     assert store._materialization.calls
     assert store._materialization.calls[0]["replica_uuid"] == expected

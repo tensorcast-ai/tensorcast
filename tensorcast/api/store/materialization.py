@@ -1901,7 +1901,11 @@ class MaterializationPipeline:
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
         if resolved_artifact_id is None and key:
             with contextlib.suppress(Exception):
-                resolved_artifact_id = self._runtime.resolve_key_mapping_cached(key=key)
+                resolved_mapping = self._runtime.resolve_key_mapping_cached(key=key)
+                if isinstance(resolved_mapping, tuple):
+                    resolved_artifact_id = resolved_mapping[0]
+                else:
+                    resolved_artifact_id = resolved_mapping
         if resolved_artifact_id and canonical_hint is None:
             cached_entry = self._runtime.get_artifact_index_cached(resolved_artifact_id)
             if cached_entry is not None:

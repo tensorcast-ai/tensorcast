@@ -77,14 +77,12 @@ class FakeDaemonCtl:
         self.resolve_calls.append(key)
         resolved = self.resolves.get(key)
         artifact_id: str | None
-        disk_path: str | None
         if isinstance(resolved, tuple):
-            artifact_id, disk_path = resolved
+            artifact_id, _ = resolved
         else:
-            artifact_id, disk_path = resolved, None
+            artifact_id = resolved
         return daemon_ctl.KeyMappingResolution(
             artifact_id=artifact_id or "",
-            used_disk_path=disk_path or "",
             generation=0,
             cache_ttl_seconds=int(self.cache_ttl_seconds),
         )

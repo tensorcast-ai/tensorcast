@@ -11,7 +11,7 @@ from tensorcast.api.store.common import canonical_index_from_bytes
 
 
 def _canonical_index_bytes() -> bytes:
-    return b'{"w":[0,4,[1],[1],"float32",0]}'
+    return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
 
 
 class _StoreStub:

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "absl/status/statusor.h"
@@ -28,6 +29,11 @@ class LipBridge {
       int target_device_id,
       const std::function<void(const store::loading::ReplicaKey&)>& on_ready,
       v2::MemCopyHandle* out_handle);
+
+  [[nodiscard]] bool has_active_on_device(
+      absl::string_view artifact_id,
+      int device_id,
+      std::optional<absl::string_view> view_id = std::nullopt) const;
 
  private:
   LipManager& lip_;

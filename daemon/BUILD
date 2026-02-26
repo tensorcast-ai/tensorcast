@@ -63,6 +63,7 @@ sc_cc_library(
     ],
     copts = [],
     deps = [
+        ":artifact_source_registry_lib",
         ":background_scheduler_hdr",
         ":deadline_utils_hdr",
         ":device_resolver_hdr",
@@ -377,10 +378,11 @@ sc_cc_library(
 )
 
 sc_cc_library(
-    name = "local_disk_import_catalog_lib",
-    srcs = ["state/local_disk_import_catalog.cc"],
-    hdrs = ["state/local_disk_import_catalog.h"],
+    name = "artifact_source_registry_lib",
+    srcs = ["state/artifact_source_registry.cc"],
+    hdrs = ["state/artifact_source_registry.h"],
     deps = [
+        "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time:time",
@@ -653,6 +655,7 @@ sc_cc_library(
     srcs = ["state/daemon_kernel.cc"],
     hdrs = ["state/daemon_kernel.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":background_scheduler_hdr",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
@@ -660,7 +663,6 @@ sc_cc_library(
         ":ipc_region_registry_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
-        ":local_disk_import_catalog_lib",
         ":persistence_manager_lib",
         ":pid_monitor_lib",
         ":placement_lease_tokens_lib",
@@ -829,6 +831,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_controller.cc"],
     hdrs = ["service/controllers/materialization_controller.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":assembly_operation_service_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
@@ -837,7 +840,6 @@ sc_cc_library(
         ":ipc_region_registry_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
-        ":local_disk_import_catalog_lib",
         ":ref_tracker_hdr",
         ":replica_lifecycle_service_lib",
         ":replica_materialization_service_lib",
@@ -890,8 +892,8 @@ sc_cc_library(
     srcs = ["service/controllers/disk_artifact_service.cc"],
     hdrs = ["service/controllers/disk_artifact_service.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":grpc_peer_utils_lib",
-        ":local_disk_import_catalog_lib",
         ":materialization_disk_resolve_utils_lib",
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
@@ -907,12 +909,12 @@ sc_cc_library(
     srcs = ["service/controllers/replica_materialization_service.cc"],
     hdrs = ["service/controllers/replica_materialization_service.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
-        ":local_disk_import_catalog_lib",
         ":materialization_disk_resolve_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_payload_utils_lib",
@@ -944,11 +946,11 @@ sc_cc_library(
     srcs = ["service/controllers/target_materialization_service.cc"],
     hdrs = ["service/controllers/target_materialization_service.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":device_resolver_hdr",
         ":grpc_peer_utils_lib",
         ":ipc_region_registry_lib",
         ":lip_manager_lib",
-        ":local_disk_import_catalog_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
@@ -1034,11 +1036,11 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_request_common_utils.cc"],
     hdrs = ["service/controllers/materialization_request_common_utils.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":deadline_utils_hdr",
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
-        ":local_disk_import_catalog_lib",
         ":materialization_disk_resolve_utils_lib",
         ":materialization_replica_handle_utils_lib",
         ":path_utils_lib",
@@ -1905,31 +1907,22 @@ cc_test(
 )
 
 cc_test(
-    name = "resolve_artifact_from_disk_test",
-    srcs = ["service/resolve_artifact_from_disk_test.cc"],
+    name = "import_artifact_from_path_test",
+    srcs = ["service/import_artifact_from_path_test.cc"],
     deps = [
-        ":background_scheduler_hdr",
-        ":device_resolver_hdr",
-        ":ipc_region_registry_lib",
-        ":lip_bridge_lib",
-        ":lip_manager_lib",
-        ":materialization_controller_lib",
-        ":ref_tracker_hdr",
-        ":rpc_context_hdr",
-        ":session_manager_hdr",
-        ":sessions_service_hdr",
-        ":shutdown_signal_hdr",
-        ":verification_tracker_hdr",
-        "//core/common:artifact_hash_lib",
+        ":artifact_source_registry_lib",
+        ":daemon_service_harness_lib",
         "//core/store:store_engine",
-        "//core/store:testing_global_store_client_stub",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
-        "@abseil-cpp//absl/time:time",
-        "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],
+)
+
+alias(
+    name = "resolve_artifact_from_disk_test",
+    actual = ":import_artifact_from_path_test",
 )
 
 cc_test(

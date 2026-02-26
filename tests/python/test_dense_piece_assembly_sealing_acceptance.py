@@ -112,6 +112,19 @@ def _wait_for_view_ready_for_seal(
     return last_resp
 
 
+def _maybe_debug_dump_view_replicas(
+    label: str,
+    resp: global_store_pb2.GetArtifactInfoByIdResponse,
+) -> None:
+    if os.environ.get("TC_DEBUG_DENSE_PIECE") != "1":
+        return
+    print(
+        f"[DENSE-DEBUG] {label}: status={resp.status} view_size={resp.view_meta.view_size} replicas={len(resp.replicas)}"
+    )
+    for idx, replica in enumerate(resp.replicas):
+        print(f"[DENSE-DEBUG] replica[{idx}] proto={replica}")
+
+
 def _start_and_wait_seal_success(
     stub: store_daemon_pb2_grpc.StoreDaemonServiceStub,
     *,
@@ -719,6 +732,7 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     assert info_resp_a_ready.status == global_store_pb2.Status.STATUS_OK
     assert info_resp_a_ready.view_meta.view_size == len(piece_a)
     assert info_resp_a_ready.view_meta.view_data_hash == commit_a.view_data_hash
+    _maybe_debug_dump_view_replicas("piece_a", info_resp_a_ready)
     info_resp_b = _wait_for_view_ready_for_seal(
         gs_stub,
         artifact_id=assembly_id,
@@ -730,6 +744,7 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     assert info_resp_b.status == global_store_pb2.Status.STATUS_OK
     assert info_resp_b.view_meta.view_size == len(piece_b)
     assert info_resp_b.view_meta.view_data_hash == commit_b.view_data_hash
+    _maybe_debug_dump_view_replicas("piece_b", info_resp_b)
 
     wait_resp = _start_and_wait_seal_success(stub, assembly_id=assembly_id)
     assert wait_resp.operation.status.state == operation_pb2.OPERATION_STATE_SUCCESS

@@ -1664,6 +1664,11 @@ future_read_result_t Communicator::read_tensor(
 
   auto local_tensor = store_.get_tensor(key);
 
+  const bool existing_tensor_conflicts = local_tensor != nullptr &&
+      (local_tensor->get_uint64_addr() != addr || local_tensor->get_bytes() != bytes ||
+       local_tensor->get_mem_type() != dev_type ||
+       (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id));
+
   const bool needs_new_tensor = local_tensor == nullptr || local_tensor->get_uint64_addr() != addr ||
       local_tensor->get_bytes() != bytes || local_tensor->get_mem_type() != dev_type ||
       (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id);
@@ -1674,7 +1679,11 @@ future_read_result_t Communicator::read_tensor(
     if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
       local_tensor->set_device_id(dev_id);
     }
-    store_.register_tensor(local_tensor);
+    // Preserve an existing source-side key mapping when this read uses the same
+    // key but a different destination buffer in-process (self-read path).
+    if (!existing_tensor_conflicts) {
+      store_.register_tensor(local_tensor);
+    }
   }
 
   if (enable_rdma_ && net_dev != nullptr) {
