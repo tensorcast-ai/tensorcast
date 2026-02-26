@@ -50,6 +50,8 @@ TP_FULL_VALIDATION_MAX_BYTES = 4 * 1024**3
 TP_SAMPLED_VALIDATION_POINTS = 4096
 RECEIVER_PROGRESS_LOG_INTERVAL_S = 10.0
 RECEIVER_RESOLVE_SLOW_THRESHOLD_MS = 1000.0
+RECEIVER_TENSOR_DICT_UNLOAD_RETRIES = 3
+RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S = 0.05
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -86,6 +88,9 @@ class PublishEvent:
     publish_device: str
     published_at_s: float
     publish_latency_s: float
+    publish_payload_bytes: int
+    publish_throughput_gib_s: float
+    put_throughput_gib_s: float
     publish_breakdown_s: dict[str, float]
 
 
@@ -177,16 +182,24 @@ def _publish_memory_log(*, stage: str, version: int, publish_device: str) -> Non
     print(" ".join(tokens), flush=True)
 
 
+def _estimate_tensor_payload_bytes(tensors: dict[str, torch.Tensor]) -> int:
+    total_bytes = 0
+    for tensor in tensors.values():
+        total_bytes += int(tensor.numel()) * int(tensor.element_size())
+    return int(max(0, total_bytes))
+
+
+def _bytes_throughput_gib_s(*, bytes_total: int, duration_s: float) -> float:
+    if int(bytes_total) <= 0 or float(duration_s) <= 0.0:
+        return 0.0
+    return float(bytes_total) / float(1024**3) / float(duration_s)
+
+
 def _sanitize_group_token(raw: str) -> str:
     value = str(raw).strip()
     if not value:
         return ""
-    allowed = set(
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789"
-        "-_.:"
-    )
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
     return "".join(ch if ch in allowed else "_" for ch in value)
 
 
@@ -205,7 +218,9 @@ def _materialization_device(requested: str) -> str:
     if requested != "auto":
         return requested
     if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
-        return "cpu"
+        # Fake CUDA exposes virtual GPU ordinals and avoids CPU shared-memory
+        # prerequisites that may be disabled in lightweight daemon configs.
+        return "cuda:0"
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
@@ -883,12 +898,6 @@ class WeightUpdatePublisher:
             wait_persistence=False,
             gc_drain_timeout_s=gc_drain_timeout_s,
             gc_require_drained=True,
-            pre_publish_trim_enabled=(
-                self._payload_mode == "tp_ranked"
-                and self._tp_total_bytes > 0
-                and int(keep_last) > 0
-            ),
-            pre_publish_keep_last=max(0, int(keep_last) - 1),
             stage_on_gpu=False,
         )
         self._publisher = WeightPublisher(self._config)
@@ -940,10 +949,20 @@ class WeightUpdatePublisher:
             version=version,
             publish_device=publish_device,
         )
+        publish_payload_bytes = _estimate_tensor_payload_bytes(tensors)
         publish_start = time.monotonic()
         artifact_id = self._publisher.publish(tensors, version=version)
         publish_latency_s = time.monotonic() - publish_start
         publish_breakdown_s = self._publisher.last_publish_breakdown_s()
+        put_s = float(publish_breakdown_s.get("put_s", 0.0))
+        publish_throughput_gib_s = _bytes_throughput_gib_s(
+            bytes_total=publish_payload_bytes,
+            duration_s=float(publish_latency_s),
+        )
+        put_throughput_gib_s = _bytes_throughput_gib_s(
+            bytes_total=publish_payload_bytes,
+            duration_s=put_s,
+        )
         _publish_memory_log(
             stage="after_publish",
             version=version,
@@ -969,6 +988,9 @@ class WeightUpdatePublisher:
             publish_device=publish_device,
             published_at_s=time.time(),
             publish_latency_s=publish_latency_s,
+            publish_payload_bytes=int(publish_payload_bytes),
+            publish_throughput_gib_s=float(publish_throughput_gib_s),
+            put_throughput_gib_s=float(put_throughput_gib_s),
             publish_breakdown_s=publish_breakdown_s,
         )
         events.append(event)
@@ -979,6 +1001,9 @@ class WeightUpdatePublisher:
             f"key={key}",
             f"artifact_id={artifact_id}",
             f"publish_latency_s={publish_latency_s:.3f}",
+            f"payload_gib={float(publish_payload_bytes)/float(1024**3):.3f}",
+            f"publish_bw_gib_s={publish_throughput_gib_s:.3f}",
+            f"put_bw_gib_s={put_throughput_gib_s:.3f}",
             flush=True,
         )
         return event
@@ -1063,12 +1088,7 @@ class WeightUpdatePublisher:
             return False
 
     def _fallback_for_checks(self) -> FallbackOptions:
-        return FallbackOptions(
-            prefer="local",
-            allow_p2p=False,
-            allow_disk=True,
-            verify_checksums=False,
-        )
+        return FallbackOptions.local_only()
 
     def _wait_materialization_state(
         self,
@@ -1118,7 +1138,6 @@ class WeightUpdateReceiver:
         key_template: str,
         poll_interval_s: float,
         per_version_timeout_s: float,
-        fallback_prefer: str,
         materialize_device: str,
         apply_mode: str,
         allow_version_skip: bool,
@@ -1139,13 +1158,10 @@ class WeightUpdateReceiver:
         self._key_template = key_template
         self._poll_interval_s = poll_interval_s
         self._per_version_timeout_s = per_version_timeout_s
-        fallback_mode = str(fallback_prefer).strip()
-        allow_p2p = fallback_mode in {"auto", "p2p"}
-        allow_disk = fallback_mode in {"auto", "disk", "local"}
         self._fallback = FallbackOptions(
-            prefer=fallback_mode,  # pyright: ignore[reportArgumentType]
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
+            prefer="p2p",
+            allow_p2p=True,
+            allow_disk=False,
             verify_checksums=False,
         )
         self._materialize_device = _materialization_device(materialize_device)
@@ -1506,15 +1522,31 @@ class WeightUpdateReceiver:
                     time.sleep(self._poll_interval_s)
                     continue
                 start = time.monotonic()
-                tensors = artifact.tensor_dict(device=self._materialize_device)
-                latency_s = time.monotonic() - start
-                _validate_payload(
-                    version=version,
-                    tensors=tensors,
-                    payload_mode=self._payload_mode,
-                    tp_world_size=self._tp_world_size,
-                    tp_total_bytes=self._tp_total_bytes,
+                materialized = artifact.tensor_dict_with_diagnostics(
+                    device=self._materialize_device
                 )
+                latency_s = time.monotonic() - start
+                tensors = materialized.tensors
+                diagnostics = materialized.diagnostics
+                try:
+                    _validate_payload(
+                        version=version,
+                        tensors=tensors,
+                        payload_mode=self._payload_mode,
+                        tp_world_size=self._tp_world_size,
+                        tp_total_bytes=self._tp_total_bytes,
+                    )
+                finally:
+                    self._release_tensor_dict_replica_after_apply(
+                        replica_uuid=str(diagnostics.replica_uuid),
+                        disk_path=(
+                            str(diagnostics.disk_path)
+                            if diagnostics.disk_path is not None
+                            else ""
+                        ),
+                        tensors=tensors,
+                    )
+                    materialized = None
                 return ReceiveEvent(
                     version=version,
                     key=key,
@@ -1526,6 +1558,10 @@ class WeightUpdateReceiver:
                     pointer_stable=None,
                 )
             except Exception as exc:  # noqa: BLE001
+                if isinstance(
+                    exc, RuntimeError
+                ) and "failed to unload tensor_dict replica after apply" in str(exc):
+                    raise
                 last_error = _compact_error_text(exc)
                 if _is_cuda_oom_error(exc):
                     raise RuntimeError(
@@ -1564,6 +1600,32 @@ class WeightUpdateReceiver:
         raise TimeoutError(
             "receiver timeout "
             f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
+        )
+
+    def _release_tensor_dict_replica_after_apply(
+        self,
+        *,
+        replica_uuid: str,
+        disk_path: str,
+        tensors: dict[str, torch.Tensor],
+    ) -> None:
+        if not replica_uuid:
+            return
+        tensors.clear()
+        gc.collect()
+        client = get_store_context().ensure_client()
+        unloaded = False
+        for _ in range(RECEIVER_TENSOR_DICT_UNLOAD_RETRIES):
+            if client.unload_replica(replica_uuid, disk_path=disk_path):
+                unloaded = True
+                break
+            gc.collect()
+            time.sleep(RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S)
+        if unloaded:
+            return
+        raise RuntimeError(
+            "receiver failed to unload tensor_dict replica after apply "
+            f"replica_uuid={replica_uuid}, disk_path={disk_path or '<memory>'}"
         )
 
     def _wait_one_binding(
@@ -1897,9 +1959,7 @@ class WeightUpdateReceiver:
                     rank_start = time.monotonic()
                     rank_remaining_s = max(0.001, deadline - time.monotonic())
                     rank_ctx = self._make_tp_materialize_ctx(
-                        version=version,
-                        rank=rank,
-                        remaining_s=rank_remaining_s
+                        version=version, rank=rank, remaining_s=rank_remaining_s
                     )
                     print(
                         "[receiver][tp]",
@@ -2036,7 +2096,7 @@ def _init_tensorcast(args: argparse.Namespace) -> None:
         if args.global_store_config_path
         else None,
         cluster_id=str(args.cluster_id) if args.cluster_id else None,
-        allow_gs_fallback=bool(args.allow_gs_fallback),
+        allow_gs_fallback=False,
     )
 
 
@@ -2134,7 +2194,6 @@ def _build_receiver_runner(
         key_template=str(args.key_template),
         poll_interval_s=float(args.poll_interval_s),
         per_version_timeout_s=float(args.receiver_timeout_s),
-        fallback_prefer=str(args.fallback_prefer),
         materialize_device=str(args.materialize_device),
         apply_mode=str(args.receiver_apply_mode),
         allow_version_skip=bool(args.allow_version_skip),
@@ -2443,13 +2502,6 @@ def _add_runtime_args(
         default=None,
         help="Optional cluster token to enforce for Global Store.",
     )
-    parser.add_argument(
-        "--allow-gs-fallback",
-        action="store_true",
-        help="Allow TensorCast to fall back when Global Store start/connect fails.",
-    )
-
-
 def _add_common_stream_args(
     parser: argparse.ArgumentParser,
     *,
@@ -2478,11 +2530,6 @@ def _add_common_stream_args(
             "'version_fill' enforces all tensor elements equal to version. "
             "'tp_ranked' publishes TP-sharded source tensors with rank-tagged values."
         ),
-    )
-    parser.add_argument(
-        "--fallback-prefer",
-        choices=["auto", "local", "p2p", "disk"],
-        default="auto",
     )
     parser.add_argument(
         "--materialize-device",
@@ -2556,9 +2603,7 @@ def _add_common_stream_args(
         "--transport-group-total-parts",
         type=int,
         default=0,
-        help=(
-            "Expected total parts per group when --transport-group-mode=tp_version."
-        ),
+        help=("Expected total parts per group when --transport-group-mode=tp_version."),
     )
     parser.add_argument(
         "--transport-group-receiver-index",
@@ -2651,7 +2696,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_runtime_args(
         single,
-        default_init_mode="auto",
+        default_init_mode="create",
         default_global_store_mode="start",
     )
     _add_common_stream_args(single, require_model_name=False)

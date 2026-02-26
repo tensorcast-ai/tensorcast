@@ -31,7 +31,7 @@ TC_REMOTE_TIMEOUT_SEC="${TC_REMOTE_TIMEOUT_SEC:-1800}"
 TC_RECEIVER_HOLD_AFTER_FINISH_S="${TC_RECEIVER_HOLD_AFTER_FINISH_S:-25}"
 TC_PUBLISHER_HOLD_AFTER_FINISH_S="${TC_PUBLISHER_HOLD_AFTER_FINISH_S:-30}"
 TC_RECEIVER_WARMUP_S="${TC_RECEIVER_WARMUP_S:-8}"
-TC_FALLBACK_PREFER="${TC_FALLBACK_PREFER:-p2p}"
+TC_PUBLISH_DEVICE="${TC_PUBLISH_DEVICE:-cpu}"
 TC_MATERIALIZE_DEVICE="${TC_MATERIALIZE_DEVICE:-cuda:0}"
 TC_ALLOW_RECEIVER_SKIPS="${TC_ALLOW_RECEIVER_SKIPS:-0}"
 TC_SCALE_RECEIVER_COUNTS="${TC_SCALE_RECEIVER_COUNTS:-1,2,4,8,16,31}"
@@ -139,7 +139,7 @@ run_single_host_functional() {
        --poll-interval-s ${TC_POLL_INTERVAL_S} \
        --receiver-timeout-s ${TC_RECEIVER_TIMEOUT_S} \
        --retention-timeout-s ${TC_RETENTION_TIMEOUT_S} \
-       --fallback-prefer local \
+       --publish-device ${TC_PUBLISH_DEVICE} \
        --materialize-device ${TC_MATERIALIZE_DEVICE} \
        --receiver-apply-mode tensor_dict \
       --weights-root /tmp/tensorcast_weight_publisher_e2e \
@@ -176,8 +176,8 @@ run_case() {
     --progress-poll-s "${TC_PROGRESS_POLL_S}"
     --max-publish-to-apply-s "${TC_MAX_PUBLISH_TO_APPLY_S}"
     --retention-timeout-s "${TC_RETENTION_TIMEOUT_S}"
+    --publish-device "${TC_PUBLISH_DEVICE}"
     --receiver-apply-mode binding_swap
-    --fallback-prefer "${TC_FALLBACK_PREFER}"
     --materialize-device "${TC_MATERIALIZE_DEVICE}"
     --receiver-hold-after-finish-s "${TC_RECEIVER_HOLD_AFTER_FINISH_S}"
     --publisher-hold-after-finish-s "${TC_PUBLISHER_HOLD_AFTER_FINISH_S}"

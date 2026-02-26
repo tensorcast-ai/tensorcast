@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Callable
 from uuid import UUID
 
 import grpc
+from google.protobuf import timestamp_pb2
 
 from tensorcast.global_store.exceptions import (
     NotFoundError,
@@ -221,6 +223,68 @@ class TransportRpcHandler:
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
+    def query_transport_window(
+        self,
+        request: global_store_pb2.QueryTransportWindowRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.QueryTransportWindowResponse:
+        try:
+            if not request.HasField("created_at_start"):
+                raise ValidationError("created_at_start is required")
+            if not request.HasField("created_at_end"):
+                raise ValidationError("created_at_end is required")
+            started_at = request.created_at_start.ToDatetime(tzinfo=timezone.utc)
+            finished_at = request.created_at_end.ToDatetime(tzinfo=timezone.utc)
+            limit = int(request.limit) if int(request.limit) > 0 else 200_000
+            rows = self._transport_service.query_transport_window(
+                started_at=started_at,
+                finished_at=finished_at,
+                limit=limit,
+            )
+            payload_rows: list[global_store_pb2.TransportWindowRow] = []
+            for row in rows:
+                created_at = timestamp_pb2.Timestamp()
+                created_at.FromDatetime(self._as_utc_datetime(row.created_at))
+                payload = global_store_pb2.TransportWindowRow(
+                    transport_id=str(row.transport_id),
+                    replica_id=str(row.replica_id),
+                    artifact_id=str(row.artifact_id),
+                    status=str(row.status),
+                    completion_outcome=str(row.completion_outcome),
+                    request_id=str(row.request_id),
+                    requester_worker_id=str(row.requester_worker_id),
+                    group_id=str(row.group_id),
+                    group_kind=str(row.group_kind),
+                    group_part_id=str(row.group_part_id),
+                    group_total_parts=max(0, int(row.group_total_parts)),
+                    replica_memory_size_bytes=max(
+                        0, int(row.replica_memory_size_bytes)
+                    ),
+                )
+                payload.created_at.CopyFrom(created_at)
+                if row.completed_at is not None:
+                    completed_at = timestamp_pb2.Timestamp()
+                    completed_at.FromDatetime(self._as_utc_datetime(row.completed_at))
+                    payload.completed_at.CopyFrom(completed_at)
+                payload_rows.append(payload)
+            return global_store_pb2.QueryTransportWindowResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                rows=payload_rows,
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.QueryTransportWindowResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.exception("Error querying transport window")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.QueryTransportWindowResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
     @staticmethod
     def _completion_outcome_from_proto(
         proto_outcome: global_store_pb2.TransportCompletionOutcome,
@@ -234,3 +298,9 @@ class TransportRpcHandler:
         if proto_outcome == global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_CANCELLED:
             return TransportCompletionOutcome.CANCELLED
         return TransportCompletionOutcome.UNSPECIFIED
+
+    @staticmethod
+    def _as_utc_datetime(raw: datetime) -> datetime:
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw.astimezone(timezone.utc)

@@ -87,7 +87,7 @@ struct ReplicaConfig {
 
   // When true, UMA CPU allocations are backed by memfd + MAP_SHARED so they can
   // be exported cross-process for zero-copy CPU tensor materialization.
-  bool cpu_shared_memory_enabled{false};
+  bool cpu_shared_memory_enabled{true};
 };
 
 } // namespace tensorcast::store::replica

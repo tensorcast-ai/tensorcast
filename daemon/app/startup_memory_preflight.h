@@ -19,8 +19,21 @@ struct StartupMemoryAvailability {
   std::optional<uint64_t> cgroup_inactive_file_bytes;
 };
 
+struct EnginePinnedConcurrencySizing {
+  uint64_t required_slices = 0;
+  int effective_gpu_count = 0;
+};
+
 // Reserve headroom=min(10% of required, 10 GiB).
 uint64_t compute_startup_memory_headroom_bytes(uint64_t required_bytes);
+
+// Computes startup sizing requirements for pinned_memory.classes[name=engine].
+// In fake-CUDA mode we intentionally size to one logical GPU so local smoke
+// and unit-test workflows do not require production-scale pinned pools.
+EnginePinnedConcurrencySizing compute_engine_pinned_concurrency_sizing(
+    uint32_t streaming_buffer_chunks,
+    int detected_gpu_count,
+    bool fake_cuda_backend);
 
 // Returns an effective "available bytes" view for startup admission checks.
 // Prefers cgroup v2 headroom when memory.max is set; otherwise falls back to

@@ -90,6 +90,19 @@ Runner 对外仅保留：
 
 输出：`peak/p95/mean_active_throughput` + `active_transport_peak/mean`。
 
+### 3.4 Publisher 发布带宽（新增，A0 起强制记录）
+
+针对每个发布版本，统一记录两类发布带宽：
+
+1. `publish_throughput_gib_s = publish_payload_bytes / publish_latency_s`
+2. `put_throughput_gib_s = publish_payload_bytes / publish_breakdown_s.put_s`
+
+说明：
+
+1. `publish_payload_bytes` 由发布张量逻辑字节数统计得到；
+2. `publish_throughput_gib_s` 反映发布端端到端 publish 阶段吞吐；
+3. `put_throughput_gib_s` 更贴近 daemon 注册写入阶段吞吐。
+
 ## 4. 复测矩阵（新方案）
 
 ## 4.1 TP8 40GB（主 A/B）
@@ -121,6 +134,7 @@ Runner 对外仅保留：
 ```bash
 python examples/cross_host/cross_host_weight_publisher_runner.py \
   --case-name <case> \
+  --publisher-daemon-config examples/config/store_daemon_config_cross_host_bench.yaml \
   ... \
   --max-concurrency <1|2> \
   --receiver-preflight-transient-overlap 1 \
@@ -132,6 +146,7 @@ python examples/cross_host/cross_host_weight_publisher_runner.py \
 ```bash
 python examples/cross_host/cross_host_weight_publisher_runner.py \
   --case-name <case> \
+  --publisher-daemon-config examples/config/store_daemon_config_cross_host_bench.yaml \
   ... \
   --max-concurrency <1|2> \
   --receiver-preflight-transient-overlap 1 \
@@ -162,6 +177,9 @@ python examples/cross_host/cross_host_weight_publisher_runner.py \
 ## 7. 输出物清单（复测后）
 
 1. case summary JSON（runner 输出）
+   - 包含 `summary.performance.publish_bandwidth_gib_s.*`
+   - 包含 `summary.performance.put_bandwidth_gib_s.*`
+   - 包含每版本 `publisher_summary.published[*].publish_payload_bytes/publish_throughput_gib_s/put_throughput_gib_s`
 2. load-balance SQL 回放表（使用 `replica_id` 口径）
 3. cluster sampled throughput 时序与汇总（`transport_metrics.throughput.series`）
 4. group vs non-group 对比汇总表（TP8 40GB + TP8 320GB）
@@ -169,3 +187,5 @@ python examples/cross_host/cross_host_weight_publisher_runner.py \
 ## 8. 备注
 
 旧版文档中的历史结果可作为背景参考，但不再用于当前结论。当前结论需以本方案复测结果为准。
+
+## 9. Smoke 测试已通过

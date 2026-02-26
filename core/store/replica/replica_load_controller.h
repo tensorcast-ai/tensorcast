@@ -70,7 +70,7 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
       uint64_t artifact_size,
       std::optional<std::string> view_id = std::nullopt,
       std::optional<MemoryTierConfig> memory_tier_config = std::nullopt,
-      bool cpu_shared_memory_enabled = false);
+      bool cpu_shared_memory_enabled = true);
 
   ~ReplicaLoadController() noexcept;
 

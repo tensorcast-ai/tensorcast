@@ -93,8 +93,6 @@ class WeightPublisherConfig(BaseModel):
     gc_wait: bool = True
     gc_drain_timeout_s: float | None = 30.0
     gc_require_drained: bool = True
-    pre_publish_trim_enabled: bool = False
-    pre_publish_keep_last: int | None = None
     # For DRAM_STABLE publish, default to direct CPU streaming into replica
     # memory. This avoids daemon-side full-size GPU staging.
     stage_on_gpu: bool = False
@@ -113,16 +111,6 @@ class WeightPublisherConfig(BaseModel):
         keep = int(str(value).strip())
         if keep < 0:
             raise ValueError("keep_last must be >= 0")
-        return keep
-
-    @field_validator("pre_publish_keep_last")
-    @classmethod
-    def _validate_pre_publish_keep_last(cls, value: object) -> int | None:
-        if value is None or value == "":
-            return None
-        keep = int(str(value).strip())
-        if keep < 0:
-            raise ValueError("pre_publish_keep_last must be >= 0")
         return keep
 
     @field_validator("policy", mode="before")
@@ -431,8 +419,6 @@ class WeightPublisher:
             )
 
     def _maybe_trim_before_publish(self, *, version: int) -> None:
-        if not self._config.pre_publish_trim_enabled:
-            return
         keep = self._effective_pre_publish_keep_last()
         history = self._load_history()
         if not history:
@@ -450,8 +436,6 @@ class WeightPublisher:
         )
 
     def _effective_pre_publish_keep_last(self) -> int:
-        if self._config.pre_publish_keep_last is not None:
-            return int(self._config.pre_publish_keep_last)
         keep = int(self._config.keep_last)
         return max(0, keep - 1)
 
