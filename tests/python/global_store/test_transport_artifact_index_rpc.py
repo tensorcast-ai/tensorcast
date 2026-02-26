@@ -30,6 +30,7 @@ def test_request_transport_view_byte_space_requires_id(servicer, test_context):
     response = servicer.RequestReplicaTransport(
         global_store_pb2.RequestReplicaTransportRequest(
             artifact_id="artifact-x",
+            request_id="transport-view-byte-space-missing-id",
             requested_byte_space=common_pb2.ByteSpaceRef(
                 kind=common_pb2.BYTE_SPACE_KIND_VIEW,
                 id="",
@@ -46,6 +47,7 @@ def test_request_transport_rejects_unknown_byte_space_kind(servicer, test_contex
     response = servicer.RequestReplicaTransport(
         global_store_pb2.RequestReplicaTransportRequest(
             artifact_id="artifact-y",
+            request_id="transport-byte-space-unknown-kind",
             requested_byte_space=common_pb2.ByteSpaceRef(
                 kind=999,
                 id="ignored",

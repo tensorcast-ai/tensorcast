@@ -199,6 +199,98 @@ def _ctx_timeout_s(ctx: CallContext | None) -> float | None:
     return max(0.001, timeout_s)
 
 
+_TRANSPORT_GROUP_OPID_MARKER = "#tcg:"
+_TRANSPORT_GROUP_KIND_TAG = "tc.transport.group.kind"
+_TRANSPORT_GROUP_ID_TAG = "tc.transport.group.id"
+_TRANSPORT_GROUP_TOTAL_PARTS_TAG = "tc.transport.group.total_parts"
+_TRANSPORT_GROUP_PART_ID_TAG = "tc.transport.group.part_id"
+_TRANSPORT_GROUP_PRIORITY_TAG = "tc.transport.group.priority"
+_TRANSPORT_GROUP_EPOCH_TAG = "tc.transport.group.epoch"
+_TRANSPORT_REQUEST_ID_TAG = "tc.transport.request_id"
+_ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
+)
+
+
+def _sanitize_operation_token(value: str | None) -> str:
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return ""
+    return "".join(ch if ch in _ALLOWED_OPERATION_TOKEN_CHARS else "_" for ch in raw)
+
+
+def _read_context_tag_str(
+    tags: Mapping[str, object] | None,
+    key: str,
+) -> str:
+    if not tags:
+        return ""
+    value = tags.get(key)
+    if value is None:
+        return ""
+    return _sanitize_operation_token(str(value))
+
+
+def _read_context_tag_int(
+    tags: Mapping[str, object] | None,
+    key: str,
+    *,
+    default: int,
+) -> int:
+    if not tags:
+        return default
+    value = tags.get(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_transport_operation_id(
+    *,
+    base_operation_id: str,
+    ctx: CallContext | None,
+) -> str:
+    if ctx is None:
+        return base_operation_id
+    tags = ctx.tags
+    group_kind = _read_context_tag_str(tags, _TRANSPORT_GROUP_KIND_TAG)
+    group_id = _read_context_tag_str(tags, _TRANSPORT_GROUP_ID_TAG)
+    part_id = _read_context_tag_str(tags, _TRANSPORT_GROUP_PART_ID_TAG)
+    total_parts = _read_context_tag_int(
+        tags,
+        _TRANSPORT_GROUP_TOTAL_PARTS_TAG,
+        default=0,
+    )
+    priority = _read_context_tag_int(
+        tags,
+        _TRANSPORT_GROUP_PRIORITY_TAG,
+        default=0,
+    )
+    epoch = _read_context_tag_int(
+        tags,
+        _TRANSPORT_GROUP_EPOCH_TAG,
+        default=0,
+    )
+    request_id = _read_context_tag_str(tags, _TRANSPORT_REQUEST_ID_TAG)
+
+    if group_kind and group_id and part_id and total_parts > 0:
+        if not request_id:
+            request_id = _sanitize_operation_token(f"{group_id}:{part_id}")
+        metadata = (
+            f"kind={group_kind};gid={group_id};tot={int(total_parts)};"
+            f"part={part_id};pri={int(priority)};ep={int(epoch)};rid={request_id}"
+        )
+        return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}{metadata}"
+
+    if request_id:
+        return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}rid={request_id}"
+
+    return base_operation_id
+
+
 @dataclass(frozen=True, slots=True)
 class PlacementPin:
     pin_id: int
@@ -875,7 +967,10 @@ class Artifact:
         )
 
         client = runtime.ensure_client()
-        operation_id = uuid.uuid4().hex
+        operation_id = _build_transport_operation_id(
+            base_operation_id=uuid.uuid4().hex,
+            ctx=ctx,
+        )
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             response = None
@@ -1133,7 +1228,10 @@ class Artifact:
         )
 
         client = runtime.ensure_client()
-        operation_id = uuid.uuid4().hex
+        operation_id = _build_transport_operation_id(
+            base_operation_id=uuid.uuid4().hex,
+            ctx=ctx,
+        )
         rpc_timeout_s = _ctx_timeout_s(ctx)
         source_view_id = self._mapped_source_view_id(runtime)
         mapped_view_id = compute_mapped_view_id(

@@ -97,6 +97,15 @@ struct DiskMetadata {
   std::optional<bool> is_safetensors;
 };
 
+struct TransportSchedulingGroupHint {
+  std::string group_id;
+  std::string group_kind;
+  uint32_t total_parts{0};
+  std::string part_id;
+  uint32_t priority{0};
+  uint64_t epoch{0};
+};
+
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
@@ -105,6 +114,12 @@ struct MaterializeHints {
   std::chrono::milliseconds request_budget{0};
   // Upper bound for each Global Store transport wait call. 0 means default.
   std::chrono::milliseconds transport_wait_timeout{0};
+  // Optional requester identity used by Global Store transport scheduler.
+  std::string transport_requester_worker_id;
+  // Optional request idempotency key for transport scheduling.
+  std::string transport_request_id;
+  // Optional scheduler group hint for fairness/completion-aware dispatch.
+  std::optional<TransportSchedulingGroupHint> transport_scheduling_group;
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
   bool prefer_pageable_cpu{false};

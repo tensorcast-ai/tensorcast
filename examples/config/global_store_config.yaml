@@ -74,6 +74,22 @@ worker_policy:
   key_mapping:
     # Alias-key cache TTL returned by ResolveKeyMapping; keep short to limit polling storms.
     alias_cache_ttl: 1s
+  transport_scheduler:
+    # Queue-based group dispatch is the unified scheduler path; keep this set to GROUP_DISPATCH.
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+    source_balance_weights:
+      # Stage A source balancing score weights.
+      replica_load_weight: 1.0
+      worker_load_weight: 1.0
+      recent_assignment_penalty_weight: 1.0
+      diffusion_bonus_weight: 1.0
+    group_dispatch:
+      # Stage B group dispatcher fairness/aging and bounded scan controls.
+      fairness_floor_ratio: 0.25
+      completion_bias_weight: 1.0
+      starvation_aging_threshold: 5s
+      queue_scan_limit: 128
+      dispatch_batch_limit: 16
 
 # v2 limits and retention policies.
 limits:

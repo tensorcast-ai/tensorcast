@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import atexit
 import concurrent.futures
+import csv
 import json
+import math
 import re
 import secrets
 import shlex
@@ -17,7 +19,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +40,8 @@ BYTE_UNITS: dict[str, int] = {
     "gb": 1024**3,
     "tb": 1024**4,
 }
+TRANSPORT_GROUP_KIND_TP_VERSION = "tp_version"
+TRANSPORT_GROUP_DEFAULT_PRIORITY = 0
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,14 @@ class RoleSpec:
     inner_cmd: str
     log_file: str
     ready_file: str | None = None
+
+
+@dataclass(frozen=True)
+class TransportGroupPlan:
+    mode: str
+    kind: str
+    total_parts: int
+    priority: int
 
 
 def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
@@ -74,6 +88,36 @@ def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
 def split_csv(raw: str) -> list[str]:
     values = [item.strip() for item in str(raw).split(",")]
     return [item for item in values if item]
+
+
+def derive_transport_group_plan(
+    *,
+    mode: str,
+    receiver_count: int,
+    tp_world_size: int,
+) -> TransportGroupPlan:
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in {"none", "tp_version"}:
+        raise ValueError(f"unsupported transport-group-mode={normalized_mode!r}")
+    if normalized_mode == "none":
+        return TransportGroupPlan(
+            mode="none",
+            kind="",
+            total_parts=0,
+            priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
+        )
+
+    total_parts = int(receiver_count) * int(tp_world_size)
+    if total_parts <= 0:
+        raise ValueError(
+            "transport-group-mode=tp_version requires receiver_count * tp_world_size > 0"
+        )
+    return TransportGroupPlan(
+        mode="tp_version",
+        kind=TRANSPORT_GROUP_KIND_TP_VERSION,
+        total_parts=total_parts,
+        priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
+    )
 
 
 def parse_host_port(address: str) -> tuple[str, int]:
@@ -377,6 +421,7 @@ def _validate_receiver_memory_budget(
     tp_world_size: int,
     tp_total_bytes: int,
     max_concurrency: int,
+    transient_overlap_hint: int,
     timeout_sec: float,
 ) -> dict[str, Any]:
     enabled = str(payload_mode).strip() == "tp_ranked" and int(tp_total_bytes) > 0
@@ -388,6 +433,7 @@ def _validate_receiver_memory_budget(
         "tp_world_size": int(tp_world_size),
         "tp_total_bytes": int(tp_total_bytes),
         "max_concurrency": int(max_concurrency),
+        "transient_overlap_hint": int(transient_overlap_hint),
     }
     if not enabled:
         return report
@@ -402,10 +448,11 @@ def _validate_receiver_memory_budget(
     pinned_total_bytes = int(daemon_hints.get("pinned_total_bytes", 0))
     # Receiver estimate:
     # - one stable resident version (stable_bytes configured budget)
-    # - transient transfer/materialization windows scaled by transport concurrency
+    # - transient transfer/materialization windows controlled by overlap hint
+    #   (unified chain is serial by default, so this is not tied to max_concurrency)
     # - TP rank local target tensors (~1/world_size of full payload)
     rank_target_bytes = int(tp_total_bytes) // world_size
-    transient_window_factor = max(1, min(2, int(max_concurrency)))
+    transient_window_factor = max(1, int(transient_overlap_hint))
     transient_materialization_bytes = int(tp_total_bytes) * transient_window_factor
     estimated_base_bytes = (
         stable_bytes
@@ -451,7 +498,8 @@ def _validate_receiver_memory_budget(
             "receiver memory preflight failed: "
             + "; ".join(violations)
             + ". suggestions: lower stable_bytes for receiver profile, "
-            "increase worker memory, or reduce tp_total_bytes."
+            "increase worker memory, reduce tp_total_bytes, or lower "
+            "receiver-preflight-transient-overlap."
         )
     return report
 
@@ -790,6 +838,13 @@ def build_e2e_command(
     hold_after_finish_s: float,
     log_file: str,
     ready_file: str | None,
+    transport_group_mode: str,
+    transport_group_kind: str,
+    transport_group_namespace: str,
+    transport_group_total_parts: int,
+    transport_group_receiver_index: int,
+    transport_group_priority: int,
+    transport_group_epoch: int,
 ) -> str:
     cli_args: list[str] = [
         "python",
@@ -819,6 +874,20 @@ def build_e2e_command(
         str(tp_device_base_index),
         "--tp-materialize-deadline-s",
         str(tp_materialize_deadline_s),
+        "--transport-group-mode",
+        transport_group_mode,
+        "--transport-group-kind",
+        transport_group_kind,
+        "--transport-group-namespace",
+        transport_group_namespace,
+        "--transport-group-total-parts",
+        str(transport_group_total_parts),
+        "--transport-group-receiver-index",
+        str(transport_group_receiver_index),
+        "--transport-group-priority",
+        str(transport_group_priority),
+        "--transport-group-epoch",
+        str(transport_group_epoch),
         "--publish-device",
         publish_device,
         "--receiver-apply-mode",
@@ -900,7 +969,7 @@ def summarize_series(values: list[float]) -> dict[str, float]:
     }
 
 
-def discover_global_cluster_token() -> str | None:
+def discover_global_status_payload() -> dict[str, Any] | None:
     cmd = ["tensorcast-cli", "global", "status", "--json"]
     try:
         output = run_local(cmd, timeout_sec=10.0)
@@ -912,6 +981,13 @@ def discover_global_cluster_token() -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
+    return payload
+
+
+def discover_global_cluster_token() -> str | None:
+    payload = discover_global_status_payload()
+    if payload is None:
+        return None
     health = payload.get("health", {})
     if not isinstance(health, dict):
         return None
@@ -919,6 +995,533 @@ def discover_global_cluster_token() -> str | None:
     if isinstance(cluster_token, str) and cluster_token.strip():
         return cluster_token.strip()
     return None
+
+
+def discover_global_db_file() -> str | None:
+    payload = discover_global_status_payload()
+    if payload is None:
+        return None
+
+    health = payload.get("health", {})
+    if isinstance(health, dict):
+        db_file = str(health.get("db_file", "")).strip()
+        if db_file:
+            return db_file
+
+    state = payload.get("state", {})
+    gs_state = state.get("global_store", state) if isinstance(state, dict) else {}
+    if isinstance(gs_state, dict):
+        db_file = str(gs_state.get("db_file", "")).strip()
+        if db_file:
+            return db_file
+    return None
+
+
+def _to_utc_sql_timestamp(ts: datetime) -> str:
+    aware_ts = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+    return aware_ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00")
+
+
+def query_transport_group_probe(
+    *,
+    group_mode: str,
+    group_kind: str,
+    started_at_utc: datetime,
+    finished_at_utc: datetime,
+) -> dict[str, Any]:
+    probe: dict[str, Any] = {
+        "enabled": True,
+        "mode": str(group_mode),
+        "expected_grouped": str(group_mode) == "tp_version",
+        "group_kind": str(group_kind),
+        "db_file": None,
+        "audit_method": "duckdb_sql",
+        "window_start_utc": _to_utc_sql_timestamp(started_at_utc),
+        "window_end_utc": _to_utc_sql_timestamp(finished_at_utc),
+        "error": None,
+        "total_transports": 0,
+        "requester_tagged_transports": 0,
+        "grouped_transports": 0,
+        "kind_matched_transports": 0,
+        "group_contract_transports": 0,
+        "window_has_transports": False,
+        "requester_tagged_complete": False,
+        "group_mode_consistent": False,
+        "group_contract_consistent": False,
+    }
+
+    db_file = discover_global_db_file()
+    if not db_file:
+        probe["error"] = "global status missing db_file"
+        return probe
+    probe["db_file"] = db_file
+    db_path = Path(db_file).expanduser().resolve()
+    if not db_path.exists():
+        probe["error"] = f"global store db_file not found: {db_path}"
+        return probe
+
+    start_sql = probe["window_start_utc"].replace("'", "''")
+    end_sql = probe["window_end_utc"].replace("'", "''")
+    kind_sql = str(group_kind).strip().replace("'", "''")
+    query = f"""
+SELECT
+  COUNT(*) AS total_transports,
+  COUNT(*) FILTER (
+    WHERE requester_worker_id IS NOT NULL
+      AND requester_worker_id <> ''
+  ) AS requester_tagged_transports,
+  COUNT(*) FILTER (
+    WHERE group_kind IS NOT NULL
+      AND group_id IS NOT NULL
+  ) AS grouped_transports,
+  COUNT(*) FILTER (
+    WHERE group_kind = '{kind_sql}'
+      AND group_id IS NOT NULL
+  ) AS kind_matched_transports,
+  COUNT(*) FILTER (
+    WHERE group_kind IS NOT NULL
+      AND group_id IS NOT NULL
+      AND group_part_id IS NOT NULL
+      AND COALESCE(group_total_parts, 0) > 0
+  ) AS group_contract_transports
+FROM artifact_transports
+WHERE created_at >= TIMESTAMPTZ '{start_sql}'
+  AND created_at <= TIMESTAMPTZ '{end_sql}'
+"""
+    try:
+        output = run_local(
+            ["duckdb", "-csv", str(db_path), query],
+            timeout_sec=15.0,
+        )
+        rows = list(csv.DictReader(output.splitlines()))
+    except Exception as exc:  # noqa: BLE001
+        probe["error"] = f"transport group probe failed: {exc}"
+        return probe
+    if not rows:
+        probe["error"] = "transport group probe returned empty result"
+        return probe
+
+    row = rows[0]
+    total_transports = int(row.get("total_transports", 0) or 0)
+    requester_tagged = int(row.get("requester_tagged_transports", 0) or 0)
+    grouped_transports = int(row.get("grouped_transports", 0) or 0)
+    kind_matched_transports = int(row.get("kind_matched_transports", 0) or 0)
+    group_contract_transports = int(row.get("group_contract_transports", 0) or 0)
+
+    probe["total_transports"] = total_transports
+    probe["requester_tagged_transports"] = requester_tagged
+    probe["grouped_transports"] = grouped_transports
+    probe["kind_matched_transports"] = kind_matched_transports
+    probe["group_contract_transports"] = group_contract_transports
+    probe["window_has_transports"] = total_transports > 0
+    probe["requester_tagged_complete"] = (
+        total_transports > 0 and requester_tagged == total_transports
+    )
+    if str(group_mode) == "tp_version":
+        probe["group_mode_consistent"] = grouped_transports > 0
+        probe["group_contract_consistent"] = (
+            grouped_transports > 0
+            and grouped_transports == kind_matched_transports
+            and grouped_transports == group_contract_transports
+        )
+    else:
+        probe["group_mode_consistent"] = grouped_transports == 0
+        probe["group_contract_consistent"] = grouped_transports == 0
+    return probe
+
+
+def _coerce_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _coerce_int(value: Any) -> int:
+    return int(_coerce_float(value))
+
+
+def evaluate_group_probe_gate_failures(
+    *,
+    probe: dict[str, Any],
+    mode: str,
+) -> list[str]:
+    reasons: list[str] = []
+    if bool(probe.get("error")):
+        reasons.append(f"group_probe_error:{probe.get('error')}")
+    if not bool(probe.get("window_has_transports")):
+        reasons.append("window_has_transports=false")
+    if not bool(probe.get("requester_tagged_complete")):
+        reasons.append("requester_tagged_complete=false")
+    if str(mode) == "tp_version":
+        if not bool(probe.get("group_mode_consistent")):
+            reasons.append("group_mode_consistent=false")
+        if not bool(probe.get("group_contract_consistent")):
+            reasons.append("group_contract_consistent=false")
+    return reasons
+
+
+def run_transport_group_p0_guard(
+    *,
+    enabled: bool,
+    mode: str,
+    group_kind: str,
+    started_at_utc: datetime,
+    grace_s: float,
+    poll_interval_s: float,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "enabled": bool(enabled) and str(mode) == "tp_version",
+        "mode": str(mode),
+        "group_kind": str(group_kind),
+        "grace_s": float(max(0.0, grace_s)),
+        "attempts": 0,
+        "triggered": False,
+        "triggered_at_utc": None,
+        "reasons": [],
+        "probe": {},
+        "terminate_errors": [],
+    }
+    if not bool(result["enabled"]):
+        return result
+
+    deadline = time.monotonic() + float(max(0.0, grace_s))
+    probe: dict[str, Any] = {}
+    reasons: list[str] = []
+    while True:
+        result["attempts"] = int(result["attempts"]) + 1
+        now_utc = datetime.now(timezone.utc)
+        probe = query_transport_group_probe(
+            group_mode=str(mode),
+            group_kind=str(group_kind),
+            started_at_utc=started_at_utc,
+            finished_at_utc=now_utc,
+        )
+        reasons = evaluate_group_probe_gate_failures(
+            probe=probe,
+            mode=str(mode),
+        )
+        if not reasons:
+            break
+        now_mono = time.monotonic()
+        if now_mono >= deadline:
+            result["triggered"] = True
+            result["triggered_at_utc"] = _to_utc_sql_timestamp(now_utc)
+            break
+        sleep_s = min(max(0.5, float(poll_interval_s)), max(0.0, deadline - now_mono))
+        if sleep_s <= 0.0:
+            continue
+        time.sleep(sleep_s)
+
+    result["probe"] = probe
+    result["reasons"] = reasons
+    return result
+
+
+def query_transport_rows(
+    *,
+    started_at_utc: datetime,
+    finished_at_utc: datetime,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "enabled": True,
+        "audit_method": "duckdb_sql",
+        "db_file": None,
+        "window_start_utc": _to_utc_sql_timestamp(started_at_utc),
+        "window_end_utc": _to_utc_sql_timestamp(finished_at_utc),
+        "error": None,
+        "row_count": 0,
+        "rows": [],
+    }
+
+    db_file = discover_global_db_file()
+    if not db_file:
+        payload["error"] = "global status missing db_file"
+        return payload
+    payload["db_file"] = db_file
+    db_path = Path(db_file).expanduser().resolve()
+    if not db_path.exists():
+        payload["error"] = f"global store db_file not found: {db_path}"
+        return payload
+
+    start_sql = payload["window_start_utc"].replace("'", "''")
+    end_sql = payload["window_end_utc"].replace("'", "''")
+    query = f"""
+SELECT
+  CAST(t.transport_id AS VARCHAR) AS transport_id,
+  CAST(t.replica_id AS VARCHAR) AS replica_id,
+  COALESCE(t.artifact_id, '') AS artifact_id,
+  COALESCE(t.status, '') AS status,
+  COALESCE(t.completion_outcome, '') AS completion_outcome,
+  COALESCE(t.request_id, '') AS request_id,
+  COALESCE(t.requester_worker_id, '') AS requester_worker_id,
+  COALESCE(t.group_id, '') AS group_id,
+  COALESCE(t.group_kind, '') AS group_kind,
+  COALESCE(t.group_part_id, '') AS group_part_id,
+  COALESCE(t.group_total_parts, 0) AS group_total_parts,
+  CAST(t.created_at AS VARCHAR) AS created_at_utc,
+  CAST(t.completed_at AS VARCHAR) AS completed_at_utc,
+  epoch(t.created_at) AS created_at_epoch_s,
+  epoch(t.completed_at) AS completed_at_epoch_s,
+  COALESCE(r.memory_size, 0) AS replica_memory_size_bytes
+FROM artifact_transports t
+LEFT JOIN artifact_replicas r
+  ON t.replica_id = r.replica_id
+WHERE t.created_at >= TIMESTAMPTZ '{start_sql}'
+  AND t.created_at <= TIMESTAMPTZ '{end_sql}'
+ORDER BY t.created_at ASC
+"""
+    try:
+        output = run_local(
+            ["duckdb", "-csv", str(db_path), query],
+            timeout_sec=20.0,
+        )
+        rows = list(csv.DictReader(output.splitlines()))
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = f"transport rows query failed: {exc}"
+        return payload
+    payload["rows"] = rows
+    payload["row_count"] = int(len(rows))
+    return payload
+
+
+def compute_transport_metrics(
+    *,
+    transport_rows_payload: dict[str, Any],
+    payload_mode: str,
+    tp_total_bytes: int,
+    sample_interval_s: float,
+    max_samples: int,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "enabled": True,
+        "error": None,
+        "db_file": transport_rows_payload.get("db_file"),
+        "audit_method": str(transport_rows_payload.get("audit_method", "duckdb_sql")),
+        "window_start_utc": transport_rows_payload.get("window_start_utc"),
+        "window_end_utc": transport_rows_payload.get("window_end_utc"),
+        "transport_count": 0,
+        "completed_transport_count": 0,
+        "bytes_fallback_count": 0,
+        "throughput": {
+            "sample_interval_s": float(max(0.1, sample_interval_s)),
+            "sample_count": 0,
+            "active_sample_count": 0,
+            "peak_active_throughput_gib_s": 0.0,
+            "p95_active_throughput_gib_s": 0.0,
+            "mean_active_throughput_gib_s": 0.0,
+            "active_transport_peak": 0.0,
+            "active_transport_mean": 0.0,
+            "window_start_epoch_s": 0.0,
+            "window_end_epoch_s": 0.0,
+            "series": [],
+        },
+        "diffusion": {
+            "source_key": "replica_id",
+            "total_transports": 0,
+            "unique_sources": 0,
+            "top1_share": 0.0,
+            "hhi": 0.0,
+            "source_counts": [],
+        },
+        "per_transport_records": [],
+    }
+    error = transport_rows_payload.get("error")
+    if error:
+        metrics["error"] = str(error)
+        return metrics
+
+    rows_raw = transport_rows_payload.get("rows", [])
+    rows: list[dict[str, Any]] = []
+    if isinstance(rows_raw, list):
+        rows.extend(row for row in rows_raw if isinstance(row, dict))
+    metrics["transport_count"] = int(len(rows))
+    if not rows:
+        return metrics
+
+    step_s = float(max(0.1, sample_interval_s))
+    cap_samples = int(max(10, max_samples))
+    fallback_bytes = (
+        int(tp_total_bytes)
+        if str(payload_mode) == "tp_ranked" and int(tp_total_bytes) > 0
+        else 0
+    )
+    source_counter: Counter[str] = Counter()
+    intervals: list[tuple[float, float, float]] = []
+    per_transport_records: list[dict[str, Any]] = []
+
+    for row in rows:
+        created_at_epoch_s = _coerce_float(row.get("created_at_epoch_s"))
+        completed_at_epoch_s = _coerce_float(row.get("completed_at_epoch_s"))
+        duration_s = (
+            max(0.0, completed_at_epoch_s - created_at_epoch_s)
+            if created_at_epoch_s > 0.0 and completed_at_epoch_s > 0.0
+            else 0.0
+        )
+        bytes_value = max(0, _coerce_int(row.get("replica_memory_size_bytes")))
+        bytes_source = "replica_memory_size_bytes"
+        if bytes_value <= 0 and fallback_bytes > 0:
+            bytes_value = int(fallback_bytes)
+            bytes_source = "tp_total_bytes_fallback"
+            metrics["bytes_fallback_count"] = int(metrics["bytes_fallback_count"]) + 1
+        throughput_gib_s = (
+            float(bytes_value) / float(1024**3) / float(duration_s)
+            if bytes_value > 0 and duration_s > 0.0
+            else 0.0
+        )
+        if duration_s > 0.0 and throughput_gib_s > 0.0:
+            intervals.append(
+                (
+                    float(created_at_epoch_s),
+                    float(completed_at_epoch_s),
+                    float(throughput_gib_s),
+                )
+            )
+            metrics["completed_transport_count"] = (
+                int(metrics["completed_transport_count"]) + 1
+            )
+
+        replica_id = str(row.get("replica_id", "")).strip()
+        if replica_id:
+            source_counter[replica_id] += 1
+
+        per_transport_records.append(
+            {
+                "transport_id": str(row.get("transport_id", "")),
+                "replica_id": replica_id,
+                "artifact_id": str(row.get("artifact_id", "")),
+                "status": str(row.get("status", "")),
+                "completion_outcome": str(row.get("completion_outcome", "")),
+                "request_id": str(row.get("request_id", "")),
+                "requester_worker_id": str(row.get("requester_worker_id", "")),
+                "group_id": str(row.get("group_id", "")),
+                "group_kind": str(row.get("group_kind", "")),
+                "group_part_id": str(row.get("group_part_id", "")),
+                "group_total_parts": int(_coerce_int(row.get("group_total_parts"))),
+                "created_at_utc": str(row.get("created_at_utc", "")),
+                "completed_at_utc": str(row.get("completed_at_utc", "")),
+                "created_at_epoch_s": float(created_at_epoch_s),
+                "completed_at_epoch_s": float(completed_at_epoch_s),
+                "duration_s": float(duration_s),
+                "bytes": int(bytes_value),
+                "bytes_source": str(bytes_source),
+                "throughput_gib_s": float(throughput_gib_s),
+                "bandwidth_gib_s": float(throughput_gib_s),
+                "included_in_sampling": bool(
+                    duration_s > 0.0 and throughput_gib_s > 0.0
+                ),
+            }
+        )
+
+    metrics["per_transport_records"] = per_transport_records
+
+    total_sources = int(sum(source_counter.values()))
+    if total_sources > 0:
+        top_count = max(source_counter.values())
+        shares = [
+            float(count) / float(total_sources) for count in source_counter.values()
+        ]
+        source_counts = [
+            {
+                "replica_id": replica_id,
+                "count": int(count),
+                "share": float(float(count) / float(total_sources)),
+            }
+            for replica_id, count in sorted(
+                source_counter.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ]
+        metrics["diffusion"] = {
+            "source_key": "replica_id",
+            "total_transports": int(total_sources),
+            "unique_sources": int(len(source_counter)),
+            "top1_share": float(float(top_count) / float(total_sources)),
+            "hhi": float(sum(share * share for share in shares)),
+            "source_counts": source_counts,
+        }
+
+    if not intervals:
+        return metrics
+
+    sample_start = min(item[0] for item in intervals)
+    sample_end = max(item[1] for item in intervals)
+    if sample_end <= sample_start:
+        sample_end = sample_start + step_s
+    estimated_samples = int(math.floor((sample_end - sample_start) / step_s)) + 1
+    if estimated_samples > cap_samples:
+        step_s = max(step_s, float(sample_end - sample_start) / float(cap_samples - 1))
+        estimated_samples = int(math.floor((sample_end - sample_start) / step_s)) + 1
+    sample_count = max(1, estimated_samples)
+
+    rate_diff = [0.0] * (sample_count + 1)
+    active_diff = [0] * (sample_count + 1)
+    for started_at_s, ended_at_s, rate_gib_s in intervals:
+        first_index = int(math.ceil((started_at_s - sample_start) / step_s - 1e-9))
+        last_index = int(math.floor((ended_at_s - sample_start) / step_s + 1e-9))
+        if last_index < 0 or first_index >= sample_count:
+            continue
+        first_index = max(0, first_index)
+        last_index = min(sample_count - 1, last_index)
+        if first_index > last_index:
+            continue
+        rate_diff[first_index] += float(rate_gib_s)
+        rate_diff[last_index + 1] -= float(rate_gib_s)
+        active_diff[first_index] += 1
+        active_diff[last_index + 1] -= 1
+
+    throughput_series: list[dict[str, float]] = []
+    active_throughputs: list[float] = []
+    active_counts: list[float] = []
+    running_rate = 0.0
+    running_active = 0
+    for index in range(sample_count):
+        running_rate += rate_diff[index]
+        running_active += active_diff[index]
+        point_rate = max(0.0, float(running_rate))
+        point_active = max(0, int(running_active))
+        ts_epoch_s = float(sample_start + float(index) * step_s)
+        throughput_series.append(
+            {
+                "ts_epoch_s": float(ts_epoch_s),
+                "throughput_gib_s": float(point_rate),
+                "active_transports": float(point_active),
+            }
+        )
+        if point_active > 0 and point_rate > 0.0:
+            active_throughputs.append(float(point_rate))
+            active_counts.append(float(point_active))
+
+    throughput_payload = metrics["throughput"]
+    throughput_payload["sample_interval_s"] = float(step_s)
+    throughput_payload["sample_count"] = float(len(throughput_series))
+    throughput_payload["active_sample_count"] = float(len(active_throughputs))
+    throughput_payload["window_start_epoch_s"] = float(sample_start)
+    throughput_payload["window_end_epoch_s"] = float(sample_end)
+    throughput_payload["peak_active_throughput_gib_s"] = (
+        float(max(active_throughputs)) if active_throughputs else 0.0
+    )
+    throughput_payload["p95_active_throughput_gib_s"] = (
+        float(percentile(active_throughputs, 95.0)) if active_throughputs else 0.0
+    )
+    throughput_payload["mean_active_throughput_gib_s"] = (
+        float(statistics.fmean(active_throughputs)) if active_throughputs else 0.0
+    )
+    throughput_payload["active_transport_peak"] = (
+        float(max(active_counts)) if active_counts else 0.0
+    )
+    throughput_payload["active_transport_mean"] = (
+        float(statistics.fmean(active_counts)) if active_counts else 0.0
+    )
+    throughput_payload["series"] = throughput_series
+    return metrics
 
 
 def query_replica_counts_via_gs_rpc(
@@ -1001,6 +1604,67 @@ def query_replica_counts_via_gs_rpc(
             "available_count": int(row.available_count),
         }
     return result, "gs_rpc"
+
+
+def query_replica_counts_until_old_released(
+    *,
+    gs_addr: str,
+    artifact_ids: list[str],
+    dropped_artifact_ids: set[str],
+    timeout_sec: float,
+    poll_interval_s: float,
+) -> dict[str, Any]:
+    if not artifact_ids:
+        return {
+            "gs_addr": str(gs_addr),
+            "audit_method": "gs_rpc",
+            "replica_counts": {},
+            "poll_attempts": 0,
+            "poll_elapsed_s": 0.0,
+            "old_versions_released_observed": True,
+            "dropped_artifact_ids": [],
+        }
+
+    effective_timeout_s = max(1.0, float(timeout_sec))
+    start_time = time.time()
+    deadline = start_time + effective_timeout_s
+    attempts = 0
+    last_counts: dict[str, dict[str, int]] = {}
+    last_audit_method = "gs_rpc"
+    while True:
+        attempts += 1
+        counts, audit_method = query_replica_counts_via_gs_rpc(
+            gs_addr=str(gs_addr),
+            artifact_ids=artifact_ids,
+            timeout_sec=max(1.0, min(10.0, float(timeout_sec))),
+        )
+        last_counts = counts
+        last_audit_method = audit_method
+        released = True
+        for artifact_id in dropped_artifact_ids:
+            row = counts.get(artifact_id, {})
+            replica_count = int(row.get("replica_count", 0))
+            if replica_count != 0:
+                released = False
+                break
+        now = time.time()
+        if released or now >= deadline:
+            return {
+                "gs_addr": str(gs_addr),
+                "audit_method": str(last_audit_method),
+                "replica_counts": last_counts,
+                "poll_attempts": int(attempts),
+                "poll_elapsed_s": float(max(0.0, now - start_time)),
+                "old_versions_released_observed": bool(released),
+                "dropped_artifact_ids": sorted(dropped_artifact_ids),
+            }
+        sleep_s = min(
+            max(0.1, float(poll_interval_s)),
+            max(0.0, deadline - now),
+        )
+        if sleep_s <= 0.0:
+            continue
+        time.sleep(sleep_s)
 
 
 VERSION_TOKEN_RE = re.compile(r"\bversion=(\d+)\b")
@@ -1451,6 +2115,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Publisher payload device passed to weight_publisher_e2e.",
     )
     parser.add_argument(
+        "--transport-group-mode",
+        choices=["none", "tp_version"],
+        default="none",
+        help=(
+            "Receiver transport scheduling-group mode passed to weight_publisher_e2e."
+        ),
+    )
+    parser.add_argument(
         "--max-concurrency",
         type=int,
         default=4,
@@ -1460,10 +2132,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--receiver-preflight-transient-overlap",
+        type=int,
+        default=1,
+        help=(
+            "Receiver memory preflight transient overlap multiplier. "
+            "Unified request chain defaults to 1 (serial apply path)."
+        ),
+    )
+    parser.add_argument(
         "--progress-poll-s",
         type=float,
         default=10.0,
         help="Progress heartbeat polling interval (seconds).",
+    )
+    parser.add_argument(
+        "--p0-early-stop",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable P0 early-stop for group case. If group metadata contract is "
+            "missing after publisher finishes, terminate roles early and fail fast."
+        ),
+    )
+    parser.add_argument(
+        "--p0-early-stop-grace-s",
+        type=float,
+        default=20.0,
+        help="P0 early-stop grace window after publisher completion (seconds).",
+    )
+    parser.add_argument(
+        "--throughput-sample-interval-s",
+        type=float,
+        default=1.0,
+        help="Sampling interval for cluster active throughput series (seconds).",
+    )
+    parser.add_argument(
+        "--throughput-max-samples",
+        type=int,
+        default=20000,
+        help="Max throughput samples kept in payload (adaptive interval when exceeded).",
     )
     parser.add_argument(
         "--max-publish-to-apply-s",
@@ -1542,8 +2250,18 @@ def main(argv: list[str]) -> int:
         raise ValueError("tp-materialize-deadline-s must be >= 0")
     if int(args.max_concurrency) <= 0:
         raise ValueError("max-concurrency must be > 0")
+    if str(args.transport_group_mode) == "tp_version" and int(args.tp_world_size) <= 0:
+        raise ValueError("transport-group-mode=tp_version requires tp-world-size > 0")
+    if int(args.receiver_preflight_transient_overlap) <= 0:
+        raise ValueError("receiver-preflight-transient-overlap must be > 0")
     if float(args.progress_poll_s) <= 0:
         raise ValueError("progress-poll-s must be > 0")
+    if float(args.p0_early_stop_grace_s) < 0.0:
+        raise ValueError("p0-early-stop-grace-s must be >= 0")
+    if float(args.throughput_sample_interval_s) <= 0.0:
+        raise ValueError("throughput-sample-interval-s must be > 0")
+    if int(args.throughput_max_samples) <= 0:
+        raise ValueError("throughput-max-samples must be > 0")
     if float(args.remote_timeout_sec) <= 0:
         raise ValueError("remote-timeout-sec must be > 0")
     estimated_remote_timeout_sec = estimate_remote_timeout_floor_sec(args)
@@ -1577,6 +2295,11 @@ def main(argv: list[str]) -> int:
     run_tag = f"{int(time.time())}"
     capability_token_secret = secrets.token_hex(32)
     run_id = f"{args.case_name}-{run_tag}"
+    transport_group_plan = derive_transport_group_plan(
+        mode=str(args.transport_group_mode),
+        receiver_count=len(receiver_procs),
+        tp_world_size=int(args.tp_world_size),
+    )
     cluster_id = str(args.cluster_id).strip() or (discover_global_cluster_token() or "")
     out_dir = Path(str(args.out_dir)).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1653,6 +2376,7 @@ def main(argv: list[str]) -> int:
                 tp_world_size=int(args.tp_world_size),
                 tp_total_bytes=int(args.tp_total_bytes),
                 max_concurrency=int(args.max_concurrency),
+                transient_overlap_hint=int(args.receiver_preflight_transient_overlap),
                 timeout_sec=min(30.0, float(args.remote_timeout_sec)),
             )
             for proc in receiver_procs
@@ -1741,6 +2465,9 @@ def main(argv: list[str]) -> int:
             timeout_sec=120.0,
         )
 
+    transport_group_namespace_base = f"{str(args.case_name).strip()}-{run_tag}"
+    transport_group_epoch = int(time.time())
+
     publisher_spec = RoleSpec(
         process_id=str(args.publisher_proc),
         output_json=publisher_output,
@@ -1773,6 +2500,13 @@ def main(argv: list[str]) -> int:
             hold_after_finish_s=float(args.publisher_hold_after_finish_s),
             log_file=publisher_log_file,
             ready_file=None,
+            transport_group_mode="none",
+            transport_group_kind=TRANSPORT_GROUP_KIND_TP_VERSION,
+            transport_group_namespace=f"{transport_group_namespace_base}:publisher",
+            transport_group_total_parts=0,
+            transport_group_receiver_index=0,
+            transport_group_priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
+            transport_group_epoch=transport_group_epoch,
         ),
         ready_file=None,
     )
@@ -1811,6 +2545,15 @@ def main(argv: list[str]) -> int:
                 hold_after_finish_s=float(args.receiver_hold_after_finish_s),
                 log_file=receiver_log_files[proc],
                 ready_file=(case_dir / f"receiver_{idx + 1}.ready.json").as_posix(),
+                transport_group_mode=transport_group_plan.mode,
+                transport_group_kind=transport_group_plan.kind,
+                transport_group_namespace=(
+                    f"{transport_group_namespace_base}:receiver"
+                ),
+                transport_group_total_parts=transport_group_plan.total_parts,
+                transport_group_receiver_index=idx,
+                transport_group_priority=transport_group_plan.priority,
+                transport_group_epoch=transport_group_epoch,
             ),
         )
         for idx, proc in enumerate(receiver_procs)
@@ -1822,6 +2565,22 @@ def main(argv: list[str]) -> int:
     receiver_summaries: dict[str, dict[str, Any]] = {}
     gs_probe: dict[str, Any] = {}
     cluster_artifact_probe: dict[str, dict[str, Any]] = {}
+    transport_group_probe: dict[str, Any] = {}
+    p0_early_stop: dict[str, Any] = {
+        "enabled": bool(args.p0_early_stop)
+        and transport_group_plan.mode == "tp_version",
+        "mode": transport_group_plan.mode,
+        "grace_s": float(args.p0_early_stop_grace_s),
+        "triggered": False,
+        "reasons": [],
+        "attempts": 0,
+        "triggered_at_utc": None,
+        "probe": {},
+        "terminate_errors": [],
+    }
+    transport_rows_payload: dict[str, Any] = {}
+    transport_metrics: dict[str, Any] = {}
+    case_transport_window_start = datetime.now(timezone.utc)
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=len(receiver_specs) + 1
@@ -1880,64 +2639,84 @@ def main(argv: list[str]) -> int:
                             published_artifact_ids.append(artifact_id)
             published_artifact_ids = list(dict.fromkeys(published_artifact_ids))
 
-            if published_artifact_ids:
-                try:
-                    replica_counts, audit_method = query_replica_counts_via_gs_rpc(
-                        gs_addr=str(args.gs_addr),
-                        artifact_ids=published_artifact_ids,
-                        timeout_sec=15.0,
-                    )
-                    gs_probe = {
-                        "gs_addr": str(args.gs_addr),
-                        "audit_method": audit_method,
-                        "replica_counts": replica_counts,
-                    }
-                except Exception as exc:  # noqa: BLE001
-                    gs_probe = {
-                        "gs_addr": str(args.gs_addr),
-                        "audit_method": "gs_rpc",
-                        "error": str(exc),
-                    }
+            p0_result = run_transport_group_p0_guard(
+                enabled=bool(args.p0_early_stop),
+                mode=transport_group_plan.mode,
+                group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+                started_at_utc=case_transport_window_start,
+                grace_s=float(args.p0_early_stop_grace_s),
+                poll_interval_s=float(args.poll_interval_s),
+            )
+            p0_early_stop.update(p0_result)
 
-            for spec in receiver_specs:
-                wait_for_remote_file_or_fail_fast(
-                    spec.process_id,
-                    spec.output_json,
-                    future=receiver_futures[spec.process_id],
-                    timeout_sec=(
-                        float(args.receiver_timeout_s)
-                        + float(args.receiver_hold_after_finish_s)
-                        + 60.0
-                    ),
+            if bool(p0_early_stop.get("triggered")):
+                terminate_errors = terminate_remote_e2e_roles(
+                    process_ids=[spec.process_id for spec in receiver_specs]
+                    + [publisher_spec.process_id],
+                    model_name=model_name,
+                    timeout_sec=15.0,
                 )
-
-            if published_artifact_ids:
-                probe_processes = [publisher_spec.process_id] + [
-                    spec.process_id for spec in receiver_specs
-                ]
-                for process_id in probe_processes:
+                p0_early_stop["terminate_errors"] = terminate_errors
+                for spec in receiver_specs:
+                    future = receiver_futures.get(spec.process_id)
+                    if future is None:
+                        continue
                     try:
-                        cluster_artifact_probe[process_id] = probe_artifacts_on_process(
-                            process_id=process_id,
-                            repo_root=str(args.repo_root),
-                            daemon_connect_address=daemon_connect_by_process[
-                                process_id
-                            ],
-                            artifact_ids=published_artifact_ids,
-                            timeout_sec=30.0,
+                        receiver_logs[spec.process_id] = future.result(timeout=30.0)
+                    except Exception as exc:  # noqa: BLE001
+                        receiver_logs[spec.process_id] = (
+                            f"receiver terminated or failed after p0 early stop: {exc}"
+                        )
+                    try:
+                        receiver_summaries[spec.process_id] = read_remote_json(
+                            spec.process_id,
+                            spec.output_json,
+                            timeout_sec=10.0,
                         )
                     except Exception as exc:  # noqa: BLE001
-                        cluster_artifact_probe[process_id] = {"__error__": str(exc)}
+                        receiver_summaries[spec.process_id] = {"__error__": str(exc)}
+            else:
+                for spec in receiver_specs:
+                    wait_for_remote_file_or_fail_fast(
+                        spec.process_id,
+                        spec.output_json,
+                        future=receiver_futures[spec.process_id],
+                        timeout_sec=(
+                            float(args.receiver_timeout_s)
+                            + float(args.receiver_hold_after_finish_s)
+                            + 60.0
+                        ),
+                    )
 
-            for spec in receiver_specs:
-                receiver_logs[spec.process_id] = receiver_futures[
-                    spec.process_id
-                ].result()
-                receiver_summaries[spec.process_id] = read_remote_json(
-                    spec.process_id,
-                    spec.output_json,
-                    timeout_sec=20.0,
-                )
+                if published_artifact_ids:
+                    probe_processes = [publisher_spec.process_id] + [
+                        spec.process_id for spec in receiver_specs
+                    ]
+                    for process_id in probe_processes:
+                        try:
+                            cluster_artifact_probe[process_id] = (
+                                probe_artifacts_on_process(
+                                    process_id=process_id,
+                                    repo_root=str(args.repo_root),
+                                    daemon_connect_address=daemon_connect_by_process[
+                                        process_id
+                                    ],
+                                    artifact_ids=published_artifact_ids,
+                                    timeout_sec=30.0,
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            cluster_artifact_probe[process_id] = {"__error__": str(exc)}
+
+                for spec in receiver_specs:
+                    receiver_logs[spec.process_id] = receiver_futures[
+                        spec.process_id
+                    ].result()
+                    receiver_summaries[spec.process_id] = read_remote_json(
+                        spec.process_id,
+                        spec.output_json,
+                        timeout_sec=20.0,
+                    )
         except Exception as exc:
             terminate_errors = terminate_remote_e2e_roles(
                 process_ids=[spec.process_id for spec in receiver_specs]
@@ -1954,6 +2733,7 @@ def main(argv: list[str]) -> int:
         finally:
             progress_stop_event.set()
             progress_thread.join(timeout=5.0)
+    case_transport_window_end = datetime.now(timezone.utc)
 
     published = publisher_summary.get("published", [])
     published_by_version: dict[int, dict[str, Any]] = {}
@@ -1985,6 +2765,49 @@ def main(argv: list[str]) -> int:
     kept_artifact_ids.discard("")
     dropped_artifact_ids.discard("")
 
+    published_artifact_ids: list[str] = []
+    for version in ordered_versions:
+        row = published_by_version.get(version, {})
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id", "")).strip()
+        if artifact_id:
+            published_artifact_ids.append(artifact_id)
+    published_artifact_ids = list(dict.fromkeys(published_artifact_ids))
+    if published_artifact_ids:
+        try:
+            gs_probe = query_replica_counts_until_old_released(
+                gs_addr=str(args.gs_addr),
+                artifact_ids=published_artifact_ids,
+                dropped_artifact_ids=dropped_artifact_ids,
+                timeout_sec=max(1.0, float(args.retention_timeout_s)),
+                poll_interval_s=max(0.2, float(args.poll_interval_s)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            gs_probe = {
+                "gs_addr": str(args.gs_addr),
+                "audit_method": "gs_rpc",
+                "error": str(exc),
+                "dropped_artifact_ids": sorted(dropped_artifact_ids),
+            }
+    transport_group_probe = query_transport_group_probe(
+        group_mode=transport_group_plan.mode,
+        group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+        started_at_utc=case_transport_window_start,
+        finished_at_utc=case_transport_window_end,
+    )
+    transport_rows_payload = query_transport_rows(
+        started_at_utc=case_transport_window_start,
+        finished_at_utc=case_transport_window_end,
+    )
+    transport_metrics = compute_transport_metrics(
+        transport_rows_payload=transport_rows_payload,
+        payload_mode=str(args.payload_mode),
+        tp_total_bytes=int(args.tp_total_bytes),
+        sample_interval_s=float(args.throughput_sample_interval_s),
+        max_samples=int(args.throughput_max_samples),
+    )
+
     publish_latencies = [
         float(row.get("publish_latency_s", 0.0))
         for row in published_by_version.values()
@@ -2003,7 +2826,22 @@ def main(argv: list[str]) -> int:
         for version, row in published_by_version.items()
     }
 
+    missing_receiver_summaries = [
+        {"process_id": proc, "reason": "receiver summary missing"}
+        for proc in receiver_procs
+        if proc not in receiver_summaries
+    ]
+    receiver_sequence_failures.extend(missing_receiver_summaries)
+
     for proc, summary in receiver_summaries.items():
+        if "__error__" in summary:
+            receiver_sequence_failures.append(
+                {
+                    "process_id": proc,
+                    "reason": str(summary.get("__error__", "receiver summary error")),
+                }
+            )
+            continue
         received_rows = summary.get("received", [])
         if not isinstance(received_rows, list):
             receiver_sequence_failures.append(
@@ -2119,6 +2957,11 @@ def main(argv: list[str]) -> int:
         "audit_method": gs_probe.get("audit_method", "gs_rpc"),
         "error": gs_probe.get("error") if gs_probe else "missing gs probe payload",
         "old_versions_released": None,
+        "old_versions_released_observed": gs_probe.get(
+            "old_versions_released_observed"
+        ),
+        "poll_attempts": int(gs_probe.get("poll_attempts", 0)),
+        "poll_elapsed_s": float(gs_probe.get("poll_elapsed_s", 0.0)),
         "replica_versions_within_window": None,
         "replica_version_count_within_limit": None,
     }
@@ -2136,7 +2979,11 @@ def main(argv: list[str]) -> int:
                     replica_artifacts.add(artifact_id)
                 if artifact_id in dropped_artifact_ids and replica_count != 0:
                     old_ok = False
-            gs_checks["old_versions_released"] = old_ok
+            observed_release = bool(
+                gs_probe.get("old_versions_released_observed", old_ok)
+            )
+            gs_checks["old_versions_released_observed"] = observed_release
+            gs_checks["old_versions_released"] = bool(old_ok and observed_release)
             gs_checks["replica_versions_within_window"] = replica_artifacts.issubset(
                 kept_artifact_ids
             )
@@ -2154,6 +3001,8 @@ def main(argv: list[str]) -> int:
     probe_checks: dict[str, Any] = {
         "enabled": bool(cluster_artifact_probe),
         "probe_errors": [],
+        "probe_modes": [],
+        "strict_materializable_checks_enforced": True,
         "dropped_non_materializable": None,
         "dropped_not_exists": None,
         "materializable_versions_within_window": None,
@@ -2167,6 +3016,7 @@ def main(argv: list[str]) -> int:
         materializable_artifacts: set[str] = set()
         probe_errors: list[dict[str, str]] = []
         probe_init_modes: dict[str, str] = {}
+        probe_modes: set[str] = set()
         for process_id, payload in cluster_artifact_probe.items():
             if "__error__" in payload:
                 probe_errors.append(
@@ -2179,6 +3029,9 @@ def main(argv: list[str]) -> int:
                 init_mode = str(payload.get("init_mode", "")).strip()
                 if init_mode:
                     probe_init_modes[process_id] = init_mode
+                mode = str(payload.get("probe_mode", "")).strip()
+                if mode:
+                    probe_modes.add(mode)
             else:
                 artifact_states = payload
             for artifact_id, state in artifact_states.items():
@@ -2204,6 +3057,20 @@ def main(argv: list[str]) -> int:
         )
         probe_checks["materializable_artifacts"] = sorted(materializable_artifacts)
         probe_checks["probe_init_modes"] = probe_init_modes
+        probe_checks["probe_modes"] = sorted(probe_modes)
+        # `exists_only` lightweight probe intentionally does not assert true
+        # materializability; avoid turning it into a hard pass/fail gate.
+        strict_probe = not probe_modes or any(
+            mode != "exists_only" for mode in probe_modes
+        )
+        probe_checks["strict_materializable_checks_enforced"] = bool(strict_probe)
+
+    transport_throughput_summary = dict(transport_metrics.get("throughput", {}))
+    if "series" in transport_throughput_summary:
+        transport_throughput_summary["series_sample_count"] = float(
+            len(transport_throughput_summary.get("series", []))
+        )
+        transport_throughput_summary.pop("series", None)
 
     summary = {
         "case_name": str(args.case_name),
@@ -2221,6 +3088,10 @@ def main(argv: list[str]) -> int:
             "publish_latency_s": summarize_series(publish_latencies),
             "apply_latency_s": summarize_series(apply_latencies),
             "publish_to_apply_s": summarize_series(propagation_latencies),
+            "transport_throughput_gib_s": transport_throughput_summary,
+        },
+        "distribution": {
+            "transport_diffusion": transport_metrics.get("diffusion", {}),
         },
         "stability": {
             "all_receivers_completed": not receiver_sequence_failures,
@@ -2230,10 +3101,17 @@ def main(argv: list[str]) -> int:
             "receiver_mode_consistent": not receiver_mode_failures,
             "publish_to_apply_within_limit": not propagation_violations,
             "mechanism_keep_last_window_validated": bool(published_by_version),
+            "p0_early_stop_triggered": bool(p0_early_stop.get("triggered")),
         },
         "retention_checks": {
             "global_store_probe": gs_checks,
             "cluster_probe": probe_checks,
+        },
+        "transport_checks": {
+            "p0_early_stop": p0_early_stop,
+            "group_metadata_probe": transport_group_probe,
+            "transport_metrics_error": transport_metrics.get("error"),
+            "transport_rows_error": transport_rows_payload.get("error"),
         },
         "failures": {
             "receiver_sequence_failures": receiver_sequence_failures,
@@ -2248,6 +3126,7 @@ def main(argv: list[str]) -> int:
         and summary["stability"]["binding_pointer_stable"]
         and summary["stability"]["receiver_mode_consistent"]
         and summary["stability"]["publish_to_apply_within_limit"]
+        and not summary["stability"]["p0_early_stop_triggered"]
     )
     if gs_checks["enabled"]:
         passed = passed and not bool(gs_checks.get("error"))
@@ -2256,13 +3135,23 @@ def main(argv: list[str]) -> int:
         passed = passed and bool(gs_checks.get("replica_version_count_within_limit"))
     if probe_checks["enabled"]:
         passed = passed and not bool(probe_checks.get("probe_errors"))
-        passed = passed and bool(probe_checks.get("dropped_non_materializable"))
-        passed = passed and bool(
-            probe_checks.get("materializable_versions_within_window")
-        )
-        passed = passed and bool(
-            probe_checks.get("materializable_version_count_within_limit")
-        )
+        if bool(probe_checks.get("strict_materializable_checks_enforced", True)):
+            passed = passed and bool(probe_checks.get("dropped_non_materializable"))
+            passed = passed and bool(
+                probe_checks.get("materializable_versions_within_window")
+            )
+            passed = passed and bool(
+                probe_checks.get("materializable_version_count_within_limit")
+            )
+    if bool(transport_group_probe.get("enabled")):
+        passed = passed and not bool(transport_group_probe.get("error"))
+        passed = passed and bool(transport_group_probe.get("window_has_transports"))
+        passed = passed and bool(transport_group_probe.get("requester_tagged_complete"))
+        passed = passed and bool(transport_group_probe.get("group_mode_consistent"))
+        passed = passed and bool(transport_group_probe.get("group_contract_consistent"))
+    if bool(transport_metrics.get("enabled")):
+        passed = passed and not bool(transport_metrics.get("error"))
+        passed = passed and int(transport_metrics.get("transport_count", 0)) > 0
     summary["passed"] = bool(passed)
 
     payload = {
@@ -2291,9 +3180,23 @@ def main(argv: list[str]) -> int:
             "tp_total_bytes": int(args.tp_total_bytes),
             "tp_device_base_index": int(args.tp_device_base_index),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
+            "transport_group_mode": transport_group_plan.mode,
+            "transport_group_kind": transport_group_plan.kind,
+            "transport_group_total_parts": transport_group_plan.total_parts,
+            "transport_group_priority": transport_group_plan.priority,
+            "transport_group_total_parts_formula": (
+                "receiver_count*tp_world_size when mode=tp_version, else 0"
+            ),
             "max_concurrency": int(args.max_concurrency),
+            "receiver_preflight_transient_overlap": int(
+                args.receiver_preflight_transient_overlap
+            ),
             "publish_device": str(args.publish_device),
             "progress_poll_s": float(args.progress_poll_s),
+            "p0_early_stop": bool(args.p0_early_stop),
+            "p0_early_stop_grace_s": float(args.p0_early_stop_grace_s),
+            "throughput_sample_interval_s": float(args.throughput_sample_interval_s),
+            "throughput_max_samples": int(args.throughput_max_samples),
             "max_publish_to_apply_s": float(args.max_publish_to_apply_s),
             "retention_timeout_s": float(args.retention_timeout_s),
             "receiver_apply_mode": str(args.receiver_apply_mode),
@@ -2304,6 +3207,12 @@ def main(argv: list[str]) -> int:
             "publisher_hold_after_finish_s": float(args.publisher_hold_after_finish_s),
             "receiver_warmup_s": float(args.receiver_warmup_s),
             "remote_timeout_sec": float(args.remote_timeout_sec),
+            "case_transport_window_start_utc": _to_utc_sql_timestamp(
+                case_transport_window_start
+            ),
+            "case_transport_window_end_utc": _to_utc_sql_timestamp(
+                case_transport_window_end
+            ),
             "cluster_id": cluster_id,
             "daemon_heartbeat_interval": str(args.daemon_heartbeat_interval),
             "daemon_periodic_sync_interval": str(args.daemon_periodic_sync_interval),
@@ -2327,6 +3236,10 @@ def main(argv: list[str]) -> int:
         "receiver_summaries": receiver_summaries,
         "cluster_artifact_probe": cluster_artifact_probe,
         "global_store_probe": gs_probe,
+        "transport_group_probe": transport_group_probe,
+        "p0_early_stop": p0_early_stop,
+        "transport_rows_payload": transport_rows_payload,
+        "transport_metrics": transport_metrics,
     }
 
     output_path = case_dir / f"{args.case_name}.json"
@@ -2350,6 +3263,19 @@ def main(argv: list[str]) -> int:
                 "publish_to_apply_p95_s": summary["performance"]["publish_to_apply_s"][
                     "p95"
                 ],
+                "grouped_transports": int(
+                    transport_group_probe.get("grouped_transports", 0)
+                ),
+                "group_probe_error": transport_group_probe.get("error"),
+                "p0_early_stop_triggered": bool(
+                    summary["stability"].get("p0_early_stop_triggered")
+                ),
+                "throughput_peak_gib_s": summary["performance"][
+                    "transport_throughput_gib_s"
+                ].get("peak_active_throughput_gib_s", 0.0),
+                "diffusion_top1_share": summary["distribution"][
+                    "transport_diffusion"
+                ].get("top1_share", 0.0),
             },
             ensure_ascii=False,
         ),

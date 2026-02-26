@@ -3,7 +3,14 @@
 """Integration tests for Global Store full stack."""
 
 
-from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
+from tensorcast.global_store.models import (
+    ExportState,
+    MemoryType,
+    Replica,
+    TransportCompletionOutcome,
+    TransportSchedulingGroup,
+    Worker,
+)
 
 
 class TestIntegration:
@@ -110,6 +117,7 @@ class TestIntegration:
             source_node_id="client",
             source_address="10.0.0.100",
             source_port=9999,
+            request_id="integration-transport-priority-1",
         )
 
         assert selected.node_id == "node0"
@@ -159,6 +167,7 @@ class TestIntegration:
                 source_node_id=f"client_{i}",
                 source_address="192.168.2.1",
                 source_port=9000 + i,
+                request_id=f"integration-concurrent-{i}",
             )
             transport_ids.append(transport_id)
             assert selected.replica_id == replica.replica_id
@@ -170,13 +179,103 @@ class TestIntegration:
 
         # Complete all transports
         for transport_id in transport_ids:
-            result = transport_service.complete_transport(transport_id)
+            result = transport_service.complete_transport(
+                transport_id,
+                outcome=TransportCompletionOutcome.SUCCESS,
+            )
             assert result is not None
 
         # Verify load is back to zero
         final_replicas = artifact_service.list_replicas(artifact_id="concurrent_artifact")
         assert len(final_replicas) == 1
         assert final_replicas[0].current_requests == 0
+
+    def test_group_aware_transport_progress_gate(self, services):
+        """Grouped transport requests should produce non-zero group progress."""
+        worker_service = services["worker"]
+        artifact_service = services["artifact"]
+        transport_service = services["transport"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_group_gate_node",
+                node_id="group_gate_node",
+                node_address="192.168.1.88",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="group_gate_artifact",
+                node_id="group_gate_node",
+                node_address="192.168.1.88",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=2,
+            )
+        )
+
+        group_part0 = TransportSchedulingGroup(
+            group_id="group-gate",
+            group_kind="tp_rank",
+            total_parts=2,
+            part_id="part-0",
+            priority=0,
+            epoch=1,
+        )
+        group_part1 = TransportSchedulingGroup(
+            group_id="group-gate",
+            group_kind="tp_rank",
+            total_parts=2,
+            part_id="part-1",
+            priority=0,
+            epoch=1,
+        )
+
+        _, transport_id_0 = transport_service.request_transport(
+            artifact_id="group_gate_artifact",
+            source_node_id="group_client_0",
+            source_address="192.168.2.10",
+            source_port=9100,
+            request_id="integration-group-gate-0",
+            scheduling_group=group_part0,
+        )
+        _, transport_id_1 = transport_service.request_transport(
+            artifact_id="group_gate_artifact",
+            source_node_id="group_client_1",
+            source_address="192.168.2.11",
+            source_port=9101,
+            request_id="integration-group-gate-1",
+            scheduling_group=group_part1,
+        )
+
+        transport_service.complete_transport(
+            transport_id_0,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+        transport_service.complete_transport(
+            transport_id_1,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+
+        progress = transport_service.transport_repository.get_group_progress(
+            group_kind="tp_rank",
+            group_id="group-gate",
+            group_epoch=1,
+            total_parts_hint=2,
+        )
+        assert progress.completed_parts == 2
+        assert progress.total_parts == 2
+        assert progress.completion_ratio == 1.0
 
     def test_worker_heartbeat_and_cleanup(self, services):
         """Test worker heartbeat and cleanup functionality."""
@@ -339,6 +438,7 @@ class TestIntegration:
             source_node_id="consistency_client",
             source_address="192.168.2.100",
             source_port=9000,
+            request_id="integration-consistency-1",
         )
 
         # Verify consistency across services
@@ -353,7 +453,10 @@ class TestIntegration:
         assert worker.worker_id in worker_ids
 
         # Complete transport
-        result = transport_service.complete_transport(transport_id)
+        result = transport_service.complete_transport(
+            transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
         assert result is not None
 
         # Verify consistency after completion
@@ -411,6 +514,7 @@ class TestIntegration:
                 source_node_id="multi_client",
                 source_address="192.168.3.1",
                 source_port=9000,
+                request_id=f"integration-multi-model-{artifact_id}",
             )
             transport_ids[artifact_id] = transport_id
             assert selected.worker_id == worker.worker_id

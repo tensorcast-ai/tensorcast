@@ -9,8 +9,16 @@ from uuid import UUID
 
 import grpc
 
-from tensorcast.global_store.exceptions import NotFoundError, TimeoutError
-from tensorcast.global_store.models import Replica
+from tensorcast.global_store.exceptions import (
+    NotFoundError,
+    TimeoutError,
+    ValidationError,
+)
+from tensorcast.global_store.models import (
+    Replica,
+    TransportCompletionOutcome,
+    TransportSchedulingGroup,
+)
 from tensorcast.global_store.services.transport_service import TransportService
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.common.v1 import common_pb2
@@ -77,6 +85,44 @@ class TransportRpcHandler:
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
 
+            scheduling_group: TransportSchedulingGroup | None = None
+            if request.HasField("scheduling_group"):
+                group = request.scheduling_group
+                group_id = group.group_id.strip()
+                group_kind = group.group_kind.strip()
+                part_id = group.part_id.strip()
+                if not group_id or not group_kind or not part_id:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(
+                        "scheduling_group requires non-empty group_id/group_kind/part_id"
+                    )
+                    return global_store_pb2.RequestReplicaTransportResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                if int(group.total_parts) <= 0:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("scheduling_group.total_parts must be > 0")
+                    return global_store_pb2.RequestReplicaTransportResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                scheduling_group = TransportSchedulingGroup(
+                    group_id=group_id,
+                    group_kind=group_kind,
+                    total_parts=int(group.total_parts),
+                    part_id=part_id,
+                    priority=int(group.priority),
+                    epoch=int(group.epoch),
+                )
+
+            requester_worker_id = request.requester_worker_id.strip() or None
+            request_id = request.request_id.strip()
+            if not request_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("request_id is required")
+                return global_store_pb2.RequestReplicaTransportResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
             replica, transport_id = self._transport_service.request_transport(
                 artifact_id=request.artifact_id,
                 view_id=requested_view_id,
@@ -84,6 +130,9 @@ class TransportRpcHandler:
                 source_address=request.source_address,
                 source_port=request.source_port,
                 wait_timeout_ms=wait_timeout_ms,
+                scheduling_group=scheduling_group,
+                requester_worker_id=requester_worker_id,
+                request_id=request_id,
             )
 
             remote_info = self._replica_to_memory_info(replica)
@@ -115,6 +164,12 @@ class TransportRpcHandler:
             return global_store_pb2.RequestReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_TIMED_OUT
             )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.RequestReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
         except Exception as exc:  # noqa: BLE001
             self._logger.exception("Error requesting artifact transport")
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -132,7 +187,17 @@ class TransportRpcHandler:
         try:
             transport_id = UUID(request.transport_id)
             set_span_attributes({"tc.transport.id": str(transport_id)})
-            self._transport_service.complete_transport(transport_id)
+            outcome = self._completion_outcome_from_proto(request.outcome)
+            if outcome == TransportCompletionOutcome.UNSPECIFIED:
+                raise ValidationError(
+                    "complete transport requires explicit outcome (SUCCESS/FAILED/EXPIRED/CANCELLED)"
+                )
+            outcome_detail = request.outcome_detail.strip() or None
+            self._transport_service.complete_transport(
+                transport_id=transport_id,
+                outcome=outcome,
+                outcome_detail=outcome_detail,
+            )
             return global_store_pb2.CompleteReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_OK
             )
@@ -142,6 +207,12 @@ class TransportRpcHandler:
             return global_store_pb2.CompleteReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_NOT_FOUND
             )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.CompleteReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
         except Exception as exc:  # noqa: BLE001
             self._logger.exception("Error completing artifact transport")
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -149,3 +220,17 @@ class TransportRpcHandler:
             return global_store_pb2.CompleteReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
+
+    @staticmethod
+    def _completion_outcome_from_proto(
+        proto_outcome: global_store_pb2.TransportCompletionOutcome,
+    ) -> TransportCompletionOutcome:
+        if proto_outcome == global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS:
+            return TransportCompletionOutcome.SUCCESS
+        if proto_outcome == global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_FAILED:
+            return TransportCompletionOutcome.FAILED
+        if proto_outcome == global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_EXPIRED:
+            return TransportCompletionOutcome.EXPIRED
+        if proto_outcome == global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_CANCELLED:
+            return TransportCompletionOutcome.CANCELLED
+        return TransportCompletionOutcome.UNSPECIFIED

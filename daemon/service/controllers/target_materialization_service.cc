@@ -2,6 +2,7 @@
 
 #include "daemon/service/controllers/target_materialization_service.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -16,7 +17,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -204,6 +207,112 @@ std::chrono::milliseconds resolve_target_request_budget(const grpc::ServerContex
     return std::min(remaining, kHardCap);
   }
   return std::min(kDefaultBudget, kHardCap);
+}
+
+struct ParsedTransportHint {
+  std::string request_id;
+  std::optional<store::loading::TransportSchedulingGroupHint> scheduling_group;
+};
+
+ParsedTransportHint parse_transport_hint_from_operation_id(std::string_view operation_id) {
+  constexpr std::string_view kGroupMarker = "#tcg:";
+  ParsedTransportHint parsed;
+  if (operation_id.empty()) {
+    return parsed;
+  }
+  const size_t marker_pos = operation_id.find(kGroupMarker);
+  if (marker_pos == std::string_view::npos) {
+    parsed.request_id = std::string(operation_id);
+    return parsed;
+  }
+
+  parsed.request_id = std::string(operation_id.substr(0, marker_pos));
+  const std::string_view metadata = operation_id.substr(marker_pos + kGroupMarker.size());
+
+  std::string group_kind;
+  std::string group_id;
+  std::string part_id;
+  std::string request_id_override;
+  int group_total_parts = 0;
+  int group_priority = 0;
+  uint64_t group_epoch = 0;
+
+  for (const std::string_view item : absl::StrSplit(metadata, ';', absl::SkipEmpty())) {
+    std::vector<std::string_view> kv = absl::StrSplit(item, absl::MaxSplits('=', 1));
+    if (kv.size() != 2) {
+      continue;
+    }
+    const std::string_view key = kv[0];
+    const std::string_view value = kv[1];
+    if (key == "kind") {
+      group_kind = std::string(value);
+      continue;
+    }
+    if (key == "gid") {
+      group_id = std::string(value);
+      continue;
+    }
+    if (key == "tot") {
+      int parsed_total_parts = 0;
+      if (absl::SimpleAtoi(value, &parsed_total_parts)) {
+        group_total_parts = parsed_total_parts;
+      }
+      continue;
+    }
+    if (key == "part") {
+      part_id = std::string(value);
+      continue;
+    }
+    if (key == "pri") {
+      int parsed_priority = 0;
+      if (absl::SimpleAtoi(value, &parsed_priority)) {
+        group_priority = parsed_priority;
+      }
+      continue;
+    }
+    if (key == "ep") {
+      uint64_t parsed_epoch = 0;
+      if (absl::SimpleAtoi(value, &parsed_epoch)) {
+        group_epoch = parsed_epoch;
+      }
+      continue;
+    }
+    if (key == "rid") {
+      request_id_override = std::string(value);
+      continue;
+    }
+  }
+
+  if (!request_id_override.empty()) {
+    parsed.request_id = std::move(request_id_override);
+  }
+
+  if (group_kind.empty() || group_id.empty() || part_id.empty() || group_total_parts <= 0) {
+    return parsed;
+  }
+
+  store::loading::TransportSchedulingGroupHint group;
+  group.group_kind = std::move(group_kind);
+  group.group_id = std::move(group_id);
+  group.total_parts = static_cast<uint32_t>(group_total_parts);
+  group.part_id = std::move(part_id);
+  group.priority = static_cast<uint32_t>(std::max(0, group_priority));
+  group.epoch = group_epoch;
+  parsed.scheduling_group = std::move(group);
+  return parsed;
+}
+
+void apply_transport_hints_from_operation_id(const std::string& operation_id, store::loading::MaterializeHints* hints) {
+  if (hints == nullptr || operation_id.empty()) {
+    return;
+  }
+  ParsedTransportHint parsed = parse_transport_hint_from_operation_id(operation_id);
+  if (!parsed.request_id.empty()) {
+    hints->transport_request_id = parsed.request_id;
+  }
+  if (parsed.scheduling_group.has_value()) {
+    hints->transport_scheduling_group = std::move(*parsed.scheduling_group);
+  }
 }
 
 template <typename RequestT>
@@ -506,6 +615,13 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   hints.request_budget = request_budget;
   hints.transport_wait_timeout = request_budget;
   hints.artifact_id = resolved_artifact_id;
+  const std::string requester_worker_id = d_.identity.worker_id();
+  if (!requester_worker_id.empty()) {
+    hints.transport_requester_worker_id = requester_worker_id;
+  }
+  if (req.has_operation_id() && !req.operation_id().empty()) {
+    apply_transport_hints_from_operation_id(req.operation_id(), &hints);
+  }
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
@@ -807,6 +923,13 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   hints.request_budget = request_budget;
   hints.transport_wait_timeout = request_budget;
   hints.artifact_id = resolved_artifact_id;
+  const std::string requester_worker_id = d_.identity.worker_id();
+  if (!requester_worker_id.empty()) {
+    hints.transport_requester_worker_id = requester_worker_id;
+  }
+  if (req.has_operation_id() && !req.operation_id().empty()) {
+    apply_transport_hints_from_operation_id(req.operation_id(), &hints);
+  }
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;

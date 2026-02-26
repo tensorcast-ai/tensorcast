@@ -408,7 +408,10 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       std::string_view,
       uint32_t,
       const DeviceKey&,
-      uint32_t) override {
+      uint32_t,
+      const std::optional<tensorcast::store::components::TransportSchedulingGroupHint>&,
+      std::string_view,
+      std::string_view) override {
     return absl::UnimplementedError("request_replica_transport not used in tests");
   }
 
@@ -419,11 +422,17 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       std::string_view,
       uint32_t,
       const DeviceKey&,
-      uint32_t) override {
+      uint32_t,
+      const std::optional<tensorcast::store::components::TransportSchedulingGroupHint>&,
+      std::string_view,
+      std::string_view) override {
     return absl::UnimplementedError("request_view_transport not used in tests");
   }
 
-  absl::Status complete_replica_transport(std::string_view) override {
+  absl::Status complete_replica_transport(
+      std::string_view,
+      tensorcast::store::components::TransportCompletionOutcome,
+      std::string_view) override {
     return absl::OkStatus();
   }
 

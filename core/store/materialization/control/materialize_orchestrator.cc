@@ -237,6 +237,25 @@ int resolve_max_reselection_attempts(const MaterializeHints& hints) {
   return static_cast<int>(computed);
 }
 
+std::optional<components::TransportSchedulingGroupHint> to_transport_scheduling_group_hint(
+    const MaterializeHints& hints) {
+  if (!hints.transport_scheduling_group.has_value()) {
+    return std::nullopt;
+  }
+  const auto& group = *hints.transport_scheduling_group;
+  if (group.group_id.empty() || group.group_kind.empty() || group.part_id.empty()) {
+    return std::nullopt;
+  }
+  components::TransportSchedulingGroupHint out;
+  out.group_id = group.group_id;
+  out.group_kind = group.group_kind;
+  out.total_parts = group.total_parts;
+  out.part_id = group.part_id;
+  out.priority = group.priority;
+  out.epoch = group.epoch;
+  return out;
+}
+
 bool should_log_reselection_attempt(int reselection_attempt) {
   return reselection_attempt <= 5 || (reselection_attempt % 10) == 0;
 }
@@ -348,6 +367,11 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   bool had_transport_request = false;
   const auto request_deadline = resolve_request_deadline(hints);
   const int max_reselection_attempts = resolve_max_reselection_attempts(hints);
+  const auto scheduling_group_hint = to_transport_scheduling_group_hint(hints);
+  const std::string_view requester_worker_id = hints.transport_requester_worker_id.empty()
+      ? std::string_view(local_identity_.worker_id)
+      : std::string_view(hints.transport_requester_worker_id);
+  const std::string_view transport_request_id = hints.transport_request_id;
 
   auto request_transport = [&]() -> absl::StatusOr<components::TransportSession> {
     const uint32_t wait_timeout_ms = effective_transport_wait_timeout_ms(hints, request_deadline);
@@ -365,7 +389,10 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           local_identity_.node_address,
           local_identity_.p2p_port,
           target_device,
-          view_probe_timeout_ms);
+          view_probe_timeout_ms,
+          scheduling_group_hint,
+          requester_worker_id,
+          transport_request_id);
       if (!view_transport_or.ok() &&
           (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
            absl::IsDeadlineExceeded(view_transport_or.status()))) {
@@ -379,7 +406,10 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
             local_identity_.node_address,
             local_identity_.p2p_port,
             target_device,
-            wait_timeout_ms);
+            wait_timeout_ms,
+            scheduling_group_hint,
+            requester_worker_id,
+            transport_request_id);
         used_canonical_transport_fallback = true;
         return canonical_transport_or;
       }
@@ -391,7 +421,10 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         local_identity_.node_address,
         local_identity_.p2p_port,
         target_device,
-        wait_timeout_ms);
+        wait_timeout_ms,
+        scheduling_group_hint,
+        requester_worker_id,
+        transport_request_id);
   };
 
   while (gs_connected && allow_p2p) {
@@ -436,7 +469,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       record_stale_source_detected("local_route", view_id.has_value(), reselection_attempt);
       LOG(WARNING) << "Global Store returned local replica for artifact_id=" << artifact_id
                    << "; treating route as stale";
-      absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
+      absl::Status comp_status = gs_client_->complete_replica_transport(
+          session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
       if (!comp_status.ok()) {
         LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
       }
@@ -486,7 +520,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     auto load_or = backend_->ingest_from_p2p(std::string(artifact_id), p2p_src, target, hints);
     if (load_or.ok()) {
       // Notify GS that transport finished
-      absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
+      absl::Status comp_status = gs_client_->complete_replica_transport(
+          session.transport_id, components::TransportCompletionOutcome::kSuccess);
       if (!comp_status.ok()) {
         LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
       }
@@ -505,7 +540,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       }
       return load_or;
     } // Loading via P2P failed – close transport and log
-    absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
+    absl::Status comp_status = gs_client_->complete_replica_transport(
+        session.transport_id, components::TransportCompletionOutcome::kFailed, load_or.status().ToString());
     if (!comp_status.ok()) {
       LOG(WARNING) << "complete_replica_transport after failure returned error: " << comp_status;
     }

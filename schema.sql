@@ -252,10 +252,22 @@ CREATE TABLE IF NOT EXISTS artifact_transports (
     transport_id UUID PRIMARY KEY,
     replica_id UUID NOT NULL,
     artifact_id TEXT NOT NULL,
+    requested_view_id TEXT NULL,
     disk_path TEXT NULL,
     source_node_id VARCHAR NOT NULL,
     source_address VARCHAR NOT NULL,
     source_port INTEGER NOT NULL,
+    request_id TEXT NULL,
+    request_fingerprint TEXT NULL,
+    requester_worker_id TEXT NULL,
+    group_id TEXT NULL,
+    group_kind TEXT NULL,
+    group_total_parts INTEGER NULL,
+    group_part_id TEXT NULL,
+    group_priority INTEGER NULL,
+    group_epoch BIGINT NULL,
+    completion_outcome TEXT NULL,
+    completion_detail TEXT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
     status VARCHAR NOT NULL DEFAULT 'in_progress'
@@ -266,6 +278,41 @@ CREATE INDEX IF NOT EXISTS idx_artifact_transports_source_node_id ON artifact_tr
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_status ON artifact_transports(status);
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_created_at ON artifact_transports(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_completed_at ON artifact_transports(completed_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_transports_request_id_unique ON artifact_transports(request_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_transports_group_status ON artifact_transports(group_kind, group_id, group_epoch, status);
+CREATE INDEX IF NOT EXISTS idx_artifact_transports_requester_status ON artifact_transports(requester_worker_id, status);
+
+-- Pending request queue for group-aware transport scheduling.
+CREATE TABLE IF NOT EXISTS pending_transport_requests (
+    request_id TEXT PRIMARY KEY,
+    request_fingerprint TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    requested_view_id TEXT NULL,
+    source_node_id TEXT NOT NULL,
+    source_address TEXT NOT NULL,
+    source_port INTEGER NOT NULL,
+    requester_worker_id TEXT NULL,
+    group_id TEXT NULL,
+    group_kind TEXT NULL,
+    group_total_parts INTEGER NULL,
+    group_part_id TEXT NULL,
+    group_priority INTEGER NULL,
+    group_epoch BIGINT NULL,
+    state TEXT CHECK (state IN ('enqueued', 'dispatched', 'cancelled', 'expired')) NOT NULL DEFAULT 'enqueued',
+    deadline_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    dispatched_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_transport_state_deadline
+    ON pending_transport_requests(state, deadline_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_transport_group_state
+    ON pending_transport_requests(group_kind, group_id, group_epoch, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_transport_requester_state
+    ON pending_transport_requests(requester_worker_id, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_transport_artifact_view_state
+    ON pending_transport_requests(artifact_id, requested_view_id, state);
 
 -- Virtual Address Space (VS) chunk directory
 CREATE TABLE IF NOT EXISTS chunk_directory (

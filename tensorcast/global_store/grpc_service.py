@@ -60,6 +60,7 @@ from tensorcast.global_store.repositories import (
     LayoutSpecRepository,
     LeafRepository,
     OperationRepository,
+    PendingTransportRequestRepository,
     ProofRepository,
     ReplicaRepository,
     TransportRepository,
@@ -213,6 +214,9 @@ class GlobalStoreServicer(
         self.artifacts_repo = ArtifactRepository(self.connection)
         self.artifact_indices = ArtifactIndexRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
+        self.pending_transport_request_repository = PendingTransportRequestRepository(
+            self.connection
+        )
         self.worker_repository = WorkerRepository(self.connection)
         self.idempotency_repository = IdempotencyRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
@@ -431,7 +435,9 @@ class GlobalStoreServicer(
             logger=logger,
         )
         self.transport_service = TransportService(
-            self.replica_repository, self.transport_repository
+            self.replica_repository,
+            self.transport_repository,
+            self.pending_transport_request_repository,
         )
         self.transport_rpc_handler = TransportRpcHandler(
             transport_service=self.transport_service,
@@ -826,6 +832,7 @@ class GlobalStoreServicer(
         # Order matters due to foreign-key constraints (replica_counters ➜ artifact_replicas)
         tables = [
             "artifact_transports",  # Depends on artifact_replicas via replica_id FK
+            "pending_transport_requests",
             "replica_counters",
             "artifact_replicas",
             "artifact_disk_locations",
@@ -862,6 +869,9 @@ class GlobalStoreServicer(
         # Recreate repositories and rebuild all runtime components that depend on them.
         self.replica_repository = ReplicaRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
+        self.pending_transport_request_repository = PendingTransportRequestRepository(
+            self.connection
+        )
         self.worker_repository = WorkerRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
         self._rebuild_runtime_services_and_handlers()

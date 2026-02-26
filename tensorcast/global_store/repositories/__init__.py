@@ -16,6 +16,7 @@ from .leaf_repository import LeafRepository
 from .memory_tier_lease_repository import MemoryTierLeaseRepository
 from .memory_tier_snapshot_repository import MemoryTierSnapshotRepository
 from .operation_repository import OperationRepository
+from .pending_transport_request_repository import PendingTransportRequestRepository
 from .placement_repository import (
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
@@ -42,6 +43,7 @@ __all__ = [
     "LeafRepository",
     "LayoutSpecRepository",
     "OperationRepository",
+    "PendingTransportRequestRepository",
     "ProofRepository",
     "ReplicaRepository",
     "TransportRepository",

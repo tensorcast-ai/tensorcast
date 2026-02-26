@@ -18,6 +18,7 @@
 namespace tensorcast::store::materialization::control {
 namespace {
 
+using tensorcast::store::components::TransportCompletionOutcome;
 using tensorcast::store::components::TransportSession;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::MaterializationSource;
@@ -144,6 +145,9 @@ TEST_CASE("MaterializeOrchestrator reselects source after stale-local route", "[
   CHECK(backend.p2p_attempts.front().source_ip == "10.1.1.2");
   CHECK(backend.p2p_attempts.front().source_port == 50002);
   REQUIRE(gs_client->replica_requests.size() == 2);
+  REQUIRE(gs_client->completed_transport_outcomes.size() == 2);
+  CHECK(gs_client->completed_transport_outcomes[0] == TransportCompletionOutcome::kFailed);
+  CHECK(gs_client->completed_transport_outcomes[1] == TransportCompletionOutcome::kSuccess);
 }
 
 TEST_CASE("MaterializeOrchestrator reselects source after retryable P2P failure", "[store][materialize][reselection]") {
@@ -180,6 +184,9 @@ TEST_CASE("MaterializeOrchestrator reselects source after retryable P2P failure"
   CHECK(backend.p2p_attempts[0].source_ip == "10.2.2.1");
   CHECK(backend.p2p_attempts[1].source_ip == "10.2.2.2");
   REQUIRE(gs_client->replica_requests.size() == 2);
+  REQUIRE(gs_client->completed_transport_outcomes.size() == 2);
+  CHECK(gs_client->completed_transport_outcomes[0] == TransportCompletionOutcome::kFailed);
+  CHECK(gs_client->completed_transport_outcomes[1] == TransportCompletionOutcome::kSuccess);
 }
 
 TEST_CASE(
@@ -270,6 +277,58 @@ TEST_CASE(
   CHECK(gs_client->view_request_wait_timeouts_ms.front() > 0);
   CHECK(gs_client->view_request_wait_timeouts_ms.front() < gs_client->replica_request_wait_timeouts_ms.front());
   CHECK(gs_client->replica_request_wait_timeouts_ms.front() == 5000);
+}
+
+TEST_CASE(
+    "MaterializeOrchestrator propagates transport scheduler hint metadata",
+    "[store][materialize][reselection][scheduler_hint]") {
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->connected = true;
+  gs_client->allow_replica_transport = true;
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-hint", "node-remote", "10.5.5.2", 50042, common::memory::MemoryLocation::GPU, 0));
+
+  FakeMaterializationBackend backend;
+  MaterializeHints hints;
+  hints.artifact_id = "artifact-scheduler-hint";
+  hints.allow_p2p = true;
+  hints.allow_disk = false;
+  hints.transport_request_id = "request-hint-1";
+  hints.transport_requester_worker_id = "worker-hint-1";
+  hints.transport_scheduling_group = loading::TransportSchedulingGroupHint{
+      .group_id = "group-a",
+      .group_kind = "tp_rank",
+      .total_parts = 4,
+      .part_id = "part-0",
+      .priority = 7,
+      .epoch = 9,
+  };
+
+  components::WorkerIdentity local_identity{
+      .worker_id = "worker-local",
+      .node_id = "node-local",
+      .node_address = "10.5.5.1",
+      .p2p_port = 50041,
+  };
+  MaterializeOrchestrator orchestrator(
+      gsl::not_null<MaterializationBackend*>{&backend},
+      gsl::not_null<components::IGlobalStoreClient*>{gs_client.get()},
+      local_identity);
+
+  auto result = orchestrator.run("artifact-scheduler-hint", make_gpu_target(0), hints, std::nullopt);
+  REQUIRE(result.ok());
+  REQUIRE(gs_client->replica_request_request_ids.size() == 1);
+  CHECK(gs_client->replica_request_request_ids.front() == "request-hint-1");
+  REQUIRE(gs_client->replica_request_requester_worker_ids.size() == 1);
+  CHECK(gs_client->replica_request_requester_worker_ids.front() == "worker-hint-1");
+  REQUIRE(gs_client->replica_request_groups.size() == 1);
+  REQUIRE(gs_client->replica_request_groups.front().has_value());
+  CHECK(gs_client->replica_request_groups.front()->group_id == "group-a");
+  CHECK(gs_client->replica_request_groups.front()->group_kind == "tp_rank");
+  CHECK(gs_client->replica_request_groups.front()->total_parts == 4);
+  CHECK(gs_client->replica_request_groups.front()->part_id == "part-0");
+  CHECK(gs_client->replica_request_groups.front()->priority == 7);
+  CHECK(gs_client->replica_request_groups.front()->epoch == 9);
 }
 
 } // namespace
