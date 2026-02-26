@@ -113,6 +113,15 @@ class TransportCandidate:
     worker_accepting: bool
     heartbeat_age_sec: float
     heartbeat_fresh: bool
+    last_assigned_at: object | None
+
+
+@dataclass(frozen=True)
+class SourceBalanceWeights:
+    replica_load: float = 1.0
+    worker_load: float = 1.0
+    recent_assignment_penalty: float = 1.0
+    diffusion_bonus: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -143,6 +152,7 @@ class ReplicaRepository(BaseRepository):
         "mr.replica_id, mr.artifact_id, mr.view_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
         "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
         "COALESCE(rc.current_requests, 0) AS current_requests, "
+        "rc.last_assigned_at AS last_assigned_at, "
         "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.export_state, mr.export_generation, "
         "mr.verification_json, mr.worker_id, mr.created_at, mr.updated_at, mr.expires_at"
     )
@@ -232,6 +242,7 @@ class ReplicaRepository(BaseRepository):
             bool(get("worker_accepting", default=False)) if worker_present else False
         )
         last_heartbeat = get("worker_last_heartbeat")
+        last_assigned_at = get("last_assigned_at")
 
         heartbeat_age_sec = -1.0
         heartbeat_fresh = False
@@ -246,6 +257,7 @@ class ReplicaRepository(BaseRepository):
             worker_accepting=worker_accepting,
             heartbeat_age_sec=heartbeat_age_sec,
             heartbeat_fresh=heartbeat_fresh,
+            last_assigned_at=last_assigned_at,
         )
 
     def has_any_replica(self, artifact_id: str, view_id: str | None = None) -> bool:
@@ -261,9 +273,13 @@ class ReplicaRepository(BaseRepository):
         finally:
             cursor.close()
 
-    def find_by_id(self, replica_id: UUID, artifact_id: str) -> Replica | None:
+    def find_by_id(
+        self, replica_id: UUID, artifact_id: str, cursor=None
+    ) -> Replica | None:
         """Find a replica by ID and content-addressed artifact_id."""
-        cursor = self.get_cursor()
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
         try:
             sql = (
                 self._replica_select_sql("LEFT JOIN")
@@ -278,7 +294,8 @@ class ReplicaRepository(BaseRepository):
                 return self._row_to_model(row, columns)
             return None
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()
 
     def find_by_replica_id(self, replica_id: UUID) -> Replica | None:
         """Find a replica by ID (artifact_id not required)."""
@@ -364,13 +381,18 @@ class ReplicaRepository(BaseRepository):
         artifact_id: str,
         heartbeat_timeout_seconds: float,
         view_id: str | None = None,
+        scheduler_mode: str = "LEGACY",
+        source_balance_weights: SourceBalanceWeights | None = None,
+        cursor=None,
     ) -> TransportSelectionResult:
         """
         Find best available replica for transport with load balancing.
 
         Atomically increments current_requests counter.
         """
-        cursor = self.get_cursor()
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
         try:
             query = (
                 "SELECT "
@@ -407,6 +429,10 @@ class ReplicaRepository(BaseRepository):
             columns = [desc[0] for desc in result.description]
             now_ts = time.time()
             exportable_replicas = 0
+            candidates: list[TransportCandidate] = []
+
+            worker_request_totals: dict[str, int] = {}
+            worker_capacity_totals: dict[str, int] = {}
 
             for row in rows:
                 candidate = self._build_transport_candidate(
@@ -415,6 +441,24 @@ class ReplicaRepository(BaseRepository):
                     now_ts=now_ts,
                     heartbeat_timeout_seconds=heartbeat_timeout_seconds,
                 )
+                candidates.append(candidate)
+
+                worker_id = candidate.replica.worker_id or ""
+                if candidate.worker_present and worker_id:
+                    worker_request_totals[worker_id] = worker_request_totals.get(
+                        worker_id, 0
+                    ) + int(candidate.replica.current_requests)
+                    worker_capacity_totals[worker_id] = worker_capacity_totals.get(
+                        worker_id, 0
+                    ) + max(1, int(candidate.replica.max_concurrency))
+
+            worker_loads: dict[str, float] = {}
+            for worker_id, total_requests in worker_request_totals.items():
+                total_capacity = max(1, worker_capacity_totals.get(worker_id, 0))
+                worker_loads[worker_id] = float(total_requests) / float(total_capacity)
+
+            eligible_candidates: list[TransportCandidate] = []
+            for candidate in candidates:
                 transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
                 if transport_ok:
                     exportable_replicas += 1
@@ -423,7 +467,24 @@ class ReplicaRepository(BaseRepository):
                 if not eligible:
                     inc_transport_filter(artifact_id, reason)
                     continue
+                eligible_candidates.append(candidate)
 
+            ranked_candidates = eligible_candidates
+            mode = str(scheduler_mode or "LEGACY").upper()
+            if mode in ("SOURCE_BALANCE", "GROUP_DISPATCH"):
+                weights = (
+                    source_balance_weights
+                    if source_balance_weights is not None
+                    else SourceBalanceWeights()
+                )
+                ranked_candidates = sorted(
+                    eligible_candidates,
+                    key=lambda candidate: self._source_balance_sort_key(
+                        candidate, worker_loads, now_ts, weights
+                    ),
+                )
+
+            for candidate in ranked_candidates:
                 replica_id = str(candidate.replica.replica_id)
                 claim = cursor.execute(
                     """
@@ -458,7 +519,86 @@ class ReplicaRepository(BaseRepository):
                 replica=None, exportable_replicas=exportable_replicas
             )
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()
+
+    @staticmethod
+    def _memory_priority(memory_type: MemoryType) -> int:
+        if memory_type is MemoryType.GPU:
+            return 0
+        if memory_type is MemoryType.RAM:
+            return 1
+        if memory_type is MemoryType.DISK:
+            return 2
+        return 3
+
+    @staticmethod
+    def _last_assigned_timestamp_seconds(last_assigned_at: object | None) -> float:
+        if last_assigned_at is None:
+            return 0.0
+        timestamp_fn = getattr(last_assigned_at, "timestamp", None)
+        if callable(timestamp_fn):
+            try:
+                return float(timestamp_fn())
+            except Exception:  # noqa: BLE001
+                return 0.0
+        return 0.0
+
+    @classmethod
+    def _recent_assignment_penalty(
+        cls, last_assigned_at: object | None, now_ts: float
+    ) -> float:
+        assigned_ts = cls._last_assigned_timestamp_seconds(last_assigned_at)
+        if assigned_ts <= 0.0:
+            return 0.0
+        age_sec = max(0.0, now_ts - assigned_ts)
+        return 1.0 / (1.0 + age_sec)
+
+    @classmethod
+    def _diffusion_bonus(cls, candidate: TransportCandidate, now_ts: float) -> float:
+        replica = candidate.replica
+        if replica.current_requests != 0:
+            return 0.0
+        if replica.export_state is not ExportState.EXPORTABLE:
+            return 0.0
+        assigned_ts = cls._last_assigned_timestamp_seconds(candidate.last_assigned_at)
+        if assigned_ts <= 0.0:
+            return 1.0
+        age_sec = max(0.0, now_ts - assigned_ts)
+        return min(1.0, age_sec / 30.0)
+
+    @classmethod
+    def _source_balance_sort_key(
+        cls,
+        candidate: TransportCandidate,
+        worker_loads: dict[str, float],
+        now_ts: float,
+        weights: SourceBalanceWeights,
+    ) -> tuple[int, float, int, int, float, str]:
+        replica = candidate.replica
+        replica_load = float(replica.current_requests) / float(
+            max(1, replica.max_concurrency)
+        )
+        worker_id = replica.worker_id or ""
+        worker_load = worker_loads.get(worker_id, 1.0)
+        recent_penalty = cls._recent_assignment_penalty(
+            candidate.last_assigned_at, now_ts
+        )
+        diffusion_bonus = cls._diffusion_bonus(candidate, now_ts)
+        source_score = (
+            float(weights.replica_load) * replica_load
+            + float(weights.worker_load) * worker_load
+            + float(weights.recent_assignment_penalty) * recent_penalty
+            - float(weights.diffusion_bonus) * diffusion_bonus
+        )
+        return (
+            cls._memory_priority(replica.memory_type),
+            source_score,
+            int(replica.current_requests),
+            -int(replica.max_concurrency),
+            cls._last_assigned_timestamp_seconds(candidate.last_assigned_at),
+            str(replica.replica_id),
+        )
 
     def get_transport_eligibility_snapshot(
         self,
@@ -958,21 +1098,12 @@ class ReplicaRepository(BaseRepository):
         cursor = self.get_cursor()
 
         try:
-            # Update counter table
-            cnt_row = cursor.execute(
-                """
-                UPDATE replica_counters
-                SET current_requests = GREATEST(0, current_requests - 1)
-                WHERE replica_id = ?
-                RETURNING current_requests
-                """,
-                [str(replica_id)],
-            ).fetchone()
+            cnt_row = self.decrement_requests_with_cursor(replica_id, cursor)
 
-            if not cnt_row:
+            if cnt_row is None:
                 return 0, 0
 
-            current_requests = int(cnt_row[0])
+            current_requests = cnt_row
 
             # Fetch max_concurrency from artifact_replicas
             max_row = cursor.execute(
@@ -987,6 +1118,21 @@ class ReplicaRepository(BaseRepository):
             return current_requests, max_conc
         finally:
             cursor.close()
+
+    def decrement_requests_with_cursor(self, replica_id: UUID, cursor) -> int | None:
+        """Decrement `current_requests` in an existing transaction."""
+        cnt_row = cursor.execute(
+            """
+            UPDATE replica_counters
+            SET current_requests = GREATEST(0, current_requests - 1)
+            WHERE replica_id = ?
+            RETURNING current_requests
+            """,
+            [str(replica_id)],
+        ).fetchone()
+        if not cnt_row:
+            return None
+        return int(cnt_row[0])
 
     def delete(self, replica_id: UUID, artifact_id: str | None = None) -> bool:
         """Delete a replica."""

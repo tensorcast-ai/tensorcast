@@ -71,6 +71,33 @@ class KeyMappingPolicyConfig(BaseModel):
     alias_cache_ttl_ms: int = 1000
 
 
+class SourceBalanceWeightsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    replica_load_weight: float = 1.0
+    worker_load_weight: float = 1.0
+    recent_assignment_penalty_weight: float = 1.0
+    diffusion_bonus_weight: float = 1.0
+
+
+class GroupDispatchPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fairness_floor_ratio: float = 0.25
+    completion_bias_weight: float = 1.0
+    starvation_aging_threshold_ms: int = 5_000
+    queue_scan_limit: int = 128
+    dispatch_batch_limit: int = 16
+
+
+class TransportSchedulerPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: str = "LEGACY"
+    source_balance_weights: SourceBalanceWeightsConfig = SourceBalanceWeightsConfig()
+    group_dispatch: GroupDispatchPolicyConfig = GroupDispatchPolicyConfig()
+
+
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
 
@@ -93,6 +120,9 @@ class GlobalStoreConfig(BaseModel):
     memory_tier_publish_interval_ms: int = 5000  # Daemon publish hint
     worker_control_reducer: WorkerControlReducerConfig = WorkerControlReducerConfig()
     key_mapping_policy: KeyMappingPolicyConfig = KeyMappingPolicyConfig()
+    transport_scheduler: TransportSchedulerPolicyConfig = (
+        TransportSchedulerPolicyConfig()
+    )
 
     # Server settings
     listen_host: str = "127.0.0.1"
@@ -174,6 +204,10 @@ class GlobalStoreConfig(BaseModel):
             else 8000
         )
 
+        worker_policy_section = (
+            data.get("worker_policy", {}) if isinstance(data, dict) else {}
+        )
+
         # Worker policy durations are in seconds+nanos
         def _dur_ms(dur) -> int:
             # google.protobuf.Duration parsed from JSON strings "Xs" yields
@@ -205,6 +239,7 @@ class GlobalStoreConfig(BaseModel):
         publish_interval_ms = 5000
         reducer_cfg = WorkerControlReducerConfig()
         key_mapping_policy = KeyMappingPolicyConfig()
+        scheduler_policy = TransportSchedulerPolicyConfig()
         if pb.worker_policy.HasField("memory_tiers"):
             mt = pb.worker_policy.memory_tiers
             snapshot_retention_ms = (
@@ -243,6 +278,89 @@ class GlobalStoreConfig(BaseModel):
             )
             key_mapping_policy = KeyMappingPolicyConfig(
                 alias_cache_ttl_ms=max(0, alias_cache_ttl_ms),
+            )
+        if pb.worker_policy.HasField("transport_scheduler"):
+            scheduler_pb = pb.worker_policy.transport_scheduler
+            scheduler_section = (
+                worker_policy_section.get("transport_scheduler", {})
+                if isinstance(worker_policy_section, dict)
+                else {}
+            )
+            if (
+                scheduler_pb.mode
+                == gsc_pb2.TransportSchedulerMode.TRANSPORT_SCHEDULER_MODE_SOURCE_BALANCE
+            ):
+                scheduler_mode = "SOURCE_BALANCE"
+            elif (
+                scheduler_pb.mode
+                == gsc_pb2.TransportSchedulerMode.TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+            ):
+                scheduler_mode = "GROUP_DISPATCH"
+            else:
+                scheduler_mode = "LEGACY"
+
+            source_weights = scheduler_policy.source_balance_weights
+            if scheduler_pb.HasField("source_balance_weights"):
+                source_pb = scheduler_pb.source_balance_weights
+                source_section = (
+                    scheduler_section.get("source_balance_weights", {})
+                    if isinstance(scheduler_section, dict)
+                    else {}
+                )
+                source_weights = SourceBalanceWeightsConfig(
+                    replica_load_weight=float(source_pb.replica_load_weight)
+                    if "replica_load_weight" in source_section
+                    else source_weights.replica_load_weight,
+                    worker_load_weight=float(source_pb.worker_load_weight)
+                    if "worker_load_weight" in source_section
+                    else source_weights.worker_load_weight,
+                    recent_assignment_penalty_weight=float(
+                        source_pb.recent_assignment_penalty_weight
+                    )
+                    if "recent_assignment_penalty_weight" in source_section
+                    else source_weights.recent_assignment_penalty_weight,
+                    diffusion_bonus_weight=float(source_pb.diffusion_bonus_weight)
+                    if "diffusion_bonus_weight" in source_section
+                    else source_weights.diffusion_bonus_weight,
+                )
+
+            group_dispatch = scheduler_policy.group_dispatch
+            if scheduler_pb.HasField("group_dispatch"):
+                dispatch_pb = scheduler_pb.group_dispatch
+                dispatch_section = (
+                    scheduler_section.get("group_dispatch", {})
+                    if isinstance(scheduler_section, dict)
+                    else {}
+                )
+                group_dispatch = GroupDispatchPolicyConfig(
+                    fairness_floor_ratio=float(dispatch_pb.fairness_floor_ratio)
+                    if "fairness_floor_ratio" in dispatch_section
+                    else group_dispatch.fairness_floor_ratio,
+                    completion_bias_weight=float(dispatch_pb.completion_bias_weight)
+                    if "completion_bias_weight" in dispatch_section
+                    else group_dispatch.completion_bias_weight,
+                    starvation_aging_threshold_ms=(
+                        _dur_ms(dispatch_pb.starvation_aging_threshold)
+                        if "starvation_aging_threshold" in dispatch_section
+                        else group_dispatch.starvation_aging_threshold_ms
+                    ),
+                    queue_scan_limit=max(
+                        1,
+                        int(dispatch_pb.queue_scan_limit)
+                        if "queue_scan_limit" in dispatch_section
+                        else group_dispatch.queue_scan_limit,
+                    ),
+                    dispatch_batch_limit=max(
+                        1,
+                        int(dispatch_pb.dispatch_batch_limit)
+                        if "dispatch_batch_limit" in dispatch_section
+                        else group_dispatch.dispatch_batch_limit,
+                    ),
+                )
+            scheduler_policy = TransportSchedulerPolicyConfig(
+                mode=scheduler_mode,
+                source_balance_weights=source_weights,
+                group_dispatch=group_dispatch,
             )
 
         # Limits
@@ -318,6 +436,7 @@ class GlobalStoreConfig(BaseModel):
             memory_tier_publish_interval_ms=max(0, publish_interval_ms),
             worker_control_reducer=reducer_cfg,
             key_mapping_policy=key_mapping_policy,
+            transport_scheduler=scheduler_policy,
             listen_host=listen_host or "127.0.0.1",
             listen_port=listen_port if listen_port >= 0 else 0,
             advertise_host=advertise_host,

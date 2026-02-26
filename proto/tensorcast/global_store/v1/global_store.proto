@@ -778,6 +778,9 @@ message RequestReplicaTransportRequest {
   string source_address = 5;
   uint32 source_port = 6;
   tensorcast.common.v1.ByteSpaceRef requested_byte_space = 7;
+  TransportSchedulingGroup scheduling_group = 8;
+  string requester_worker_id = 9;
+  string request_id = 10;
 }
 
 message RequestReplicaTransportResponse {
@@ -786,8 +789,27 @@ message RequestReplicaTransportResponse {
   string transport_id = 3;
 }
 
+message TransportSchedulingGroup {
+  string group_id = 1;
+  string group_kind = 2;
+  uint32 total_parts = 3;
+  string part_id = 4;
+  uint32 priority = 5;
+  uint64 epoch = 6;
+}
+
+enum TransportCompletionOutcome {
+  TRANSPORT_COMPLETION_OUTCOME_UNSPECIFIED = 0;
+  TRANSPORT_COMPLETION_OUTCOME_SUCCESS = 1;
+  TRANSPORT_COMPLETION_OUTCOME_FAILED = 2;
+  TRANSPORT_COMPLETION_OUTCOME_EXPIRED = 3;
+  TRANSPORT_COMPLETION_OUTCOME_CANCELLED = 4;
+}
+
 message CompleteReplicaTransportRequest {
   string transport_id = 1;
+  TransportCompletionOutcome outcome = 2;
+  string outcome_detail = 3;
 }
 
 message CompleteReplicaTransportResponse {

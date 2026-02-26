@@ -165,6 +165,35 @@ class TestConfiguration:
         config = GlobalStoreConfig.from_file(str(p))
         assert config.port == 99999
 
+    def test_transport_scheduler_allows_zero_weights(self, tmp_path):
+        """Explicit zero-valued scheduler weights should be preserved."""
+        cfg = {
+            "worker_policy": {
+                "transport_scheduler": {
+                    "mode": "TRANSPORT_SCHEDULER_MODE_SOURCE_BALANCE",
+                    "source_balance_weights": {
+                        "replica_load_weight": 0.0,
+                        "worker_load_weight": 2.0,
+                    },
+                    "group_dispatch": {
+                        "fairness_floor_ratio": 0.0,
+                        "completion_bias_weight": 0.0,
+                    },
+                }
+            }
+        }
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        config = GlobalStoreConfig.from_file(str(p))
+        assert config.transport_scheduler.source_balance_weights.replica_load_weight == 0.0
+        assert config.transport_scheduler.source_balance_weights.worker_load_weight == 2.0
+        assert (
+            config.transport_scheduler.source_balance_weights.recent_assignment_penalty_weight
+            == 1.0
+        )
+        assert config.transport_scheduler.group_dispatch.fairness_floor_ratio == 0.0
+        assert config.transport_scheduler.group_dispatch.completion_bias_weight == 0.0
+
     def test_config_unicode_db_path(self, tmp_path):
         """Unicode paths supported in file config."""
         unicode_path = "/data/测试/моделі/データ.db"

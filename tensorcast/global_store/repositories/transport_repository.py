@@ -2,112 +2,230 @@
 
 """Repository for transport data access."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
-from tensorcast.global_store.models import Transport
+from tensorcast.global_store.models import Transport, TransportCompletionOutcome
 from tensorcast.global_store.repositories.base import BaseRepository
-from tensorcast.logger import init_logger
 
-logger = init_logger(__name__)
+
+@dataclass(frozen=True)
+class TransportGroupProgress:
+    """Aggregate completion snapshot for one scheduling group."""
+
+    completed_parts: int
+    total_parts: int
+    last_success_at: datetime | None
+
+    @property
+    def completion_ratio(self) -> float:
+        if self.total_parts <= 0:
+            return 0.0
+        return min(1.0, float(self.completed_parts) / float(self.total_parts))
 
 
 class TransportRepository(BaseRepository):
     """Repository for managing transports in the database."""
 
-    def find_by_id(self, transport_id: UUID) -> Optional[Transport]:
-        """Find a transport by ID."""
-        cursor = self.get_cursor()
-        try:
-            result = cursor.execute(
-                "SELECT * FROM artifact_transports WHERE transport_id = ?",
-                [str(transport_id)],
-            ).fetchone()
+    _TRANSPORT_PROJECTION = (
+        "transport_id, replica_id, artifact_id, requested_view_id, disk_path, "
+        "source_node_id, source_address, source_port, request_id, request_fingerprint, "
+        "requester_worker_id, group_id, group_kind, group_total_parts, "
+        "group_part_id, group_priority, group_epoch, completion_outcome, "
+        "completion_detail, created_at, completed_at, status"
+    )
 
-            if result:
-                return self._row_to_model(result)
-            return None
+    def find_by_id(self, transport_id: UUID, cursor=None) -> Transport | None:
+        """Find a transport by ID."""
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            query = cursor.execute(
+                f"SELECT {self._TRANSPORT_PROJECTION} FROM artifact_transports WHERE transport_id = ?",
+                [str(transport_id)],
+            )
+            row = query.fetchone()
+            if row is None:
+                return None
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()
+
+    def find_by_request_id(self, request_id: str, cursor=None) -> Transport | None:
+        """Find a transport by request idempotency key."""
+        normalized = request_id.strip()
+        if not normalized:
+            return None
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            query = cursor.execute(
+                f"""
+                SELECT {self._TRANSPORT_PROJECTION}
+                FROM artifact_transports
+                WHERE request_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                [normalized],
+            )
+            row = query.fetchone()
+            if row is None:
+                return None
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
+        finally:
+            if owns_cursor:
+                cursor.close()
 
     def create(self, transport: Transport) -> Transport:
         """Create a new transport record."""
         cursor = self.get_cursor()
         try:
-            cursor.execute(
-                """
-                INSERT INTO artifact_transports (
-                    transport_id, replica_id, artifact_id, disk_path,
-                    source_node_id, source_address, source_port,
-                    status
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    str(transport.transport_id),
-                    str(transport.replica_id),
-                    transport.artifact_id,
-                    transport.disk_path,
-                    transport.source_node_id,
-                    transport.source_address,
-                    transport.source_port,
-                    "in_progress",
-                ],
-            )
-
+            self.create_with_cursor(transport, cursor)
             return transport
         finally:
             cursor.close()
 
     def create_with_cursor(self, transport: Transport, cursor) -> Transport:
         """Create a new transport record using an existing cursor."""
+        normalized_request_id = self._normalize_request_id(transport.request_id)
         cursor.execute(
             """
             INSERT INTO artifact_transports (
-                transport_id, replica_id, artifact_id, disk_path,
+                transport_id, replica_id, artifact_id, requested_view_id, disk_path,
                 source_node_id, source_address, source_port,
+                request_id, request_fingerprint, requester_worker_id,
+                group_id, group_kind, group_total_parts, group_part_id,
+                group_priority, group_epoch,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(transport.transport_id),
                 str(transport.replica_id),
                 transport.artifact_id,
+                self._normalize_optional_text(transport.requested_view_id),
                 transport.disk_path,
                 transport.source_node_id,
                 transport.source_address,
-                transport.source_port,
+                int(transport.source_port),
+                normalized_request_id,
+                self._normalize_optional_text(transport.request_fingerprint),
+                self._normalize_optional_text(transport.requester_worker_id),
+                self._normalize_optional_text(transport.group_id),
+                self._normalize_optional_text(transport.group_kind),
+                self._normalize_optional_int(transport.group_total_parts),
+                self._normalize_optional_text(transport.group_part_id),
+                self._normalize_optional_int(transport.group_priority),
+                self._normalize_optional_int(transport.group_epoch),
                 "in_progress",
             ],
         )
-
+        transport.request_id = normalized_request_id
+        transport.status = "in_progress"
+        transport.completion_outcome = TransportCompletionOutcome.UNSPECIFIED
+        transport.completion_detail = None
         return transport
+
+    def create_if_absent_with_cursor(
+        self, transport: Transport, cursor
+    ) -> tuple[Transport, bool]:
+        """
+        Insert transport by request_id idempotency key if absent.
+
+        Returns (transport_row, created_now).
+        """
+        normalized_request_id = self._normalize_request_id(transport.request_id)
+        if normalized_request_id is None:
+            created = self.create_with_cursor(transport, cursor)
+            return created, True
+
+        cursor.execute(
+            """
+            INSERT INTO artifact_transports (
+                transport_id, replica_id, artifact_id, requested_view_id, disk_path,
+                source_node_id, source_address, source_port,
+                request_id, request_fingerprint, requester_worker_id,
+                group_id, group_kind, group_total_parts, group_part_id,
+                group_priority, group_epoch,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (request_id) DO NOTHING
+            """,
+            [
+                str(transport.transport_id),
+                str(transport.replica_id),
+                transport.artifact_id,
+                self._normalize_optional_text(transport.requested_view_id),
+                transport.disk_path,
+                transport.source_node_id,
+                transport.source_address,
+                int(transport.source_port),
+                normalized_request_id,
+                self._normalize_optional_text(transport.request_fingerprint),
+                self._normalize_optional_text(transport.requester_worker_id),
+                self._normalize_optional_text(transport.group_id),
+                self._normalize_optional_text(transport.group_kind),
+                self._normalize_optional_int(transport.group_total_parts),
+                self._normalize_optional_text(transport.group_part_id),
+                self._normalize_optional_int(transport.group_priority),
+                self._normalize_optional_int(transport.group_epoch),
+                "in_progress",
+            ],
+        )
+        existing = self.find_by_request_id(normalized_request_id, cursor=cursor)
+        if existing is None:
+            raise RuntimeError(
+                "Transport missing after insert-or-ignore "
+                f"request_id={normalized_request_id}"
+            )
+        created_now = existing.transport_id == transport.transport_id
+        if created_now:
+            transport.request_id = normalized_request_id
+            transport.status = "in_progress"
+            transport.completion_outcome = TransportCompletionOutcome.UNSPECIFIED
+            transport.completion_detail = None
+            return transport, True
+        return existing, False
 
     def delete(self, transport_id: UUID) -> bool:
         """Delete a transport record."""
         cursor = self.get_cursor()
         try:
-            result = cursor.execute(
-                """
-                DELETE FROM artifact_transports
-                WHERE transport_id = ?
-                RETURNING transport_id
-                """,
-                [str(transport_id)],
-            )
-
-            return result.fetchone() is not None
+            return self.delete_with_cursor(transport_id, cursor)
         finally:
             cursor.close()
+
+    def delete_with_cursor(self, transport_id: UUID, cursor) -> bool:
+        row = cursor.execute(
+            """
+            DELETE FROM artifact_transports
+            WHERE transport_id = ?
+            RETURNING transport_id
+            """,
+            [str(transport_id)],
+        ).fetchone()
+        return row is not None
 
     def update_status(self, transport_id: UUID, status: str, completed_at=None) -> bool:
         """Update transport status and optionally set completed_at."""
         cursor = self.get_cursor()
         try:
-            if completed_at:
-                result = cursor.execute(
+            if completed_at is not None:
+                row = cursor.execute(
                     """
                     UPDATE artifact_transports
                     SET status = ?, completed_at = ?
@@ -115,9 +233,9 @@ class TransportRepository(BaseRepository):
                     RETURNING transport_id
                     """,
                     [status, completed_at, str(transport_id)],
-                )
+                ).fetchone()
             else:
-                result = cursor.execute(
+                row = cursor.execute(
                     """
                     UPDATE artifact_transports
                     SET status = ?
@@ -125,50 +243,68 @@ class TransportRepository(BaseRepository):
                     RETURNING transport_id
                     """,
                     [status, str(transport_id)],
-                )
-
-            return result.fetchone() is not None
+                ).fetchone()
+            return row is not None
         finally:
             cursor.close()
 
     def complete_if_in_progress(
-        self, transport_id: UUID, completed_at: datetime
+        self,
+        transport_id: UUID,
+        completed_at: datetime,
+        outcome: TransportCompletionOutcome,
+        outcome_detail: str | None = None,
+        cursor=None,
     ) -> bool:
         """Atomically mark transport completed only when status is in_progress."""
-        cursor = self.get_cursor()
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
         try:
-            result = cursor.execute(
+            row = cursor.execute(
                 """
                 UPDATE artifact_transports
-                SET status = 'completed', completed_at = ?
+                SET status = 'completed',
+                    completed_at = ?,
+                    completion_outcome = ?,
+                    completion_detail = ?
                 WHERE transport_id = ?
                   AND status = 'in_progress'
                 RETURNING transport_id
                 """,
-                [completed_at, str(transport_id)],
-            )
-            return result.fetchone() is not None
+                [
+                    completed_at,
+                    self._normalize_completion_outcome(outcome),
+                    self._normalize_optional_text(outcome_detail),
+                    str(transport_id),
+                ],
+            ).fetchone()
+            return row is not None
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()
 
     def list_with_filters(
-        self, status: Optional[str] = None, limit: int = 50, offset: int = 0
+        self,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[Transport]:
         """List transports with optional filters and pagination."""
         cursor = self.get_cursor()
         try:
-            query = "SELECT * FROM artifact_transports"
-            params = []
-
+            query = f"SELECT {self._TRANSPORT_PROJECTION} FROM artifact_transports"
+            params: list[Any] = []
             if status:
                 query += " WHERE status = ?"
                 params.append(status)
-
             query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            params.extend([str(limit), str(offset)])
-
-            rows = cursor.execute(query, params).fetchall()
-            return [self._row_to_model(row) for row in rows]
+            params.extend([int(limit), int(offset)])
+            result = cursor.execute(query, params)
+            rows = result.fetchall()
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            return [self._row_to_model(row, columns) for row in rows]
         finally:
             cursor.close()
 
@@ -195,47 +331,146 @@ class TransportRepository(BaseRepository):
         finally:
             cursor.close()
 
-    def count_with_filters(self, status: Optional[str] = None) -> int:
+    def count_with_filters(self, status: str | None = None) -> int:
         """Count transports with optional filters."""
         cursor = self.get_cursor()
         try:
             query = "SELECT COUNT(*) FROM artifact_transports"
-            params = []
-
+            params: list[Any] = []
             if status:
                 query += " WHERE status = ?"
                 params.append(status)
-
-            result = cursor.execute(query, params).fetchone()
-            return result[0] if result else 0
+            row = cursor.execute(query, params).fetchone()
+            return int(row[0]) if row else 0
         finally:
             cursor.close()
 
-    def _row_to_model(self, row: tuple[Any, ...]) -> Transport:
-        """Convert a database row returned by DuckDB into a ``Transport`` object.
+    def get_group_progress(
+        self,
+        *,
+        group_kind: str,
+        group_id: str,
+        group_epoch: int,
+        total_parts_hint: int | None = None,
+        cursor=None,
+    ) -> TransportGroupProgress:
+        """Return completion snapshot for one group (SUCCESS outcomes only)."""
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            row = cursor.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT CASE
+                        WHEN completion_outcome = 'success' AND group_part_id IS NOT NULL
+                            THEN group_part_id
+                        ELSE NULL
+                    END) AS completed_parts,
+                    MAX(CASE
+                        WHEN completion_outcome = 'success' THEN completed_at
+                        ELSE NULL
+                    END) AS last_success_at,
+                    MAX(group_total_parts) AS observed_total_parts
+                FROM artifact_transports
+                WHERE group_kind = ?
+                  AND group_id = ?
+                  AND COALESCE(group_epoch, 0) = ?
+                """,
+                [group_kind, group_id, int(group_epoch)],
+            ).fetchone()
+            completed_parts = int(row[0] or 0) if row is not None else 0
+            last_success_at = row[1] if row is not None else None
+            observed_total_parts = int(row[2] or 0) if row is not None else 0
+            total_parts = (
+                int(total_parts_hint or 0) if total_parts_hint else observed_total_parts
+            )
+            return TransportGroupProgress(
+                completed_parts=max(0, completed_parts),
+                total_parts=max(0, total_parts),
+                last_success_at=last_success_at,
+            )
+        finally:
+            if owns_cursor:
+                cursor.close()
 
-        The database can return UUIDs either as ``uuid.UUID`` instances (when the
-        DuckDB ``uuid`` extension is enabled) or as plain strings.  Instead of
-        branching on the runtime type with ``isinstance`` we normalise the value
-        by casting it to ``str`` first and then constructing a ``UUID``.
-        This keeps the code branch-free and shifts type checking to static
-        analysis tools rather than to runtime conditionals.
-        """
+    @staticmethod
+    def _normalize_optional_text(value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped if stripped else None
 
-        # Always cast to ``str`` first – this works for both ``uuid.UUID`` and
-        # already-stringified UUIDs and avoids the need for ``isinstance`` checks.
-        transport_id = UUID(str(row[0]))
-        replica_id = UUID(str(row[1]))
+    @staticmethod
+    def _normalize_optional_int(value: int | None) -> int | None:
+        if value is None:
+            return None
+        return int(value)
+
+    @staticmethod
+    def _normalize_request_id(request_id: str | None) -> str | None:
+        if request_id is None:
+            return None
+        normalized = request_id.strip()
+        return normalized if normalized else None
+
+    @staticmethod
+    def _normalize_completion_outcome(outcome: TransportCompletionOutcome) -> str:
+        if outcome == TransportCompletionOutcome.UNSPECIFIED:
+            return "unspecified"
+        if outcome == TransportCompletionOutcome.SUCCESS:
+            return "success"
+        if outcome == TransportCompletionOutcome.FAILED:
+            return "failed"
+        if outcome == TransportCompletionOutcome.EXPIRED:
+            return "expired"
+        if outcome == TransportCompletionOutcome.CANCELLED:
+            return "cancelled"
+        return "unspecified"
+
+    def _row_to_model(self, row: tuple[Any, ...], columns: list[str]) -> Transport:
+        idx = {column: i for i, column in enumerate(columns)}
+
+        def get(column: str, default=None):
+            i = idx.get(column)
+            if i is None:
+                return default
+            value = row[i]
+            if value is None:
+                return default
+            return value
+
+        outcome_raw = str(get("completion_outcome", "unspecified")).strip().lower()
+        try:
+            outcome = TransportCompletionOutcome(outcome_raw)
+        except ValueError:
+            outcome = TransportCompletionOutcome.UNSPECIFIED
 
         return Transport(
-            transport_id=transport_id,
-            replica_id=replica_id,
-            artifact_id=row[2],
-            disk_path=row[3],
-            source_node_id=row[4],
-            source_address=row[5],
-            source_port=row[6],
-            created_at=row[7],
-            completed_at=row[8] if len(row) > 8 else None,
-            status=row[9] if len(row) > 9 else "in_progress",
+            transport_id=UUID(str(get("transport_id"))),
+            replica_id=UUID(str(get("replica_id"))),
+            artifact_id=str(get("artifact_id", "")),
+            requested_view_id=self._normalize_optional_text(get("requested_view_id")),
+            disk_path=get("disk_path"),
+            source_node_id=str(get("source_node_id", "")),
+            source_address=str(get("source_address", "")),
+            source_port=int(get("source_port", 0)),
+            request_id=self._normalize_request_id(get("request_id")),
+            request_fingerprint=self._normalize_optional_text(
+                get("request_fingerprint")
+            ),
+            requester_worker_id=self._normalize_optional_text(
+                get("requester_worker_id")
+            ),
+            group_id=self._normalize_optional_text(get("group_id")),
+            group_kind=self._normalize_optional_text(get("group_kind")),
+            group_total_parts=self._normalize_optional_int(get("group_total_parts")),
+            group_part_id=self._normalize_optional_text(get("group_part_id")),
+            group_priority=self._normalize_optional_int(get("group_priority")),
+            group_epoch=self._normalize_optional_int(get("group_epoch")),
+            completion_outcome=outcome,
+            completion_detail=self._normalize_optional_text(get("completion_detail")),
+            created_at=get("created_at"),
+            completed_at=get("completed_at"),
+            status=str(get("status", "in_progress")),
         )

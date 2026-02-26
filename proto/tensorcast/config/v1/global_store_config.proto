@@ -37,6 +37,34 @@ message KeyMappingPolicy {
   google.protobuf.Duration alias_cache_ttl = 1;
 }
 
+enum TransportSchedulerMode {
+  TRANSPORT_SCHEDULER_MODE_UNSPECIFIED = 0;
+  TRANSPORT_SCHEDULER_MODE_LEGACY = 1;
+  TRANSPORT_SCHEDULER_MODE_SOURCE_BALANCE = 2;
+  TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH = 3;
+}
+
+message SourceBalanceScoreWeights {
+  double replica_load_weight = 1;
+  double worker_load_weight = 2;
+  double recent_assignment_penalty_weight = 3;
+  double diffusion_bonus_weight = 4;
+}
+
+message GroupDispatchPolicy {
+  double fairness_floor_ratio = 1;
+  double completion_bias_weight = 2;
+  google.protobuf.Duration starvation_aging_threshold = 3;
+  uint32 queue_scan_limit = 4;
+  uint32 dispatch_batch_limit = 5;
+}
+
+message TransportSchedulerPolicy {
+  TransportSchedulerMode mode = 1;
+  SourceBalanceScoreWeights source_balance_weights = 2;
+  GroupDispatchPolicy group_dispatch = 3;
+}
+
 message WorkerPolicy {
   google.protobuf.Duration heartbeat_timeout = 1;
   google.protobuf.Duration cleanup_interval = 2;
@@ -44,6 +72,7 @@ message WorkerPolicy {
   MemoryTierPolicy memory_tiers = 4;
   WorkerControlReducerPolicy control_reducer = 5;
   KeyMappingPolicy key_mapping = 6;
+  TransportSchedulerPolicy transport_scheduler = 7;
 }
 
 message WorkerControlReducerPolicy {

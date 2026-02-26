@@ -7,7 +7,13 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
-from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
+from tensorcast.global_store.models import (
+    ExportState,
+    MemoryType,
+    Replica,
+    TransportCompletionOutcome,
+    Worker,
+)
 from tensorcast.global_store.exceptions import (
     NotFoundError,
     ValidationError,
@@ -66,7 +72,8 @@ class TestErrorHandling:
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
-                wait_timeout_ms=100
+                wait_timeout_ms=100,
+                request_id="error-no-replicas-1",
             )
         assert "No replicas registered" in str(exc_info.value)
 
@@ -116,16 +123,21 @@ class TestErrorHandling:
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
-                wait_timeout_ms=100  # Short timeout for test
+                wait_timeout_ms=100,  # Short timeout for test
+                request_id="error-all-capacity-1",
             )
-        assert "No available replica" in str(exc_info.value) and "timeout" in str(exc_info.value)
+        assert (
+            "No available replica" in str(exc_info.value)
+            or "expired before dispatch" in str(exc_info.value)
+        )
 
     def test_complete_transport_invalid_id(self, services):
         """Test completing transport with invalid ID."""
         from uuid import uuid4
         with pytest.raises(NotFoundError) as exc_info:
             services["transport"].complete_transport(
-                transport_id=uuid4()
+                transport_id=uuid4(),
+                outcome=TransportCompletionOutcome.SUCCESS,
             )
         # The error message includes the transport ID
         assert "Transport" in str(exc_info.value) and "not found" in str(exc_info.value)
@@ -393,7 +405,8 @@ class TestEdgeCases:
                 source_node_id="zero_timeout_source",
                 source_address="192.168.60.2",  # Different from replica address
                 source_port=8181,
-                wait_timeout_ms=0
+                wait_timeout_ms=0,
+                request_id="error-zero-timeout-1",
             )
             assert transport_id
             assert selected_replica.artifact_id == "zero_timeout_artifact"

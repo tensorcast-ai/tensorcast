@@ -282,6 +282,7 @@ class TestGRPCService:
                 source_node_id="source_node",
                 source_address="192.168.1.2",
                 source_port=9000,
+                request_id="transport-drain-1",
             ),
             test_context,
         )
@@ -647,6 +648,7 @@ class TestGRPCService:
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id="transport-request-basic-1",
         )
 
         transport_response = servicer.RequestReplicaTransport(
@@ -656,6 +658,220 @@ class TestGRPCService:
         assert transport_response.status == global_store_pb2.Status.STATUS_OK
         assert transport_response.remote_memory_info is not None
         assert transport_response.transport_id is not None
+
+    def test_request_replica_transport_requires_request_id(
+        self, servicer, test_context, memory_info
+    ):
+        """Transport request must include explicit idempotency request_id."""
+        response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_requires_request_id",
+                local_memory_info=memory_info,
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+            ),
+            test_context,
+        )
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+        assert "request_id is required" in (test_context.details or "")
+
+    def test_request_replica_transport_rejects_invalid_scheduling_group_fields(
+        self, servicer, test_context
+    ):
+        """Scheduling group requires non-empty group_id/group_kind/part_id."""
+        response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_invalid_group_fields",
+                request_id="transport-invalid-group-fields-1",
+                scheduling_group=global_store_pb2.TransportSchedulingGroup(
+                    group_id="",
+                    group_kind="tp_rank",
+                    total_parts=1,
+                    part_id="part-0",
+                ),
+            ),
+            test_context,
+        )
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+        assert "requires non-empty group_id/group_kind/part_id" in (
+            test_context.details or ""
+        )
+
+    def test_request_replica_transport_rejects_nonpositive_group_total_parts(
+        self, servicer, test_context
+    ):
+        """Scheduling group total_parts must be > 0."""
+        response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_invalid_group_total_parts",
+                request_id="transport-invalid-group-total-parts-1",
+                scheduling_group=global_store_pb2.TransportSchedulingGroup(
+                    group_id="group-a",
+                    group_kind="tp_rank",
+                    total_parts=0,
+                    part_id="part-0",
+                ),
+            ),
+            test_context,
+        )
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+        assert "scheduling_group.total_parts must be > 0" in (
+            test_context.details or ""
+        )
+
+    def test_request_replica_transport_request_id_replay(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """Duplicate transport request_id should replay the original transport assignment."""
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_request_id_replay",
+                mem_info=memory_info,
+                max_concurrency=3,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        first_request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id="test_artifact_request_id_replay",
+            local_memory_info=memory_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+            request_id="transport-request-replay-1",
+        )
+        first_response = servicer.RequestReplicaTransport(first_request, test_context)
+        assert first_response.status == global_store_pb2.Status.STATUS_OK
+
+        second_response = servicer.RequestReplicaTransport(first_request, test_context)
+        assert second_response.status == global_store_pb2.Status.STATUS_OK
+        assert second_response.transport_id == first_response.transport_id
+
+    def test_request_replica_transport_request_id_payload_mismatch_rejected(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """Same request_id with different payload should be rejected."""
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_request_id_conflict",
+                mem_info=memory_info,
+                max_concurrency=3,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        response_a = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_request_id_conflict",
+                local_memory_info=memory_info,
+                source_node_id="source_node_a",
+                source_address="192.168.1.2",
+                source_port=9000,
+                request_id="transport-request-conflict-1",
+            ),
+            test_context,
+        )
+        assert response_a.status == global_store_pb2.Status.STATUS_OK
+
+        response_b = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_request_id_conflict",
+                local_memory_info=memory_info,
+                source_node_id="source_node_b",
+                source_address="192.168.1.2",
+                source_port=9000,
+                request_id="transport-request-conflict-1",
+            ),
+            test_context,
+        )
+        assert response_b.status == global_store_pb2.Status.STATUS_ERROR
+
+    def test_request_replica_transport_normalizes_requester_worker_id(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """requester_worker_id should be trimmed and empty values normalized to None."""
+        artifact_id = "test_artifact_requester_worker_id_normalization"
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=memory_info,
+                max_concurrency=4,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        whitespace_response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id=artifact_id,
+                local_memory_info=memory_info,
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+                request_id="transport-requester-worker-whitespace-1",
+                requester_worker_id="   ",
+            ),
+            test_context,
+        )
+        assert whitespace_response.status == global_store_pb2.Status.STATUS_OK
+        whitespace_row = servicer.transport_repository.find_by_id(
+            uuid.UUID(whitespace_response.transport_id)
+        )
+        assert whitespace_row is not None
+        assert whitespace_row.requester_worker_id is None
+
+        trimmed_response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id=artifact_id,
+                local_memory_info=memory_info,
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+                request_id="transport-requester-worker-trimmed-1",
+                requester_worker_id="  worker-7  ",
+            ),
+            test_context,
+        )
+        assert trimmed_response.status == global_store_pb2.Status.STATUS_OK
+        trimmed_row = servicer.transport_repository.find_by_id(
+            uuid.UUID(trimmed_response.transport_id)
+        )
+        assert trimmed_row is not None
+        assert trimmed_row.requester_worker_id == "worker-7"
 
     def test_request_replica_transport_respects_byte_space(
         self, servicer, test_context, registered_worker
@@ -735,6 +951,7 @@ class TestGRPCService:
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id="transport-bytespace-view-1",
             requested_byte_space=common_pb2.ByteSpaceRef(
                 kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
             ),
@@ -754,6 +971,7 @@ class TestGRPCService:
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id="transport-bytespace-canonical-1",
             requested_byte_space=common_pb2.ByteSpaceRef(
                 kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
             ),
@@ -857,6 +1075,7 @@ class TestGRPCService:
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id="transport-missing-artifact-1",
         )
 
         transport_response = servicer.RequestReplicaTransport(
@@ -895,6 +1114,7 @@ class TestGRPCService:
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id="transport-complete-basic-1",
         )
 
         transport_response = servicer.RequestReplicaTransport(
@@ -903,7 +1123,8 @@ class TestGRPCService:
 
         # Complete transport
         complete_request = global_store_pb2.CompleteReplicaTransportRequest(
-            transport_id=transport_response.transport_id
+            transport_id=transport_response.transport_id,
+            outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
         )
 
         complete_response = servicer.CompleteReplicaTransport(
@@ -912,15 +1133,82 @@ class TestGRPCService:
 
         assert complete_response.status == global_store_pb2.Status.STATUS_OK
 
+    def test_complete_transport_persists_completion_outcome(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """CompleteReplicaTransport should persist outcome and detail in repository."""
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_completion_outcome",
+                mem_info=memory_info,
+                max_concurrency=3,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+        transport_response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_completion_outcome",
+                local_memory_info=memory_info,
+                wait_timeout_dur=duration_pb2.Duration(seconds=1),
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+                request_id="transport-complete-outcome-1",
+            ),
+            test_context,
+        )
+        assert transport_response.status == global_store_pb2.Status.STATUS_OK
+
+        complete_response = servicer.CompleteReplicaTransport(
+            global_store_pb2.CompleteReplicaTransportRequest(
+                transport_id=transport_response.transport_id,
+                outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_FAILED,
+                outcome_detail="simulated_transport_failure",
+            ),
+            test_context,
+        )
+        assert complete_response.status == global_store_pb2.Status.STATUS_OK
+
+        transport_id = uuid.UUID(transport_response.transport_id)
+        transport_row = servicer.transport_repository.find_by_id(transport_id)
+        assert transport_row is not None
+        assert transport_row.status == "completed"
+        assert (
+            transport_row.completion_outcome.value
+            == "failed"
+        )
+        assert transport_row.completion_detail == "simulated_transport_failure"
+
     def test_complete_nonexistent_transport(self, servicer, test_context):
         """Test completing a transport that doesn't exist"""
         request = global_store_pb2.CompleteReplicaTransportRequest(
-            transport_id=str(uuid.uuid4())
+            transport_id=str(uuid.uuid4()),
+            outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
         )
 
         response = servicer.CompleteReplicaTransport(request, test_context)
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+
+    def test_complete_transport_requires_explicit_outcome(self, servicer, test_context):
+        """CompleteReplicaTransport rejects unspecified outcome."""
+        request = global_store_pb2.CompleteReplicaTransportRequest(
+            transport_id=str(uuid.uuid4())
+        )
+        response = servicer.CompleteReplicaTransport(request, test_context)
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+        assert "explicit outcome" in (test_context.details or "")
 
     def test_persistence(self, test_context, memory_info, temp_db_file):
         """Test that the database persists data between servicer instances"""

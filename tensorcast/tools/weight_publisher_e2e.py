@@ -38,6 +38,7 @@ SUPPORTED_RECEIVER_APPLY_MODES = {
     "tp_bind_into_swap",
     "tp4_bind_into_swap",
 }
+SUPPORTED_TRANSPORT_GROUP_MODES = {"none", "tp_version"}
 
 TP4_COL_BLOCK_ROWS = 4
 TP4_COL_WIDTH = 8
@@ -174,6 +175,19 @@ def _publish_memory_log(*, stage: str, version: int, publish_device: str) -> Non
     if cuda_bytes is not None:
         tokens.append(f"cuda_alloc_gib={float(cuda_bytes) / float(1024**3):.2f}")
     print(" ".join(tokens), flush=True)
+
+
+def _sanitize_group_token(raw: str) -> str:
+    value = str(raw).strip()
+    if not value:
+        return ""
+    allowed = set(
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "-_.:"
+    )
+    return "".join(ch if ch in allowed else "_" for ch in value)
 
 
 def _build_key(*, model_name: str, key_template: str, version: int) -> str:
@@ -1113,6 +1127,13 @@ class WeightUpdateReceiver:
         tp_device_base_index: int,
         tp_total_bytes: int,
         tp_materialize_deadline_s: float,
+        transport_group_mode: str,
+        transport_group_kind: str,
+        transport_group_namespace: str,
+        transport_group_total_parts: int,
+        transport_group_receiver_index: int,
+        transport_group_priority: int,
+        transport_group_epoch: int,
     ) -> None:
         self._model_name = model_name
         self._key_template = key_template
@@ -1136,6 +1157,33 @@ class WeightUpdateReceiver:
         self._tp_materialize_deadline_s = _ensure_non_negative_float(
             "tp_materialize_deadline_s",
             float(tp_materialize_deadline_s),
+        )
+        self._transport_group_mode = str(transport_group_mode).strip().lower()
+        if self._transport_group_mode not in SUPPORTED_TRANSPORT_GROUP_MODES:
+            raise ValueError(
+                "unsupported transport_group_mode="
+                f"{self._transport_group_mode!r}, "
+                f"allowed={sorted(SUPPORTED_TRANSPORT_GROUP_MODES)}"
+            )
+        self._transport_group_kind = _sanitize_group_token(transport_group_kind)
+        self._transport_group_namespace = _sanitize_group_token(
+            transport_group_namespace
+        )
+        self._transport_group_total_parts = _ensure_non_negative(
+            "transport_group_total_parts",
+            int(transport_group_total_parts),
+        )
+        self._transport_group_receiver_index = _ensure_non_negative(
+            "transport_group_receiver_index",
+            int(transport_group_receiver_index),
+        )
+        self._transport_group_priority = _ensure_non_negative(
+            "transport_group_priority",
+            int(transport_group_priority),
+        )
+        self._transport_group_epoch = _ensure_non_negative(
+            "transport_group_epoch",
+            int(transport_group_epoch),
         )
         self._tp_device_base_index = _ensure_non_negative(
             "tp_device_base_index",
@@ -1161,6 +1209,22 @@ class WeightUpdateReceiver:
                 raise ValueError(f"{self._apply_mode} requires real CUDA backend")
             if not torch.cuda.is_available():
                 raise ValueError(f"{self._apply_mode} requires CUDA devices")
+        if self._transport_group_mode == "tp_version":
+            if self._transport_group_total_parts <= 0:
+                raise ValueError(
+                    "transport_group_total_parts must be > 0 when "
+                    "transport_group_mode=tp_version"
+                )
+            if not self._transport_group_kind:
+                raise ValueError(
+                    "transport_group_kind must be non-empty when "
+                    "transport_group_mode=tp_version"
+                )
+            if not self._transport_group_namespace:
+                raise ValueError(
+                    "transport_group_namespace must be non-empty when "
+                    "transport_group_mode=tp_version"
+                )
         self._binding: Any | None = None
         self._binding_ptrs: dict[str, int] | None = None
         self._tp_bindings: dict[int, Any] = {}
@@ -1632,13 +1696,40 @@ class WeightUpdateReceiver:
     def _tp_rank_device(self, rank: int) -> str:
         return f"cuda:{self._tp_device_base_index + rank}"
 
-    def _make_tp_materialize_ctx(self, *, remaining_s: float) -> Any | None:
+    def _make_tp_materialize_ctx(
+        self,
+        *,
+        version: int,
+        rank: int,
+        remaining_s: float,
+    ) -> Any | None:
         if self._tp_materialize_deadline_s <= 0.0:
             return None
         bounded_s = min(self._tp_materialize_deadline_s, max(0.001, float(remaining_s)))
+        tags: dict[str, bool | int | float | str] | None = None
+        if self._transport_group_mode == "tp_version":
+            group_id = _sanitize_group_token(
+                f"{self._transport_group_namespace}:v{int(version)}"
+            )
+            part_id = _sanitize_group_token(
+                f"rx{self._transport_group_receiver_index}:r{int(rank)}"
+            )
+            request_id = _sanitize_group_token(f"{group_id}:{part_id}")
+            tags = {
+                "tc.transport.group.kind": self._transport_group_kind,
+                "tc.transport.group.id": group_id,
+                "tc.transport.group.total_parts": int(
+                    self._transport_group_total_parts
+                ),
+                "tc.transport.group.part_id": part_id,
+                "tc.transport.group.priority": int(self._transport_group_priority),
+                "tc.transport.group.epoch": int(self._transport_group_epoch),
+                "tc.transport.request_id": request_id,
+            }
         return tc.context(
             qos="interactive",
             deadline_ms=max(1, int(bounded_s * 1000.0)),
+            tags=tags,
         )
 
     def _maybe_publish_tp_binding(
@@ -1806,6 +1897,8 @@ class WeightUpdateReceiver:
                     rank_start = time.monotonic()
                     rank_remaining_s = max(0.001, deadline - time.monotonic())
                     rank_ctx = self._make_tp_materialize_ctx(
+                        version=version,
+                        rank=rank,
                         remaining_s=rank_remaining_s
                     )
                     print(
@@ -2050,6 +2143,13 @@ def _build_receiver_runner(
         tp_device_base_index=int(args.tp_device_base_index),
         tp_total_bytes=int(args.tp_total_bytes),
         tp_materialize_deadline_s=float(args.tp_materialize_deadline_s),
+        transport_group_mode=str(args.transport_group_mode),
+        transport_group_kind=str(args.transport_group_kind),
+        transport_group_namespace=str(args.transport_group_namespace),
+        transport_group_total_parts=int(args.transport_group_total_parts),
+        transport_group_receiver_index=int(args.transport_group_receiver_index),
+        transport_group_priority=int(args.transport_group_priority),
+        transport_group_epoch=int(args.transport_group_epoch),
     )
 
 
@@ -2109,6 +2209,15 @@ def _run_receiver(args: argparse.Namespace) -> int:
                 "tp_total_bytes": int(args.tp_total_bytes),
                 "tp_device_base_index": int(args.tp_device_base_index),
                 "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
+                "transport_group_mode": str(args.transport_group_mode),
+                "transport_group_kind": str(args.transport_group_kind),
+                "transport_group_namespace": str(args.transport_group_namespace),
+                "transport_group_total_parts": int(args.transport_group_total_parts),
+                "transport_group_receiver_index": int(
+                    args.transport_group_receiver_index
+                ),
+                "transport_group_priority": int(args.transport_group_priority),
+                "transport_group_epoch": int(args.transport_group_epoch),
                 "pid": os.getpid(),
                 "ready_at_s": time.time(),
             },
@@ -2129,6 +2238,13 @@ def _run_receiver(args: argparse.Namespace) -> int:
             "tp_total_bytes": int(args.tp_total_bytes),
             "tp_device_base_index": int(args.tp_device_base_index),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
+            "transport_group_mode": str(args.transport_group_mode),
+            "transport_group_kind": str(args.transport_group_kind),
+            "transport_group_namespace": str(args.transport_group_namespace),
+            "transport_group_total_parts": int(args.transport_group_total_parts),
+            "transport_group_receiver_index": int(args.transport_group_receiver_index),
+            "transport_group_priority": int(args.transport_group_priority),
+            "transport_group_epoch": int(args.transport_group_epoch),
             "received": _to_jsonable(events),
         }
         output = (
@@ -2413,6 +2529,54 @@ def _add_common_stream_args(
             "RPC deadline for TP bind_into/swap path in seconds. "
             "Use larger values for large multi-node payloads."
         ),
+    )
+    parser.add_argument(
+        "--transport-group-mode",
+        choices=sorted(SUPPORTED_TRANSPORT_GROUP_MODES),
+        default="none",
+        help=(
+            "Transport scheduling-group hint mode for TP receive path. "
+            "'tp_version' tags each TP rank request into one per-version group."
+        ),
+    )
+    parser.add_argument(
+        "--transport-group-kind",
+        default="tp_version",
+        help="Group kind label used when --transport-group-mode=tp_version.",
+    )
+    parser.add_argument(
+        "--transport-group-namespace",
+        default="",
+        help=(
+            "Group id namespace prefix used when --transport-group-mode=tp_version. "
+            "Should be unique per benchmark run."
+        ),
+    )
+    parser.add_argument(
+        "--transport-group-total-parts",
+        type=int,
+        default=0,
+        help=(
+            "Expected total parts per group when --transport-group-mode=tp_version."
+        ),
+    )
+    parser.add_argument(
+        "--transport-group-receiver-index",
+        type=int,
+        default=0,
+        help="Receiver index encoded into group part id when group mode is enabled.",
+    )
+    parser.add_argument(
+        "--transport-group-priority",
+        type=int,
+        default=0,
+        help="Group priority hint.",
+    )
+    parser.add_argument(
+        "--transport-group-epoch",
+        type=int,
+        default=0,
+        help="Group epoch hint.",
     )
     parser.add_argument(
         "--publish-device",

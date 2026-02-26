@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <format>
@@ -66,7 +67,8 @@ void TransportLease::complete() {
   if (!client_ || transport_id_.empty()) {
     return;
   }
-  absl::Status st = client_->complete_replica_transport(transport_id_);
+  absl::Status st =
+      client_->complete_replica_transport(transport_id_, TransportCompletionOutcome::kCancelled, "lease_scope_exit");
   if (!st.ok()) {
     LOG(WARNING) << "complete_replica_transport failed for " << transport_id_ << ": " << st;
   }
@@ -95,6 +97,44 @@ const char* status_to_cstr(global_store::Status s) {
     default:
       return "<unknown>";
   }
+}
+
+global_store::TransportCompletionOutcome to_proto_transport_completion_outcome(TransportCompletionOutcome outcome) {
+  switch (outcome) {
+    case TransportCompletionOutcome::kSuccess:
+      return global_store::TRANSPORT_COMPLETION_OUTCOME_SUCCESS;
+    case TransportCompletionOutcome::kFailed:
+      return global_store::TRANSPORT_COMPLETION_OUTCOME_FAILED;
+    case TransportCompletionOutcome::kExpired:
+      return global_store::TRANSPORT_COMPLETION_OUTCOME_EXPIRED;
+    case TransportCompletionOutcome::kCancelled:
+      return global_store::TRANSPORT_COMPLETION_OUTCOME_CANCELLED;
+    case TransportCompletionOutcome::kUnspecified:
+    default:
+      return global_store::TRANSPORT_COMPLETION_OUTCOME_UNSPECIFIED;
+  }
+}
+
+void apply_transport_scheduling_group_hint(
+    const std::optional<TransportSchedulingGroupHint>& scheduling_group,
+    global_store::RequestReplicaTransportRequest* request) {
+  if (!scheduling_group.has_value()) {
+    return;
+  }
+  auto* group = request->mutable_scheduling_group();
+  group->set_group_id(scheduling_group->group_id);
+  group->set_group_kind(scheduling_group->group_kind);
+  group->set_total_parts(scheduling_group->total_parts);
+  group->set_part_id(scheduling_group->part_id);
+  group->set_priority(scheduling_group->priority);
+  group->set_epoch(scheduling_group->epoch);
+}
+
+std::string build_transport_request_id(std::string_view operation_kind) {
+  static std::atomic<std::uint64_t> transport_request_sequence{1};
+  const std::uint64_t sequence = transport_request_sequence.fetch_add(1, std::memory_order_relaxed);
+  const std::int64_t now_ns = absl::ToUnixNanos(absl::Now());
+  return std::format("transport:{}:{}:{}", operation_kind, now_ns, sequence);
 }
 
 const char* rpc_service_for_method(absl::string_view method_name) {
@@ -1752,12 +1792,22 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     std::string_view source_address,
     uint32_t source_port,
     const DeviceKey& target_device,
-    uint32_t wait_timeout_ms) {
+    uint32_t wait_timeout_ms,
+    const std::optional<TransportSchedulingGroupHint>& scheduling_group,
+    std::string_view requester_worker_id,
+    std::string_view request_id) {
+  const std::string effective_request_id =
+      request_id.empty() ? build_transport_request_id("canonical") : std::string(request_id);
   global_store::RequestReplicaTransportRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_source_node_id(std::string(source_node_id));
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
+  apply_transport_scheduling_group_hint(scheduling_group, &request);
+  if (!requester_worker_id.empty()) {
+    request.set_requester_worker_id(std::string(requester_worker_id));
+  }
+  request.set_request_id(effective_request_id);
   request.mutable_requested_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   // Use standard duration
   auto* dur = request.mutable_wait_timeout_dur();
@@ -1825,16 +1875,26 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
     std::string_view source_address,
     uint32_t source_port,
     const DeviceKey& target_device,
-    uint32_t wait_timeout_ms) {
+    uint32_t wait_timeout_ms,
+    const std::optional<TransportSchedulingGroupHint>& scheduling_group,
+    std::string_view requester_worker_id,
+    std::string_view request_id) {
   if (view_id.empty()) {
     return absl::InvalidArgumentError("view_id must be non-empty for view transport");
   }
 
+  const std::string effective_request_id =
+      request_id.empty() ? build_transport_request_id("view") : std::string(request_id);
   global_store::RequestReplicaTransportRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_source_node_id(std::string(source_node_id));
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
+  apply_transport_scheduling_group_hint(scheduling_group, &request);
+  if (!requester_worker_id.empty()) {
+    request.set_requester_worker_id(std::string(requester_worker_id));
+  }
+  request.set_request_id(effective_request_id);
   auto* dur = request.mutable_wait_timeout_dur();
   dur->set_seconds(static_cast<int64_t>(wait_timeout_ms / 1000));
   dur->set_nanos(static_cast<int32_t>((wait_timeout_ms % 1000) * 1000000));
@@ -1901,9 +1961,19 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   return session;
 }
 
-absl::Status GlobalStoreClient::complete_replica_transport(std::string_view transport_id) {
+absl::Status GlobalStoreClient::complete_replica_transport(
+    std::string_view transport_id,
+    TransportCompletionOutcome outcome,
+    std::string_view outcome_detail) {
+  if (outcome == TransportCompletionOutcome::kUnspecified) {
+    return absl::InvalidArgumentError("complete_replica_transport requires explicit completion outcome");
+  }
   global_store::CompleteReplicaTransportRequest request;
   request.set_transport_id(std::string(transport_id));
+  request.set_outcome(to_proto_transport_completion_outcome(outcome));
+  if (!outcome_detail.empty()) {
+    request.set_outcome_detail(std::string(outcome_detail));
+  }
 
   global_store::CompleteReplicaTransportResponse response;
 

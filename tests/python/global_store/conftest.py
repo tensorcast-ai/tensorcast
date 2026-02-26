@@ -21,6 +21,7 @@ from tensorcast.global_store.repositories import (
     InstanceRepository,
     LeafRepository,
     LayoutSpecRepository,
+    PendingTransportRequestRepository,
     ProofRepository,
     ReplicaRepository,
     TransportRepository,
@@ -195,6 +196,7 @@ def repositories(db_connection):
     return {
         "replica": ReplicaRepository(db_connection),
         "transport": TransportRepository(db_connection),
+        "pending_transport_request": PendingTransportRequestRepository(db_connection),
         "view": ViewRepository(db_connection),
         "coverage": ViewCoverageRepository(db_connection),
         "leaf": LeafRepository(db_connection),
@@ -236,7 +238,9 @@ observability:
     return {
         "artifact": ArtifactService(repositories["replica"]),
         "transport": TransportService(
-            repositories["replica"], repositories["transport"]
+            repositories["replica"],
+            repositories["transport"],
+            repositories["pending_transport_request"],
         ),
         "worker": WorkerService(repositories["worker"], repositories["replica"]),
         "instance": InstanceService(repositories["instance"], repositories["worker"]),

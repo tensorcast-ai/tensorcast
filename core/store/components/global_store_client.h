@@ -104,6 +104,23 @@ struct TransportSession {
   absl::Time start_time;
 };
 
+struct TransportSchedulingGroupHint {
+  std::string group_id;
+  std::string group_kind;
+  uint32_t total_parts{0};
+  std::string part_id;
+  uint32_t priority{0};
+  uint64_t epoch{0};
+};
+
+enum class TransportCompletionOutcome : uint8_t {
+  kUnspecified = 0,
+  kSuccess = 1,
+  kFailed = 2,
+  kExpired = 3,
+  kCancelled = 4,
+};
+
 struct ReplicaDrainStatus {
   bool drained{false};
   uint32_t current_requests{0};
@@ -449,7 +466,10 @@ class IGlobalStoreClient {
       std::string_view source_address,
       uint32_t source_port,
       const DeviceKey& target_device,
-      uint32_t wait_timeout_ms = 30000) = 0;
+      uint32_t wait_timeout_ms = 30000,
+      const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      std::string_view requester_worker_id = {},
+      std::string_view request_id = {}) = 0;
 
   virtual absl::StatusOr<TransportSession> request_view_transport(
       std::string_view artifact_id,
@@ -458,9 +478,15 @@ class IGlobalStoreClient {
       std::string_view source_address,
       uint32_t source_port,
       const DeviceKey& target_device,
-      uint32_t wait_timeout_ms = 30000) = 0;
+      uint32_t wait_timeout_ms = 30000,
+      const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      std::string_view requester_worker_id = {},
+      std::string_view request_id = {}) = 0;
 
-  virtual absl::Status complete_replica_transport(std::string_view transport_id) = 0;
+  virtual absl::Status complete_replica_transport(
+      std::string_view transport_id,
+      TransportCompletionOutcome outcome,
+      std::string_view outcome_detail = {}) = 0;
 
   virtual absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
       std::string_view artifact_id,
@@ -748,7 +774,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view source_address,
       uint32_t source_port,
       const DeviceKey& target_device,
-      uint32_t wait_timeout_ms = 30000) override;
+      uint32_t wait_timeout_ms = 30000,
+      const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      std::string_view requester_worker_id = {},
+      std::string_view request_id = {}) override;
   absl::StatusOr<TransportSession> request_view_transport(
       std::string_view artifact_id,
       std::string_view view_id,
@@ -756,9 +785,15 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view source_address,
       uint32_t source_port,
       const DeviceKey& target_device,
-      uint32_t wait_timeout_ms = 30000) override;
+      uint32_t wait_timeout_ms = 30000,
+      const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      std::string_view requester_worker_id = {},
+      std::string_view request_id = {}) override;
 
-  absl::Status complete_replica_transport(std::string_view transport_id) override;
+  absl::Status complete_replica_transport(
+      std::string_view transport_id,
+      TransportCompletionOutcome outcome,
+      std::string_view outcome_detail = {}) override;
 
   absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
       std::string_view artifact_id,

@@ -29,8 +29,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool replica_transport_not_found{false};
   std::vector<std::string> view_requests;
   std::vector<std::string> replica_requests;
+  std::vector<std::optional<components::TransportSchedulingGroupHint>> view_request_groups;
+  std::vector<std::optional<components::TransportSchedulingGroupHint>> replica_request_groups;
+  std::vector<std::string> view_request_request_ids;
+  std::vector<std::string> replica_request_request_ids;
+  std::vector<std::string> view_request_requester_worker_ids;
+  std::vector<std::string> replica_request_requester_worker_ids;
   std::vector<uint32_t> view_request_wait_timeouts_ms;
   std::vector<uint32_t> replica_request_wait_timeouts_ms;
+  std::vector<std::string> completed_transport_ids;
+  std::vector<components::TransportCompletionOutcome> completed_transport_outcomes;
+  std::vector<std::string> completed_transport_outcome_details;
   std::vector<std::string> registered_replicas;
   std::vector<std::pair<std::string, std::string>> unregistered_replicas;
   std::vector<std::string> marked_unavailable;
@@ -325,8 +334,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       uint32_t,
       const tensorcast::store::DeviceKey& target_device,
-      uint32_t wait_timeout_ms) override {
+      uint32_t wait_timeout_ms,
+      const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
+      std::string_view requester_worker_id,
+      std::string_view request_id) override {
     replica_requests.emplace_back(std::string(artifact_id));
+    replica_request_groups.push_back(scheduling_group);
+    replica_request_request_ids.emplace_back(std::string(request_id));
+    replica_request_requester_worker_ids.emplace_back(std::string(requester_worker_id));
     replica_request_wait_timeouts_ms.push_back(wait_timeout_ms);
     if (scripted_transport_next < scripted_transport_sessions.size()) {
       return scripted_transport_sessions[scripted_transport_next++];
@@ -351,8 +366,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       uint32_t,
       const tensorcast::store::DeviceKey& target_device,
-      uint32_t wait_timeout_ms) override {
+      uint32_t wait_timeout_ms,
+      const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
+      std::string_view requester_worker_id,
+      std::string_view request_id) override {
     view_requests.emplace_back(std::string(view_id));
+    view_request_groups.push_back(scheduling_group);
+    view_request_request_ids.emplace_back(std::string(request_id));
+    view_request_requester_worker_ids.emplace_back(std::string(requester_worker_id));
     view_request_wait_timeouts_ms.push_back(wait_timeout_ms);
     if (!allow_view_transport) {
       return absl::NotFoundError("view transport disabled in RecordingGlobalStoreClient");
@@ -364,7 +385,13 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return make_transport_session(it->second, target_device);
   }
 
-  absl::Status complete_replica_transport(std::string_view) override {
+  absl::Status complete_replica_transport(
+      std::string_view transport_id,
+      components::TransportCompletionOutcome outcome,
+      std::string_view outcome_detail) override {
+    completed_transport_ids.emplace_back(std::string(transport_id));
+    completed_transport_outcomes.push_back(outcome);
+    completed_transport_outcome_details.emplace_back(std::string(outcome_detail));
     return absl::OkStatus();
   }
 

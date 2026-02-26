@@ -7,7 +7,14 @@ from datetime import datetime, timezone
 import pytest
 
 from tensorcast.global_store.exceptions import DatabaseError
-from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
+from tensorcast.global_store.models import (
+    ExportState,
+    MemoryType,
+    Replica,
+    Transport,
+    TransportCompletionOutcome,
+    Worker,
+)
 from tensorcast.global_store.repositories import ArtifactDiskLocationRepository
 from tensorcast.global_store.repositories.base import BaseRepository
 
@@ -624,8 +631,6 @@ class TestRepositories:
         created_replica = replica_repo.create(replica)
 
         # Create transport
-        from tensorcast.global_store.models import Transport
-
         transport = Transport(
             replica_id=created_replica.replica_id,
             artifact_id="test_artifact",
@@ -645,6 +650,80 @@ class TestRepositories:
         deleted = transport_repo.delete(created_transport.transport_id)
         assert deleted is True
         assert transport_repo.find_by_id(created_transport.transport_id) is None
+
+    def test_transport_repository_request_id_and_group_progress(self, repositories):
+        """Transport repository should support request-id dedupe and SUCCESS-only group progress."""
+        transport_repo = repositories["transport"]
+        replica_repo = repositories["replica"]
+
+        replica = Replica(
+            artifact_id="test_artifact_group_progress",
+            node_id="node1",
+            node_address="192.168.1.1",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            worker_id="worker1",
+        )
+        created_replica = replica_repo.create(replica)
+
+        failed_transport = Transport(
+            replica_id=created_replica.replica_id,
+            artifact_id="test_artifact_group_progress",
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9000,
+            request_id="request-id-failed",
+            group_id="group-progress",
+            group_kind="tp_rank",
+            group_total_parts=2,
+            group_part_id="part-0",
+            group_priority=0,
+            group_epoch=1,
+        )
+        transport_repo.create(failed_transport)
+        found_by_request = transport_repo.find_by_request_id("request-id-failed")
+        assert found_by_request is not None
+        assert found_by_request.transport_id == failed_transport.transport_id
+
+        assert transport_repo.complete_if_in_progress(
+            failed_transport.transport_id,
+            completed_at=datetime.now(timezone.utc),
+            outcome=TransportCompletionOutcome.FAILED,
+            outcome_detail="simulated_failure",
+        )
+
+        success_transport = Transport(
+            replica_id=created_replica.replica_id,
+            artifact_id="test_artifact_group_progress",
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9000,
+            request_id="request-id-success",
+            group_id="group-progress",
+            group_kind="tp_rank",
+            group_total_parts=2,
+            group_part_id="part-1",
+            group_priority=0,
+            group_epoch=1,
+        )
+        transport_repo.create(success_transport)
+        assert transport_repo.complete_if_in_progress(
+            success_transport.transport_id,
+            completed_at=datetime.now(timezone.utc),
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+
+        progress = transport_repo.get_group_progress(
+            group_kind="tp_rank",
+            group_id="group-progress",
+            group_epoch=1,
+            total_parts_hint=2,
+        )
+        assert progress.completed_parts == 1
+        assert progress.total_parts == 2
+        assert progress.completion_ratio == pytest.approx(0.5)
 
     def test_replica_by_worker_cleanup(self, repositories):
         """Test marking replicas unavailable when worker is removed."""

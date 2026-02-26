@@ -4,18 +4,39 @@
 
 import base64
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tensorcast.global_store import metrics
+from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config.settings import set_config
 from tensorcast.global_store.exceptions import (
     DatabaseError,
     NotFoundError,
     TimeoutError,
     ValidationError,
 )
-from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
+from tensorcast.global_store.models import (
+    ByteSpaceRef,
+    ExportState,
+    MemoryType,
+    PendingTransportRequest,
+    PendingTransportState,
+    Replica,
+    Transport,
+    TransportCompletionOutcome,
+    TransportSchedulingGroup,
+    Worker,
+)
+from tensorcast.global_store.repositories.transport_repository import (
+    TransportGroupProgress,
+)
+from tensorcast.global_store.services import (
+    ArtifactService,
+    TransportService,
+    WorkerService,
+)
 from tensorcast.global_store.services.view_state_service import (
     PROOF_SCHEMA_V1,
     LeafWritePayload,
@@ -596,13 +617,17 @@ class TestServices:
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9090,
+            request_id="transport-basic-1",
         )
 
         assert selected.replica_id == replica.replica_id
         assert selected.current_requests == 1
 
         # Complete transport
-        current, max_conc = transport_service.complete_transport(transport_id)
+        current, max_conc = transport_service.complete_transport(
+            transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
         assert current == 0
         assert max_conc == 2
 
@@ -646,16 +671,234 @@ class TestServices:
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9090,
+            request_id="transport-idempotent-1",
         )
         assert selected.replica_id == replica.replica_id
 
-        current, max_conc = transport_service.complete_transport(transport_id)
+        current, max_conc = transport_service.complete_transport(
+            transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
         assert current == 0
         assert max_conc == 1
 
-        current2, max_conc2 = transport_service.complete_transport(transport_id)
+        current2, max_conc2 = transport_service.complete_transport(
+            transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
         assert current2 == 0
         assert max_conc2 == 1
+
+    def test_transport_service_request_idempotency_reuses_existing_transport(
+        self, services
+    ):
+        """Duplicate request_id should reuse the same transport row and lease."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_node_idempotency_request",
+                node_id="node_idempotency_request",
+                node_address="192.168.9.10",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="idempotency_request_artifact",
+                node_id="node_idempotency_request",
+                node_address="192.168.9.10",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        first_replica, first_transport_id = transport_service.request_transport(
+            artifact_id="idempotency_request_artifact",
+            view_id=None,
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9090,
+            request_id="transport-request-id-1",
+        )
+        second_replica, second_transport_id = transport_service.request_transport(
+            artifact_id="idempotency_request_artifact",
+            view_id=None,
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9090,
+            request_id="transport-request-id-1",
+        )
+
+        assert first_transport_id == second_transport_id
+        assert first_replica.replica_id == second_replica.replica_id
+        assert second_replica.current_requests == 1
+
+        current, max_conc = transport_service.complete_transport(
+            first_transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+        assert current == 0
+        assert max_conc == 1
+
+    def test_transport_service_request_id_rejects_payload_mismatch(self, services):
+        """Same request_id with a different payload must fail deterministically."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_node_request_id_conflict",
+                node_id="node_request_id_conflict",
+                node_address="192.168.9.30",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="request_id_conflict_artifact",
+                node_id="node_request_id_conflict",
+                node_address="192.168.9.30",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=2,
+            )
+        )
+
+        _, transport_id = transport_service.request_transport(
+            artifact_id="request_id_conflict_artifact",
+            view_id=None,
+            source_node_id="source_node_a",
+            source_address="192.168.2.1",
+            source_port=9090,
+            request_id="shared-request-id",
+        )
+        with pytest.raises(ValidationError, match="already used with different payload"):
+            transport_service.request_transport(
+                artifact_id="request_id_conflict_artifact",
+                view_id=None,
+                source_node_id="source_node_b",
+                source_address="192.168.2.1",
+                source_port=9090,
+                request_id="shared-request-id",
+            )
+
+        transport_service.complete_transport(
+            transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+
+    def test_transport_service_group_progress_counts_success_only(self, services):
+        """Group progress uses completion outcome SUCCESS only."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_node_group_outcome",
+                node_id="node_group_outcome",
+                node_address="192.168.9.20",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="group_outcome_artifact",
+                node_id="node_group_outcome",
+                node_address="192.168.9.20",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=2,
+            )
+        )
+
+        group_failed = TransportSchedulingGroup(
+            group_id="group-outcome",
+            group_kind="tp_rank",
+            total_parts=2,
+            part_id="part-0",
+            priority=0,
+            epoch=1,
+        )
+        group_success = TransportSchedulingGroup(
+            group_id="group-outcome",
+            group_kind="tp_rank",
+            total_parts=2,
+            part_id="part-1",
+            priority=0,
+            epoch=1,
+        )
+
+        _, transport_failed_id = transport_service.request_transport(
+            artifact_id="group_outcome_artifact",
+            view_id=None,
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9090,
+            request_id="group-outcome-failed",
+            scheduling_group=group_failed,
+        )
+        transport_service.complete_transport(
+            transport_failed_id,
+            outcome=TransportCompletionOutcome.FAILED,
+            outcome_detail="simulated_failure",
+        )
+
+        _, transport_success_id = transport_service.request_transport(
+            artifact_id="group_outcome_artifact",
+            view_id=None,
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9090,
+            request_id="group-outcome-success",
+            scheduling_group=group_success,
+        )
+        transport_service.complete_transport(
+            transport_success_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+
+        progress = transport_service.transport_repository.get_group_progress(
+            group_kind="tp_rank",
+            group_id="group-outcome",
+            group_epoch=1,
+            total_parts_hint=2,
+        )
+        assert progress.completed_parts == 1
+        assert progress.total_parts == 2
+        assert progress.completion_ratio == pytest.approx(0.5)
 
     def test_transport_service_no_replicas(self, services):
         """Test transport when no replicas exist."""
@@ -670,6 +913,7 @@ class TestServices:
                 source_address="192.168.1.1",
                 source_port=8080,
                 wait_timeout_ms=100,
+                request_id="transport-no-replica-1",
             )
 
     def test_transport_service_timeout(self, services):
@@ -715,6 +959,7 @@ class TestServices:
             source_node_id="source_1",
             source_address="192.168.2.1",
             source_port=9090,
+            request_id="transport-timeout-first",
         )
 
         # Request second transport with short timeout (should fail with TimeoutError)
@@ -726,10 +971,14 @@ class TestServices:
                 source_address="192.168.2.2",
                 source_port=9091,
                 wait_timeout_ms=100,  # Short timeout
+                request_id="transport-timeout-second",
             )
 
         # Complete the first transport
-        transport_service.complete_transport(transport_id)
+        transport_service.complete_transport(
+            transport_id,
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
 
     def test_transport_service_concurrency_limit(self, services):
         """Test concurrency limiting."""
@@ -776,6 +1025,7 @@ class TestServices:
                 source_node_id=f"source_{i}",
                 source_address="192.168.2.1",
                 source_port=9090 + i,
+                request_id=f"transport-concurrency-{i}",
             )
             transport_ids.append(transport_id)
 
@@ -788,10 +1038,14 @@ class TestServices:
                 source_address="192.168.2.1",
                 source_port=9093,
                 wait_timeout_ms=100,
+                request_id="transport-concurrency-overflow",
             )
 
         # Complete one transport
-        transport_service.complete_transport(transport_ids[0])
+        transport_service.complete_transport(
+            transport_ids[0],
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
 
         # Now request should succeed
         _, transport_id = transport_service.request_transport(
@@ -800,6 +1054,7 @@ class TestServices:
             source_node_id="source_3",
             source_address="192.168.2.1",
             source_port=9093,
+            request_id="transport-concurrency-retry",
         )
         assert transport_id is not None
 
@@ -809,7 +1064,730 @@ class TestServices:
 
         # Try to complete non-existent transport
         with pytest.raises(NotFoundError):
-            transport_service.complete_transport("nonexistent_transport_id")
+            transport_service.complete_transport(
+                "nonexistent_transport_id",
+                outcome=TransportCompletionOutcome.SUCCESS,
+            )
+
+    def test_dispatch_rolls_back_claim_when_transport_already_exists(
+        self, services, repositories
+    ):
+        """Dispatch must rollback replica claim when request_id transport already exists."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+        pending_repo = repositories["pending_transport_request"]
+        transport_repo = repositories["transport"]
+        replica_repo = repositories["replica"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_dispatch_reuse",
+                node_id="node_dispatch_reuse",
+                node_address="192.168.11.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="dispatch_reuse_artifact",
+                node_id="node_dispatch_reuse",
+                node_address="192.168.11.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        request_id = "dispatch-reuse-request-1"
+        request_fingerprint = transport_service._build_request_fingerprint(
+            artifact_id="dispatch_reuse_artifact",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="192.168.12.1",
+            source_port=9090,
+            requester_worker_id=None,
+            scheduling_group=None,
+        )
+        transport_repo.create(
+            Transport(
+                replica_id=replica.replica_id,
+                artifact_id="dispatch_reuse_artifact",
+                source_node_id="source-node",
+                source_address="192.168.12.1",
+                source_port=9090,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+        )
+
+        with replica_repo.transaction() as tx:
+            pending_repo.create_if_absent_with_cursor(
+                PendingTransportRequest(
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    artifact_id="dispatch_reuse_artifact",
+                    requested_view_id=None,
+                    source_node_id="source-node",
+                    source_address="192.168.12.1",
+                    source_port=9090,
+                ),
+                tx,
+            )
+            dispatched = transport_service._dispatch_pending_requests(tx=tx)
+
+        assert dispatched == 1
+        assert replica_repo.get_current_requests(replica.replica_id) == 0
+        pending = pending_repo.find_by_request_id(request_id)
+        assert pending is not None
+        assert pending.state == PendingTransportState.DISPATCHED
+
+    def test_dispatch_rolls_back_claim_on_mark_dispatched_race(
+        self, services, repositories, monkeypatch
+    ):
+        """Dispatch race rollback should delete newly-created transport and release claim."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+        pending_repo = repositories["pending_transport_request"]
+        transport_repo = repositories["transport"]
+        replica_repo = repositories["replica"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_dispatch_race",
+                node_id="node_dispatch_race",
+                node_address="192.168.21.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="dispatch_race_artifact",
+                node_id="node_dispatch_race",
+                node_address="192.168.21.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        request_id = "dispatch-race-request-1"
+        request_fingerprint = transport_service._build_request_fingerprint(
+            artifact_id="dispatch_race_artifact",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="192.168.22.1",
+            source_port=9090,
+            requester_worker_id=None,
+            scheduling_group=None,
+        )
+
+        with replica_repo.transaction() as tx:
+            pending_repo.create_if_absent_with_cursor(
+                PendingTransportRequest(
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    artifact_id="dispatch_race_artifact",
+                    requested_view_id=None,
+                    source_node_id="source-node",
+                    source_address="192.168.22.1",
+                    source_port=9090,
+                ),
+                tx,
+            )
+
+        monkeypatch.setattr(pending_repo, "mark_dispatched", lambda _request_id, _tx: False)
+
+        with replica_repo.transaction() as tx:
+            dispatched = transport_service._dispatch_pending_requests(tx=tx)
+
+        assert dispatched == 0
+        assert replica_repo.get_current_requests(replica.replica_id) == 0
+        pending = pending_repo.find_by_request_id(request_id)
+        assert pending is not None
+        assert pending.state == PendingTransportState.ENQUEUED
+        assert transport_repo.find_by_request_id(request_id) is None
+
+    def test_cleanup_expired_transports_forces_completion_and_releases_capacity(
+        self, services, repositories
+    ):
+        """cleanup_expired_transports must force-complete stale in-flight rows."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+        replica_repo = repositories["replica"]
+        transport_repo = repositories["transport"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_cleanup_expired",
+                node_id="node_cleanup_expired",
+                node_address="192.168.31.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="cleanup_expired_artifact",
+                node_id="node_cleanup_expired",
+                node_address="192.168.31.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        _, transport_id = transport_service.request_transport(
+            artifact_id="cleanup_expired_artifact",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="192.168.32.1",
+            source_port=9090,
+            request_id="cleanup-expired-request-1",
+        )
+        assert replica_repo.get_current_requests(replica.replica_id) == 1
+
+        stale_created_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        transport_repo.connection.execute(
+            "UPDATE artifact_transports SET created_at = ? WHERE transport_id = ?",
+            [stale_created_at, str(transport_id)],
+        )
+
+        cleaned = transport_service.cleanup_expired_transports(expiration_seconds=1)
+        assert cleaned == 1
+
+        transport_row = transport_repo.find_by_id(transport_id)
+        assert transport_row is not None
+        assert transport_row.status == "completed"
+        assert transport_row.completion_outcome == TransportCompletionOutcome.EXPIRED
+        assert transport_row.completion_detail is not None
+        assert "cleanup_expired_transports" in transport_row.completion_detail
+        assert replica_repo.get_current_requests(replica.replica_id) == 0
+
+    def test_group_dispatch_honors_dispatch_batch_limit(
+        self, tmp_path, repositories
+    ):
+        """A single dispatch cycle should respect dispatch_batch_limit."""
+        legacy_cfg = GlobalStoreConfig()
+        cfg_path = tmp_path / "group_dispatch_batch_limit.yaml"
+        cfg_path.write_text(
+            """
+database:
+  db_file: ""
+server:
+  listen:
+    host: "127.0.0.1"
+    port: 50051
+worker_policy:
+  heartbeat_timeout: "30s"
+  cleanup_interval: "60s"
+  default_heartbeat_interval: "5s"
+  transport_scheduler:
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+    group_dispatch:
+      queue_scan_limit: 16
+      dispatch_batch_limit: 1
+            """,
+            encoding="utf-8",
+        )
+        try:
+            set_config(GlobalStoreConfig.from_file(str(cfg_path)))
+            artifact_service = ArtifactService(repositories["replica"])
+            worker_service = WorkerService(
+                repositories["worker"], repositories["replica"]
+            )
+            transport_service = TransportService(
+                repositories["replica"],
+                repositories["transport"],
+                repositories["pending_transport_request"],
+            )
+
+            worker = worker_service.register_worker(
+                Worker(
+                    daemon_id="daemon_group_batch_limit",
+                    node_id="node_group_batch_limit",
+                    node_address="192.168.41.1",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="group_batch_limit_artifact",
+                    node_id="node_group_batch_limit",
+                    node_address="192.168.41.1",
+                    node_port=8080,
+                    memory_size=1024,
+                    memory_type=MemoryType.GPU,
+                    device_id=0,
+                    remote_memory_keys=["rk0"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
+                    worker_id=worker.worker_id,
+                    max_concurrency=8,
+                )
+            )
+
+            pending_repo = repositories["pending_transport_request"]
+            for i in range(3):
+                with repositories["replica"].transaction() as tx:
+                    pending_repo.create_if_absent_with_cursor(
+                        PendingTransportRequest(
+                            request_id=f"group-batch-limit-{i}",
+                            request_fingerprint=f"fp-group-batch-limit-{i}",
+                            artifact_id="group_batch_limit_artifact",
+                            requested_view_id=None,
+                            source_node_id=f"source-{i}",
+                            source_address="192.168.42.1",
+                            source_port=9090 + i,
+                        ),
+                        tx,
+                    )
+
+            with repositories["replica"].transaction() as tx:
+                dispatched = transport_service._dispatch_pending_requests(tx=tx)
+            assert dispatched == 1
+
+            states = [
+                pending_repo.find_by_request_id(f"group-batch-limit-{i}").state
+                for i in range(3)
+            ]
+            assert states.count(PendingTransportState.DISPATCHED) == 1
+            assert states.count(PendingTransportState.ENQUEUED) == 2
+        finally:
+            set_config(legacy_cfg)
+
+    def test_group_dispatch_honors_queue_scan_limit(
+        self, tmp_path, repositories
+    ):
+        """queue_scan_limit should cap how many enqueued requests are considered per cycle."""
+        legacy_cfg = GlobalStoreConfig()
+        cfg_path = tmp_path / "group_dispatch_scan_limit.yaml"
+        cfg_path.write_text(
+            """
+database:
+  db_file: ""
+server:
+  listen:
+    host: "127.0.0.1"
+    port: 50051
+worker_policy:
+  heartbeat_timeout: "30s"
+  cleanup_interval: "60s"
+  default_heartbeat_interval: "5s"
+  transport_scheduler:
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+    group_dispatch:
+      queue_scan_limit: 1
+      dispatch_batch_limit: 8
+            """,
+            encoding="utf-8",
+        )
+        try:
+            set_config(GlobalStoreConfig.from_file(str(cfg_path)))
+            artifact_service = ArtifactService(repositories["replica"])
+            worker_service = WorkerService(
+                repositories["worker"], repositories["replica"]
+            )
+            transport_service = TransportService(
+                repositories["replica"],
+                repositories["transport"],
+                repositories["pending_transport_request"],
+            )
+
+            worker = worker_service.register_worker(
+                Worker(
+                    daemon_id="daemon_group_scan_limit",
+                    node_id="node_group_scan_limit",
+                    node_address="192.168.51.1",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="group_scan_limit_artifact",
+                    node_id="node_group_scan_limit",
+                    node_address="192.168.51.1",
+                    node_port=8080,
+                    memory_size=1024,
+                    memory_type=MemoryType.GPU,
+                    device_id=0,
+                    remote_memory_keys=["rk0"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
+                    worker_id=worker.worker_id,
+                    max_concurrency=8,
+                )
+            )
+
+            pending_repo = repositories["pending_transport_request"]
+            for i in range(3):
+                with repositories["replica"].transaction() as tx:
+                    pending_repo.create_if_absent_with_cursor(
+                        PendingTransportRequest(
+                            request_id=f"group-scan-limit-{i}",
+                            request_fingerprint=f"fp-group-scan-limit-{i}",
+                            artifact_id="group_scan_limit_artifact",
+                            requested_view_id=None,
+                            source_node_id=f"source-{i}",
+                            source_address="192.168.52.1",
+                            source_port=9190 + i,
+                        ),
+                        tx,
+                    )
+
+            with repositories["replica"].transaction() as tx:
+                dispatched = transport_service._dispatch_pending_requests(tx=tx)
+            assert dispatched == 1
+
+            states = [
+                pending_repo.find_by_request_id(f"group-scan-limit-{i}").state
+                for i in range(3)
+            ]
+            assert states.count(PendingTransportState.DISPATCHED) == 1
+            assert states.count(PendingTransportState.ENQUEUED) == 2
+        finally:
+            set_config(legacy_cfg)
+
+    def test_group_dispatch_sort_key_prefers_starved_low_progress_group(
+        self, services, monkeypatch
+    ):
+        """Sort key should prefer stale groups under fairness floor."""
+        transport_service = services["transport"]
+        now_utc = datetime.now(timezone.utc)
+
+        lagging = PendingTransportRequest(
+            request_id="group-sort-lagging",
+            request_fingerprint="fp-lagging",
+            artifact_id="group-sort-artifact",
+            requested_view_id=None,
+            source_node_id="source-lagging",
+            source_address="192.168.61.1",
+            source_port=9090,
+            created_at=now_utc,
+        )
+        lagging.set_scheduling_group(
+            TransportSchedulingGroup(
+                group_id="group-lagging",
+                group_kind="tp_rank",
+                total_parts=4,
+                part_id="part-0",
+                priority=0,
+                epoch=1,
+            )
+        )
+
+        leading = PendingTransportRequest(
+            request_id="group-sort-leading",
+            request_fingerprint="fp-leading",
+            artifact_id="group-sort-artifact",
+            requested_view_id=None,
+            source_node_id="source-leading",
+            source_address="192.168.61.2",
+            source_port=9091,
+            created_at=now_utc,
+        )
+        leading.set_scheduling_group(
+            TransportSchedulingGroup(
+                group_id="group-leading",
+                group_kind="tp_rank",
+                total_parts=4,
+                part_id="part-1",
+                priority=0,
+                epoch=1,
+            )
+        )
+
+        def _fake_progress(*, group_kind, group_id, group_epoch, total_parts_hint, cursor):
+            if group_id == "group-lagging":
+                return TransportGroupProgress(
+                    completed_parts=0,
+                    total_parts=4,
+                    last_success_at=now_utc - timedelta(seconds=30),
+                )
+            return TransportGroupProgress(
+                completed_parts=3,
+                total_parts=4,
+                last_success_at=now_utc,
+            )
+
+        monkeypatch.setattr(
+            transport_service.transport_repository,
+            "get_group_progress",
+            _fake_progress,
+        )
+
+        lagging_key = transport_service._group_dispatch_sort_key(
+            pending_request=lagging,
+            min_completion_ratio=0.0,
+            now_utc=now_utc,
+            tx=None,
+        )
+        leading_key = transport_service._group_dispatch_sort_key(
+            pending_request=leading,
+            min_completion_ratio=0.0,
+            now_utc=now_utc,
+            tx=None,
+        )
+
+        assert lagging_key < leading_key
+
+    def test_group_dispatch_rejects_duplicate_group_part_id(
+        self, tmp_path, repositories
+    ):
+        """GROUP_DISPATCH enforces unique part_id within (group_kind, group_id, epoch)."""
+        legacy_cfg = GlobalStoreConfig()
+        cfg_path = tmp_path / "group_dispatch_config.yaml"
+        cfg_path.write_text(
+            """
+database:
+  db_file: ""
+server:
+  listen:
+    host: "127.0.0.1"
+    port: 50051
+worker_policy:
+  heartbeat_timeout: "30s"
+  cleanup_interval: "60s"
+  default_heartbeat_interval: "5s"
+  transport_scheduler:
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+            """,
+            encoding="utf-8",
+        )
+
+        try:
+            set_config(GlobalStoreConfig.from_file(str(cfg_path)))
+            artifact_service = ArtifactService(repositories["replica"])
+            worker_service = WorkerService(
+                repositories["worker"], repositories["replica"]
+            )
+            transport_service = TransportService(
+                repositories["replica"],
+                repositories["transport"],
+                repositories["pending_transport_request"],
+            )
+
+            worker = worker_service.register_worker(
+                Worker(
+                    daemon_id="daemon_group_dispatch_contract",
+                    node_id="node_group_dispatch_contract",
+                    node_address="192.168.10.10",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="group_dispatch_contract_artifact",
+                    node_id="node_group_dispatch_contract",
+                    node_address="192.168.10.10",
+                    node_port=8080,
+                    memory_size=1024,
+                    memory_type=MemoryType.GPU,
+                    device_id=0,
+                    remote_memory_keys=["rk0"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
+                    worker_id=worker.worker_id,
+                    max_concurrency=2,
+                )
+            )
+
+            scheduling_group = TransportSchedulingGroup(
+                group_id="group-dispatch-contract",
+                group_kind="tp_rank",
+                total_parts=2,
+                part_id="part-0",
+                priority=0,
+                epoch=7,
+            )
+            _, first_transport_id = transport_service.request_transport(
+                artifact_id="group_dispatch_contract_artifact",
+                view_id=None,
+                source_node_id="source_node",
+                source_address="192.168.2.1",
+                source_port=9090,
+                request_id="group-dispatch-req-1",
+                scheduling_group=scheduling_group,
+            )
+            transport_service.complete_transport(
+                first_transport_id,
+                outcome=TransportCompletionOutcome.SUCCESS,
+            )
+
+            with pytest.raises(
+                ValidationError, match="duplicate part_id in transport history"
+            ):
+                transport_service.request_transport(
+                    artifact_id="group_dispatch_contract_artifact",
+                    view_id=None,
+                    source_node_id="source_node",
+                    source_address="192.168.2.1",
+                    source_port=9090,
+                    request_id="group-dispatch-req-2",
+                    scheduling_group=scheduling_group,
+                )
+        finally:
+            set_config(legacy_cfg)
+
+    def test_group_dispatch_rejects_cross_view_group_epoch(self, tmp_path, repositories):
+        """GROUP_DISPATCH enforces one requested view per group epoch."""
+        legacy_cfg = GlobalStoreConfig()
+        cfg_path = tmp_path / "group_dispatch_view_contract.yaml"
+        cfg_path.write_text(
+            """
+database:
+  db_file: ""
+server:
+  listen:
+    host: "127.0.0.1"
+    port: 50051
+worker_policy:
+  heartbeat_timeout: "30s"
+  cleanup_interval: "60s"
+  default_heartbeat_interval: "5s"
+  transport_scheduler:
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+            """,
+            encoding="utf-8",
+        )
+
+        try:
+            set_config(GlobalStoreConfig.from_file(str(cfg_path)))
+            artifact_service = ArtifactService(repositories["replica"])
+            worker_service = WorkerService(
+                repositories["worker"], repositories["replica"]
+            )
+            transport_service = TransportService(
+                repositories["replica"],
+                repositories["transport"],
+                repositories["pending_transport_request"],
+            )
+
+            worker = worker_service.register_worker(
+                Worker(
+                    daemon_id="daemon_group_dispatch_view_contract",
+                    node_id="node_group_dispatch_view_contract",
+                    node_address="192.168.10.20",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="group_dispatch_view_contract_artifact",
+                    byte_space=ByteSpaceRef.view("view-a"),
+                    node_id="node_group_dispatch_view_contract",
+                    node_address="192.168.10.20",
+                    node_port=8080,
+                    memory_size=1024,
+                    memory_type=MemoryType.GPU,
+                    device_id=0,
+                    remote_memory_keys=["rk0"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
+                    worker_id=worker.worker_id,
+                    max_concurrency=2,
+                )
+            )
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="group_dispatch_view_contract_artifact",
+                    byte_space=ByteSpaceRef.view("view-b"),
+                    node_id="node_group_dispatch_view_contract",
+                    node_address="192.168.10.20",
+                    node_port=8080,
+                    memory_size=1024,
+                    memory_type=MemoryType.GPU,
+                    device_id=1,
+                    remote_memory_keys=["rk1"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
+                    worker_id=worker.worker_id,
+                    max_concurrency=2,
+                )
+            )
+
+            _, first_transport_id = transport_service.request_transport(
+                artifact_id="group_dispatch_view_contract_artifact",
+                view_id="view-a",
+                source_node_id="source_node",
+                source_address="192.168.2.1",
+                source_port=9090,
+                request_id="group-view-req-1",
+                scheduling_group=TransportSchedulingGroup(
+                    group_id="group-view-contract",
+                    group_kind="tp_rank",
+                    total_parts=2,
+                    part_id="part-0",
+                    priority=0,
+                    epoch=3,
+                ),
+            )
+            transport_service.complete_transport(
+                first_transport_id,
+                outcome=TransportCompletionOutcome.SUCCESS,
+            )
+
+            with pytest.raises(
+                ValidationError, match="artifact/view/total_parts mismatch"
+            ):
+                transport_service.request_transport(
+                    artifact_id="group_dispatch_view_contract_artifact",
+                    view_id="view-b",
+                    source_node_id="source_node",
+                    source_address="192.168.2.1",
+                    source_port=9090,
+                    request_id="group-view-req-2",
+                    scheduling_group=TransportSchedulingGroup(
+                        group_id="group-view-contract",
+                        group_kind="tp_rank",
+                        total_parts=2,
+                        part_id="part-1",
+                        priority=0,
+                        epoch=3,
+                    ),
+                )
+        finally:
+            set_config(legacy_cfg)
 
     def test_artifact_service_validation(self, services):
         """Test artifact service validation."""
@@ -884,6 +1862,7 @@ class TestServices:
             source_node_id="client",
             source_address="192.168.2.1",
             source_port=9000,
+            request_id="transport-balanced-1",
         )
 
         # Should select the GPU replica with lower load (node_1, load=2)

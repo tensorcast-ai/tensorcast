@@ -119,6 +119,25 @@ absl::Status stale_local_route_status(std::string_view artifact_id) {
       absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk source"));
 }
 
+std::optional<components::TransportSchedulingGroupHint> to_transport_scheduling_group_hint(
+    const loading::MaterializeHints& hints) {
+  if (!hints.transport_scheduling_group.has_value()) {
+    return std::nullopt;
+  }
+  const auto& group = *hints.transport_scheduling_group;
+  if (group.group_id.empty() || group.group_kind.empty() || group.part_id.empty()) {
+    return std::nullopt;
+  }
+  components::TransportSchedulingGroupHint out;
+  out.group_id = group.group_id;
+  out.group_kind = group.group_kind;
+  out.total_parts = group.total_parts;
+  out.part_id = group.part_id;
+  out.priority = group.priority;
+  out.epoch = group.epoch;
+  return out;
+}
+
 loading::ReplicaHandle build_local_replica_handle(
     const loading::ReplicaKey& key,
     const std::shared_ptr<replica::Replica>& replica,
@@ -1500,6 +1519,12 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::FailedPreconditionError("Communication not enabled");
   }
 
+  const auto scheduling_group_hint = to_transport_scheduling_group_hint(hints);
+  const std::string_view requester_worker_id = hints.transport_requester_worker_id.empty()
+      ? std::string_view(local_identity.worker_id)
+      : std::string_view(hints.transport_requester_worker_id);
+  const std::string_view transport_request_id = hints.transport_request_id;
+
   if (allow_p2p && gs_connected && !hints.artifact_id.empty()) {
     auto transport_or = gs_client->request_replica_transport(
         hints.artifact_id,
@@ -1507,14 +1532,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         local_identity.node_address,
         local_identity.p2p_port,
         target_device,
-        resolve_transport_wait_timeout_ms(hints));
+        resolve_transport_wait_timeout_ms(hints),
+        scheduling_group_hint,
+        requester_worker_id,
+        transport_request_id);
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
       if (is_local_replica(remote, local_identity)) {
         LOG(WARNING) << "Global Store returned local replica for artifact_id=" << hints.artifact_id
                      << "; treating route as stale";
-        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        auto complete_status = gs_client->complete_replica_transport(
+            session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
         }
@@ -1540,7 +1569,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           p2p_src.fallback_disk_dir = disk_source->path.string();
         }
         auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
-        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        auto complete_status = gs_client->complete_replica_transport(
+            session.transport_id,
+            p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
+                        : components::TransportCompletionOutcome::kFailed,
+            p2p_or.ok() ? std::string_view{} : std::string_view(p2p_or.status().ToString()));
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
         }
@@ -1901,6 +1934,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (hints.variant && hints.variant->view_id.has_value() && !hints.variant->view_id->empty()) {
     requested_view_id = *hints.variant->view_id;
   }
+  const auto scheduling_group_hint = to_transport_scheduling_group_hint(hints);
+  const std::string_view requester_worker_id = hints.transport_requester_worker_id.empty()
+      ? std::string_view(local_identity.worker_id)
+      : std::string_view(hints.transport_requester_worker_id);
+  const std::string_view transport_request_id = hints.transport_request_id;
 
   if (allow_p2p && gs_connected && !hints.artifact_id.empty()) {
     bool used_canonical_transport_fallback = false;
@@ -1916,7 +1954,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             local_identity.node_address,
             local_identity.p2p_port,
             target_device,
-            view_probe_timeout_ms);
+            view_probe_timeout_ms,
+            scheduling_group_hint,
+            requester_worker_id,
+            transport_request_id);
         if (!view_transport_or.ok() &&
             (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
              absl::IsDeadlineExceeded(view_transport_or.status()))) {
@@ -1930,7 +1971,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               local_identity.node_address,
               local_identity.p2p_port,
               target_device,
-              wait_timeout_ms);
+              wait_timeout_ms,
+              scheduling_group_hint,
+              requester_worker_id,
+              transport_request_id);
         }
         return view_transport_or;
       }
@@ -1940,7 +1984,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           local_identity.node_address,
           local_identity.p2p_port,
           target_device,
-          wait_timeout_ms);
+          wait_timeout_ms,
+          scheduling_group_hint,
+          requester_worker_id,
+          transport_request_id);
     };
 
     auto transport_or = request_transport();
@@ -1950,7 +1997,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       if (is_local_replica(remote, local_identity)) {
         LOG(WARNING) << "Global Store returned local replica for artifact_id=" << hints.artifact_id
                      << "; treating route as stale";
-        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        auto complete_status = gs_client->complete_replica_transport(
+            session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
         }
@@ -1980,7 +2028,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             std::make_unique<P2PLoader>(p2p_src),
             loading::MaterializationSource::kP2P,
             source_is_view ? MappedSourceByteSpace::kView : MappedSourceByteSpace::kCanonical);
-        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        auto complete_status = gs_client->complete_replica_transport(
+            session.transport_id,
+            p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
+                        : components::TransportCompletionOutcome::kFailed,
+            p2p_or.ok() ? std::string_view{} : std::string_view(p2p_or.status().ToString()));
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
         }

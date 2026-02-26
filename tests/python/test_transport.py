@@ -9,13 +9,13 @@ import time
 import uuid
 
 import pytest
+from google.protobuf import duration_pb2
 
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
-from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.proto.common.v1 import common_pb2
-from google.protobuf import duration_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
 class _MockContext:
@@ -102,6 +102,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
             source_node_id=f"source_node_{i}",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id=f"transport-concurrency-{i}",
         )
         response = servicer.RequestReplicaTransport(
             transport_request, test_context
@@ -117,6 +118,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         source_node_id="source_node_overflow",
         source_address="192.168.1.2",
         source_port=9000,
+        request_id="transport-concurrency-overflow",
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
@@ -124,7 +126,8 @@ def test_transport_concurrency(servicer, test_context, memory_info):
 
     # Complete one transport
     complete_request = global_store_pb2.CompleteReplicaTransportRequest(
-        transport_id=transports[0]
+        transport_id=transports[0],
+        outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
     )
     complete_response = servicer.CompleteReplicaTransport(
         complete_request, test_context
@@ -138,6 +141,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         source_node_id="source_node_new",
         source_address="192.168.1.2",
         source_port=9000,
+        request_id="transport-concurrency-new",
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
@@ -176,6 +180,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
         source_node_id="source_node_1",
         source_address="192.168.1.2",
         source_port=9000,
+        request_id="transport-timeout-first",
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
@@ -192,6 +197,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
         source_node_id="source_node_2",
         source_address="192.168.1.2",
         source_port=9000,
+        request_id="transport-timeout-second",
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
@@ -204,7 +210,8 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
 
     # Complete the first transport
     complete_request = global_store_pb2.CompleteReplicaTransportRequest(
-        transport_id=transport_id
+        transport_id=transport_id,
+        outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
     )
     servicer.CompleteReplicaTransport(complete_request, test_context)
 
@@ -245,6 +252,7 @@ def test_concurrent_transport_requests(servicer, test_context, memory_info):
             source_node_id=f"source_node_{i}",
             source_address="192.168.1.2",
             source_port=9000,
+            request_id=f"transport-concurrent-{i}",
         )
 
         response = servicer.RequestReplicaTransport(
@@ -380,6 +388,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         source_node_id="source_node_disk",
         source_address="192.168.1.4",
         source_port=9000,
+        request_id="transport-priority-disk",
     )
 
     disk_response = servicer.RequestReplicaTransport(
@@ -390,7 +399,8 @@ def test_transport_memory_type_priority(servicer, test_context):
 
     # Complete the transport to release the GPU replica
     complete_request = global_store_pb2.CompleteReplicaTransportRequest(
-        transport_id=disk_response.transport_id
+        transport_id=disk_response.transport_id,
+        outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
     )
     servicer.CompleteReplicaTransport(complete_request, test_context)
 
@@ -401,6 +411,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         source_node_id="source_node_ram",
         source_address="192.168.1.4",
         source_port=9000,
+        request_id="transport-priority-ram",
     )
 
     ram_response = servicer.RequestReplicaTransport(
@@ -411,7 +422,8 @@ def test_transport_memory_type_priority(servicer, test_context):
 
     # Complete the transport to release the GPU replica
     complete_request = global_store_pb2.CompleteReplicaTransportRequest(
-        transport_id=ram_response.transport_id
+        transport_id=ram_response.transport_id,
+        outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
     )
     servicer.CompleteReplicaTransport(complete_request, test_context)
 
@@ -433,6 +445,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         source_node_id="source_node_gpu",
         source_address="192.168.1.4",
         source_port=9000,
+        request_id="transport-priority-gpu",
     )
 
     response = servicer.RequestReplicaTransport(

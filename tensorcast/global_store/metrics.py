@@ -7,6 +7,7 @@ import queue
 import threading
 from collections.abc import Sequence
 from contextlib import contextmanager
+from datetime import datetime
 from time import monotonic
 from typing import Callable, Iterator
 
@@ -218,6 +219,48 @@ TRANSPORT_NO_EXPORTABLE_COUNTER = Counter(
     "Total number of transport requests rejected due to no exportable sources.",
     labelnames=("artifact_id",),
 )
+
+TRANSPORT_SOURCE_TOP1_SHARE_GAUGE = Gauge(
+    "tc_transport_source_top1_share",
+    "Top-1 source assignment share per artifact transport scheduling window.",
+    labelnames=("artifact_id",),
+)
+
+TRANSPORT_SOURCE_HHI_GAUGE = Gauge(
+    "tc_transport_source_hhi",
+    "Herfindahl-Hirschman index over source assignment shares per artifact.",
+    labelnames=("artifact_id",),
+)
+
+TRANSPORT_DIFFUSION_FIRST_HIT_SECONDS = Histogram(
+    "tc_transport_diffusion_first_hit_seconds",
+    "Latency from source availability to first assignment for diffusion tracking.",
+    labelnames=("artifact_id",),
+    buckets=(
+        0.01,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        30.0,
+        60.0,
+        float("inf"),
+    ),
+)
+
+TRANSPORT_DISPATCH_EVENT_COUNTER = Counter(
+    "tc_transport_dispatch_events_total",
+    "Internal dispatcher lifecycle events for queue-driven transport scheduling.",
+    labelnames=("event",),
+)
+
+_TRANSPORT_ASSIGNMENT_LOCK = threading.Lock()
+_TRANSPORT_SOURCE_ASSIGNMENTS: dict[str, dict[str, int]] = {}
+_TRANSPORT_SOURCE_FIRST_ASSIGNMENT: set[tuple[str, str]] = set()
 
 # Capability directory -------------------------------------------------------
 
@@ -617,6 +660,56 @@ def inc_transport_no_exportable(artifact_id: str) -> None:
     """Increment no-exportable transport counter."""
 
     TRANSPORT_NO_EXPORTABLE_COUNTER.labels(artifact_id=artifact_id).inc()
+
+
+def inc_transport_dispatch_event(event: str, count: int = 1) -> None:
+    """Increment bounded dispatcher event counters."""
+    if count <= 0:
+        return
+    TRANSPORT_DISPATCH_EVENT_COUNTER.labels(event=event).inc(count)
+
+
+def record_transport_source_assignment(
+    *,
+    artifact_id: str,
+    replica_id: str,
+    source_created_at: datetime | None,
+) -> None:
+    """Track source assignment distribution and diffusion first-hit latency."""
+    if not artifact_id or not replica_id:
+        return
+
+    is_first_assignment_for_source = False
+    top1_share = 0.0
+    hhi = 0.0
+    with _TRANSPORT_ASSIGNMENT_LOCK:
+        artifact_counts = _TRANSPORT_SOURCE_ASSIGNMENTS.setdefault(artifact_id, {})
+        artifact_counts[replica_id] = int(artifact_counts.get(replica_id, 0)) + 1
+        total = sum(int(v) for v in artifact_counts.values())
+        if total > 0:
+            shares = [float(count) / float(total) for count in artifact_counts.values()]
+            top1_share = max(shares)
+            hhi = sum(share * share for share in shares)
+
+        source_key = (artifact_id, replica_id)
+        if source_key not in _TRANSPORT_SOURCE_FIRST_ASSIGNMENT:
+            _TRANSPORT_SOURCE_FIRST_ASSIGNMENT.add(source_key)
+            is_first_assignment_for_source = True
+
+    TRANSPORT_SOURCE_TOP1_SHARE_GAUGE.labels(artifact_id=artifact_id).set(top1_share)
+    TRANSPORT_SOURCE_HHI_GAUGE.labels(artifact_id=artifact_id).set(hhi)
+
+    if not is_first_assignment_for_source or source_created_at is None:
+        return
+    now = (
+        datetime.now(tz=source_created_at.tzinfo)
+        if source_created_at.tzinfo is not None
+        else datetime.now()
+    )
+    latency_seconds = max(0.0, float((now - source_created_at).total_seconds()))
+    TRANSPORT_DIFFUSION_FIRST_HIT_SECONDS.labels(artifact_id=artifact_id).observe(
+        latency_seconds
+    )
 
 
 # ---------------------------------------------------------------------------

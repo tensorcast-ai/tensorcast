@@ -3,6 +3,10 @@
 """Domain models for Global Store."""
 
 from .instance import Instance
+from .pending_transport_request import (
+    PendingTransportRequest,
+    PendingTransportState,
+)
 from .persistence import (
     PersistenceShardStatus,
     PersistenceStatus,
@@ -11,13 +15,19 @@ from .persistence import (
     PlacementTarget,
 )
 from .replica import ByteSpaceKind, ByteSpaceRef, ExportState, MemoryType, Replica
-from .transport import Transport
+from .transport import (
+    Transport,
+    TransportCompletionOutcome,
+    TransportSchedulingGroup,
+)
 from .worker import Worker, WorkerMemoryTierState
 
 __all__ = [
     "Instance",
     "Replica",
     "Transport",
+    "TransportCompletionOutcome",
+    "TransportSchedulingGroup",
     "Worker",
     "WorkerMemoryTierState",
     "MemoryType",
@@ -31,4 +41,6 @@ __all__ += [
     "PlacementTarget",
     "PersistenceStatus",
     "PersistenceShardStatus",
+    "PendingTransportRequest",
+    "PendingTransportState",
 ]
