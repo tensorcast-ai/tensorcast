@@ -623,14 +623,17 @@ int main(int argc, char** argv) {
     LOG(ERROR) << "INTERNAL: cuda::get_device_count returned a negative value: " << detected_gpu_count;
     return 2;
   }
-  if (detected_gpu_count > 0) {
-    const uint64_t required_engine_slices =
-        static_cast<uint64_t>(streaming_buffer_chunks) * static_cast<uint64_t>(detected_gpu_count);
+  const bool fake_cuda_backend = cuda::is_fake();
+  const daemon::EnginePinnedConcurrencySizing engine_sizing =
+      daemon::compute_engine_pinned_concurrency_sizing(streaming_buffer_chunks, detected_gpu_count, fake_cuda_backend);
+  if (engine_sizing.required_slices > 0) {
     const uint64_t capacity_engine_slices = engine_pool->capacity_slices();
-    if (capacity_engine_slices < required_engine_slices) {
+    if (capacity_engine_slices < engine_sizing.required_slices) {
       LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=engine] cannot cover GPU concurrency: "
-                 << "capacity_slices=" << capacity_engine_slices << " required_slices=" << required_engine_slices
+                 << "capacity_slices=" << capacity_engine_slices << " required_slices=" << engine_sizing.required_slices
                  << " (detected_gpu_count=" << detected_gpu_count
+                 << " effective_gpu_count=" << engine_sizing.effective_gpu_count
+                 << " fake_cuda_backend=" << (fake_cuda_backend ? "true" : "false")
                  << " streaming_buffer_chunks=" << streaming_buffer_chunks
                  << " slice_bytes=" << engine_pool->slice_bytes()
                  << "). Increase pinned_memory.classes[name=engine].pool_bytes "
@@ -638,7 +641,9 @@ int main(int argc, char** argv) {
       return 2;
     }
     LOG(INFO) << "Engine pinned pool startup check passed: capacity_slices=" << capacity_engine_slices
-              << " required_slices=" << required_engine_slices << " (detected_gpu_count=" << detected_gpu_count
+              << " required_slices=" << engine_sizing.required_slices << " (detected_gpu_count=" << detected_gpu_count
+              << ", effective_gpu_count=" << engine_sizing.effective_gpu_count
+              << ", fake_cuda_backend=" << (fake_cuda_backend ? "true" : "false")
               << ", streaming_buffer_chunks=" << streaming_buffer_chunks << ")";
   } else {
     LOG(WARNING) << "No CUDA devices detected at startup; skipping engine pinned concurrency coverage check";

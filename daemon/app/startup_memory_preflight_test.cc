@@ -31,4 +31,27 @@ TEST_CASE("Startup memory preflight fails when available < required+headroom", "
   set_startup_memory_available_override_for_testing(std::nullopt);
 }
 
+TEST_CASE("Engine pinned concurrency sizing honors fake CUDA mode", "[startup_memory_preflight]") {
+  const auto real = compute_engine_pinned_concurrency_sizing(
+      /*streaming_buffer_chunks=*/16,
+      /*detected_gpu_count=*/4,
+      /*fake_cuda_backend=*/false);
+  REQUIRE(real.effective_gpu_count == 4);
+  REQUIRE(real.required_slices == 64);
+
+  const auto fake_multi = compute_engine_pinned_concurrency_sizing(
+      /*streaming_buffer_chunks=*/16,
+      /*detected_gpu_count=*/4,
+      /*fake_cuda_backend=*/true);
+  REQUIRE(fake_multi.effective_gpu_count == 1);
+  REQUIRE(fake_multi.required_slices == 16);
+
+  const auto fake_zero = compute_engine_pinned_concurrency_sizing(
+      /*streaming_buffer_chunks=*/16,
+      /*detected_gpu_count=*/0,
+      /*fake_cuda_backend=*/true);
+  REQUIRE(fake_zero.effective_gpu_count == 1);
+  REQUIRE(fake_zero.required_slices == 16);
+}
+
 } // namespace tensorcast::daemon

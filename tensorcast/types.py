@@ -25,7 +25,7 @@ class ServerConfig(BaseModel):
     mem_pool_size: int
     artifact_chunk_bytes: int = 0
     local_handle_socket_path: str = ""
-    cpu_shared_memory_enabled: bool = False
+    cpu_shared_memory_enabled: bool = True
 
 
 # ----------------------------- Handshake models ----------------------------

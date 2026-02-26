@@ -8,9 +8,10 @@ from __future__ import annotations
 import argparse
 import atexit
 import concurrent.futures
-import csv
 import json
 import math
+import os
+import pwd
 import re
 import secrets
 import shlex
@@ -27,6 +28,7 @@ from typing import Any
 
 import grpc
 import yaml
+from google.protobuf import timestamp_pb2
 
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
@@ -42,6 +44,8 @@ BYTE_UNITS: dict[str, int] = {
 }
 TRANSPORT_GROUP_KIND_TP_VERSION = "tp_version"
 TRANSPORT_GROUP_DEFAULT_PRIORITY = 0
+REMOTE_USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,63}$")
+_REMOTE_RUN_AS_USER = ""
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,81 @@ def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
 def split_csv(raw: str) -> list[str]:
     values = [item.strip() for item in str(raw).split(",")]
     return [item for item in values if item]
+
+
+def normalize_cuda_backend(raw: str) -> str:
+    value = str(raw).strip().lower()
+    if not value:
+        return ""
+    if value not in {"real", "fake"}:
+        raise ValueError(f"cuda-backend must be one of: real, fake, empty; got {raw!r}")
+    return value
+
+
+def normalize_non_root_user(raw: str) -> str:
+    value = str(raw).strip()
+    if not value:
+        raise ValueError("resolved empty workspace user for remote execution")
+    if not REMOTE_USER_RE.fullmatch(value):
+        raise ValueError(f"invalid workspace user for remote execution: {value!r}")
+    if value == "root":
+        raise ValueError(
+            "workspace user resolved to root; refusing remote execution as root"
+        )
+    return value
+
+
+def resolve_workspace_user() -> str:
+    env_user = str(os.environ.get("USER", "")).strip()
+    if env_user:
+        try:
+            return normalize_non_root_user(env_user)
+        except ValueError:
+            # Fall through to uid-based lookup if USER is unavailable or malformed.
+            pass
+    try:
+        uid_user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError as exc:
+        raise RuntimeError(
+            f"failed to resolve workspace user from uid={os.getuid()}"
+        ) from exc
+    return normalize_non_root_user(uid_user)
+
+
+def configure_remote_run_as_user(run_as_user: str) -> str:
+    normalized = normalize_non_root_user(run_as_user)
+    global _REMOTE_RUN_AS_USER
+    _REMOTE_RUN_AS_USER = normalized
+    return normalized
+
+
+def _resolved_remote_run_as_user() -> str:
+    run_as_user = str(_REMOTE_RUN_AS_USER).strip()
+    if not run_as_user:
+        raise RuntimeError("remote run-as user is not configured")
+    return run_as_user
+
+
+def _wrap_remote_inner_cmd_for_user(
+    *,
+    inner_cmd: str,
+    run_as_user: str,
+) -> str:
+    quoted_inner = shlex.quote(str(inner_cmd))
+    quoted_user = shlex.quote(str(run_as_user))
+    return (
+        "set -euo pipefail; "
+        f"run_as_user={quoted_user}; "
+        'if ! getent passwd "${run_as_user}" >/dev/null 2>&1; then '
+        'echo "remote run-as user not found: ${run_as_user}" >&2; '
+        "exit 97; "
+        "fi; "
+        'if [[ "$(id -un)" == "${run_as_user}" ]]; then '
+        f"bash -lc {quoted_inner}; "
+        "else "
+        f'su - "${{run_as_user}}" -s /bin/bash -c {quoted_inner}; '
+        "fi"
+    )
 
 
 def derive_transport_group_plan(
@@ -162,7 +241,18 @@ def _parse_bytes_literal(value: Any) -> int:
     return parsed
 
 
-def _load_daemon_memory_hints(daemon_config_path: str) -> dict[str, int]:
+def _parse_bool_literal(value: Any) -> bool:
+    if isinstance(value, bool):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"invalid bool literal: {value!r}")
+
+
+def _load_daemon_memory_hints(daemon_config_path: str) -> dict[str, Any]:
     config_path = Path(str(daemon_config_path)).expanduser().resolve()
     if not config_path.exists():
         raise FileNotFoundError(f"daemon config not found: {config_path}")
@@ -173,6 +263,14 @@ def _load_daemon_memory_hints(daemon_config_path: str) -> dict[str, int]:
     memory_tiers = engine.get("memory_tiers", {}) if isinstance(engine, dict) else {}
     stable_bytes = _parse_bytes_literal(
         memory_tiers.get("stable_bytes", 0) if isinstance(memory_tiers, dict) else 0
+    )
+    cpu_shared_memory = (
+        engine.get("cpu_shared_memory", {}) if isinstance(engine, dict) else {}
+    )
+    cpu_shared_memory_enabled = (
+        _parse_bool_literal(cpu_shared_memory.get("enabled", False))
+        if isinstance(cpu_shared_memory, dict)
+        else False
     )
 
     pinned = loaded.get("pinned_memory", {})
@@ -186,6 +284,7 @@ def _load_daemon_memory_hints(daemon_config_path: str) -> dict[str, int]:
     return {
         "stable_bytes": int(stable_bytes),
         "pinned_total_bytes": int(pinned_total),
+        "cpu_shared_memory_enabled": bool(cpu_shared_memory_enabled),
     }
 
 
@@ -331,6 +430,9 @@ def _validate_publisher_memory_budget(
             "memory_limit_bytes": memory_limit_bytes,
             "stable_bytes_configured": int(daemon_hints.get("stable_bytes", 0)),
             "pinned_total_bytes_configured": pinned_total_bytes,
+            "cpu_shared_memory_enabled": bool(
+                daemon_hints.get("cpu_shared_memory_enabled", True)
+            ),
             "pre_publish_trim_enabled": bool(pre_publish_trim_enabled),
             "retained_before_publish_versions": int(retained_before_publish_versions),
             "steady_state_versions": int(keep_last_versions),
@@ -408,7 +510,7 @@ def _validate_publisher_memory_budget(
             "publisher memory preflight failed: "
             + "; ".join(violations)
             + ". suggestions: increase worker memory, reduce tp_total_bytes, "
-            "or keep publish_device=cpu, enable pre-publish trim, or implement stage_on_gpu=false streaming for DRAM_STABLE."
+            "or keep publish_device=cpu, or implement stage_on_gpu=false streaming for DRAM_STABLE."
         )
     return report
 
@@ -504,6 +606,37 @@ def _validate_receiver_memory_budget(
     return report
 
 
+def _validate_daemon_memfd_required(
+    *,
+    process_id: str,
+    role: str,
+    daemon_config_path: str,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "required": True,
+        "process_id": str(process_id),
+        "role": str(role),
+        "daemon_config_path": str(daemon_config_path),
+        "checked": True,
+        "cpu_shared_memory_enabled": None,
+        "safe": True,
+    }
+    daemon_hints = _load_daemon_memory_hints(str(daemon_config_path))
+    cpu_shared_memory_enabled = bool(
+        daemon_hints.get("cpu_shared_memory_enabled", True)
+    )
+    report["cpu_shared_memory_enabled"] = bool(cpu_shared_memory_enabled)
+    report["safe"] = bool(cpu_shared_memory_enabled)
+    if not cpu_shared_memory_enabled:
+        raise RuntimeError(
+            "daemon memfd preflight failed: "
+            "all benchmark roles require daemon config "
+            "engine.cpu_shared_memory.enabled=true. "
+            f"role={role}, process={process_id}, config={daemon_config_path}"
+        )
+    return report
+
+
 def run_local(cmd: list[str], *, timeout_sec: float) -> str:
     proc = subprocess.run(
         cmd,
@@ -523,6 +656,11 @@ def run_local(cmd: list[str], *, timeout_sec: float) -> str:
 
 
 def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
+    run_as_user = _resolved_remote_run_as_user()
+    remote_cmd = _wrap_remote_inner_cmd_for_user(
+        inner_cmd=str(inner_cmd),
+        run_as_user=run_as_user,
+    )
     cmd = [
         "brainctl",
         "exec",
@@ -532,7 +670,7 @@ def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
         "--",
         "bash",
         "-lc",
-        inner_cmd,
+        remote_cmd,
     ]
     proc = subprocess.run(
         cmd,
@@ -544,7 +682,8 @@ def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
     if proc.returncode != 0:
         raise RuntimeError(
             "remote command failed: "
-            f"process={process_id} rc={proc.returncode}\n"
+            f"process={process_id} rc={proc.returncode} "
+            f"run_as_user={run_as_user}\n"
             f"stdout:\n{proc.stdout}\n"
             f"stderr:\n{proc.stderr}"
         )
@@ -622,6 +761,54 @@ def discover_remote_advertise_ip(
     return host
 
 
+def detect_remote_execution_context(
+    *,
+    process_id: str,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    detect_cmd = (
+        "set -euo pipefail; "
+        "user=$(id -un); "
+        "home=${HOME:-}; "
+        "host=$(hostname -f 2>/dev/null || hostname); "
+        'printf \'{"user":"%s","home":"%s","host":"%s",'
+        '\\"tensorcast_session_root\\":\\"%s/.tensorcast\\"}\\n\' '
+        '"$user" "$home" "$host" "$home"'
+    )
+    output = run_remote(process_id, detect_cmd, timeout_sec=max(10.0, timeout_sec))
+    payload = extract_last_json_object(output)
+    user = str(payload.get("user", "")).strip()
+    home = str(payload.get("home", "")).strip()
+    session_root = str(payload.get("tensorcast_session_root", "")).strip()
+    if not user:
+        raise RuntimeError(
+            "failed to detect remote execution user: "
+            f"process={process_id}, payload={payload}"
+        )
+    if not session_root:
+        session_root = f"{home}/.tensorcast" if home else ""
+        payload["tensorcast_session_root"] = session_root
+    return payload
+
+
+def verify_remote_run_as_user(
+    *,
+    process_id: str,
+    timeout_sec: float,
+) -> None:
+    run_as_user = _resolved_remote_run_as_user()
+    check_cmd = (
+        "set -euo pipefail; "
+        f"target={shlex.quote(str(run_as_user))}; "
+        'if ! getent passwd "${target}" >/dev/null 2>&1; then '
+        'echo "remote run-as user not found: ${target}" >&2; '
+        "exit 97; "
+        "fi; "
+        'printf "run_as_user_ready current=%s target=%s\\n" "$(id -un)" "${target}"'
+    )
+    _ = run_remote(process_id, check_cmd, timeout_sec=max(10.0, timeout_sec))
+
+
 def start_remote_daemon(
     *,
     process_id: str,
@@ -637,6 +824,7 @@ def start_remote_daemon(
     heartbeat_interval: str,
     periodic_sync_interval: str,
     max_concurrency: int,
+    cuda_backend: str,
     capability_token_secret: str,
     timeout_sec: float,
 ) -> dict[str, Any]:
@@ -689,6 +877,19 @@ def start_remote_daemon(
         ),
         f"tensorcast-cli daemon status --session {shlex.quote(daemon_session)} --json",
     ]
+    if str(cuda_backend).strip():
+        start_cmd.insert(
+            4,
+            (
+                "export TENSORCAST_CUDA_BACKEND="
+                f"{shlex.quote(str(cuda_backend).strip())}"
+            ),
+        )
+    if str(cuda_backend).strip() == "fake":
+        start_cmd.insert(
+            5, "export TEST_TMPDIR=${TEST_TMPDIR:-/tmp/tensorcast_fake_backend}"
+        )
+        start_cmd.insert(6, 'mkdir -p "$TEST_TMPDIR"')
     output = run_remote(
         process_id,
         "; ".join(start_cmd),
@@ -813,6 +1014,7 @@ def build_e2e_command(
     *,
     repo_root: str,
     mode: str,
+    cuda_backend: str,
     daemon_connect_address: str,
     model_name: str,
     start_version: int,
@@ -832,7 +1034,6 @@ def build_e2e_command(
     weights_root: str,
     run_id: str,
     receiver_apply_mode: str,
-    fallback_prefer: str,
     materialize_device: str,
     allow_version_skip: bool,
     hold_after_finish_s: float,
@@ -892,8 +1093,6 @@ def build_e2e_command(
         publish_device,
         "--receiver-apply-mode",
         receiver_apply_mode,
-        "--fallback-prefer",
-        fallback_prefer,
         "--materialize-device",
         materialize_device,
         "--output-json",
@@ -931,6 +1130,19 @@ def build_e2e_command(
         f"mkdir -p {shlex.quote(str(Path(log_file).parent))}",
         f"{quoted_cli} 2>&1 | tee -a {quoted_log}",
     ]
+    if str(cuda_backend).strip():
+        script.insert(
+            4,
+            (
+                "export TENSORCAST_CUDA_BACKEND="
+                f"{shlex.quote(str(cuda_backend).strip())}"
+            ),
+        )
+    if str(cuda_backend).strip() == "fake":
+        script.insert(
+            5, "export TEST_TMPDIR=${TEST_TMPDIR:-/tmp/tensorcast_fake_backend}"
+        )
+        script.insert(6, 'mkdir -p "$TEST_TMPDIR"')
     return "; ".join(script)
 
 
@@ -1022,8 +1234,110 @@ def _to_utc_sql_timestamp(ts: datetime) -> str:
     return aware_ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00")
 
 
+def _to_proto_timestamp(ts: datetime) -> timestamp_pb2.Timestamp:
+    aware_ts = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+    proto_ts = timestamp_pb2.Timestamp()
+    proto_ts.FromDatetime(aware_ts.astimezone(timezone.utc))
+    return proto_ts
+
+
+def query_transport_rows(
+    *,
+    gs_addr: str,
+    started_at_utc: datetime,
+    finished_at_utc: datetime,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "enabled": True,
+        "audit_method": "gs_rpc",
+        "gs_addr": str(gs_addr),
+        "window_start_utc": _to_utc_sql_timestamp(started_at_utc),
+        "window_end_utc": _to_utc_sql_timestamp(finished_at_utc),
+        "error": None,
+        "row_count": 0,
+        "rows": [],
+    }
+    if not str(gs_addr).strip():
+        payload["error"] = "gs_addr is empty"
+        return payload
+
+    channel = grpc.insecure_channel(str(gs_addr))
+    try:
+        grpc.channel_ready_future(channel).result(timeout=5.0)
+        stub = global_store_pb2_grpc.ClusterRuntimeServiceStub(channel)
+        response = stub.QueryTransportWindow(
+            global_store_pb2.QueryTransportWindowRequest(
+                created_at_start=_to_proto_timestamp(started_at_utc),
+                created_at_end=_to_proto_timestamp(finished_at_utc),
+                limit=200_000,
+            ),
+            timeout=20.0,
+        )
+    except grpc.RpcError as exc:
+        detail = exc.details() if hasattr(exc, "details") else str(exc)
+        payload["error"] = f"QueryTransportWindow RPC failed: {detail}"
+        return payload
+    finally:
+        channel.close()
+
+    if response.status != global_store_pb2.Status.STATUS_OK:
+        payload["error"] = (
+            f"QueryTransportWindow returned non-OK status: {int(response.status)}"
+        )
+        return payload
+
+    rows: list[dict[str, Any]] = []
+    for row in response.rows:
+        created_dt = (
+            row.created_at.ToDatetime(tzinfo=timezone.utc)
+            if row.HasField("created_at")
+            else None
+        )
+        completed_dt = (
+            row.completed_at.ToDatetime(tzinfo=timezone.utc)
+            if row.HasField("completed_at")
+            else None
+        )
+        rows.append(
+            {
+                "transport_id": str(row.transport_id),
+                "replica_id": str(row.replica_id),
+                "artifact_id": str(row.artifact_id),
+                "status": str(row.status),
+                "completion_outcome": str(row.completion_outcome),
+                "request_id": str(row.request_id),
+                "requester_worker_id": str(row.requester_worker_id),
+                "group_id": str(row.group_id),
+                "group_kind": str(row.group_kind),
+                "group_part_id": str(row.group_part_id),
+                "group_total_parts": int(row.group_total_parts),
+                "created_at_utc": (
+                    created_dt.astimezone(timezone.utc).isoformat()
+                    if created_dt is not None
+                    else ""
+                ),
+                "completed_at_utc": (
+                    completed_dt.astimezone(timezone.utc).isoformat()
+                    if completed_dt is not None
+                    else ""
+                ),
+                "created_at_epoch_s": (
+                    float(created_dt.timestamp()) if created_dt is not None else 0.0
+                ),
+                "completed_at_epoch_s": (
+                    float(completed_dt.timestamp()) if completed_dt is not None else 0.0
+                ),
+                "replica_memory_size_bytes": int(row.replica_memory_size_bytes),
+            }
+        )
+    payload["rows"] = rows
+    payload["row_count"] = int(len(rows))
+    return payload
+
+
 def query_transport_group_probe(
     *,
+    gs_addr: str,
     group_mode: str,
     group_kind: str,
     started_at_utc: datetime,
@@ -1034,8 +1348,8 @@ def query_transport_group_probe(
         "mode": str(group_mode),
         "expected_grouped": str(group_mode) == "tp_version",
         "group_kind": str(group_kind),
-        "db_file": None,
-        "audit_method": "duckdb_sql",
+        "audit_method": "gs_rpc",
+        "gs_addr": str(gs_addr),
         "window_start_utc": _to_utc_sql_timestamp(started_at_utc),
         "window_end_utc": _to_utc_sql_timestamp(finished_at_utc),
         "error": None,
@@ -1049,64 +1363,44 @@ def query_transport_group_probe(
         "group_mode_consistent": False,
         "group_contract_consistent": False,
     }
-
-    db_file = discover_global_db_file()
-    if not db_file:
-        probe["error"] = "global status missing db_file"
-        return probe
-    probe["db_file"] = db_file
-    db_path = Path(db_file).expanduser().resolve()
-    if not db_path.exists():
-        probe["error"] = f"global store db_file not found: {db_path}"
-        return probe
-
-    start_sql = probe["window_start_utc"].replace("'", "''")
-    end_sql = probe["window_end_utc"].replace("'", "''")
-    kind_sql = str(group_kind).strip().replace("'", "''")
-    query = f"""
-SELECT
-  COUNT(*) AS total_transports,
-  COUNT(*) FILTER (
-    WHERE requester_worker_id IS NOT NULL
-      AND requester_worker_id <> ''
-  ) AS requester_tagged_transports,
-  COUNT(*) FILTER (
-    WHERE group_kind IS NOT NULL
-      AND group_id IS NOT NULL
-  ) AS grouped_transports,
-  COUNT(*) FILTER (
-    WHERE group_kind = '{kind_sql}'
-      AND group_id IS NOT NULL
-  ) AS kind_matched_transports,
-  COUNT(*) FILTER (
-    WHERE group_kind IS NOT NULL
-      AND group_id IS NOT NULL
-      AND group_part_id IS NOT NULL
-      AND COALESCE(group_total_parts, 0) > 0
-  ) AS group_contract_transports
-FROM artifact_transports
-WHERE created_at >= TIMESTAMPTZ '{start_sql}'
-  AND created_at <= TIMESTAMPTZ '{end_sql}'
-"""
-    try:
-        output = run_local(
-            ["duckdb", "-csv", str(db_path), query],
-            timeout_sec=15.0,
+    transport_rows_payload = query_transport_rows(
+        gs_addr=str(gs_addr),
+        started_at_utc=started_at_utc,
+        finished_at_utc=finished_at_utc,
+    )
+    probe["audit_method"] = str(transport_rows_payload.get("audit_method", "gs_rpc"))
+    if bool(transport_rows_payload.get("error")):
+        probe["error"] = (
+            f"transport group probe failed: {transport_rows_payload.get('error')}"
         )
-        rows = list(csv.DictReader(output.splitlines()))
-    except Exception as exc:  # noqa: BLE001
-        probe["error"] = f"transport group probe failed: {exc}"
-        return probe
-    if not rows:
-        probe["error"] = "transport group probe returned empty result"
         return probe
 
-    row = rows[0]
-    total_transports = int(row.get("total_transports", 0) or 0)
-    requester_tagged = int(row.get("requester_tagged_transports", 0) or 0)
-    grouped_transports = int(row.get("grouped_transports", 0) or 0)
-    kind_matched_transports = int(row.get("kind_matched_transports", 0) or 0)
-    group_contract_transports = int(row.get("group_contract_transports", 0) or 0)
+    rows_raw = transport_rows_payload.get("rows", [])
+    rows: list[dict[str, Any]] = []
+    if isinstance(rows_raw, list):
+        rows.extend(row for row in rows_raw if isinstance(row, dict))
+
+    total_transports = int(len(rows))
+    requester_tagged = 0
+    grouped_transports = 0
+    kind_matched_transports = 0
+    group_contract_transports = 0
+    expected_kind = str(group_kind).strip()
+    for row in rows:
+        requester = str(row.get("requester_worker_id", "")).strip()
+        if requester:
+            requester_tagged += 1
+        row_group_id = str(row.get("group_id", "")).strip()
+        row_group_kind = str(row.get("group_kind", "")).strip()
+        grouped = bool(row_group_id and row_group_kind)
+        if grouped:
+            grouped_transports += 1
+            if row_group_kind == expected_kind:
+                kind_matched_transports += 1
+            part_id = str(row.get("group_part_id", "")).strip()
+            total_parts = int(_coerce_int(row.get("group_total_parts", 0)))
+            if part_id and total_parts > 0:
+                group_contract_transports += 1
 
     probe["total_transports"] = total_transports
     probe["requester_tagged_transports"] = requester_tagged
@@ -1173,6 +1467,7 @@ def run_transport_group_p0_guard(
     enabled: bool,
     mode: str,
     group_kind: str,
+    gs_addr: str,
     started_at_utc: datetime,
     grace_s: float,
     poll_interval_s: float,
@@ -1199,6 +1494,7 @@ def run_transport_group_p0_guard(
         result["attempts"] = int(result["attempts"]) + 1
         now_utc = datetime.now(timezone.utc)
         probe = query_transport_group_probe(
+            gs_addr=str(gs_addr),
             group_mode=str(mode),
             group_kind=str(group_kind),
             started_at_utc=started_at_utc,
@@ -1225,91 +1521,22 @@ def run_transport_group_p0_guard(
     return result
 
 
-def query_transport_rows(
-    *,
-    started_at_utc: datetime,
-    finished_at_utc: datetime,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "enabled": True,
-        "audit_method": "duckdb_sql",
-        "db_file": None,
-        "window_start_utc": _to_utc_sql_timestamp(started_at_utc),
-        "window_end_utc": _to_utc_sql_timestamp(finished_at_utc),
-        "error": None,
-        "row_count": 0,
-        "rows": [],
-    }
-
-    db_file = discover_global_db_file()
-    if not db_file:
-        payload["error"] = "global status missing db_file"
-        return payload
-    payload["db_file"] = db_file
-    db_path = Path(db_file).expanduser().resolve()
-    if not db_path.exists():
-        payload["error"] = f"global store db_file not found: {db_path}"
-        return payload
-
-    start_sql = payload["window_start_utc"].replace("'", "''")
-    end_sql = payload["window_end_utc"].replace("'", "''")
-    query = f"""
-SELECT
-  CAST(t.transport_id AS VARCHAR) AS transport_id,
-  CAST(t.replica_id AS VARCHAR) AS replica_id,
-  COALESCE(t.artifact_id, '') AS artifact_id,
-  COALESCE(t.status, '') AS status,
-  COALESCE(t.completion_outcome, '') AS completion_outcome,
-  COALESCE(t.request_id, '') AS request_id,
-  COALESCE(t.requester_worker_id, '') AS requester_worker_id,
-  COALESCE(t.group_id, '') AS group_id,
-  COALESCE(t.group_kind, '') AS group_kind,
-  COALESCE(t.group_part_id, '') AS group_part_id,
-  COALESCE(t.group_total_parts, 0) AS group_total_parts,
-  CAST(t.created_at AS VARCHAR) AS created_at_utc,
-  CAST(t.completed_at AS VARCHAR) AS completed_at_utc,
-  epoch(t.created_at) AS created_at_epoch_s,
-  epoch(t.completed_at) AS completed_at_epoch_s,
-  COALESCE(r.memory_size, 0) AS replica_memory_size_bytes
-FROM artifact_transports t
-LEFT JOIN artifact_replicas r
-  ON t.replica_id = r.replica_id
-WHERE t.created_at >= TIMESTAMPTZ '{start_sql}'
-  AND t.created_at <= TIMESTAMPTZ '{end_sql}'
-ORDER BY t.created_at ASC
-"""
-    try:
-        output = run_local(
-            ["duckdb", "-csv", str(db_path), query],
-            timeout_sec=20.0,
-        )
-        rows = list(csv.DictReader(output.splitlines()))
-    except Exception as exc:  # noqa: BLE001
-        payload["error"] = f"transport rows query failed: {exc}"
-        return payload
-    payload["rows"] = rows
-    payload["row_count"] = int(len(rows))
-    return payload
-
-
 def compute_transport_metrics(
     *,
     transport_rows_payload: dict[str, Any],
-    payload_mode: str,
-    tp_total_bytes: int,
     sample_interval_s: float,
     max_samples: int,
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "enabled": True,
         "error": None,
-        "db_file": transport_rows_payload.get("db_file"),
-        "audit_method": str(transport_rows_payload.get("audit_method", "duckdb_sql")),
+        "gs_addr": transport_rows_payload.get("gs_addr"),
+        "audit_method": str(transport_rows_payload.get("audit_method", "gs_rpc")),
         "window_start_utc": transport_rows_payload.get("window_start_utc"),
         "window_end_utc": transport_rows_payload.get("window_end_utc"),
         "transport_count": 0,
         "completed_transport_count": 0,
-        "bytes_fallback_count": 0,
+        "invalid_completed_bytes_count": 0,
         "throughput": {
             "sample_interval_s": float(max(0.1, sample_interval_s)),
             "sample_count": 0,
@@ -1348,14 +1575,10 @@ def compute_transport_metrics(
 
     step_s = float(max(0.1, sample_interval_s))
     cap_samples = int(max(10, max_samples))
-    fallback_bytes = (
-        int(tp_total_bytes)
-        if str(payload_mode) == "tp_ranked" and int(tp_total_bytes) > 0
-        else 0
-    )
     source_counter: Counter[str] = Counter()
     intervals: list[tuple[float, float, float]] = []
     per_transport_records: list[dict[str, Any]] = []
+    invalid_completed_transport_ids: list[str] = []
 
     for row in rows:
         created_at_epoch_s = _coerce_float(row.get("created_at_epoch_s"))
@@ -1367,10 +1590,8 @@ def compute_transport_metrics(
         )
         bytes_value = max(0, _coerce_int(row.get("replica_memory_size_bytes")))
         bytes_source = "replica_memory_size_bytes"
-        if bytes_value <= 0 and fallback_bytes > 0:
-            bytes_value = int(fallback_bytes)
-            bytes_source = "tp_total_bytes_fallback"
-            metrics["bytes_fallback_count"] = int(metrics["bytes_fallback_count"]) + 1
+        if duration_s > 0.0 and bytes_value <= 0:
+            invalid_completed_transport_ids.append(str(row.get("transport_id", "")))
         throughput_gib_s = (
             float(bytes_value) / float(1024**3) / float(duration_s)
             if bytes_value > 0 and duration_s > 0.0
@@ -1447,6 +1668,30 @@ def compute_transport_metrics(
             "hhi": float(sum(share * share for share in shares)),
             "source_counts": source_counts,
         }
+
+    if invalid_completed_transport_ids:
+        metrics["invalid_completed_bytes_count"] = int(
+            len(invalid_completed_transport_ids)
+        )
+        sample_transport_ids = [
+            transport_id
+            for transport_id in invalid_completed_transport_ids
+            if transport_id
+        ][:5]
+        sample_suffix = ""
+        if len(invalid_completed_transport_ids) > len(sample_transport_ids):
+            sample_suffix = ",..."
+        sample_segment = (
+            f" sample_transport_ids={','.join(sample_transport_ids)}{sample_suffix}."
+            if sample_transport_ids
+            else ""
+        )
+        metrics["error"] = (
+            "invalid transport metrics input: missing replica_memory_size_bytes "
+            "for completed transports;"
+            f" count={len(invalid_completed_transport_ids)}.{sample_segment}"
+        )
+        return metrics
 
     if not intervals:
         return metrics
@@ -2111,8 +2356,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--publish-device",
-        default="auto",
-        help="Publisher payload device passed to weight_publisher_e2e.",
+        default="cpu",
+        help=(
+            "Publisher payload device passed to weight_publisher_e2e. "
+            "Must be explicit (e.g., cpu or cuda:0); auto is disallowed."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-backend",
+        default=os.environ.get("TENSORCAST_CUDA_BACKEND", ""),
+        help=(
+            "Optional CUDA backend override for daemon/role commands. "
+            "Allowed values: real, fake. Empty keeps process default."
+        ),
     )
     parser.add_argument(
         "--transport-group-mode",
@@ -2189,7 +2445,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Default is strict (no skip)."
         ),
     )
-    parser.add_argument("--fallback-prefer", default="p2p")
     parser.add_argument("--materialize-device", default="cuda:0")
     parser.add_argument("--receiver-hold-after-finish-s", type=float, default=25.0)
     parser.add_argument("--publisher-hold-after-finish-s", type=float, default=30.0)
@@ -2248,8 +2503,19 @@ def main(argv: list[str]) -> int:
         raise ValueError("tp-device-base-index must be >= 0")
     if float(args.tp_materialize_deadline_s) < 0.0:
         raise ValueError("tp-materialize-deadline-s must be >= 0")
+    publish_device = str(args.publish_device).strip().lower()
+    if publish_device == "auto":
+        raise ValueError(
+            "publish-device must be explicit (cpu/cuda:<index>); auto is not allowed"
+        )
+    materialize_device = str(args.materialize_device).strip().lower()
+    if materialize_device == "auto":
+        raise ValueError(
+            "materialize-device must be explicit (cpu/cuda:<index>); auto is not allowed"
+        )
     if int(args.max_concurrency) <= 0:
         raise ValueError("max-concurrency must be > 0")
+    cuda_backend = normalize_cuda_backend(str(args.cuda_backend))
     if str(args.transport_group_mode) == "tp_version" and int(args.tp_world_size) <= 0:
         raise ValueError("transport-group-mode=tp_version requires tp-world-size > 0")
     if int(args.receiver_preflight_transient_overlap) <= 0:
@@ -2291,6 +2557,11 @@ def main(argv: list[str]) -> int:
     daemon_p2p_port_base = int(args.daemon_p2p_port_base)
     if daemon_p2p_port_base <= 0:
         raise ValueError("daemon-p2p-port-base must be > 0")
+    remote_run_as_user = configure_remote_run_as_user(resolve_workspace_user())
+    print(
+        "[preflight] enforce non-root remote execution "
+        f"run_as_user={remote_run_as_user}"
+    )
 
     run_tag = f"{int(time.time())}"
     capability_token_secret = secrets.token_hex(32)
@@ -2324,6 +2595,36 @@ def main(argv: list[str]) -> int:
         raise ValueError(
             "daemon-p2p-port-base is too large for role count (port > 65535)"
         )
+    remote_exec_context_by_process: dict[str, dict[str, Any]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_processes)) as pool:
+        ctx_futures = {
+            process_id: pool.submit(
+                detect_remote_execution_context,
+                process_id=process_id,
+                timeout_sec=20.0,
+            )
+            for process_id in all_processes
+        }
+        for process_id, future in ctx_futures.items():
+            remote_exec_context_by_process[process_id] = future.result()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_processes)) as pool:
+        verify_futures = {
+            process_id: pool.submit(
+                verify_remote_run_as_user,
+                process_id=process_id,
+                timeout_sec=20.0,
+            )
+            for process_id in all_processes
+        }
+        for process_id, future in verify_futures.items():
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "remote run-as user preflight failed: "
+                    f"process={process_id}, run_as_user={remote_run_as_user}"
+                ) from exc
     if bool(args.preclean_roles):
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(all_processes)
@@ -2354,6 +2655,14 @@ def main(argv: list[str]) -> int:
         str(args.publisher_proc): str(publisher_daemon_config),
         **{proc: str(receiver_daemon_config) for proc in receiver_procs},
     }
+    memfd_preflight_by_process: dict[str, dict[str, Any]] = {}
+    for process_id, daemon_config_path in daemon_config_by_process.items():
+        role = "publisher" if process_id == str(args.publisher_proc) else "receiver"
+        memfd_preflight_by_process[process_id] = _validate_daemon_memfd_required(
+            process_id=process_id,
+            role=role,
+            daemon_config_path=str(daemon_config_path),
+        )
     publisher_memory_preflight = _validate_publisher_memory_budget(
         publisher_process_id=str(args.publisher_proc),
         daemon_config_path=str(publisher_daemon_config),
@@ -2441,11 +2750,18 @@ def main(argv: list[str]) -> int:
 
     atexit.register(_cleanup_daemons)
     for process_id in all_processes:
+        process_context = remote_exec_context_by_process.get(process_id, {})
+        process_user = str(process_context.get("user", "unknown")).strip() or "unknown"
+        process_session_root = (
+            str(process_context.get("tensorcast_session_root", "")).strip()
+            or "<unknown>"
+        )
         print(
             "[daemon-start] process="
             f"{process_id} session={daemon_sessions[process_id]} "
             f"connect={daemon_connect_by_process[process_id]} "
-            f"p2p={daemon_p2p_port_by_process[process_id]}"
+            f"p2p={daemon_p2p_port_by_process[process_id]} "
+            f"user={process_user} session_root={process_session_root}"
         )
         daemon_status_by_process[process_id] = start_remote_daemon(
             process_id=process_id,
@@ -2461,6 +2777,7 @@ def main(argv: list[str]) -> int:
             heartbeat_interval=str(args.daemon_heartbeat_interval),
             periodic_sync_interval=str(args.daemon_periodic_sync_interval),
             max_concurrency=int(args.max_concurrency),
+            cuda_backend=cuda_backend,
             capability_token_secret=capability_token_secret,
             timeout_sec=120.0,
         )
@@ -2475,6 +2792,7 @@ def main(argv: list[str]) -> int:
         inner_cmd=build_e2e_command(
             repo_root=str(args.repo_root),
             mode="publisher",
+            cuda_backend=cuda_backend,
             daemon_connect_address=daemon_connect_by_process[str(args.publisher_proc)],
             model_name=model_name,
             start_version=int(args.start_version),
@@ -2494,7 +2812,6 @@ def main(argv: list[str]) -> int:
             weights_root=str(args.weights_root),
             run_id=f"{run_id}-publisher",
             receiver_apply_mode=str(args.receiver_apply_mode),
-            fallback_prefer=str(args.fallback_prefer),
             materialize_device=str(args.materialize_device),
             allow_version_skip=bool(args.allow_receiver_skips),
             hold_after_finish_s=float(args.publisher_hold_after_finish_s),
@@ -2520,6 +2837,7 @@ def main(argv: list[str]) -> int:
             inner_cmd=build_e2e_command(
                 repo_root=str(args.repo_root),
                 mode="receiver",
+                cuda_backend=cuda_backend,
                 daemon_connect_address=daemon_connect_by_process[proc],
                 model_name=model_name,
                 start_version=int(args.start_version),
@@ -2539,7 +2857,6 @@ def main(argv: list[str]) -> int:
                 weights_root=str(args.weights_root),
                 run_id=f"{run_id}-receiver",
                 receiver_apply_mode=str(args.receiver_apply_mode),
-                fallback_prefer=str(args.fallback_prefer),
                 materialize_device=str(args.materialize_device),
                 allow_version_skip=bool(args.allow_receiver_skips),
                 hold_after_finish_s=float(args.receiver_hold_after_finish_s),
@@ -2643,6 +2960,7 @@ def main(argv: list[str]) -> int:
                 enabled=bool(args.p0_early_stop),
                 mode=transport_group_plan.mode,
                 group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+                gs_addr=str(args.gs_addr),
                 started_at_utc=case_transport_window_start,
                 grace_s=float(args.p0_early_stop_grace_s),
                 poll_interval_s=float(args.poll_interval_s),
@@ -2791,19 +3109,19 @@ def main(argv: list[str]) -> int:
                 "dropped_artifact_ids": sorted(dropped_artifact_ids),
             }
     transport_group_probe = query_transport_group_probe(
+        gs_addr=str(args.gs_addr),
         group_mode=transport_group_plan.mode,
         group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
         started_at_utc=case_transport_window_start,
         finished_at_utc=case_transport_window_end,
     )
     transport_rows_payload = query_transport_rows(
+        gs_addr=str(args.gs_addr),
         started_at_utc=case_transport_window_start,
         finished_at_utc=case_transport_window_end,
     )
     transport_metrics = compute_transport_metrics(
         transport_rows_payload=transport_rows_payload,
-        payload_mode=str(args.payload_mode),
-        tp_total_bytes=int(args.tp_total_bytes),
         sample_interval_s=float(args.throughput_sample_interval_s),
         max_samples=int(args.throughput_max_samples),
     )
@@ -2812,6 +3130,18 @@ def main(argv: list[str]) -> int:
         float(row.get("publish_latency_s", 0.0))
         for row in published_by_version.values()
         if isinstance(row, dict)
+    ]
+    publish_bandwidths = [
+        float(_coerce_float(row.get("publish_throughput_gib_s", 0.0)))
+        for row in published_by_version.values()
+        if isinstance(row, dict)
+        and float(_coerce_float(row.get("publish_throughput_gib_s", 0.0))) > 0.0
+    ]
+    put_bandwidths = [
+        float(_coerce_float(row.get("put_throughput_gib_s", 0.0)))
+        for row in published_by_version.values()
+        if isinstance(row, dict)
+        and float(_coerce_float(row.get("put_throughput_gib_s", 0.0))) > 0.0
     ]
     apply_latencies: list[float] = []
     propagation_latencies: list[float] = []
@@ -3086,6 +3416,8 @@ def main(argv: list[str]) -> int:
         },
         "performance": {
             "publish_latency_s": summarize_series(publish_latencies),
+            "publish_bandwidth_gib_s": summarize_series(publish_bandwidths),
+            "put_bandwidth_gib_s": summarize_series(put_bandwidths),
             "apply_latency_s": summarize_series(apply_latencies),
             "publish_to_apply_s": summarize_series(propagation_latencies),
             "transport_throughput_gib_s": transport_throughput_summary,
@@ -3168,6 +3500,7 @@ def main(argv: list[str]) -> int:
             "daemon_connect_addresses": daemon_connect_by_process,
             "daemon_p2p_port_base": daemon_p2p_port_base,
             "daemon_p2p_ports": daemon_p2p_port_by_process,
+            "remote_run_as_user": remote_run_as_user,
             "repo_root": str(args.repo_root),
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
@@ -3188,6 +3521,7 @@ def main(argv: list[str]) -> int:
                 "receiver_count*tp_world_size when mode=tp_version, else 0"
             ),
             "max_concurrency": int(args.max_concurrency),
+            "cuda_backend": cuda_backend or "process-default",
             "receiver_preflight_transient_overlap": int(
                 args.receiver_preflight_transient_overlap
             ),
@@ -3201,7 +3535,6 @@ def main(argv: list[str]) -> int:
             "retention_timeout_s": float(args.retention_timeout_s),
             "receiver_apply_mode": str(args.receiver_apply_mode),
             "allow_receiver_skips": bool(args.allow_receiver_skips),
-            "fallback_prefer": str(args.fallback_prefer),
             "materialize_device": str(args.materialize_device),
             "receiver_hold_after_finish_s": float(args.receiver_hold_after_finish_s),
             "publisher_hold_after_finish_s": float(args.publisher_hold_after_finish_s),
@@ -3218,12 +3551,14 @@ def main(argv: list[str]) -> int:
             "daemon_periodic_sync_interval": str(args.daemon_periodic_sync_interval),
             "preclean_roles": bool(args.preclean_roles),
             "publisher_memory_preflight": publisher_memory_preflight,
+            "memfd_preflight_by_process": memfd_preflight_by_process,
             "receiver_memory_preflight": receiver_memory_preflight,
         },
         "daemon": {
             "sessions": daemon_sessions,
             "daemon_ids": daemon_ids,
             "advertise_hosts": remote_advertise_hosts,
+            "remote_exec_context": remote_exec_context_by_process,
             "status": daemon_status_by_process,
             "keep_daemons": bool(args.keep_daemons),
             "daemon_config_by_process": daemon_config_by_process,
@@ -3257,6 +3592,12 @@ def main(argv: list[str]) -> int:
                 "publish_latency_mean_s": summary["performance"]["publish_latency_s"][
                     "mean"
                 ],
+                "publish_bandwidth_mean_gib_s": summary["performance"][
+                    "publish_bandwidth_gib_s"
+                ]["mean"],
+                "put_bandwidth_mean_gib_s": summary["performance"][
+                    "put_bandwidth_gib_s"
+                ]["mean"],
                 "apply_latency_mean_s": summary["performance"]["apply_latency_s"][
                     "mean"
                 ],

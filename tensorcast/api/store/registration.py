@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Mapping
@@ -488,9 +489,13 @@ class RegistrationPipeline:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        # `put` always requires a CUDA device for staging and IPC; fail early to
-        # produce a clearer error than a deeper runtime path.
-        if saw_cpu and not torch.cuda.is_available():
+        # With fake CUDA, CPU tensors are accepted for smoke/testing workflows.
+        fake_cuda_enabled = (
+            os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
+        )
+        # `put` otherwise requires a CUDA device for staging and IPC; fail early
+        # to produce a clearer error than a deeper runtime path.
+        if saw_cpu and not torch.cuda.is_available() and not fake_cuda_enabled:
             raise ArtifactError(
                 "put requires CUDA to be available for staging CPU tensors",
                 status_code="FAILED_PRECONDITION",

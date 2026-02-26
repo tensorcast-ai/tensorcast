@@ -40,6 +40,9 @@ from tensorcast.global_store.repositories import (
 )
 from tensorcast.global_store.repositories.base import is_transient_tx_conflict
 from tensorcast.global_store.repositories.replica_repository import SourceBalanceWeights
+from tensorcast.global_store.repositories.transport_repository import (
+    TransportWindowRow,
+)
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -807,6 +810,22 @@ class TransportService:
         )
 
         return current, max_conc
+
+    def query_transport_window(
+        self,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+        limit: int,
+    ) -> list[TransportWindowRow]:
+        if finished_at < started_at:
+            raise ValidationError("created_at_end must be >= created_at_start")
+        bounded_limit = min(max(1, int(limit)), 1_000_000)
+        return self.transport_repository.list_rows_in_created_window(
+            started_at=started_at,
+            finished_at=finished_at,
+            limit=bounded_limit,
+        )
 
     def cleanup_expired_transports(self, expiration_seconds: int | None = None) -> int:
         """Release transports that have been in *in_progress* state for too long."""

@@ -1535,7 +1535,7 @@ class DaemonCtl:
                     getattr(response, "local_handle_socket_path", "") or ""
                 )
                 cpu_shared_memory_enabled = bool(
-                    getattr(response, "cpu_shared_memory_enabled", False)
+                    getattr(response, "cpu_shared_memory_enabled", True)
                 )
                 if not local_handle_socket_path and cpu_shared_memory_enabled:
                     try:

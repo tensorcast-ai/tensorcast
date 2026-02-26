@@ -265,6 +265,9 @@ class ClusterRuntimeRpcServicerMixin:
     ) -> Any:
         return self.transport_rpc_handler.complete_replica_transport(request, context)
 
+    def QueryTransportWindow(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.transport_rpc_handler.query_transport_window(request, context)
+
     def RegisterWorker(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.worker_rpc_handler.register_worker(request, context)
 

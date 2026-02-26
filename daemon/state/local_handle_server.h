@@ -21,7 +21,7 @@ class LocalHandleServer final {
  public:
   struct Options {
     std::string socket_path;
-    bool cpu_shared_memory_enabled{false};
+    bool cpu_shared_memory_enabled{true};
   };
 
   LocalHandleServer(Options opts, HandleLeaseRegistry& leases);

@@ -402,7 +402,7 @@ def materialize_artifact_v2(
         server_config.local_handle_socket_path if server_config is not None else ""
     )
     cpu_shared_memory_enabled = bool(
-        server_config.cpu_shared_memory_enabled if server_config is not None else False
+        server_config.cpu_shared_memory_enabled if server_config is not None else True
     )
 
     cuda_ipc_handle = b""

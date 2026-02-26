@@ -28,6 +28,24 @@ class TransportGroupProgress:
         return min(1.0, float(self.completed_parts) / float(self.total_parts))
 
 
+@dataclass(frozen=True)
+class TransportWindowRow:
+    transport_id: str
+    replica_id: str
+    artifact_id: str
+    status: str
+    completion_outcome: str
+    request_id: str
+    requester_worker_id: str
+    group_id: str
+    group_kind: str
+    group_part_id: str
+    group_total_parts: int
+    created_at: datetime
+    completed_at: datetime | None
+    replica_memory_size_bytes: int
+
+
 class TransportRepository(BaseRepository):
     """Repository for managing transports in the database."""
 
@@ -345,6 +363,68 @@ class TransportRepository(BaseRepository):
         finally:
             cursor.close()
 
+    def list_rows_in_created_window(
+        self,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+        limit: int,
+    ) -> list[TransportWindowRow]:
+        cursor = self.get_cursor()
+        try:
+            rows = cursor.execute(
+                """
+                SELECT
+                    CAST(t.transport_id AS VARCHAR) AS transport_id,
+                    CAST(t.replica_id AS VARCHAR) AS replica_id,
+                    COALESCE(t.artifact_id, '') AS artifact_id,
+                    COALESCE(t.status, '') AS status,
+                    COALESCE(t.completion_outcome, '') AS completion_outcome,
+                    COALESCE(t.request_id, '') AS request_id,
+                    COALESCE(t.requester_worker_id, '') AS requester_worker_id,
+                    COALESCE(t.group_id, '') AS group_id,
+                    COALESCE(t.group_kind, '') AS group_kind,
+                    COALESCE(t.group_part_id, '') AS group_part_id,
+                    COALESCE(t.group_total_parts, 0) AS group_total_parts,
+                    t.created_at AS created_at,
+                    t.completed_at AS completed_at,
+                    COALESCE(r.memory_size, 0) AS replica_memory_size_bytes
+                FROM artifact_transports t
+                LEFT JOIN artifact_replicas r
+                  ON t.replica_id = r.replica_id
+                WHERE t.created_at >= ?
+                  AND t.created_at <= ?
+                ORDER BY t.created_at ASC
+                LIMIT ?
+                """,
+                [started_at, finished_at, int(limit)],
+            ).fetchall()
+            result: list[TransportWindowRow] = []
+            for row in rows:
+                created_at = self._coerce_datetime(row[11])
+                completed_at = self._coerce_datetime_optional(row[12])
+                result.append(
+                    TransportWindowRow(
+                        transport_id=str(row[0] or ""),
+                        replica_id=str(row[1] or ""),
+                        artifact_id=str(row[2] or ""),
+                        status=str(row[3] or ""),
+                        completion_outcome=str(row[4] or ""),
+                        request_id=str(row[5] or ""),
+                        requester_worker_id=str(row[6] or ""),
+                        group_id=str(row[7] or ""),
+                        group_kind=str(row[8] or ""),
+                        group_part_id=str(row[9] or ""),
+                        group_total_parts=int(row[10] or 0),
+                        created_at=created_at,
+                        completed_at=completed_at,
+                        replica_memory_size_bytes=int(row[13] or 0),
+                    )
+                )
+            return result
+        finally:
+            cursor.close()
+
     def get_group_progress(
         self,
         *,
@@ -427,6 +507,20 @@ class TransportRepository(BaseRepository):
         if outcome == TransportCompletionOutcome.CANCELLED:
             return "cancelled"
         return "unspecified"
+
+    @staticmethod
+    def _coerce_datetime(raw: Any) -> datetime:
+        if isinstance(raw, datetime):
+            return raw
+        if raw is None:
+            raise ValueError("created_at is missing")
+        return datetime.fromisoformat(str(raw))
+
+    @classmethod
+    def _coerce_datetime_optional(cls, raw: Any) -> datetime | None:
+        if raw is None:
+            return None
+        return cls._coerce_datetime(raw)
 
     def _row_to_model(self, row: tuple[Any, ...], columns: list[str]) -> Transport:
         idx = {column: i for i, column in enumerate(columns)}

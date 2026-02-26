@@ -5,6 +5,7 @@
 import base64
 import hashlib
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import grpc
 from google.protobuf import duration_pb2, timestamp_pb2, wrappers_pb2
@@ -1209,6 +1210,92 @@ class TestGRPCService:
         assert response.status == global_store_pb2.Status.STATUS_ERROR
         assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
         assert "explicit outcome" in (test_context.details or "")
+
+    def test_query_transport_window_returns_rows(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_query_transport_window",
+                mem_info=memory_info,
+                max_concurrency=3,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+        transport_response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_query_transport_window",
+                local_memory_info=memory_info,
+                wait_timeout_dur=duration_pb2.Duration(seconds=1),
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+                requester_worker_id="receiver-1",
+                request_id="query-window-req-1",
+                scheduling_group=global_store_pb2.TransportSchedulingGroup(
+                    group_id="case-a0:v1",
+                    group_kind="tp_version",
+                    total_parts=16,
+                    part_id="rx1:r0",
+                    priority=0,
+                    epoch=1,
+                ),
+            ),
+            test_context,
+        )
+        assert transport_response.status == global_store_pb2.Status.STATUS_OK
+        servicer.CompleteReplicaTransport(
+            global_store_pb2.CompleteReplicaTransportRequest(
+                transport_id=transport_response.transport_id,
+                outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
+            ),
+            test_context,
+        )
+
+        start_ts = timestamp_pb2.Timestamp()
+        start_ts.FromDatetime(datetime.now(timezone.utc) - timedelta(minutes=5))
+        end_ts = timestamp_pb2.Timestamp()
+        end_ts.FromDatetime(datetime.now(timezone.utc) + timedelta(minutes=5))
+        response = servicer.QueryTransportWindow(
+            global_store_pb2.QueryTransportWindowRequest(
+                created_at_start=start_ts,
+                created_at_end=end_ts,
+                limit=1000,
+            ),
+            test_context,
+        )
+
+        assert response.status == global_store_pb2.Status.STATUS_OK
+        matched = None
+        for row in response.rows:
+            if row.transport_id == transport_response.transport_id:
+                matched = row
+                break
+        assert matched is not None
+        assert matched.requester_worker_id == "receiver-1"
+        assert matched.group_kind == "tp_version"
+        assert matched.group_total_parts == 16
+        assert matched.HasField("created_at")
+
+    def test_query_transport_window_requires_window_bounds(
+        self, servicer, test_context
+    ):
+        response = servicer.QueryTransportWindow(
+            global_store_pb2.QueryTransportWindowRequest(),
+            test_context,
+        )
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
 
     def test_persistence(self, test_context, memory_info, temp_db_file):
         """Test that the database persists data between servicer instances"""
