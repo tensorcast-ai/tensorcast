@@ -182,4 +182,8 @@ absl::StatusOr<ExportRegistration> CommunicationManager::register_memory(
   return info;
 }
 
+void CommunicationManager::set_routing_context(std::shared_ptr<communicator::routing::RoutingContext> routing_context) {
+  routing_context_ = std::move(routing_context);
+}
+
 } // namespace tensorcast::store::components

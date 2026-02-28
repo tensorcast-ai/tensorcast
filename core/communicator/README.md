@@ -80,7 +80,7 @@ Topology modeling examples live in `core/communicator/topology/topology_test.cc`
 
 ### Routing Wrapper (Phase 2)
 
-Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the topology model and runtime endpoint bindings onto the existing engine without changing data-plane behavior:
+Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the topology model and runtime endpoint bindings onto the existing engine:
 
 - **RoutingContext** owns a `Topology` plus `EndpointBinding` records (node id, IP/port, device ids) and returns a per `src_endpoint_id` → `dst_endpoint_id` communicator.
 - **RouteChannel** represents a path composed of `Connection` hops; Phase 2 supports direct 1-hop channels only (multi-hop returns `UNIMPLEMENTED`).
@@ -92,7 +92,7 @@ Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the 
 - **Connection reads** bound waits on adapter futures (default: 60s); timeouts return `DEADLINE_EXCEEDED` and are recorded as failures.
 - **Link directionality** is explicit: a reverse path requires a reverse `Link` entry in the topology.
 
-The wrapper is currently standalone and not yet wired into the P2P read path; existing callers still use `engine::Communicator` directly until Phase 4 integration.
+Store read paths now integrate this wrapper in routed-first mode when `local_endpoint_id`, `remote_endpoint_id`, and `RoutingContext` are all present. Any routed path failure (communicator lookup/channel/read status) immediately falls back to direct `engine::Communicator::read_tensor(ip, port, ...)` for compatibility.
 
 ### Simple NUMA -> DOT helper
 

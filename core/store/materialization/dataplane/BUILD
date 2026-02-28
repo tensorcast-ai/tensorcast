@@ -149,6 +149,7 @@ sc_cc_library(
     deps = [
         ":source",
         "//core/communicator:engine_lib",
+        "//core/communicator:routing_context_lib",
         "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
@@ -484,6 +485,20 @@ cc_test(
         "//core/checkpoint:aligned_buffer_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "remote_key_source_routing_fallback_test",
+    srcs = ["sources/tests/remote_key_source_routing_fallback_test.cc"],
+    deps = [
+        ":remote_key_source",
+        "//core/communicator:engine_lib",
+        "//core/communicator:routing_context_lib",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+        "@gsl",
     ],
 )
 

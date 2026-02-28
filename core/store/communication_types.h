@@ -7,6 +7,7 @@
 #include <vector>
 #include "core/common/memory/memory_location.h"
 #include "core/communicator/engine/engine.h"
+#include "core/communicator/routing/routing_context.h"
 #include "core/store/device_types.h"
 
 namespace tensorcast::store {
@@ -31,6 +32,8 @@ struct P2PSource {
   uint64_t size_bytes;
   std::string ip;
   uint16_t port;
+  std::string local_endpoint_id;
+  std::string remote_endpoint_id;
   std::vector<std::string> memory_keys;
   std::vector<size_t> buf_sizes;
   bool enable_checksum = true;
@@ -47,6 +50,7 @@ struct P2PSource {
   // will mux remote source with this disk source for resilience.
   std::string fallback_disk_dir;
 
+  std::shared_ptr<communicator::routing::RoutingContext> routing_context;
   std::shared_ptr<communicator::engine::Communicator> comm_engine;
 };
 

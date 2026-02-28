@@ -85,3 +85,14 @@ bazel test //core/store/replica:replica_p2p_transfer_test --test_env=TENSORCAST_
 
 These tests are tagged `requires_cuda`. To skip them, add
 `--test_tag_filters=-requires_cuda`.
+
+## Store dataplane routing tests
+
+Use this test when validating the new routed-read wrapper interface in
+`RemoteKeySource` and its strict fallback to direct `ip:port` reads.
+
+```bash
+bazel test //core/store/materialization/dataplane:remote_key_source_routing_fallback_test \
+  --test_env=TENSORCAST_CUDA_BACKEND=fake \
+  --test_output=errors
+```

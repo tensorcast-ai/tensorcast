@@ -72,6 +72,15 @@ absl::Status stale_local_route_status(std::string_view artifact_id) {
       absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
 }
 
+std::string build_local_endpoint_id(const components::WorkerIdentity& local_identity, const DeviceKey& device) {
+  if (local_identity.node_id.empty()) {
+    return {};
+  }
+  const std::string_view dev_type = device.type == DeviceType::GPU ? "gpu" : "cpu";
+  const int endpoint_dev_id = device.type == DeviceType::GPU ? std::max(0, device.ordinal) : 0;
+  return absl::StrCat(local_identity.node_id, "/dev/", dev_type, "/", endpoint_dev_id);
+}
+
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
   constexpr std::string_view kPrefix = common::kMi2Prefix;
   if (!artifact_id.starts_with(kPrefix)) {
@@ -1062,6 +1071,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
     local_identity.p2p_port = options.p2p_port;
   }
+  auto comm_manager = config_.runtime_context->communication_manager();
 
   if (prefer_disk && !allow_disk) {
     return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
@@ -1113,12 +1123,20 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.size_bytes = remote.memory_size;
         p2p_src.ip = remote.node_address;
         p2p_src.port = static_cast<uint16_t>(remote.node_port);
+        p2p_src.local_endpoint_id = build_local_endpoint_id(local_identity, target_device);
+        p2p_src.remote_endpoint_id = remote.endpoint_id;
         p2p_src.memory_keys = remote.remote_memory_keys;
         p2p_src.buf_sizes = remote.buffer_sizes;
         p2p_src.verification_json = remote.verification_json;
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        if (comm_manager && comm_manager->is_enabled()) {
+          p2p_src.comm_engine =
+              gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+                  comm_manager->get_shared_engine()};
+          p2p_src.routing_context = comm_manager->routing_context();
+        }
         auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
         auto complete_status = gs_client->complete_replica_transport(session.transport_id);
         if (!complete_status.ok()) {
@@ -1262,6 +1280,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   }
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool comm_enabled = comm_manager && comm_manager->is_enabled();
+  const std::string local_endpoint_id = build_local_endpoint_id(local_identity, request.target_device());
   auto& replica_registry = config_.replica_runtime->registry();
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
@@ -1311,6 +1330,9 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
         .buffer_sizes = std::move(buffer_sizes),
         .ip = remote.node_address,
         .port = static_cast<uint16_t>(remote.node_port),
+        .local_endpoint_id = local_endpoint_id,
+        .remote_endpoint_id = remote.endpoint_id,
+        .routing_context = comm_manager->routing_context(),
         .total_size = remote.memory_size,
     };
     piece_sources.push_back(std::make_shared<loader::RemoteKeySource>(std::move(opts)));
@@ -1543,6 +1565,8 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
   if (!comm_manager || !comm_manager->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
+  const components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
+  const std::string local_endpoint_id = build_local_endpoint_id(local_identity, target_device);
 
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
@@ -1567,6 +1591,9 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
         .buffer_sizes = std::move(buffer_sizes),
         .ip = remote.node_address,
         .port = static_cast<uint16_t>(remote.node_port),
+        .local_endpoint_id = local_endpoint_id,
+        .remote_endpoint_id = remote.endpoint_id,
+        .routing_context = comm_manager->routing_context(),
         .total_size = remote.memory_size,
     };
     piece_sources.push_back(std::make_shared<loader::RemoteKeySource>(std::move(opts)));

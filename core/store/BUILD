@@ -15,6 +15,7 @@ sc_header_only_library(
         ":device_types",
         "//core/common:memory_location_lib",
         "//core/communicator:engine_hdrs",
+        "//core/communicator:routing_context_lib",
         "@gsl",
     ],
 )
@@ -160,6 +161,7 @@ sc_cc_library(
         ":communication_types",
         "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
+        "//core/communicator:routing_context_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )

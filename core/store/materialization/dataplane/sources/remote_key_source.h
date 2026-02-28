@@ -9,6 +9,7 @@
 
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
+#include "core/communicator/routing/routing_context.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 
 namespace tensorcast::store::loader {
@@ -21,6 +22,9 @@ class RemoteKeySource : public SeekableSource {
     std::vector<size_t> buffer_sizes; // Corresponding sizes for each key
     std::string ip; // Remote peer IP
     uint16_t port = 0; // Remote peer port
+    std::string local_endpoint_id;
+    std::string remote_endpoint_id;
+    std::shared_ptr<communicator::routing::RoutingContext> routing_context;
     uint64_t total_size = 0; // Aggregate size across all keys
   };
 
@@ -41,6 +45,7 @@ class RemoteKeySource : public SeekableSource {
   size_t current_key_index_ = 0;
   size_t current_key_offset_ = 0;
   size_t total_bytes_read_ = 0;
+  bool routed_path_enabled_ = true;
 };
 
 } // namespace tensorcast::store::loader

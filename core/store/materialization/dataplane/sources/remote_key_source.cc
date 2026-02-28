@@ -4,13 +4,102 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "core/communicator/engine/engine.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 
 namespace tensorcast::store::loader {
+
+namespace {
+
+bool can_use_routed_read(const RemoteKeySource::Options& options, bool routed_path_enabled) {
+  return routed_path_enabled && options.routing_context != nullptr &&
+      !options.local_endpoint_id.empty() && !options.remote_endpoint_id.empty();
+}
+
+communicator::transport::read_result_t read_direct(
+    const RemoteKeySource::Options& options,
+    const std::string& key,
+    uint64_t local_addr,
+    uint64_t bytes,
+    uint64_t remote_offset,
+    int dev_type,
+    int dev_id) {
+  auto future = options.comm_engine->read_tensor(
+      key,
+      local_addr,
+      bytes,
+      dev_type,
+      dev_id,
+      options.ip,
+      options.port,
+      remote_offset);
+  return future.get();
+}
+
+absl::StatusOr<communicator::transport::read_result_t> read_routed(
+    const RemoteKeySource::Options& options,
+    const std::string& key,
+    uint64_t local_addr,
+    uint64_t bytes,
+    uint64_t remote_offset,
+    int dev_type,
+    int dev_id) {
+  auto communicator_or =
+      options.routing_context->get_communicator(options.local_endpoint_id, options.remote_endpoint_id);
+  if (!communicator_or.ok()) {
+    return communicator_or.status();
+  }
+
+  communicator::routing::ReadRequest request{
+      .tensor_key = key,
+      .addr = local_addr,
+      .bytes = bytes,
+      .dev_type = dev_type,
+      .dev_id = dev_id,
+      .remote_offset = remote_offset,
+  };
+  try {
+    auto future = communicator_or.value()->read_tensor(request);
+    auto result = future.get();
+    if (!result.status.ok()) {
+      return result.status;
+    }
+    return result;
+  } catch (const std::exception& ex) {
+    return absl::InternalError(absl::StrCat("routed read future failed: ", ex.what()));
+  }
+}
+
+communicator::transport::read_result_t read_with_strict_fallback(
+    const RemoteKeySource::Options& options,
+    const std::string& key,
+    uint64_t local_addr,
+    uint64_t bytes,
+    uint64_t remote_offset,
+    int dev_type,
+    int dev_id,
+    bool* routed_path_enabled) {
+  if (can_use_routed_read(options, *routed_path_enabled)) {
+    auto routed_or = read_routed(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
+    if (routed_or.ok()) {
+      return *routed_or;
+    }
+    *routed_path_enabled = false;
+    LOG(WARNING) << "Routed read failed for src_endpoint=" << options.local_endpoint_id
+                 << " dst_endpoint=" << options.remote_endpoint_id << ", fallback to direct ip/port " << options.ip
+                 << ":" << options.port << " reason=" << routed_or.status();
+  }
+
+  return read_direct(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
+}
+
+} // namespace
 
 RemoteKeySource::RemoteKeySource(Options options) : options_(std::move(options)) {
   if (options_.memory_keys.size() != options_.buffer_sizes.size()) {
@@ -48,18 +137,15 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    // Use Communicator to read from remote peer directly into dst_ptr.
-    auto future = options_.comm_engine->read_tensor(
+    auto result = read_with_strict_fallback(
+        options_,
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
         static_cast<uint64_t>(to_read),
-        0 /* CPU dev type */,
+        static_cast<uint64_t>(current_key_offset_),
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
-        options_.ip,
-        options_.port,
-        static_cast<uint64_t>(current_key_offset_));
-
-    auto result = future.get();
+        &routed_path_enabled_);
     if (!result.status.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
@@ -150,17 +236,15 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto future = options_.comm_engine->read_tensor(
+    auto result = read_with_strict_fallback(
+        options_,
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
         static_cast<uint64_t>(to_read),
-        0 /* CPU dev type */,
+        static_cast<uint64_t>(key_offset),
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
-        options_.ip,
-        options_.port,
-        static_cast<uint64_t>(key_offset));
-
-    auto result = future.get();
+        &routed_path_enabled_);
     if (!result.status.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
@@ -248,16 +332,15 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(step));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto future = options_.comm_engine->read_tensor(
+    auto result = read_with_strict_fallback(
+        options_,
         key,
         local_addr,
         static_cast<uint64_t>(step),
-        0 /* CPU */,
+        static_cast<uint64_t>(key_offset),
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
-        options_.ip,
-        options_.port,
-        static_cast<uint64_t>(key_offset));
-    auto result = future.get();
+        &routed_path_enabled_);
     if (!result.status.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
