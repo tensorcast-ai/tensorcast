@@ -30,6 +30,7 @@ import grpc
 import yaml
 from google.protobuf import timestamp_pb2
 
+from tensorcast.global_store.cluster_runtime_rpc import call_cluster_runtime_rpc
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
 
@@ -87,6 +88,324 @@ def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
         float(args.retention_timeout_s),
     )
     return float(int(int(args.num_versions) * per_version_seconds + tail_guard + 600.0))
+
+
+def estimate_receiver_timeout_floor_sec(args: argparse.Namespace) -> float:
+    apply_mode = str(args.receiver_apply_mode).strip().lower()
+    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
+        return max(30.0, float(args.receiver_timeout_s))
+    tp_world_size = max(1, int(args.tp_world_size))
+    total_payload_gib = float(max(0, int(args.tp_total_bytes))) / float(1024**3)
+    per_rank_payload_gib = (
+        total_payload_gib / float(tp_world_size)
+        if total_payload_gib > 0.0
+        else 0.0
+    )
+    # Empirical lower bound from multi-host TP4 runs:
+    # rank-local bind/swap latency grows with per-rank payload and fanout.
+    per_rank_apply_budget_s = max(12.0, per_rank_payload_gib * 2.0 + 8.0)
+    receiver_count = max(1, len(split_csv(str(args.receiver_procs))))
+    queue_budget_s = max(10.0, float(receiver_count) * 5.0)
+    visibility_budget_s = max(20.0, float(args.publish_interval_s) * 2.0)
+    guard_s = 20.0
+    floor = (
+        visibility_budget_s
+        + float(tp_world_size) * per_rank_apply_budget_s
+        + queue_budget_s
+        + guard_s
+    )
+    return float(int(math.ceil(floor)))
+
+
+def estimate_keep_last_floor(args: argparse.Namespace) -> int:
+    keep_last = max(0, int(args.keep_last))
+    if str(args.payload_mode).strip().lower() != "tp_ranked":
+        return keep_last
+    if int(args.tp_total_bytes) <= 0:
+        return keep_last
+    apply_mode = str(args.receiver_apply_mode).strip().lower()
+    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
+        return keep_last
+    if bool(args.allow_receiver_skips):
+        return keep_last
+    receiver_count = max(1, len(split_csv(str(args.receiver_procs))))
+    if receiver_count <= 1:
+        return keep_last
+    return min(max(1, int(args.num_versions)), max(2, keep_last))
+
+
+def estimate_keep_last_stable_cap(args: argparse.Namespace) -> int | None:
+    if str(args.payload_mode).strip().lower() != "tp_ranked":
+        return None
+    per_version_bytes = int(args.tp_total_bytes)
+    if per_version_bytes <= 0:
+        return None
+    publisher_daemon_config = str(
+        getattr(args, "publisher_daemon_config", "") or getattr(args, "daemon_config", "")
+    ).strip()
+    if not publisher_daemon_config:
+        return None
+    daemon_hints = _load_daemon_memory_hints(publisher_daemon_config)
+    stable_bytes = int(daemon_hints.get("stable_bytes", 0))
+    if stable_bytes <= 0:
+        return None
+    return max(0, stable_bytes // per_version_bytes)
+
+
+def estimate_publish_to_apply_floor_sec(args: argparse.Namespace) -> float:
+    apply_mode = str(args.receiver_apply_mode).strip().lower()
+    configured = float(args.max_publish_to_apply_s)
+    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
+        return max(20.0, configured)
+    if str(args.payload_mode).strip().lower() != "tp_ranked":
+        return max(20.0, configured)
+    if int(args.tp_total_bytes) <= 0:
+        return max(20.0, configured)
+
+    tp_world_size = max(1, int(args.tp_world_size))
+    receiver_count = max(1, len(split_csv(str(args.receiver_procs))))
+    total_payload_gib = float(max(0, int(args.tp_total_bytes))) / float(1024**3)
+    per_rank_payload_gib = total_payload_gib / float(tp_world_size)
+    per_rank_apply_budget_s = max(4.0, per_rank_payload_gib * 1.2 + 3.0)
+    tp_wave_budget_s = float(tp_world_size) * per_rank_apply_budget_s * 0.4
+    queue_budget_s = float(max(0, receiver_count - 1)) * max(
+        1.5, per_rank_apply_budget_s * 0.25
+    )
+    visibility_budget_s = max(8.0, float(args.publish_interval_s) * 2.0)
+    guard_s = 10.0 if str(args.transport_group_mode).strip().lower() == "tp_version" else 6.0
+    floor = visibility_budget_s + tp_wave_budget_s + queue_budget_s + guard_s
+    return float(max(20.0, math.ceil(floor)))
+
+
+def parse_receiver_skip_events(receiver_log: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in str(receiver_log).splitlines():
+        if "[receiver] skipped" not in line:
+            continue
+        version_match = re.search(r"\bversion=(\d+)\b", line)
+        if version_match is None:
+            continue
+        version = int(version_match.group(1))
+        reason_match = re.search(r"\breason=([^\s]+)", line)
+        reason = (
+            str(reason_match.group(1)).strip().lower()
+            if reason_match is not None
+            else "unknown"
+        )
+        newer_version_match = re.search(r"\bnewer_version=([^\s]+)", line)
+        newer_version_raw = (
+            str(newer_version_match.group(1)).strip()
+            if newer_version_match is not None
+            else ""
+        )
+        newer_version: int | None = None
+        if newer_version_raw.isdigit():
+            newer_version = int(newer_version_raw)
+        events.append(
+            {
+                "version": version,
+                "reason": reason,
+                "newer_version": newer_version,
+                "line": line.strip(),
+            }
+        )
+    return events
+
+
+def collect_receiver_skip_events_by_process(
+    receiver_logs: dict[str, str],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        str(process_id): parse_receiver_skip_events(str(log_text))
+        for process_id, log_text in receiver_logs.items()
+    }
+
+
+def assess_receiver_sequence(
+    *,
+    expected_versions: list[int],
+    actual_versions: list[int],
+    allow_receiver_skips: bool,
+    explicit_skipped_versions: set[int],
+) -> dict[str, Any]:
+    expected_set = set(expected_versions)
+    actual_set = set(actual_versions)
+    unique_sorted_versions = sorted(actual_set)
+    has_order_or_dup_issue = actual_versions != unique_sorted_versions
+    out_of_expected_range = [
+        version for version in actual_versions if version not in expected_set
+    ]
+    missing_versions = [
+        version for version in expected_versions if version not in actual_set
+    ]
+    latest_expected = expected_versions[-1] if expected_versions else 0
+    reached_latest = bool(actual_versions) and actual_versions[-1] == latest_expected
+
+    effective_explicit_skips = sorted(
+        version for version in explicit_skipped_versions if version in expected_set
+    )
+    effective_explicit_skip_set = set(effective_explicit_skips)
+    accounted_missing_versions = (
+        [
+            version
+            for version in missing_versions
+            if version in effective_explicit_skip_set
+        ]
+        if allow_receiver_skips
+        else []
+    )
+    unaccounted_missing_versions = (
+        [
+            version
+            for version in missing_versions
+            if version not in effective_explicit_skip_set
+        ]
+        if allow_receiver_skips
+        else list(missing_versions)
+    )
+    skip_disallowed_violation = bool(missing_versions) and not allow_receiver_skips
+    latest_violation = (not reached_latest) and not allow_receiver_skips
+    missing_violation = bool(unaccounted_missing_versions)
+
+    is_failure = bool(
+        has_order_or_dup_issue
+        or out_of_expected_range
+        or skip_disallowed_violation
+        or latest_violation
+        or missing_violation
+    )
+    return {
+        "expected_versions": expected_versions,
+        "actual_versions": actual_versions,
+        "missing_versions": missing_versions,
+        "order_or_duplicate_issue": has_order_or_dup_issue,
+        "out_of_expected_range": out_of_expected_range,
+        "reached_latest_version": reached_latest,
+        "allow_receiver_skips": bool(allow_receiver_skips),
+        "explicit_skipped_versions": effective_explicit_skips,
+        "accounted_missing_versions": accounted_missing_versions,
+        "unaccounted_missing_versions": unaccounted_missing_versions,
+        "is_failure": is_failure,
+    }
+
+
+def _infer_timeout_reasons_from_text(text: str) -> tuple[set[str], set[str]]:
+    lowered = str(text).lower()
+    timeout_tokens = ("deadline exceeded", "timed out", "timeout")
+    has_timeout_signal = any(token in lowered for token in timeout_tokens)
+    waiting_reasons: set[str] = set()
+    transport_reasons: set[str] = set()
+
+    if any(
+        token in lowered
+        for token in (
+            "state=key_mapping_absent",
+            "key_mapping_absent",
+            "receiver summary missing",
+            "timed out waiting remote file",
+            "no available replicas",
+            "retrying source selection",
+        )
+    ):
+        waiting_reasons.add("queue_or_visibility_wait")
+    if any(
+        token in lowered
+        for token in (
+            "version_deregistered",
+            "region is poisoned",
+            "artifact id",
+            "tensor not found",
+            "unaccounted_missing_versions",
+        )
+    ):
+        waiting_reasons.add("version_window_evicted")
+    if any(
+        token in lowered
+        for token in (
+            "group contract violation",
+            "duplicate part_id in transport history",
+            "artifact/view/total_parts mismatch",
+        )
+    ):
+        waiting_reasons.add("group_contract_conflict")
+
+    if any(
+        token in lowered
+        for token in (
+            "deadline exceeded",
+            "statuscode.deadline_exceeded",
+            "grpc_status:4",
+            "client_rpc_retry_suppressed",
+        )
+    ):
+        transport_reasons.add("deadline_exceeded")
+    if any(
+        token in lowered
+        for token in (
+            "connection reset",
+            "connection refused",
+            "peer closed connection",
+            "failed to read chunk",
+            "failed to connect",
+            "epollrdhup",
+        )
+    ):
+        transport_reasons.add("connection_or_io_error")
+
+    if has_timeout_signal and not waiting_reasons and not transport_reasons:
+        waiting_reasons.add("timeout_unknown")
+    return waiting_reasons, transport_reasons
+
+
+def summarize_timeout_reasons(
+    *,
+    receiver_logs: dict[str, str],
+    receiver_sequence_failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    waiting_by_process: dict[str, set[str]] = {}
+    transport_by_process: dict[str, set[str]] = {}
+
+    def _ensure_proc(process_id: str) -> None:
+        waiting_by_process.setdefault(process_id, set())
+        transport_by_process.setdefault(process_id, set())
+
+    for process_id, log_text in receiver_logs.items():
+        process_key = str(process_id)
+        _ensure_proc(process_key)
+        waiting, transport = _infer_timeout_reasons_from_text(str(log_text))
+        waiting_by_process[process_key].update(waiting)
+        transport_by_process[process_key].update(transport)
+
+    for idx, failure in enumerate(receiver_sequence_failures):
+        if not isinstance(failure, dict):
+            continue
+        process_key = str(failure.get("process_id", "")).strip()
+        if not process_key:
+            process_key = f"unknown-{idx}"
+        _ensure_proc(process_key)
+        reason_text = str(failure.get("reason", ""))
+        waiting, transport = _infer_timeout_reasons_from_text(reason_text)
+        waiting_by_process[process_key].update(waiting)
+        transport_by_process[process_key].update(transport)
+        unaccounted_missing = failure.get("unaccounted_missing_versions", [])
+        if isinstance(unaccounted_missing, list) and unaccounted_missing:
+            waiting_by_process[process_key].add("version_window_evicted")
+
+    waiting_counts: Counter[str] = Counter()
+    transport_counts: Counter[str] = Counter()
+    for reasons in waiting_by_process.values():
+        for reason in reasons:
+            waiting_counts[str(reason)] += 1
+    for reasons in transport_by_process.values():
+        for reason in reasons:
+            transport_counts[str(reason)] += 1
+
+    return {
+        "waiting_timeout_reason_counts": dict(waiting_counts),
+        "transport_timeout_reason_counts": dict(transport_counts),
+        "waiting_timeout_observed": bool(waiting_counts),
+        "transport_timeout_observed": bool(transport_counts),
+    }
 
 
 def split_csv(raw: str) -> list[str]:
@@ -548,14 +867,14 @@ def _validate_receiver_memory_budget(
     )
     stable_bytes = int(daemon_hints.get("stable_bytes", 0))
     pinned_total_bytes = int(daemon_hints.get("pinned_total_bytes", 0))
-    # Receiver estimate:
-    # - one stable resident version (stable_bytes configured budget)
+    # Receiver estimate for tp_ranked:
+    # - one stable resident window for local rank payload
     # - transient transfer/materialization windows controlled by overlap hint
-    #   (unified chain is serial by default, so this is not tied to max_concurrency)
-    # - TP rank local target tensors (~1/world_size of full payload)
+    #   (serial by default; not tied to max_concurrency in this runner)
+    # - local TP rank target tensors (~1/world_size of full payload)
     rank_target_bytes = int(tp_total_bytes) // world_size
     transient_window_factor = max(1, int(transient_overlap_hint))
-    transient_materialization_bytes = int(tp_total_bytes) * transient_window_factor
+    transient_materialization_bytes = rank_target_bytes * transient_window_factor
     estimated_base_bytes = (
         stable_bytes
         + pinned_total_bytes
@@ -579,11 +898,11 @@ def _validate_receiver_memory_budget(
     )
 
     violations: list[str] = []
-    if stable_bytes < int(tp_total_bytes):
+    if stable_bytes < rank_target_bytes:
         violations.append(
-            "stable_bytes is smaller than one full payload version "
+            "stable_bytes is smaller than one local TP-rank window "
             f"(stable={_format_gib(stable_bytes):.1f}GiB, "
-            f"payload={_format_gib(int(tp_total_bytes)):.1f}GiB)"
+            f"rank_target={_format_gib(rank_target_bytes):.1f}GiB)"
         )
     if memory_limit_bytes is not None and estimated_peak_bytes > int(
         float(memory_limit_bytes) * 0.95
@@ -655,6 +974,58 @@ def run_local(cmd: list[str], *, timeout_sec: float) -> str:
     return proc.stdout
 
 
+def probe_process_state(process_id: str, *, timeout_sec: float) -> dict[str, Any]:
+    cmd = [
+        "brainctl",
+        "get",
+        "process",
+        str(process_id),
+        "-n",
+        "shai-core",
+    ]
+    proc = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=max(1.0, timeout_sec),
+    )
+    stdout = str(proc.stdout or "")
+    stderr = str(proc.stderr or "")
+    merged = (stdout + "\n" + stderr).strip()
+    lowered = merged.lower()
+    detail = merged[-500:] if merged else ""
+    if "notfound" in lowered or "not found" in lowered:
+        return {
+            "exists": False,
+            "status": "NotFound",
+            "rc": int(proc.returncode),
+            "detail_tail": detail,
+        }
+    if proc.returncode != 0:
+        return {
+            "exists": None,
+            "status": "Unknown",
+            "rc": int(proc.returncode),
+            "detail_tail": detail,
+        }
+    status = "Unknown"
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("ID "):
+            continue
+        tokens = stripped.split()
+        if len(tokens) >= 5:
+            status = tokens[4]
+        break
+    return {
+        "exists": True,
+        "status": status,
+        "rc": int(proc.returncode),
+        "detail_tail": detail,
+    }
+
+
 def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
     run_as_user = _resolved_remote_run_as_user()
     remote_cmd = _wrap_remote_inner_cmd_for_user(
@@ -680,10 +1051,28 @@ def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
         timeout=max(1.0, timeout_sec),
     )
     if proc.returncode != 0:
+        probe_timeout_sec = max(3.0, min(12.0, float(timeout_sec) * 0.1))
+        process_probe = probe_process_state(
+            process_id=str(process_id),
+            timeout_sec=probe_timeout_sec,
+        )
+        infra_hint = ""
+        if process_probe.get("exists") is False:
+            infra_hint = (
+                "remote process is NotFound in namespace; likely preempted/terminated "
+                "by scheduler or cleaned externally"
+            )
+        elif int(proc.returncode) in {137, 143}:
+            infra_hint = (
+                "remote command terminated by signal-like exit code "
+                f"{int(proc.returncode)}; check daemon/session logs and worker health"
+            )
         raise RuntimeError(
             "remote command failed: "
             f"process={process_id} rc={proc.returncode} "
             f"run_as_user={run_as_user}\n"
+            f"infra_hint={infra_hint or 'none'}\n"
+            f"process_probe={json.dumps(process_probe, ensure_ascii=False)}\n"
             f"stdout:\n{proc.stdout}\n"
             f"stderr:\n{proc.stderr}"
         )
@@ -1028,6 +1417,7 @@ def build_e2e_command(
     tp_world_size: int,
     tp_total_bytes: int,
     tp_device_base_index: int,
+    tp_device_map_policy: str,
     tp_materialize_deadline_s: float,
     publish_device: str,
     output_json: str,
@@ -1073,6 +1463,8 @@ def build_e2e_command(
         str(tp_total_bytes),
         "--tp-device-base-index",
         str(tp_device_base_index),
+        "--tp-device-map-policy",
+        str(tp_device_map_policy),
         "--tp-materialize-deadline-s",
         str(tp_materialize_deadline_s),
         "--transport-group-mode",
@@ -1261,24 +1653,25 @@ def query_transport_rows(
         payload["error"] = "gs_addr is empty"
         return payload
 
-    channel = grpc.insecure_channel(str(gs_addr))
-    try:
-        grpc.channel_ready_future(channel).result(timeout=5.0)
-        stub = global_store_pb2_grpc.ClusterRuntimeServiceStub(channel)
-        response = stub.QueryTransportWindow(
-            global_store_pb2.QueryTransportWindowRequest(
-                created_at_start=_to_proto_timestamp(started_at_utc),
-                created_at_end=_to_proto_timestamp(finished_at_utc),
-                limit=200_000,
-            ),
-            timeout=20.0,
-        )
-    except grpc.RpcError as exc:
-        detail = exc.details() if hasattr(exc, "details") else str(exc)
-        payload["error"] = f"QueryTransportWindow RPC failed: {detail}"
+    request = global_store_pb2.QueryTransportWindowRequest(
+        created_at_start=_to_proto_timestamp(started_at_utc),
+        created_at_end=_to_proto_timestamp(finished_at_utc),
+        limit=200_000,
+    )
+    response, rpc_error = call_cluster_runtime_rpc(
+        gs_addr=str(gs_addr),
+        ready_timeout_sec=5.0,
+        rpc_name="QueryTransportWindow",
+        grpc_module=grpc,
+        stub_factory=global_store_pb2_grpc.ClusterRuntimeServiceStub,
+        rpc_call=lambda stub: stub.QueryTransportWindow(request, timeout=20.0),
+    )
+    if rpc_error is not None:
+        payload["error"] = rpc_error
         return payload
-    finally:
-        channel.close()
+    if response is None:
+        payload["error"] = "QueryTransportWindow returned empty response"
+        return payload
 
     if response.status != global_store_pb2.Status.STATUS_OK:
         payload["error"] = (
@@ -1462,6 +1855,61 @@ def evaluate_group_probe_gate_failures(
     return reasons
 
 
+def _extract_group_probe_progress_snapshot(probe: dict[str, Any]) -> dict[str, int]:
+    return {
+        "total_transports": int(_coerce_int(probe.get("total_transports", 0))),
+        "requester_tagged_transports": int(
+            _coerce_int(probe.get("requester_tagged_transports", 0))
+        ),
+        "grouped_transports": int(_coerce_int(probe.get("grouped_transports", 0))),
+        "kind_matched_transports": int(
+            _coerce_int(probe.get("kind_matched_transports", 0))
+        ),
+        "group_contract_transports": int(
+            _coerce_int(probe.get("group_contract_transports", 0))
+        ),
+    }
+
+
+def _progress_snapshot_token(snapshot: dict[str, int]) -> tuple[int, int, int, int, int]:
+    return (
+        int(snapshot.get("total_transports", 0)),
+        int(snapshot.get("requester_tagged_transports", 0)),
+        int(snapshot.get("grouped_transports", 0)),
+        int(snapshot.get("kind_matched_transports", 0)),
+        int(snapshot.get("group_contract_transports", 0)),
+    )
+
+
+def evaluate_waiting_lease(
+    *,
+    previous_progress_token: tuple[int, int, int, int, int] | None,
+    previous_progress_mono: float | None,
+    now_mono: float,
+    no_progress_limit_s: float,
+    probe: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = _extract_group_probe_progress_snapshot(probe)
+    current_token = _progress_snapshot_token(snapshot)
+    progressed = previous_progress_token is None or current_token != previous_progress_token
+    if progressed or previous_progress_mono is None:
+        effective_progress_mono = float(now_mono)
+    else:
+        effective_progress_mono = float(previous_progress_mono)
+    no_progress_elapsed_s = max(0.0, float(now_mono) - effective_progress_mono)
+    waiting_timeout = no_progress_elapsed_s >= max(0.0, float(no_progress_limit_s))
+    waiting_timeout_reason = "waiting_no_progress" if waiting_timeout else ""
+    return {
+        "current_progress_token": current_token,
+        "current_progress_snapshot": snapshot,
+        "progressed": bool(progressed),
+        "effective_progress_mono": float(effective_progress_mono),
+        "no_progress_elapsed_s": float(no_progress_elapsed_s),
+        "waiting_timeout": bool(waiting_timeout),
+        "waiting_timeout_reason": waiting_timeout_reason,
+    }
+
+
 def run_transport_group_p0_guard(
     *,
     enabled: bool,
@@ -1472,14 +1920,24 @@ def run_transport_group_p0_guard(
     grace_s: float,
     poll_interval_s: float,
 ) -> dict[str, Any]:
+    no_progress_limit_s = float(max(0.0, grace_s))
+    effective_poll_interval_s = float(max(0.5, poll_interval_s))
     result: dict[str, Any] = {
         "enabled": bool(enabled) and str(mode) == "tp_version",
         "mode": str(mode),
         "group_kind": str(group_kind),
         "grace_s": float(max(0.0, grace_s)),
+        "no_progress_limit_s": no_progress_limit_s,
+        "poll_interval_s": effective_poll_interval_s,
+        "timeout_model": "waiting_lease_no_progress",
         "attempts": 0,
         "triggered": False,
         "triggered_at_utc": None,
+        "waiting_timeout_reason": None,
+        "lease_renew_count": 0,
+        "max_no_progress_elapsed_s": 0.0,
+        "last_no_progress_elapsed_s": 0.0,
+        "last_progress_snapshot": {},
         "reasons": [],
         "probe": {},
         "terminate_errors": [],
@@ -1487,7 +1945,8 @@ def run_transport_group_p0_guard(
     if not bool(result["enabled"]):
         return result
 
-    deadline = time.monotonic() + float(max(0.0, grace_s))
+    previous_progress_token: tuple[int, int, int, int, int] | None = None
+    previous_progress_mono: float | None = None
     probe: dict[str, Any] = {}
     reasons: list[str] = []
     while True:
@@ -1504,14 +1963,38 @@ def run_transport_group_p0_guard(
             probe=probe,
             mode=str(mode),
         )
+        now_mono = time.monotonic()
+        lease_eval = evaluate_waiting_lease(
+            previous_progress_token=previous_progress_token,
+            previous_progress_mono=previous_progress_mono,
+            now_mono=float(now_mono),
+            no_progress_limit_s=no_progress_limit_s,
+            probe=probe,
+        )
+        previous_progress_token = lease_eval["current_progress_token"]
+        previous_progress_mono = float(lease_eval["effective_progress_mono"])
+        result["last_progress_snapshot"] = dict(
+            lease_eval.get("current_progress_snapshot", {})
+        )
+        result["last_no_progress_elapsed_s"] = float(
+            lease_eval.get("no_progress_elapsed_s", 0.0)
+        )
+        result["max_no_progress_elapsed_s"] = max(
+            float(result.get("max_no_progress_elapsed_s", 0.0)),
+            float(lease_eval.get("no_progress_elapsed_s", 0.0)),
+        )
+        if bool(lease_eval.get("progressed")):
+            result["lease_renew_count"] = int(result.get("lease_renew_count", 0)) + 1
         if not reasons:
             break
-        now_mono = time.monotonic()
-        if now_mono >= deadline:
+        if bool(lease_eval.get("waiting_timeout")):
             result["triggered"] = True
             result["triggered_at_utc"] = _to_utc_sql_timestamp(now_utc)
+            result["waiting_timeout_reason"] = str(
+                lease_eval.get("waiting_timeout_reason") or "waiting_no_progress"
+            )
             break
-        sleep_s = min(max(0.5, float(poll_interval_s)), max(0.0, deadline - now_mono))
+        sleep_s = effective_poll_interval_s
         if sleep_s <= 0.0:
             continue
         time.sleep(sleep_s)
@@ -1519,6 +2002,54 @@ def run_transport_group_p0_guard(
     result["probe"] = probe
     result["reasons"] = reasons
     return result
+
+
+def merge_timeout_analysis_with_waiting_guard(
+    *,
+    timeout_analysis: dict[str, Any],
+    p0_guard: dict[str, Any],
+) -> dict[str, Any]:
+    waiting_counts = Counter(
+        {
+            str(k): int(v)
+            for k, v in dict(
+                timeout_analysis.get("waiting_timeout_reason_counts", {})
+            ).items()
+        }
+    )
+    transport_counts = Counter(
+        {
+            str(k): int(v)
+            for k, v in dict(
+                timeout_analysis.get("transport_timeout_reason_counts", {})
+            ).items()
+        }
+    )
+    waiting_reason = str(p0_guard.get("waiting_timeout_reason") or "").strip()
+    if bool(p0_guard.get("triggered")) and waiting_reason:
+        waiting_counts[waiting_reason] += 1
+
+    merged = dict(timeout_analysis)
+    merged["waiting_timeout_reason_counts"] = dict(waiting_counts)
+    merged["transport_timeout_reason_counts"] = dict(transport_counts)
+    merged["waiting_timeout_observed"] = bool(waiting_counts)
+    merged["transport_timeout_observed"] = bool(transport_counts)
+    merged["waiting_lease"] = {
+        "renew_count": int(p0_guard.get("lease_renew_count", 0)),
+        "no_progress_limit_s": float(max(0.0, p0_guard.get("no_progress_limit_s", 0.0))),
+        "max_no_progress_elapsed_s": float(
+            max(0.0, p0_guard.get("max_no_progress_elapsed_s", 0.0))
+        ),
+        "last_no_progress_elapsed_s": float(
+            max(0.0, p0_guard.get("last_no_progress_elapsed_s", 0.0))
+        ),
+        "last_progress_snapshot": (
+            dict(p0_guard.get("last_progress_snapshot", {}))
+            if isinstance(p0_guard.get("last_progress_snapshot"), dict)
+            else {}
+        ),
+    }
+    return merged
 
 
 def compute_transport_metrics(
@@ -2319,6 +2850,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--receiver-timeout-s", type=float, default=300.0)
     parser.add_argument(
+        "--receiver-timeout-auto-adjust",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Auto-adjust receiver-timeout-s upward for TP bind_into/swap cases "
+            "using a conservative scaleout timeout floor."
+        ),
+    )
+    parser.add_argument(
+        "--keep-last-auto-adjust",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Auto-adjust keep-last upward for TP bind_into/swap scaleout cases "
+            "to avoid dropped-version false failures under queueing."
+        ),
+    )
+    parser.add_argument(
         "--payload-mode",
         choices=["probe", "version_fill", "tp_ranked"],
         default="probe",
@@ -2344,6 +2893,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="TP rank base device index (rank i uses cuda:{base+i}).",
+    )
+    parser.add_argument(
+        "--tp-device-map-policy",
+        choices=["auto", "strict", "modulo"],
+        default="auto",
+        help=(
+            "TP rank->CUDA mapping policy forwarded to weight_publisher_e2e. "
+            "auto: contiguous when possible else modulo fallback."
+        ),
     )
     parser.add_argument(
         "--tp-materialize-deadline-s",
@@ -2434,6 +2992,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         help="Upper bound for publish->receiver-apply latency (seconds).",
+    )
+    parser.add_argument(
+        "--max-publish-to-apply-auto-adjust",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Auto-adjust max-publish-to-apply-s upward for TP bind scaleout "
+            "so queueing-heavy runs are evaluated against a realistic floor."
+        ),
     )
     parser.add_argument("--retention-timeout-s", type=float, default=90.0)
     parser.add_argument("--receiver-apply-mode", default="binding_swap")
@@ -2528,6 +3095,95 @@ def main(argv: list[str]) -> int:
         raise ValueError("throughput-sample-interval-s must be > 0")
     if int(args.throughput_max_samples) <= 0:
         raise ValueError("throughput-max-samples must be > 0")
+    if float(args.receiver_timeout_s) <= 0:
+        raise ValueError("receiver-timeout-s must be > 0")
+    if float(args.max_publish_to_apply_s) <= 0:
+        raise ValueError("max-publish-to-apply-s must be > 0")
+    estimated_keep_last = estimate_keep_last_floor(args)
+    keep_last_stable_cap = estimate_keep_last_stable_cap(args)
+    effective_keep_last_floor = estimated_keep_last
+    if (
+        keep_last_stable_cap is not None
+        and keep_last_stable_cap > 0
+        and keep_last_stable_cap < estimated_keep_last
+    ):
+        effective_keep_last_floor = keep_last_stable_cap
+        print(
+            "[preflight] warning: keep-last floor capped by publisher stable budget "
+            f"(estimated_floor={estimated_keep_last}, "
+            f"stable_cap={keep_last_stable_cap}); "
+            "no-skip runs may observe dropped versions under queueing"
+        )
+
+    configured_keep_last = int(args.keep_last)
+    if bool(args.keep_last_auto_adjust) and configured_keep_last < effective_keep_last_floor:
+        args.keep_last = effective_keep_last_floor
+        print(
+            "[preflight] auto-adjust keep-last "
+            f"{configured_keep_last} -> {effective_keep_last_floor} "
+            "(tp_bind scaleout no-skip floor)"
+        )
+    elif (
+        not bool(args.keep_last_auto_adjust)
+        and configured_keep_last < effective_keep_last_floor
+    ):
+        print(
+            "[preflight] warning: configured keep-last "
+            f"{configured_keep_last} is lower than estimated floor "
+            f"{effective_keep_last_floor}; receiver may observe dropped versions"
+        )
+    estimated_receiver_timeout_sec = estimate_receiver_timeout_floor_sec(args)
+    configured_receiver_timeout_sec = float(args.receiver_timeout_s)
+    if (
+        bool(args.receiver_timeout_auto_adjust)
+        and configured_receiver_timeout_sec < estimated_receiver_timeout_sec
+    ):
+        args.receiver_timeout_s = estimated_receiver_timeout_sec
+        print(
+            "[preflight] auto-adjust receiver-timeout-s "
+            f"{configured_receiver_timeout_sec:.1f} -> "
+            f"{estimated_receiver_timeout_sec:.1f} "
+            "(tp_bind scaleout conservative floor)"
+        )
+    elif (
+        not bool(args.receiver_timeout_auto_adjust)
+        and configured_receiver_timeout_sec < estimated_receiver_timeout_sec
+    ):
+        print(
+            "[preflight] warning: configured receiver-timeout-s "
+            f"{configured_receiver_timeout_sec:.1f}s is lower than estimated floor "
+            f"{estimated_receiver_timeout_sec:.1f}s; TP bind may timeout under scaleout"
+        )
+    estimated_publish_to_apply_sec = estimate_publish_to_apply_floor_sec(args)
+    configured_publish_to_apply_sec = float(args.max_publish_to_apply_s)
+    publish_to_apply_auto_adjusted = False
+    if (
+        bool(args.max_publish_to_apply_auto_adjust)
+        and configured_publish_to_apply_sec < estimated_publish_to_apply_sec
+    ):
+        args.max_publish_to_apply_s = estimated_publish_to_apply_sec
+        publish_to_apply_auto_adjusted = True
+        print(
+            "[preflight] auto-adjust max-publish-to-apply-s "
+            f"{configured_publish_to_apply_sec:.1f} -> "
+            f"{estimated_publish_to_apply_sec:.1f} "
+            "(tp_bind scaleout propagation floor)"
+        )
+    elif (
+        not bool(args.max_publish_to_apply_auto_adjust)
+        and configured_publish_to_apply_sec < estimated_publish_to_apply_sec
+    ):
+        print(
+            "[preflight] warning: configured max-publish-to-apply-s "
+            f"{configured_publish_to_apply_sec:.1f}s is lower than estimated floor "
+            f"{estimated_publish_to_apply_sec:.1f}s; queueing may produce false violations"
+        )
+    args._max_publish_to_apply_preflight = {  # noqa: SLF001
+        "configured_s": configured_publish_to_apply_sec,
+        "estimated_floor_s": estimated_publish_to_apply_sec,
+        "auto_adjusted": publish_to_apply_auto_adjusted,
+        "effective_s": float(args.max_publish_to_apply_s),
+    }
     if float(args.remote_timeout_sec) <= 0:
         raise ValueError("remote-timeout-sec must be > 0")
     estimated_remote_timeout_sec = estimate_remote_timeout_floor_sec(args)
@@ -2806,6 +3462,7 @@ def main(argv: list[str]) -> int:
             tp_world_size=int(args.tp_world_size),
             tp_total_bytes=int(args.tp_total_bytes),
             tp_device_base_index=int(args.tp_device_base_index),
+            tp_device_map_policy=str(args.tp_device_map_policy),
             tp_materialize_deadline_s=float(args.tp_materialize_deadline_s),
             publish_device=str(args.publish_device),
             output_json=publisher_output,
@@ -2851,6 +3508,7 @@ def main(argv: list[str]) -> int:
                 tp_world_size=int(args.tp_world_size),
                 tp_total_bytes=int(args.tp_total_bytes),
                 tp_device_base_index=int(args.tp_device_base_index),
+                tp_device_map_policy=str(args.tp_device_map_policy),
                 tp_materialize_deadline_s=float(args.tp_materialize_deadline_s),
                 publish_device=str(args.publish_device),
                 output_json=receiver_outputs[proc],
@@ -2963,7 +3621,9 @@ def main(argv: list[str]) -> int:
                 gs_addr=str(args.gs_addr),
                 started_at_utc=case_transport_window_start,
                 grace_s=float(args.p0_early_stop_grace_s),
-                poll_interval_s=float(args.poll_interval_s),
+                poll_interval_s=max(
+                    float(args.poll_interval_s), float(args.progress_poll_s)
+                ),
             )
             p0_early_stop.update(p0_result)
 
@@ -3148,8 +3808,12 @@ def main(argv: list[str]) -> int:
     pointer_stability_violations: list[dict[str, Any]] = []
     receiver_sequence_failures: list[dict[str, Any]] = []
     receiver_skips: list[dict[str, Any]] = []
+    receiver_skip_events_by_process = collect_receiver_skip_events_by_process(
+        receiver_logs
+    )
     receiver_mode_failures: list[dict[str, Any]] = []
     propagation_violations: list[dict[str, Any]] = []
+    publish_to_apply_limit_s = float(args.max_publish_to_apply_s)
 
     publish_ts_by_version = {
         version: float(row.get("published_at_s", 0.0))
@@ -3184,43 +3848,40 @@ def main(argv: list[str]) -> int:
         versions = [
             int(row.get("version", 0)) for row in received_rows if isinstance(row, dict)
         ]
-        expected_set = set(expected_versions)
-        unique_sorted_versions = sorted(set(versions))
-        has_order_or_dup_issue = versions != unique_sorted_versions
-        out_of_expected_range = [
-            version for version in versions if version not in expected_set
-        ]
-        missing_versions = [
-            version for version in expected_versions if version not in set(versions)
-        ]
-        latest_expected = expected_versions[-1] if expected_versions else 0
-        reached_latest = bool(versions) and versions[-1] == latest_expected
+        skip_events = receiver_skip_events_by_process.get(str(proc), [])
+        explicit_skipped_versions = {
+            int(event.get("version", 0))
+            for event in skip_events
+            if isinstance(event, dict) and int(event.get("version", 0)) > 0
+        }
+        sequence_assessment = assess_receiver_sequence(
+            expected_versions=expected_versions,
+            actual_versions=versions,
+            allow_receiver_skips=bool(args.allow_receiver_skips),
+            explicit_skipped_versions=explicit_skipped_versions,
+        )
+        missing_versions = list(sequence_assessment.get("missing_versions", []))
         if missing_versions:
             receiver_skips.append(
                 {
                     "process_id": proc,
                     "missing_versions": missing_versions,
+                    "explicit_skipped_versions": sequence_assessment.get(
+                        "explicit_skipped_versions", []
+                    ),
+                    "accounted_missing_versions": sequence_assessment.get(
+                        "accounted_missing_versions", []
+                    ),
+                    "unaccounted_missing_versions": sequence_assessment.get(
+                        "unaccounted_missing_versions", []
+                    ),
                 }
             )
-        skip_disallowed_violation = bool(missing_versions) and not bool(
-            args.allow_receiver_skips
-        )
-        if (
-            has_order_or_dup_issue
-            or out_of_expected_range
-            or not reached_latest
-            or skip_disallowed_violation
-        ):
+        if bool(sequence_assessment.get("is_failure", False)):
             receiver_sequence_failures.append(
                 {
                     "process_id": proc,
-                    "expected_versions": expected_versions,
-                    "actual_versions": versions,
-                    "missing_versions": missing_versions,
-                    "order_or_duplicate_issue": has_order_or_dup_issue,
-                    "out_of_expected_range": out_of_expected_range,
-                    "reached_latest_version": reached_latest,
-                    "allow_receiver_skips": bool(args.allow_receiver_skips),
+                    **sequence_assessment,
                 }
             )
         for idx, row in enumerate(received_rows):
@@ -3272,15 +3933,24 @@ def main(argv: list[str]) -> int:
                 delta = received_at_s - published_at_s
                 if delta >= 0:
                     propagation_latencies.append(delta)
-                    if delta > float(args.max_publish_to_apply_s):
+                    if delta > publish_to_apply_limit_s:
                         propagation_violations.append(
                             {
                                 "process_id": proc,
                                 "version": version,
                                 "publish_to_apply_s": delta,
-                                "threshold_s": float(args.max_publish_to_apply_s),
+                                "threshold_s": publish_to_apply_limit_s,
                             }
                         )
+
+    timeout_analysis = summarize_timeout_reasons(
+        receiver_logs=receiver_logs,
+        receiver_sequence_failures=receiver_sequence_failures,
+    )
+    timeout_analysis = merge_timeout_analysis_with_waiting_guard(
+        timeout_analysis=timeout_analysis,
+        p0_guard=p0_early_stop,
+    )
 
     gs_checks: dict[str, Any] = {
         "enabled": bool(published_by_version),
@@ -3432,13 +4102,21 @@ def main(argv: list[str]) -> int:
             "binding_pointer_stable": not pointer_stability_violations,
             "receiver_mode_consistent": not receiver_mode_failures,
             "publish_to_apply_within_limit": not propagation_violations,
+            "publish_to_apply_limit_s": publish_to_apply_limit_s,
             "mechanism_keep_last_window_validated": bool(published_by_version),
             "p0_early_stop_triggered": bool(p0_early_stop.get("triggered")),
+            "waiting_timeout_observed": bool(
+                timeout_analysis.get("waiting_timeout_observed")
+            ),
+            "transport_timeout_observed": bool(
+                timeout_analysis.get("transport_timeout_observed")
+            ),
         },
         "retention_checks": {
             "global_store_probe": gs_checks,
             "cluster_probe": probe_checks,
         },
+        "timeout_analysis": timeout_analysis,
         "transport_checks": {
             "p0_early_stop": p0_early_stop,
             "group_metadata_probe": transport_group_probe,
@@ -3448,6 +4126,7 @@ def main(argv: list[str]) -> int:
         "failures": {
             "receiver_sequence_failures": receiver_sequence_failures,
             "receiver_skips": receiver_skips,
+            "receiver_skip_events": receiver_skip_events_by_process,
             "receiver_mode_failures": receiver_mode_failures,
             "pointer_stability_violations": pointer_stability_violations,
             "propagation_violations": propagation_violations,
@@ -3512,6 +4191,7 @@ def main(argv: list[str]) -> int:
             "tp_world_size": int(args.tp_world_size),
             "tp_total_bytes": int(args.tp_total_bytes),
             "tp_device_base_index": int(args.tp_device_base_index),
+            "tp_device_map_policy": str(args.tp_device_map_policy),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
             "transport_group_mode": transport_group_plan.mode,
             "transport_group_kind": transport_group_plan.kind,
@@ -3532,6 +4212,12 @@ def main(argv: list[str]) -> int:
             "throughput_sample_interval_s": float(args.throughput_sample_interval_s),
             "throughput_max_samples": int(args.throughput_max_samples),
             "max_publish_to_apply_s": float(args.max_publish_to_apply_s),
+            "max_publish_to_apply_auto_adjust": bool(
+                args.max_publish_to_apply_auto_adjust
+            ),
+            "max_publish_to_apply_preflight": dict(
+                getattr(args, "_max_publish_to_apply_preflight", {})
+            ),
             "retention_timeout_s": float(args.retention_timeout_s),
             "receiver_apply_mode": str(args.receiver_apply_mode),
             "allow_receiver_skips": bool(args.allow_receiver_skips),
@@ -3611,6 +4297,12 @@ def main(argv: list[str]) -> int:
                 "p0_early_stop_triggered": bool(
                     summary["stability"].get("p0_early_stop_triggered")
                 ),
+                "waiting_timeout_reasons": summary.get("timeout_analysis", {}).get(
+                    "waiting_timeout_reason_counts", {}
+                ),
+                "transport_timeout_reasons": summary.get(
+                    "timeout_analysis", {}
+                ).get("transport_timeout_reason_counts", {}),
                 "throughput_peak_gib_s": summary["performance"][
                     "transport_throughput_gib_s"
                 ].get("peak_active_throughput_gib_s", 0.0),

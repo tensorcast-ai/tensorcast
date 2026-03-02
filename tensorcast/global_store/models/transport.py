@@ -45,6 +45,8 @@ class Transport:
     source_node_id: str = ""
     source_address: str = ""
     source_port: int = 0
+    # Immutable bytes snapshot captured at dispatch time for transport analytics.
+    replica_memory_size_bytes: int | None = None
     requester_worker_id: str | None = None
     request_id: str | None = None
     request_fingerprint: str | None = None

@@ -10,7 +10,7 @@ meta:
 # Metadata persistence (DuckDB).
 database:
   # Path to DuckDB file; null uses in-memory DB (ephemeral, good for tests).
-  db_file: "/tmp/tc_cross_20260221/gs/gs_bench.duckdb"
+  db_file: null
 
 # gRPC server settings.
 server:

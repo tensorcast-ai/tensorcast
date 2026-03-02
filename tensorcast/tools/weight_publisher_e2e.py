@@ -12,6 +12,7 @@ Scenarios:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import json
 import os
@@ -39,6 +40,7 @@ SUPPORTED_RECEIVER_APPLY_MODES = {
     "tp4_bind_into_swap",
 }
 SUPPORTED_TRANSPORT_GROUP_MODES = {"none", "tp_version"}
+SUPPORTED_TP_DEVICE_MAP_POLICIES = {"auto", "strict", "modulo"}
 
 TP4_COL_BLOCK_ROWS = 4
 TP4_COL_WIDTH = 8
@@ -52,6 +54,9 @@ RECEIVER_PROGRESS_LOG_INTERVAL_S = 10.0
 RECEIVER_RESOLVE_SLOW_THRESHOLD_MS = 1000.0
 RECEIVER_TENSOR_DICT_UNLOAD_RETRIES = 3
 RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S = 0.05
+TP_BIND_PER_RANK_TIMEOUT_MIN_S = 20.0
+TP_BIND_PER_RANK_TIMEOUT_FLOOR_S = 8.0
+TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR = 2.0
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -62,6 +67,30 @@ def _is_not_found_error(exc: Exception) -> bool:
         or "key not found" in msg
         or "statuscode.not_found" in msg
         or "no available replicas" in msg
+    )
+
+
+def _is_version_unavailable_during_apply_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    if _is_not_found_error(exc):
+        return True
+    return (
+        "region is poisoned" in msg
+        or "tensor not found" in msg
+        or (
+            "artifact id" in msg
+            and ("not found" in msg or "was not found" in msg)
+        )
+    )
+
+
+def _is_non_retryable_transport_group_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    if "group contract violation" in msg:
+        return True
+    return (
+        "duplicate part_id in transport history" in msg
+        or "artifact/view/total_parts mismatch" in msg
     )
 
 
@@ -229,6 +258,57 @@ def _publisher_device(requested: str) -> str:
         return requested
     if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
         return "cpu"
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def _resolve_tp_rank_devices(
+    *,
+    tp_world_size: int,
+    tp_device_base_index: int,
+    visible_device_count: int,
+    map_policy: str,
+) -> tuple[dict[int, str], str]:
+    if visible_device_count <= 0:
+        raise ValueError(
+            "tp_bind_into_swap requires at least one visible CUDA device, "
+            f"got {visible_device_count}"
+        )
+    if tp_device_base_index < 0:
+        raise ValueError(
+            "tp_device_base_index must be >= 0, "
+            f"got {tp_device_base_index}"
+        )
+    if tp_device_base_index >= visible_device_count:
+        raise ValueError(
+            "tp_device_base_index is out of range for visible CUDA devices: "
+            f"base={tp_device_base_index}, visible={visible_device_count}"
+        )
+    available_from_base = visible_device_count - tp_device_base_index
+    if available_from_base >= tp_world_size:
+        return (
+            {
+                rank: f"cuda:{tp_device_base_index + rank}"
+                for rank in range(tp_world_size)
+            },
+            "contiguous",
+        )
+    if map_policy == "strict":
+        raise ValueError(
+            "tp strict device mapping requires enough visible CUDA devices from base index: "
+            f"tp_world_size={tp_world_size}, base={tp_device_base_index}, "
+            f"visible={visible_device_count}, available_from_base={available_from_base}"
+        )
+    if map_policy not in {"auto", "modulo"}:
+        raise ValueError(
+            f"unsupported tp device map policy: {map_policy!r}"
+        )
+    return (
+        {
+            rank: f"cuda:{tp_device_base_index + (rank % available_from_base)}"
+            for rank in range(tp_world_size)
+        },
+        "modulo",
+    )
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
@@ -1144,6 +1224,7 @@ class WeightUpdateReceiver:
         payload_mode: str,
         tp_world_size: int,
         tp_device_base_index: int,
+        tp_device_map_policy: str,
         tp_total_bytes: int,
         tp_materialize_deadline_s: float,
         transport_group_mode: str,
@@ -1205,6 +1286,16 @@ class WeightUpdateReceiver:
             "tp_device_base_index",
             tp_device_base_index,
         )
+        self._tp_device_map_policy = str(tp_device_map_policy).strip().lower()
+        if self._tp_device_map_policy not in SUPPORTED_TP_DEVICE_MAP_POLICIES:
+            raise ValueError(
+                "unsupported tp_device_map_policy="
+                f"{self._tp_device_map_policy!r}, "
+                f"allowed={sorted(SUPPORTED_TP_DEVICE_MAP_POLICIES)}"
+            )
+        self._tp_visible_device_count = 0
+        self._tp_device_map_effective_mode = "inactive"
+        self._tp_rank_devices: dict[int, str] = {}
         if self._tp_total_bytes > 0 and self._payload_mode != "tp_ranked":
             raise ValueError("tp_total_bytes requires payload_mode=tp_ranked")
         if self._apply_mode not in SUPPORTED_RECEIVER_APPLY_MODES:
@@ -1225,6 +1316,38 @@ class WeightUpdateReceiver:
                 raise ValueError(f"{self._apply_mode} requires real CUDA backend")
             if not torch.cuda.is_available():
                 raise ValueError(f"{self._apply_mode} requires CUDA devices")
+            self._tp_visible_device_count = int(torch.cuda.device_count())
+            (
+                self._tp_rank_devices,
+                self._tp_device_map_effective_mode,
+            ) = _resolve_tp_rank_devices(
+                tp_world_size=self._tp_world_size,
+                tp_device_base_index=self._tp_device_base_index,
+                visible_device_count=self._tp_visible_device_count,
+                map_policy=self._tp_device_map_policy,
+            )
+            map_tokens = " ".join(
+                f"r{rank}->{device}"
+                for rank, device in self._tp_rank_devices.items()
+            )
+            print(
+                "[receiver][tp-device-map]",
+                f"policy={self._tp_device_map_policy}",
+                f"effective_mode={self._tp_device_map_effective_mode}",
+                f"tp_world_size={self._tp_world_size}",
+                f"visible_cuda_devices={self._tp_visible_device_count}",
+                f"base_index={self._tp_device_base_index}",
+                map_tokens,
+                flush=True,
+            )
+            if self._tp_device_map_effective_mode == "modulo":
+                print(
+                    "[receiver][tp-device-map]",
+                    "fallback=modulo",
+                    "reason=insufficient_visible_cuda_devices_for_contiguous_rank_map",
+                    f"available_from_base={self._tp_visible_device_count - self._tp_device_base_index}",
+                    flush=True,
+                )
         if self._transport_group_mode == "tp_version":
             if self._transport_group_total_parts <= 0:
                 raise ValueError(
@@ -1250,6 +1373,20 @@ class WeightUpdateReceiver:
         self._resolve_slow_threshold_ms = RECEIVER_RESOLVE_SLOW_THRESHOLD_MS
         self._last_resolve_log_state = ""
         self._last_resolve_log_mono = 0.0
+
+    def tp_device_map_info(self) -> dict[str, Any]:
+        policy = str(getattr(self, "_tp_device_map_policy", "auto"))
+        effective_mode = str(
+            getattr(self, "_tp_device_map_effective_mode", "inactive")
+        )
+        visible_device_count = int(getattr(self, "_tp_visible_device_count", 0))
+        rank_device_map = dict(getattr(self, "_tp_rank_devices", {}))
+        return {
+            "policy": policy,
+            "effective_mode": effective_mode,
+            "visible_device_count": visible_device_count,
+            "rank_device_map": rank_device_map,
+        }
 
     def receive_versions(
         self,
@@ -1491,6 +1628,62 @@ class WeightUpdateReceiver:
                 return candidate
         return None
 
+    def _find_newer_resolved_version(
+        self,
+        *,
+        version: int,
+        max_version: int,
+    ) -> int | None:
+        for candidate in range(version + 1, max_version + 1):
+            key = _build_key(
+                model_name=self._model_name,
+                key_template=self._key_template,
+                version=candidate,
+            )
+            if self._resolve_artifact_id_for_key(key=key):
+                return candidate
+        return None
+
+    def _maybe_raise_version_dropped(
+        self,
+        *,
+        version: int,
+        key: str,
+        max_version: int,
+        exc: Exception,
+        treat_apply_unavailable_error_as_dropped: bool = False,
+        prefer_resolved_newer_version: bool = False,
+    ) -> None:
+        looks_unavailable = _is_not_found_error(exc)
+        if treat_apply_unavailable_error_as_dropped:
+            looks_unavailable = looks_unavailable or _is_version_unavailable_during_apply_error(
+                exc
+            )
+        if not looks_unavailable:
+            return
+        artifact_id = self._resolve_artifact_id_for_key(key=key)
+        newer_version: int | None = None
+        if prefer_resolved_newer_version:
+            newer_version = self._find_newer_resolved_version(
+                version=version,
+                max_version=max_version,
+            )
+        if newer_version is None:
+            newer_version = self._find_newer_materializable_version(
+                version=version,
+                max_version=max_version,
+            )
+        if artifact_id and newer_version is not None:
+            raise VersionDroppedError(
+                version=version,
+                key=key,
+                artifact_id=artifact_id,
+                message=(
+                    "target version already deregistered before receiver applied it"
+                ),
+                newer_version=newer_version,
+            ) from exc
+
     def _wait_one_tensor_dict(
         self,
         *,
@@ -1568,22 +1761,12 @@ class WeightUpdateReceiver:
                         "receiver encountered CUDA OOM in tensor_dict path "
                         f"version={version}, key={key}, detail={last_error}"
                     ) from exc
-                if _is_not_found_error(exc):
-                    artifact_id = self._resolve_artifact_id_for_key(key=key)
-                    newer_version = self._find_newer_materializable_version(
-                        version=version,
-                        max_version=max_version,
-                    )
-                    if artifact_id and newer_version is not None:
-                        raise VersionDroppedError(
-                            version=version,
-                            key=key,
-                            artifact_id=artifact_id,
-                            message=(
-                                "target version already deregistered before receiver applied it"
-                            ),
-                            newer_version=newer_version,
-                        ) from exc
+                self._maybe_raise_version_dropped(
+                    version=version,
+                    key=key,
+                    max_version=max_version,
+                    exc=exc,
+                )
                 last_state = "materialize_failed"
                 next_log_at = self._maybe_log_wait_progress(
                     mode="tensor_dict",
@@ -1637,6 +1820,7 @@ class WeightUpdateReceiver:
     ) -> ReceiveEvent:
         start_monotonic = time.monotonic()
         deadline = start_monotonic + self._per_version_timeout_s
+        attempt_seq = 0
         last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
@@ -1661,10 +1845,19 @@ class WeightUpdateReceiver:
                 start = time.monotonic()
                 pointer_stable: bool | None = None
                 apply_operation = "swap"
+                remaining_s = max(0.001, deadline - time.monotonic())
+                materialize_ctx = self._make_tp_materialize_ctx(
+                    version=version,
+                    rank=0,
+                    remaining_s=remaining_s,
+                    attempt=attempt_seq,
+                )
+                attempt_seq += 1
                 if self._binding is None:
                     self._binding = artifact.bind(
                         device=self._materialize_device,
                         packing="byte_space",
+                        ctx=materialize_ctx,
                     )
                     self._binding_ptrs = {
                         name: tensor.data_ptr()
@@ -1675,7 +1868,7 @@ class WeightUpdateReceiver:
                 else:
                     if self._binding_ptrs is None:
                         raise AssertionError("binding pointer baseline is missing")
-                    self._binding.swap(artifact)
+                    self._binding.swap(artifact, ctx=materialize_ctx)
                     latest_ptrs = {
                         name: tensor.data_ptr()
                         for name, tensor in self._binding.tensors.items()
@@ -1721,22 +1914,12 @@ class WeightUpdateReceiver:
                         "receiver encountered CUDA OOM in binding_swap path "
                         f"version={version}, key={key}, detail={last_error}"
                     ) from exc
-                if _is_not_found_error(exc):
-                    artifact_id = self._resolve_artifact_id_for_key(key=key)
-                    newer_version = self._find_newer_materializable_version(
-                        version=version,
-                        max_version=max_version,
-                    )
-                    if artifact_id and newer_version is not None:
-                        raise VersionDroppedError(
-                            version=version,
-                            key=key,
-                            artifact_id=artifact_id,
-                            message=(
-                                "target version already deregistered before receiver applied it"
-                            ),
-                            newer_version=newer_version,
-                        ) from exc
+                self._maybe_raise_version_dropped(
+                    version=version,
+                    key=key,
+                    max_version=max_version,
+                    exc=exc,
+                )
                 last_state = "binding_apply_failed"
                 next_log_at = self._maybe_log_wait_progress(
                     mode="binding_swap",
@@ -1756,6 +1939,14 @@ class WeightUpdateReceiver:
         )
 
     def _tp_rank_device(self, rank: int) -> str:
+        rank_devices = getattr(self, "_tp_rank_devices", None)
+        resolved = (
+            rank_devices.get(rank)
+            if isinstance(rank_devices, dict)
+            else None
+        )
+        if resolved is not None:
+            return resolved
         return f"cuda:{self._tp_device_base_index + rank}"
 
     def _make_tp_materialize_ctx(
@@ -1764,10 +1955,15 @@ class WeightUpdateReceiver:
         version: int,
         rank: int,
         remaining_s: float,
+        attempt: int = 0,
     ) -> Any | None:
         if self._tp_materialize_deadline_s <= 0.0:
             return None
-        bounded_s = min(self._tp_materialize_deadline_s, max(0.001, float(remaining_s)))
+        bounded_s = max(
+            0.001,
+            min(float(self._tp_materialize_deadline_s), float(remaining_s)),
+        )
+        safe_attempt = max(0, int(attempt))
         tags: dict[str, bool | int | float | str] | None = None
         if self._transport_group_mode == "tp_version":
             group_id = _sanitize_group_token(
@@ -1776,7 +1972,9 @@ class WeightUpdateReceiver:
             part_id = _sanitize_group_token(
                 f"rx{self._transport_group_receiver_index}:r{int(rank)}"
             )
-            request_id = _sanitize_group_token(f"{group_id}:{part_id}")
+            request_id = _sanitize_group_token(
+                f"{group_id}:{part_id}:a{safe_attempt}"
+            )
             tags = {
                 "tc.transport.group.kind": self._transport_group_kind,
                 "tc.transport.group.id": group_id,
@@ -1787,11 +1985,45 @@ class WeightUpdateReceiver:
                 "tc.transport.group.priority": int(self._transport_group_priority),
                 "tc.transport.group.epoch": int(self._transport_group_epoch),
                 "tc.transport.request_id": request_id,
+                "tc.transport.request_attempt": safe_attempt,
+                "tc.tp.no_progress_remaining_s": float(max(0.0, remaining_s)),
             }
         return tc.context(
             qos="interactive",
             deadline_ms=max(1, int(bounded_s * 1000.0)),
             tags=tags,
+        )
+
+    def _tp_rank_attempt_timeout_s(self, *, remaining_s: float) -> float:
+        per_rank_gib = (
+            float(max(0, int(self._tp_total_bytes))) / float(1024**3)
+        ) / float(max(1, int(self._tp_world_size)))
+        budget_s = max(
+            TP_BIND_PER_RANK_TIMEOUT_MIN_S,
+            TP_BIND_PER_RANK_TIMEOUT_FLOOR_S
+            + per_rank_gib * TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR,
+        )
+        return max(0.001, min(float(remaining_s), float(budget_s)))
+
+    def _reset_tp_bindings_after_apply_failure(self, *, version: int) -> None:
+        if not self._tp_bindings:
+            return
+        recycled = 0
+        for rank, binding in list(self._tp_bindings.items()):
+            tensors = getattr(binding, "tensors", None)
+            if isinstance(tensors, dict) and tensors:
+                self._tp_pending_targets[rank] = dict(tensors)
+                recycled += 1
+            with contextlib.suppress(Exception):
+                binding.close()
+        self._tp_bindings.clear()
+        self._tp_binding_ptrs.clear()
+        print(
+            "[receiver][tp]",
+            f"version={version}",
+            "phase=reset_after_failure",
+            f"recycled_ranks={recycled}",
+            flush=True,
         )
 
     def _maybe_publish_tp_binding(
@@ -1929,12 +2161,16 @@ class WeightUpdateReceiver:
         max_version: int,
     ) -> ReceiveEvent:
         start_monotonic = time.monotonic()
-        deadline = start_monotonic + self._per_version_timeout_s
+        last_progress_monotonic = start_monotonic
+        no_progress_deadline = start_monotonic + self._per_version_timeout_s
         last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
+        rank_attempt_seq: dict[int, int] = {
+            rank: 0 for rank in range(self._tp_world_size)
+        }
 
-        while time.monotonic() < deadline:
+        while time.monotonic() < no_progress_deadline:
             try:
                 artifact = self._resolve_artifact_for_key(key=key)
                 if artifact is None:
@@ -1944,7 +2180,7 @@ class WeightUpdateReceiver:
                         version=version,
                         key=key,
                         start_monotonic=start_monotonic,
-                        deadline=deadline,
+                        deadline=no_progress_deadline,
                         last_state=last_state,
                         last_error=last_error,
                         next_log_at=next_log_at,
@@ -1957,17 +2193,28 @@ class WeightUpdateReceiver:
                 artifact_id: str | None = None
                 for rank in range(self._tp_world_size):
                     rank_start = time.monotonic()
-                    rank_remaining_s = max(0.001, deadline - time.monotonic())
+                    rank_remaining_s = max(
+                        0.001, no_progress_deadline - time.monotonic()
+                    )
+                    rank_attempt = rank_attempt_seq.get(rank, 0)
+                    rank_attempt_seq[rank] = rank_attempt + 1
+                    rank_attempt_timeout_s = self._tp_rank_attempt_timeout_s(
+                        remaining_s=rank_remaining_s
+                    )
                     rank_ctx = self._make_tp_materialize_ctx(
-                        version=version, rank=rank, remaining_s=rank_remaining_s
+                        version=version,
+                        rank=rank,
+                        remaining_s=rank_attempt_timeout_s,
+                        attempt=rank_attempt,
                     )
                     print(
                         "[receiver][tp]",
                         f"version={version}",
                         f"rank={rank}",
+                        f"attempt={rank_attempt}",
                         f"device={self._tp_rank_device(rank)}",
                         "phase=start",
-                        f"deadline_s={rank_remaining_s:.3f}",
+                        f"deadline_s={rank_attempt_timeout_s:.3f}",
                         flush=True,
                     )
                     rank_operation, rank_pointer_stable = self._apply_tp4_rank(
@@ -1980,6 +2227,10 @@ class WeightUpdateReceiver:
                         operation = "bind_into"
                     if not rank_pointer_stable:
                         pointer_stable = False
+                    last_progress_monotonic = time.monotonic()
+                    no_progress_deadline = (
+                        last_progress_monotonic + self._per_version_timeout_s
+                    )
                     binding = self._tp_bindings.get(rank)
                     if binding is None:
                         raise AssertionError(f"tp4 binding missing for rank={rank}")
@@ -2022,38 +2273,50 @@ class WeightUpdateReceiver:
                         "receiver encountered CUDA OOM in tp_bind_into_swap path "
                         f"version={version}, key={key}, detail={last_error}"
                     ) from exc
-                if _is_not_found_error(exc):
+                self._maybe_raise_version_dropped(
+                    version=version,
+                    key=key,
+                    max_version=max_version,
+                    exc=exc,
+                    treat_apply_unavailable_error_as_dropped=True,
+                    prefer_resolved_newer_version=True,
+                )
+                if (
+                    self._transport_group_mode == "tp_version"
+                    and _is_non_retryable_transport_group_error(exc)
+                ):
                     artifact_id = self._resolve_artifact_id_for_key(key=key)
-                    newer_version = self._find_newer_materializable_version(
+                    self._reset_tp_bindings_after_apply_failure(version=version)
+                    raise VersionDroppedError(
                         version=version,
-                        max_version=max_version,
-                    )
-                    if artifact_id and newer_version is not None:
-                        raise VersionDroppedError(
-                            version=version,
-                            key=key,
-                            artifact_id=artifact_id,
-                            message=(
-                                "target version already deregistered before receiver applied it"
-                            ),
-                            newer_version=newer_version,
-                        ) from exc
+                        key=key,
+                        artifact_id=artifact_id,
+                        message=(
+                            "non-retryable tp transport-group apply failure "
+                            f"version={version}, key={key}, artifact_id={artifact_id}, "
+                            f"detail={last_error}"
+                        ),
+                        newer_version=None,
+                    ) from exc
+                self._reset_tp_bindings_after_apply_failure(version=version)
                 last_state = "tp_binding_apply_failed"
                 next_log_at = self._maybe_log_wait_progress(
                     mode=self._apply_mode,
                     version=version,
                     key=key,
                     start_monotonic=start_monotonic,
-                    deadline=deadline,
+                    deadline=no_progress_deadline,
                     last_state=last_state,
                     last_error=last_error,
                     next_log_at=next_log_at,
                 )
                 time.sleep(self._poll_interval_s)
 
+        no_progress_elapsed_s = max(0.0, time.monotonic() - last_progress_monotonic)
         raise TimeoutError(
             "receiver timeout for tp binding mode "
-            f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
+            f"version={version}, key={key}, last_state={last_state}, "
+            f"last_error={last_error}, no_progress_elapsed_s={no_progress_elapsed_s:.3f}"
         )
 
     def close(self) -> None:
@@ -2200,6 +2463,7 @@ def _build_receiver_runner(
         payload_mode=str(args.payload_mode),
         tp_world_size=int(args.tp_world_size),
         tp_device_base_index=int(args.tp_device_base_index),
+        tp_device_map_policy=str(args.tp_device_map_policy),
         tp_total_bytes=int(args.tp_total_bytes),
         tp_materialize_deadline_s=float(args.tp_materialize_deadline_s),
         transport_group_mode=str(args.transport_group_mode),
@@ -2257,6 +2521,7 @@ def _run_receiver(args: argparse.Namespace) -> int:
     try:
         model_name = _resolve_model_name(args, run_root=None)
         receiver = _build_receiver_runner(args, model_name=model_name)
+        tp_device_map_info = receiver.tp_device_map_info()
         _write_ready_file(
             str(args.ready_file) if args.ready_file else None,
             {
@@ -2267,6 +2532,14 @@ def _run_receiver(args: argparse.Namespace) -> int:
                 "tp_world_size": int(args.tp_world_size),
                 "tp_total_bytes": int(args.tp_total_bytes),
                 "tp_device_base_index": int(args.tp_device_base_index),
+                "tp_device_map_policy": str(args.tp_device_map_policy),
+                "tp_device_map_effective_mode": tp_device_map_info.get(
+                    "effective_mode", "inactive"
+                ),
+                "tp_visible_device_count": int(
+                    tp_device_map_info.get("visible_device_count", 0)
+                ),
+                "tp_rank_device_map": tp_device_map_info.get("rank_device_map", {}),
                 "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
                 "transport_group_mode": str(args.transport_group_mode),
                 "transport_group_kind": str(args.transport_group_kind),
@@ -2296,6 +2569,14 @@ def _run_receiver(args: argparse.Namespace) -> int:
             "tp_world_size": int(args.tp_world_size),
             "tp_total_bytes": int(args.tp_total_bytes),
             "tp_device_base_index": int(args.tp_device_base_index),
+            "tp_device_map_policy": str(args.tp_device_map_policy),
+            "tp_device_map_effective_mode": tp_device_map_info.get(
+                "effective_mode", "inactive"
+            ),
+            "tp_visible_device_count": int(
+                tp_device_map_info.get("visible_device_count", 0)
+            ),
+            "tp_rank_device_map": tp_device_map_info.get("rank_device_map", {}),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
             "transport_group_mode": str(args.transport_group_mode),
             "transport_group_kind": str(args.transport_group_kind),
@@ -2330,6 +2611,7 @@ def _run_single_host(args: argparse.Namespace) -> int:
             args, run_root=run_root, model_name=model_name
         )
         receiver = _build_receiver_runner(args, model_name=model_name)
+        tp_device_map_info = receiver.tp_device_map_info()
         _write_ready_file(
             str(args.ready_file) if args.ready_file else None,
             {
@@ -2340,6 +2622,14 @@ def _run_single_host(args: argparse.Namespace) -> int:
                 "tp_world_size": int(args.tp_world_size),
                 "tp_total_bytes": int(args.tp_total_bytes),
                 "tp_device_base_index": int(args.tp_device_base_index),
+                "tp_device_map_policy": str(args.tp_device_map_policy),
+                "tp_device_map_effective_mode": tp_device_map_info.get(
+                    "effective_mode", "inactive"
+                ),
+                "tp_visible_device_count": int(
+                    tp_device_map_info.get("visible_device_count", 0)
+                ),
+                "tp_rank_device_map": tp_device_map_info.get("rank_device_map", {}),
                 "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
                 "pid": os.getpid(),
                 "ready_at_s": time.time(),
@@ -2439,6 +2729,14 @@ def _run_single_host(args: argparse.Namespace) -> int:
             "tp_world_size": int(args.tp_world_size),
             "tp_total_bytes": int(args.tp_total_bytes),
             "tp_device_base_index": int(args.tp_device_base_index),
+            "tp_device_map_policy": str(args.tp_device_map_policy),
+            "tp_device_map_effective_mode": tp_device_map_info.get(
+                "effective_mode", "inactive"
+            ),
+            "tp_visible_device_count": int(
+                tp_device_map_info.get("visible_device_count", 0)
+            ),
+            "tp_rank_device_map": tp_device_map_info.get("rank_device_map", {}),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
             "publish_device": _publisher_device(str(args.publish_device)),
             "run_root": str(run_root),
@@ -2567,6 +2865,17 @@ def _add_common_stream_args(
         type=int,
         default=0,
         help="CUDA device base index for TP ranks (rank i uses cuda:{base+i}).",
+    )
+    parser.add_argument(
+        "--tp-device-map-policy",
+        choices=sorted(SUPPORTED_TP_DEVICE_MAP_POLICIES),
+        default="auto",
+        help=(
+            "TP rank-to-device mapping policy. "
+            "'auto' uses contiguous map when possible, else falls back to modulo reuse. "
+            "'strict' requires contiguous map. "
+            "'modulo' always reuses visible devices with modulo."
+        ),
     )
     parser.add_argument(
         "--tp-materialize-deadline-s",

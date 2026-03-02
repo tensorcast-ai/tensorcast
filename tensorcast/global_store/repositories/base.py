@@ -31,6 +31,10 @@ _RECENT_MUTATION_WRITES: deque[dict[str, object]] = deque(maxlen=256)
 _CURSOR_STATS_LOCK = threading.RLock()
 _OPEN_CURSORS_BY_CONN: dict[str, int] = {}
 _OPEN_CURSORS_TOTAL = 0
+_TRANSIENT_TX_CONFLICT_LOG_LOCK = threading.RLock()
+_TRANSIENT_TX_CONFLICT_LAST_WARN_AT = 0.0
+_TRANSIENT_TX_CONFLICT_SUPPRESSED = 0
+_TRANSIENT_TX_CONFLICT_WARN_INTERVAL_SEC = 5.0
 
 
 @contextmanager
@@ -159,6 +163,74 @@ def _cursor_stats_snapshot(conn_obj_id: str) -> tuple[int, int]:
         return int(_OPEN_CURSORS_BY_CONN.get(conn_obj_id, 0)), int(_OPEN_CURSORS_TOTAL)
 
 
+def _log_transient_tx_conflict_warning(
+    *,
+    repo: str,
+    repo_obj_id: str,
+    conn_obj_id: str,
+    tx_id: int,
+    thread_name: str,
+    origin: str,
+    tx_context: dict[str, object],
+    last_query: str,
+    error: Exception,
+    rollback_error: Exception | None,
+) -> None:
+    """Emit a lightweight, rate-limited warning for transient tx conflicts."""
+    global _TRANSIENT_TX_CONFLICT_LAST_WARN_AT
+    global _TRANSIENT_TX_CONFLICT_SUPPRESSED
+
+    suppressed_since_last = 0
+    should_warn = False
+    now = time.monotonic()
+    with _TRANSIENT_TX_CONFLICT_LOG_LOCK:
+        elapsed = now - _TRANSIENT_TX_CONFLICT_LAST_WARN_AT
+        if (
+            _TRANSIENT_TX_CONFLICT_LAST_WARN_AT <= 0.0
+            or elapsed >= _TRANSIENT_TX_CONFLICT_WARN_INTERVAL_SEC
+        ):
+            should_warn = True
+            suppressed_since_last = _TRANSIENT_TX_CONFLICT_SUPPRESSED
+            _TRANSIENT_TX_CONFLICT_SUPPRESSED = 0
+            _TRANSIENT_TX_CONFLICT_LAST_WARN_AT = now
+        else:
+            _TRANSIENT_TX_CONFLICT_SUPPRESSED += 1
+
+    if not should_warn:
+        return
+
+    if rollback_error is None:
+        logger.warning(
+            "Transient transaction conflict repo=%s repo_obj_id=%s conn_obj_id=%s tx_id=%s thread=%s origin=%s tx_context=%s last_query=%s error=%s suppressed_since_last=%s",
+            repo,
+            repo_obj_id,
+            conn_obj_id,
+            tx_id,
+            thread_name,
+            origin,
+            tx_context,
+            last_query,
+            error,
+            suppressed_since_last,
+        )
+        return
+
+    logger.warning(
+        "Transient transaction conflict repo=%s repo_obj_id=%s conn_obj_id=%s tx_id=%s thread=%s origin=%s tx_context=%s last_query=%s error=%s rollback_error=%s suppressed_since_last=%s",
+        repo,
+        repo_obj_id,
+        conn_obj_id,
+        tx_id,
+        thread_name,
+        origin,
+        tx_context,
+        last_query,
+        error,
+        rollback_error,
+        suppressed_since_last,
+    )
+
+
 @contextmanager
 def bind_tx_context(**fields):
     """Attach lightweight context to repository transactions in this thread."""
@@ -222,6 +294,9 @@ def is_transient_tx_conflict(exc: Exception) -> bool:
         "failed to commit: write-write conflict on key",
         "serialization",
         "transactioncontext error: conflict",
+        # ON CONFLICT DO NOTHING may race with an uncommitted writer under
+        # concurrent dispatch transactions; retry on a fresh snapshot.
+        "missing after insert-or-ignore",
     )
     return any(marker in message for marker in conflict_markers)
 
@@ -434,6 +509,21 @@ class BaseRepository:
                 if locked_cursor is not None
                 else "<unknown>"
             )
+            if is_transient_tx_conflict(e):
+                _log_transient_tx_conflict_warning(
+                    repo=self._repo_name,
+                    repo_obj_id=hex(id(self)),
+                    conn_obj_id=hex(id(self.connection)),
+                    tx_id=tx_id,
+                    thread_name=thread_name,
+                    origin=origin,
+                    tx_context=tx_context,
+                    last_query=last_query,
+                    error=e,
+                    rollback_error=None if rollback_was_noop else rollback_error,
+                )
+                raise DatabaseError(f"Transaction failed: {e}") from e
+
             with _ACTIVE_TX_LOCK:
                 active_others = [
                     (
