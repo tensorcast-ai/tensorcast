@@ -208,6 +208,7 @@ sc_cc_library(
         ":source",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
     ],
@@ -867,6 +868,20 @@ cc_test(
         "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
         "@gsl",
+    ],
+)
+
+cc_test(
+    name = "streaming_buffer_adapter_test",
+    srcs = [
+        "runtime/tests/streaming_buffer_adapter_test.cc",
+    ],
+    deps = [
+        ":streaming_buffer_adapter",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:streaming_pinned_buffer_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

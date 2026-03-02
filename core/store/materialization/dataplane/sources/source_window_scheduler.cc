@@ -12,6 +12,7 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -341,7 +342,15 @@ absl::Status SourceWindowScheduler::Execute(
     }
     auto spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
         std::max<size_t>(1, options_.prefetch_depth), pinned_slice_bytes, pinned_pool);
-    auto init_status = spb->initialize(pinned_timeout);
+    auto init_status = spb->initialize(
+        pinned_timeout,
+        absl::StrCat(
+            "path=",
+            options_.path,
+            " source_ordered=true prefetch_depth=",
+            options_.prefetch_depth,
+            " window_cap_bytes=",
+            options_.window_cap_bytes));
     if (!init_status.ok()) {
       return init_status;
     }

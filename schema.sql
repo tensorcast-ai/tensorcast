@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS artifact_transports (
     source_node_id VARCHAR NOT NULL,
     source_address VARCHAR NOT NULL,
     source_port INTEGER NOT NULL,
+    replica_memory_size_bytes BIGINT NULL,
     request_id TEXT NULL,
     request_fingerprint TEXT NULL,
     requester_worker_id TEXT NULL,

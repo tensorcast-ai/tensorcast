@@ -2112,7 +2112,7 @@ class MaterializationPipeline:
         )
         attempt = 1
         start_time = time.monotonic()
-        if ctx is not None and ctx.deadline_ms is not None and policy is not None:
+        if ctx is not None and ctx.deadline_ms is not None:
             ctx_budget_s = float(ctx.deadline_ms) / 1000.0
             if ctx_budget_s <= 0:
                 raise ArtifactError(
@@ -2120,13 +2120,17 @@ class MaterializationPipeline:
                     status_code="DEADLINE_EXCEEDED",
                     retryable=False,
                 )
-            if policy.deadline_seconds <= 0:
-                effective_deadline = ctx_budget_s
-            else:
-                effective_deadline = min(policy.deadline_seconds, ctx_budget_s)
-            if effective_deadline != policy.deadline_seconds:
+            if policy is None:
                 policy = RetryPolicy(
-                    deadline_seconds=effective_deadline,
+                    deadline_seconds=ctx_budget_s,
+                    max_attempts=1,
+                    base_backoff_seconds=0.0,
+                    backoff_multiplier=1.0,
+                    jitter=0.0,
+                )
+            elif ctx_budget_s != policy.deadline_seconds:
+                policy = RetryPolicy(
+                    deadline_seconds=ctx_budget_s,
                     max_attempts=policy.max_attempts,
                     base_backoff_seconds=policy.base_backoff_seconds,
                     backoff_multiplier=policy.backoff_multiplier,

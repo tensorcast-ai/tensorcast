@@ -62,6 +62,7 @@ class RemoteKeySource : public SeekableSource {
       std::string_view key,
       uint64_t remote_offset,
       size_t bytes);
+  void abort_timed_out_channel(std::string_view key, uint64_t remote_offset, size_t bytes) const;
   std::chrono::milliseconds remaining_request_budget() const;
 
   Options options_;
