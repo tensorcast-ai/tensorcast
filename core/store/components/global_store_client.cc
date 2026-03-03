@@ -18,6 +18,7 @@
 #include "absl/time/time.h"
 #include "core/common/otel/grpc_propagation.h"
 #include "core/communicator/misc/utils.h"
+#include "core/store/components/endpoint_id.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "tensorcast/common/v1/common.pb.h"
@@ -90,20 +91,6 @@ const char* status_to_cstr(global_store::Status s) {
     default:
       return "<unknown>";
   }
-}
-
-std::string derive_endpoint_id(
-    std::string_view node_id,
-    common::memory::MemoryLocation memory_type,
-    uint32_t device_id) {
-  if (node_id.empty()) {
-    return {};
-  }
-  const std::string_view dev_type =
-      memory_type == common::memory::MemoryLocation::GPU ? "gpu" : "cpu";
-  const uint32_t endpoint_dev_id =
-      memory_type == common::memory::MemoryLocation::GPU ? device_id : 0;
-  return absl::StrCat(node_id, "/dev/", dev_type, "/", endpoint_dev_id);
 }
 
 memory_tier::LeaseKind to_proto_kind(MemoryTierLeaseKind kind) {
@@ -1369,7 +1356,7 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
   replica.memory_size = info.memory_size();
   replica.memory_type = convert_from_proto_memory_type(info.memory_type());
   replica.device_id = info.device_id();
-  replica.endpoint_id = derive_endpoint_id(replica.node_id, replica.memory_type, replica.device_id);
+  replica.endpoint_id = derive_endpoint_id(replica.node_id, replica.memory_type, static_cast<int>(replica.device_id));
 
   for (const auto& key : info.remote_memory_keys()) {
     replica.remote_memory_keys.push_back(key);

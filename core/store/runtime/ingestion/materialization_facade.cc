@@ -22,6 +22,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
 #include "core/cuda/cuda_ipc.h"
+#include "core/store/components/endpoint_id.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/device_registry.h"
@@ -72,13 +73,15 @@ absl::Status stale_local_route_status(std::string_view artifact_id) {
       absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
 }
 
-std::string build_local_endpoint_id(const components::WorkerIdentity& local_identity, const DeviceKey& device) {
-  if (local_identity.node_id.empty()) {
-    return {};
+void fill_runtime_p2p_bindings(
+    const std::shared_ptr<components::CommunicationManager>& comm_manager,
+    P2PSource* source) {
+  if (source == nullptr || !comm_manager || !comm_manager->is_enabled()) {
+    return;
   }
-  const std::string_view dev_type = device.type == DeviceType::GPU ? "gpu" : "cpu";
-  const int endpoint_dev_id = device.type == DeviceType::GPU ? std::max(0, device.ordinal) : 0;
-  return absl::StrCat(local_identity.node_id, "/dev/", dev_type, "/", endpoint_dev_id);
+  source->comm_engine = gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{
+      comm_manager->get_shared_engine()};
+  source->routing_context = comm_manager->routing_context();
 }
 
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
@@ -1123,7 +1126,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.size_bytes = remote.memory_size;
         p2p_src.ip = remote.node_address;
         p2p_src.port = static_cast<uint16_t>(remote.node_port);
-        p2p_src.local_endpoint_id = build_local_endpoint_id(local_identity, target_device);
+        p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
         p2p_src.remote_endpoint_id = remote.endpoint_id;
         p2p_src.memory_keys = remote.remote_memory_keys;
         p2p_src.buf_sizes = remote.buffer_sizes;
@@ -1131,12 +1134,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
-        if (comm_manager && comm_manager->is_enabled()) {
-          p2p_src.comm_engine =
-              gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-                  comm_manager->get_shared_engine()};
-          p2p_src.routing_context = comm_manager->routing_context();
-        }
+        fill_runtime_p2p_bindings(comm_manager, &p2p_src);
         auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
         auto complete_status = gs_client->complete_replica_transport(session.transport_id);
         if (!complete_status.ok()) {
@@ -1280,7 +1278,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   }
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool comm_enabled = comm_manager && comm_manager->is_enabled();
-  const std::string local_endpoint_id = build_local_endpoint_id(local_identity, request.target_device());
+  const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, request.target_device());
   auto& replica_registry = config_.replica_runtime->registry();
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
@@ -1566,7 +1564,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     return absl::FailedPreconditionError("Communication not enabled");
   }
   const components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
-  const std::string local_endpoint_id = build_local_endpoint_id(local_identity, target_device);
+  const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
 
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
@@ -1728,6 +1726,10 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_p2p(
     const loading::MaterializeHints& hints,
     bool publish_to_global_store) {
   return run_p2p_ingestion_internal(artifact_identifier, source, target, hints, publish_to_global_store);
+}
+
+void MaterializationFacade::prepare_p2p_source(P2PSource* source) const {
+  fill_runtime_p2p_bindings(config_.runtime_context->communication_manager(), source);
 }
 
 absl::Status MaterializationFacade::register_replica_with_global_store(

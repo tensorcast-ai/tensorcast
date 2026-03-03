@@ -99,9 +99,10 @@ struct ProtoReadResponseExHeader {
   uint32_t num_segments;
   uint32_t window_seq;
   uint32_t credit_granted;
+  uint64_t request_offset; // Original ProtoReadRequest.offset for stable pending-request lookup
   uint8_t more_segments; // 1 when additional windows remain
   int16_t rail_id;
-  uint8_t reserved[1];
+  uint8_t reserved[5];
 };
 
 struct ProtoReadResponseExSeg {

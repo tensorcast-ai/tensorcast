@@ -112,6 +112,8 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints) override;
 
+  void prepare_p2p_source(P2PSource* source) const override;
+
   absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override,

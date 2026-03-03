@@ -3,8 +3,11 @@
 #ifndef CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 #define CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 
+#include <atomic>
 #include <deque>
+#include <future>
 #include <functional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -50,6 +53,7 @@ class ReadRequest {
   void set_remote_tensor(remote_tensor_t tensor);
   future_read_result_t get_future();
   void set_result(absl::Status result);
+  void set_on_result(std::function<void()> callback);
   bool is_result_set();
 
   std::string get_dst_url();
@@ -67,6 +71,16 @@ class ReadRequest {
 
   void add_expected_completions(int n) {
     expected_completions_.fetch_add(n);
+  }
+
+  // Register one READ_RESPONSE_EX window. This ensures final completion is not
+  // signaled before the final response window is observed.
+  void register_response_window(int segment_count, bool final_window) {
+    waiting_for_final_window_.store(true, std::memory_order_relaxed);
+    expected_completions_.fetch_add(segment_count, std::memory_order_relaxed);
+    if (final_window) {
+      final_window_received_.store(true, std::memory_order_release);
+    }
   }
 
   // Returns true if all segments have completed
@@ -104,7 +118,9 @@ class ReadRequest {
         sender(window.window_seq, window.offsets, window.final_window);
       }
     }
-    return done >= expected_completions_.load();
+    const bool final_ready = !waiting_for_final_window_.load(std::memory_order_acquire) ||
+        final_window_received_.load(std::memory_order_acquire);
+    return done >= expected_completions_.load(std::memory_order_acquire) && final_ready;
   }
 
   void set_ack_sender(std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> fn) {
@@ -113,6 +129,10 @@ class ReadRequest {
   }
 
   void enqueue_window_ack(uint32_t window_seq, std::vector<uint64_t> offsets, bool final_window) {
+    waiting_for_final_window_.store(true, std::memory_order_relaxed);
+    if (final_window) {
+      final_window_received_.store(true, std::memory_order_release);
+    }
     absl::MutexLock lk(&ack_mu_);
     PendingAckWindow window;
     window.window_seq = window_seq;
@@ -134,6 +154,8 @@ class ReadRequest {
   uint16_t dst_port_;
   std::promise<read_result_t> result_;
   std::atomic_bool result_set_;
+  absl::Mutex result_mu_;
+  std::function<void()> on_result_ ABSL_GUARDED_BY(result_mu_);
 
   misc::Timer timer_;
   read_result_t status_;
@@ -143,6 +165,8 @@ class ReadRequest {
   // Number of expected RDMA READ completions for this request
   std::atomic<int> expected_completions_{0};
   std::atomic<int> completed_{0};
+  std::atomic_bool waiting_for_final_window_{false};
+  std::atomic_bool final_window_received_{false};
 
   struct PendingAckWindow {
     uint32_t window_seq = 0;

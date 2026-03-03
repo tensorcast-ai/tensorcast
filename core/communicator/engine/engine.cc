@@ -465,6 +465,7 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     hdr->num_segments = seg_count;
     hdr->window_seq = staged_window.window_seq;
     hdr->credit_granted = static_cast<uint32_t>(staged_window.granted_credit);
+    hdr->request_offset = session.request.offset;
     hdr->more_segments = staged_window.more_segments ? 1 : 0;
 
     std::vector<StageLeaseKey> inserted_keys;
@@ -1635,6 +1636,7 @@ absl::Status Communicator::handle_mtcp_read_request(
   hdr->num_segments = 1;
   hdr->window_seq = 0;
   hdr->credit_granted = 0;
+  hdr->request_offset = request.offset;
   hdr->more_segments = 0;
   absl::Status shutdown_status = absl::CancelledError("communicator shutting down");
   if (stop_.load(std::memory_order_relaxed)) {
@@ -1831,8 +1833,28 @@ void Communicator::do_read_request_loop() {
     VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
             << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
 
-    // Put into pending BEFORE send to prevent response racing ahead of insertion
     const std::string req_key = req->get_key();
+    auto existing = pending_requests_.get(req_key);
+    if (existing != nullptr) {
+      if (!existing->is_result_set()) {
+        LOG(ERROR) << "[do_read_request_loop] duplicate in-flight READ_REQUEST key=" << req_key;
+        req->set_result(absl::AlreadyExistsError("duplicate in-flight read request key"));
+        continue;
+      }
+      LOG(WARNING) << "[do_read_request_loop] replacing stale completed pending request key=" << req_key;
+      pending_requests_.erase_if(req_key, existing);
+    }
+
+    std::weak_ptr<transport::ReadRequest> weak_req = req;
+    req->set_on_result([this, req_key, weak_req]() {
+      auto locked = weak_req.lock();
+      if (locked == nullptr) {
+        return;
+      }
+      pending_requests_.erase_if(req_key, locked);
+    });
+
+    // Put into pending BEFORE send to prevent response racing ahead of insertion
     pending_requests_.put(req_key, req);
 
     if (transport->send(msg) == SUCCESS) {
@@ -2108,7 +2130,6 @@ misc::result_t Communicator::on_receive_response(
 
       auto ready_reads = drain_pending_reads_for_generation(endpoint, generation);
       for (auto& pending : ready_reads) {
-        pending.request->add_expected_completions(static_cast<int>(pending.segments.size()));
         auto res = transport->read_multi(pending.request, pending.segments);
         if (res != misc::SUCCESS) {
           pending_requests_.del(pending.request->get_key());
@@ -2142,9 +2163,7 @@ misc::result_t Communicator::on_receive_response(
       LOG(INFO) << "[on_receive_response] READ_RESPONSE_EX: key=" << tensor_key << " segs=" << hdr->num_segments
                 << " transport=" << (hdr->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
 
-      auto* seg0 = reinterpret_cast<ProtoReadResponseExSeg*>(
-          reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
-      auto req_key = transport::get_request_key(tensor_key, seg0->offset);
+      auto req_key = transport::get_request_key(tensor_key, hdr->request_offset);
       auto read_request = pending_requests_.get(req_key);
       if (read_request == nullptr) {
         LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX: pending request not found for " << req_key;
@@ -2180,6 +2199,8 @@ misc::result_t Communicator::on_receive_response(
           rdma_segs.emplace_back(seg);
           ack_offsets.emplace_back(s->offset);
         }
+
+        read_request->register_response_window(static_cast<int>(rdma_segs.size()), hdr->more_segments == 0);
 
         if (hdr->staged) {
           auto ctrl = channel->get_control();
@@ -2354,7 +2375,6 @@ misc::result_t Communicator::on_receive_response(
         }
 
         if (issue_now) {
-          read_request->add_expected_completions(static_cast<int>(rdma_segs.size()));
           auto res = transport_to_use->read_multi(read_request, rdma_segs);
           if (res != misc::SUCCESS) {
             read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
