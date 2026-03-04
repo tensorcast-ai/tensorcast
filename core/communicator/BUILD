@@ -524,6 +524,7 @@ sc_cc_library(
         ":lldp_source_lib",
         ":nvlink_source_lib",
         ":topology_lib",
+        "//core/cuda:cuda_api_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",

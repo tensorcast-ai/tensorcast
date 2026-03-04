@@ -3,8 +3,12 @@
 #include "core/communicator/topology/discovery/host_topology_builder.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <format>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -13,6 +17,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "core/cuda/cuda_api.h"
 #include "core/communicator/topology/discovery/lldp_source.h"
 #include "core/communicator/topology/discovery/nvlink_source.h"
 
@@ -26,6 +31,248 @@ struct BaselineBuildResult {
   std::vector<Endpoint> endpoints;
   absl::flat_hash_map<int, std::string> gpu_pool_by_index;
 };
+
+struct PciGpuRecord {
+  std::string pool_id;
+  std::string pci_path;
+};
+
+struct AffinityInferenceStats {
+  int nic_candidate_count = 0;
+  int nic_path_resolved_count = 0;
+  int nic_scored_count = 0;
+  int nic_narrowed_count = 0;
+  int gpu_candidate_count = 0;
+  int gpu_path_resolved_count = 0;
+};
+
+int longest_common_prefix_len(std::string_view lhs, std::string_view rhs) {
+  int prefix_len = 0;
+  const size_t max_len = std::min(lhs.size(), rhs.size());
+  while (static_cast<size_t>(prefix_len) < max_len && lhs[static_cast<size_t>(prefix_len)] == rhs[static_cast<size_t>(
+                                                                   prefix_len)]) {
+    prefix_len += 1;
+  }
+  return prefix_len;
+}
+
+std::string join_with_comma(const std::vector<std::string>& values) {
+  std::string output;
+  bool first = true;
+  for (const auto& value : values) {
+    if (!first) {
+      output += ", ";
+    }
+    output += value;
+    first = false;
+  }
+  return output;
+}
+
+absl::StatusOr<std::string> resolve_realpath(const std::string& path) {
+  std::unique_ptr<char, decltype(&std::free)> resolved(realpath(path.c_str(), nullptr), &std::free);
+  if (resolved == nullptr) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("realpath failed: ", path));
+  }
+  return std::string(resolved.get());
+}
+
+absl::StatusOr<std::string> resolve_pci_path_from_bdf(const std::string& pci_bdf) {
+  if (pci_bdf.empty()) {
+    return absl::InvalidArgumentError("PCI BDF is empty");
+  }
+  return resolve_realpath(std::format("/sys/bus/pci/devices/{}", pci_bdf));
+}
+
+std::string gpu_pci_bdf(const cudaDeviceProp& props) {
+  return std::format(
+      "{:04x}:{:02x}:{:02x}.0",
+      static_cast<unsigned int>(props.pciDomainID),
+      static_cast<unsigned int>(props.pciBusID),
+      static_cast<unsigned int>(props.pciDeviceID));
+}
+
+absl::StatusOr<std::string> resolve_gpu_pci_path(
+    int gpu_index,
+    const HostTopologyBuilderOptions& options) {
+  const auto override_it = options.gpu_pci_path_overrides.find(gpu_index);
+  if (override_it != options.gpu_pci_path_overrides.end()) {
+    if (override_it->second.empty()) {
+      return absl::InvalidArgumentError(std::format("gpu_pci_path_overrides[{}] is empty", gpu_index));
+    }
+    return override_it->second;
+  }
+
+  cudaDeviceProp props{};
+  const auto status = cuda::get_device_properties(gpu_index, &props);
+  if (!status.ok()) {
+    return absl::Status(
+        status.code(),
+        absl::StrCat("failed to query CUDA device properties for GPU ", gpu_index, ": ", status.message()));
+  }
+  return resolve_pci_path_from_bdf(gpu_pci_bdf(props));
+}
+
+absl::StatusOr<std::string> resolve_nic_pci_path(
+    std::string_view nic_name,
+    const absl::flat_hash_map<std::string, LldpNicRecord>& lldp_records,
+    const HostTopologyBuilderOptions& options) {
+  const auto override_it = options.nic_pci_path_overrides.find(std::string(nic_name));
+  if (override_it != options.nic_pci_path_overrides.end()) {
+    if (override_it->second.empty()) {
+      return absl::InvalidArgumentError(std::format("nic_pci_path_overrides[{}] is empty", nic_name));
+    }
+    return override_it->second;
+  }
+
+  absl::Status lldp_path_status = absl::NotFoundError("LLDP nic record not found");
+  const auto lldp_it = lldp_records.find(std::string(nic_name));
+  if (lldp_it != lldp_records.end()) {
+    auto lldp_path_or = resolve_pci_path_from_bdf(lldp_it->second.pci_bdf);
+    if (lldp_path_or.ok()) {
+      return std::move(lldp_path_or).value();
+    }
+    lldp_path_status = lldp_path_or.status();
+  }
+
+  auto sysfs_path_or = resolve_realpath(std::format("/sys/class/infiniband/{}/device", nic_name));
+  if (sysfs_path_or.ok()) {
+    return std::move(sysfs_path_or).value();
+  }
+  if (lldp_it == lldp_records.end()) {
+    return sysfs_path_or.status();
+  }
+  return absl::Status(
+      sysfs_path_or.status().code(),
+      absl::StrCat(
+          "failed to resolve NIC PCI path from LLDP and sysfs; lldp=",
+          lldp_path_status.message(),
+          ", sysfs=",
+          sysfs_path_or.status().message()));
+}
+
+std::string build_affinity_degrade_reason(const AffinityInferenceStats& stats) {
+  std::vector<std::string> parts;
+  if (stats.gpu_candidate_count > stats.gpu_path_resolved_count) {
+    parts.push_back(
+        std::format("gpu_paths_resolved={}/{}", stats.gpu_path_resolved_count, stats.gpu_candidate_count));
+  }
+  if (stats.nic_candidate_count > stats.nic_path_resolved_count) {
+    parts.push_back(
+        std::format("nic_paths_resolved={}/{}", stats.nic_path_resolved_count, stats.nic_candidate_count));
+  }
+  if (stats.nic_candidate_count > stats.nic_scored_count) {
+    parts.push_back(std::format("nic_scored={}/{}", stats.nic_scored_count, stats.nic_candidate_count));
+  }
+  if (parts.empty()) {
+    return {};
+  }
+  return join_with_comma(parts);
+}
+
+AffinityInferenceStats infer_nic_gpu_affinity(
+    std::vector<Endpoint>* endpoints,
+    const absl::flat_hash_map<int, std::string>& gpu_pool_by_index,
+    const absl::flat_hash_map<std::string, LldpNicRecord>& lldp_records,
+    const HostTopologyBuilderOptions& options) {
+  AffinityInferenceStats stats;
+  if (endpoints == nullptr) {
+    return stats;
+  }
+
+  stats.gpu_candidate_count = static_cast<int>(gpu_pool_by_index.size());
+  absl::flat_hash_set<std::string> all_gpu_pool_ids;
+  all_gpu_pool_ids.reserve(gpu_pool_by_index.size());
+  std::vector<PciGpuRecord> gpu_records;
+  gpu_records.reserve(gpu_pool_by_index.size());
+
+  for (const auto& [gpu_index, pool_id] : gpu_pool_by_index) {
+    all_gpu_pool_ids.insert(pool_id);
+    auto gpu_path_or = resolve_gpu_pci_path(gpu_index, options);
+    if (!gpu_path_or.ok()) {
+      VLOG(1) << "Skipping GPU in NIC-GPU affinity inference due to missing PCI path: gpu="
+              << gpu_index << " status=" << gpu_path_or.status();
+      continue;
+    }
+    stats.gpu_path_resolved_count += 1;
+    gpu_records.push_back(PciGpuRecord{
+        .pool_id = pool_id,
+        .pci_path = std::move(gpu_path_or).value(),
+    });
+  }
+
+  for (auto& endpoint : *endpoints) {
+    if (endpoint.kind != EndpointKind::kClient || endpoint.type != EndpointType::kNic) {
+      continue;
+    }
+    stats.nic_candidate_count += 1;
+
+    auto nic_path_or = resolve_nic_pci_path(endpoint.name, lldp_records, options);
+    if (!nic_path_or.ok()) {
+      VLOG(1) << "Skipping NIC in NIC-GPU affinity inference due to missing PCI path: nic="
+              << endpoint.name << " status=" << nic_path_or.status();
+      continue;
+    }
+    stats.nic_path_resolved_count += 1;
+    if (gpu_records.empty()) {
+      continue;
+    }
+
+    absl::flat_hash_set<std::string> endpoint_gpu_pool_ids;
+    endpoint_gpu_pool_ids.reserve(endpoint.pool_ids.size());
+    for (const auto& pool_id : endpoint.pool_ids) {
+      if (all_gpu_pool_ids.contains(pool_id)) {
+        endpoint_gpu_pool_ids.insert(pool_id);
+      }
+    }
+    if (endpoint_gpu_pool_ids.empty()) {
+      continue;
+    }
+
+    const std::string& nic_path = nic_path_or.value();
+    int max_prefix_len = -1;
+    absl::flat_hash_set<std::string> selected_gpu_pool_ids;
+    selected_gpu_pool_ids.reserve(endpoint_gpu_pool_ids.size());
+
+    for (const auto& gpu_record : gpu_records) {
+      if (!endpoint_gpu_pool_ids.contains(gpu_record.pool_id)) {
+        continue;
+      }
+      const int prefix_len = longest_common_prefix_len(nic_path, gpu_record.pci_path);
+      if (prefix_len > max_prefix_len) {
+        max_prefix_len = prefix_len;
+        selected_gpu_pool_ids.clear();
+        selected_gpu_pool_ids.insert(gpu_record.pool_id);
+      } else if (prefix_len == max_prefix_len && max_prefix_len >= 0) {
+        selected_gpu_pool_ids.insert(gpu_record.pool_id);
+      }
+    }
+    if (selected_gpu_pool_ids.empty()) {
+      continue;
+    }
+
+    stats.nic_scored_count += 1;
+    if (selected_gpu_pool_ids.size() < endpoint_gpu_pool_ids.size()) {
+      stats.nic_narrowed_count += 1;
+    }
+
+    std::vector<std::string> updated_pool_ids;
+    updated_pool_ids.reserve(endpoint.pool_ids.size());
+    for (const auto& pool_id : endpoint.pool_ids) {
+      if (!all_gpu_pool_ids.contains(pool_id)) {
+        updated_pool_ids.push_back(pool_id);
+      }
+    }
+    for (const auto& pool_id : endpoint.pool_ids) {
+      if (selected_gpu_pool_ids.contains(pool_id)) {
+        updated_pool_ids.push_back(pool_id);
+      }
+    }
+    endpoint.pool_ids = std::move(updated_pool_ids);
+  }
+
+  return stats;
+}
 
 std::string cpu_pool_id(int node_id) {
   return std::format("cpu{}", node_id);
@@ -305,6 +552,24 @@ absl::StatusOr<HostTopologyBuildResult> build_topology_from_discovery_with_obser
     }
   } else {
     observability.lldp_source = "disabled";
+  }
+
+  if (discovery_enabled) {
+    const AffinityInferenceStats affinity_stats =
+        infer_nic_gpu_affinity(&endpoints, baseline.gpu_pool_by_index, lldp_records, options);
+    observability.affinity_nic_candidate_count = affinity_stats.nic_candidate_count;
+    observability.affinity_nic_scored_count = affinity_stats.nic_scored_count;
+    observability.affinity_nic_narrowed_count = affinity_stats.nic_narrowed_count;
+    const bool affinity_degraded =
+        affinity_stats.nic_candidate_count > 0 &&
+        (affinity_stats.nic_candidate_count > affinity_stats.nic_scored_count ||
+         affinity_stats.gpu_candidate_count > affinity_stats.gpu_path_resolved_count);
+    observability.affinity_degraded = affinity_degraded;
+    if (affinity_degraded) {
+      observability.affinity_degrade_reason = build_affinity_degrade_reason(affinity_stats);
+      LOG(WARNING) << "NIC-GPU affinity inference degraded: "
+                   << observability.affinity_degrade_reason;
+    }
   }
 
   absl::flat_hash_set<std::string> switch_endpoint_ids;

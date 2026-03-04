@@ -11,6 +11,10 @@ related_code:
   - core/communicator/transport/net_dev.cc
   - core/communicator/topology/topology.h
   - core/communicator/topology/simple_numa_topology.cc
+  - core/communicator/topology/discovery/host_topology_builder.cc
+  - core/communicator/topology/discovery/host_topology_builder.h
+  - core/communicator/topology/discovery/discovery_test.cc
+  - core/communicator/topology/simple_numa_topology_tool.cc
   - core/communicator/routing/routing_context.cc
   - core/communicator/routing/types.h
   - core/store/materialization/dataplane/sources/remote_key_source.cc
@@ -68,6 +72,7 @@ related_code:
 - 首版采用“配置驱动 + 快照优先”，保证开发机和 CI 可稳定复现拓扑构建。
 - `simple_numa` 继续作为基础 CPU/GPU/NIC inventory；LLDP 与 NVLINK 负责增量信息补强。
 - 对不完整输入优先 degrade（除非 `required=true`），避免影响现网可用性。
+- 2026-03-04 增量增强：`HostTopologyBuilder` 新增 NIC↔GPU 动态亲和性推断（PCI path longest-common-prefix 评分），并新增 builder observability 计数与降级原因字段；当推断不完整时保留基线 `pool_ids`。
 
 # Acceptance Checks
 
@@ -80,12 +85,20 @@ related_code:
   - [x] `bazel test //core/communicator:topology_test`
   - [x] `bazel test //core/communicator:routing_context_test`
   - [x] 新增 discovery 相关测试 target（LLDP/NVLINK/merge）。
+  - [x] 新增 NIC↔GPU 亲和性推断单测（成功收敛与降级保持基线两类场景）。
 
 - 集成验证
   - [x] 使用仓库内 `lldp-info.txt` 与 NVLINK 快照构建 DOT，人工核对 rail 分组和 GPU 互联边。
     - 2026-03-04 验证命令：`bazel run //core/communicator:simple_numa_topology_tool -- /tmp/topology_discovery_validation.yaml`
     - 观测输出：`lldp_records=16`、`rail_switch_endpoints=8`、`nvlink_gpus=8`、`nvlink_edges=7`，且 `lldp_degraded=false`、`nvlink_degraded=false`。
   - [x] 在 routed-first 场景验证失败回退直连路径。
+  - [x] 使用远程 GPU 资源验证 runtime probe + 动态亲和性推断观测字段（brainctl skill）。
+    - 2026-03-04 远程命令：
+      - `brainctl launch -d --charged-group=tensorcast_dev --gpu 1 --cpu 4 --memory 106400 --private-machine group --positive-tags L40S,H200,H800,H100 ...`
+      - `brainctl exec process/<id> -n shai-core -- ... bazel run //core/communicator:simple_numa_topology_tool -- /tmp/topology_remote_affinity.yaml`
+      - `brainctl exec process/<id> -n shai-core -- ... bazel test //core/communicator:discovery_test ...`
+    - 远程观测行：`nvlink_source=runtime_probe nvlink_gpus=1 nvlink_edges=0 affinity_nic_candidates=2 affinity_nic_scored=2 affinity_nic_narrowed=0 affinity_degraded=false`。
+    - 清理：`brainctl delete process <id> -n shai-core` 后 `brainctl get process <id> -n shai-core` 返回 `NotFound`。
 
 # Rollout / Backout
 

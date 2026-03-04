@@ -11,6 +11,9 @@ related_code:
   - core/communicator/transport/net_dev.cc
   - core/communicator/topology/topology.h
   - core/communicator/topology/simple_numa_topology.cc
+  - core/communicator/topology/discovery/host_topology_builder.cc
+  - core/communicator/topology/discovery/host_topology_builder.h
+  - core/communicator/topology/simple_numa_topology_tool.cc
   - core/communicator/routing/routing_context.cc
   - core/communicator/routing/types.h
   - proto/tensorcast/communicator/v1/communicator_config.proto
@@ -118,9 +121,47 @@ brainvf0=0000:0e:00.1,mlx5_9,1
 
 1. 先建立 CPU/GPU pool 与 NIC endpoint 基线。
 2. 用 LLDP 结果为 NIC endpoint 绑定 `rail_id`、`pci_bdf`、`if_name` 标签。
-3. 基于 rail 生成网络 switch 端点（`netsw_rail_<id>`）并建立 `SW` 链路。
-4. 为每个 GPU 生成 NVLINK endpoint（`nvlink_<gpu_uuid>`），按 `NvlinkEdge` 生成 `P2P` 链路。
-5. 最终生成可验证的 `Topology`；如果网络图与 NVLINK 图不连通，允许 `require_connected=false`。
+3. 执行 NIC↔GPU 亲和性推断：按 PCI 拓扑最短“距离”（最长公共 PCI 路径前缀）缩小 NIC 的 GPU pool 集合。
+4. 基于 rail 生成网络 switch 端点（`netsw_rail_<id>`）并建立 `SW` 链路。
+5. 为每个 GPU 生成 NVLINK endpoint（`nvlink_<gpu_uuid>`），按 `NvlinkEdge` 生成 `P2P` 链路。
+6. 最终生成可验证的 `Topology`；如果网络图与 NVLINK 图不连通，允许 `require_connected=false`。
+
+## NIC-GPU Affinity Inference
+
+推断目标：在不改变 `simple_numa` 基线 CPU 归属的前提下，让每个 NIC 只保留“最近”的 GPU pool 子集，减少跨 root-complex 或跨 NUMA 的非必要路径。
+
+输入来源与优先级：
+
+- GPU PCI path：
+  - 优先使用测试覆盖钩子 `HostTopologyBuilderOptions.gpu_pci_path_overrides`（用于确定性单测）。
+  - 默认路径：`cudaGetDeviceProperties` 获取 `domain:bus:device`，再 resolve `/sys/bus/pci/devices/<bdf>` realpath。
+- NIC PCI path：
+  - 优先使用 `HostTopologyBuilderOptions.nic_pci_path_overrides`。
+  - 默认路径 1：LLDP 中 `pci_bdf` 对应的 sysfs realpath。
+  - 默认路径 2（降级）：`/sys/class/infiniband/<nic>/device` realpath。
+
+推断规则（确定性）：
+
+1. 只对 `EndpointKind::kClient && EndpointType::kNic` 端点执行。
+2. 在该 NIC 现有 `pool_ids` 的 GPU 子集范围内打分，避免引入基线之外的 GPU。
+3. 以 NIC/GPU PCI realpath 的最长公共前缀长度作为亲和分值，保留所有并列最高分 GPU（处理并列/多卡同距）。
+4. 输出 `pool_ids` 保序：先保留原 CPU pool，再保留筛选后的 GPU pool。
+
+降级与兼容：
+
+- 任一 NIC 或 GPU 无法解析 PCI path 时，跳过该对象，不中断拓扑构建。
+- 若亲和性推断部分失败，则标记 observability 降级并保留基线 pool，不改变 fail-fast 行为边界（除非上层 required 语义要求）。
+- 推断逻辑默认仅在 `topology_discovery.enable=true` 时启用。
+
+可观测性：
+
+- 增加字段：
+  - `affinity_nic_candidate_count`
+  - `affinity_nic_scored_count`
+  - `affinity_nic_narrowed_count`
+  - `affinity_degraded`
+  - `affinity_degrade_reason`
+- `simple_numa_topology_tool` stderr 汇总中同步输出亲和性统计，便于灰度验证。
 
 ## Topology Projection Rules
 

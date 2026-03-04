@@ -44,6 +44,13 @@ int main(int argc, char** argv) {
     if (!observability.nvlink_degrade_reason.empty()) {
       std::cerr << " nvlink_degrade_reason=\"" << observability.nvlink_degrade_reason << "\"";
     }
+    std::cerr << " affinity_nic_candidates=" << observability.affinity_nic_candidate_count
+              << " affinity_nic_scored=" << observability.affinity_nic_scored_count
+              << " affinity_nic_narrowed=" << observability.affinity_nic_narrowed_count
+              << " affinity_degraded=" << observability.affinity_degraded;
+    if (!observability.affinity_degrade_reason.empty()) {
+      std::cerr << " affinity_degrade_reason=\"" << observability.affinity_degrade_reason << "\"";
+    }
     std::cerr << " nic_endpoints=" << observability.nic_endpoint_count
               << " rail_switch_endpoints=" << observability.rail_switch_endpoint_count << "\n";
     topology = std::move(build_or).value().topology;

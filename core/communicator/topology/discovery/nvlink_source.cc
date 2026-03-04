@@ -87,6 +87,30 @@ std::vector<std::string> split_whitespace(const std::string& text) {
   return tokens;
 }
 
+std::string strip_ansi_escape_sequences(std::string_view text) {
+  std::string cleaned;
+  cleaned.reserve(text.size());
+  size_t cursor = 0;
+  while (cursor < text.size()) {
+    if (text[cursor] != '\x1b' || cursor + 1 >= text.size() || text[cursor + 1] != '[') {
+      cleaned.push_back(text[cursor]);
+      cursor += 1;
+      continue;
+    }
+
+    cursor += 2;
+    while (cursor < text.size()) {
+      const unsigned char ch = static_cast<unsigned char>(text[cursor]);
+      cursor += 1;
+      // ANSI CSI final bytes are in [0x40, 0x7E].
+      if (ch >= 0x40 && ch <= 0x7E) {
+        break;
+      }
+    }
+  }
+  return cleaned;
+}
+
 absl::StatusOr<std::string> run_command_capture_stdout(const std::string& command) {
   errno = 0;
   FILE* raw = popen(command.c_str(), "r");
@@ -322,7 +346,8 @@ absl::StatusOr<TopologyMatrix> parse_runtime_topology_matrix_output(
   int line_no = 0;
   while (std::getline(input, line)) {
     line_no += 1;
-    const std::string trimmed = std::string(absl::StripAsciiWhitespace(line));
+    const std::string trimmed =
+        std::string(absl::StripAsciiWhitespace(strip_ansi_escape_sequences(line)));
     if (trimmed.empty()) {
       continue;
     }

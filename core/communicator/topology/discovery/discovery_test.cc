@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -51,6 +52,16 @@ CommunicatorConfig make_simple_numa_config() {
   node1->add_gpus(2);
 
   return config;
+}
+
+std::vector<std::string> endpoint_pool_ids(
+    const Topology& topology,
+    const std::string& endpoint_id) {
+  const auto* endpoint = topology.find_endpoint(endpoint_id);
+  if (endpoint == nullptr) {
+    return {};
+  }
+  return endpoint->pool_ids;
 }
 
 } // namespace
@@ -131,6 +142,42 @@ TEST_CASE("NVLINK runtime parser extracts GPU edges from topology matrix", "[com
   CHECK(snapshot.edges[1].src_gpu_uuid == "GPU-1");
   CHECK(snapshot.edges[1].dst_gpu_uuid == "GPU-2");
   CHECK(snapshot.edges[1].link_count == 1);
+}
+
+TEST_CASE(
+    "NVLINK runtime parser strips ANSI topology header sequences",
+    "[communicator][topology][discovery]") {
+  const std::string gpu_query_output =
+      "0, GPU-0\n"
+      "1, GPU-1\n"
+      "2, GPU-2\n"
+      "3, GPU-3\n";
+
+  const std::string topology_matrix_output =
+      "\t\x1b[4mGPU0\tGPU1\tGPU2\tGPU3\tNIC0\tCPU Affinity\x1b[0m\n"
+      "GPU0\tX\tNV8\tNV8\tNV8\tPIX\t0-43\n"
+      "GPU1\tNV8\tX\tNV8\tNV8\tSYS\t0-43\n"
+      "GPU2\tNV8\tNV8\tX\tNV8\tSYS\t0-43\n"
+      "GPU3\tNV8\tNV8\tNV8\tX\tSYS\t0-43\n"
+      "NIC0\tPIX\tSYS\tSYS\tSYS\tX\n"
+      "\n"
+      "Legend:\n";
+
+  auto snapshot_or = parse_nvlink_runtime_probe_outputs(
+      gpu_query_output,
+      topology_matrix_output,
+      NvlinkSnapshotOptions{.strict = true});
+  REQUIRE(snapshot_or.ok());
+  const auto& snapshot = snapshot_or.value();
+  REQUIRE(snapshot.gpus.size() == 4);
+  REQUIRE(snapshot.edges.size() == 6);
+
+  CHECK(snapshot.edges[0].src_gpu_uuid == "GPU-0");
+  CHECK(snapshot.edges[0].dst_gpu_uuid == "GPU-1");
+  CHECK(snapshot.edges[0].link_count == 8);
+  CHECK(snapshot.edges[5].src_gpu_uuid == "GPU-2");
+  CHECK(snapshot.edges[5].dst_gpu_uuid == "GPU-3");
+  CHECK(snapshot.edges[5].link_count == 8);
 }
 
 TEST_CASE("Host topology builder merges rail switches and NVLINK edges", "[communicator][topology][discovery]") {
@@ -273,6 +320,99 @@ TEST_CASE("Host topology builder supports NVLINK runtime probe source", "[commun
   CHECK(topology.find_link("nvlink_GPU-1_to_nvlink_GPU-0") != nullptr);
   CHECK(topology.find_link("nvlink_GPU-1_to_nvlink_GPU-2") != nullptr);
   CHECK(topology.find_link("nvlink_GPU-2_to_nvlink_GPU-1") != nullptr);
+}
+
+TEST_CASE(
+    "Host topology builder infers NIC GPU affinity from PCI paths",
+    "[communicator][topology][discovery]") {
+  CommunicatorConfig config = make_simple_numa_config();
+  auto* discovery = config.mutable_topology_discovery();
+  discovery->set_enable(true);
+  discovery->mutable_merge_policy()->set_emit_rail_switch_endpoints(false);
+  discovery->mutable_merge_policy()->set_require_connected(false);
+  discovery->mutable_nvlink()->set_source(NvlinkDiscoveryConfig::SOURCE_DISABLED);
+
+  const std::string lldp_file = write_temp_file(
+      "pf0=0000:41:00.1,mlx5_0,1\n"
+      "pf1=0000:42:00.1,mlx5_1,1\n"
+      "pf2=0000:81:00.1,mlx5_2,2\n",
+      "lldp_affinity.txt");
+  discovery->mutable_lldp()->set_file_path(lldp_file);
+  discovery->mutable_lldp()->set_required(true);
+
+  tensorcast::communicator::topology::discovery::HostTopologyBuilderOptions options;
+  options.gpu_pci_path_overrides = {
+      {0, "/sys/devices/pci0000:00/0000:00:01.0/0000:41:00.0"},
+      {1, "/sys/devices/pci0000:00/0000:00:02.0/0000:42:00.0"},
+      {2, "/sys/devices/pci0000:80/0000:80:01.0/0000:81:00.0"},
+  };
+  options.nic_pci_path_overrides = {
+      {"mlx5_0", "/sys/devices/pci0000:00/0000:00:01.0/0000:41:00.1"},
+      {"mlx5_1", "/sys/devices/pci0000:00/0000:00:02.0/0000:42:00.1"},
+      {"mlx5_2", "/sys/devices/pci0000:80/0000:80:01.0/0000:81:00.1"},
+  };
+
+  auto build_or = build_topology_from_discovery_with_observability(config, options);
+  INFO(build_or.status());
+  REQUIRE(build_or.ok());
+
+  const Topology& topology = build_or->topology;
+  CHECK(endpoint_pool_ids(topology, "nic_mlx5_0") == std::vector<std::string>{"cpu0", "gpu0"});
+  CHECK(endpoint_pool_ids(topology, "nic_mlx5_1") == std::vector<std::string>{"cpu0", "gpu1"});
+  CHECK(endpoint_pool_ids(topology, "nic_mlx5_2") == std::vector<std::string>{"cpu1", "gpu2"});
+
+  const auto& observability = build_or->observability;
+  CHECK(observability.affinity_nic_candidate_count == 3);
+  CHECK(observability.affinity_nic_scored_count == 3);
+  CHECK(observability.affinity_nic_narrowed_count == 2);
+  CHECK(observability.affinity_degraded == false);
+}
+
+TEST_CASE(
+    "Host topology builder keeps baseline pools when affinity inference degrades",
+    "[communicator][topology][discovery]") {
+  CommunicatorConfig config = make_simple_numa_config();
+  auto* discovery = config.mutable_topology_discovery();
+  discovery->set_enable(true);
+  discovery->mutable_merge_policy()->set_emit_rail_switch_endpoints(false);
+  discovery->mutable_merge_policy()->set_require_connected(false);
+  discovery->mutable_nvlink()->set_source(NvlinkDiscoveryConfig::SOURCE_DISABLED);
+
+  const std::string lldp_file = write_temp_file(
+      "pf0=0000:41:00.1,mlx5_0,1\n"
+      "pf1=0000:42:00.1,mlx5_1,1\n"
+      "pf2=0000:81:00.1,mlx5_2,2\n",
+      "lldp_affinity_degrade.txt");
+  discovery->mutable_lldp()->set_file_path(lldp_file);
+  discovery->mutable_lldp()->set_required(true);
+
+  tensorcast::communicator::topology::discovery::HostTopologyBuilderOptions options;
+  options.gpu_pci_path_overrides = {
+      {0, "/sys/devices/pci0000:00/0000:00:01.0/0000:41:00.0"},
+      {1, "/sys/devices/pci0000:00/0000:00:02.0/0000:42:00.0"},
+      {2, "/sys/devices/pci0000:80/0000:80:01.0/0000:81:00.0"},
+  };
+  options.nic_pci_path_overrides = {
+      {"mlx5_0", ""},
+      {"mlx5_1", ""},
+      {"mlx5_2", ""},
+  };
+
+  auto build_or = build_topology_from_discovery_with_observability(config, options);
+  INFO(build_or.status());
+  REQUIRE(build_or.ok());
+
+  const Topology& topology = build_or->topology;
+  CHECK(endpoint_pool_ids(topology, "nic_mlx5_0") == std::vector<std::string>{"cpu0", "gpu0", "gpu1"});
+  CHECK(endpoint_pool_ids(topology, "nic_mlx5_1") == std::vector<std::string>{"cpu0", "gpu0", "gpu1"});
+  CHECK(endpoint_pool_ids(topology, "nic_mlx5_2") == std::vector<std::string>{"cpu1", "gpu2"});
+
+  const auto& observability = build_or->observability;
+  CHECK(observability.affinity_nic_candidate_count == 3);
+  CHECK(observability.affinity_nic_scored_count == 0);
+  CHECK(observability.affinity_nic_narrowed_count == 0);
+  CHECK(observability.affinity_degraded == true);
+  CHECK_FALSE(observability.affinity_degrade_reason.empty());
 }
 
 TEST_CASE("Host topology builder ignores NVLINK GPUs without discovered edges", "[communicator][topology][discovery]") {

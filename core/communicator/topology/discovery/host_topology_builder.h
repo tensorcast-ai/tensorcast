@@ -5,6 +5,7 @@
 
 #include <string>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "core/communicator/topology/discovery/nvlink_source.h"
 #include "core/communicator/topology/topology.h"
@@ -18,6 +19,11 @@ struct HostTopologyBuilderOptions {
   bool require_connected_when_discovery_disabled = true;
   bool strict_parsing = false;
   NvlinkRuntimeProbeOptions nvlink_runtime_probe;
+  // Test-only and deterministic override hooks for PCI affinity inference.
+  // Keyed by simple_numa GPU index.
+  absl::flat_hash_map<int, std::string> gpu_pci_path_overrides;
+  // Keyed by NIC endpoint name (e.g. mlx5_0).
+  absl::flat_hash_map<std::string, std::string> nic_pci_path_overrides;
 };
 
 struct TopologyDiscoveryObservability {
@@ -33,6 +39,11 @@ struct TopologyDiscoveryObservability {
   std::string nvlink_degrade_reason;
   int nic_endpoint_count = 0;
   int rail_switch_endpoint_count = 0;
+  int affinity_nic_candidate_count = 0;
+  int affinity_nic_scored_count = 0;
+  int affinity_nic_narrowed_count = 0;
+  bool affinity_degraded = false;
+  std::string affinity_degrade_reason;
 };
 
 struct HostTopologyBuildResult {

@@ -113,12 +113,18 @@ Behavior depends on `communicator.topology_discovery.enable`:
 - `true`: topology is built via discovery merge:
   - LLDP maps NICs to `netsw_rail_<rail_id>` switch endpoints.
   - Missing LLDP rows degrade to `netsw_unknown` unless `lldp.required=true`.
+  - NIC/GPU affinity is inferred dynamically from PCI topology (longest common PCI path prefix):
+    - GPU PCI paths come from CUDA device properties + sysfs resolution.
+    - NIC PCI paths come from LLDP `pci_bdf` (or `/sys/class/infiniband/<nic>/device` fallback).
+    - When inferred successfully, NIC endpoint `pool_ids` are narrowed from `CPU + node GPUs` to `CPU + nearest GPU subset`.
+    - On partial probe failure, inference degrades and preserves baseline NIC `pool_ids`.
   - NVLINK snapshot source (`SOURCE_SNAPSHOT_FILE`) can add `nvlink_<gpu_uuid>` endpoints plus bidirectional P2P links between discovered GPU pairs.
   - NVLINK runtime probe source (`SOURCE_RUNTIME_PROBE`) runs:
     - `nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits`
     - `nvidia-smi topo -m`
+    - Runtime parser strips ANSI control sequences from `topo -m` rows (for drivers that emit underlined headers, e.g. `ESC[4mGPU0`).
     and derives GPU pairs from `NV*` matrix cells.
-  - The builder also emits discovery observability fields: source selection (`lldp_source` / `nvlink_source`), parsed record counts (`lldp_records`, `nvlink_gpus`, `nvlink_edges`), and degrade reasons (`*_degrade_reason`) when fallback is taken.
+  - The builder also emits discovery observability fields: source selection (`lldp_source` / `nvlink_source`), parsed record counts (`lldp_records`, `nvlink_gpus`, `nvlink_edges`), NIC affinity counters (`affinity_nic_candidates`, `affinity_nic_scored`, `affinity_nic_narrowed`), and degrade reasons (`*_degrade_reason`, including `affinity_degrade_reason`) when fallback is taken.
 
 When discovery is enabled, `simple_numa_topology_tool` writes one summary line to stderr with these observability fields and still writes DOT graph output to stdout.
 For repeatable local checks, the repository includes `lldp-info.txt` and `nvlink-snapshot.txt` as sample discovery inputs.
