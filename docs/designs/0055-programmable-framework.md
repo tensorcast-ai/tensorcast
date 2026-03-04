@@ -67,7 +67,7 @@ Instead, programmability is expressed by **composing existing Artifact primitive
 
 - `CallContext`: QoS + deadline + idempotency + tracing tags (per request/task).
 - `Operation[T]`: unified operation handle (`status/wait/cancel`) for long-tail control-plane actions (Phase-0: sync/blocking only).
-- `Plan`: a composable orchestration IR that dispatches actions across daemons and instances via node-local agents/engine adapters (no “shipping arbitrary Python” like Ray).
+- `Plan`: a composable orchestration IR executed by a caller-local **PlanExecutor** (`Plan.run()`), dispatching worker steps to Store Daemons and instance steps to **Instance Agents / Engine Adapters** (no “shipping arbitrary Python” like Ray).
 
 This document prioritizes **What/Why** (semantics and rationale) and defines contracts/invariants that must hold from Phase-0.
 
@@ -87,8 +87,8 @@ Scope choices (long-term, repo-wide):
   object” abstraction.
 - **Control-plane programmable, data-plane fixed**: programmability may add control RPCs (idempotency, pinning,
   wait/cancel/status), but does not fork transport/loading semantics.
-- **Node-local safety boundary**: any action that touches PID/IPC/regions must run at the node-local boundary
-  (Engine Adapter / node agent), not from a central controller.
+- **Instance-local safety boundary**: any action that touches PID/IPC/regions must run at the inference-instance
+  boundary (Engine Adapter / Instance Agent), not from a central controller.
 
 ### Phase labels (note)
 
@@ -97,7 +97,7 @@ strictly linear sequence inside this doc. For `status: implemented` 0055:
 
 - **Phase-0**: baseline implemented behavior (sync/blocking public APIs; local-run plans; user-driven retries).
 - **Phase-1**: recommended follow-ups (e.g., additional wait/status RPCs to reduce polling).
-- **Phase-4**: implemented PlanSpec + node-local execution boundary (node_agent / engine adapter dispatch).
+- **Phase-4**: implemented PlanSpec + instance-local execution boundary (Instance Agent / Engine Adapter dispatch; legacy proto/package name: `node_agent`).
 
 ## Prior State (Grounding)
 
@@ -401,7 +401,8 @@ Programmability must respect the existing TensorCast process/runtime boundaries:
 
 - **Global Store (central, required)**: metadata & coordination (worker registry, instance registry, persistence metadata).
 - **Store Daemon / Worker (node-local, required)**: daemon-owned data plane (`StoreEngine`, replica lifecycles, P2P transfers, placement pins).
-- **Node Agent (node-local, required for instance steps)**: executes actions that must run on the target node (including actions that require process context via an Engine Adapter).
+- **PlanExecutor (caller-local, required for Plan execution)**: executes `PlanSpec` in the caller process (`Plan.run()`), dispatching worker steps to Store Daemons and instance steps to Instance Agents.
+- **Instance Agent (in-process with the inference instance, required for instance steps)**: executes instance-scoped plan actions by calling an Engine Adapter.
 - **Engine Adapter (in-process, required for PID/IPC/region binding)**: executes process-context actions (region-backed `into`, LIP registration, target resolution, transforms).
 
 Remote-safety rules:
@@ -409,7 +410,7 @@ Remote-safety rules:
 - Any action requiring PID/IPC/region references MUST run via the Engine Adapter on the target instance.
 - Any daemon-owned action that should be safe under retries and should not couple to a PID MUST run in `NO_LEASE` mode
   (see Prefetch/Pinning).
-- Remote callers must not directly call PID/IPC-binding RPCs across nodes; they dispatch instance-scoped plan steps to Node Agents, which enforce process-context safety.
+- Remote callers must not directly call PID/IPC-binding RPCs across nodes; the PlanExecutor dispatches instance-scoped plan steps to Instance Agents via the instance-agent RPC boundary (legacy proto/package label: `node_agent`), which enforces process-context safety.
 
 ---
 
@@ -848,7 +849,7 @@ Naming note: `Plan` here is orchestration IR, distinct from the existing `PlanTy
 
 - Avoids “distributed Python execution” complexity.
 - Supports at-least-once semantics with idempotent action submission (Phase-0 retries are user-driven).
-- Provides a composable DAG of actions: worker steps run on Store Daemons, and instance steps run via Node Agents / Engine Adapters.
+- Provides a composable DAG of actions: worker steps run on Store Daemons, and instance steps run via Instance Agents / Engine Adapters.
 
 #### Plan is a serializable IR (normative)
 
@@ -868,8 +869,10 @@ For long-term correctness, `Plan` MUST be serializable and versioned (proto pref
     builders before hashing/fingerprinting.
   - Planned refinement: derive `step_id` deterministically from a step fingerprint (UUIDv5 over stable inputs) and
     enforce canonical ordering of dependency lists and batch inputs in the IR (see `docs/designs/0056-programmable-framework-adv.md`).
-- A Node Agent implementation exists for node-local execution and Engine Adapter dispatch.
-- `Plan.run()` executes in the caller process and dispatches actions to Store Daemons and Node Agents.
+- An Instance Agent implementation exists for instance-local execution and Engine Adapter dispatch (legacy code/proto name: `node_agent`).
+- `Plan.run()` executes in the caller process (PlanExecutor) and dispatches actions to Store Daemons and Instance Agents.
+  - Worker-only plans can be executed from any process that can reach the target Store Daemons.
+  - Plans containing instance-scoped steps require reachability to the target instance’s Instance Agent boundary.
 
 #### Node identity: Worker vs Instance
 
@@ -999,9 +1002,10 @@ class WorkerStepBuilder:
     ) -> PlanStepRef[None]: ...
 ```
 
-#### Instance steps (engine-owned; via Node Agent)
+#### Instance steps (engine-owned; via Instance Agent)
 
-Instance steps are dispatched to the target instance’s Node Agent, which calls the engine adapter.
+Instance steps are dispatched to the target instance’s Instance Agent via the instance-agent RPC boundary (legacy
+proto/package label: `node_agent`), which calls the engine adapter.
 
 ```python
 class InstanceStepBuilder:
@@ -1405,9 +1409,9 @@ Migration/compatibility (required):
 - Retention handles require the unified envelope (issuer must be configured with capability token keys); they do not
   have a legacy token format.
 
-### Node Agent / Engine Adapter RPCs (Phase-4; implemented)
+### Instance Agent / Engine Adapter RPCs (Phase-4; implemented)
 
-Node-local execution is provided by:
+Instance-local execution boundary is provided by (legacy code/proto name: `node_agent`):
 
 - `proto/tensorcast/node_agent/v1/node_agent.proto` (Plan execution RPCs)
 - `tensorcast/node_agent/executor.py` + `tensorcast/node_agent/server.py`
@@ -1432,7 +1436,7 @@ Node-local execution is provided by:
 
 - Worker registry/heartbeat includes a stable `daemon_id` (derived from daemon config, not from address); address/port
   are routing attributes and endpoint conflicts are rejected regardless of `node_id`.
-- `ListActiveWorkers` returns `daemon_id` alongside `worker_id` so plan executors/node agents can reconcile state across
+- `ListActiveWorkers` returns `daemon_id` alongside `worker_id` so plan executors/instance agents can reconcile state across
   HA re-registrations.
 - Instance registry exposes `RegisterInstance`, `InstanceHeartbeat`, and `ListActiveInstances` for stable
   `instance_id` discovery (and includes an HA-safe `daemon_id` for routing).
@@ -1458,7 +1462,7 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
 
 - Add `daemon_id` to the Global Store worker registry (`schema.sql`: `workers` table), **NOT NULL** with a uniqueness
   constraint (stable identity; address/port remain unique but are not identity).
-- Plumb `daemon_id` through `RegisterWorker`, heartbeat, and `ListActiveWorkers`, so plan executors/node agents can
+- Plumb `daemon_id` through `RegisterWorker`, heartbeat, and `ListActiveWorkers`, so plan executors/instance agents can
   reconcile worker restarts and address changes without guessing.
 
 ---
