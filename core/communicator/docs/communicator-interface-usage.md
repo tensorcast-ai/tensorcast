@@ -114,6 +114,11 @@ Current code constraints:
 - `RoutingContext::set_endpoint_bindings(...)` is one-shot immutable.
 - `RoutingContext::update_endpoint_binding(...)` returns `FAILED_PRECONDITION`.
 - `RouteChannel` supports direct 1-hop only; multi-hop read returns `UNIMPLEMENTED`.
+- When a direct topology link is missing for cross-node traffic, `RoutingContext` now attempts a rail-matched NIC fallback:
+  - resolve local NIC by source GPU/pool/rail affinity from topology,
+  - choose a destination-node binding with network address via rail-aware scoring (`preferred rail` > `destination rail` > endpoint-id/NIC heuristics),
+  - build a single-hop channel anchored on the selected local NIC link.
+- This fallback is additive and keeps the same strict direct read fallback in `RemoteKeySource` if routed lookup/read fails.
 - `NvlinkAdapter` currently returns `UNIMPLEMENTED`.
 
 Important:

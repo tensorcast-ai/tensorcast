@@ -105,6 +105,69 @@ Topology build_minimal_topology() {
   return std::move(topology_or).value();
 }
 
+Topology build_rail_switch_topology() {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"gpu0", "gpu0", PoolType::kGpu});
+  pools.push_back(Pool{"gpu1", "gpu1", PoolType::kGpu});
+
+  std::vector<Endpoint> endpoints;
+  Endpoint nic0;
+  nic0.id = "nic_0";
+  nic0.name = "nic_0";
+  nic0.kind = EndpointKind::kClient;
+  nic0.type = EndpointType::kNic;
+  nic0.pool_ids = {"cpu0", "gpu0"};
+  endpoints.push_back(nic0);
+
+  Endpoint nic1;
+  nic1.id = "nic_1";
+  nic1.name = "nic_1";
+  nic1.kind = EndpointKind::kClient;
+  nic1.type = EndpointType::kNic;
+  nic1.pool_ids = {"cpu0", "gpu1"};
+  endpoints.push_back(nic1);
+
+  Endpoint rail0;
+  rail0.id = "netsw_rail_0";
+  rail0.name = rail0.id;
+  rail0.kind = EndpointKind::kSwitch;
+  rail0.type = EndpointType::kNic;
+  endpoints.push_back(rail0);
+
+  Endpoint rail1;
+  rail1.id = "netsw_rail_1";
+  rail1.name = rail1.id;
+  rail1.kind = EndpointKind::kSwitch;
+  rail1.type = EndpointType::kNic;
+  endpoints.push_back(rail1);
+
+  std::vector<Link> links;
+  Link nic0_to_rail0;
+  nic0_to_rail0.id = "nic_0_to_netsw_rail_0";
+  nic0_to_rail0.name = nic0_to_rail0.id;
+  nic0_to_rail0.type = LinkType::kSwitch;
+  nic0_to_rail0.src_endpoint_id = "nic_0";
+  nic0_to_rail0.dst_endpoint_id = "netsw_rail_0";
+  links.push_back(nic0_to_rail0);
+
+  Link nic1_to_rail1;
+  nic1_to_rail1.id = "nic_1_to_netsw_rail_1";
+  nic1_to_rail1.name = nic1_to_rail1.id;
+  nic1_to_rail1.type = LinkType::kSwitch;
+  nic1_to_rail1.src_endpoint_id = "nic_1";
+  nic1_to_rail1.dst_endpoint_id = "netsw_rail_1";
+  links.push_back(nic1_to_rail1);
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      {.require_endpoint_links = true, .require_connected = false});
+  REQUIRE(topology_or.ok());
+  return std::move(topology_or).value();
+}
+
 } // namespace
 
 TEST_CASE("Connection records success and failure", "[communicator][routing]") {
@@ -175,6 +238,11 @@ TEST_CASE("RoutingContext caches communicators and builds direct channels", "[co
   CHECK(channel_or.value()->hop_count() == 1);
   CHECK(channel_or.value()->src_endpoint_id() == "nic0");
   CHECK(channel_or.value()->dst_endpoint_id() == "nic1");
+  REQUIRE(channel_or.value()->hops().size() == 1);
+  CHECK(channel_or.value()->hops().front()->type() == ConnectionType::kP2P);
+  CHECK(channel_or.value()->hops().front()->remote_binding().endpoint_id == "nic1");
+  REQUIRE(channel_or.value()->hops().front()->link() != nullptr);
+  CHECK(channel_or.value()->hops().front()->link()->id == "nic0_to_nic1");
 }
 
 TEST_CASE("RoutingContext rejects topology and binding mutation", "[communicator][routing]") {
@@ -198,4 +266,98 @@ TEST_CASE("RoutingContext rejects topology and binding mutation", "[communicator
   EndpointBinding update_binding{"nic0", "node0", "127.0.0.1", 3000};
   auto update_status = context->update_endpoint_binding(std::move(update_binding));
   CHECK(update_status.code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE(
+    "RoutingContext rail-matched fallback selects remote NIC by source rail",
+    "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_rail_switch_topology()).ok());
+
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_a/dev/gpu/0",
+      .node_id = "node_a",
+      .rail_id = 0,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_b/dev/gpu/0",
+      .node_id = "node_b",
+      .rail_id = 1,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_remote_0",
+      .node_id = "node_b",
+      .ip = "10.0.0.10",
+      .port = 4010,
+      .rail_id = 0,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_remote_1",
+      .node_id = "node_b",
+      .ip = "10.0.0.11",
+      .port = 4011,
+      .rail_id = 1,
+  });
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  auto comm_or = context->get_communicator("node_a/dev/gpu/0", "node_b/dev/gpu/0");
+  REQUIRE(comm_or.ok());
+  auto channel_or = comm_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+
+  const std::shared_ptr<Connection>& connection = channel_or.value()->hops().front();
+  CHECK(connection->remote_binding().endpoint_id == "nic_remote_0");
+  CHECK(connection->remote_binding().ip == "10.0.0.10");
+  CHECK(connection->remote_binding().port == 4010);
+  CHECK(connection->type() == ConnectionType::kSwitch);
+  REQUIRE(connection->link() != nullptr);
+  CHECK(connection->link()->id == "nic_0_to_netsw_rail_0");
+}
+
+TEST_CASE(
+    "RoutingContext rail-matched fallback uses destination rail when preferred rail missing",
+    "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_rail_switch_topology()).ok());
+
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_a/dev/gpu/0",
+      .node_id = "node_a",
+      .rail_id = 0,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_b/dev/gpu/1",
+      .node_id = "node_b",
+      .rail_id = 1,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_remote_1",
+      .node_id = "node_b",
+      .ip = "10.0.0.21",
+      .port = 4021,
+      .rail_id = 1,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_remote_2",
+      .node_id = "node_b",
+      .ip = "10.0.0.22",
+      .port = 4022,
+      .rail_id = 2,
+  });
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  auto comm_or = context->get_communicator("node_a/dev/gpu/0", "node_b/dev/gpu/1");
+  REQUIRE(comm_or.ok());
+  auto channel_or = comm_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+
+  const std::shared_ptr<Connection>& connection = channel_or.value()->hops().front();
+  CHECK(connection->remote_binding().endpoint_id == "nic_remote_1");
+  CHECK(connection->remote_binding().rail_id == 1);
 }

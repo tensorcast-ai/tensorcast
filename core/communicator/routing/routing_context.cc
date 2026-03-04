@@ -2,17 +2,73 @@
 
 #include "core/communicator/routing/routing_context.h"
 
+#include <algorithm>
+#include <charconv>
 #include <format>
+#include <limits>
+#include <optional>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
+#include "core/communicator/base/constants.h"
 #include "core/communicator/routing/read_helpers.h"
 
 namespace tensorcast::communicator::routing {
 namespace {
 
-ConnectionType connection_type_from_link(const topology::Link& link) {
-  switch (link.type) {
+constexpr std::string_view kNicEndpointPrefix = "nic_";
+constexpr std::string_view kRailSwitchPrefix = "netsw_rail_";
+constexpr std::string_view kGpuEndpointMarker = "/dev/gpu/";
+
+std::optional<int> parse_decimal_int(std::string_view text) {
+  int value = 0;
+  const auto* begin = text.data();
+  const auto* end = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, value);
+  if (ec != std::errc() || ptr != end) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+std::optional<int> parse_gpu_dev_id_from_endpoint_id(std::string_view endpoint_id) {
+  const size_t marker_pos = endpoint_id.rfind(kGpuEndpointMarker);
+  if (marker_pos == std::string_view::npos) {
+    return std::nullopt;
+  }
+  const size_t value_pos = marker_pos + kGpuEndpointMarker.size();
+  if (value_pos >= endpoint_id.size()) {
+    return std::nullopt;
+  }
+  return parse_decimal_int(endpoint_id.substr(value_pos));
+}
+
+std::optional<int> parse_rail_id_from_switch_endpoint_id(std::string_view endpoint_id) {
+  if (!endpoint_id.starts_with(kRailSwitchPrefix)) {
+    return std::nullopt;
+  }
+  auto value = parse_decimal_int(endpoint_id.substr(kRailSwitchPrefix.size()));
+  if (!value.has_value() || *value < 0) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+bool endpoint_has_pool(const topology::Endpoint& endpoint, std::string_view pool_id) {
+  return std::find(endpoint.pool_ids.begin(), endpoint.pool_ids.end(), pool_id) != endpoint.pool_ids.end();
+}
+
+bool is_nic_binding_id(std::string_view endpoint_id) {
+  return endpoint_id.starts_with(kNicEndpointPrefix);
+}
+
+ConnectionType connection_type_from_link(const topology::Link* link) {
+  if (link == nullptr) {
+    return ConnectionType::kP2P;
+  }
+  switch (link->type) {
     case topology::LinkType::kForward:
       return ConnectionType::kForward;
     case topology::LinkType::kP2P:
@@ -187,16 +243,6 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
   if (!topology_) {
     return absl::FailedPreconditionError("topology is not set");
   }
-  const topology::Endpoint* src_endpoint = topology_->find_endpoint(src_endpoint_id);
-  if (!src_endpoint) {
-    return absl::NotFoundError(
-        std::format("source endpoint not found: {}", src_endpoint_id));
-  }
-  const topology::Endpoint* dst_endpoint = topology_->find_endpoint(dst_endpoint_id);
-  if (!dst_endpoint) {
-    return absl::NotFoundError(
-        std::format("destination endpoint not found: {}", dst_endpoint_id));
-  }
 
   auto src_binding_it = bindings_.find(src_endpoint_id);
   if (src_binding_it == bindings_.end()) {
@@ -209,21 +255,69 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
         std::format("missing endpoint binding for destination: {}", dst_endpoint_id));
   }
 
-  const topology::Link* link = find_link_locked(src_endpoint_id, dst_endpoint_id);
-  if (!link) {
-    return absl::NotFoundError(
-        std::format("no direct link between endpoints: {} -> {}", src_endpoint_id, dst_endpoint_id));
+  const topology::Endpoint* src_endpoint = topology_->find_endpoint(src_endpoint_id);
+  const topology::Endpoint* dst_endpoint = topology_->find_endpoint(dst_endpoint_id);
+  const EndpointBinding& local_binding = src_binding_it->second;
+  EndpointBinding remote_binding = dst_binding_it->second;
+
+  const topology::Endpoint* protocol_src_endpoint = src_endpoint;
+  const topology::Endpoint* protocol_dst_endpoint = dst_endpoint;
+  const topology::Link* link = nullptr;
+  if (src_endpoint && dst_endpoint) {
+    link = find_link_locked(src_endpoint_id, dst_endpoint_id);
   }
 
-  const ConnectionProtocol protocol = select_protocol_locked(
-      *src_endpoint, *dst_endpoint, src_binding_it->second, dst_binding_it->second);
+  if (!link) {
+    auto rail_path_or = resolve_rail_matched_path_locked(
+        src_endpoint_id,
+        dst_endpoint_id,
+        local_binding,
+        remote_binding);
+    if (!rail_path_or.ok()) {
+      if (!src_endpoint) {
+        return absl::NotFoundError(std::format(
+            "source endpoint not found in topology and no rail-matched fallback: {}",
+            src_endpoint_id));
+      }
+      if (!dst_endpoint) {
+        return absl::NotFoundError(std::format(
+            "destination endpoint not found in topology and no rail-matched fallback: {}",
+            dst_endpoint_id));
+      }
+      return absl::NotFoundError(std::format(
+          "no direct link or rail-matched fallback between endpoints: {} -> {} ({})",
+          src_endpoint_id,
+          dst_endpoint_id,
+          rail_path_or.status().message()));
+    }
+
+    RailMatchedPath rail_path = std::move(rail_path_or).value();
+    if (rail_path.src_topology_endpoint != nullptr) {
+      protocol_src_endpoint = rail_path.src_topology_endpoint;
+    }
+    if (rail_path.dst_topology_endpoint != nullptr) {
+      protocol_dst_endpoint = rail_path.dst_topology_endpoint;
+    }
+    link = rail_path.link;
+    remote_binding = std::move(rail_path.remote_binding);
+  }
+
+  ConnectionProtocol protocol = ConnectionProtocol::kAuto;
+  if (protocol_src_endpoint != nullptr && protocol_dst_endpoint != nullptr) {
+    protocol = select_protocol_locked(
+        *protocol_src_endpoint,
+        *protocol_dst_endpoint,
+        local_binding,
+        remote_binding);
+  }
+
   auto connection = get_or_create_connection_locked(
       src_endpoint_id,
       dst_endpoint_id,
       link,
       protocol,
-      src_binding_it->second,
-      dst_binding_it->second);
+      local_binding,
+      remote_binding);
   std::vector<std::shared_ptr<Connection>> hops;
   hops.push_back(connection);
 
@@ -252,7 +346,7 @@ std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
     return it->second;
   }
   auto link_state = get_or_create_link_state_locked(link);
-  const ConnectionType type = connection_type_from_link(*link);
+  const ConnectionType type = connection_type_from_link(link);
   std::shared_ptr<ConnectionAdapter> adapter =
       protocol == ConnectionProtocol::kNvlink ? nvlink_adapter_ : engine_adapter_;
   auto connection = std::make_shared<Connection>(
@@ -278,6 +372,266 @@ const topology::Link* RoutingContext::find_link_locked(
     }
   }
   return nullptr;
+}
+
+const topology::Link* RoutingContext::find_any_link_for_endpoint_locked(
+    const std::string& endpoint_id) const {
+  const topology::Link* best = nullptr;
+  for (const auto& [link_id, link] : topology_->links()) {
+    if (link.src_endpoint_id != endpoint_id && link.dst_endpoint_id != endpoint_id) {
+      continue;
+    }
+    if (best == nullptr || link.id < best->id) {
+      best = &link;
+    }
+  }
+  return best;
+}
+
+int RoutingContext::infer_nic_rail_id_locked(const std::string& nic_endpoint_id) const {
+  int inferred_rail_id = -1;
+  for (const auto& [link_id, link] : topology_->links()) {
+    if (link.type != topology::LinkType::kSwitch) {
+      continue;
+    }
+
+    std::string_view switch_endpoint_id;
+    if (link.src_endpoint_id == nic_endpoint_id) {
+      switch_endpoint_id = link.dst_endpoint_id;
+    } else if (link.dst_endpoint_id == nic_endpoint_id) {
+      switch_endpoint_id = link.src_endpoint_id;
+    } else {
+      continue;
+    }
+
+    auto rail_id = parse_rail_id_from_switch_endpoint_id(switch_endpoint_id);
+    if (!rail_id.has_value()) {
+      continue;
+    }
+    if (inferred_rail_id < 0 || *rail_id < inferred_rail_id) {
+      inferred_rail_id = *rail_id;
+    }
+  }
+  return inferred_rail_id;
+}
+
+absl::StatusOr<RoutingContext::LocalNicSelection>
+RoutingContext::select_local_nic_for_source_locked(
+    const std::string& src_endpoint_id,
+    const EndpointBinding& src_binding) const {
+  const topology::Endpoint* direct_endpoint = topology_->find_endpoint(src_endpoint_id);
+  if (direct_endpoint != nullptr &&
+      direct_endpoint->kind == topology::EndpointKind::kClient &&
+      direct_endpoint->type == topology::EndpointType::kNic) {
+    return LocalNicSelection{
+        .endpoint = direct_endpoint,
+        .rail_id = infer_nic_rail_id_locked(direct_endpoint->id),
+    };
+  }
+
+  std::vector<const topology::Endpoint*> nic_candidates;
+  nic_candidates.reserve(topology_->endpoints().size());
+  for (const auto& [endpoint_id, endpoint] : topology_->endpoints()) {
+    if (endpoint.kind != topology::EndpointKind::kClient ||
+        endpoint.type != topology::EndpointType::kNic) {
+      continue;
+    }
+    nic_candidates.push_back(&endpoint);
+  }
+  if (nic_candidates.empty()) {
+    return absl::NotFoundError("topology has no NIC endpoints for rail matching");
+  }
+
+  std::sort(
+      nic_candidates.begin(),
+      nic_candidates.end(),
+      [](const topology::Endpoint* lhs, const topology::Endpoint* rhs) {
+        return lhs->id < rhs->id;
+      });
+
+  int source_gpu_dev_id = -1;
+  if (const auto parsed_gpu_id = parse_gpu_dev_id_from_endpoint_id(src_endpoint_id); parsed_gpu_id.has_value()) {
+    source_gpu_dev_id = *parsed_gpu_id;
+  } else if (src_binding.dev_type == base::COMMUNICATE_ENGINE_DEV_GPU) {
+    source_gpu_dev_id = src_binding.dev_id;
+  }
+  const bool source_is_gpu = source_gpu_dev_id >= 0;
+  const int preferred_rail_id = src_binding.rail_id;
+  const std::string gpu_pool_id = source_is_gpu ? std::format("gpu{}", source_gpu_dev_id) : "";
+
+  const topology::Endpoint* best_endpoint = nullptr;
+  int best_endpoint_rail_id = -1;
+  int best_score = std::numeric_limits<int>::min();
+  for (const topology::Endpoint* candidate : nic_candidates) {
+    int score = 0;
+    const int candidate_rail_id = infer_nic_rail_id_locked(candidate->id);
+
+    if (preferred_rail_id >= 0) {
+      if (candidate_rail_id == preferred_rail_id) {
+        score += 200;
+      } else if (candidate_rail_id >= 0) {
+        score -= 80;
+      }
+    }
+
+    if (source_is_gpu) {
+      if (endpoint_has_pool(*candidate, gpu_pool_id)) {
+        score += 80;
+      } else {
+        score -= 20;
+      }
+    }
+
+    if (candidate_rail_id >= 0) {
+      score += 5;
+    }
+
+    if (score > best_score) {
+      best_score = score;
+      best_endpoint = candidate;
+      best_endpoint_rail_id = candidate_rail_id;
+      continue;
+    }
+    if (score == best_score && best_endpoint != nullptr && candidate->id < best_endpoint->id) {
+      best_endpoint = candidate;
+      best_endpoint_rail_id = candidate_rail_id;
+    }
+  }
+
+  if (best_endpoint == nullptr) {
+    return absl::NotFoundError(
+        std::format("failed to resolve local NIC endpoint for source: {}", src_endpoint_id));
+  }
+  return LocalNicSelection{
+      .endpoint = best_endpoint,
+      .rail_id = best_endpoint_rail_id,
+  };
+}
+
+absl::StatusOr<EndpointBinding> RoutingContext::select_remote_binding_for_rail_locked(
+    const EndpointBinding& dst_binding,
+    int preferred_rail_id) const {
+  if (dst_binding.node_id.empty()) {
+    return absl::InvalidArgumentError("destination binding node_id is empty");
+  }
+
+  struct RemoteCandidate {
+    const EndpointBinding* binding = nullptr;
+    int score = std::numeric_limits<int>::min();
+  };
+
+  std::vector<RemoteCandidate> candidates;
+  candidates.reserve(bindings_.size());
+  for (const auto& [endpoint_id, binding] : bindings_) {
+    if (binding.node_id != dst_binding.node_id) {
+      continue;
+    }
+    if (!binding.has_network_address()) {
+      continue;
+    }
+
+    int score = 0;
+    if (preferred_rail_id >= 0) {
+      if (binding.rail_id == preferred_rail_id) {
+        score += 200;
+      } else if (binding.rail_id >= 0) {
+        score -= 80;
+      }
+    }
+    if (dst_binding.rail_id >= 0 && binding.rail_id == dst_binding.rail_id) {
+      score += 80;
+    }
+    if (binding.endpoint_id == dst_binding.endpoint_id) {
+      score += 40;
+    }
+    if (is_nic_binding_id(binding.endpoint_id)) {
+      score += 20;
+    }
+    if (binding.rail_id >= 0) {
+      score += 5;
+    }
+
+    candidates.push_back(RemoteCandidate{
+        .binding = &binding,
+        .score = score,
+    });
+  }
+
+  if (candidates.empty()) {
+    if (dst_binding.has_network_address()) {
+      return dst_binding;
+    }
+    return absl::NotFoundError(std::format(
+        "no remote binding with network address for node: {}",
+        dst_binding.node_id));
+  }
+
+  std::sort(
+      candidates.begin(),
+      candidates.end(),
+      [](const RemoteCandidate& lhs, const RemoteCandidate& rhs) {
+        if (lhs.score != rhs.score) {
+          return lhs.score > rhs.score;
+        }
+        return lhs.binding->endpoint_id < rhs.binding->endpoint_id;
+      });
+  return *candidates.front().binding;
+}
+
+absl::StatusOr<RoutingContext::RailMatchedPath> RoutingContext::resolve_rail_matched_path_locked(
+    const std::string& src_endpoint_id,
+    const std::string& dst_endpoint_id,
+    const EndpointBinding& src_binding,
+    const EndpointBinding& dst_binding) const {
+  if (src_binding.node_id.empty() || dst_binding.node_id.empty()) {
+    return absl::FailedPreconditionError(
+        "rail-matched routing requires node_id in both endpoint bindings");
+  }
+  if (src_binding.node_id == dst_binding.node_id) {
+    return absl::FailedPreconditionError(
+        "rail-matched routing only applies to cross-node communication");
+  }
+
+  auto local_nic_or = select_local_nic_for_source_locked(src_endpoint_id, src_binding);
+  if (!local_nic_or.ok()) {
+    return local_nic_or.status();
+  }
+  const LocalNicSelection local_nic = std::move(local_nic_or).value();
+  if (local_nic.endpoint == nullptr) {
+    return absl::NotFoundError(std::format(
+        "failed to resolve local NIC endpoint for source: {}",
+        src_endpoint_id));
+  }
+
+  int preferred_rail_id = local_nic.rail_id;
+  if (preferred_rail_id < 0 && src_binding.rail_id >= 0) {
+    preferred_rail_id = src_binding.rail_id;
+  }
+  if (preferred_rail_id < 0 && dst_binding.rail_id >= 0) {
+    preferred_rail_id = dst_binding.rail_id;
+  }
+
+  auto remote_binding_or = select_remote_binding_for_rail_locked(dst_binding, preferred_rail_id);
+  if (!remote_binding_or.ok()) {
+    return remote_binding_or.status();
+  }
+  EndpointBinding remote_binding = std::move(remote_binding_or).value();
+  const topology::Endpoint* remote_topology_endpoint = topology_->find_endpoint(remote_binding.endpoint_id);
+
+  const topology::Link* selected_link = nullptr;
+  if (remote_topology_endpoint != nullptr) {
+    selected_link = find_link_locked(local_nic.endpoint->id, remote_topology_endpoint->id);
+  }
+  if (selected_link == nullptr) {
+    selected_link = find_any_link_for_endpoint_locked(local_nic.endpoint->id);
+  }
+
+  return RailMatchedPath{
+      .src_topology_endpoint = local_nic.endpoint,
+      .dst_topology_endpoint = remote_topology_endpoint,
+      .link = selected_link,
+      .remote_binding = std::move(remote_binding),
+  };
 }
 
 ConnectionProtocol RoutingContext::select_protocol_locked(

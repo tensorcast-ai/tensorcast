@@ -95,6 +95,18 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
     uint64_t generation = 0;
   };
 
+  struct RailMatchedPath {
+    const topology::Endpoint* src_topology_endpoint = nullptr;
+    const topology::Endpoint* dst_topology_endpoint = nullptr;
+    const topology::Link* link = nullptr;
+    EndpointBinding remote_binding;
+  };
+
+  struct LocalNicSelection {
+    const topology::Endpoint* endpoint = nullptr;
+    int rail_id = -1;
+  };
+
   absl::StatusOr<std::shared_ptr<RouteChannel>> build_direct_channel(
       const std::string& src_endpoint_id,
       const std::string& dst_endpoint_id);
@@ -117,6 +129,26 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   const topology::Link* find_link_locked(
       const std::string& src_endpoint_id,
       const std::string& dst_endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  const topology::Link* find_any_link_for_endpoint_locked(
+      const std::string& endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  absl::StatusOr<LocalNicSelection> select_local_nic_for_source_locked(
+      const std::string& src_endpoint_id,
+      const EndpointBinding& src_binding) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  int infer_nic_rail_id_locked(
+      const std::string& nic_endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  absl::StatusOr<EndpointBinding> select_remote_binding_for_rail_locked(
+      const EndpointBinding& dst_binding,
+      int preferred_rail_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  absl::StatusOr<RailMatchedPath> resolve_rail_matched_path_locked(
+      const std::string& src_endpoint_id,
+      const std::string& dst_endpoint_id,
+      const EndpointBinding& src_binding,
+      const EndpointBinding& dst_binding) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ConnectionProtocol select_protocol_locked(
       const topology::Endpoint& src_endpoint,

@@ -209,6 +209,18 @@ message TopologyDiscoveryConfig {
 - `EndpointBinding` 建议增补可选字段（如 `pci_bdf`、`rail_id`、`gpu_uuid`）以支持后续路由策略。
 - `core/communicator/transport/net_dev.cc` 的 `read_rail_id()` 迁移为调用统一 LLDP 解析组件，避免重复解析逻辑。
 
+## Cross-node NIC rail matching（路由阶段增量）
+
+为匹配“每个 GPU 亲和本地 NIC/NVLINK endpoint，跨节点走 NIC rail 对齐”的实践部署，本设计在路由阶段补充了跨节点 rail 匹配策略（保持 `RoutingContext` 1-hop 语义不变）：
+
+1. 若 `src -> dst` 存在 direct link，沿用 direct 1-hop。
+2. 若 direct link 不存在且 `src_binding.node_id != dst_binding.node_id`：
+   - 从本机拓扑中为 source 选择本地 NIC（优先 rail 命中，再结合 GPU pool 亲和）。
+   - 以该 NIC rail 作为 preferred rail，在目标节点 bindings 中选择可用网络地址端点（评分优先级：preferred rail > dst rail > endpoint/NIC 特征）。
+   - 用本地 NIC 邻接链路（通常是 `nic -> netsw_rail_<id>`）作为链路锚点建立 1-hop channel。
+3. 该策略允许运行时 endpoint id（例如 `node/dev/gpu/<id>`）与拓扑 endpoint id 解耦，不要求两者完全同名。
+4. 若 rail 匹配失败，保持现有错误语义并由上层 `RemoteKeySource` 继续 strict direct fallback。
+
 # Error Model & Invariants
 
 - LLDP 解析不变量：

@@ -73,6 +73,7 @@ related_code:
 - `simple_numa` 继续作为基础 CPU/GPU/NIC inventory；LLDP 与 NVLINK 负责增量信息补强。
 - 对不完整输入优先 degrade（除非 `required=true`），避免影响现网可用性。
 - 2026-03-04 增量增强：`HostTopologyBuilder` 新增 NIC↔GPU 动态亲和性推断（PCI path longest-common-prefix 评分），并新增 builder observability 计数与降级原因字段；当推断不完整时保留基线 `pool_ids`。
+- 2026-03-04 增量增强：`RoutingContext` 在 cross-node 且无 direct link 时新增 NIC rail 匹配回退（本地 NIC 选择 + 目标节点 rail 评分绑定选择），保持 1-hop channel 与 `RemoteKeySource` strict direct fallback 兼容语义。
 
 # Acceptance Checks
 
