@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -40,6 +41,9 @@ from tensorcast.global_store.repositories import (
 )
 from tensorcast.global_store.repositories.base import is_transient_tx_conflict
 from tensorcast.global_store.repositories.replica_repository import SourceBalanceWeights
+from tensorcast.global_store.repositories.transport_repository import (
+    TransportWindowRow,
+)
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -59,6 +63,27 @@ class TransportService:
         self.transport_repository = transport_repository
         self.pending_transport_request_repository = pending_transport_request_repository
         self.config = get_config()
+        # Serialize queue-wide dispatch to avoid multi-thread transaction storms.
+        self._dispatch_loop_lock = threading.Lock()
+
+    def _retry_transient_db_call(self, *, op_name: str, fn):
+        max_attempts = 8
+        for attempt in range(max_attempts):
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001
+                if not is_transient_tx_conflict(exc) or attempt == max_attempts - 1:
+                    raise
+                backoff_sec = min(0.2, 0.005 * (2**attempt))
+                logger.warning(
+                    "Retrying transient DB conflict op=%s attempt=%s/%s backoff_s=%.3f error=%s",
+                    op_name,
+                    attempt + 1,
+                    max_attempts,
+                    backoff_sec,
+                    exc,
+                )
+                time.sleep(backoff_sec)
 
     def _source_balance_weights(self) -> SourceBalanceWeights:
         policy = self.config.transport_scheduler.source_balance_weights
@@ -138,6 +163,7 @@ class TransportService:
             source_node_id=source_node_id,
             source_address=source_address,
             source_port=source_port,
+            replica_memory_size_bytes=max(0, int(replica.memory_size)),
             request_id=request_id,
             request_fingerprint=request_fingerprint,
             requester_worker_id=requester_worker_id,
@@ -291,6 +317,7 @@ class TransportService:
 
         try:
             with self.replica_repository.transaction() as tx:
+                self.pending_transport_request_repository.purge_malformed_rows(cursor=tx)
                 existing_pending = (
                     self.pending_transport_request_repository.find_by_request_id(
                         request_id, cursor=tx
@@ -345,55 +372,45 @@ class TransportService:
         while True:
             terminal_pending_state: PendingTransportState | None = None
             try:
-                with self.replica_repository.transaction() as tx:
-                    self.pending_transport_request_repository.expire_enqueued_deadlines(
-                        now_utc=datetime.now(timezone.utc),
-                        cursor=tx,
-                    )
-                    self._dispatch_pending_requests(tx=tx)
-
-                    pending_row = (
-                        self.pending_transport_request_repository.find_by_request_id(
-                            request_id, cursor=tx
-                        )
-                    )
-                    if pending_row is None:
-                        raise NotFoundError(
-                            f"Pending request {request_id} disappeared unexpectedly"
-                        )
-                    if pending_row.state == PendingTransportState.DISPATCHED:
-                        transport = self.transport_repository.find_by_request_id(
-                            request_id, cursor=tx
-                        )
-                        if transport is None:
-                            logger.warning(
-                                "Pending request marked dispatched without transport row "
-                                "request_id=%s",
-                                request_id,
+                resolved_replica: Replica | None = None
+                resolved_transport_id: UUID | None = None
+                dispatch_owner = self._dispatch_loop_lock.acquire(blocking=False)
+                if dispatch_owner:
+                    try:
+                        with self.replica_repository.transaction() as tx:
+                            self.pending_transport_request_repository.purge_malformed_rows(
+                                cursor=tx
                             )
-                        else:
-                            if (
-                                transport.request_fingerprint is not None
-                                and transport.request_fingerprint != request_fingerprint
-                            ):
-                                raise ValidationError(
-                                    f"request_id={request_id} replay fingerprint mismatch"
-                                )
-                            replica = self.replica_repository.find_by_id(
-                                transport.replica_id,
-                                transport.artifact_id,
+                            self.pending_transport_request_repository.expire_enqueued_deadlines(
+                                now_utc=datetime.now(timezone.utc),
                                 cursor=tx,
                             )
-                            if replica is not None:
-                                inc_transport_request(artifact_id, "success")
-                                observe_transport_wait(
-                                    artifact_id, time.time() - start_time
-                                )
-                                return replica, transport.transport_id
-                    elif pending_row.state == PendingTransportState.EXPIRED:
-                        terminal_pending_state = PendingTransportState.EXPIRED
-                    elif pending_row.state == PendingTransportState.CANCELLED:
-                        terminal_pending_state = PendingTransportState.CANCELLED
+                            self._dispatch_pending_requests(tx=tx)
+                            (
+                                resolved_replica,
+                                resolved_transport_id,
+                                terminal_pending_state,
+                            ) = self._resolve_pending_request_state(
+                                request_id=request_id,
+                                request_fingerprint=request_fingerprint,
+                                cursor=tx,
+                            )
+                    finally:
+                        self._dispatch_loop_lock.release()
+                else:
+                    (
+                        resolved_replica,
+                        resolved_transport_id,
+                        terminal_pending_state,
+                    ) = self._resolve_pending_request_state(
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                    )
+
+                if resolved_replica is not None and resolved_transport_id is not None:
+                    inc_transport_request(artifact_id, "success")
+                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    return resolved_replica, resolved_transport_id
             except (NotFoundError, TimeoutError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -427,6 +444,70 @@ class TransportService:
                 )
 
             time.sleep(self.config.transport_wait_retry_interval_ms / 1000)
+
+    def _resolve_pending_request_state(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+        cursor=None,
+    ) -> tuple[Replica | None, UUID | None, PendingTransportState | None]:
+        pending_row = self.pending_transport_request_repository.find_by_request_id(
+            request_id, cursor=cursor
+        )
+        if pending_row is None:
+            transport = self.transport_repository.find_by_request_id(
+                request_id, cursor=cursor
+            )
+            if transport is None:
+                inc_transport_dispatch_event("request_pending_missing")
+                return None, None, None
+            if (
+                transport.request_fingerprint is not None
+                and transport.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} replay fingerprint mismatch"
+                )
+            replica = self.replica_repository.find_by_id(
+                transport.replica_id,
+                transport.artifact_id,
+                cursor=cursor,
+            )
+            if replica is None:
+                return None, None, None
+            return replica, transport.transport_id, None
+
+        if pending_row.state == PendingTransportState.DISPATCHED:
+            transport = self.transport_repository.find_by_request_id(
+                request_id, cursor=cursor
+            )
+            if transport is None:
+                inc_transport_dispatch_event("request_dispatched_missing_transport")
+                return None, None, None
+
+            if (
+                transport.request_fingerprint is not None
+                and transport.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} replay fingerprint mismatch"
+                )
+
+            replica = self.replica_repository.find_by_id(
+                transport.replica_id,
+                transport.artifact_id,
+                cursor=cursor,
+            )
+            if replica is None:
+                return None, None, None
+            return replica, transport.transport_id, None
+
+        if pending_row.state == PendingTransportState.EXPIRED:
+            return None, None, PendingTransportState.EXPIRED
+        if pending_row.state == PendingTransportState.CANCELLED:
+            return None, None, PendingTransportState.CANCELLED
+        return None, None, None
 
     def _validate_group_contract_with_cursor(
         self,
@@ -773,40 +854,107 @@ class TransportService:
                 "complete_transport requires explicit outcome "
                 "(SUCCESS/FAILED/EXPIRED/CANCELLED)"
             )
-        transport = self.transport_repository.find_by_id(transport_id)
-        if not transport:
-            raise NotFoundError(f"Transport {transport_id} not found")
+        # Share the same mutation gate with dispatch to avoid hot-row conflicts
+        # on replica counters under high fanout completion bursts.
+        try:
+            with self._dispatch_loop_lock:
+                current, max_conc, transport, released = self._retry_transient_db_call(
+                    op_name="complete_transport_tx",
+                    fn=lambda: self._complete_transport_in_single_tx(
+                        transport_id=transport_id,
+                        outcome=outcome,
+                        outcome_detail=outcome_detail,
+                    ),
+                )
+        except DatabaseError as exc:
+            # Keep public contract stable for callers/tests.
+            if isinstance(exc.__cause__, NotFoundError):
+                raise exc.__cause__
+            raise
 
-        status_updated = self.transport_repository.complete_if_in_progress(
-            transport_id,
-            completed_at=datetime.now(timezone.utc),
-            outcome=outcome,
-            outcome_detail=outcome_detail,
-        )
-        if not status_updated:
-            replica = self.replica_repository.find_by_id(
-                transport.replica_id, transport.artifact_id
+        if released:
+            dec_active_transports()
+            logger.info(
+                "Completed transport %s for %s, replica=%s, outcome=%s, new_load=%s/%s",
+                transport_id,
+                transport.artifact_id,
+                transport.replica_id,
+                outcome.value,
+                current,
+                max_conc,
             )
-            if replica is not None:
-                return int(replica.current_requests), int(replica.max_concurrency)
-            return 0, 0
-
-        current, max_conc = self.replica_repository.decrement_requests(
-            transport.replica_id
-        )
-        dec_active_transports()
-
-        logger.info(
-            "Completed transport %s for %s, replica=%s, outcome=%s, new_load=%s/%s",
-            transport_id,
-            transport.artifact_id,
-            transport.replica_id,
-            outcome.value,
-            current,
-            max_conc,
-        )
-
         return current, max_conc
+
+    def _complete_transport_in_single_tx(
+        self,
+        *,
+        transport_id: UUID,
+        outcome: TransportCompletionOutcome,
+        outcome_detail: str | None,
+    ) -> tuple[int, int, Transport, bool]:
+        with self.replica_repository.transaction() as tx:
+            transport = self.transport_repository.find_by_id(transport_id, cursor=tx)
+            if transport is None:
+                raise NotFoundError(f"Transport {transport_id} not found")
+
+            status_updated = self.transport_repository.complete_if_in_progress(
+                transport_id,
+                completed_at=datetime.now(timezone.utc),
+                outcome=outcome,
+                outcome_detail=outcome_detail,
+                cursor=tx,
+            )
+            if not status_updated:
+                replica = self.replica_repository.find_by_id(
+                    transport.replica_id, transport.artifact_id, cursor=tx
+                )
+                if replica is None:
+                    return 0, 0, transport, False
+                return (
+                    int(replica.current_requests),
+                    int(replica.max_concurrency),
+                    transport,
+                    False,
+                )
+
+            # Release source quota in the same transaction as status completion.
+            self.replica_repository.decrement_requests_with_cursor(
+                transport.replica_id, tx
+            )
+            replica_after = self.replica_repository.find_by_id(
+                transport.replica_id, transport.artifact_id, cursor=tx
+            )
+            if replica_after is None:
+                return 0, 0, transport, True
+            return (
+                int(replica_after.current_requests),
+                int(replica_after.max_concurrency),
+                transport,
+                True,
+            )
+
+    def query_transport_window(
+        self,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+        limit: int,
+    ) -> list[TransportWindowRow]:
+        if finished_at < started_at:
+            raise ValidationError("created_at_end must be >= created_at_start")
+        bounded_limit = min(max(1, int(limit)), 1_000_000)
+        return self.transport_repository.list_rows_in_created_window(
+            started_at=started_at,
+            finished_at=finished_at,
+            limit=bounded_limit,
+        )
+
+    @staticmethod
+    def _is_malformed_inflight_transport(transport: Transport) -> bool:
+        status = str(transport.status or "").strip().lower()
+        if "in_progress" not in status:
+            return False
+        return status != "in_progress"
 
     def cleanup_expired_transports(self, expiration_seconds: int | None = None) -> int:
         """Release transports that have been in *in_progress* state for too long."""
@@ -816,17 +964,47 @@ class TransportService:
             else int(expiration_seconds)
         )
         expired: list[Transport] = []
+        malformed: list[Transport] = []
+        cleaned = 0
 
         try:
-            pending = self.transport_repository.list_with_filters(
-                status="in_progress", limit=10_000
-            )
-            expired = [t for t in pending if t.age_seconds > effective_expiration]
+            pending = self.transport_repository.list_inflight(limit=10_000)
+            malformed = [
+                transport
+                for transport in pending
+                if self._is_malformed_inflight_transport(transport)
+            ]
+            malformed_ids = {transport.transport_id for transport in malformed}
+            expired = [
+                transport
+                for transport in pending
+                if transport.transport_id not in malformed_ids
+                and transport.age_seconds > effective_expiration
+            ]
         except Exception:  # noqa: BLE001
             logger.exception("Failed to fetch pending transports for cleanup")
             return 0
 
-        cleaned = 0
+        malformed_cleaned = 0
+        stale_cleaned = 0
+        for transport in malformed:
+            try:
+                self.complete_transport(
+                    transport.transport_id,
+                    outcome=TransportCompletionOutcome.EXPIRED,
+                    outcome_detail=(
+                        "cleanup_malformed_inflight "
+                        f"status={transport.status}"
+                    ),
+                )
+                malformed_cleaned += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to force-complete malformed transport %s: %s",
+                    transport.transport_id,
+                    exc,
+                )
+
         for transport in expired:
             try:
                 self.complete_transport(
@@ -836,7 +1014,7 @@ class TransportService:
                         f"cleanup_expired_transports age_seconds={transport.age_seconds:.3f}"
                     ),
                 )
-                cleaned += 1
+                stale_cleaned += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to force-complete stale transport %s: %s",
@@ -844,11 +1022,13 @@ class TransportService:
                     exc,
                 )
 
-        if cleaned:
+        if malformed_cleaned or stale_cleaned:
             logger.info(
-                "Cleaned up %s stale transports (>%ss)",
-                cleaned,
+                "Cleaned up transports malformed=%s stale=%s (>%ss)",
+                malformed_cleaned,
+                stale_cleaned,
                 effective_expiration,
             )
 
+        cleaned += malformed_cleaned + stale_cleaned
         return cleaned

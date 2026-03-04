@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
@@ -28,6 +29,8 @@ namespace tcfg = tensorcast::config::v1;
 namespace tensorcast::common::config {
 
 namespace {
+
+constexpr uint64_t kDefaultCpuSharedMemoryStableBytes = 64ULL * 1024 * 1024;
 
 // Convert a YAML::Node tree into nlohmann::json for uniform JsonStringToMessage parsing.
 nlohmann::json yaml_node_to_json(const YAML::Node& node, std::string_view key = {}) {
@@ -209,6 +212,21 @@ void normalize_enum_aliases(nlohmann::json& root) {
   }
 }
 
+void normalize_capability_defaults(nlohmann::json& root) {
+  if (!root.contains("engine") || !root["engine"].is_object()) {
+    return;
+  }
+  auto& engine = root["engine"];
+  if (!engine.contains("cpu_shared_memory")) {
+    engine["cpu_shared_memory"] = nlohmann::json::object({{"enabled", true}});
+    return;
+  }
+  auto& cpu_shared = engine["cpu_shared_memory"];
+  if (cpu_shared.is_object() && !cpu_shared.contains("enabled")) {
+    cpu_shared["enabled"] = true;
+  }
+}
+
 // Convert size-like string fields to numeric bytes in-place on JSON tree
 void normalize_size_fields(nlohmann::json& root) {
   auto to_bytes = [](nlohmann::json& n) {
@@ -343,6 +361,15 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     e->set_artifact_chunk_bytes(256ULL * 1024 * 1024);
   if (e->streaming_buffer_chunks() == 0)
     e->set_streaming_buffer_chunks(16);
+  if (!e->has_cpu_shared_memory()) {
+    e->mutable_cpu_shared_memory()->set_enabled(true);
+  }
+  if (e->cpu_shared_memory().enabled()) {
+    auto* mt = e->mutable_memory_tiers();
+    if (mt->stable_bytes() == 0) {
+      mt->set_stable_bytes(kDefaultCpuSharedMemoryStableBytes);
+    }
+  }
   if (e->has_memory_tiers()) {
     auto* mt = e->mutable_memory_tiers();
     if (mt->preemptible_low_watermark_ratio() <= 0.0) {
@@ -463,6 +490,7 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_file(const std::strin
 
   // Normalize before protobuf parsing
   normalize_enum_aliases(root_json);
+  normalize_capability_defaults(root_json);
   normalize_size_fields(root_json);
   normalize_duration_fields(root_json);
 
@@ -507,6 +535,7 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_text(const std::strin
 
   // Normalize before protobuf parsing
   normalize_enum_aliases(root_json);
+  normalize_capability_defaults(root_json);
   normalize_size_fields(root_json);
   normalize_duration_fields(root_json);
 

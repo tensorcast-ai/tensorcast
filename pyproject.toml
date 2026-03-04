@@ -58,6 +58,7 @@ dev = [
     "ruff>=0.11.2",
     "toml>=0.10.2",
     "types-protobuf==5.28.3.20241203",
+    "safetensors==0.7.0"
 ]
 
 [project.scripts]

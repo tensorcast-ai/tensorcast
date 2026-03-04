@@ -80,7 +80,7 @@ def start_daemon_binary(
     config_mode: Literal["yaml", "inline_json"] = "yaml",
     enable_same_process_ipc_fallback: bool = True,
     *,
-    cpu_shared_memory_enabled: bool = False,
+    cpu_shared_memory_enabled: bool = True,
     local_handle_socket_path: str | None = None,
     stable_bytes: int | None = None,
     handle_lease_ttl: str = "10m",
@@ -167,8 +167,9 @@ def start_daemon_binary(
     }
     if cpu_shared_memory_enabled:
         if not local_handle_socket_path:
-            raise ValueError(
-                "local_handle_socket_path is required when cpu_shared_memory_enabled is True"
+            local_handle_socket_path = str(
+                Path(tempfile.gettempdir())
+                / f"tc_lh_{os.getpid()}_{port}_{int(time.time() * 1000)}.sock"
             )
         if stable_bytes is None:
             stable_bytes = 64 * 1024 * 1024

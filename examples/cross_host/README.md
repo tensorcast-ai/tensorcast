@@ -4,6 +4,7 @@
 
 - `cross_host_matrix_runner.py`：统一矩阵 runner（负责重启两侧 daemon、循环 put/get、收集结果、清理 artifact）。
 - `cross_host_fanout_runner.py`：多机 fanout/cascade runner（验证“get 节点成为新 P2P 源”，并支持 wave 并发扩容性能测试）。
+- `cross_host_iperf3_probe.py`：多机 `iperf3` 双向链路探针（产出单链路硬件上限参考，供 early gate 自动对照）。
 - `cross_host_chaos_runner.py`：chaos 编排 runner（按 event spec 定时注入故障，输出可回放 timeline，并支持 expected-failure pass 语义）。
 - `cross_host_weight_publisher_runner.py`：多机权重发布 runner（publisher 连续发布，receiver 通过 `binding.swap` 持续更新，含 `keep_last` 去注册验证）。
 - `cross_host_put_once.py`：单轮 put helper。
@@ -142,11 +143,40 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_DAEMON_CONFIG=examples/config/store_daemon_config_cross_host_bench.yaml
 # 大负载（>=8GiB）建议：
 # export TC_DAEMON_CONFIG=examples/config/store_daemon_config_cross_host_bench_large_payload.yaml
-# export TC_OUT_DIR=/tmp/tc_cross_20260222/results_multi_host
+# export TC_OUT_DIR=/data/tc_cross_rerun/results_multi_host_scaleout
+# export TC_RUNTIME_ROOT=/data/tc_cross_rerun/runtime
+# export TC_FAILURE_DIAG=1
+# export TC_FAILURE_DIAG_TIMEOUT_SEC=45
+# export TC_VISIBILITY_TIMEOUT_SEC=120
+# export TC_EARLY_GATE_ENABLE=1
+# export TC_EARLY_GATE_HARD_FAIL=1
+# export TC_EARLY_GATE_ROUND_WORKERS=3,4
+# export TC_EARLY_GATE_TARGET_SIZE_MIB=1024
+# export TC_EARLY_GATE_MIN_CLUSTER_SCALE_RATIO=1.10
+# export TC_EARLY_GATE_MIN_WAVE2_OVER_WAVE1=0.75
+# export TC_IPERF3_PROBE_ENABLE=1
+# export TC_IPERF3_AUTOFILL_EARLY_BASELINE=1
+# export TC_IPERF3_PROBE_HARD_FAIL=0
+# export TC_EARLY_GATE_BASELINE_LINK_GIBPS=<micro_baseline_gibps>
+# export TC_EARLY_GATE_MIN_BASELINE_RATIO=0.60
+# export TC_QUOTA_PREFLIGHT_ENABLE=1
+# export TC_QUOTA_CHARGED_GROUP=tensorcast_dev
+# export TC_XLARGE_STABLE_PREFLIGHT_ENABLE=1
+# export TC_XLARGE_STABLE_OVERLAP_VERSIONS=2
+# export TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO=1.05
+# export TC_WAVE_ASSIGNMENT=rotate
+# export TC_WAVE_ASSIGNMENT_SEED=20260227
+# export TC_CLEANUP_LEAK_SENTINEL=1
+# export TC_CLEANUP_LEAK_THRESHOLD_BYTES=0
+# export TC_CLEANUP_LEAK_STREAK_THRESHOLD=2
+# export TC_TEARDOWN_STRICT=1
+# export TC_TEARDOWN_VERIFY_TIMEOUT_SEC=30
 # export TC_RUN_ID=manual-20260222
 # export TC_PORT_BASE=62800
+# export TC_SCALE_WORKERS=2,4,8,16,32
+# export TC_SCALE_SIZES_MIB=1024,8192
 
-# 全阶段（small -> medium -> large）
+# 全阶段（small -> medium -> large -> xlarge）
 bash examples/cross_host/run_multihost_benchmark_suite.sh --phase all
 
 # 仅小规模功能阶段（3/4 节点）
@@ -157,20 +187,49 @@ bash examples/cross_host/run_multihost_benchmark_suite.sh --phase medium
 
 # 仅大规模阶段（8/9 节点）
 bash examples/cross_host/run_multihost_benchmark_suite.sh --phase large
+
+# 仅超大规模阶段（16/32 节点，要求 getter >= 15）
+bash examples/cross_host/run_multihost_benchmark_suite.sh --phase xlarge
 ```
 
 阶段说明：
 1. `phase=small`
 - 需要至少 2 个 getter。
 - 执行 3/4 节点功能验证（含 cascade 与 fanout）。
+- 若 getter >= 3，阶段结束后自动执行 early gate（默认 round workers=3,4）。
 2. `phase=medium`
 - 需要至少 5 个 getter。
 - 执行 6 节点 fanout 收敛与吞吐验证。
 3. `phase=large`
 - 需要至少 7 个 getter。
 - 执行 8 节点负载 case；当 getter >= 8 时追加 9 节点 case。
-4. `phase=all`
-- 自动按 `small -> medium -> large` 顺序执行，节点不足的阶段会自动 skip 并打印原因。
+4. `phase=xlarge`
+- 根据 `TC_SCALE_WORKERS`（默认 `2,4,8,16,32`）筛选 `>=16` 的目标规模并执行。
+- 默认 payload 使用 `TC_SCALE_SIZES_MIB`（默认 `1024,8192`）。
+- 配额不足（如 32-worker 无法补齐）会直接 skip，并写入 skip manifest。
+- 开启 `TC_XLARGE_STABLE_PREFLIGHT_ENABLE=1` 时，会按 `size_mib * overlap_versions * margin_ratio` 预算 `stable_bytes`，预算不足的 case 会提前 skip，避免运行时 OOM / insufficient bytes。
+5. `phase=all`
+- 自动按 `small -> medium -> large -> xlarge` 顺序执行，节点不足的阶段会自动 skip 并打印原因。
+- `small` 跑完会自动执行 early gate；当 `TC_EARLY_GATE_HARD_FAIL=1` 且 gate 失败时，流程立即中止。
+- 默认会先执行 `iperf3` 探针（固定 profile：前 2 个 getter、`20s`、`P=20`），并自动回填 early gate baseline。
+- 探针输出：`suite_<run_id>_iperf3_probe.json/md`；early gate 输出：`suite_<run_id>_early_gate.json/md`。
+
+手工复核 early gate：
+
+```bash
+source .venv/bin/activate
+
+python examples/cross_host/scaleout_early_gate.py \
+  --fanout-dir /data/tc_cross_rerun/results_multi_host_scaleout \
+  --run-id <run_id> \
+  --round-workers 3,4 \
+  --target-size-mib 1024 \
+  --min-cluster-scale-ratio 1.10 \
+  --baseline-link-gibps <micro_baseline_gibps> \
+  --min-baseline-ratio 0.60 \
+  --out-json /data/tc_cross_rerun/results_multi_host_scaleout/suite_<run_id>_early_gate.json \
+  --out-md /data/tc_cross_rerun/results_multi_host_scaleout/suite_<run_id>_early_gate.md
+```
 
 ## 2.3 Chaos 套件（事件时间线 + expected-failure 门禁）
 
@@ -300,11 +359,23 @@ source .venv/bin/activate
 export TC_WP_PUBLISHER_PROC=<PUBLISHER_PROCESS_ID>
 export TC_WP_RECEIVER_PROCS=<RECEIVER1_PROCESS_ID>,<RECEIVER2_PROCESS_ID>
 export TC_GS_ADDR=<GS_IP>:50051
+export TC_OUT_DIR=/data/tc_cross_rerun/results_weight_publisher
+export TC_RUN_AS_USER=$(id -un)
 export TC_PUBLISH_INTERVAL_S=60
 export TC_RECEIVER_TIMEOUT_S=95
 export TC_MAX_PUBLISH_TO_APPLY_S=30
-export TC_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
+export TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1
+export TC_WP_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
 export TC_SCALE_NUM_VERSIONS=10
+export TC_WP_TRANSPORT_GROUP_MODES=none,tp_version
+export TC_WP_PAYLOAD_MODE=tp_ranked
+export TC_WP_TP_WORLD_SIZE=4
+export TC_WP_TP_TOTAL_BYTES=42949672960
+export TC_WP_RECEIVER_APPLY_MODE=tp_bind_into_swap
+export TC_WP_MAX_CONCURRENCY=1
+export TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP=1
+export TC_WP_P0_EARLY_STOP=1
+export TC_WP_P0_EARLY_STOP_GRACE_S=20
 export TC_LONG_RUN_ENABLE=1
 export TC_LONG_RUN_NUM_VERSIONS=20
 export TC_LONG_RUN_TARGET_DURATION_S=900
@@ -318,8 +389,8 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 
 流程与判定：
 1. 在 publisher 节点先执行 single-host 功能烟测（`tensor_dict`）。
-2. 执行 2 节点 case（1 publisher + 1 receiver）。
-3. 若 receiver>=2，再执行 3 节点 case（1 publisher + 2 receivers）。
+2. 按 `TC_WP_SCALE_RECEIVER_COUNTS` 逐级执行 receiver 规模 case。
+3. 每个规模按 `TC_WP_TRANSPORT_GROUP_MODES` 循环（例如 `none -> tp_version`）。
 4. 验证点包括：
 - receiver 通过 `binding.swap` 连续更新，首版 `bind`，后续全是 `swap`；
 - pointer 稳定（swap 后 `data_ptr` 不变）；
@@ -327,11 +398,19 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 - 通过 GS RPC `BatchGetReplicaCounts` 审计，旧版本副本计数回到 0，且有副本的版本数不超过 2。
 - runner 显式管理每台机器的 daemon 生命周期，role/probe 均通过 `tc.init(mode="connect", address=127.0.0.1:50052)` 仅连接本地 daemon。
 - 建议将 `TC_RECEIVER_TIMEOUT_S` 设为大于发布间隔（例如 `publish=60s` 时用 `timeout=95s`），并通过
-  `TC_MAX_PUBLISH_TO_APPLY_S=30` 约束“发布到应用”的时延上限。
-- 深度压测可通过 `TC_SCALE_RECEIVER_COUNTS` 扩大到 32 worker 规模（1 publisher + 31 receivers），并用
+  `TC_MAX_PUBLISH_TO_APPLY_S` 约束“发布到应用”的时延上限；在 TP 扩容场景建议保持
+  `TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1`，由 runner 按 receiver 数、TP 字节规模与 group 模式自动抬升阈值下限。
+- 当 `allow_receiver_skips` 生效时，runner 会基于 receiver 日志中的显式
+  `[receiver] skipped version=...` 记录做缺失版本记账：仅将“未被显式 skip 覆盖”的缺失版本计为 sequence failure，
+  并在输出中给出 `timeout_analysis.waiting_timeout_reason_counts` 与
+  `timeout_analysis.transport_timeout_reason_counts` 以区分等待超时和传输超时。
+- 深度压测可通过 `TC_WP_SCALE_RECEIVER_COUNTS` 扩大到 32 worker 规模（1 publisher + 31 receivers），并用
   `TC_SCALE_NUM_VERSIONS`/`TC_LONG_RUN_NUM_VERSIONS` 与 `TC_LONG_RUN_TARGET_DURATION_S`
   组合出 10/20 版本、最长约 15 分钟的长跑 case。
+- TP 场景可通过 `TC_WP_TP_WORLD_SIZE`、`TC_WP_TP_TOTAL_BYTES`、`TC_WP_RECEIVER_APPLY_MODE`
+  固定为 TP4/TP8 接收路径，并通过 `TC_WP_TRANSPORT_GROUP_MODES` 做 group/non-group A/B。
 - 运行中会周期打印 `[progress]` 聚合状态，便于外部 `tail -f`/log poll 观察实时进展。
+- suite 输出目录包含 `suite_skips.jsonl`，用于记录无效 receiver count、不支持 group mode、long-run 跳过等结构化原因。
 
 ## 3. 输出说明
 
@@ -353,6 +432,13 @@ runner 会输出：
   - `failure_classification_counts`（`infra/product/unknown`）
   - payload sample hash 校验统计
 - `params`：本次运行关键参数快照。
+- `teardown`：每个 worker 的 stop + status verify 结果；当 `--teardown-strict` 生效且未完全退出时 case 失败。
+- `summary.pre_case_seed_status` / `summary.cleanup_leak_*`：seed 端 cleanup 泄漏哨兵指标与阈值配置。
+
+suite 额外输出：
+
+- `suite_<run_id>_cases.jsonl`：计划执行的 case 清单。
+- `suite_<run_id>_skips.jsonl`：结构化 skip 记录（含 `reason/detail`，用于复盘资源不足或策略跳过）。
 
 chaos 报告模板：
 

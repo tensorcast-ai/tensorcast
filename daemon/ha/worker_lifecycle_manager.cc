@@ -809,22 +809,21 @@ void WorkerLifecycleManager::heartbeat_loop() {
         std::lock_guard<std::mutex> lock(state_mu_);
         state_checksum_ = checksum;
       }
-      absl::StatusOr<global_store::WorkerHeartbeatResponse> hb_or;
-      {
-        std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
-        hb_or = global_store_->send_heartbeat_enhanced(
-            worker_id,
-            engine_->get_available_memory(),
-            accepting,
-            state_version,
-            checksum,
-            registered_ids,
-            last_sync_success_ts,
-            global_store::CONNECTION_STATUS_CONNECTED,
-            build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
-            daemon_id_,
-            opts_.capability_flags);
-      }
+      // Heartbeat must remain independent from state-sync/reconcile RPC latency.
+      // Those paths can issue long control-plane calls; sharing one serial lock
+      // can stall heartbeats and trigger false liveness loss under load.
+      absl::StatusOr<global_store::WorkerHeartbeatResponse> hb_or = global_store_->send_heartbeat_enhanced(
+          worker_id,
+          engine_->get_available_memory(),
+          accepting,
+          state_version,
+          checksum,
+          registered_ids,
+          last_sync_success_ts,
+          global_store::CONNECTION_STATUS_CONNECTED,
+          build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
+          daemon_id_,
+          opts_.capability_flags);
       if (stop_.load() || hb_epoch_.load() != epoch) {
         break;
       }
@@ -914,7 +913,10 @@ void WorkerLifecycleManager::heartbeat_loop() {
   } catch (...) {
     LOG(ERROR) << "heartbeat_loop crashed: unknown exception";
   }
-  hb_alive_.store(false);
+  // A retired epoch must not clobber liveness for a newer heartbeat thread.
+  if (hb_epoch_.load() == epoch) {
+    hb_alive_.store(false);
+  }
 }
 
 void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
@@ -1005,7 +1007,10 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
   } catch (...) {
     LOG(ERROR) << "state_sync_loop crashed: unknown exception";
   }
-  state_sync_alive_.store(false);
+  // A retired epoch must not clobber liveness for a newer state-sync thread.
+  if (state_sync_epoch_.load() == epoch) {
+    state_sync_alive_.store(false);
+  }
 }
 
 void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
@@ -1684,19 +1689,24 @@ void WorkerLifecycleManager::chunk_sync_loop() {
 void WorkerLifecycleManager::monitor_loop() {
   // Simple liveness/restart loop for lifecycle threads
   using namespace std::chrono_literals;
+  constexpr int64_t kDefaultGlobalStoreRpcTimeoutMs = 60000;
+  constexpr auto kHeartbeatRestartGrace = std::chrono::seconds(5);
   uint64_t last_hb_ticks = 0;
   uint64_t last_sync_ticks = 0;
   auto last_hb_change = std::chrono::steady_clock::now();
   auto last_sync_change = std::chrono::steady_clock::now();
   const auto state_sync_budget = state_sync_stall_budget();
+  const int64_t heartbeat_rpc_timeout_ms =
+      opts_.heartbeat_rpc_timeout_ms > 0 ? opts_.heartbeat_rpc_timeout_ms : kDefaultGlobalStoreRpcTimeoutMs;
+  const auto heartbeat_stall_budget = std::max(
+      std::chrono::milliseconds(opts_.heartbeat_interval_ms * 3),
+      std::chrono::milliseconds(heartbeat_rpc_timeout_ms + opts_.heartbeat_interval_ms) + kHeartbeatRestartGrace);
   while (!stop_.load()) {
     // Detect stalled heartbeat: ticks not increasing for > 3 * heartbeat_interval
     if (hb_ticks_.load() != last_hb_ticks) {
       last_hb_ticks = hb_ticks_.load();
       last_hb_change = std::chrono::steady_clock::now();
-    } else if (
-        std::chrono::steady_clock::now() - last_hb_change >
-        std::chrono::milliseconds(opts_.heartbeat_interval_ms * 3)) {
+    } else if (std::chrono::steady_clock::now() - last_hb_change > heartbeat_stall_budget) {
       LOG(WARNING) << "heartbeat_loop appears stalled; restarting";
       hb_alive_.store(false);
     }
@@ -1705,6 +1715,10 @@ void WorkerLifecycleManager::monitor_loop() {
       retire_thread(&hb_thread_);
       hb_restarts_.fetch_add(1);
       hb_thread_ = std::thread(&WorkerLifecycleManager::heartbeat_loop, this);
+      // Give the restarted loop a fresh grace window so monitor does not
+      // repeatedly trigger before the new thread can complete one heartbeat.
+      last_hb_ticks = hb_ticks_.load();
+      last_hb_change = std::chrono::steady_clock::now();
     }
     if (state_sync_budget.has_value() && state_sync_inflight_.load()) {
       const int64_t last_progress_ns = state_sync_last_progress_ns_.load();

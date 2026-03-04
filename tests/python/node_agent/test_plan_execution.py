@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
+import tensorcast.node_agent.executor as executor_mod
+from tensorcast.api._errors import DeviceMismatch
 from tensorcast.engine_adapter import EngineAdapter
 from tensorcast.node_agent.executor import NodeAgentExecutor
 from tensorcast.proto.common.v1 import common_pb2
@@ -42,7 +45,9 @@ def _selection() -> common_pb2.ArtifactSelection:
 
 
 def test_node_agent_executes_instance_transform_into() -> None:
-    adapter = EngineAdapter(instance_id="inst-1", engine="test", register_identity_transform=False)
+    adapter = EngineAdapter(
+        instance_id="inst-1", engine="test", register_identity_transform=False
+    )
     called = {"into": False}
 
     def _into(ctx):  # noqa: ANN001
@@ -78,7 +83,9 @@ def test_node_agent_executes_instance_transform_into() -> None:
 
 
 def test_node_agent_marks_dependents_cancelled_on_failure() -> None:
-    adapter = EngineAdapter(instance_id="inst-1", engine="test", register_identity_transform=False)
+    adapter = EngineAdapter(
+        instance_id="inst-1", engine="test", register_identity_transform=False
+    )
     adapter.register_transform_fn("noop.v1", into=lambda _ctx: None)
     target = adapter.mint_target("target", {"w": torch.zeros(1)})
 
@@ -116,8 +123,11 @@ def test_node_agent_marks_dependents_cancelled_on_failure() -> None:
     assert result.steps["s2"].status.state == "cancelled"
 
 
-def test_node_agent_propagates_deadline_to_worker_actions() -> None:
+def test_node_agent_propagates_deadline_to_worker_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     daemon = _DaemonStub()
+    monkeypatch.setattr(executor_mod, "device_uuid_for", lambda _device_id: "gpu-0")
     spec = plan_pb2.PlanSpec(plan_id="plan-3")
     spec.context.request_id = "req-3"
     spec.context.deadline_ms = 1500
@@ -151,3 +161,39 @@ def test_node_agent_propagates_deadline_to_worker_actions() -> None:
     assert abs(float(daemon.materialize_timeout_s) - 1.5) < 0.1
     assert daemon.placement_timeout_s is not None
     assert abs(float(daemon.placement_timeout_s) - 1.5) < 0.1
+
+
+def test_node_agent_prefetch_reports_device_mismatch_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _DaemonStub()
+
+    def _raise_device_mismatch(_device_id: int) -> str:
+        raise DeviceMismatch("device map unavailable")
+
+    monkeypatch.setattr(executor_mod, "device_uuid_for", _raise_device_mismatch)
+    spec = plan_pb2.PlanSpec(plan_id="plan-4")
+    spec.context.request_id = "req-4"
+
+    step = spec.steps.add()
+    step.step_id = "s1"
+    step.target.target_type = plan_pb2.TARGET_TYPE_WORKER
+    step.target.target_id = "daemon-1"
+    action = step.action.prefetch
+    action.selection.CopyFrom(_selection())
+    action.device_id = 0
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    result = executor.execute_plan(spec)
+    assert result.ok is False
+    step_result = result.steps["s1"]
+    assert step_result.status.state == "failed"
+    assert step_result.status.error is not None
+    assert step_result.status.error.status_code == "FAILED_PRECONDITION"
+    assert "device map unavailable" in step_result.status.message

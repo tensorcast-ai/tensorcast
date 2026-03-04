@@ -15,7 +15,10 @@ from tensorcast.global_store.models import (
     MemoryType,
     Replica,
 )
-from tensorcast.global_store.repositories.base import BaseRepository
+from tensorcast.global_store.repositories.base import (
+    BaseRepository,
+    is_transient_tx_conflict,
+)
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -1095,29 +1098,40 @@ class ReplicaRepository(BaseRepository):
         Returns:
             Tuple of (current_requests, max_concurrency)
         """
-        cursor = self.get_cursor()
+        max_attempts = 8
+        for attempt in range(max_attempts):
+            cursor = self.get_cursor()
+            try:
+                cnt_row = self.decrement_requests_with_cursor(replica_id, cursor)
+                if cnt_row is None:
+                    return 0, 0
 
-        try:
-            cnt_row = self.decrement_requests_with_cursor(replica_id, cursor)
+                current_requests = cnt_row
+                max_row = cursor.execute(
+                    """
+                    SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
+                    """,
+                    [str(replica_id)],
+                ).fetchone()
+                max_conc = int(max_row[0]) if max_row else 0
+                return current_requests, max_conc
+            except Exception as exc:  # noqa: BLE001
+                if not is_transient_tx_conflict(exc) or attempt == max_attempts - 1:
+                    raise
+                backoff_sec = min(0.2, 0.005 * (2**attempt))
+                logger.warning(
+                    "Retrying decrement_requests after transient DB conflict replica_id=%s attempt=%s/%s backoff_s=%.3f error=%s",
+                    replica_id,
+                    attempt + 1,
+                    max_attempts,
+                    backoff_sec,
+                    exc,
+                )
+                time.sleep(backoff_sec)
+            finally:
+                cursor.close()
 
-            if cnt_row is None:
-                return 0, 0
-
-            current_requests = cnt_row
-
-            # Fetch max_concurrency from artifact_replicas
-            max_row = cursor.execute(
-                """
-                SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
-                """,
-                [str(replica_id)],
-            ).fetchone()
-
-            max_conc = int(max_row[0]) if max_row else 0
-
-            return current_requests, max_conc
-        finally:
-            cursor.close()
+        return 0, 0
 
     def decrement_requests_with_cursor(self, replica_id: UUID, cursor) -> int | None:
         """Decrement `current_requests` in an existing transaction."""

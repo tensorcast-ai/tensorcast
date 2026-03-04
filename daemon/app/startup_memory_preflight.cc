@@ -128,6 +128,21 @@ uint64_t compute_startup_memory_headroom_bytes(uint64_t required_bytes) {
   return std::min<uint64_t>(ten_percent, kMaxHeadroomBytes);
 }
 
+EnginePinnedConcurrencySizing compute_engine_pinned_concurrency_sizing(
+    uint32_t streaming_buffer_chunks,
+    int detected_gpu_count,
+    bool fake_cuda_backend) {
+  const uint64_t chunks = static_cast<uint64_t>(std::max<uint32_t>(1, streaming_buffer_chunks));
+  int effective_gpu_count = std::max(0, detected_gpu_count);
+  if (fake_cuda_backend) {
+    effective_gpu_count = 1;
+  }
+  return EnginePinnedConcurrencySizing{
+      .required_slices = chunks * static_cast<uint64_t>(effective_gpu_count),
+      .effective_gpu_count = effective_gpu_count,
+  };
+}
+
 absl::StatusOr<StartupMemoryAvailability> detect_startup_memory_available_bytes() {
   {
     absl::MutexLock lk(&override_mutex());

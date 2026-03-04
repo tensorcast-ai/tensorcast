@@ -34,7 +34,7 @@ class ReplicaMaterializationService {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
-    bool cpu_shared_memory_enabled{false};
+    bool cpu_shared_memory_enabled{true};
     DaemonOptions::PostSealPolicy post_seal_policy{};
     std::filesystem::path storage_path;
   };

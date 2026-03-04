@@ -11,6 +11,7 @@ from typing import Callable, Mapping
 
 from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for
+from tensorcast.api._errors import DeviceMismatch
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
 from tensorcast.api.errors import ArtifactError
@@ -652,13 +653,6 @@ class NodeAgentExecutor:
             replica_uuid = str(uuid.uuid5(ns, action_key))
         else:
             replica_uuid = uuid.uuid4().hex
-        device_id = int(action.device_id)
-        if device_id == CPU_DEVICE_ID:
-            target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-            device_uuid = ""
-        else:
-            target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
-            device_uuid = device_uuid_for(device_id)
         timeout_s = _ctx_timeout_s(call_ctx)
         if timeout_s is not None and timeout_s <= 0:
             return NodeAgentStepResult(
@@ -672,6 +666,13 @@ class NodeAgentExecutor:
                 ),
             )
         try:
+            device_id = int(action.device_id)
+            if device_id == CPU_DEVICE_ID:
+                target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                device_uuid = ""
+            else:
+                target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
+                device_uuid = device_uuid_for(device_id)
             self._client.materialize_by_artifact_id_v2(
                 selection=selection,
                 replica_uuid=replica_uuid,
@@ -681,6 +682,17 @@ class NodeAgentExecutor:
                 target_device_type=target_device_type,
                 lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
                 timeout_s=timeout_s,
+            )
+        except DeviceMismatch as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="prefetch",
+                status=_status_failed(
+                    f"prefetch failed: {exc}",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             return NodeAgentStepResult(

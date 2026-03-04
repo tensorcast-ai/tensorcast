@@ -3,6 +3,7 @@
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
 
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 
 namespace tensorcast::store::loader {
 
@@ -23,10 +24,25 @@ absl::StatusOr<int> StreamingBufferAdapter::get_free_chunk() {
 }
 
 void StreamingBufferAdapter::return_chunk(int slot_id) {
-  auto status = buffer_->return_chunk(slot_id);
-  if (!status.ok()) {
-    LOG(ERROR) << "Failed to return chunk: " << status;
+  absl::Status status = buffer_->return_chunk(slot_id);
+  if (status.ok()) {
+    return;
   }
+  if (!absl::IsFailedPrecondition(status)) {
+    LOG(ERROR) << "Failed to return chunk: " << status;
+    return;
+  }
+
+  // Producer-side error paths use the same BufferPool::return_chunk contract
+  // via RAII slot guards. StreamingPinnedBuffer requires producer-owned slots
+  // to be released with abort_producer_slot().
+  absl::Status abort_status = buffer_->abort_producer_slot(slot_id);
+  if (abort_status.ok()) {
+    VLOG(1) << "Recovered producer-owned slot via abort_producer_slot slot=" << slot_id;
+    return;
+  }
+  LOG(ERROR) << "Failed to release slot after return_chunk fallback slot=" << slot_id
+             << " return_status=" << status << " abort_status=" << abort_status;
 }
 
 absl::Status StreamingBufferAdapter::mark_chunk_ready(int slot_id, uint64_t global_chunk_idx, size_t valid_bytes) {

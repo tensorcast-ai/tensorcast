@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import torch
+
 from tensorcast.tools.weight_publisher_e2e import (
     TP_FULL_VALIDATION_MAX_BYTES,
     PublishEvent,
@@ -22,6 +24,9 @@ def _build_event(version: int) -> PublishEvent:
         publish_device="cpu",
         published_at_s=0.0,
         publish_latency_s=0.0,
+        publish_payload_bytes=0,
+        publish_throughput_gib_s=0.0,
+        put_throughput_gib_s=0.0,
         publish_breakdown_s={},
     )
 
@@ -196,3 +201,50 @@ def test_publish_one_version_releases_source_before_retention(
     assert released["value"] is True
     assert event.artifact_id == "artifact-1"
     assert [e.version for e in events] == [1]
+
+
+def test_publish_one_version_records_bandwidth_fields(
+    monkeypatch,
+) -> None:
+    publisher = WeightUpdatePublisher.__new__(WeightUpdatePublisher)
+    publisher._model_name = "test"
+    publisher._key_template = "model:{model_name}:v{weight_version}"
+    publisher._publish_device = "cpu"
+    publisher._payload_mode = "tp_ranked"
+    publisher._tp_world_size = 4
+    publisher._tp_total_bytes = 1024
+
+    class _FakeInnerPublisher:
+        def publish(self, tensors, *, version: int) -> str:  # noqa: ANN001
+            _ = (tensors, version)
+            return "artifact-bandwidth"
+
+        def last_publish_breakdown_s(self) -> dict[str, float]:
+            return {"put_s": 2.0}
+
+    publisher._publisher = _FakeInnerPublisher()
+    publisher._verify_retention_window = lambda **_: None
+
+    tensor_payload = {"tp_col_weight_0": torch.ones((256,), dtype=torch.float32)}
+    monkeypatch.setattr(
+        "tensorcast.tools.weight_publisher_e2e._build_publish_tensors",
+        lambda **_: tensor_payload,
+    )
+    monkeypatch.setattr(
+        "tensorcast.tools.weight_publisher_e2e._publish_memory_log",
+        lambda **_: None,
+    )
+
+    monotonic_points = iter([10.0, 14.0])
+    monkeypatch.setattr(
+        "tensorcast.tools.weight_publisher_e2e.time.monotonic",
+        lambda: next(monotonic_points),
+    )
+
+    events: list[PublishEvent] = []
+    event = publisher.publish_one_version(version=1, events=events)
+
+    assert event.publish_payload_bytes == 256 * 4
+    assert event.publish_latency_s == 4.0
+    assert event.put_throughput_gib_s > 0.0
+    assert event.publish_throughput_gib_s > 0.0
