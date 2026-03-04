@@ -17,6 +17,7 @@ dependencies = [
     "grpcio>=1.56.0,<2",
     "grpcio-health-checking>=1.56.0,<2",
     "pandas>=2.2.3",
+    "pytz>=2025.2",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
     "torch==2.8.0+cu128",
