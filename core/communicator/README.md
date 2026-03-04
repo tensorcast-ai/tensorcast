@@ -74,7 +74,12 @@ The communicator now ships a topology model under `core/communicator/topology/` 
 - **Endpoint** models a transport endpoint with pool affinity constraints by type. Each endpoint carries a `pool_ids` list and validation enforces: **NIC**/**PCIE** endpoints must reference at least one CPU pool and one GPU pool, **NVLINK** endpoints must reference GPU pools only, and **Switch** endpoints have no pool affinity (used only for path search).
 - **Link** models a topology edge; **SW links** are the only links allowed to touch switch endpoints, and link endpoints must share the same `EndpointType` (e.g., NIC↔NIC, NVLINK↔NVLINK).
 
-The topology is pure data: it is built from explicit inputs and does **not** rely on any external hardware discovery. `Topology::validate()` enforces switch semantics and structural invariants, and `Topology::to_dot()` emits a minimal Graphviz view for debugging with DOT-safe escaped ids/labels. Routing/connection mapping will be layered on in subsequent phases.
+The topology model is pure data (`Pool` / `Endpoint` / `Link`) and all validation still happens through `Topology::validate()`. Topology construction can now come from either:
+
+- explicit Simple NUMA-only inputs (`BuildSwitchTopologyFromSimpleNuma`), or
+- host discovery merge (`topology/discovery/host_topology_builder.cc`) that overlays LLDP rail mapping and optional NVLINK data (snapshot file or runtime probe) on top of the Simple NUMA baseline.
+
+`Topology::to_dot()` emits a minimal Graphviz view for debugging with DOT-safe escaped ids/labels.
 
 Topology modeling examples live in `core/communicator/topology/topology_test.cc`, including a rail-optimized 8-GPU/8-NIC/2-CPU NVLINK layout (separate NVSwitch and network switch components) and a no-rail 4-GPU/1-NIC/1-CPU layout where a single NIC (bound to CPU + all GPUs) links to one network switch without per-GPU PCIe endpoints. When running under Bazel, the tests emit DOT files into `TEST_UNDECLARED_OUTPUTS_DIR` as `topology_<label>.dot`; set `TENSORCAST_TOPOLOGY_DOT_STDOUT=1` to also print the graphs to stdout.
 
@@ -94,7 +99,7 @@ Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the 
 
 Store read paths now integrate this wrapper in routed-first mode when `local_endpoint_id`, `remote_endpoint_id`, and `RoutingContext` are all present. Any routed path failure (communicator lookup/channel/read status) immediately falls back to direct `engine::Communicator::read_tensor(ip, port, ...)` for compatibility.
 
-### Simple NUMA -> DOT helper
+### Simple NUMA / Discovery -> DOT helper
 
 For quick validation, you can build a switch-based direct topology from `CommunicatorConfig.simple_numa` and emit a DOT graph. The helper loads either a **CommunicatorConfig** YAML/JSON directly or a daemon config that contains a top-level `communicator:` section.
 
@@ -102,9 +107,23 @@ For quick validation, you can build a switch-based direct topology from `Communi
 bazel run //core/communicator:simple_numa_topology_tool -- path/to/comm_or_daemon.yaml > topology.dot
 ```
 
-The adapter always connects NIC endpoints to a single virtual network switch (`netsw0`) using switch links, avoiding full-mesh P2P edges.
+Behavior depends on `communicator.topology_discovery.enable`:
 
-Validation is strict: each node must list at least one NIC and one GPU, node IDs and GPU IDs must be unique across the config, NIC names must be non-empty/unique, and `switch_id` must not collide with any generated `nic_<name>` endpoint ID.
+- `false` (default): same as before, all NIC endpoints connect to a single virtual switch (`netsw0`).
+- `true`: topology is built via discovery merge:
+  - LLDP maps NICs to `netsw_rail_<rail_id>` switch endpoints.
+  - Missing LLDP rows degrade to `netsw_unknown` unless `lldp.required=true`.
+  - NVLINK snapshot source (`SOURCE_SNAPSHOT_FILE`) can add `nvlink_<gpu_uuid>` endpoints plus bidirectional P2P links between discovered GPU pairs.
+  - NVLINK runtime probe source (`SOURCE_RUNTIME_PROBE`) runs:
+    - `nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits`
+    - `nvidia-smi topo -m`
+    and derives GPU pairs from `NV*` matrix cells.
+  - The builder also emits discovery observability fields: source selection (`lldp_source` / `nvlink_source`), parsed record counts (`lldp_records`, `nvlink_gpus`, `nvlink_edges`), and degrade reasons (`*_degrade_reason`) when fallback is taken.
+
+When discovery is enabled, `simple_numa_topology_tool` writes one summary line to stderr with these observability fields and still writes DOT graph output to stdout.
+For repeatable local checks, the repository includes `lldp-info.txt` and `nvlink-snapshot.txt` as sample discovery inputs.
+
+Validation remains strict: each node must list at least one NIC and one GPU, node IDs and GPU IDs must be unique across the config, NIC names must be non-empty/unique, and endpoint/link invariants are enforced by `Topology::Build(...)`.
 
 ---
 

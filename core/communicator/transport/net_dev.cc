@@ -1,10 +1,16 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/transport/net_dev.h"
+
+#include <fstream>
+#include <limits>
+#include <regex>
+
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/misc/utils.h"
+#include "core/communicator/topology/discovery/lldp_source.h"
 #include "core/communicator/transport/partition_tensor.h"
 
 namespace tensorcast::communicator::transport {
@@ -119,46 +125,27 @@ misc::result_t NetDev::read_numa_id() {
 
 void NetDev::read_rail_id() {
   const char* lldp_file_name = std::getenv("TENSORCAST_LLDP_FILE_NAME");
-  if (lldp_file_name != nullptr) {
-    std::ifstream lldp_file(lldp_file_name);
-    std::string line;
-    // brainpf_bond0=0000:19:00.0,mlx5_bond100,1
-    while (std::getline(lldp_file, line)) {
-      if (line.empty() || line[0] == '#') {
-        continue;
-      }
-      // use = to split, get the left part of eth_name and the right part of value_part
-      size_t eq_pos = line.find('=');
-      if (eq_pos == std::string::npos) {
-        continue;
-      }
-
-      std::string eth_name = line.substr(0, eq_pos), value_part = line.substr(eq_pos + 1);
-
-      // use , to split the right part
-      std::istringstream iss(value_part);
-      std::string pci_path, mlx5_name, rail_id_str;
-
-      if (!std::getline(iss, pci_path, ',') || !std::getline(iss, mlx5_name, ',') ||
-          !std::getline(iss, rail_id_str, ','))
-        continue;
-
-      // check if mlx5_name matches the current device name
-      if (mlx5_name == dev_name_) {
-        try {
-          int rail_id = std::stoi(rail_id_str);
-          rail_id_ = uint16_t(rail_id);
-        } catch (const std::exception& e) {
-          LOG(WARNING) << "Failed to parse rail_id: " << rail_id_str;
+  if (lldp_file_name != nullptr && lldp_file_name[0] != '\0') {
+    auto records_or = topology::discovery::load_lldp_records_by_nic(
+        lldp_file_name, topology::discovery::LldpParseOptions{.strict = false});
+    if (!records_or.ok()) {
+      LOG(WARNING) << "Failed to load LLDP file for rail detection: " << records_or.status();
+    } else {
+      auto it = records_or->find(dev_name_);
+      if (it != records_or->end()) {
+        if (it->second.rail_id > std::numeric_limits<uint16_t>::max()) {
+          LOG(WARNING) << "LLDP rail_id is out of uint16 range, ignore: " << it->second.rail_id;
+        } else {
+          rail_id_ = static_cast<uint16_t>(it->second.rail_id);
+          return;
         }
-        break; // exit the loop
       }
     }
-  } else {
-    // base: by mlx5_name
-    if (std::regex_match(this->dev_name_, std::regex("mlx5_(\\d+)"))) {
-      this->rail_id_ = uint16_t(std::stoi(this->dev_name_.substr(this->dev_name_.find_last_of('_') + 1)));
-    }
+  }
+
+  // Fallback: infer rail id from mlx5 device suffix (legacy behavior).
+  if (std::regex_match(this->dev_name_, std::regex("mlx5_(\\d+)"))) {
+    this->rail_id_ = uint16_t(std::stoi(this->dev_name_.substr(this->dev_name_.find_last_of('_') + 1)));
   }
 }
 

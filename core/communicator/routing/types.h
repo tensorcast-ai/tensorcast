@@ -38,6 +38,9 @@ struct EndpointBinding {
   uint16_t port = 0;
   int dev_type = base::COMMUNICATE_ENGINE_DEV_CPU;
   int dev_id = 0;
+  std::string pci_bdf;
+  int rail_id = -1;
+  std::string gpu_uuid;
 
   bool has_network_address() const;
 };

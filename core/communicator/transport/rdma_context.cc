@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <regex>
 #include <string>
 #include <unordered_set>
 #include <utility>

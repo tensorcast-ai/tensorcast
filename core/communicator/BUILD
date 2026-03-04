@@ -190,6 +190,7 @@ sc_cc_library(
     deps = [
         ":common_lib",
         ":ibv_wrap_lib",
+        ":lldp_source_lib",
         ":metric_lib",
         ":queue_lib",
         ":utils_lib",
@@ -490,11 +491,53 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "lldp_source_lib",
+    srcs = ["topology/discovery/lldp_source.cc"],
+    hdrs = ["topology/discovery/lldp_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "nvlink_source_lib",
+    srcs = ["topology/discovery/nvlink_source.cc"],
+    hdrs = ["topology/discovery/nvlink_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "host_topology_builder_lib",
+    srcs = ["topology/discovery/host_topology_builder.cc"],
+    hdrs = ["topology/discovery/host_topology_builder.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lldp_source_lib",
+        ":nvlink_source_lib",
+        ":topology_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
 cc_binary(
     name = "simple_numa_topology_tool",
     srcs = ["topology/simple_numa_topology_tool.cc"],
     deps = [
         ":config_io_lib",
+        ":host_topology_builder_lib",
         ":simple_numa_topology_lib",
         "@abseil-cpp//absl/status",
     ],
@@ -681,6 +724,18 @@ cc_test(
         ":simple_numa_topology_lib",
         ":topology_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "discovery_test",
+    srcs = ["topology/discovery/discovery_test.cc"],
+    deps = [
+        ":host_topology_builder_lib",
+        ":lldp_source_lib",
+        ":nvlink_source_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

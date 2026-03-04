@@ -199,9 +199,33 @@ communicator:
     tcp_conn_count: 8
     connect_timeout_sec: 10
     tcp_tos: 0
+  topology_discovery:
+    enable: false
+    lldp:
+      file_path: /host-config/lldp-info.txt
+      required: false
+    nvlink:
+      source: SOURCE_DISABLED  # SOURCE_SNAPSHOT_FILE | SOURCE_RUNTIME_PROBE
+      snapshot_file_path: ""
+      required: false
+    merge_policy:
+      emit_rail_switch_endpoints: true
+      require_connected: false
 ```
 
 Pinned staging pool sizing and chunking come from the daemon-wide pinned memory configuration (`DaemonConfig.pinned_memory`) via the `comm_gpu` / `comm_cpu` classes (`slice_bytes` + `pool_bytes`), not from `CommunicatorConfig`.
+
+When `topology_discovery.enable=true`, communicator topology generation uses `simple_numa` as the baseline and then merges LLDP/NVLINK discovery data:
+
+- LLDP maps NIC endpoints to per-rail switch endpoints (`netsw_rail_<id>`), with `netsw_unknown` fallback when LLDP data is partial and `lldp.required=false`.
+- NVLINK snapshot mode (`SOURCE_SNAPSHOT_FILE`) adds `nvlink_<gpu_uuid>` endpoints and bidirectional NVLINK links for discovered GPU pairs.
+- NVLINK runtime probe mode (`SOURCE_RUNTIME_PROBE`) executes:
+  - `nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits`
+  - `nvidia-smi topo -m`
+  and derives edge counts from `NV*` matrix cells (`NV1`, `NV2`, ...). Non-NV tokens (`SYS`, `PHB`, `PIX`, `X`, `N/A`) are treated as no NVLINK edge.
+- `merge_policy.require_connected` controls whether final topology validation enforces a fully connected graph.
+
+For offline verification, `bazel run //core/communicator:simple_numa_topology_tool -- <config>` prints a discovery summary line to stderr containing `lldp_source`, `lldp_records`, `nvlink_source`, `nvlink_gpus`, `nvlink_edges`, and per-source degrade reasons when fallback is taken. The repository ships `lldp-info.txt` and `nvlink-snapshot.txt` for repeatable local checks.
 
 ## RDMA Environment Variables
 
@@ -236,6 +260,15 @@ export TENSORCAST_LLDP_FILE_NAME="/path/to/lldp_config.txt"
 
 Lines starting with `#` and blank lines are ignored. If unset, rail IDs are
 derived from the mlx5 device name (for example `mlx5_0` -> rail 0).
+
+This variable is a legacy fallback used by `NetDev` rail detection. For topology discovery, prefer typed config:
+`communicator.topology_discovery.lldp.file_path`.
+
+Deprecation schedule:
+- 2026-03-04: legacy compatibility only (typed config is primary).
+- 2026-06-30: removed from new deployment examples except compatibility notes.
+- 2026-10-31: CI/integration should use typed config path only.
+- 2026-12-31 (target): fallback removal from `NetDev`.
 
 ## Launch Example (Unified Config)
 

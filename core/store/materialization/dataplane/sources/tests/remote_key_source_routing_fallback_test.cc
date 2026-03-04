@@ -208,3 +208,73 @@ TEST_CASE("RemoteKeySource falls back to direct reads when routed lookup fails",
 
   REQUIRE(received == payload);
 }
+
+TEST_CASE(
+    "RemoteKeySource keeps strict direct fallback after routed failure",
+    "[store][p2p][routing]") {
+  constexpr std::size_t kArtifactBytes = 512 * 1024;
+  const std::string tensor_key = "remote_key_source_strict_fallback_tensor";
+  const std::string local_endpoint = "node_local/dev/cpu/0";
+  const std::string remote_endpoint = "node_remote/dev/cpu/0";
+
+  const int direct_src_port = find_available_port(54000);
+  REQUIRE(direct_src_port > 0);
+  const int routed_src_port = find_available_port(direct_src_port + 1);
+  REQUIRE(routed_src_port > 0);
+  const int dst_port = find_available_port(routed_src_port + 1);
+  REQUIRE(dst_port > 0);
+
+  auto direct_src_engine = make_engine_on_port(direct_src_port);
+  auto routed_src_engine = make_engine_on_port(routed_src_port);
+  auto dst_engine = make_engine_on_port(dst_port);
+
+  std::vector<uint8_t> direct_payload = create_test_pattern(kArtifactBytes, /*seed=*/11);
+  std::vector<uint8_t> routed_payload = create_test_pattern(kArtifactBytes, /*seed=*/73);
+  REQUIRE(direct_payload != routed_payload);
+  register_cpu_tensor(direct_src_engine, tensor_key, direct_payload);
+  register_cpu_tensor(routed_src_engine, tensor_key, routed_payload);
+
+  auto routing_context = std::make_shared<RoutingContext>(RoutingContext::Options{}, dst_engine);
+  RemoteKeySource::Options opts{
+      .comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{dst_engine},
+      .memory_keys = {tensor_key},
+      .buffer_sizes = {kArtifactBytes},
+      .ip = "127.0.0.1",
+      .port = static_cast<uint16_t>(direct_src_port),
+      .local_endpoint_id = local_endpoint,
+      .remote_endpoint_id = remote_endpoint,
+      .routing_context = routing_context,
+      .total_size = kArtifactBytes,
+  };
+  RemoteKeySource source(std::move(opts));
+
+  std::vector<uint8_t> first_read(kArtifactBytes, 0);
+  auto first_or = source.read_at(/*offset=*/0, first_read.data(), first_read.size());
+  REQUIRE(first_or.ok());
+  REQUIRE(*first_or == first_read.size());
+  REQUIRE(first_read == direct_payload);
+
+  REQUIRE(routing_context->set_topology(build_direct_topology(local_endpoint, remote_endpoint)).ok());
+  std::vector<EndpointBinding> bindings{
+      EndpointBinding{
+          .endpoint_id = local_endpoint,
+          .node_id = "node_local",
+          .ip = "127.0.0.1",
+          .port = static_cast<uint16_t>(dst_port),
+      },
+      EndpointBinding{
+          .endpoint_id = remote_endpoint,
+          .node_id = "node_remote",
+          .ip = "127.0.0.1",
+          .port = static_cast<uint16_t>(routed_src_port),
+      },
+  };
+  REQUIRE(routing_context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  std::vector<uint8_t> second_read(kArtifactBytes, 0);
+  auto second_or = source.read_at(/*offset=*/0, second_read.data(), second_read.size());
+  REQUIRE(second_or.ok());
+  REQUIRE(*second_or == second_read.size());
+  REQUIRE(second_read == direct_payload);
+  CHECK(second_read != routed_payload);
+}

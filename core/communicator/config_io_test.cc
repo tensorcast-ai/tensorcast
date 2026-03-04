@@ -45,6 +45,9 @@ transport:
   REQUIRE(cfg.transport().tcp_conn_count() == 4);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
   REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(cfg.topology_discovery().lldp().file_path() == "/host-config/lldp-info.txt");
+  REQUIRE(
+      cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == true);
 }
 
 TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
@@ -63,6 +66,9 @@ TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
   REQUIRE(cfg.stager().buffers_per_flow() == 4);
   REQUIRE(cfg.transport().tcp_tos() == 0);
   REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(
+      cfg.topology_discovery().nvlink().source() ==
+      tensorcast::communicator::v1::NvlinkDiscoveryConfig::SOURCE_DISABLED);
 }
 
 TEST_CASE("config_io communicator wrapper parse", "[communicator][config]") {
@@ -84,4 +90,38 @@ communicator:
   REQUIRE(cfg.transport().tcp_conn_count() == 2);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
   REQUIRE(cfg.transport().so_reuseport() == true);
+}
+
+TEST_CASE("config_io topology discovery explicit values", "[communicator][config]") {
+  const char* yaml = R"YAML(
+communicator:
+  topology_discovery:
+    enable: true
+    lldp:
+      file_path: /tmp/custom-lldp.txt
+      required: true
+    nvlink:
+      source: SOURCE_SNAPSHOT_FILE
+      snapshot_file_path: /tmp/nvlink.txt
+      required: true
+    merge_policy:
+      emit_rail_switch_endpoints: false
+      require_connected: true
+)YAML";
+  const std::string path = write_temp_file(yaml, "topology_discovery.yaml");
+  auto cfg_or = LoadCommunicatorConfigFromFile(path);
+  REQUIRE(cfg_or.ok());
+  const CommunicatorConfig& cfg = cfg_or.value();
+
+  REQUIRE(cfg.topology_discovery().enable() == true);
+  REQUIRE(cfg.topology_discovery().lldp().file_path() == "/tmp/custom-lldp.txt");
+  REQUIRE(cfg.topology_discovery().lldp().required() == true);
+  REQUIRE(
+      cfg.topology_discovery().nvlink().source() ==
+      tensorcast::communicator::v1::NvlinkDiscoveryConfig::SOURCE_SNAPSHOT_FILE);
+  REQUIRE(cfg.topology_discovery().nvlink().snapshot_file_path() == "/tmp/nvlink.txt");
+  REQUIRE(cfg.topology_discovery().nvlink().required() == true);
+  REQUIRE(
+      cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == false);
+  REQUIRE(cfg.topology_discovery().merge_policy().require_connected() == true);
 }

@@ -50,6 +50,18 @@ communicator:
       - id: 1
         nics: ["mlx5_2", "mlx5_3"]
         gpus: [2, 3]
+  topology_discovery:
+    enable: false
+    lldp:
+      file_path: /host-config/lldp-info.txt
+      required: false
+    nvlink:
+      source: SOURCE_DISABLED
+      snapshot_file_path: ""
+      required: false
+    merge_policy:
+      emit_rail_switch_endpoints: true
+      require_connected: false
   transport:
     tcp_conn_count: 8
     connect_timeout_sec: 10
@@ -70,6 +82,14 @@ Pinned pool sizing and chunking are no longer part of `CommunicatorConfig`. When
 - `STAGER_NUMA_ENABLE` → `simple_numa.enable`
 - `STAGER_NUMA_GPU_MAP` → `simple_numa.nodes[].gpus`
 - `STAGER_NUMA_NIC_MAP` → `simple_numa.nodes[].nics`
+- `TENSORCAST_LLDP_FILE_NAME` → `topology_discovery.lldp.file_path` (legacy fallback remains for `NetDev` rail detection)
+
+## `TENSORCAST_LLDP_FILE_NAME` Deprecation Timeline
+
+- 2026-03-04: marked as legacy fallback only; typed config path (`topology_discovery.lldp.file_path`) is the primary and recommended control.
+- 2026-06-30: new deployment manifests and examples stop documenting the env path as a configuration option (kept only in compatibility notes).
+- 2026-10-31: CI and integration tests should validate LLDP input through typed config only; env path remains compatibility-only.
+- 2026-12-31 (target): remove `NetDev` env fallback and require typed config for LLDP mapping.
 
 ## Failure Modes (by design)
 
