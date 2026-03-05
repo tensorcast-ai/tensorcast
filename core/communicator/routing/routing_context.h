@@ -26,6 +26,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
  public:
   struct Options {
     bool prefer_nvlink = true;
+    bool prefer_pcie = true;
   };
 
   class Communicator {
@@ -61,7 +62,8 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   RoutingContext(
       Options options,
       std::shared_ptr<engine::Communicator> engine,
-      std::shared_ptr<ConnectionAdapter> nvlink_adapter = std::make_shared<NvlinkAdapter>(),
+      std::shared_ptr<ConnectionAdapter> nvlink_adapter = nullptr,
+      std::shared_ptr<ConnectionAdapter> pcie_adapter = nullptr,
       std::shared_ptr<common::AsyncRuntime> async_runtime = nullptr);
 
   absl::Status set_topology(topology::Topology topology);
@@ -167,6 +169,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   std::shared_ptr<engine::Communicator> engine_;
   std::shared_ptr<ConnectionAdapter> engine_adapter_;
   std::shared_ptr<ConnectionAdapter> nvlink_adapter_;
+  std::shared_ptr<ConnectionAdapter> pcie_adapter_;
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
 
   mutable absl::Mutex mu_;

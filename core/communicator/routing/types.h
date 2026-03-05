@@ -19,7 +19,8 @@ enum class ConnectionProtocol {
   kTcp = 2,
   kMtcp = 3,
   kNvlink = 4,
-  kShm = 5,
+  kPcie = 5,
+  kShm = 6,
 };
 
 enum class ConnectionType {

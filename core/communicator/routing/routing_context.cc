@@ -163,17 +163,22 @@ RoutingContext::RoutingContext(
     Options options,
     std::shared_ptr<engine::Communicator> engine,
     std::shared_ptr<ConnectionAdapter> nvlink_adapter,
+    std::shared_ptr<ConnectionAdapter> pcie_adapter,
     std::shared_ptr<common::AsyncRuntime> async_runtime)
     : options_(options),
       engine_(std::move(engine)),
       engine_adapter_(std::make_shared<EngineAdapter>(engine_)),
       nvlink_adapter_(std::move(nvlink_adapter)),
+      pcie_adapter_(std::move(pcie_adapter)),
       async_runtime_(std::move(async_runtime)) {
   if (!async_runtime_) {
     async_runtime_ = std::make_shared<common::AsyncRuntime>();
   }
   if (!nvlink_adapter_) {
     nvlink_adapter_ = std::make_shared<NvlinkAdapter>();
+  }
+  if (!pcie_adapter_) {
+    pcie_adapter_ = std::make_shared<PcieAdapter>(engine_);
   }
 }
 
@@ -391,8 +396,12 @@ std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
   }
   auto link_state = get_or_create_link_state_locked(link);
   const ConnectionType type = connection_type_from_link(link);
-  std::shared_ptr<ConnectionAdapter> adapter =
-      protocol == ConnectionProtocol::kNvlink ? nvlink_adapter_ : engine_adapter_;
+  std::shared_ptr<ConnectionAdapter> adapter = engine_adapter_;
+  if (protocol == ConnectionProtocol::kNvlink) {
+    adapter = nvlink_adapter_;
+  } else if (protocol == ConnectionProtocol::kPcie) {
+    adapter = pcie_adapter_;
+  }
   auto connection = std::make_shared<Connection>(
       key,
       type,
@@ -718,23 +727,30 @@ ConnectionProtocol RoutingContext::select_protocol_locked(
     const topology::Endpoint& dst_endpoint,
     const EndpointBinding& local_binding,
     const EndpointBinding& remote_binding) const {
-  if (!options_.prefer_nvlink) {
-    return ConnectionProtocol::kAuto;
-  }
-  if (!nvlink_adapter_ || !nvlink_adapter_->is_available()) {
-    return ConnectionProtocol::kAuto;
-  }
   if (local_binding.node_id.empty() || remote_binding.node_id.empty()) {
     return ConnectionProtocol::kAuto;
   }
   if (local_binding.node_id != remote_binding.node_id) {
     return ConnectionProtocol::kAuto;
   }
-  if (src_endpoint.type != topology::EndpointType::kNvlink ||
-      dst_endpoint.type != topology::EndpointType::kNvlink) {
-    return ConnectionProtocol::kAuto;
+
+  if (src_endpoint.type == topology::EndpointType::kNvlink &&
+      dst_endpoint.type == topology::EndpointType::kNvlink &&
+      options_.prefer_nvlink &&
+      nvlink_adapter_ &&
+      nvlink_adapter_->is_available()) {
+    return ConnectionProtocol::kNvlink;
   }
-  return ConnectionProtocol::kNvlink;
+
+  if (src_endpoint.type == topology::EndpointType::kPcie &&
+      dst_endpoint.type == topology::EndpointType::kPcie &&
+      options_.prefer_pcie &&
+      pcie_adapter_ &&
+      pcie_adapter_->is_available()) {
+    return ConnectionProtocol::kPcie;
+  }
+
+  return ConnectionProtocol::kAuto;
 }
 
 std::shared_ptr<LinkState> RoutingContext::get_or_create_link_state_locked(

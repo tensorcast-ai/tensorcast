@@ -122,7 +122,10 @@ Current code constraints:
   - choose a destination-node binding with network address via weighted rail-aware scoring (`preferred rail`, `destination rail`, topology NIC presence, GPU/CPU pool affinity, endpoint-id/NIC heuristics),
   - build a single-hop channel anchored on the selected local NIC link.
 - This fallback is additive and keeps the same strict direct read fallback in `RemoteKeySource` if routed lookup/read fails.
-- `NvlinkAdapter` currently returns `UNIMPLEMENTED`.
+- Local-fabric adapter matrix:
+  - `NvlinkAdapter` is wired for protocol selection but datapath is still `UNIMPLEMENTED`.
+  - `PcieAdapter` is wired for protocol selection and executes via current engine-backed path.
+  - same-node protocol selection is deterministic: NVLINK first (`prefer_nvlink` + adapter available), then PCIE (`prefer_pcie` + adapter available), else `AUTO`.
 
 Important:
 - Store read paths now call `RoutingContext::get_communicator(...)` in routed-first mode when endpoint metadata and context are available.

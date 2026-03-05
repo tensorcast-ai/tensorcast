@@ -74,6 +74,29 @@ class NvlinkAdapter final : public ConnectionAdapter {
   absl::Status close(const EndpointBinding& remote) override;
 };
 
+class PcieAdapter final : public ConnectionAdapter {
+ public:
+  explicit PcieAdapter(std::shared_ptr<engine::Communicator> engine);
+
+  ConnectionProtocol protocol() const override {
+    return ConnectionProtocol::kPcie;
+  }
+
+  bool is_available() const override {
+    return engine_ != nullptr;
+  }
+
+  transport::future_read_result_t read_tensor(
+      const ReadRequest& request,
+      const EndpointBinding& local,
+      const EndpointBinding& remote) override;
+
+  absl::Status close(const EndpointBinding& remote) override;
+
+ private:
+  std::shared_ptr<engine::Communicator> engine_;
+};
+
 } // namespace tensorcast::communicator::routing
 
 #endif // CORE_COMMUNICATOR_ROUTING_ADAPTER_H_

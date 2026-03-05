@@ -89,9 +89,12 @@ Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the 
 
 - **RoutingContext** owns a `Topology` plus `EndpointBinding` records (node id, IP/port, device ids) and returns a per `src_endpoint_id` → `dst_endpoint_id` communicator.
 - **RouteChannel** represents a path composed of `Connection` hops; Phase 2 supports direct 1-hop channels only (multi-hop returns `UNIMPLEMENTED`).
-- **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`, while `NvlinkAdapter` is a placeholder that currently returns `UNIMPLEMENTED`.
+- **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`; `PcieAdapter` is now wired into routing (engine-backed for now); `NvlinkAdapter` remains a placeholder that returns `UNIMPLEMENTED`.
 - **Stats/Health** are tracked per connection and per link (`ConnectionStats`, `LinkStats`, `HealthState`), recording success/failure counts, last latency, and last error.
-- **Protocol selection** prefers NVLINK when both endpoints are NVLINK on the same node and the NVLINK adapter reports availability; otherwise it falls back to `AUTO` (engine path).
+- **Protocol selection (same-node local fabric)** now follows deterministic precedence:
+  - NVLINK endpoint pair + `prefer_nvlink=true` + available NVLINK adapter => `NVLINK`
+  - PCIE endpoint pair + `prefer_pcie=true` + available PCIE adapter => `PCIE`
+  - otherwise => `AUTO` (engine path)
 - **Cross-node rail-matched fallback** is now supported for direct-channel construction: when no direct topology link exists and source/destination bindings are on different nodes, routing infers source/destination device hints (`gpu<id>` / `cpu<id>`) from endpoint ids or binding metadata. It then selects the local NIC by rail + pool affinity and picks a destination-node network binding by weighted scoring (preferred rail, destination rail, NIC topology presence, GPU/CPU pool affinity, endpoint-id/NIC heuristics, network address). This keeps fallback routing affinity-aware for GPU↔GPU, GPU↔CPU-memory, and CPU-memory↔CPU-memory traffic.
 - **Topology/bindings are immutable after setup**: `set_topology` and `set_endpoint_bindings` are one-shot; `update_endpoint_binding` returns `FAILED_PRECONDITION`. Create a new `RoutingContext` to change configuration.
 - **Channel caching** captures the topology generation used to build the channel and only reuses cached channels when the current generation matches, preventing stale channel reuse on mid-build changes.

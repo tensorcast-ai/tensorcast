@@ -63,4 +63,45 @@ absl::Status NvlinkAdapter::close(const EndpointBinding& /*remote*/) {
   return absl::UnimplementedError("NVLINK adapter not available");
 }
 
+PcieAdapter::PcieAdapter(std::shared_ptr<engine::Communicator> engine)
+    : engine_(std::move(engine)) {}
+
+transport::future_read_result_t PcieAdapter::read_tensor(
+    const ReadRequest& request,
+    const EndpointBinding& /*local*/,
+    const EndpointBinding& remote) {
+  if (engine_ == nullptr) {
+    return make_failed_read_future(
+        absl::FailedPreconditionError("pcie adapter missing engine"),
+        request.tensor_key);
+  }
+  if (!remote.has_network_address()) {
+    return make_failed_read_future(
+        absl::InvalidArgumentError(
+            std::format("missing network address for endpoint: {}", remote.endpoint_id)),
+        request.tensor_key);
+  }
+
+  return engine_->read_tensor(
+      request.tensor_key,
+      request.addr,
+      request.bytes,
+      request.dev_type,
+      request.dev_id,
+      remote.ip,
+      remote.port,
+      request.remote_offset);
+}
+
+absl::Status PcieAdapter::close(const EndpointBinding& remote) {
+  if (engine_ == nullptr) {
+    return absl::FailedPreconditionError("pcie adapter missing engine");
+  }
+  if (!remote.has_network_address()) {
+    return absl::InvalidArgumentError(
+        std::format("missing network address for endpoint: {}", remote.endpoint_id));
+  }
+  return engine_->close_connection(remote.ip, remote.port);
+}
+
 } // namespace tensorcast::communicator::routing

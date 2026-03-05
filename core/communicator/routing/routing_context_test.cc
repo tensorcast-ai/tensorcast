@@ -17,6 +17,7 @@ namespace {
 using tensorcast::communicator::routing::Connection;
 using tensorcast::communicator::routing::ConnectionAdapter;
 using tensorcast::communicator::routing::ConnectionKey;
+using tensorcast::communicator::routing::ConnectionProtocol;
 using tensorcast::communicator::routing::ConnectionType;
 using tensorcast::communicator::routing::EndpointBinding;
 using tensorcast::communicator::routing::HealthState;
@@ -65,6 +66,40 @@ class FakeAdapter final : public ConnectionAdapter {
   absl::Status status_;
 };
 
+class ProtocolAdapterStub final : public ConnectionAdapter {
+ public:
+  ProtocolAdapterStub(ConnectionProtocol protocol, bool available)
+      : protocol_(protocol), available_(available) {}
+
+  ConnectionProtocol protocol() const override {
+    return protocol_;
+  }
+
+  bool is_available() const override {
+    return available_;
+  }
+
+  tensorcast::communicator::transport::future_read_result_t read_tensor(
+      const ReadRequest&,
+      const EndpointBinding&,
+      const EndpointBinding&) override {
+    std::promise<tensorcast::communicator::transport::read_result_t> promise;
+    auto future = promise.get_future();
+    tensorcast::communicator::transport::read_result_t result;
+    result.status = absl::UnimplementedError("protocol adapter stub has no datapath");
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  absl::Status close(const EndpointBinding&) override {
+    return absl::OkStatus();
+  }
+
+ private:
+  ConnectionProtocol protocol_;
+  bool available_ = false;
+};
+
 Topology build_minimal_topology() {
   std::vector<Pool> pools;
   pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
@@ -101,6 +136,71 @@ Topology build_minimal_topology() {
       std::move(endpoints),
       std::move(links),
       {.require_endpoint_links = true, .require_connected = true});
+  REQUIRE(topology_or.ok());
+  return std::move(topology_or).value();
+}
+
+Topology build_local_fabric_topology() {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"gpu0", "gpu0", PoolType::kGpu});
+  pools.push_back(Pool{"gpu1", "gpu1", PoolType::kGpu});
+
+  std::vector<Endpoint> endpoints;
+  Endpoint nvlink0;
+  nvlink0.id = "nvlink0";
+  nvlink0.name = "nvlink0";
+  nvlink0.kind = EndpointKind::kClient;
+  nvlink0.type = EndpointType::kNvlink;
+  nvlink0.pool_ids = {"gpu0"};
+  endpoints.push_back(nvlink0);
+
+  Endpoint nvlink1;
+  nvlink1.id = "nvlink1";
+  nvlink1.name = "nvlink1";
+  nvlink1.kind = EndpointKind::kClient;
+  nvlink1.type = EndpointType::kNvlink;
+  nvlink1.pool_ids = {"gpu1"};
+  endpoints.push_back(nvlink1);
+
+  Endpoint pcie0;
+  pcie0.id = "pcie0";
+  pcie0.name = "pcie0";
+  pcie0.kind = EndpointKind::kClient;
+  pcie0.type = EndpointType::kPcie;
+  pcie0.pool_ids = {"cpu0", "gpu0"};
+  endpoints.push_back(pcie0);
+
+  Endpoint pcie1;
+  pcie1.id = "pcie1";
+  pcie1.name = "pcie1";
+  pcie1.kind = EndpointKind::kClient;
+  pcie1.type = EndpointType::kPcie;
+  pcie1.pool_ids = {"cpu0", "gpu1"};
+  endpoints.push_back(pcie1);
+
+  std::vector<Link> links;
+  Link nvlink_link;
+  nvlink_link.id = "nvlink0_to_nvlink1";
+  nvlink_link.name = nvlink_link.id;
+  nvlink_link.type = LinkType::kP2P;
+  nvlink_link.src_endpoint_id = "nvlink0";
+  nvlink_link.dst_endpoint_id = "nvlink1";
+  links.push_back(nvlink_link);
+
+  Link pcie_link;
+  pcie_link.id = "pcie0_to_pcie1";
+  pcie_link.name = pcie_link.id;
+  pcie_link.type = LinkType::kP2P;
+  pcie_link.src_endpoint_id = "pcie0";
+  pcie_link.dst_endpoint_id = "pcie1";
+  links.push_back(pcie_link);
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      {.require_endpoint_links = true, .require_connected = false});
   REQUIRE(topology_or.ok());
   return std::move(topology_or).value();
 }
@@ -320,6 +420,117 @@ TEST_CASE("RoutingContext rejects topology and binding mutation", "[communicator
   EndpointBinding update_binding{"nic0", "node0", "127.0.0.1", 3000};
   auto update_status = context->update_endpoint_binding(std::move(update_binding));
   CHECK(update_status.code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE(
+    "RoutingContext prefers NVLINK protocol for same-node NVLINK endpoints when adapter is available",
+    "[communicator][routing]") {
+  auto nvlink_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kNvlink, true);
+  auto pcie_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kPcie, true);
+
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{},
+      /*engine=*/nullptr,
+      std::move(nvlink_adapter),
+      std::move(pcie_adapter));
+  REQUIRE(context->set_topology(build_local_fabric_topology()).ok());
+  REQUIRE(context
+              ->set_endpoint_bindings({
+                  EndpointBinding{.endpoint_id = "nvlink0", .node_id = "node0"},
+                  EndpointBinding{.endpoint_id = "nvlink1", .node_id = "node0"},
+              })
+              .ok());
+
+  auto communicator_or = context->get_communicator("nvlink0", "nvlink1");
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+  CHECK(channel_or.value()->hops().front()->protocol() == ConnectionProtocol::kNvlink);
+}
+
+TEST_CASE(
+    "RoutingContext falls back to AUTO protocol when NVLINK adapter is unavailable",
+    "[communicator][routing]") {
+  auto nvlink_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kNvlink, false);
+  auto pcie_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kPcie, true);
+
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{},
+      /*engine=*/nullptr,
+      std::move(nvlink_adapter),
+      std::move(pcie_adapter));
+  REQUIRE(context->set_topology(build_local_fabric_topology()).ok());
+  REQUIRE(context
+              ->set_endpoint_bindings({
+                  EndpointBinding{.endpoint_id = "nvlink0", .node_id = "node0"},
+                  EndpointBinding{.endpoint_id = "nvlink1", .node_id = "node0"},
+              })
+              .ok());
+
+  auto communicator_or = context->get_communicator("nvlink0", "nvlink1");
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+  CHECK(channel_or.value()->hops().front()->protocol() == ConnectionProtocol::kAuto);
+}
+
+TEST_CASE(
+    "RoutingContext prefers PCIE protocol for same-node PCIE endpoints when adapter is available",
+    "[communicator][routing]") {
+  auto nvlink_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kNvlink, false);
+  auto pcie_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kPcie, true);
+
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{},
+      /*engine=*/nullptr,
+      std::move(nvlink_adapter),
+      std::move(pcie_adapter));
+  REQUIRE(context->set_topology(build_local_fabric_topology()).ok());
+  REQUIRE(context
+              ->set_endpoint_bindings({
+                  EndpointBinding{.endpoint_id = "pcie0", .node_id = "node0"},
+                  EndpointBinding{.endpoint_id = "pcie1", .node_id = "node0"},
+              })
+              .ok());
+
+  auto communicator_or = context->get_communicator("pcie0", "pcie1");
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+  CHECK(channel_or.value()->hops().front()->protocol() == ConnectionProtocol::kPcie);
+}
+
+TEST_CASE(
+    "RoutingContext falls back to AUTO protocol when PCIE adapter is unavailable",
+    "[communicator][routing]") {
+  auto options = RoutingContext::Options{};
+  options.prefer_nvlink = true;
+  options.prefer_pcie = true;
+  auto nvlink_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kNvlink, false);
+  auto pcie_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kPcie, false);
+
+  auto context = std::make_shared<RoutingContext>(
+      options,
+      /*engine=*/nullptr,
+      std::move(nvlink_adapter),
+      std::move(pcie_adapter));
+  REQUIRE(context->set_topology(build_local_fabric_topology()).ok());
+  REQUIRE(context
+              ->set_endpoint_bindings({
+                  EndpointBinding{.endpoint_id = "pcie0", .node_id = "node0"},
+                  EndpointBinding{.endpoint_id = "pcie1", .node_id = "node0"},
+              })
+              .ok());
+
+  auto communicator_or = context->get_communicator("pcie0", "pcie1");
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+  CHECK(channel_or.value()->hops().front()->protocol() == ConnectionProtocol::kAuto);
 }
 
 TEST_CASE(

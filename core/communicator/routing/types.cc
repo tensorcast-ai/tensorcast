@@ -38,6 +38,8 @@ std::string_view to_string(ConnectionProtocol protocol) {
       return "MTCP";
     case ConnectionProtocol::kNvlink:
       return "NVLINK";
+    case ConnectionProtocol::kPcie:
+      return "PCIE";
     case ConnectionProtocol::kShm:
       return "SHM";
     default:
