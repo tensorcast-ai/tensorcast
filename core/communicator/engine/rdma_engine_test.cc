@@ -39,9 +39,24 @@ class CommunicatorTestPeer {
     return communicator.on_receive_response(channel, control, message);
   }
 
+  static auto on_receive_request(
+      Communicator& communicator,
+      const channel_t& channel,
+      const transport::tcp_transport_t& control,
+      const engine_message_t& message) {
+    return communicator.on_receive_request(channel, control, message);
+  }
+
   static void stop_workers(Communicator& communicator) {
     communicator.stop_.store(true);
     communicator.request_queue_.stop();
+  }
+
+  static bool has_rdma_device(Communicator& communicator) {
+    if (communicator.rdma_context_ == nullptr) {
+      return false;
+    }
+    return !communicator.rdma_context_->list_devs().empty();
   }
 };
 
@@ -134,6 +149,11 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
   SECTION("Register tensors synchronously") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
+    if (!communicator::engine::CommunicatorTestPeer::has_rdma_device(*fixture.server_) ||
+        !communicator::engine::CommunicatorTestPeer::has_rdma_device(*fixture.client_)) {
+      SUCCEED("Skipping RDMA register test: no RDMA net devices available");
+      return;
+    }
 
     // register GPU tensor
     communicator::engine::Communicator::RegisterTensorOptions o1;
@@ -167,6 +187,11 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
   SECTION("Register and unregister tensors") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
+    if (!communicator::engine::CommunicatorTestPeer::has_rdma_device(*fixture.server_) ||
+        !communicator::engine::CommunicatorTestPeer::has_rdma_device(*fixture.client_)) {
+      SUCCEED("Skipping RDMA register/unregister test: no RDMA net devices available");
+      return;
+    }
 
     // register/unregister CPU tensor
     communicator::engine::Communicator::RegisterTensorOptions o3;
@@ -217,6 +242,11 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
   SECTION("Read tensors") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
+    if (!communicator::engine::CommunicatorTestPeer::has_rdma_device(*fixture.server_) ||
+        !communicator::engine::CommunicatorTestPeer::has_rdma_device(*fixture.client_)) {
+      SUCCEED("Skipping RDMA read test: no RDMA net devices available");
+      return;
+    }
 
     communicator::engine::Communicator::RegisterTensorOptions o5;
     o5.register_mr = true;
@@ -332,6 +362,11 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
       /*cpu_slice_bytes=*/(4ULL << 20),
       /*enable_rdma=*/true);
   Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(client)) {
+    CommunicatorTestPeer::stop_workers(client);
+    SUCCEED("Skipping RDMA handshake test: no RDMA net devices available");
+    return;
+  }
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
   auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);
@@ -475,6 +510,11 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
       /*cpu_slice_bytes=*/(4ULL << 20),
       /*enable_rdma=*/true);
   Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(client)) {
+    CommunicatorTestPeer::stop_workers(client);
+    SUCCEED("Skipping RDMA handshake failure test: no RDMA net devices available");
+    return;
+  }
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
   auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);
@@ -580,6 +620,63 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
   REQUIRE(free_status.ok());
 }
 
+TEST_CASE("RDMA connect request failure sends connect-failed opcode", "[rdma][communicator][handshake]") {
+  using tensorcast::communicator::base::CHANNEL_RDMA;
+  using tensorcast::communicator::misc::STRNCPY;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator server(cfg, std::move(pools), /*channel_expire_sec=*/0);
+
+  int sv[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  timeval timeout{};
+  timeout.tv_sec = 2;
+  REQUIRE(::setsockopt(sv[1], SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+
+  auto control_ctx = std::make_shared<tensorcast::communicator::transport::TcpContext>();
+  struct sockaddr_in remote_addr{};
+  remote_addr.sin_family = AF_INET;
+  remote_addr.sin_port = htons(65003);
+  remote_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  auto control_transport =
+      std::make_shared<tensorcast::communicator::transport::TcpTransport>(control_ctx.get(), sv[0], remote_addr);
+  auto channel = std::make_shared<Channel>(
+      control_transport,
+      CHANNEL_RDMA,
+      /*buffers_per_flow=*/2,
+      /*max_window_segments=*/2);
+
+  auto connect_req = EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
+  auto* req_payload = connect_req->get_payload<ProtoRdmaConnectRequest>();
+  STRNCPY(req_payload->src_dev_name, "peer.nic3", kMaxDevName);
+  STRNCPY(req_payload->dst_dev_name, "nonexistent.nic", kMaxDevName);
+
+  auto status = CommunicatorTestPeer::on_receive_request(server, channel, control_transport, connect_req);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  ProtoHeader header{};
+  auto header_bytes = ::recv(sv[1], &header, sizeof(header), MSG_WAITALL);
+  REQUIRE(header_bytes == static_cast<ssize_t>(sizeof(header)));
+  CHECK(header.prefix == kHeaderPrefix);
+  CHECK(header.op == ENGINE_OP_RDMA_CONNECT_FAILED);
+  CHECK(header.size == sizeof(ProtoRdmaConnectFailed));
+
+  ProtoRdmaConnectFailed failed_payload{};
+  auto payload_bytes = ::recv(sv[1], &failed_payload, sizeof(failed_payload), MSG_WAITALL);
+  REQUIRE(payload_bytes == static_cast<ssize_t>(sizeof(failed_payload)));
+  CHECK(std::string(failed_payload.src_dev_name) == "peer.nic3");
+  CHECK(std::string(failed_payload.dst_dev_name) == "nonexistent.nic");
+
+  ::close(sv[1]);
+  CommunicatorTestPeer::stop_workers(server);
+}
+
 TEST_CASE("RDMA response lookup uses request offset across windows", "[rdma][communicator][handshake]") {
   using tensorcast::communicator::base::CHANNEL_RDMA;
   using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
@@ -593,6 +690,11 @@ TEST_CASE("RDMA response lookup uses request offset across windows", "[rdma][com
       /*cpu_slice_bytes=*/(4ULL << 20),
       /*enable_rdma=*/true);
   Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(client)) {
+    CommunicatorTestPeer::stop_workers(client);
+    SUCCEED("Skipping RDMA response lookup test: no RDMA net devices available");
+    return;
+  }
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
   auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);

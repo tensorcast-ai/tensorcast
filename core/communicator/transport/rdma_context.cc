@@ -136,6 +136,11 @@ net_dev_t RdmaContext::get_dev_by_rail(int rail_id) {
 }
 
 net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const std::string& key) {
+  if (devs_.empty()) {
+    LOG(WARNING) << "No RDMA net devices available when selecting best device for dev_type=" << dev_type
+                 << " dev_id=" << dev_id << " rail_id=" << rail_id;
+    return nullptr;
+  }
   if (dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
     if (rail_id == -1) {
       int index = std::hash<std::string>{}(key) % devs_.size();
@@ -144,7 +149,7 @@ net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const
                 << " dev rail_id=" << devs_[index]->get_rail_id();
       return devs_[index];
     } else {
-      return rail_devs_[rail_id];
+      return get_dev_by_rail(rail_id);
     }
   } else {
     return get_best_dev(dev_id);
@@ -152,6 +157,15 @@ net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const
 }
 
 net_dev_t RdmaContext::get_best_dev(int gpu_id) {
+  if (gpu_id < 0 || gpu_id >= static_cast<int>(std::size(dev_vector_))) {
+    LOG(WARNING) << "gpu_id is out of supported range for cached affinity map: gpu_id=" << gpu_id
+                 << " max_supported=" << static_cast<int>(std::size(dev_vector_)) - 1;
+    return nullptr;
+  }
+  if (devs_.empty()) {
+    LOG(WARNING) << "No RDMA net devices available when selecting best device for gpu_id=" << gpu_id;
+    return nullptr;
+  }
   if (dev_vector_[gpu_id] != nullptr) {
     return dev_vector_[gpu_id];
   }
@@ -173,14 +187,14 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
         device_prop.pciBusID,
         device_prop.pciDeviceID);
   }
-  char* path = realpath(pci_path, nullptr);
-
+  std::unique_ptr<char, decltype(&std::free)> path(realpath(pci_path, nullptr), &std::free);
   if (path == nullptr) {
     return nullptr;
   }
   int max_prefix_len = 0;
   int max_prefix_idx = -1;
   int max_gid_idx = -1;
+  std::vector<int> max_prefix_candidates;
 
   for (uint32_t i = 0; i < devs_.size(); i++) {
     int prefix_len = 0;
@@ -194,14 +208,19 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
       continue;
     }
 
-    while (path[prefix_len] != '\0' && net_pci_path[prefix_len] != '\0' &&
-           net_pci_path[prefix_len] == path[prefix_len] && prefix_len < 512) {
+    while (path.get()[prefix_len] != '\0' && net_pci_path[prefix_len] != '\0' &&
+           net_pci_path[prefix_len] == path.get()[prefix_len] && prefix_len < 512) {
       prefix_len++;
     }
 
-    if (prefix_len >= max_prefix_len) {
+    if (prefix_len > max_prefix_len) {
       max_prefix_idx = static_cast<int>(i);
       max_prefix_len = prefix_len;
+      max_prefix_candidates.clear();
+      max_prefix_candidates.push_back(static_cast<int>(i));
+    } else if (prefix_len == max_prefix_len) {
+      max_prefix_idx = static_cast<int>(i);
+      max_prefix_candidates.push_back(static_cast<int>(i));
     }
 
     if (dev->get_best_gid_index() > max_gid_idx) {
@@ -227,14 +246,28 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
       continue;
     }
 
-    while (path[prefix_len] != '\0' && net_pci_path[prefix_len] != '\0' &&
-           net_pci_path[prefix_len] == path[prefix_len] && prefix_len < 512) {
+    while (path.get()[prefix_len] != '\0' && net_pci_path[prefix_len] != '\0' &&
+           net_pci_path[prefix_len] == path.get()[prefix_len] && prefix_len < 512) {
       prefix_len++;
     }
 
     if (prefix_len == max_prefix_len) {
       dev_idx_list.push_back(static_cast<int>(i));
     }
+  }
+
+  if (dev_idx_list.empty()) {
+    if (max_prefix_candidates.empty()) {
+      LOG(WARNING) << "No RDMA candidate remains for gpu_id=" << gpu_id
+                   << " after affinity scan; max_prefix_candidates is empty";
+      return nullptr;
+    }
+    const int fallback_idx =
+        max_prefix_candidates[static_cast<size_t>(gpu_id) % max_prefix_candidates.size()];
+    LOG(WARNING) << "No RDMA candidate satisfies max GID + max PCI-prefix jointly for gpu_id=" << gpu_id
+                 << "; fallback to max-prefix candidate dev=" << devs_[fallback_idx]->get_name();
+    dev_vector_[gpu_id] = devs_[fallback_idx];
+    return dev_vector_[gpu_id];
   }
 
   max_prefix_idx = dev_idx_list[gpu_id % dev_idx_list.size()];

@@ -1889,7 +1889,7 @@ misc::result_t Communicator::on_receive_request(
       CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
       auto transport = rdma_context_->create_transport(local_dev_name);
 
-      if (transport->connect(&req->qp_info) == misc::SUCCESS) {
+      if (transport != nullptr && transport->connect(&req->qp_info) == misc::SUCCESS) {
         channel->set_transport(local_dev_name, peer_dev_name, transport);
         auto rsp = EngineMessage::make_message<ProtoRdmaConnectResponse>(ENGINE_OP_RDMA_CONNECT_RESPONSE);
         auto* payload = rsp->get_payload<ProtoRdmaConnectResponse>();
@@ -1899,8 +1899,13 @@ misc::result_t Communicator::on_receive_request(
         memcpy(payload->dst_dev_name, req->dst_dev_name, kMaxDevName);
         COMM_CHECK(t->send(rsp));
       } else {
-        LOG(WARNING) << "failed to rdma connect from " << t->get_remote_url() << ": net_dev=" << local_dev_name;
-        auto rsp = EngineMessage::make_message<ProtoRdmaConnectFailed>(ENGINE_OP_RDMA_CONNECT_RESPONSE);
+        if (transport == nullptr) {
+          LOG(WARNING) << "failed to create rdma transport from " << t->get_remote_url()
+                       << ": net_dev=" << local_dev_name;
+        } else {
+          LOG(WARNING) << "failed to rdma connect from " << t->get_remote_url() << ": net_dev=" << local_dev_name;
+        }
+        auto rsp = EngineMessage::make_message<ProtoRdmaConnectFailed>(ENGINE_OP_RDMA_CONNECT_FAILED);
         auto* payload = rsp->get_payload<ProtoRdmaConnectFailed>();
         memcpy(payload->src_dev_name, req->src_dev_name, kMaxDevName);
         memcpy(payload->dst_dev_name, req->dst_dev_name, kMaxDevName);
@@ -2024,8 +2029,66 @@ misc::result_t Communicator::on_receive_response(
     const engine_message_t& msg) {
   LOG(INFO) << "[on_receive_response] Received response op=" << msg->get_op() << " from " << t->get_remote_url();
 
+  auto handle_rdma_connect_failure = [&](const std::string& local_dev_name,
+                                         const std::string& peer_dev_name,
+                                         const char* failure_reason) {
+    LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name
+               << " peer=" << peer_dev_name << " reason=" << failure_reason;
+
+    auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+    if (endpoint == nullptr) {
+      return;
+    }
+
+    uint64_t generation = 0;
+    Channel::HandshakeState from_state = Channel::HandshakeState::kIdle;
+    {
+      absl::MutexLock lock(&endpoint->mu);
+      generation = endpoint->generation;
+      from_state = endpoint->state;
+    }
+
+    auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+    const absl::Status status = absl::UnavailableError(failure_reason);
+    for (auto& pending : failed_reads) {
+      pending_requests_.del(pending.request->get_key());
+      pending.request->set_result(status);
+    }
+
+    {
+      absl::MutexLock lock(&endpoint->mu);
+      log_handshake_transition(
+          local_dev_name,
+          peer_dev_name,
+          from_state,
+          Channel::HandshakeState::kFailed,
+          endpoint->generation,
+          endpoint->pending_reads.size());
+      endpoint->state = Channel::HandshakeState::kFailed;
+      endpoint->transport.reset();
+      endpoint->failure_count += 1;
+      endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+      endpoint->retry_scheduled = false;
+    }
+  };
+
   switch (msg->get_op()) {
     case ENGINE_OP_RDMA_CONNECT_RESPONSE: {
+      if (msg->get_payload_size() == sizeof(ProtoRdmaConnectFailed)) {
+        auto* failed = msg->get_payload<ProtoRdmaConnectFailed>();
+        std::string peer_dev_name = reinterpret_cast<char*>(failed->dst_dev_name);
+        std::string local_dev_name = reinterpret_cast<char*>(failed->src_dev_name);
+        LOG(WARNING) << "[on_receive_response] Received RDMA_CONNECT_RESPONSE with failed payload; "
+                        "treating as connect failure";
+        handle_rdma_connect_failure(local_dev_name, peer_dev_name, "remote RDMA connect failed");
+        break;
+      }
+      if (msg->get_payload_size() < sizeof(ProtoRdmaConnectResponse)) {
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_RESPONSE payload too small: got="
+                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectResponse);
+        break;
+      }
+
       LOG(INFO) << "get rdma response from " << t->get_remote_url();
 
       auto* req = msg->get_payload<ProtoRdmaConnectResponse>();
@@ -2455,44 +2518,16 @@ misc::result_t Communicator::on_receive_response(
       break;
     }
     case ENGINE_OP_RDMA_CONNECT_FAILED: {
-      auto* req = msg->get_payload<ProtoRdmaConnectFailed>();
-      std::string peer_dev_name = reinterpret_cast<char*>(req->dst_dev_name);
-      std::string local_dev_name = reinterpret_cast<char*>(req->src_dev_name);
-      LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name << " peer=" << peer_dev_name;
-
-      auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
-      if (endpoint == nullptr) {
+      if (msg->get_payload_size() < sizeof(ProtoRdmaConnectFailed)) {
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED payload too small: got="
+                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectFailed);
         break;
       }
 
-      uint64_t generation = 0;
-      {
-        absl::MutexLock lock(&endpoint->mu);
-        generation = endpoint->generation;
-      }
-
-      auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
-      const absl::Status status = absl::UnavailableError("remote RDMA connect failed");
-      for (auto& pending : failed_reads) {
-        pending_requests_.del(pending.request->get_key());
-        pending.request->set_result(status);
-      }
-
-      {
-        absl::MutexLock lock(&endpoint->mu);
-        log_handshake_transition(
-            local_dev_name,
-            peer_dev_name,
-            Channel::HandshakeState::kConnectRequested,
-            Channel::HandshakeState::kFailed,
-            endpoint->generation,
-            endpoint->pending_reads.size());
-        endpoint->state = Channel::HandshakeState::kFailed;
-        endpoint->transport.reset();
-        endpoint->failure_count += 1;
-        endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
-        endpoint->retry_scheduled = false;
-      }
+      auto* req = msg->get_payload<ProtoRdmaConnectFailed>();
+      std::string peer_dev_name = reinterpret_cast<char*>(req->dst_dev_name);
+      std::string local_dev_name = reinterpret_cast<char*>(req->src_dev_name);
+      handle_rdma_connect_failure(local_dev_name, peer_dev_name, "remote RDMA connect failed");
       break;
     }
     case ENGINE_OP_READ_FAILED: {

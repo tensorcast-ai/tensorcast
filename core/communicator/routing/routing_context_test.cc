@@ -168,6 +168,60 @@ Topology build_rail_switch_topology() {
   return std::move(topology_or).value();
 }
 
+Topology build_eight_rail_switch_topology() {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"cpu1", "cpu1", PoolType::kCpu});
+  for (int gpu_id = 0; gpu_id < 8; ++gpu_id) {
+    pools.push_back(Pool{
+        "gpu" + std::to_string(gpu_id),
+        "gpu" + std::to_string(gpu_id),
+        PoolType::kGpu,
+    });
+  }
+
+  std::vector<Endpoint> endpoints;
+  for (int rail_id = 0; rail_id < 8; ++rail_id) {
+    Endpoint nic;
+    nic.id = "nic_" + std::to_string(rail_id);
+    nic.name = nic.id;
+    nic.kind = EndpointKind::kClient;
+    nic.type = EndpointType::kNic;
+    nic.pool_ids = {
+        rail_id < 4 ? "cpu0" : "cpu1",
+        "gpu" + std::to_string(rail_id),
+    };
+    endpoints.push_back(std::move(nic));
+
+    Endpoint rail_switch;
+    rail_switch.id = "netsw_rail_" + std::to_string(rail_id);
+    rail_switch.name = rail_switch.id;
+    rail_switch.kind = EndpointKind::kSwitch;
+    rail_switch.type = EndpointType::kNic;
+    endpoints.push_back(std::move(rail_switch));
+  }
+
+  std::vector<Link> links;
+  for (int rail_id = 0; rail_id < 8; ++rail_id) {
+    Link link;
+    link.id =
+        "nic_" + std::to_string(rail_id) + "_to_netsw_rail_" + std::to_string(rail_id);
+    link.name = link.id;
+    link.type = LinkType::kSwitch;
+    link.src_endpoint_id = "nic_" + std::to_string(rail_id);
+    link.dst_endpoint_id = "netsw_rail_" + std::to_string(rail_id);
+    links.push_back(std::move(link));
+  }
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      {.require_endpoint_links = true, .require_connected = false});
+  REQUIRE(topology_or.ok());
+  return std::move(topology_or).value();
+}
+
 } // namespace
 
 TEST_CASE("Connection records success and failure", "[communicator][routing]") {
@@ -360,4 +414,160 @@ TEST_CASE(
   const std::shared_ptr<Connection>& connection = channel_or.value()->hops().front();
   CHECK(connection->remote_binding().endpoint_id == "nic_remote_1");
   CHECK(connection->remote_binding().rail_id == 1);
+}
+
+TEST_CASE(
+    "RoutingContext rail-matched fallback maps GPU-GPU traffic across eight rails by affinity",
+    "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_eight_rail_switch_topology()).ok());
+
+  std::vector<EndpointBinding> bindings;
+  for (int idx = 0; idx < 8; ++idx) {
+    bindings.push_back(EndpointBinding{
+        .endpoint_id = "node_a/dev/gpu/" + std::to_string(idx),
+        .node_id = "node_a",
+        .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+        .dev_id = idx,
+    });
+    bindings.push_back(EndpointBinding{
+        .endpoint_id = "node_b/dev/gpu/" + std::to_string(idx),
+        .node_id = "node_b",
+        .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+        .dev_id = idx,
+    });
+    bindings.push_back(EndpointBinding{
+        .endpoint_id = "nic_" + std::to_string(idx),
+        .node_id = "node_b",
+        .ip = "10.0.1." + std::to_string(10 + idx),
+        .port = static_cast<uint16_t>(4100 + idx),
+    });
+  }
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  for (int idx = 0; idx < 8; ++idx) {
+    auto comm_or = context->get_communicator(
+        "node_a/dev/gpu/" + std::to_string(idx),
+        "node_b/dev/gpu/" + std::to_string(idx));
+    REQUIRE(comm_or.ok());
+
+    auto channel_or = comm_or.value()->primary_channel();
+    REQUIRE(channel_or.ok());
+    REQUIRE(channel_or.value()->hops().size() == 1);
+
+    const std::shared_ptr<Connection>& connection = channel_or.value()->hops().front();
+    CHECK(connection->type() == ConnectionType::kSwitch);
+    CHECK(connection->remote_binding().endpoint_id == "nic_" + std::to_string(idx));
+    REQUIRE(connection->link() != nullptr);
+    CHECK(
+        connection->link()->id ==
+        "nic_" + std::to_string(idx) + "_to_netsw_rail_" + std::to_string(idx));
+  }
+}
+
+TEST_CASE(
+    "RoutingContext rail-matched fallback picks CPU-affine remote NIC for GPU-to-CPU traffic when preferred rail is absent",
+    "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_eight_rail_switch_topology()).ok());
+
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_a/dev/gpu/3",
+      .node_id = "node_a",
+      .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+      .dev_id = 3,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_b/dev/cpu/1",
+      .node_id = "node_b",
+      .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      .dev_id = 1,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_1",
+      .node_id = "node_b",
+      .ip = "10.0.2.11",
+      .port = 4201,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_5",
+      .node_id = "node_b",
+      .ip = "10.0.2.15",
+      .port = 4205,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_7",
+      .node_id = "node_b",
+      .ip = "10.0.2.17",
+      .port = 4207,
+  });
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  auto comm_or = context->get_communicator("node_a/dev/gpu/3", "node_b/dev/cpu/1");
+  REQUIRE(comm_or.ok());
+  auto channel_or = comm_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+
+  const std::shared_ptr<Connection>& connection = channel_or.value()->hops().front();
+  CHECK(connection->type() == ConnectionType::kSwitch);
+  CHECK(connection->remote_binding().endpoint_id == "nic_5");
+  REQUIRE(connection->link() != nullptr);
+  CHECK(connection->link()->id == "nic_3_to_netsw_rail_3");
+}
+
+TEST_CASE(
+    "RoutingContext rail-matched fallback keeps CPU affinity for CPU-to-CPU traffic on both nodes",
+    "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_eight_rail_switch_topology()).ok());
+
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_a/dev/cpu/1",
+      .node_id = "node_a",
+      .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      .dev_id = 1,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node_b/dev/cpu/0",
+      .node_id = "node_b",
+      .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      .dev_id = 0,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_0",
+      .node_id = "node_b",
+      .ip = "10.0.3.10",
+      .port = 4300,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_1",
+      .node_id = "node_b",
+      .ip = "10.0.3.11",
+      .port = 4301,
+  });
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "nic_5",
+      .node_id = "node_b",
+      .ip = "10.0.3.15",
+      .port = 4305,
+  });
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  auto comm_or = context->get_communicator("node_a/dev/cpu/1", "node_b/dev/cpu/0");
+  REQUIRE(comm_or.ok());
+  auto channel_or = comm_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+
+  const std::shared_ptr<Connection>& connection = channel_or.value()->hops().front();
+  CHECK(connection->type() == ConnectionType::kSwitch);
+  CHECK(connection->remote_binding().endpoint_id == "nic_0");
+  REQUIRE(connection->link() != nullptr);
+  CHECK(connection->link()->id == "nic_4_to_netsw_rail_4");
 }

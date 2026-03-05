@@ -21,6 +21,12 @@ namespace {
 constexpr std::string_view kNicEndpointPrefix = "nic_";
 constexpr std::string_view kRailSwitchPrefix = "netsw_rail_";
 constexpr std::string_view kGpuEndpointMarker = "/dev/gpu/";
+constexpr std::string_view kCpuEndpointMarker = "/dev/cpu/";
+
+struct DevicePoolHint {
+  std::string gpu_pool_id;
+  std::string cpu_pool_id;
+};
 
 std::optional<int> parse_decimal_int(std::string_view text) {
   int value = 0;
@@ -45,6 +51,18 @@ std::optional<int> parse_gpu_dev_id_from_endpoint_id(std::string_view endpoint_i
   return parse_decimal_int(endpoint_id.substr(value_pos));
 }
 
+std::optional<int> parse_cpu_dev_id_from_endpoint_id(std::string_view endpoint_id) {
+  const size_t marker_pos = endpoint_id.rfind(kCpuEndpointMarker);
+  if (marker_pos == std::string_view::npos) {
+    return std::nullopt;
+  }
+  const size_t value_pos = marker_pos + kCpuEndpointMarker.size();
+  if (value_pos >= endpoint_id.size()) {
+    return std::nullopt;
+  }
+  return parse_decimal_int(endpoint_id.substr(value_pos));
+}
+
 std::optional<int> parse_rail_id_from_switch_endpoint_id(std::string_view endpoint_id) {
   if (!endpoint_id.starts_with(kRailSwitchPrefix)) {
     return std::nullopt;
@@ -62,6 +80,32 @@ bool endpoint_has_pool(const topology::Endpoint& endpoint, std::string_view pool
 
 bool is_nic_binding_id(std::string_view endpoint_id) {
   return endpoint_id.starts_with(kNicEndpointPrefix);
+}
+
+DevicePoolHint infer_device_pool_hint(
+    std::string_view endpoint_id,
+    const EndpointBinding& binding) {
+  DevicePoolHint hint;
+
+  if (const auto gpu_id = parse_gpu_dev_id_from_endpoint_id(endpoint_id); gpu_id.has_value() && *gpu_id >= 0) {
+    hint.gpu_pool_id = std::format("gpu{}", *gpu_id);
+  }
+  if (const auto cpu_id = parse_cpu_dev_id_from_endpoint_id(endpoint_id); cpu_id.has_value() && *cpu_id >= 0) {
+    hint.cpu_pool_id = std::format("cpu{}", *cpu_id);
+  }
+  if (!hint.gpu_pool_id.empty() || !hint.cpu_pool_id.empty()) {
+    return hint;
+  }
+
+  if (binding.dev_type == base::COMMUNICATE_ENGINE_DEV_GPU && binding.dev_id >= 0) {
+    hint.gpu_pool_id = std::format("gpu{}", binding.dev_id);
+    return hint;
+  }
+  if (binding.dev_type == base::COMMUNICATE_ENGINE_DEV_CPU && binding.dev_id >= 0) {
+    hint.cpu_pool_id = std::format("cpu{}", binding.dev_id);
+    return hint;
+  }
+  return hint;
 }
 
 ConnectionType connection_type_from_link(const topology::Link* link) {
@@ -449,15 +493,10 @@ RoutingContext::select_local_nic_for_source_locked(
         return lhs->id < rhs->id;
       });
 
-  int source_gpu_dev_id = -1;
-  if (const auto parsed_gpu_id = parse_gpu_dev_id_from_endpoint_id(src_endpoint_id); parsed_gpu_id.has_value()) {
-    source_gpu_dev_id = *parsed_gpu_id;
-  } else if (src_binding.dev_type == base::COMMUNICATE_ENGINE_DEV_GPU) {
-    source_gpu_dev_id = src_binding.dev_id;
-  }
-  const bool source_is_gpu = source_gpu_dev_id >= 0;
+  const DevicePoolHint source_hint = infer_device_pool_hint(src_endpoint_id, src_binding);
+  const bool source_is_gpu = !source_hint.gpu_pool_id.empty();
+  const bool source_is_cpu = !source_hint.cpu_pool_id.empty();
   const int preferred_rail_id = src_binding.rail_id;
-  const std::string gpu_pool_id = source_is_gpu ? std::format("gpu{}", source_gpu_dev_id) : "";
 
   const topology::Endpoint* best_endpoint = nullptr;
   int best_endpoint_rail_id = -1;
@@ -475,10 +514,18 @@ RoutingContext::select_local_nic_for_source_locked(
     }
 
     if (source_is_gpu) {
-      if (endpoint_has_pool(*candidate, gpu_pool_id)) {
-        score += 80;
+      if (endpoint_has_pool(*candidate, source_hint.gpu_pool_id)) {
+        score += 120;
       } else {
-        score -= 20;
+        score -= 40;
+      }
+    }
+
+    if (source_is_cpu) {
+      if (endpoint_has_pool(*candidate, source_hint.cpu_pool_id)) {
+        score += 100;
+      } else {
+        score -= 35;
       }
     }
 
@@ -514,6 +561,7 @@ absl::StatusOr<EndpointBinding> RoutingContext::select_remote_binding_for_rail_l
   if (dst_binding.node_id.empty()) {
     return absl::InvalidArgumentError("destination binding node_id is empty");
   }
+  const DevicePoolHint dst_hint = infer_device_pool_hint(dst_binding.endpoint_id, dst_binding);
 
   struct RemoteCandidate {
     const EndpointBinding* binding = nullptr;
@@ -530,16 +578,47 @@ absl::StatusOr<EndpointBinding> RoutingContext::select_remote_binding_for_rail_l
       continue;
     }
 
+    const topology::Endpoint* candidate_endpoint = topology_->find_endpoint(binding.endpoint_id);
+    int candidate_rail_id = binding.rail_id;
+    if (candidate_rail_id < 0 &&
+        candidate_endpoint != nullptr &&
+        candidate_endpoint->kind == topology::EndpointKind::kClient &&
+        candidate_endpoint->type == topology::EndpointType::kNic) {
+      candidate_rail_id = infer_nic_rail_id_locked(candidate_endpoint->id);
+    }
+
     int score = 0;
     if (preferred_rail_id >= 0) {
-      if (binding.rail_id == preferred_rail_id) {
+      if (candidate_rail_id == preferred_rail_id) {
         score += 200;
-      } else if (binding.rail_id >= 0) {
+      } else if (candidate_rail_id >= 0) {
         score -= 80;
       }
     }
-    if (dst_binding.rail_id >= 0 && binding.rail_id == dst_binding.rail_id) {
+    if (dst_binding.rail_id >= 0 && candidate_rail_id == dst_binding.rail_id) {
       score += 80;
+    }
+    if (candidate_endpoint != nullptr) {
+      if (candidate_endpoint->kind == topology::EndpointKind::kClient &&
+          candidate_endpoint->type == topology::EndpointType::kNic) {
+        score += 30;
+      } else {
+        score -= 30;
+      }
+      if (!dst_hint.gpu_pool_id.empty()) {
+        if (endpoint_has_pool(*candidate_endpoint, dst_hint.gpu_pool_id)) {
+          score += 120;
+        } else {
+          score -= 40;
+        }
+      }
+      if (!dst_hint.cpu_pool_id.empty()) {
+        if (endpoint_has_pool(*candidate_endpoint, dst_hint.cpu_pool_id)) {
+          score += 100;
+        } else {
+          score -= 35;
+        }
+      }
     }
     if (binding.endpoint_id == dst_binding.endpoint_id) {
       score += 40;
@@ -547,7 +626,7 @@ absl::StatusOr<EndpointBinding> RoutingContext::select_remote_binding_for_rail_l
     if (is_nic_binding_id(binding.endpoint_id)) {
       score += 20;
     }
-    if (binding.rail_id >= 0) {
+    if (candidate_rail_id >= 0) {
       score += 5;
     }
 

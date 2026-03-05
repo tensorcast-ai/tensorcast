@@ -46,6 +46,8 @@ Notes:
 - `unregister_tensor` idempotency is implemented in `core/communicator/engine/engine.cc` (missing key returns OK).
 - `close_connection(...)` is not used in store/daemon product paths (only tests and routing adapter scaffolding).
 - `set_dram_lease_provider(...)` / `set_residency_provider(...)` currently have no product callsites.
+- RDMA NIC selection (`RdmaContext::get_best_dev`) now degrades safely on sparse HCA sets: no visible RDMA device returns `nullptr` with warnings, and GPU affinity selection falls back to max PCI-prefix candidates when `max GID + max prefix` intersection is empty.
+- RDMA handshake failure signaling is now strict and backward-safe: server-side connect failures always send `ENGINE_OP_RDMA_CONNECT_FAILED`, and client-side response handling validates payload size so malformed/legacy failure payloads are treated as connect-failed instead of crashing in payload decode.
 
 ### 1.2 Initialization and wiring
 
@@ -115,8 +117,9 @@ Current code constraints:
 - `RoutingContext::update_endpoint_binding(...)` returns `FAILED_PRECONDITION`.
 - `RouteChannel` supports direct 1-hop only; multi-hop read returns `UNIMPLEMENTED`.
 - When a direct topology link is missing for cross-node traffic, `RoutingContext` now attempts a rail-matched NIC fallback:
-  - resolve local NIC by source GPU/pool/rail affinity from topology,
-  - choose a destination-node binding with network address via rail-aware scoring (`preferred rail` > `destination rail` > endpoint-id/NIC heuristics),
+  - infer source/destination device pool hints (`gpu<id>` / `cpu<id>`) from endpoint ids or binding metadata,
+  - resolve local NIC by source rail + GPU/CPU pool affinity from topology,
+  - choose a destination-node binding with network address via weighted rail-aware scoring (`preferred rail`, `destination rail`, topology NIC presence, GPU/CPU pool affinity, endpoint-id/NIC heuristics),
   - build a single-hop channel anchored on the selected local NIC link.
 - This fallback is additive and keeps the same strict direct read fallback in `RemoteKeySource` if routed lookup/read fails.
 - `NvlinkAdapter` currently returns `UNIMPLEMENTED`.
