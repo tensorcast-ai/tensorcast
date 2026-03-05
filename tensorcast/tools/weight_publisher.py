@@ -44,6 +44,7 @@ class WeightPublisherConfig(BaseModel):
 
     model_name: str
     keep_last: int = 2
+    pre_publish_trim_margin: int = 1
     history_path: str | None = None
     # Durable policies trigger managed shared-disk persistence; daemon storage_path is required.
     policy: StorePolicy | str | None = StorePolicyProfile.DURABLE.value
@@ -113,6 +114,14 @@ class WeightPublisherConfig(BaseModel):
         if keep < 0:
             raise ValueError("keep_last must be >= 0")
         return keep
+
+    @field_validator("pre_publish_trim_margin")
+    @classmethod
+    def _validate_pre_publish_trim_margin(cls, value: object) -> int:
+        margin = int(str(value).strip())
+        if margin < 0:
+            raise ValueError("pre_publish_trim_margin must be >= 0")
+        return margin
 
     @field_validator("policy", mode="before")
     @classmethod
@@ -443,7 +452,8 @@ class WeightPublisher:
 
     def _effective_pre_publish_keep_last(self) -> int:
         keep = int(self._config.keep_last)
-        return max(0, keep - 1)
+        margin = int(self._config.pre_publish_trim_margin)
+        return max(0, keep - margin)
 
     def _gc_old_artifacts(self, version: int, latest_artifact_id: str) -> None:
         keep = self._config.keep_last

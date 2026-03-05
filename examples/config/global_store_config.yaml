@@ -90,6 +90,10 @@ worker_policy:
       starvation_aging_threshold: 5s
       queue_scan_limit: 128
       dispatch_batch_limit: 16
+      # Stage C source anti-hotspot controls within one (group_kind, group_id, epoch).
+      group_source_spread_weight: 2.0
+      group_source_soft_cap_ratio: 1.3
+      group_source_min_candidates_for_enforce: 3
 
 # v2 limits and retention policies.
 limits:
