@@ -4,7 +4,7 @@ title: Mapped Binding (Map Abiding) Requirements
 areas: ["sdk", "materialization", "binding", "inplace"]
 status: draft
 created: 2026-02-03
-last_updated: 2026-02-03
+last_updated: 2026-03-04
 related_code:
   - docs/designs/0063-binding-first-inplace-updates.md
   - docs/designs/0061-slot-based-inplace-binding-and-swap.md
@@ -289,7 +289,8 @@ Outcome: parameters update in place, pointers are stable, no Python copy loop.
 # Compatibility and Interactions
 
 - Fully compatible with Binding design (0063); mapped binding is a specialization.
-- Mapped binding is local-only in v1; `publish=True` is rejected even for full coverage.
+- Mapped binding supports publish in v1 when full destination coverage validation passes and the daemon mints a
+  `target_write_token`; otherwise publish fails with a clear precondition error.
 - Works with artifact.view(...): selection is captured and reused on swap.
 - If a new artifact has incompatible shapes or dtypes, swap must fail or trigger a rebind (caller decision).
 
@@ -301,4 +302,5 @@ Outcome: parameters update in place, pointers are stable, no Python copy loop.
 4) Scalar fill: 0 d source fills 1 element dst.
 5) Mismatch detection: wrong dtype or shape causes clean failure without partial overwrite.
 6) Swap failure semantics: dirty state on overwrite failure.
-7) Publish gating: mapped bindings are rejected when publish is requested in v1.
+7) Publish gating: mapped bindings publish only under the documented v1 constraints (full coverage + valid
+   `target_write_token`), otherwise fail without partial publish state.

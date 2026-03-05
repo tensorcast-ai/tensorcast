@@ -114,7 +114,8 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   performing a swap. Use this when bind/swap should stay `publish=False` but you
   still want routable replicas after a successful apply.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
-  enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
+  enforces full dst coverage with no overlaps, and uses a local/loopback
+  materialization RPC path for the overwrite step.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
   mint `target_write_token` for mapped writes, and publish routes through a VIEW
   byte-space id derived from canonical index + source view identity + copy plan +
