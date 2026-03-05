@@ -175,7 +175,7 @@ RoutingContext::RoutingContext(
     async_runtime_ = std::make_shared<common::AsyncRuntime>();
   }
   if (!nvlink_adapter_) {
-    nvlink_adapter_ = std::make_shared<NvlinkAdapter>();
+    nvlink_adapter_ = std::make_shared<NvlinkAdapter>(engine_);
   }
   if (!pcie_adapter_) {
     pcie_adapter_ = std::make_shared<PcieAdapter>(engine_);

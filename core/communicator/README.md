@@ -89,7 +89,7 @@ Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the 
 
 - **RoutingContext** owns a `Topology` plus `EndpointBinding` records (node id, IP/port, device ids) and returns a per `src_endpoint_id` → `dst_endpoint_id` communicator.
 - **RouteChannel** represents a path composed of `Connection` hops; Phase 2 supports direct 1-hop channels only (multi-hop returns `UNIMPLEMENTED`).
-- **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`; `PcieAdapter` is now wired into routing (engine-backed for now); `NvlinkAdapter` remains a placeholder that returns `UNIMPLEMENTED`.
+- **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`; `PcieAdapter` is engine-backed; `NvlinkAdapter` is now engine-backed through local in-process datapath (`read_tensor_local`) and bypasses network transport when source tensor is registered in the same process.
 - **Stats/Health** are tracked per connection and per link (`ConnectionStats`, `LinkStats`, `HealthState`), recording success/failure counts, last latency, and last error.
 - **Protocol selection (same-node local fabric)** now follows deterministic precedence:
   - NVLINK endpoint pair + `prefer_nvlink=true` + available NVLINK adapter => `NVLINK`

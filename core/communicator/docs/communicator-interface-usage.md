@@ -123,7 +123,7 @@ Current code constraints:
   - build a single-hop channel anchored on the selected local NIC link.
 - This fallback is additive and keeps the same strict direct read fallback in `RemoteKeySource` if routed lookup/read fails.
 - Local-fabric adapter matrix:
-  - `NvlinkAdapter` is wired for protocol selection but datapath is still `UNIMPLEMENTED`.
+  - `NvlinkAdapter` is wired for protocol selection and executes through `engine::Communicator::read_tensor_local(...)` when the source tensor is present in the same process.
   - `PcieAdapter` is wired for protocol selection and executes via current engine-backed path.
   - same-node protocol selection is deterministic: NVLINK first (`prefer_nvlink` + adapter available), then PCIE (`prefer_pcie` + adapter available), else `AUTO`.
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -1215,6 +1216,135 @@ void Communicator::set_dram_lease_provider(const std::shared_ptr<HostPinnedCpuSt
       ds2->set_lease_provider(provider);
     }
   }
+}
+
+future_read_result_t Communicator::read_tensor_local(
+    const std::string& key,
+    uint64_t addr,
+    uint64_t bytes,
+    int dev_type,
+    int dev_id,
+    uint64_t remote_offset) {
+  std::promise<transport::read_result_t> promise;
+  auto future = promise.get_future();
+  transport::read_result_t result;
+  result.tensor_key = key;
+
+  auto local_tensor = store_.get_tensor(key);
+  if (local_tensor == nullptr) {
+    result.status = absl::NotFoundError(absl::StrCat("local tensor not found: key=", key));
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  const uint64_t tensor_bytes = local_tensor->get_bytes();
+  if (remote_offset > tensor_bytes || bytes > tensor_bytes - remote_offset) {
+    result.status = absl::OutOfRangeError(absl::StrCat(
+        "local read range out of bounds: key=",
+        key,
+        " offset=",
+        remote_offset,
+        " bytes=",
+        bytes,
+        " tensor_bytes=",
+        tensor_bytes));
+    promise.set_value(std::move(result));
+    return future;
+  }
+  if (bytes == 0) {
+    result.status = absl::OkStatus();
+    promise.set_value(std::move(result));
+    return future;
+  }
+  if (addr == 0) {
+    result.status = absl::InvalidArgumentError("local read destination address must be non-zero");
+    promise.set_value(std::move(result));
+    return future;
+  }
+  if (dev_type != COMMUNICATE_ENGINE_DEV_CPU && dev_type != COMMUNICATE_ENGINE_DEV_GPU) {
+    result.status = absl::InvalidArgumentError(absl::StrCat("unsupported destination device type: ", dev_type));
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  const int src_dev_type = local_tensor->get_mem_type();
+  const int src_dev_id = local_tensor->get_device_id();
+  const uint64_t src_addr = local_tensor->get_uint64_addr();
+  if (src_addr == 0) {
+    result.status = absl::FailedPreconditionError(absl::StrCat("local tensor address is null: key=", key));
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  const void* src_ptr = reinterpret_cast<const void*>(src_addr + remote_offset);
+  void* dst_ptr = reinterpret_cast<void*>(addr);
+
+  auto wrap_cuda_status = [&key](const char* op, absl::Status status) -> absl::Status {
+    if (status.ok()) {
+      return status;
+    }
+    return absl::Status(
+        status.code(),
+        absl::StrCat("local tensor copy ", op, " failed for key=", key, ": ", status.message()));
+  };
+
+  absl::Status copy_status = absl::OkStatus();
+  if (src_dev_type == COMMUNICATE_ENGINE_DEV_CPU && dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
+    std::memcpy(dst_ptr, src_ptr, bytes);
+  } else if (src_dev_type == COMMUNICATE_ENGINE_DEV_CPU && dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+    if (dev_id < 0) {
+      copy_status = absl::InvalidArgumentError("destination GPU device id must be non-negative");
+    } else {
+      copy_status = wrap_cuda_status("set_device(dst_gpu)", cuda::set_device(dev_id));
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("cpu_to_gpu", cuda::memcpy(dst_ptr, src_ptr, bytes, cudaMemcpyHostToDevice));
+      }
+    }
+  } else if (src_dev_type == COMMUNICATE_ENGINE_DEV_GPU && dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
+    if (src_dev_id < 0) {
+      copy_status = absl::InvalidArgumentError("source tensor has invalid GPU device id");
+    } else {
+      copy_status = wrap_cuda_status("set_device(src_gpu)", cuda::set_device(src_dev_id));
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("gpu_to_cpu", cuda::memcpy(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost));
+      }
+    }
+  } else if (src_dev_type == COMMUNICATE_ENGINE_DEV_GPU && dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+    if (src_dev_id < 0 || dev_id < 0) {
+      copy_status = absl::InvalidArgumentError("source/destination GPU device id must be non-negative");
+    } else if (src_dev_id == dev_id) {
+      copy_status = wrap_cuda_status("set_device(d2d)", cuda::set_device(dev_id));
+      if (copy_status.ok()) {
+        copy_status =
+            wrap_cuda_status("gpu_to_gpu_same_device", cuda::memcpy(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice));
+      }
+    } else {
+      int can_access = 0;
+      copy_status = wrap_cuda_status("device_can_access_peer", cuda::device_can_access_peer(&can_access, dev_id, src_dev_id));
+      if (copy_status.ok() && can_access == 0) {
+        copy_status = absl::FailedPreconditionError(
+            absl::StrCat("peer access unavailable between dst_device=", dev_id, " and src_device=", src_dev_id));
+      }
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("enable_peer_access", cuda::enable_peer_access(dev_id, src_dev_id));
+      }
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status(
+            "memcpy_peer_async",
+            cuda::memcpy_peer_async(dst_ptr, dev_id, src_ptr, src_dev_id, bytes));
+      }
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("device_synchronize", cuda::device_synchronize());
+      }
+    }
+  } else {
+    copy_status = absl::InvalidArgumentError(absl::StrCat(
+        "unsupported local copy matrix: src_dev_type=", src_dev_type, " dst_dev_type=", dev_type));
+  }
+
+  result.status = copy_status;
+  promise.set_value(std::move(result));
+  return future;
 }
 
 absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_count) {

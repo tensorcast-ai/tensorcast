@@ -743,6 +743,22 @@ cc_test(
 )
 
 cc_test(
+    name = "routing_adapter_test",
+    srcs = ["routing/adapter_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
+    deps = [
+        ":constants_lib",
+        ":routing_adapter_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "routing_context_test",
     srcs = ["routing/routing_context_test.cc"],
     deps = [

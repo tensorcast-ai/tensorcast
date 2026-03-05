@@ -56,14 +56,14 @@ class EngineAdapter final : public ConnectionAdapter {
 
 class NvlinkAdapter final : public ConnectionAdapter {
  public:
-  NvlinkAdapter() = default;
+  explicit NvlinkAdapter(std::shared_ptr<engine::Communicator> engine = nullptr);
 
   ConnectionProtocol protocol() const override {
     return ConnectionProtocol::kNvlink;
   }
 
   bool is_available() const override {
-    return false;
+    return engine_ != nullptr;
   }
 
   transport::future_read_result_t read_tensor(
@@ -72,6 +72,9 @@ class NvlinkAdapter final : public ConnectionAdapter {
       const EndpointBinding& remote) override;
 
   absl::Status close(const EndpointBinding& remote) override;
+
+ private:
+  std::shared_ptr<engine::Communicator> engine_;
 };
 
 class PcieAdapter final : public ConnectionAdapter {
