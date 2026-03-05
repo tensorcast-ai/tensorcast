@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, TensorCast Team.
+#  Copyright (c) 2026, TensorCast Team.
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import re
+import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +76,18 @@ def _infer_workers(payload: dict[str, Any]) -> int | None:
     return None
 
 
+_ROUND_RE = re.compile(r"(?:^|_)round(?P<round>\d+)(?:_|$)")
+_ORDER_RE = re.compile(r"(?:^|_)o(?P<order>\d+)(?:_|$)")
+
+
+def _infer_round_and_order(case_name: str) -> tuple[int | None, int | None]:
+    round_match = _ROUND_RE.search(case_name)
+    order_match = _ORDER_RE.search(case_name)
+    round_index = int(round_match.group("round")) if round_match else None
+    order_slot = int(order_match.group("order")) if order_match else None
+    return round_index, order_slot
+
+
 @dataclass(slots=True)
 class FanoutCase:
     path: str
@@ -112,6 +126,8 @@ class Tp4Case:
     case_name: str
     workers: int | None
     receivers: int | None
+    round_index: int | None
+    order_slot: int | None
     group_mode: str
     passed: bool | None
     l0_pass: bool
@@ -136,6 +152,18 @@ class Tp4Improvement:
     receivers: int
     non_group_case: str
     group_case: str
+    top1_share_improve_ratio: float | None
+    hhi_improve_ratio: float | None
+    publish_to_apply_p95_improve_ratio: float | None
+
+
+@dataclass(slots=True)
+class Tp4RoundImprovement:
+    workers: int
+    receivers: int
+    round_index: int
+    none_case_count: int
+    group_case_count: int
     top1_share_improve_ratio: float | None
     hhi_improve_ratio: float | None
     publish_to_apply_p95_improve_ratio: float | None
@@ -173,7 +201,9 @@ def _parse_fanout_case(path: Path) -> FanoutCase | None:
     cluster_gibps_p90 = _safe_float(summary.get("cluster_gibps_p90"))
     wave1_transfer = _safe_float(summary.get("wave1_transfer_gibps_mean"))
     wave2_transfer = _safe_float(summary.get("wave2_transfer_gibps_mean"))
-    task_load_complete_sec_mean = _safe_float(summary.get("task_load_complete_sec_mean"))
+    task_load_complete_sec_mean = _safe_float(
+        summary.get("task_load_complete_sec_mean")
+    )
     task_total_sec_mean = _safe_float(summary.get("task_total_sec_mean"))
     completion_curve_auc_norm_mean = _safe_float(
         summary.get("completion_curve_auc_norm_mean")
@@ -265,8 +295,11 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
         return None
 
     case_name = _infer_case_name(path, payload)
+    round_index, order_slot = _infer_round_and_order(case_name)
     receiver_processes = summary.get("receiver_processes", [])
-    receivers = len(receiver_processes) if isinstance(receiver_processes, list) else None
+    receivers = (
+        len(receiver_processes) if isinstance(receiver_processes, list) else None
+    )
     workers = receivers + 1 if isinstance(receivers, int) else _infer_workers(payload)
 
     params = payload.get("params", {})
@@ -323,9 +356,7 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
             and group_contract_consistent is True
         )
     elif group_mode == "none":
-        group_gate_ok = bool(
-            grouped_transports == 0 and group_mode_consistent is True
-        )
+        group_gate_ok = bool(grouped_transports == 0 and group_mode_consistent is True)
     else:
         group_gate_ok = False
 
@@ -336,6 +367,8 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
         case_name=case_name,
         workers=workers,
         receivers=receivers,
+        round_index=round_index,
+        order_slot=order_slot,
         group_mode=group_mode,
         passed=passed,
         l0_pass=l0_pass,
@@ -361,12 +394,28 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
     )
 
 
-def _compute_improve_ratio(baseline: float | None, target: float | None) -> float | None:
+def _compute_improve_ratio(
+    baseline: float | None, target: float | None
+) -> float | None:
     if baseline is None or target is None:
         return None
     if baseline <= 0:
         return None
     return (baseline - target) / baseline
+
+
+def _median_optional(values: list[float | None]) -> float | None:
+    data = [value for value in values if value is not None]
+    if not data:
+        return None
+    return float(statistics.median(data))
+
+
+def _collect_metric_median(
+    cases: list[Tp4Case],
+    metric: str,
+) -> float | None:
+    return _median_optional([getattr(case, metric) for case in cases])
 
 
 def _render_percent(value: float | None) -> str:
@@ -391,11 +440,10 @@ def _build_markdown(
     fanout_cases: list[FanoutCase],
     tp4_cases: list[Tp4Case],
     improvements: list[Tp4Improvement],
+    round_improvements: list[Tp4RoundImprovement],
 ) -> str:
     lines: list[str] = []
-    lines.append(
-        f"# Scaleout Summary ({datetime.now(tz=timezone.utc).isoformat()})"
-    )
+    lines.append(f"# Scaleout Summary ({datetime.now(tz=timezone.utc).isoformat()})")
     lines.append("")
 
     lines.append("## Phase A (Fanout/Cascade)")
@@ -418,7 +466,9 @@ def _build_markdown(
         lines.append(
             "| case | mode | workers | size_mib | L0 | get_success_rate | task_load_s | auc_norm | by_half | wave2/wave1 | cluster_gibps_mean | top1_share | hhi |"
         )
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append(
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        )
         lines.extend(
             [
                 "| "
@@ -462,9 +512,9 @@ def _build_markdown(
         lines.append(f"- cases={len(tp4_cases)} l0_all_pass={tp4_l0_all}")
         lines.append("")
         lines.append(
-            "| case | workers | group_mode | passed | L0 | grouped_transports | p95_publish_to_apply_s | top1_share | hhi |"
+            "| case | workers | round | order | group_mode | passed | L0 | grouped_transports | p95_publish_to_apply_s | top1_share | hhi |"
         )
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         lines.extend(
             [
                 "| "
@@ -472,6 +522,8 @@ def _build_markdown(
                     [
                         case.case_name,
                         _render_int(case.workers),
+                        _render_int(case.round_index),
+                        _render_int(case.order_slot),
                         case.group_mode,
                         str(case.passed),
                         "PASS" if case.l0_pass else "FAIL",
@@ -486,6 +538,8 @@ def _build_markdown(
                     tp4_cases,
                     key=lambda x: (
                         x.workers if x.workers is not None else 0,
+                        x.round_index if x.round_index is not None else -1,
+                        x.order_slot if x.order_slot is not None else -1,
                         x.group_mode,
                         x.case_name,
                     ),
@@ -494,9 +548,9 @@ def _build_markdown(
         )
         lines.append("")
         lines.append(
-            "| workers | receivers | top1_share improvement | hhi improvement | p95 improvement |"
+            "| workers | receivers | none samples | tp_version samples | top1_share improvement | hhi improvement | p95 improvement |"
         )
-        lines.append("|---:|---:|---:|---:|---:|")
+        lines.append("|---:|---:|---:|---:|---:|---:|---:|")
         lines.extend(
             [
                 "| "
@@ -504,6 +558,8 @@ def _build_markdown(
                     [
                         str(row.workers),
                         str(row.receivers),
+                        row.non_group_case,
+                        row.group_case,
                         _render_percent(row.top1_share_improve_ratio),
                         _render_percent(row.hhi_improve_ratio),
                         _render_percent(row.publish_to_apply_p95_improve_ratio),
@@ -513,6 +569,33 @@ def _build_markdown(
                 for row in sorted(improvements, key=lambda x: x.workers)
             ]
         )
+        lines.append("")
+        if round_improvements:
+            lines.append(
+                "| workers | receivers | round | none samples | tp_version samples | top1_share improvement | hhi improvement | p95 improvement |"
+            )
+            lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
+            lines.extend(
+                [
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.workers),
+                            str(row.receivers),
+                            str(row.round_index),
+                            str(row.none_case_count),
+                            str(row.group_case_count),
+                            _render_percent(row.top1_share_improve_ratio),
+                            _render_percent(row.hhi_improve_ratio),
+                            _render_percent(row.publish_to_apply_p95_improve_ratio),
+                        ]
+                    )
+                    + " |"
+                    for row in round_improvements
+                ]
+            )
+        else:
+            lines.append("No round-paired TP4 rows detected.")
 
     return "\n".join(lines) + "\n"
 
@@ -555,37 +638,83 @@ def _collect_tp4_cases(tp4_dir: Path) -> list[Tp4Case]:
 
 
 def _build_tp4_improvements(tp4_cases: list[Tp4Case]) -> list[Tp4Improvement]:
-    keyed: dict[tuple[int, int], dict[str, Tp4Case]] = {}
+    keyed: dict[tuple[int, int], dict[str, list[Tp4Case]]] = {}
     for case in tp4_cases:
         if case.workers is None or case.receivers is None:
             continue
         bucket = keyed.setdefault((case.workers, case.receivers), {})
-        bucket[case.group_mode] = case
+        bucket.setdefault(case.group_mode, []).append(case)
 
     rows: list[Tp4Improvement] = []
     for (workers, receivers), bucket in keyed.items():
-        base = bucket.get("none")
-        group = bucket.get("tp_version")
-        if base is None or group is None:
+        base_cases = bucket.get("none", [])
+        group_cases = bucket.get("tp_version", [])
+        if not base_cases or not group_cases:
             continue
+
+        base_top1 = _collect_metric_median(base_cases, "diffusion_top1_share")
+        group_top1 = _collect_metric_median(group_cases, "diffusion_top1_share")
+        base_hhi = _collect_metric_median(base_cases, "diffusion_hhi")
+        group_hhi = _collect_metric_median(group_cases, "diffusion_hhi")
+        base_p95 = _collect_metric_median(base_cases, "publish_to_apply_p95_s")
+        group_p95 = _collect_metric_median(group_cases, "publish_to_apply_p95_s")
+
         rows.append(
             Tp4Improvement(
                 workers=workers,
                 receivers=receivers,
-                non_group_case=base.case_name,
-                group_case=group.case_name,
-                top1_share_improve_ratio=_compute_improve_ratio(
-                    base.diffusion_top1_share, group.diffusion_top1_share
-                ),
-                hhi_improve_ratio=_compute_improve_ratio(
-                    base.diffusion_hhi, group.diffusion_hhi
-                ),
+                non_group_case=f"none_samples={len(base_cases)}",
+                group_case=f"tp_version_samples={len(group_cases)}",
+                top1_share_improve_ratio=_compute_improve_ratio(base_top1, group_top1),
+                hhi_improve_ratio=_compute_improve_ratio(base_hhi, group_hhi),
                 publish_to_apply_p95_improve_ratio=_compute_improve_ratio(
-                    base.publish_to_apply_p95_s, group.publish_to_apply_p95_s
+                    base_p95, group_p95
                 ),
             )
         )
     return sorted(rows, key=lambda x: x.workers)
+
+
+def _build_tp4_round_improvements(
+    tp4_cases: list[Tp4Case],
+) -> list[Tp4RoundImprovement]:
+    keyed: dict[tuple[int, int, int], dict[str, list[Tp4Case]]] = {}
+    for case in tp4_cases:
+        if case.workers is None or case.receivers is None or case.round_index is None:
+            continue
+        key = (case.workers, case.receivers, case.round_index)
+        bucket = keyed.setdefault(key, {})
+        bucket.setdefault(case.group_mode, []).append(case)
+
+    rows: list[Tp4RoundImprovement] = []
+    for (workers, receivers, round_index), bucket in keyed.items():
+        base_cases = bucket.get("none", [])
+        group_cases = bucket.get("tp_version", [])
+        if not base_cases or not group_cases:
+            continue
+
+        base_top1 = _collect_metric_median(base_cases, "diffusion_top1_share")
+        group_top1 = _collect_metric_median(group_cases, "diffusion_top1_share")
+        base_hhi = _collect_metric_median(base_cases, "diffusion_hhi")
+        group_hhi = _collect_metric_median(group_cases, "diffusion_hhi")
+        base_p95 = _collect_metric_median(base_cases, "publish_to_apply_p95_s")
+        group_p95 = _collect_metric_median(group_cases, "publish_to_apply_p95_s")
+
+        rows.append(
+            Tp4RoundImprovement(
+                workers=workers,
+                receivers=receivers,
+                round_index=round_index,
+                none_case_count=len(base_cases),
+                group_case_count=len(group_cases),
+                top1_share_improve_ratio=_compute_improve_ratio(base_top1, group_top1),
+                hhi_improve_ratio=_compute_improve_ratio(base_hhi, group_hhi),
+                publish_to_apply_p95_improve_ratio=_compute_improve_ratio(
+                    base_p95, group_p95
+                ),
+            )
+        )
+    return sorted(rows, key=lambda x: (x.workers, x.receivers, x.round_index))
 
 
 def main() -> None:
@@ -621,6 +750,7 @@ def main() -> None:
     fanout_cases = _collect_fanout_cases(args.fanout_dir)
     tp4_cases = _collect_tp4_cases(args.tp4_dir)
     improvements = _build_tp4_improvements(tp4_cases)
+    round_improvements = _build_tp4_round_improvements(tp4_cases)
 
     payload = {
         "generated_at_utc": datetime.now(tz=timezone.utc).isoformat(),
@@ -635,16 +765,24 @@ def main() -> None:
         },
         "tp4": {
             "case_count": len(tp4_cases),
-            "l0_all_pass": all(case.l0_pass for case in tp4_cases) if tp4_cases else None,
+            "l0_all_pass": all(case.l0_pass for case in tp4_cases)
+            if tp4_cases
+            else None,
             "cases": [asdict(case) for case in tp4_cases],
             "improvements": [asdict(row) for row in improvements],
+            "round_improvements": [asdict(row) for row in round_improvements],
         },
     }
 
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
-    markdown = _build_markdown(fanout_cases, tp4_cases, improvements)
+    markdown = _build_markdown(
+        fanout_cases,
+        tp4_cases,
+        improvements,
+        round_improvements,
+    )
     args.out_md.parent.mkdir(parents=True, exist_ok=True)
     args.out_md.write_text(markdown)
 

@@ -57,6 +57,9 @@ message GroupDispatchPolicy {
   google.protobuf.Duration starvation_aging_threshold = 3;
   uint32 queue_scan_limit = 4;
   uint32 dispatch_batch_limit = 5;
+  double group_source_spread_weight = 6;
+  double group_source_soft_cap_ratio = 7;
+  uint32 group_source_min_candidates_for_enforce = 8;
 }
 
 message TransportSchedulerPolicy {

@@ -30,9 +30,15 @@ def _pending_request(
     )
 
 
+def _double(value: str) -> str:
+    return f"{value}{value}"
+
+
 def test_create_if_absent_with_cursor_is_idempotent(repositories):
     pending_repo = repositories["pending_transport_request"]
-    first = _pending_request(request_id="pending-idempotent-1", request_fingerprint="fp-1")
+    first = _pending_request(
+        request_id="pending-idempotent-1", request_fingerprint="fp-1"
+    )
 
     with pending_repo.transaction() as tx:
         created = pending_repo.create_if_absent_with_cursor(first, tx)
@@ -149,3 +155,115 @@ def test_purge_malformed_rows_does_not_drop_request_id_by_token_pattern(reposito
     assert row is not None
     assert row.request_id == request_id
     assert row.state == PendingTransportState.ENQUEUED
+
+
+def test_create_if_absent_normalizes_exact_doubled_tokens(repositories):
+    pending_repo = repositories["pending_transport_request"]
+    canonical_request_id = "suite:v3:rx4:r1:a0"
+    canonical_group_id = "suite:v3"
+    canonical_group_kind = "tp_version"
+    canonical_group_part_id = "rx4:r1"
+    canonical_fingerprint = "fp-dedupe-1"
+    canonical_artifact_id = "cgid:artifact-v3"
+
+    request = PendingTransportRequest(
+        request_id=_double(canonical_request_id),
+        request_fingerprint=_double(canonical_fingerprint),
+        artifact_id=_double(canonical_artifact_id),
+        requested_view_id=None,
+        source_node_id=_double("node-a"),
+        source_address=_double("192.168.10.1"),
+        source_port=9000,
+        requester_worker_id=_double("worker_a"),
+        group_id=_double(canonical_group_id),
+        group_kind=_double(canonical_group_kind),
+        group_total_parts=28,
+        group_part_id=_double(canonical_group_part_id),
+        group_priority=0,
+        group_epoch=9,
+    )
+
+    with pending_repo.transaction() as tx:
+        created = pending_repo.create_if_absent_with_cursor(request, tx)
+
+    assert created.request_id == canonical_request_id
+    assert created.request_fingerprint == canonical_fingerprint
+    assert created.artifact_id == canonical_artifact_id
+    assert created.source_node_id == "node-a"
+    assert created.source_address == "192.168.10.1"
+    assert created.requester_worker_id == "worker_a"
+    assert created.group_id == canonical_group_id
+    assert created.group_kind == canonical_group_kind
+    assert created.group_part_id == canonical_group_part_id
+
+    resolved = pending_repo.find_by_request_id(canonical_request_id)
+    assert resolved is not None
+    assert resolved.request_id == canonical_request_id
+    assert resolved.group_kind == canonical_group_kind
+
+
+def test_purge_malformed_rows_heals_exact_doubled_tokens(repositories):
+    pending_repo = repositories["pending_transport_request"]
+    request_id = "heal:v3:rx4:r1:a0"
+
+    with pending_repo.transaction() as tx:
+        pending_repo.create_if_absent_with_cursor(
+            PendingTransportRequest(
+                request_id=request_id,
+                request_fingerprint="fp-heal",
+                artifact_id="cgid:heal-artifact",
+                requested_view_id=None,
+                source_node_id="node-a",
+                source_address="192.168.10.1",
+                source_port=9000,
+                requester_worker_id="worker-a",
+                group_id="heal:v3",
+                group_kind="tp_version",
+                group_total_parts=28,
+                group_part_id="rx4:r1",
+                group_priority=0,
+                group_epoch=1,
+            ),
+            tx,
+        )
+        tx.execute(
+            """
+            UPDATE pending_transport_requests
+            SET request_id = ?,
+                request_fingerprint = ?,
+                artifact_id = ?,
+                source_node_id = ?,
+                source_address = ?,
+                requester_worker_id = ?,
+                group_id = ?,
+                group_kind = ?,
+                group_part_id = ?
+            WHERE request_id = ?
+            """,
+            [
+                _double(request_id),
+                _double("fp-heal"),
+                _double("cgid:heal-artifact"),
+                _double("node-a"),
+                _double("192.168.10.1"),
+                _double("worker-a"),
+                _double("heal:v3"),
+                _double("tp_version"),
+                _double("rx4:r1"),
+                request_id,
+            ],
+        )
+        reconciled = pending_repo.purge_malformed_rows(cursor=tx)
+        assert reconciled == 1
+
+    healed = pending_repo.find_by_request_id(request_id)
+    assert healed is not None
+    assert healed.request_id == request_id
+    assert healed.request_fingerprint == "fp-heal"
+    assert healed.artifact_id == "cgid:heal-artifact"
+    assert healed.source_node_id == "node-a"
+    assert healed.source_address == "192.168.10.1"
+    assert healed.requester_worker_id == "worker-a"
+    assert healed.group_id == "heal:v3"
+    assert healed.group_kind == "tp_version"
+    assert healed.group_part_id == "rx4:r1"

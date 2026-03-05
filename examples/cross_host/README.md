@@ -368,11 +368,14 @@ export TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1
 export TC_WP_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
 export TC_SCALE_NUM_VERSIONS=10
 export TC_WP_TRANSPORT_GROUP_MODES=none,tp_version
+export TC_WP_GROUP_PAIR_ORDER=abba
+export TC_WP_GROUP_PAIR_ROUNDS=3
 export TC_WP_PAYLOAD_MODE=tp_ranked
 export TC_WP_TP_WORLD_SIZE=4
 export TC_WP_TP_TOTAL_BYTES=42949672960
 export TC_WP_RECEIVER_APPLY_MODE=tp_bind_into_swap
 export TC_WP_MAX_CONCURRENCY=1
+export TC_WP_PRE_PUBLISH_TRIM_MARGIN=1
 export TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP=1
 export TC_WP_P0_EARLY_STOP=1
 export TC_WP_P0_EARLY_STOP_GRACE_S=20
@@ -390,8 +393,12 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 流程与判定：
 1. 在 publisher 节点先执行 single-host 功能烟测（`tensor_dict`）。
 2. 按 `TC_WP_SCALE_RECEIVER_COUNTS` 逐级执行 receiver 规模 case。
-3. 每个规模按 `TC_WP_TRANSPORT_GROUP_MODES` 循环（例如 `none -> tp_version`）。
-4. 验证点包括：
+3. 每个规模按 `TC_WP_TRANSPORT_GROUP_MODES` 做组模式循环。
+4. 组模式顺序由 `TC_WP_GROUP_PAIR_ORDER` 控制：
+- `linear`（默认）：按配置顺序执行（例如 `none -> tp_version`）。
+- `abba`：当模式包含 `none,tp_version` 时执行 `none -> tp_version -> tp_version -> none`。
+5. 重复轮次由 `TC_WP_GROUP_PAIR_ROUNDS` 控制（建议 `>=3`，用于抑制 run-order 偏差并支撑 paired 对照统计）。
+6. 验证点包括：
 - receiver 通过 `binding.swap` 连续更新，首版 `bind`，后续全是 `swap`；
 - pointer 稳定（swap 后 `data_ptr` 不变）；
 - `keep_last=2` 时旧版本去注册后不可物化；
