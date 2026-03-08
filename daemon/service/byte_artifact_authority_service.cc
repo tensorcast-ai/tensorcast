@@ -14,6 +14,10 @@ namespace tensorcast::daemon {
 
 namespace {
 
+const ArtifactProfileRuntime& byte_artifact_runtime() {
+  return ArtifactProfileRegistry::runtime_for_profile(ArtifactProfileRegistry::Profile::kByteArtifact);
+}
+
 v2::BatchItemOutcome make_outcome(
     std::string_view artifact_id,
     v2::BatchItemStatus status,
@@ -30,12 +34,11 @@ v2::BatchItemOutcome make_outcome(
 absl::Status validate_artifact_for_context(
     std::string_view artifact_id,
     const ByteArtifactAuthorityService::Context& context) {
-  const auto& runtime = ArtifactProfileRegistry::runtime_for_artifact_id(artifact_id);
-  auto artifact_id_st = runtime.validate_artifact_id_for_field(artifact_id, "artifact_id");
+  auto artifact_id_st = byte_artifact_runtime().validate_artifact_id_for_field(artifact_id, "artifact_id");
   if (!artifact_id_st.ok()) {
     return artifact_id_st;
   }
-  auto shard_or = runtime.shard_id_for_artifact(artifact_id, context.shard_count);
+  auto shard_or = byte_artifact_runtime().shard_id_for_artifact(artifact_id, context.shard_count);
   if (!shard_or.ok()) {
     return shard_or.status();
   }
@@ -114,6 +117,8 @@ std::vector<ByteArtifactAuthorityService::GetResult> ByteArtifactAuthorityServic
             .status = v2::BATCH_ITEM_STATUS_OK,
             .descriptor = entry->descriptor,
             .body_handle = entry->body_handle,
+            .authority_record = entry->authority_record,
+            .serving_capability = entry->serving_capability,
         });
   }
   return results;
@@ -137,8 +142,8 @@ std::vector<v2::BatchItemOutcome> ByteArtifactAuthorityService::batch_put_if_abs
       continue;
     }
 
-    const auto invariant_st = ArtifactProfileRegistry::runtime_for_artifact_id(item.artifact_id)
-                                  .validate_invariant_body_descriptor(item.invariant, item.descriptor);
+    const auto invariant_st =
+        byte_artifact_runtime().validate_invariant_body_descriptor(item.invariant, item.descriptor);
     if (!invariant_st.ok()) {
       retire_put_item_backing(item);
       outcomes.push_back(
@@ -150,6 +155,8 @@ std::vector<v2::BatchItemOutcome> ByteArtifactAuthorityService::batch_put_if_abs
         item.artifact_id,
         item.invariant,
         item.descriptor,
+        item.verified_content_descriptor,
+        item.verification_record,
         item.observation,
         item.body_handle,
         context.shard_id,

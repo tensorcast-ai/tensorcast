@@ -38,6 +38,9 @@ class BodyBackingManager {
     BodyDescriptor descriptor;
     BodyBackingObservation observation;
     BodyHandle body_handle;
+    store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+    store::runtime::ingestion::VerificationRecord verification_record;
+    store::runtime::ingestion::BackingIdentity backing_identity;
   };
 
   struct ReuseRequest {

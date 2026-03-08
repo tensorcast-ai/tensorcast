@@ -87,7 +87,9 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":artifact_hash_lib",
+        "//proto/tensorcast/common/v1:common_cc",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
     ],

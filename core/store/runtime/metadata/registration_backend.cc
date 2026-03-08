@@ -224,6 +224,28 @@ std::vector<components::CanonicalRange> to_component_ranges(const std::vector<Ca
   return out;
 }
 
+ingestion::VerifiedContentDescriptor build_registration_verified_content_descriptor(
+    std::string_view index_multihash,
+    std::string_view data_multihash,
+    uint64_t size_bytes) {
+  ingestion::VerifiedContentDescriptor descriptor;
+  descriptor.content_identity.semantic_layout_identity.kind = ingestion::SemanticLayoutKind::kCanonicalIndexDigest;
+  descriptor.content_identity.semantic_layout_identity.value = std::string(index_multihash);
+  descriptor.content_identity.logical_size_bytes = size_bytes;
+  descriptor.content_identity.digest_alg = "multihash";
+  descriptor.content_identity.digest_bytes = std::string(data_multihash);
+  return descriptor;
+}
+
+ingestion::VerificationRecord build_registration_verification_record(std::string_view index_multihash) {
+  return ingestion::VerificationRecord{
+      .verification_method = ingestion::VerificationMethod::kRegistrationCommit,
+      .verified_at = absl::Now(),
+      .layout_proof_kind = ingestion::LayoutProofKind::kCanonicalIndexDigest,
+      .layout_proof_value = std::string(index_multihash),
+  };
+}
+
 absl::Status zero_view_padding(
     const loader::ViewWritePlan& write_plan,
     uint64_t view_size_bytes,
@@ -1230,6 +1252,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.schema_version = entry->schema_version;
     result.encoding = entry->encoding;
     result.id_kind = entry->id_kind;
+    result.verified_content_descriptor =
+        build_registration_verified_content_descriptor(index_multihash, data_multihash, entry->size_bytes);
+    result.verification_record = build_registration_verification_record(index_multihash);
     record_commit_latency(*entry, "existed");
     return result;
   }
@@ -1654,6 +1679,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   result.schema_version = entry->schema_version;
   result.encoding = entry->encoding;
   result.id_kind = entry->id_kind;
+  result.verified_content_descriptor =
+      build_registration_verified_content_descriptor(index_multihash, data_multihash, entry->size_bytes);
+  result.verification_record = build_registration_verification_record(index_multihash);
   uint64_t covered_bytes = 0;
   if (entry->view_state) {
     if (!entry->view_state->options.view_id.empty()) {

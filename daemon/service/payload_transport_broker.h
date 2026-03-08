@@ -58,6 +58,7 @@ class PayloadTransportBroker {
   struct CapabilityResolution {
     RefMetadata metadata;
     ResolvedBodyCapability capability;
+    ServingCapability serving_capability;
     std::shared_ptr<const std::string> payload;
   };
 
@@ -67,20 +68,31 @@ class PayloadTransportBroker {
       std::string_view artifact_id,
       std::string payload,
       tensorcast::common::v1::PayloadRefDirection direction,
-      std::string_view operation_id = "");
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture());
+
+  [[nodiscard]] absl::StatusOr<std::string> issue_payload_ref(
+      std::string_view artifact_id,
+      std::shared_ptr<const std::string> payload,
+      const BodyDescriptor& descriptor,
+      tensorcast::common::v1::PayloadRefDirection direction,
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture());
 
   [[nodiscard]] absl::StatusOr<std::string> issue_payload_ref(
       std::string_view artifact_id,
       std::shared_ptr<const std::string> payload,
       tensorcast::common::v1::PayloadRefDirection direction,
-      std::string_view operation_id = "");
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture());
 
   [[nodiscard]] absl::StatusOr<std::string> issue_payload_ref(
       std::string_view artifact_id,
       const BodyHandle& body_handle,
       const BodyDescriptor& descriptor,
       tensorcast::common::v1::PayloadRefDirection direction,
-      std::string_view operation_id = "");
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture());
 
   [[nodiscard]] absl::StatusOr<RefMetadata> inspect_payload_ref(
       std::string_view payload_ref,

@@ -51,5 +51,23 @@ TEST_CASE("Byte artifact selection identity vectors", "[selection_identity][byte
   REQUIRE(to_hex_lower(selection_hash) == "b231ede6078bceb7b1046c23dd93b6f7cf4e35e4042ca87e634f1e2975953fee");
 }
 
+TEST_CASE("SelectionIdentity requires artifact id and both hashes", "[selection_identity][typed]") {
+  tensorcast::common::v1::ArtifactSelection selection;
+  selection.set_artifact_id("mi2:test:typed");
+  selection.set_logical_layout_hash("layout_hash");
+  selection.set_selection_hash("selection_hash");
+
+  auto identity_or = build_selection_identity(selection);
+  REQUIRE(identity_or.ok());
+  CHECK(identity_or->artifact_id == "mi2:test:typed");
+  CHECK(identity_or->logical_layout_hash == "layout_hash");
+  CHECK(identity_or->selection_hash == "selection_hash");
+
+  tensorcast::common::v1::ArtifactSelection missing_artifact_id;
+  missing_artifact_id.set_logical_layout_hash("layout_hash");
+  missing_artifact_id.set_selection_hash("selection_hash");
+  CHECK_FALSE(build_selection_identity(missing_artifact_id).ok());
+}
+
 } // namespace
 } // namespace tensorcast::common

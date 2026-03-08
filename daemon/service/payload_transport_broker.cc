@@ -48,6 +48,20 @@ std::string compute_sha256_hex(std::string_view payload) {
   return hex;
 }
 
+absl::StatusOr<absl::Time> resolve_payload_ref_expiry(
+    absl::Time now,
+    absl::Duration default_ttl,
+    absl::Time capability_expires_at) {
+  absl::Time expires_at = now + default_ttl;
+  if (capability_expires_at != absl::InfiniteFuture()) {
+    expires_at = std::min(expires_at, capability_expires_at);
+  }
+  if (expires_at <= now) {
+    return absl::FailedPreconditionError("payload_ref capability is already expired");
+  }
+  return expires_at;
+}
+
 const char* capability_mode_label(BodyCapabilityResolutionMode mode) {
   switch (mode) {
     case BodyCapabilityResolutionMode::kLocalBodyHandle:
@@ -307,16 +321,106 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     std::string_view artifact_id,
     std::string payload,
     tensorcast::common::v1::PayloadRefDirection direction,
-    std::string_view operation_id) {
+    std::string_view operation_id,
+    absl::Time capability_expires_at) {
   return issue_payload_ref(
-      artifact_id, std::make_shared<const std::string>(std::move(payload)), direction, operation_id);
+      artifact_id,
+      std::make_shared<const std::string>(std::move(payload)),
+      direction,
+      operation_id,
+      capability_expires_at);
+}
+
+absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
+    std::string_view artifact_id,
+    std::shared_ptr<const std::string> payload,
+    const BodyDescriptor& descriptor,
+    tensorcast::common::v1::PayloadRefDirection direction,
+    std::string_view operation_id,
+    absl::Time capability_expires_at) {
+  if (!payload || payload->empty()) {
+    return absl::InvalidArgumentError("payload is required for payload_ref issuance");
+  }
+  const BodyDescriptor normalized_descriptor = normalized_body_descriptor(descriptor);
+  if (normalized_descriptor.size_bytes != payload->size()) {
+    return absl::FailedPreconditionError("descriptor size does not match payload size");
+  }
+  if (normalized_descriptor.payload_digest_alg.empty() || normalized_descriptor.payload_digest_hex.empty()) {
+    return absl::InvalidArgumentError("descriptor digest is required for payload_ref issuance");
+  }
+  if (daemon_id_.empty()) {
+    return absl::FailedPreconditionError("daemon_id is required for payload_ref issuance");
+  }
+  if (artifact_id.empty()) {
+    return absl::InvalidArgumentError("artifact_id is required for payload_ref issuance");
+  }
+  if (capability_tokens_ == nullptr || !capability_tokens_->configured()) {
+    return absl::FailedPreconditionError("capability tokens are required for payload_ref issuance");
+  }
+  if (direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED) {
+    return absl::InvalidArgumentError("payload_ref direction is required");
+  }
+
+  const absl::Time now = absl::Now();
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
+  const std::string payload_id = [&]() {
+    absl::MutexLock lock(&mu_);
+    prune_locked(now);
+    return mint_payload_id();
+  }();
+
+  RefMetadata metadata;
+  metadata.issuer_daemon_id = daemon_id_;
+  metadata.payload_id = payload_id;
+  metadata.artifact_id = std::string(artifact_id);
+  metadata.payload_size = payload->size();
+  metadata.digest_alg = normalized_descriptor.payload_digest_alg;
+  metadata.digest_hex = normalized_descriptor.payload_digest_hex;
+  metadata.direction = direction;
+  metadata.operation_id = std::string(operation_id);
+  metadata.expires_at = expires_at;
+
+  {
+    absl::MutexLock lock(&mu_);
+    records_[payload_id] = Record{
+        .metadata = metadata,
+        .payload = std::move(payload),
+        .body_handle = BodyHandle(),
+        .descriptor = normalized_descriptor,
+    };
+  }
+
+  tensorcast::common::v1::PayloadRefScope scope;
+  scope.set_payload_id(metadata.payload_id);
+  scope.set_artifact_id(metadata.artifact_id);
+  scope.set_payload_size(metadata.payload_size);
+  scope.set_digest_alg(metadata.digest_alg);
+  scope.set_digest_hex(metadata.digest_hex);
+  scope.set_direction(direction);
+  if (!metadata.operation_id.empty()) {
+    scope.set_operation_id(metadata.operation_id);
+  }
+  auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  if (!scope_or.ok()) {
+    return scope_or.status();
+  }
+  return capability_tokens_->mint(
+      daemon_id_,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
+      *scope_or,
+      static_cast<std::uint64_t>(absl::ToUnixMillis(expires_at)));
 }
 
 absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     std::string_view artifact_id,
     std::shared_ptr<const std::string> payload,
     tensorcast::common::v1::PayloadRefDirection direction,
-    std::string_view operation_id) {
+    std::string_view operation_id,
+    absl::Time capability_expires_at) {
   if (daemon_id_.empty()) {
     return absl::FailedPreconditionError("daemon_id is required for payload_ref issuance");
   }
@@ -334,7 +438,11 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
 
   const absl::Time now = absl::Now();
-  const absl::Time expires_at = now + options_.ttl;
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
   const std::string payload_id = [&]() {
     absl::MutexLock lock(&mu_);
     prune_locked(now);
@@ -388,7 +496,8 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     const BodyHandle& body_handle,
     const BodyDescriptor& descriptor,
     tensorcast::common::v1::PayloadRefDirection direction,
-    std::string_view operation_id) {
+    std::string_view operation_id,
+    absl::Time capability_expires_at) {
   if (daemon_id_.empty()) {
     return absl::FailedPreconditionError("daemon_id is required for payload_ref issuance");
   }
@@ -409,7 +518,11 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
 
   const absl::Time now = absl::Now();
-  const absl::Time expires_at = now + options_.ttl;
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
   const std::string payload_id = [&]() {
     absl::MutexLock lock(&mu_);
     prune_locked(now);
@@ -575,11 +688,15 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
       resolution.capability.local = true;
       resolution.capability.body_handle = local_or->body_handle;
       resolution.capability.descriptor = local_or->descriptor;
+      resolution.serving_capability = resolve_serving_capability(
+          payload_ref, resolution.metadata.expires_at, resolution.capability.mode, /*local=*/true);
       record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
       return resolution;
     }
     resolution.capability.mode = BodyCapabilityResolutionMode::kLoader;
     resolution.capability.local = true;
+    resolution.serving_capability = resolve_serving_capability(
+        payload_ref, resolution.metadata.expires_at, resolution.capability.mode, /*local=*/true);
     record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
     return resolution;
   }
@@ -588,6 +705,8 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
   resolution.metadata = *metadata_or;
   resolution.capability.mode = BodyCapabilityResolutionMode::kChunkRpcFallback;
   resolution.capability.local = false;
+  resolution.serving_capability = resolve_serving_capability(
+      payload_ref, resolution.metadata.expires_at, resolution.capability.mode, /*local=*/false);
   record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/false);
   return resolution;
 }

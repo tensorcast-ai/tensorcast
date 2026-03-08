@@ -293,29 +293,147 @@ TEST_CASE(
   harness.initialize();
 
   const auto payload = std::make_shared<std::string>("body-bytes-for-verification");
-  ArtifactLoweringPlan plan;
-  plan.identity.logical_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE";
-  plan.identity.physical_artifact_id = "__tc_body__:verified";
-  plan.target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  plan.source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
-      .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
-      .size_bytes = payload->size(),
-  });
-  plan.byte_range_map = loading::build_identity_byte_range_map(payload->size());
-  plan.canonical_index_json = loading::build_synthetic_payload_canonical_index_json(payload->size());
   loading::ReplicaTarget target;
   target.location.type = MemoryLocation::CPU;
   target.location.device_id = -1;
-  plan.replica_target = target;
-  plan.source_kind = loading::MaterializationSource::kLocalReplica;
+  tensorcast::common::SelectionIdentity selection_identity{
+      .artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE",
+      .logical_layout_hash = tensorcast::common::compute_byte_artifact_logical_layout_hash_bytes(),
+      .selection_hash = tensorcast::common::compute_byte_artifact_selection_hash_bytes(),
+  };
+  auto plan_or = lower_to_artifact_plan(
+      tensorcast::store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              tensorcast::store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE",
+                  .physical_artifact_id = "__tc_body__:verified",
+              },
+          .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          .source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+              .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+              .size_bytes = payload->size(),
+          }),
+          .selection_identity = selection_identity,
+          .expected_size_bytes = payload->size(),
+          .generation = 1,
+          .source_kind = loading::MaterializationSource::kLocalReplica,
+          .replica_target = target,
+      });
+  REQUIRE(plan_or.ok());
+  ArtifactLoweringPlan plan = std::move(*plan_or);
 
   auto result_or = harness.facade->execute_artifact_lowering_plan(std::move(plan));
   REQUIRE(result_or.ok());
   REQUIRE(result_or->replica_handle.has_value());
-  REQUIRE(result_or->verified_content.has_value());
-  CHECK(result_or->verified_content->size_bytes == payload->size());
-  CHECK(result_or->verified_content->payload_digest_alg == "sha256");
-  CHECK(result_or->verified_content->payload_digest_hex == sha256_hex(*payload));
+  REQUIRE(result_or->selection_identity.has_value());
+  REQUIRE(result_or->resolved_source_descriptor.has_value());
+  REQUIRE(result_or->verified_content_descriptor.has_value());
+  REQUIRE(result_or->verification_record.has_value());
+  REQUIRE(result_or->backing_identity.has_value());
+  CHECK(*result_or->selection_identity == selection_identity);
+  CHECK(result_or->resolved_source_descriptor->exact_size_bytes == payload->size());
+  CHECK(result_or->verified_content_descriptor->content_identity.logical_size_bytes == payload->size());
+  CHECK(result_or->verified_content_descriptor->content_identity.digest_alg == "sha256");
+  CHECK(
+      tensorcast::store::runtime::ingestion::content_digest_bytes_to_hex(
+          result_or->verified_content_descriptor->content_identity.digest_bytes) == sha256_hex(*payload));
+  CHECK(result_or->verification_record->verified_at != absl::InfinitePast());
+  CHECK(result_or->backing_identity->physical_artifact_id == "__tc_body__:verified");
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "lower_to_artifact_plan enforces exact source size for identity-map staging",
+    "[materialization_facade][artifact_lowering]") {
+  const auto payload = std::make_shared<std::string>("size-check");
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+
+  auto plan_or = lower_to_artifact_plan(
+      tensorcast::store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              tensorcast::store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.c2l6ZQ~layout_v1~b64u.azEy",
+                  .physical_artifact_id = "__tc_body__:size_check",
+              },
+          .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          .source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+              .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+              .size_bytes = payload->size(),
+          }),
+          .expected_size_bytes = payload->size() + 1,
+          .generation = 1,
+          .source_kind = loading::MaterializationSource::kLocalReplica,
+          .replica_target = target,
+      });
+  REQUIRE_FALSE(plan_or.ok());
+  CHECK(absl::IsFailedPrecondition(plan_or.status()));
+}
+
+TEST_CASE("Shared content identity is independent of artifact id", "[materialization_facade][artifact_lowering]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_content_identity";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  const auto payload = std::make_shared<std::string>("same-content-different-artifact-id");
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+
+  const auto execute = [&](std::string_view logical_artifact_id, std::string_view physical_artifact_id) {
+    auto plan_or = lower_to_artifact_plan(
+        tensorcast::store::runtime::ingestion::LowerToArtifactPlanRequest{
+            .identity =
+                tensorcast::store::runtime::ingestion::ArtifactLoweringIdentity{
+                    .logical_artifact_id = std::string(logical_artifact_id),
+                    .physical_artifact_id = std::string(physical_artifact_id),
+                },
+            .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+            .source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+                .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+                .size_bytes = payload->size(),
+            }),
+            .semantic_layout_identity =
+                tensorcast::store::runtime::ingestion::SemanticLayoutIdentity{
+                    .kind = tensorcast::store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId,
+                    .value = "layout_v1",
+                },
+            .expected_size_bytes = payload->size(),
+            .generation = 1,
+            .source_kind = loading::MaterializationSource::kLocalReplica,
+            .replica_target = target,
+        });
+    REQUIRE(plan_or.ok());
+    return harness.facade->execute_artifact_lowering_plan(std::move(*plan_or));
+  };
+
+  auto first_or =
+      execute("cgid:byte_artifact~tenant~engine~b64u.Zmlyc3Q~layout_v1~b64u.azEz", "__tc_body__:content_identity_a");
+  auto second_or =
+      execute("cgid:byte_artifact~tenant~engine~b64u.c2Vjb25k~layout_v1~b64u.azE0", "__tc_body__:content_identity_b");
+  REQUIRE(first_or.ok());
+  REQUIRE(second_or.ok());
+  REQUIRE(first_or->verified_content_descriptor.has_value());
+  REQUIRE(second_or->verified_content_descriptor.has_value());
+
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.semantic_layout_identity ==
+      second_or->verified_content_descriptor->content_identity.semantic_layout_identity);
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.logical_size_bytes ==
+      second_or->verified_content_descriptor->content_identity.logical_size_bytes);
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.digest_alg ==
+      second_or->verified_content_descriptor->content_identity.digest_alg);
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.digest_bytes ==
+      second_or->verified_content_descriptor->content_identity.digest_bytes);
 
   harness.shutdown();
   std::error_code cleanup_ec;

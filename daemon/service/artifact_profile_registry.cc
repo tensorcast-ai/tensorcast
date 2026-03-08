@@ -130,6 +130,57 @@ class ByteArtifactProfileRuntime final : public ArtifactProfileRuntime {
   }
 };
 
+class OrdinaryArtifactProfileRuntime final : public ArtifactProfileRuntime {
+ public:
+  [[nodiscard]] absl::Status validate_artifact_id_for_field(std::string_view artifact_id, std::string_view field_name)
+      const override {
+    if (artifact_id.empty()) {
+      return absl::InvalidArgumentError(absl::StrCat(field_name, " is required"));
+    }
+    const auto artifact_kind_or = common::validate_and_get_artifact_id_kind(artifact_id);
+    if (!artifact_kind_or.ok()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(field_name, " is not a valid artifact id: ", artifact_kind_or.status().message()));
+    }
+    if (*artifact_kind_or == common::ArtifactIdKind::kCgid) {
+      const auto validation_st = common::validate_client_generated_id(artifact_id);
+      if (!validation_st.ok()) {
+        return absl::InvalidArgumentError(
+            absl::StrCat(field_name, " is not a valid client-generated artifact id: ", validation_st.message()));
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  [[nodiscard]] absl::Status validate_batch_selection(
+      const tensorcast::common::v1::ArtifactSelection& selection) const override {
+    return validate_artifact_id_for_field(selection.artifact_id(), "selection.artifact_id");
+  }
+
+  [[nodiscard]] absl::StatusOr<tensorcast::common::v1::ArtifactSelection> build_normalized_selection(
+      std::string_view artifact_id) const override {
+    const auto artifact_id_st = validate_artifact_id_for_field(artifact_id, "artifact_id");
+    if (!artifact_id_st.ok()) {
+      return artifact_id_st;
+    }
+    tensorcast::common::v1::ArtifactSelection selection;
+    selection.set_artifact_id(std::string(artifact_id));
+    return selection;
+  }
+
+  [[nodiscard]] absl::StatusOr<std::uint64_t> shard_id_for_artifact(
+      std::string_view /*artifact_id*/,
+      std::uint64_t /*shard_count*/) const override {
+    return absl::FailedPreconditionError("ordinary artifacts do not use routed shard authority");
+  }
+
+  [[nodiscard]] absl::Status validate_invariant_body_descriptor(
+      const v2::PutIfAbsentInvariant& /*invariant*/,
+      const BodyDescriptor& /*descriptor*/) const override {
+    return absl::FailedPreconditionError("ordinary artifacts do not use byte-artifact body invariants");
+  }
+};
+
 class UnknownArtifactProfileRuntime final : public ArtifactProfileRuntime {
  public:
   [[nodiscard]] absl::Status validate_artifact_id_for_field(
@@ -168,15 +219,55 @@ const ByteArtifactProfileRuntime& byte_artifact_profile_runtime() {
   return *runtime;
 }
 
+const OrdinaryArtifactProfileRuntime& ordinary_artifact_profile_runtime() {
+  static const auto* runtime = new OrdinaryArtifactProfileRuntime();
+  return *runtime;
+}
+
 const UnknownArtifactProfileRuntime& unknown_artifact_profile_runtime() {
   static const auto* runtime = new UnknownArtifactProfileRuntime();
   return *runtime;
+}
+
+const ArtifactProfileRegistry::ProfileTraits& ordinary_profile_traits() {
+  static const auto* traits = new ArtifactProfileRegistry::ProfileTraits{
+      .profile = ArtifactProfileRegistry::Profile::kOrdinaryArtifact,
+      .profile_name = "ordinary_artifact",
+      .family = ArtifactProfileRegistry::ArtifactFamily::kOrdinary,
+      .authority_model = ArtifactProfileRegistry::AuthorityModel::kGlobalStoreBacked,
+      .fixed_full_selection = false,
+  };
+  return *traits;
+}
+
+const ArtifactProfileRegistry::ProfileTraits& byte_artifact_profile_traits() {
+  static const auto* traits = new ArtifactProfileRegistry::ProfileTraits{
+      .profile = ArtifactProfileRegistry::Profile::kByteArtifact,
+      .profile_name = "byte_artifact",
+      .family = ArtifactProfileRegistry::ArtifactFamily::kHighCardinality,
+      .authority_model = ArtifactProfileRegistry::AuthorityModel::kRoutedHomeEpoch,
+      .fixed_full_selection = true,
+  };
+  return *traits;
+}
+
+const ArtifactProfileRegistry::ProfileTraits& unknown_profile_traits() {
+  static const auto* traits = new ArtifactProfileRegistry::ProfileTraits{
+      .profile = ArtifactProfileRegistry::Profile::kUnknown,
+      .profile_name = "unknown",
+      .family = ArtifactProfileRegistry::ArtifactFamily::kOrdinary,
+      .authority_model = ArtifactProfileRegistry::AuthorityModel::kUnknown,
+      .fixed_full_selection = false,
+  };
+  return *traits;
 }
 
 } // namespace
 
 const ArtifactProfileRuntime& ArtifactProfileRegistry::runtime_for_profile(Profile profile) {
   switch (profile) {
+    case Profile::kOrdinaryArtifact:
+      return ordinary_artifact_profile_runtime();
     case Profile::kByteArtifact:
       return byte_artifact_profile_runtime();
     case Profile::kUnknown:
@@ -189,11 +280,38 @@ const ArtifactProfileRuntime& ArtifactProfileRegistry::runtime_for_artifact_id(s
   return runtime_for_profile(classify_artifact_id(artifact_id));
 }
 
+const ArtifactProfileRegistry::ProfileTraits& ArtifactProfileRegistry::traits_for_profile(Profile profile) {
+  switch (profile) {
+    case Profile::kOrdinaryArtifact:
+      return ordinary_profile_traits();
+    case Profile::kByteArtifact:
+      return byte_artifact_profile_traits();
+    case Profile::kUnknown:
+    default:
+      return unknown_profile_traits();
+  }
+}
+
+const ArtifactProfileRegistry::ProfileTraits& ArtifactProfileRegistry::traits_for_artifact_id(
+    std::string_view artifact_id) {
+  return traits_for_profile(classify_artifact_id(artifact_id));
+}
+
 ArtifactProfileRegistry::Profile ArtifactProfileRegistry::classify_artifact_id(std::string_view artifact_id) {
+  if (artifact_id.empty()) {
+    return Profile::kUnknown;
+  }
   if (common::is_byte_artifact_id(artifact_id)) {
     return Profile::kByteArtifact;
   }
-  return Profile::kUnknown;
+  switch (common::infer_artifact_id_kind(artifact_id)) {
+    case common::ArtifactIdKind::kMi2:
+    case common::ArtifactIdKind::kCgid:
+      return Profile::kOrdinaryArtifact;
+    case common::ArtifactIdKind::kUnspecified:
+    default:
+      return Profile::kUnknown;
+  }
 }
 
 } // namespace tensorcast::daemon

@@ -5,7 +5,7 @@ title: Human–AI Collaborative Documentation System (Design)
 
 # Summary
 
-Define the documentation model centered on `docs/designs/` (why/what) and `docs/plans/` (how). It standardizes directory semantics, required content, and metadata so designs and plans are consistent, discoverable, and enforce a clear separation of concerns.
+Define the documentation model centered on `docs/designs/` as the durable architectural record. `docs/plans/` remain optional execution notes for work that benefits from phased tracking, but plans are not required to persist after completion if the final outcome is folded back into the design. The system standardizes directory semantics, required content, and metadata so design intent stays discoverable without forcing long-lived implementation checklists to accumulate in the repository.
 
 This document specifies the directory semantics, required sections, and metadata schema for designs and plans.
 
@@ -33,7 +33,7 @@ flowchart LR
 
 - Durable context: Make architectural intent, invariants, and interfaces discoverable and enforceable.
 - Speed with safety: Enable agents to operate top‑down with human review, reducing rework.
-- Clear separation of concerns: Designs (why/what) vs. Plans (how) vs. Guides (how‑to/tutorials).
+- Clear separation of concerns: Designs (why/what) vs. optional Plans (temporary how) vs. Guides (how‑to/tutorials).
 - Localized guidance: README.md and AGENTS.md provide precise, directory‑scoped instructions.
 - Canonical data source: `schema.sql` is the single source of truth for data structures.
 - Guardrails: CI enforces metadata, cross‑linking, and the “doc sync” rule for code changes.
@@ -43,7 +43,7 @@ flowchart LR
 ## Directories and Semantics
 
 - `docs/designs/` — Product requirements, goals, constraints, normative schemas and APIs, trade‑offs, risks, and acceptance criteria. Authoritative “why and what.”
-- `docs/plans/` — Phased, actionable implementation plans with milestones, testing, rollout and backout. The “how.”
+- `docs/plans/` — Optional phased implementation notes with milestones, testing, rollout and backout. Use them when work benefits from active execution tracking; fold the final result back into the design when the work is complete.
 - `docs/guides/` — Tutorials and how‑tos for APIs/tools, often drafted by agents after reading source/docs.
 - `schema.sql` (repo root) — Canonical, versioned relational schema for the project’s persistent data; designs that change data must reference and modify this file.
 - `README.md` and `AGENTS.md` — Placed at meaningful boundaries (module roots, service dirs, tools). These files give localized guidance to humans and agents. See “Localized Guidance” below.
@@ -52,7 +52,7 @@ flowchart LR
 
 - `docs/designs/` and `docs/plans/` filenames begin with a zero-padded sequence number: `0001-<slug>.md`, `0002-<slug>.md`, etc.
 - The numeric prefix increments monotonically; do not reuse or skip numbers except when explicitly superseding a document (record the relationship in frontmatter).
-- Companion designs and plans share the same sequence number to make the pairing obvious (e.g., `docs/designs/0015-foo.md` ↔ `docs/plans/0015-foo.md`).
+- When a design has one or more companion plans, those plans should reuse the design sequence number or a clear derivative of it so the relationship is obvious (for example `docs/designs/0015-foo.md` and `docs/plans/0015-foo.md`, or `docs/plans/0040-01-foo.md`).
 - The `<slug>` portion of the filename is a descriptive string reused in the frontmatter `slug` field without the numeric prefix.
 
 ## Document Types and Required Content
@@ -82,7 +82,7 @@ Design (docs/designs/<slug>.md)
         A[Reclaimer</n>(idempotent cleanup)] --> B[Done]
       ```
 
-Plan (docs/plans/<slug>.md)
+Plan (docs/plans/<slug>.md, optional)
 - Grounding: summarize current state and link concrete code references; declare baseline
 - Phases/milestones and tasks
 - Acceptance checks, test plan, rollout/backout
@@ -116,7 +116,7 @@ Purpose
 Placement and Precedence
 - Place at every module/service boundary and any directory where special rules apply.
 - Precedence: deeper AGENTS.md overrides parent; direct human/developer/user instructions override AGENTS.md. Scope is limited to the directory subtree.
-- Doc Sync Rule: Any code change that modifies behavior must update the nearest README/AGENTS.md and relevant design/plan.
+- Doc Sync Rule: Any code change that modifies behavior must update the nearest README/AGENTS.md, the relevant design, and any in-use companion plan.
 
 Recommended Structure
 - README.md: Overview, Setup, Commands, Layout, Key Links, Owner
@@ -136,21 +136,22 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 - Acts as canonical ground truth for persistent data structures across components.
 - Any design that changes data must include a “Schema Changes” section describing rationale and impact, and must propose a synchronized patch to `schema.sql`.
 - Ownership: global_store owners maintain `schema.sql` with review from affected areas.
-- Compatibility: migrations and backfills are tracked in plans; designs must specify compatibility strategy and versioning.
+- Compatibility: migrations and backfills are tracked in plans when a plan exists; designs must specify compatibility strategy and versioning.
 
 # Ownership, Reviews, and Status Lifecycle
 
 - Status:
   - draft → proposed → accepted → (deprecated|superseded|retired)
-  - Plans track execution; designs capture intent and compatibility commitment.
+  - Designs capture intent and compatibility commitment.
+  - Plans, when present, track in-flight execution and may be removed after completion once the final status, decisions, and verification are captured in the design.
 - Decision Records: When a design is accepted, capture the final decision and key rationale; link commits that implement it.
 
 # Guardrails (What must be true)
 
 - Frontmatter validation: required keys present; status is valid; cross‑links resolve.
-- 1:1 linkage: every plan points to exactly one design and vice versa.
+- Linkage: every plan points to exactly one design; a design may have zero, one, or multiple plans over its lifetime.
 - Link hygiene: CI link checker passes.
-- Doc Sync: PRs that change code touching an owned area must link a design/plan and update localized README/AGENTS.md.
+- Doc Sync: PRs that change code touching an owned area must update the relevant design and localized README/AGENTS.md; add or update a plan when phased execution tracking is useful.
 - Schema discipline: designs referencing data models must link `schema.sql`; plans must include migration/testing steps.
 - Local `AGENTS.md` include the repository’s Software Design Philosophy anchors (Complexity Reduction, Comment‑First Development, Error Handling Philosophy).
 
@@ -158,7 +159,7 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 
 - Indexes: `docs/README.md` lists designs, plans, and guides by area and status with short descriptions.
 - Stable slugs and IDs for deep links; filenames mirror `<slug>.md`.
-- Cross‑linking: designs link to plans and owning code; plans link back to designs and tests.
+- Cross-linking: designs link to owning code and related docs; plans, when present, link back to their design and tests.
 
 # How to Write a Plan
 

@@ -218,6 +218,7 @@ class DaemonKernel {
   std::unique_ptr<WorkerIdentityStore> identity_store_;
   std::unique_ptr<ByteArtifactRuntimeState> byte_artifact_runtime_state_;
   std::unique_ptr<ByteArtifactBodyStore> byte_artifact_body_store_;
+  std::unique_ptr<store::runtime::RuntimeContextEvents::Subscription> runtime_event_subscription_;
   std::unique_ptr<ByteArtifactRouteResolver> byte_artifact_route_resolver_;
   std::unique_ptr<PayloadTransportBroker> payload_transport_broker_;
   std::unique_ptr<WorkerDirectoryCache> worker_directory_cache_;

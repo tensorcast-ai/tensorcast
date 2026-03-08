@@ -7,6 +7,7 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "daemon/service/body_backing_types.h"
@@ -36,14 +37,23 @@ struct ByteArtifactRuntimeState {
     absl::Time refreshed_at{absl::UnixEpoch()};
   };
 
+  struct AuthorityEntry {
+    BodyDescriptor claim_descriptor;
+    store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+    store::runtime::ingestion::VerificationRecord verification_record;
+    BodyBackingObservation last_observation;
+    BodyHandle visible_body_handle;
+    absl::Time expires_at{absl::InfinitePast()};
+    std::uint64_t shard_id{0};
+    std::uint64_t lease_generation{0};
+    std::uint64_t routing_epoch{1};
+    AuthorityVisibilityKind visibility_kind{AuthorityVisibilityKind::kNone};
+    AuthorityClaimState claim_state{AuthorityClaimState::kUnclaimed};
+  };
+
   mutable absl::Mutex mu;
-  absl::flat_hash_map<std::string, BodyHandle> body_handles ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, BodyDescriptor> body_descriptors ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, BodyBackingObservation> body_observations ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, absl::Time> expires_at ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, std::uint64_t> entry_shard_id ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, std::uint64_t> entry_lease_generation ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, std::uint64_t> entry_routing_epoch ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<std::string, AuthorityEntry> authority_entries ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> replica_visibility_index ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, ShardRouteCacheEntry> shard_routes ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, OwnedShardLeaseEntry> owned_shard_leases ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::string, DaemonEndpointCacheEntry> daemon_endpoints ABSL_GUARDED_BY(mu);

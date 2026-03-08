@@ -6,8 +6,10 @@
 #include <string>
 
 #include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/time/time.h"
 #include "core/common/memory/memory_location.h"
+#include "core/store/runtime/ingestion/artifact_truth.h"
 #include "daemon/service/byte_artifact_body_handle.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -68,6 +70,19 @@ enum class BodyCapabilityResolutionMode : std::uint8_t {
   kChunkRpcFallback = 2,
 };
 
+enum class AuthorityVisibilityKind : std::uint8_t {
+  kNone = 0,
+  kReadyBacking = 1,
+  kPolicyBackedPath = 2,
+};
+
+enum class AuthorityClaimState : std::uint8_t {
+  kUnclaimed = 0,
+  kClaimedVisible = 1,
+  kClaimedInvisible = 2,
+  kClaimDeleted = 3,
+};
+
 struct BodyDescriptor {
   std::string physical_artifact_id;
   std::string layout_id;
@@ -83,6 +98,24 @@ struct ResolvedBodyCapability {
   bool local{true};
   BodyHandle body_handle;
   BodyDescriptor descriptor;
+};
+
+struct ServingCapability {
+  std::string capability_id;
+  absl::Time expires_at{absl::InfinitePast()};
+  BodyCapabilityResolutionMode mode{BodyCapabilityResolutionMode::kLoader};
+  bool local{true};
+};
+
+struct AuthorityRecord {
+  std::string artifact_id;
+  std::uint64_t shard_id{0};
+  std::uint64_t lease_generation{0};
+  std::uint64_t routing_epoch{1};
+  absl::Time expires_at{absl::InfinitePast()};
+  AuthorityVisibilityKind visibility_kind{AuthorityVisibilityKind::kNone};
+  AuthorityClaimState claim_state{AuthorityClaimState::kUnclaimed};
+  bool visible{false};
 };
 
 struct BodyBackingObservation {
@@ -115,6 +148,54 @@ inline v2::PutIfAbsentInvariant body_descriptor_to_invariant(const BodyDescripto
   invariant.set_payload_digest_alg(descriptor.payload_digest_alg);
   invariant.set_payload_digest_hex(descriptor.payload_digest_hex);
   return invariant;
+}
+
+inline store::runtime::ingestion::VerifiedContentDescriptor body_descriptor_to_verified_content_descriptor(
+    const BodyDescriptor& descriptor) {
+  store::runtime::ingestion::VerifiedContentDescriptor verified;
+  verified.content_identity.semantic_layout_identity.kind =
+      store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId;
+  verified.content_identity.semantic_layout_identity.value = descriptor.layout_id;
+  verified.content_identity.logical_size_bytes = descriptor.size_bytes;
+  verified.content_identity.digest_alg = descriptor.payload_digest_alg;
+  std::string digest_bytes;
+  if (!absl::HexStringToBytes(descriptor.payload_digest_hex, &digest_bytes)) {
+    digest_bytes = descriptor.payload_digest_hex;
+  }
+  verified.content_identity.digest_bytes = std::move(digest_bytes);
+  return verified;
+}
+
+inline store::runtime::ingestion::VerificationRecord body_descriptor_to_verification_record(
+    const BodyDescriptor& descriptor) {
+  return store::runtime::ingestion::VerificationRecord{
+      .verification_method = store::runtime::ingestion::VerificationMethod::kSharedExecutorFullReadDigest,
+      .verified_at = descriptor.verified_at,
+      .layout_proof_kind = store::runtime::ingestion::LayoutProofKind::kNamedLayoutId,
+      .layout_proof_value = descriptor.layout_id,
+  };
+}
+
+inline store::runtime::ingestion::BackingIdentity body_descriptor_to_backing_identity(
+    const BodyDescriptor& descriptor,
+    const BodyHandle& body_handle) {
+  return store::runtime::ingestion::BackingIdentity{
+      .physical_artifact_id = descriptor.physical_artifact_id,
+      .device = body_handle.replica_handle().key().device,
+  };
+}
+
+inline ServingCapability resolve_serving_capability(
+    std::string_view capability_id,
+    absl::Time expires_at,
+    BodyCapabilityResolutionMode mode,
+    bool local) {
+  return ServingCapability{
+      .capability_id = std::string(capability_id),
+      .expires_at = expires_at,
+      .mode = mode,
+      .local = local,
+  };
 }
 
 } // namespace tensorcast::daemon

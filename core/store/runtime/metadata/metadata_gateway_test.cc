@@ -641,6 +641,20 @@ TEST_CASE("RegistrationBackend commits publish to MetadataGateway", "[registrati
 
   auto commit_or = backend.commit(begin_or->registration_id);
   REQUIRE(commit_or.ok());
+  REQUIRE(commit_or->verified_content_descriptor.has_value());
+  REQUIRE(commit_or->verification_record.has_value());
+  CHECK(
+      commit_or->verified_content_descriptor->content_identity.semantic_layout_identity.kind ==
+      tensorcast::store::runtime::ingestion::SemanticLayoutKind::kCanonicalIndexDigest);
+  CHECK(
+      commit_or->verified_content_descriptor->content_identity.semantic_layout_identity.value ==
+      commit_or->index_multihash);
+  CHECK(commit_or->verified_content_descriptor->content_identity.logical_size_bytes == reg.total_size_bytes);
+  CHECK(commit_or->verified_content_descriptor->content_identity.digest_alg == "multihash");
+  CHECK(commit_or->verified_content_descriptor->content_identity.digest_bytes == commit_or->data_multihash);
+  CHECK(
+      commit_or->verification_record->verification_method ==
+      tensorcast::store::runtime::ingestion::VerificationMethod::kRegistrationCommit);
 
   REQUIRE_FALSE(harness.publisher.publications.empty());
   const auto& publication = harness.publisher.publications.back();

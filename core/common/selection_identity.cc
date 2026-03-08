@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "core/common/artifact_hash.h"
 #include "nlohmann/json.hpp"
 
@@ -88,6 +89,23 @@ std::string compute_byte_artifact_logical_layout_hash_bytes() {
 std::string compute_byte_artifact_selection_hash_bytes() {
   static const std::string kHash = sha256_as_string(kByteArtifactSelectionProfile);
   return kHash;
+}
+
+absl::StatusOr<SelectionIdentity> build_selection_identity(const tensorcast::common::v1::ArtifactSelection& selection) {
+  if (selection.artifact_id().empty()) {
+    return absl::InvalidArgumentError("selection.artifact_id is required");
+  }
+  if (selection.logical_layout_hash().empty()) {
+    return absl::InvalidArgumentError("selection.logical_layout_hash is required");
+  }
+  if (selection.selection_hash().empty()) {
+    return absl::InvalidArgumentError("selection.selection_hash is required");
+  }
+  return SelectionIdentity{
+      .artifact_id = selection.artifact_id(),
+      .logical_layout_hash = selection.logical_layout_hash(),
+      .selection_hash = selection.selection_hash(),
+  };
 }
 
 } // namespace tensorcast::common

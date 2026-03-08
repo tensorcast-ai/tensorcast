@@ -109,6 +109,16 @@ DaemonKernel::DaemonKernel(
   identity_store_->set_daemon_id(options_.daemon_id);
   byte_artifact_runtime_state_ = std::make_unique<ByteArtifactRuntimeState>();
   byte_artifact_body_store_ = std::make_unique<ByteArtifactBodyStore>(*byte_artifact_runtime_state_);
+  runtime_event_subscription_ = engine_->subscribe_to_runtime_events([this](const store::runtime::RuntimeEvent& event) {
+    if (event.type != store::runtime::RuntimeEventType::kReplicaEvicted) {
+      return;
+    }
+    const auto* payload = std::get_if<store::runtime::ReplicaLifecycleEvent>(&event.payload);
+    if (payload == nullptr || !byte_artifact_body_store_) {
+      return;
+    }
+    byte_artifact_body_store_->invalidate_replica_visibility(payload->key, absl::Now(), "runtime_evicted");
+  });
   worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client);
   const std::string local_daemon_id = options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id;
   byte_artifact_route_resolver_ = std::make_unique<ByteArtifactRouteResolver>(
@@ -142,6 +152,7 @@ DaemonKernel::DaemonKernel(
 }
 
 DaemonKernel::~DaemonKernel() {
+  runtime_event_subscription_.reset();
   stop();
   if (engine_) {
     engine_->set_stable_cache_spill_evictable({});
@@ -166,6 +177,7 @@ void DaemonKernel::stop() {
     return;
   }
   started_.store(false);
+  runtime_event_subscription_.reset();
   if (scheduler_) {
     scheduler_->stop();
   }

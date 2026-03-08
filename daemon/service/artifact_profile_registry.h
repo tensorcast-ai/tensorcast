@@ -40,11 +40,33 @@ class ArtifactProfileRegistry {
  public:
   enum class Profile {
     kUnknown = 0,
-    kByteArtifact = 1,
+    kOrdinaryArtifact = 1,
+    kByteArtifact = 2,
+  };
+
+  enum class ArtifactFamily {
+    kOrdinary = 0,
+    kHighCardinality = 1,
+  };
+
+  enum class AuthorityModel {
+    kUnknown = 0,
+    kGlobalStoreBacked = 1,
+    kRoutedHomeEpoch = 2,
+  };
+
+  struct ProfileTraits {
+    Profile profile{Profile::kUnknown};
+    std::string_view profile_name;
+    ArtifactFamily family{ArtifactFamily::kOrdinary};
+    AuthorityModel authority_model{AuthorityModel::kUnknown};
+    bool fixed_full_selection{false};
   };
 
   [[nodiscard]] static const ArtifactProfileRuntime& runtime_for_profile(Profile profile);
   [[nodiscard]] static const ArtifactProfileRuntime& runtime_for_artifact_id(std::string_view artifact_id);
+  [[nodiscard]] static const ProfileTraits& traits_for_profile(Profile profile);
+  [[nodiscard]] static const ProfileTraits& traits_for_artifact_id(std::string_view artifact_id);
 
   [[nodiscard]] static Profile classify_artifact_id(std::string_view artifact_id);
 };

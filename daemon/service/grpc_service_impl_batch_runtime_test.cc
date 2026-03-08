@@ -21,6 +21,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/artifact_profile_registry.h"
 #include "daemon/service/body_backing_manager.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -97,6 +98,28 @@ uint64_t shard_for_artifact(std::string_view artifact_id) {
     hash64 |= static_cast<uint64_t>(digest[i]) << (8U * i);
   }
   return hash64 % 4096ULL;
+}
+
+TEST_CASE("ArtifactProfileRegistry exposes explicit family and authority traits", "[daemon][profile_registry]") {
+  using Registry = tensorcast::daemon::ArtifactProfileRegistry;
+
+  CHECK(Registry::classify_artifact_id("mi2:weights/example") == Registry::Profile::kOrdinaryArtifact);
+  CHECK(
+      Registry::traits_for_artifact_id("mi2:weights/example").authority_model ==
+      Registry::AuthorityModel::kGlobalStoreBacked);
+  CHECK(Registry::traits_for_artifact_id("mi2:weights/example").family == Registry::ArtifactFamily::kOrdinary);
+  CHECK(Registry::classify_artifact_id("not-an-artifact-id") == Registry::Profile::kUnknown);
+  CHECK_FALSE(
+      Registry::runtime_for_profile(Registry::Profile::kOrdinaryArtifact)
+          .validate_artifact_id_for_field("not-an-artifact-id", "artifact_id")
+          .ok());
+
+  const std::string byte_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azQ";
+  CHECK(Registry::classify_artifact_id(byte_artifact_id) == Registry::Profile::kByteArtifact);
+  CHECK(
+      Registry::traits_for_artifact_id(byte_artifact_id).authority_model == Registry::AuthorityModel::kRoutedHomeEpoch);
+  CHECK(Registry::traits_for_artifact_id(byte_artifact_id).family == Registry::ArtifactFamily::kHighCardinality);
+  CHECK(Registry::traits_for_artifact_id(byte_artifact_id).fixed_full_selection);
 }
 
 void set_invariant(
@@ -498,6 +521,8 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
       absl::Now());
   REQUIRE(entry.has_value());
   REQUIRE_FALSE(entry->body_handle.empty());
+  REQUIRE(entry->authority_record.visible);
+  REQUIRE(entry->authority_record.artifact_id == artifact_id);
 
   auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
       artifact_id,
@@ -519,6 +544,9 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
   REQUIRE(capability_or->capability.mode == tensorcast::daemon::BodyCapabilityResolutionMode::kLocalBodyHandle);
   REQUIRE_FALSE(capability_or->capability.body_handle.empty());
   REQUIRE(capability_or->capability.descriptor.payload_digest_hex == entry->descriptor.payload_digest_hex);
+  REQUIRE(capability_or->serving_capability.capability_id == *payload_ref_or);
+  REQUIRE(capability_or->serving_capability.local);
+  REQUIRE(capability_or->serving_capability.mode == tensorcast::daemon::BodyCapabilityResolutionMode::kLocalBodyHandle);
 
   tensorcast::daemon::BodyBackingManager manager(*engine);
   auto reused_or = manager.try_reuse_body(
@@ -534,6 +562,246 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
   REQUIRE(reused_or->has_value());
   REQUIRE((*reused_or)->body_handle.replica_handle().key() == entry->body_handle.replica_handle().key());
   REQUIRE((*reused_or)->descriptor.physical_artifact_id == entry->descriptor.physical_artifact_id);
+  REQUIRE((*reused_or)->backing_identity.physical_artifact_id == entry->descriptor.physical_artifact_id);
+}
+
+TEST_CASE(
+    "HomeBatchGet payload_ref capability is bounded by authority expiry",
+    "[daemon][batch][payload_ref][expiry]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.ZXhwaXJ5~layout_v1~b64u.azY";
+  const std::string payload = "payload-ref-expiry-body";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_ttl_ms(50);
+  put_req.set_operation_id("op-payload-ref-expiry");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  const auto entry = harness->kernel().byte_artifact_body_store().get(
+      artifact_id,
+      shard_id,
+      /*lease_generation=*/1,
+      /*routing_epoch=*/1,
+      absl::Now());
+  REQUIRE(entry.has_value());
+  REQUIRE(entry->serving_capability.expires_at == entry->expires_at);
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.add_artifact_ids(artifact_id);
+  get_req.set_operation_id("op-payload-ref-expiry");
+
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 1);
+  REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
+
+  auto metadata_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
+      get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  REQUIRE(metadata_or.ok());
+  CHECK(metadata_or->expires_at <= entry->expires_at);
+}
+
+TEST_CASE(
+    "Backing loss makes routed exists miss but preserves claim truth for conflict decisions",
+    "[daemon][batch][visibility][claim_truth]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Y2xhaW0~layout_v1~b64u.azk";
+  const std::string payload = "claim-truth-payload";
+  const std::string conflicting_payload = "claim-truth-conflict";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  auto* item = put_req.add_items();
+  item->set_artifact_id(artifact_id);
+  item->set_inline_payload(payload);
+  set_invariant(item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  REQUIRE(engine->clear_mem() == 0);
+
+  HomeBatchExistsRequest exists_req;
+  exists_req.mutable_fence()->CopyFrom(put_req.fence());
+  exists_req.add_artifact_ids(artifact_id);
+  HomeBatchExistsResponse exists_resp;
+  grpc::ServerContext exists_ctx;
+  REQUIRE(svc.HomeBatchExists(&exists_ctx, &exists_req, &exists_resp).ok());
+  REQUIRE(exists_resp.outcomes_size() == 1);
+  REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
+
+  HomeBatchPutIfAbsentRequest conflict_req;
+  conflict_req.mutable_fence()->CopyFrom(put_req.fence());
+  auto* conflict_item = conflict_req.add_items();
+  conflict_item->set_artifact_id(artifact_id);
+  conflict_item->set_inline_payload(conflicting_payload);
+  set_invariant(conflict_item->mutable_invariant(), "layout_v1", conflicting_payload);
+
+  HomeBatchPutIfAbsentResponse conflict_resp;
+  grpc::ServerContext conflict_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&conflict_ctx, &conflict_req, &conflict_resp).ok());
+  REQUIRE(conflict_resp.outcomes_size() == 1);
+  REQUIRE(conflict_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+
+  HomeBatchPutIfAbsentRequest join_req;
+  join_req.mutable_fence()->CopyFrom(put_req.fence());
+  auto* join_item = join_req.add_items();
+  join_item->set_artifact_id(artifact_id);
+  join_item->set_inline_payload(payload);
+  set_invariant(join_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse join_resp;
+  grpc::ServerContext join_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&join_ctx, &join_req, &join_resp).ok());
+  REQUIRE(join_resp.outcomes_size() == 1);
+  REQUIRE(join_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+}
+
+TEST_CASE("TTL expiry deletes routed claim and allows fresh create", "[daemon][batch][ttl][recreate]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dHRsLXJlY3JlYXRl~layout_v1~b64u.azEw";
+  const std::string initial_payload = "ttl-recreate-initial";
+  const std::string replacement_payload = "ttl-recreate-replacement";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_ttl_ms(1);
+  auto* item = put_req.add_items();
+  item->set_artifact_id(artifact_id);
+  item->set_inline_payload(initial_payload);
+  set_invariant(item->mutable_invariant(), "layout_v1", initial_payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  absl::SleepFor(absl::Milliseconds(5));
+
+  HomeBatchExistsRequest exists_req;
+  exists_req.mutable_fence()->CopyFrom(put_req.fence());
+  exists_req.add_artifact_ids(artifact_id);
+  HomeBatchExistsResponse exists_resp;
+  grpc::ServerContext exists_ctx;
+  REQUIRE(svc.HomeBatchExists(&exists_ctx, &exists_req, &exists_resp).ok());
+  REQUIRE(exists_resp.outcomes_size() == 1);
+  REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
+
+  HomeBatchPutIfAbsentRequest recreate_req;
+  recreate_req.mutable_fence()->CopyFrom(put_req.fence());
+  auto* recreate_item = recreate_req.add_items();
+  recreate_item->set_artifact_id(artifact_id);
+  recreate_item->set_inline_payload(replacement_payload);
+  set_invariant(recreate_item->mutable_invariant(), "layout_v1", replacement_payload);
+
+  HomeBatchPutIfAbsentResponse recreate_resp;
+  grpc::ServerContext recreate_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&recreate_ctx, &recreate_req, &recreate_resp).ok());
+  REQUIRE(recreate_resp.outcomes_size() == 1);
+  REQUIRE(recreate_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+}
+
+TEST_CASE(
+    "Issued HomeBatchGet payload_ref survives immediate backing retirement pressure",
+    "[daemon][batch][payload_ref][survives_retire]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.c3Vydml2ZS1yZXRpcmU~layout_v1~b64u.azEx";
+  const std::string payload = "survive-retire-payload";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-survive-retire");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.add_artifact_ids(artifact_id);
+  get_req.set_operation_id("op-survive-retire");
+
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 1);
+  REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
+
+  REQUIRE(engine->clear_mem() == 0);
+
+  HomeBatchExistsRequest exists_req;
+  exists_req.mutable_fence()->CopyFrom(put_req.fence());
+  exists_req.add_artifact_ids(artifact_id);
+  HomeBatchExistsResponse exists_resp;
+  grpc::ServerContext exists_ctx;
+  REQUIRE(svc.HomeBatchExists(&exists_ctx, &exists_req, &exists_resp).ok());
+  REQUIRE(exists_resp.outcomes_size() == 1);
+  REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
+
+  auto payload_or = harness->kernel().payload_transport_broker().resolve_local_payload_ref(
+      get_resp.items(0).payload_ref(),
+      artifact_id,
+      absl::Now(),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-survive-retire");
+  REQUIRE(payload_or.ok());
+  REQUIRE(payload_or->payload == payload);
 }
 
 TEST_CASE("BodyBackingManager derives stable admission from shared policy flow", "[daemon][body_backing][policy]") {
@@ -563,6 +831,8 @@ TEST_CASE("BodyBackingManager derives stable admission from shared policy flow",
           .route_role = tensorcast::daemon::BodyBackingManager::RouteRole::kHomeAuthority,
       });
   REQUIRE(retained_or.ok());
+  CHECK(retained_or->verified_content_descriptor.content_identity.logical_size_bytes == retained_payload->size());
+  CHECK(retained_or->backing_identity.physical_artifact_id == retained_or->descriptor.physical_artifact_id);
   CHECK(retained_or->observation.stable_retention_state != tensorcast::daemon::BodyStableRetentionState::kNotRequested);
   REQUIRE(retained_or->body_handle.replica_handle().key().device.type == tensorcast::DeviceType::CPU);
   REQUIRE(retained_or->body_handle.retire().ok());

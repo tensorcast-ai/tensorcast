@@ -158,17 +158,20 @@ absl::StatusOr<BodyStableRetentionState> maybe_admit_stable_retention(
 }
 
 BodyDescriptor make_body_descriptor(
-    std::string_view physical_artifact_id,
+    const store::runtime::ingestion::BackingIdentity& backing_identity,
     std::string_view layout_id,
-    const store::runtime::ingestion::VerifiedArtifactContent& verified_content) {
+    const store::runtime::ingestion::VerifiedContentDescriptor& verified_content_descriptor,
+    const store::runtime::ingestion::VerificationRecord& verification_record) {
   BodyDescriptor descriptor;
-  descriptor.physical_artifact_id = std::string(physical_artifact_id);
+  descriptor.physical_artifact_id = backing_identity.physical_artifact_id;
   descriptor.layout_id = std::string(layout_id);
-  descriptor.size_bytes = verified_content.size_bytes;
-  descriptor.payload_digest_alg = normalize_body_digest_value(verified_content.payload_digest_alg);
-  descriptor.payload_digest_hex = normalize_body_digest_value(verified_content.payload_digest_hex);
-  descriptor.created_at = verified_content.verified_at;
-  descriptor.verified_at = verified_content.verified_at;
+  descriptor.size_bytes = verified_content_descriptor.content_identity.logical_size_bytes;
+  descriptor.payload_digest_alg = normalize_body_digest_value(verified_content_descriptor.content_identity.digest_alg);
+  descriptor.payload_digest_hex = normalize_body_digest_value(
+      store::runtime::ingestion::content_digest_bytes_to_hex(
+          verified_content_descriptor.content_identity.digest_bytes));
+  descriptor.created_at = verification_record.verified_at;
+  descriptor.verified_at = verification_record.verified_at;
   return descriptor;
 }
 
@@ -299,19 +302,38 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
     return resolved_policy_or.status();
   }
   const BodyBackingIntent intent = classify_intent(request.access_class, *resolved_policy_or);
-  store::runtime::ingestion::ArtifactLoweringPlan plan;
-  plan.identity.logical_artifact_id = request.artifact_id;
-  plan.identity.physical_artifact_id = build_body_backing_artifact_id(request.artifact_id, request.invariant);
-  plan.identity.request_id = request.operation_id;
-  plan.target_device = resolve_target_device(intent);
-  plan.source_loader = std::move(request.loader);
-  plan.byte_range_map = store::loading::build_identity_byte_range_map(request.invariant.byte_length());
-  plan.canonical_index_json =
-      store::loading::build_synthetic_payload_canonical_index_json(request.invariant.byte_length());
-  plan.generation = 1;
-  plan.hints = build_lowering_hints(request.artifact_id, request.operation_id);
-  plan.source_kind = request.source_kind;
-  plan.replica_target = build_replica_target(intent);
+  auto plan_or = store::runtime::ingestion::lower_to_artifact_plan(
+      store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = request.artifact_id,
+                  .physical_artifact_id = build_body_backing_artifact_id(request.artifact_id, request.invariant),
+                  .request_id = request.operation_id,
+              },
+          .target_device = resolve_target_device(intent),
+          .source_loader = std::move(request.loader),
+          .selection_identity =
+              tensorcast::common::SelectionIdentity{
+                  .artifact_id = request.artifact_id,
+                  .logical_layout_hash = tensorcast::common::compute_byte_artifact_logical_layout_hash_bytes(),
+                  .selection_hash = tensorcast::common::compute_byte_artifact_selection_hash_bytes(),
+              },
+          .semantic_layout_identity =
+              store::runtime::ingestion::SemanticLayoutIdentity{
+                  .kind = store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId,
+                  .value = request.invariant.layout_id(),
+              },
+          .expected_size_bytes = request.invariant.byte_length(),
+          .generation = 1,
+          .hints = build_lowering_hints(request.artifact_id, request.operation_id),
+          .source_kind = request.source_kind,
+          .replica_target = build_replica_target(intent),
+      });
+  if (!plan_or.ok()) {
+    record_body_backing_metrics("stage", request.access_class, intent, "lowering_error");
+    return plan_or.status();
+  }
+  store::runtime::ingestion::ArtifactLoweringPlan plan = std::move(*plan_or);
 
   const std::string physical_artifact_id = plan.identity.physical_artifact_id;
   auto result_or = engine_.execute_artifact_lowering_plan(std::move(plan));
@@ -323,14 +345,28 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
     record_body_backing_metrics("stage", request.access_class, intent, "missing_replica");
     return absl::InternalError("body staging did not return a replica handle");
   }
-  if (!result_or->verified_content.has_value()) {
+  if (!result_or->verified_content_descriptor.has_value() || !result_or->verification_record.has_value() ||
+      !result_or->backing_identity.has_value()) {
     record_body_backing_metrics("stage", request.access_class, intent, "missing_descriptor");
-    return absl::InternalError("body staging did not return verified content metadata");
+    return absl::InternalError("body staging did not return shared truth metadata");
   }
 
   store::loading::ReplicaHandle replica_handle = std::move(*result_or->replica_handle);
-  const BodyDescriptor descriptor =
-      make_body_descriptor(physical_artifact_id, request.invariant.layout_id(), *result_or->verified_content);
+  store::runtime::ingestion::BackingIdentity backing_identity = *result_or->backing_identity;
+  if (backing_identity.physical_artifact_id.empty()) {
+    backing_identity.physical_artifact_id = physical_artifact_id;
+  }
+  const store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor =
+      *result_or->verified_content_descriptor;
+  store::runtime::ingestion::VerifiedContentDescriptor staged_verified_content_descriptor = verified_content_descriptor;
+  staged_verified_content_descriptor.content_identity.semantic_layout_identity.kind =
+      store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId;
+  staged_verified_content_descriptor.content_identity.semantic_layout_identity.value = request.invariant.layout_id();
+  store::runtime::ingestion::VerificationRecord verification_record = *result_or->verification_record;
+  verification_record.layout_proof_kind = store::runtime::ingestion::LayoutProofKind::kNamedLayoutId;
+  verification_record.layout_proof_value = request.invariant.layout_id();
+  const BodyDescriptor descriptor = make_body_descriptor(
+      backing_identity, request.invariant.layout_id(), staged_verified_content_descriptor, verification_record);
 
   auto stable_state_or = maybe_admit_stable_retention(engine_, *resolved_policy_or, intent, replica_handle);
   if (!stable_state_or.ok() && intent.stable_retention_requirement == BodyStableRetentionRequirement::kRequireStable) {
@@ -365,6 +401,9 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
       .descriptor = descriptor,
       .observation = observation,
       .body_handle = std::move(*body_handle_or),
+      .verified_content_descriptor = std::move(staged_verified_content_descriptor),
+      .verification_record = verification_record,
+      .backing_identity = std::move(backing_identity),
   };
 }
 
@@ -410,6 +449,9 @@ absl::StatusOr<std::optional<BodyBackingManager::StageResult>> BodyBackingManage
       .descriptor = descriptor,
       .observation = make_observation(descriptor, *core_observation_or, stable_state, absl::Now()),
       .body_handle = request.body_handle,
+      .verified_content_descriptor = body_descriptor_to_verified_content_descriptor(descriptor),
+      .verification_record = body_descriptor_to_verification_record(descriptor),
+      .backing_identity = body_descriptor_to_backing_identity(descriptor, request.body_handle),
   });
 }
 

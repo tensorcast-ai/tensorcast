@@ -31,8 +31,12 @@ using status_utils::to_grpc_status;
 
 namespace {
 
+const ArtifactProfileRuntime& byte_artifact_runtime() {
+  return ArtifactProfileRegistry::runtime_for_profile(ArtifactProfileRegistry::Profile::kByteArtifact);
+}
+
 absl::Status validate_batch_selection(const tensorcast::common::v1::ArtifactSelection& selection) {
-  return ArtifactProfileRegistry::runtime_for_artifact_id(selection.artifact_id()).validate_batch_selection(selection);
+  return byte_artifact_runtime().validate_batch_selection(selection);
 }
 
 v2::BatchItemOutcome make_outcome(
@@ -166,18 +170,27 @@ absl::StatusOr<store::runtime::ingestion::ArtifactLoweringPlan> build_into_targe
   if (loader == nullptr) {
     return absl::InvalidArgumentError("into-target lowering requires loader");
   }
-  store::runtime::ingestion::ArtifactLoweringPlan plan;
-  plan.identity.logical_artifact_id = std::string(artifact_id);
-  plan.identity.request_id = std::string(operation_id);
-  plan.target_device = target_device;
-  plan.source_loader = std::move(loader);
-  plan.byte_range_map = store::loading::build_identity_byte_range_map(payload_bytes);
-  plan.canonical_index_json = store::loading::build_synthetic_payload_canonical_index_json(payload_bytes);
-  plan.generation = 1;
-  plan.hints = build_lowering_hints(artifact_id, operation_id);
-  plan.source_kind = source_kind;
-  plan.into_target = target_layout;
-  return plan;
+  return store::runtime::ingestion::lower_to_artifact_plan(
+      store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = std::string(artifact_id),
+                  .request_id = std::string(operation_id),
+              },
+          .target_device = target_device,
+          .source_loader = std::move(loader),
+          .selection_identity =
+              tensorcast::common::SelectionIdentity{
+                  .artifact_id = std::string(artifact_id),
+                  .logical_layout_hash = tensorcast::common::compute_byte_artifact_logical_layout_hash_bytes(),
+                  .selection_hash = tensorcast::common::compute_byte_artifact_selection_hash_bytes(),
+              },
+          .expected_size_bytes = payload_bytes,
+          .generation = 1,
+          .hints = build_lowering_hints(artifact_id, operation_id),
+          .source_kind = source_kind,
+          .into_target = target_layout,
+      });
 }
 
 } // namespace
@@ -273,32 +286,30 @@ grpc::Status ByteArtifactController::home_batch_get(
     if (result.status != v2::BATCH_ITEM_STATUS_OK) {
       continue;
     }
-    if (result.body_handle.size_bytes() > options_.routing.inline_payload_threshold_bytes) {
+    auto payload_or = result.body_handle.read_all_bytes();
+    if (!payload_or.ok()) {
+      d_.body_store.invalidate_artifact_visibility(result.artifact_id, now, "serve_read_failed");
+      *item = make_home_get_item(result.artifact_id, v2::BATCH_ITEM_STATUS_MISS, "artifact is no longer visible");
+      continue;
+    }
+    auto payload = std::make_shared<const std::string>(std::move(*payload_or));
+    if (payload->size() > options_.routing.inline_payload_threshold_bytes) {
       auto payload_ref_or = d_.payload_transport_broker.issue_payload_ref(
           result.artifact_id,
-          result.body_handle,
+          payload,
           result.descriptor,
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-          req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
+          req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""),
+          result.serving_capability.expires_at);
       if (!payload_ref_or.ok()) {
         *item = make_home_get_item(
-            result.artifact_id,
-            batch_item_status_from_absl_status(payload_ref_or.status()),
-            std::string(payload_ref_or.status().message()));
+            result.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, payload_ref_or.status().message());
         continue;
       }
       item->set_payload_ref(*payload_ref_or);
       continue;
     }
-    auto payload_or = result.body_handle.read_all_bytes();
-    if (!payload_or.ok()) {
-      *item = make_home_get_item(
-          result.artifact_id,
-          batch_item_status_from_absl_status(payload_or.status()),
-          std::string(payload_or.status().message()));
-      continue;
-    }
-    item->set_inline_payload(*payload_or);
+    item->set_inline_payload(*payload);
   }
   rctx.mark_success();
   return Status::OK;
@@ -459,8 +470,8 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
       staged_body = std::move(*staged_body_or);
     }
 
-    const auto invariant_st = ArtifactProfileRegistry::runtime_for_artifact_id(artifact_id)
-                                  .validate_invariant_body_descriptor(item.invariant(), staged_body->descriptor);
+    const auto invariant_st =
+        byte_artifact_runtime().validate_invariant_body_descriptor(item.invariant(), staged_body->descriptor);
     if (!invariant_st.ok()) {
       auto retire_status = staged_body->body_handle.retire();
       if (!retire_status.ok()) {
@@ -478,6 +489,8 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
             .artifact_id = artifact_id,
             .invariant = item.invariant(),
             .descriptor = staged_body->descriptor,
+            .verified_content_descriptor = staged_body->verified_content_descriptor,
+            .verification_record = staged_body->verification_record,
             .observation = staged_body->observation,
             .body_handle = staged_body->body_handle,
         });
@@ -586,8 +599,8 @@ grpc::Status ByteArtifactController::batch_exists(
           selection.artifact_id(), v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, std::string(selection_st.message()));
       continue;
     }
-    auto shard_or = ArtifactProfileRegistry::runtime_for_artifact_id(selection.artifact_id())
-                        .shard_id_for_artifact(selection.artifact_id(), options_.routing.shard_count);
+    auto shard_or =
+        byte_artifact_runtime().shard_id_for_artifact(selection.artifact_id(), options_.routing.shard_count);
     if (!shard_or.ok()) {
       *outcome = make_outcome(
           selection.artifact_id(), v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, std::string(shard_or.status().message()));
@@ -787,8 +800,8 @@ grpc::Status ByteArtifactController::batch_get_into_region(
           selection.artifact_id(), v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, std::string(selection_st.message()));
       continue;
     }
-    auto shard_or = ArtifactProfileRegistry::runtime_for_artifact_id(selection.artifact_id())
-                        .shard_id_for_artifact(selection.artifact_id(), options_.routing.shard_count);
+    auto shard_or =
+        byte_artifact_runtime().shard_id_for_artifact(selection.artifact_id(), options_.routing.shard_count);
     if (!shard_or.ok()) {
       *outcome = make_outcome(
           selection.artifact_id(), v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, std::string(shard_or.status().message()));
@@ -1094,6 +1107,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     v2::PutIfAbsentInvariant invariant;
     std::optional<BodyHandle> body_handle;
     std::optional<BodyDescriptor> descriptor;
+    std::optional<store::runtime::ingestion::VerifiedContentDescriptor> verified_content_descriptor;
+    std::optional<store::runtime::ingestion::VerificationRecord> verification_record;
     std::optional<BodyBackingObservation> observation;
     std::shared_ptr<const std::string> inline_payload;
     std::string payload_ref;
@@ -1122,8 +1137,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       continue;
     }
 
-    auto shard_or = ArtifactProfileRegistry::runtime_for_artifact_id(artifact_id)
-                        .shard_id_for_artifact(artifact_id, options_.routing.shard_count);
+    auto shard_or = byte_artifact_runtime().shard_id_for_artifact(artifact_id, options_.routing.shard_count);
     if (!shard_or.ok()) {
       *outcome =
           make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, std::string(shard_or.status().message()));
@@ -1328,8 +1342,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       staged_body = std::move(*staged_body_or);
     }
 
-    auto invariant_st = ArtifactProfileRegistry::runtime_for_artifact_id(pending->artifact_id)
-                            .validate_invariant_body_descriptor(pending->invariant, staged_body->descriptor);
+    auto invariant_st =
+        byte_artifact_runtime().validate_invariant_body_descriptor(pending->invariant, staged_body->descriptor);
     if (!invariant_st.ok()) {
       auto retire_status = staged_body->body_handle.retire();
       if (!retire_status.ok()) {
@@ -1346,6 +1360,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
 
     pending->body_handle = staged_body->body_handle;
     pending->descriptor = staged_body->descriptor;
+    pending->verified_content_descriptor = staged_body->verified_content_descriptor;
+    pending->verification_record = staged_body->verification_record;
     pending->observation = staged_body->observation;
     pending->needs_source_layout = false;
   };
@@ -1389,7 +1405,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           if (!pending.body_handle.has_value()) {
             continue;
           }
-          if (!pending.descriptor.has_value() || !pending.observation.has_value()) {
+          if (!pending.descriptor.has_value() || !pending.verified_content_descriptor.has_value() ||
+              !pending.verification_record.has_value() || !pending.observation.has_value()) {
             *resp.mutable_outcomes(pending.outcome_index) = make_outcome(
                 pending.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "staged body metadata is missing");
             continue;
@@ -1399,6 +1416,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
                   .artifact_id = pending.artifact_id,
                   .invariant = pending.invariant,
                   .descriptor = *pending.descriptor,
+                  .verified_content_descriptor = *pending.verified_content_descriptor,
+                  .verification_record = *pending.verification_record,
                   .observation = *pending.observation,
                   .body_handle = *pending.body_handle,
               });
@@ -1681,15 +1700,13 @@ grpc::Status ByteArtifactController::batch_touch_ttl(
       *outcome = make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, "artifact_id is required");
       continue;
     }
-    const auto artifact_id_st = ArtifactProfileRegistry::runtime_for_artifact_id(artifact_id)
-                                    .validate_artifact_id_for_field(artifact_id, "artifact_id");
+    const auto artifact_id_st = byte_artifact_runtime().validate_artifact_id_for_field(artifact_id, "artifact_id");
     if (!artifact_id_st.ok()) {
       *outcome =
           make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, std::string(artifact_id_st.message()));
       continue;
     }
-    auto shard_or = ArtifactProfileRegistry::runtime_for_artifact_id(artifact_id)
-                        .shard_id_for_artifact(artifact_id, options_.routing.shard_count);
+    auto shard_or = byte_artifact_runtime().shard_id_for_artifact(artifact_id, options_.routing.shard_count);
     if (!shard_or.ok()) {
       *outcome =
           make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, std::string(shard_or.status().message()));

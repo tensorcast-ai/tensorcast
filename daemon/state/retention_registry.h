@@ -15,6 +15,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "core/common/capability_token.h"
+#include "core/common/selection_identity.h"
 #include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "daemon/state/session_lifecycle.h"
@@ -96,17 +97,16 @@ class RetentionRegistry {
 
  private:
   struct SelectionKey {
-    std::string logical_layout_hash;
-    std::string selection_hash;
+    common::SelectionIdentity selection_identity;
 
     bool operator==(const SelectionKey& other) const {
-      return logical_layout_hash == other.logical_layout_hash && selection_hash == other.selection_hash;
+      return selection_identity == other.selection_identity;
     }
   };
 
   struct SelectionKeyHash {
     size_t operator()(const SelectionKey& key) const {
-      return absl::HashOf(key.logical_layout_hash, key.selection_hash);
+      return common::SelectionIdentityHash{}(key.selection_identity);
     }
   };
 

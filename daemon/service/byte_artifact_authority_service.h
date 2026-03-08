@@ -31,12 +31,16 @@ class ByteArtifactAuthorityService {
     std::string message;
     BodyDescriptor descriptor;
     BodyHandle body_handle;
+    AuthorityRecord authority_record;
+    ServingCapability serving_capability;
   };
 
   struct PutItem {
     std::string artifact_id;
     v2::PutIfAbsentInvariant invariant;
     BodyDescriptor descriptor;
+    store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+    store::runtime::ingestion::VerificationRecord verification_record;
     BodyBackingObservation observation;
     BodyHandle body_handle;
   };

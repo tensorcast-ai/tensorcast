@@ -17,6 +17,10 @@ namespace {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 
+const ArtifactProfileRuntime& byte_artifact_runtime() {
+  return ArtifactProfileRegistry::runtime_for_profile(ArtifactProfileRegistry::Profile::kByteArtifact);
+}
+
 void set_error_reason(std::string_view* error_reason, std::string_view value) {
   if (error_reason != nullptr) {
     *error_reason = value;
@@ -30,8 +34,7 @@ absl::StatusOr<bool> is_validated_byte_artifact_profile(
   if (ArtifactProfileRegistry::classify_artifact_id(artifact_id) != ArtifactProfileRegistry::Profile::kByteArtifact) {
     return false;
   }
-  const auto& runtime = ArtifactProfileRegistry::runtime_for_profile(ArtifactProfileRegistry::Profile::kByteArtifact);
-  const auto validation_st = runtime.validate_artifact_id_for_field(artifact_id, field_name);
+  const auto validation_st = byte_artifact_runtime().validate_artifact_id_for_field(artifact_id, field_name);
   if (!validation_st.ok()) {
     set_error_reason(error_reason, "byte_artifact_id_invalid");
     return validation_st;
@@ -132,8 +135,7 @@ Status validate_hashes_and_build_resolved_selection(
       set_error_reason(error_reason, "byte_artifact_subset_hash_not_allowed");
       return {StatusCode::INVALID_ARGUMENT, "byte artifact selection does not support view_subset_hash"};
     }
-    auto normalized_or = ArtifactProfileRegistry::runtime_for_artifact_id(resolved_artifact_id)
-                             .build_normalized_selection(resolved_artifact_id);
+    auto normalized_or = byte_artifact_runtime().build_normalized_selection(resolved_artifact_id);
     if (!normalized_or.ok()) {
       set_error_reason(error_reason, "byte_artifact_selection_invalid");
       return {StatusCode::INVALID_ARGUMENT, std::string(normalized_or.status().message())};

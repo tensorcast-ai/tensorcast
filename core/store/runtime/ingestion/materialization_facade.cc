@@ -427,18 +427,55 @@ absl::StatusOr<std::string> read_source_fully(loader::SeekableSource& source) {
   return payload;
 }
 
-std::string compute_sha256_hex(std::string_view payload) {
+std::string compute_sha256_bytes(std::string_view payload) {
   const auto digest = common::sha256_digest_bytes(
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
-  std::string hex =
-      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
-  absl::AsciiStrToLower(&hex);
-  return hex;
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
 }
 
-absl::StatusOr<VerifiedArtifactContent> build_verified_content_from_replica(
+SemanticLayoutIdentity compute_canonical_index_semantic_layout_identity(std::string_view canonical_index_json) {
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(canonical_index_json.data()), canonical_index_json.size()));
+  SemanticLayoutIdentity identity;
+  identity.kind = SemanticLayoutKind::kCanonicalIndexDigest;
+  identity.value = absl::AsciiStrToLower(
+      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size())));
+  return identity;
+}
+
+struct VerifiedContentProjection {
+  VerifiedContentDescriptor descriptor;
+  VerificationRecord verification_record;
+};
+
+VerifiedContentDescriptor build_sealed_artifact_verified_content_descriptor(
+    std::string_view index_multihash,
+    std::string_view data_multihash,
+    uint64_t total_size) {
+  VerifiedContentDescriptor descriptor;
+  descriptor.content_identity.semantic_layout_identity.kind = SemanticLayoutKind::kCanonicalIndexDigest;
+  descriptor.content_identity.semantic_layout_identity.value = std::string(index_multihash);
+  descriptor.content_identity.logical_size_bytes = total_size;
+  descriptor.content_identity.digest_alg = "multihash";
+  descriptor.content_identity.digest_bytes = std::string(data_multihash);
+  return descriptor;
+}
+
+VerificationRecord build_seal_verification_record(std::string_view index_multihash) {
+  return VerificationRecord{
+      .verification_method = VerificationMethod::kSealCommit,
+      .verified_at = absl::Now(),
+      .layout_proof_kind = LayoutProofKind::kCanonicalIndexDigest,
+      .layout_proof_value = std::string(index_multihash),
+  };
+}
+
+absl::StatusOr<VerifiedContentProjection> build_verified_content_projection_from_replica(
     const std::shared_ptr<replica::Replica>& replica,
-    common::memory::MemoryLocation location) {
+    common::memory::MemoryLocation location,
+    std::string_view canonical_index_json,
+    const std::optional<SemanticLayoutIdentity>& semantic_layout_identity_override) {
   auto size_or = replica->get_artifact_size();
   if (!size_or.ok()) {
     return size_or.status();
@@ -453,12 +490,20 @@ absl::StatusOr<VerifiedArtifactContent> build_verified_content_from_replica(
     return payload_or.status();
   }
 
-  VerifiedArtifactContent content;
-  content.size_bytes = *size_or;
-  content.payload_digest_alg = "sha256";
-  content.payload_digest_hex = compute_sha256_hex(*payload_or);
-  content.verified_at = absl::Now();
-  return content;
+  VerifiedContentProjection projection;
+  projection.descriptor.content_identity.semantic_layout_identity = semantic_layout_identity_override.value_or(
+      compute_canonical_index_semantic_layout_identity(canonical_index_json));
+  projection.descriptor.content_identity.logical_size_bytes = *size_or;
+  projection.descriptor.content_identity.digest_alg = "sha256";
+  projection.descriptor.content_identity.digest_bytes = compute_sha256_bytes(*payload_or);
+  projection.verification_record.verification_method = VerificationMethod::kSharedExecutorFullReadDigest;
+  projection.verification_record.verified_at = absl::Now();
+  projection.verification_record.layout_proof_kind = semantic_layout_identity_override.has_value()
+      ? LayoutProofKind::kNamedLayoutId
+      : LayoutProofKind::kCanonicalIndexDigest;
+  projection.verification_record.layout_proof_value =
+      projection.descriptor.content_identity.semantic_layout_identity.value;
+  return projection;
 }
 
 absl::StatusOr<uint64_t> compute_logical_total_size(std::string_view canonical_index_json) {
@@ -2341,6 +2386,39 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
     return validation_status;
   }
 
+  const auto build_resolved_source_descriptor = [&](const ArtifactLoweringPlan& lowering_plan) {
+    if (lowering_plan.resolved_source_descriptor.has_value()) {
+      return *lowering_plan.resolved_source_descriptor;
+    }
+    ResolvedSourceDescriptor descriptor;
+    if (!lowering_plan.identity.physical_artifact_id.empty()) {
+      descriptor.source_id = lowering_plan.identity.physical_artifact_id;
+    } else if (!lowering_plan.identity.request_id.empty()) {
+      descriptor.source_id = lowering_plan.identity.request_id;
+    } else {
+      descriptor.source_id = lowering_plan.identity.logical_artifact_id;
+    }
+    auto source_size_or = compute_logical_total_size(lowering_plan.canonical_index_json);
+    if (!source_size_or.ok()) {
+      return ResolvedSourceDescriptor{
+          .source_id = descriptor.source_id,
+          .exact_size_bytes = 0,
+          .size_is_authoritative = false,
+          .resolved_locally = lowering_plan.source_kind != loading::MaterializationSource::kP2P,
+          .resolved_remotely = lowering_plan.source_kind == loading::MaterializationSource::kP2P,
+          .already_verified = false,
+          .source_kind = lowering_plan.source_kind,
+      };
+    }
+    descriptor.exact_size_bytes = *source_size_or;
+    descriptor.size_is_authoritative = true;
+    descriptor.resolved_locally = lowering_plan.source_kind != loading::MaterializationSource::kP2P;
+    descriptor.resolved_remotely = lowering_plan.source_kind == loading::MaterializationSource::kP2P;
+    descriptor.already_verified = false;
+    descriptor.source_kind = lowering_plan.source_kind;
+    return descriptor;
+  };
+
   if (plan.into_target.has_value()) {
     auto result_or = materialize_mapped_loader_into_target(
         plan.target_device,
@@ -2354,6 +2432,8 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
     }
     ArtifactLoweringResult result;
     result.into_target_result = std::move(*result_or);
+    result.selection_identity = plan.selection_identity;
+    result.resolved_source_descriptor = build_resolved_source_descriptor(plan);
     return result;
   }
 
@@ -2374,14 +2454,22 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
   if (!replica_or.ok()) {
     return replica_or.status();
   }
-  const auto verified_content_or = build_verified_content_from_replica(*replica_or, plan.replica_target->location.type);
-  if (!verified_content_or.ok()) {
-    return verified_content_or.status();
+  const auto verified_projection_or = build_verified_content_projection_from_replica(
+      *replica_or, plan.replica_target->location.type, plan.canonical_index_json, plan.semantic_layout_identity);
+  if (!verified_projection_or.ok()) {
+    return verified_projection_or.status();
   }
 
   ArtifactLoweringResult result;
   result.replica_handle = std::move(*replica_handle_or);
-  result.verified_content = *verified_content_or;
+  result.selection_identity = plan.selection_identity;
+  result.resolved_source_descriptor = build_resolved_source_descriptor(plan);
+  result.verified_content_descriptor = verified_projection_or->descriptor;
+  result.verification_record = verified_projection_or->verification_record;
+  result.backing_identity = BackingIdentity{
+      .physical_artifact_id = plan.identity.physical_artifact_id,
+      .device = plan.target_device,
+  };
   return result;
 }
 
@@ -3157,9 +3245,6 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     }
     result.index_multihash = parse_or->first;
     result.data_multihash = parse_or->second;
-    if (!publish_canonical) {
-      return result;
-    }
   }
 
   std::string sealed_artifact_id;
@@ -3174,9 +3259,6 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
       }
       result.index_multihash = parse_or->first;
       result.data_multihash = parse_or->second;
-      if (!publish_canonical) {
-        return result;
-      }
     } else if (!absl::IsNotFound(binding_or.status())) {
       return binding_or.status();
     }
@@ -3385,6 +3467,10 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
       result.data_multihash = parse_or->second;
     }
   }
+
+  result.verified_content_descriptor = build_sealed_artifact_verified_content_descriptor(
+      result.index_multihash, result.data_multihash, result.total_size);
+  result.verification_record = build_seal_verification_record(result.index_multihash);
 
   if (!publish_canonical) {
     return result;

@@ -44,6 +44,9 @@ sc_header_only_library(
     name = "seal_assembly_result",
     hdrs = ["seal_assembly_result.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/runtime/ingestion:artifact_truth",
+    ],
 )
 
 sc_header_only_library(

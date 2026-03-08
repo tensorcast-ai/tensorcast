@@ -2,6 +2,7 @@
 
 from tensorcast.api.store.view_composer import compute_view_id
 from tensorcast.common.selection_identity import (
+    build_selection_identity,
     compute_byte_artifact_logical_layout_hash,
     compute_byte_artifact_selection_hash,
     compute_selection_hash,
@@ -60,3 +61,15 @@ def test_byte_artifact_selection_identity_vectors() -> None:
     assert compute_byte_artifact_selection_hash().hex() == (
         "b231ede6078bceb7b1046c23dd93b6f7cf4e35e4042ca87e634f1e2975953fee"
     )
+
+
+def test_build_selection_identity_requires_artifact_id_and_hashes() -> None:
+    selection = common_pb2.ArtifactSelection(
+        artifact_id="mi2:test:typed",
+        logical_layout_hash=b"layout_hash",
+        selection_hash=b"selection_hash",
+    )
+    identity = build_selection_identity(selection)
+    assert identity.artifact_id == "mi2:test:typed"
+    assert identity.logical_layout_hash == b"layout_hash"
+    assert identity.selection_hash == b"selection_hash"

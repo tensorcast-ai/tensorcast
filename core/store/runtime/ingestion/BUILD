@@ -16,10 +16,24 @@ sc_cc_library(
 )
 
 sc_header_only_library(
+    name = "artifact_truth",
+    hdrs = ["artifact_truth.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store:device_types",
+        "//core/store/materialization/contracts:loading_spec",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+sc_header_only_library(
     name = "artifact_lowering_plan",
     hdrs = ["artifact_lowering_plan.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":artifact_truth",
+        "//core/common:selection_identity_lib",
         "//core/store:device_types",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:loader",

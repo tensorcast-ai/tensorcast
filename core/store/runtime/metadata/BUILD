@@ -21,6 +21,7 @@ sc_header_only_library(
         "//core/store:store_engine_options",
         "//core/store/materialization/dataplane:view_planner",
         "//core/store/replica",
+        "//core/store/runtime/ingestion:artifact_truth",
         "//core/store/runtime/replica:replica_promotion_manager",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",

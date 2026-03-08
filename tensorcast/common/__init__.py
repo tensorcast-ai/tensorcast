@@ -17,6 +17,8 @@ from tensorcast.common.identity import (
     validate_client_generated_id,
 )
 from tensorcast.common.selection_identity import (
+    SelectionIdentity,
+    build_selection_identity,
     compute_byte_artifact_logical_layout_hash,
     compute_byte_artifact_selection_hash,
     compute_logical_layout_hash,
@@ -30,7 +32,9 @@ __all__ = [
     "CGID_PREFIX",
     "ByteArtifactCgidParts",
     "MI2_PREFIX",
+    "SelectionIdentity",
     "build_byte_artifact_cgid",
+    "build_selection_identity",
     "compute_byte_artifact_logical_layout_hash",
     "compute_byte_artifact_selection_hash",
     "compute_logical_layout_hash",

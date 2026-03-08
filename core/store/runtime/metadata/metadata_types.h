@@ -26,6 +26,7 @@
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/ingestion/artifact_truth.h"
 #include "core/store/runtime/replica/replica_promotion_manager.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/view_utils.h"
@@ -108,6 +109,8 @@ struct RegistrationCommitResult {
   std::vector<CanonicalRange> canonical_ranges;
   ViewRegistrationKind registration_kind{ViewRegistrationKind::kUnspecified};
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
+  std::optional<ingestion::VerifiedContentDescriptor> verified_content_descriptor;
+  std::optional<ingestion::VerificationRecord> verification_record;
 };
 
 struct RegistrationResources {

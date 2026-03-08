@@ -449,6 +449,18 @@ TEST_CASE("StoreEngine assembles and seals dense pieces", "[store_engine][assemb
   REQUIRE(seal_or.ok());
   const auto& seal = *seal_or;
   REQUIRE(seal.sealed_artifact_id.rfind("mi2:", 0) == 0);
+  REQUIRE(seal.verified_content_descriptor.has_value());
+  REQUIRE(seal.verification_record.has_value());
+  CHECK(
+      seal.verified_content_descriptor->content_identity.semantic_layout_identity.kind ==
+      tensorcast::store::runtime::ingestion::SemanticLayoutKind::kCanonicalIndexDigest);
+  CHECK(seal.verified_content_descriptor->content_identity.semantic_layout_identity.value == seal.index_multihash);
+  CHECK(seal.verified_content_descriptor->content_identity.logical_size_bytes == seal.total_size);
+  CHECK(seal.verified_content_descriptor->content_identity.digest_alg == "multihash");
+  CHECK(seal.verified_content_descriptor->content_identity.digest_bytes == seal.data_multihash);
+  CHECK(
+      seal.verification_record->verification_method ==
+      tensorcast::store::runtime::ingestion::VerificationMethod::kSealCommit);
   REQUIRE(gs_stub->artifact_binding.has_value());
   CHECK(gs_stub->artifact_binding->from_artifact_id == assembly_id);
   CHECK(gs_stub->artifact_binding->to_artifact_id == seal.sealed_artifact_id);

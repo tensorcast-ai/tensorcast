@@ -292,6 +292,10 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
   if (selection.logical_layout_hash().empty() || selection.selection_hash().empty()) {
     return absl::InvalidArgumentError("selection logical_layout_hash and selection_hash are required");
   }
+  auto selection_identity_or = common::build_selection_identity(selection);
+  if (!selection_identity_or.ok()) {
+    return selection_identity_or.status();
+  }
   if (ttl_ms == 0 && opts_.default_ttl <= absl::ZeroDuration()) {
     return absl::InvalidArgumentError("ttl_ms is required");
   }
@@ -370,8 +374,7 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
   }
 
   SelectionKey selection_key{
-      .logical_layout_hash = selection.logical_layout_hash(),
-      .selection_hash = selection.selection_hash(),
+      .selection_identity = *selection_identity_or,
   };
 
   SelectionRecord selection_record;
