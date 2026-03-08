@@ -6,6 +6,15 @@ import hashlib
 import json
 from collections.abc import Sequence
 
+_BYTE_ARTIFACT_LAYOUT_PROFILE: bytes = b"tensorcast.byte_artifact.layout.v1\n"
+_BYTE_ARTIFACT_SELECTION_PROFILE: bytes = b"tensorcast.byte_artifact.selection.v1\n"
+_BYTE_ARTIFACT_LOGICAL_LAYOUT_HASH: bytes = hashlib.sha256(
+    _BYTE_ARTIFACT_LAYOUT_PROFILE
+).digest()
+_BYTE_ARTIFACT_SELECTION_HASH: bytes = hashlib.sha256(
+    _BYTE_ARTIFACT_SELECTION_PROFILE
+).digest()
+
 
 def compute_logical_layout_hash(*, index_bytes: bytes, needs_view_index: bool) -> bytes:
     digest = hashlib.sha256()
@@ -37,7 +46,17 @@ def compute_selection_hash(*, view_id: str, view_subset_hash: bytes | None) -> b
     return digest.digest()
 
 
+def compute_byte_artifact_logical_layout_hash() -> bytes:
+    return _BYTE_ARTIFACT_LOGICAL_LAYOUT_HASH
+
+
+def compute_byte_artifact_selection_hash() -> bytes:
+    return _BYTE_ARTIFACT_SELECTION_HASH
+
+
 __all__ = [
+    "compute_byte_artifact_logical_layout_hash",
+    "compute_byte_artifact_selection_hash",
     "compute_logical_layout_hash",
     "compute_selection_hash",
     "compute_view_subset_hash",

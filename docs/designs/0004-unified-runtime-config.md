@@ -103,7 +103,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 - Determinism: all defaults are applied in one place; behavior does not depend on process environment.
 - Fail‑fast: unknown fields, type mismatches, and invalid units/durations cause startup failure.
 - Cross‑language equivalence: the same file yields identical Protobuf messages in C++ and Python.
-- Distributed namespace profiles (for example cache-blob routing invariants such as shard count/hash version/lease
+- Distributed namespace profiles (for example byte artifact routing invariants such as shard count/hash version/lease
   staleness policy) must be modeled as typed config fields and remain cluster-consistent; incompatible rolling changes
   must have an explicit cutover strategy instead of mixed semantics.
 

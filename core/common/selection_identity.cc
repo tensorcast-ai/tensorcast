@@ -14,6 +14,19 @@
 
 namespace tensorcast::common {
 
+namespace {
+
+constexpr std::string_view kByteArtifactLayoutProfile = "tensorcast.byte_artifact.layout.v1\n";
+constexpr std::string_view kByteArtifactSelectionProfile = "tensorcast.byte_artifact.selection.v1\n";
+
+std::string sha256_as_string(std::string_view payload) {
+  const std::vector<uint8_t> digest =
+      sha256_digest_bytes(absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+} // namespace
+
 std::string compute_logical_layout_hash_bytes(absl::Span<const uint8_t> index_bytes, bool needs_view_index) {
   std::string buffer;
   buffer.reserve(index_bytes.size() + 10);
@@ -65,6 +78,16 @@ std::string compute_selection_hash_bytes(std::string_view view_id, std::optional
   const std::vector<uint8_t> digest =
       sha256_digest_bytes(absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()));
   return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+std::string compute_byte_artifact_logical_layout_hash_bytes() {
+  static const std::string kHash = sha256_as_string(kByteArtifactLayoutProfile);
+  return kHash;
+}
+
+std::string compute_byte_artifact_selection_hash_bytes() {
+  static const std::string kHash = sha256_as_string(kByteArtifactSelectionProfile);
+  return kHash;
 }
 
 } // namespace tensorcast::common

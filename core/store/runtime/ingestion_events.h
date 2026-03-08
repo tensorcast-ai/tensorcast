@@ -16,6 +16,7 @@ namespace tensorcast::store::runtime {
 enum class IngestionSource : std::uint8_t {
   kDisk = 0,
   kP2P = 1,
+  kMemory = 2,
 };
 
 struct IngestionStartedEvent {

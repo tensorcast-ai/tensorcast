@@ -6,6 +6,13 @@ import grpc
 from google.protobuf import timestamp_pb2
 
 from tensorcast.api.operation import OperationStatus
+from tensorcast.engine_adapter import (
+    BatchOutcome,
+    BatchResult,
+    HydrateResult,
+    ManifestResult,
+    PublishResult,
+)
 from tensorcast.node_agent.executor import NodeAgentExecutor
 from tensorcast.proto.node_agent.v1 import node_agent_pb2, node_agent_pb2_grpc
 
@@ -43,6 +50,64 @@ def _status_to_proto(status: OperationStatus) -> node_agent_pb2.OperationStatus:
     return msg
 
 
+def _batch_outcome_to_proto(
+    outcome: BatchOutcome,
+) -> node_agent_pb2.ArtifactBatchOutcome:
+    message = node_agent_pb2.ArtifactBatchOutcome(
+        artifact_id=str(outcome.artifact_id),
+        status_code=str(outcome.status_code),
+    )
+    if outcome.message:
+        message.message = str(outcome.message)
+    return message
+
+
+def _manifest_result_to_proto(
+    result: ManifestResult,
+) -> node_agent_pb2.ArtifactManifestResult:
+    return node_agent_pb2.ArtifactManifestResult(
+        engine_request_id=str(result.engine_request_id),
+        layout_id=str(result.layout_id),
+        artifact_ids=[str(item) for item in result.artifact_ids],
+        key_set_digest_alg=str(result.key_set_digest_alg),
+        key_set_digest_hex=str(result.key_set_digest_hex),
+    )
+
+
+def _artifact_result_to_proto(
+    result: ManifestResult | PublishResult | HydrateResult | BatchResult,
+) -> node_agent_pb2.ArtifactActionResult:
+    message = node_agent_pb2.ArtifactActionResult()
+    if isinstance(result, ManifestResult):
+        message.manifest.CopyFrom(_manifest_result_to_proto(result))
+        return message
+    if isinstance(result, PublishResult):
+        message.publish.manifest.CopyFrom(_manifest_result_to_proto(result.manifest))
+        message.publish.put_outcomes.extend(
+            _batch_outcome_to_proto(outcome) for outcome in result.put_outcomes
+        )
+        return message
+    if isinstance(result, HydrateResult):
+        if result.manifest is not None:
+            message.hydrate.manifest.CopyFrom(
+                _manifest_result_to_proto(result.manifest)
+            )
+        message.hydrate.get_outcomes.extend(
+            _batch_outcome_to_proto(outcome) for outcome in result.get_outcomes
+        )
+        message.hydrate.missing_artifact_ids.extend(
+            str(item) for item in result.missing_artifact_ids
+        )
+        return message
+
+    if result.engine_request_id is not None:
+        message.evict_local.engine_request_id = str(result.engine_request_id)
+    message.evict_local.outcomes.extend(
+        _batch_outcome_to_proto(outcome) for outcome in result.outcomes
+    )
+    return message
+
+
 class NodeAgentServicer(node_agent_pb2_grpc.NodeAgentServiceServicer):
     def __init__(self, executor: NodeAgentExecutor) -> None:
         self._executor = executor
@@ -64,6 +129,10 @@ class NodeAgentServicer(node_agent_pb2_grpc.NodeAgentServiceServicer):
             entry.target_id = step.target_id
             entry.action = step.action
             entry.status.CopyFrom(_status_to_proto(step.status))
+            if step.artifact_result is not None:
+                entry.artifact_result.CopyFrom(
+                    _artifact_result_to_proto(step.artifact_result)
+                )
         return response
 
     def GetAgentInfo(

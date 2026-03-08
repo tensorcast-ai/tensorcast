@@ -140,8 +140,8 @@ canonical artifact. Key behaviours:
 - `registration_kind="piece"` (or `register_piece`) registers dense view pieces
   for partial coverage. Piece registration is selection-only (narrow only), does
   not allow transpose, and requires server placement.
-- `allow_partial` is deprecated and maps to `registration_kind="piece"`. Sparse
-  canonical zero-fill semantics are removed.
+- Sparse canonical zero-fill semantics are removed; piece registration now uses
+  `register_piece(...)` or `registration_kind="piece"` only.
 - `canonical_index_bytes` can be supplied to bootstrap a new assembly without
   requiring prior Global Store state.
 

@@ -79,13 +79,7 @@ DEFAULT_ALIGN = 1
 
 def _uses_fake_cuda_backend() -> bool:
     backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
-    if backend == "fake":
-        return True
-    with contextlib.suppress(Exception):
-        from tensorcast._C import is_fake_cuda
-
-        return bool(is_fake_cuda())
-    return False
+    return backend == "fake"
 
 
 @dataclass
@@ -109,7 +103,6 @@ class RegistrationResult:
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     registration_kind: Literal["canonical", "piece"] = "canonical"
-    allow_partial: bool = False
     local_stable_tier: LocalStableTierResult | None = None
 
 
@@ -1617,6 +1610,21 @@ def _register_artifact_core(
         plan_type = options.plan
         plan_model = make_plan_model(options, layout.total_size)
 
+    # Stable DRAM GPU staging is an optimization. In fake-CUDA tests (and in
+    # environments where torch.cuda is unavailable) clients cannot perform the
+    # staging copies, so force stage_on_gpu=false to use the CPU ingest path.
+    if (
+        plan_type is PlanType.DRAM_STABLE
+        and isinstance(plan_model, StableDramPlan)
+        and plan_model.stage_on_gpu
+        and (_uses_fake_cuda_backend() or not torch.cuda.is_available())
+    ):
+        plan_model = StableDramPlan(
+            kind="dram_stable",
+            stage_on_gpu=False,
+            release_gpu_on_commit=False,
+        )
+
     # Plan input-mode constraints
     if plan_type is PlanType.VRAM_LEASED and ctx.input_mode != "cuda":
         raise DeviceMismatch(
@@ -1709,7 +1717,6 @@ def _register_artifact_core(
                             canonical_ranges=commit_res.canonical_ranges
                             or view.canonical_ranges,
                             registration_kind=commit_res.registration_kind,
-                            allow_partial=commit_res.registration_kind == "piece",
                             local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
@@ -1766,7 +1773,6 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         registration_kind=commit_res.registration_kind,
-                        allow_partial=commit_res.allow_partial,
                         local_stable_tier=commit_res.local_stable_tier,
                     )
 
@@ -1810,7 +1816,6 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         registration_kind=commit_res.registration_kind,
-                        allow_partial=commit_res.allow_partial,
                         local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:

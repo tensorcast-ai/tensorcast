@@ -1047,8 +1047,58 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (cfg.has_byte_artifact_routing()) {
+    const auto& bar = cfg.byte_artifact_routing();
+    if (bar.shard_count() > 0) {
+      daemon_opts.byte_artifact_routing.shard_count = bar.shard_count();
+    }
+    if (bar.inline_payload_threshold_bytes() > 0) {
+      daemon_opts.byte_artifact_routing.inline_payload_threshold_bytes = bar.inline_payload_threshold_bytes();
+    }
+    if (bar.has_route_staleness_budget()) {
+      daemon_opts.byte_artifact_routing.route_staleness_budget = duration_to_millis(bar.route_staleness_budget());
+    }
+    if (bar.has_lease_ttl()) {
+      daemon_opts.byte_artifact_routing.lease_ttl = duration_to_millis(bar.lease_ttl());
+    }
+    if (bar.has_keepalive_interval()) {
+      daemon_opts.byte_artifact_routing.keepalive_interval = duration_to_millis(bar.keepalive_interval());
+    }
+    if (bar.has_worker_directory_staleness_budget()) {
+      daemon_opts.byte_artifact_routing.worker_directory_staleness_budget =
+          duration_to_millis(bar.worker_directory_staleness_budget());
+    }
+    if (bar.routing_epoch() != 0) {
+      daemon_opts.byte_artifact_routing.routing_epoch = bar.routing_epoch();
+    }
+    if (bar.has_payload_transport()) {
+      const auto& pt = bar.payload_transport();
+      if (pt.has_ref_ttl()) {
+        daemon_opts.byte_artifact_routing.payload_transport.ref_ttl = duration_to_absl(pt.ref_ttl());
+      }
+      if (pt.max_chunk_bytes() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_chunk_bytes = pt.max_chunk_bytes();
+      }
+      if (pt.has_fetch_deadline()) {
+        daemon_opts.byte_artifact_routing.payload_transport.fetch_deadline = duration_to_absl(pt.fetch_deadline());
+      }
+      if (pt.has_cleanup_interval()) {
+        daemon_opts.byte_artifact_routing.payload_transport.cleanup_interval = duration_to_absl(pt.cleanup_interval());
+      }
+    }
+  }
+
   uint64_t capability_flags = 0;
   const bool cap_dir_enabled = cfg.has_capability_directory() && cfg.capability_directory().enabled();
+  if (cfg.has_capability_directory()) {
+    const auto& cap_cfg = cfg.capability_directory();
+    if (cap_cfg.has_gateway_ingress_enabled()) {
+      daemon_opts.gateway_ingress_enabled = cap_cfg.gateway_ingress_enabled();
+    }
+    if (cap_cfg.has_shard_home_eligible()) {
+      daemon_opts.byte_artifact_routing.shard_home_eligible = cap_cfg.shard_home_eligible();
+    }
+  }
   const bool tokens_configured =
       daemon_opts.capability_tokens.active.version != 0 && !daemon_opts.capability_tokens.active.secret.empty();
   if (cap_dir_enabled) {
@@ -1057,6 +1107,12 @@ int main(int argc, char** argv) {
     }
     if (daemon_opts.retention_handles.enabled && tokens_configured) {
       capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED);
+    }
+    if (daemon_opts.gateway_ingress_enabled) {
+      capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED);
+    }
+    if (daemon_opts.byte_artifact_routing.shard_home_eligible) {
+      capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE);
     }
   }
   // Observability high-cardinality attributes: default off (config hook TBD)

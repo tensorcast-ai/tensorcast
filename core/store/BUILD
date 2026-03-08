@@ -353,6 +353,7 @@ sc_cc_library(
         "//core/store/replica:memory_state",
         "//core/store/replica:replica_config",
         "//core/store/runtime:runtime_env",
+        "//core/store/runtime/ingestion:artifact_lowering_plan",
         "//core/store/runtime/ingestion:ingestion_runtime",
         "//core/store/runtime/metadata:metadata_gateway",
         "//core/store/runtime/replica:replica_promotion_manager",

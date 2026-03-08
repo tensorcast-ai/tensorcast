@@ -245,6 +245,13 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("unregister_worker not used in tests");
   }
 
+  absl::StatusOr<std::vector<tensorcast::store::components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_workers not used in tests");
+  }
+
   absl::StatusOr<std::string> register_replica(
       std::string_view artifact_id,
       std::string_view,
@@ -456,6 +463,46 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       const tensorcast::store::components::StateSyncToken&,
       const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("reconcile_worker_state not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t,
+      std::string_view,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("acquire_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("keepalive_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ShardHomeLeaseKeepaliveOutcome>>
+  batch_keepalive_shard_home_leases(
+      const std::vector<tensorcast::store::components::ShardHomeLeaseKeepaliveInput>&,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_keepalive_shard_home_leases not used in tests");
+  }
+
+  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const tensorcast::store::components::RpcOptions&)
+      override {
+    return absl::UnimplementedError("release_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::ShardHomeRouteInfo> get_shard_home_lease(
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("get_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>&,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_get_shard_home_leases not used in tests");
   }
 
   bool is_connected() const override {

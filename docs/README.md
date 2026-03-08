@@ -25,6 +25,7 @@ Cross-cutting high-level reasoning for centralized vs decentralized coordination
 
 - **[Distributed Coordination Series](distributed-coordination-series/README.md)** - Index for the full strategy and trade-off document set
 
+
 ## 📘 User Guides
 
 Integration-oriented guides for SDK consumers:

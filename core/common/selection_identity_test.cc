@@ -44,5 +44,12 @@ TEST_CASE("Selection hash golden vectors", "[selection_identity]") {
   REQUIRE(to_hex_lower(hash_view_subset) == "09c927caf75fcb752fa6efdf1eeaa3bb3167b6e1d5d2517923c860c2db9d98dd");
 }
 
+TEST_CASE("Byte artifact selection identity vectors", "[selection_identity][byte_artifact]") {
+  const std::string layout_hash = compute_byte_artifact_logical_layout_hash_bytes();
+  const std::string selection_hash = compute_byte_artifact_selection_hash_bytes();
+  REQUIRE(to_hex_lower(layout_hash) == "7ee7921aeedb6147ad6860dc2e0f398d56eeae79daf2ae947eae68eb4626349c");
+  REQUIRE(to_hex_lower(selection_hash) == "b231ede6078bceb7b1046c23dd93b6f7cf4e35e4042ca87e634f1e2975953fee");
+}
+
 } // namespace
 } // namespace tensorcast::common

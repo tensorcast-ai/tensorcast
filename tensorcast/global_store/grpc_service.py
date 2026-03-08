@@ -63,6 +63,7 @@ from tensorcast.global_store.repositories import (
     PendingTransportRequestRepository,
     ProofRepository,
     ReplicaRepository,
+    ShardHomeLeaseRepository,
     TransportRepository,
     ViewCoverageRepository,
     ViewRepository,
@@ -109,6 +110,9 @@ from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
 from tensorcast.global_store.rpc.replica_registration_rpc_handler import (
     ReplicaRegistrationRpcHandler,
 )
+from tensorcast.global_store.rpc.shard_home_lease_rpc_handler import (
+    ShardHomeLeaseRpcHandler,
+)
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.view_proof_rpc_handler import ViewProofRpcHandler
 from tensorcast.global_store.rpc.worker_rpc_handler import WorkerRpcHandler
@@ -127,6 +131,7 @@ from tensorcast.global_store.services import (
     InstanceService,
     PlacementService,
     RecoveryService,
+    ShardHomeLeaseService,
     TransportService,
     ViewStateService,
     WorkerControlReducer,
@@ -244,6 +249,7 @@ class GlobalStoreServicer(
         )
         self.proof_repository = ProofRepository(self.connection)
         self.operation_repository = OperationRepository(self.connection)
+        self.shard_home_lease_repository = ShardHomeLeaseRepository(self.connection)
 
     def _init_catalog_handlers(self) -> None:
         """Initialize handlers for artifact catalog and workflow metadata."""
@@ -509,6 +515,14 @@ class GlobalStoreServicer(
         )
         self.worker_state_sync_rpc_handler = WorkerStateSyncRpcHandler(
             recovery_service=self.recovery_service,
+            logger=logger,
+        )
+        self.shard_home_lease_service = ShardHomeLeaseService(
+            self.shard_home_lease_repository
+        )
+        self.shard_home_lease_rpc_handler = ShardHomeLeaseRpcHandler(
+            shard_home_lease_service=self.shard_home_lease_service,
+            datetime_to_timestamp=datetime_to_timestamp,
             logger=logger,
         )
 

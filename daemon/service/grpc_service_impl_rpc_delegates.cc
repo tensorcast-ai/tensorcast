@@ -158,6 +158,78 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::BatchExists(
+    grpc::ServerContext* ctx,
+    const v2::BatchExistsRequest* req,
+    v2::BatchExistsResponse* resp) {
+  RpcContext rctx{"BatchExists", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->batch_exists(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::BatchGetIntoRegion(
+    grpc::ServerContext* ctx,
+    const v2::BatchGetIntoRegionRequest* req,
+    v2::BatchGetIntoRegionResponse* resp) {
+  RpcContext rctx{"BatchGetIntoRegion", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->batch_get_into_region(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::BatchPutIfAbsentFromRegion(
+    grpc::ServerContext* ctx,
+    const v2::BatchPutIfAbsentFromRegionRequest* req,
+    v2::BatchPutIfAbsentFromRegionResponse* resp) {
+  RpcContext rctx{"BatchPutIfAbsentFromRegion", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->batch_put_if_absent_from_region(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::BatchTouchTtl(
+    grpc::ServerContext* ctx,
+    const v2::BatchTouchTtlRequest* req,
+    v2::BatchTouchTtlResponse* resp) {
+  RpcContext rctx{"BatchTouchTtl", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->batch_touch_ttl(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::HomeBatchExists(
+    grpc::ServerContext* ctx,
+    const v2::HomeBatchExistsRequest* req,
+    v2::HomeBatchExistsResponse* resp) {
+  RpcContext rctx{"HomeBatchExists", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->home_batch_exists(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::HomeBatchGet(
+    grpc::ServerContext* ctx,
+    const v2::HomeBatchGetRequest* req,
+    v2::HomeBatchGetResponse* resp) {
+  RpcContext rctx{"HomeBatchGet", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->home_batch_get(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::HomeBatchPutIfAbsent(
+    grpc::ServerContext* ctx,
+    const v2::HomeBatchPutIfAbsentRequest* req,
+    v2::HomeBatchPutIfAbsentResponse* resp) {
+  RpcContext rctx{"HomeBatchPutIfAbsent", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->home_batch_put_if_absent(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::FetchPayloadRefChunk(
+    grpc::ServerContext* ctx,
+    const v2::FetchPayloadRefChunkRequest* req,
+    v2::FetchPayloadRefChunkResponse* resp) {
+  RpcContext rctx{"FetchPayloadRefChunk", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->fetch_payload_ref_chunk(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::HomeBatchTouchTtl(
+    grpc::ServerContext* ctx,
+    const v2::HomeBatchTouchTtlRequest* req,
+    v2::HomeBatchTouchTtlResponse* resp) {
+  RpcContext rctx{"HomeBatchTouchTtl", *ctx, opts_.allow_high_card_attrs};
+  return byte_artifact_controller_->home_batch_touch_ttl(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::SealAssembly(
     grpc::ServerContext* ctx,
     const v2::SealAssemblyRequest* req,

@@ -12,7 +12,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
+#include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/materialization_facade.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/replica/replica_runtime.h"
@@ -75,6 +77,17 @@ class IngestionRuntime {
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints);
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+
+  absl::StatusOr<ingestion::ArtifactLoweringResult> execute_artifact_lowering_plan(
+      ingestion::ArtifactLoweringPlan plan);
 
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,

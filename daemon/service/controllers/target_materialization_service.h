@@ -8,6 +8,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/controllers/target_publish_service.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/artifact_source_registry.h"
@@ -15,7 +16,7 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/shutdown_signal.h"
-#include "daemon/state/target_write_registry.h"
+#include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -31,6 +32,7 @@ class TargetMaterializationService {
     ArtifactSourceRegistry& disk_imports;
     ShutdownSignal& shutdown_signal;
     WorkerIdentityStore& identity;
+    ExternalTargetAccessService& external_target_access_service;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
@@ -55,7 +57,7 @@ class TargetMaterializationService {
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
-  TargetWriteRegistry::Record insert_target_write_for_testing(TargetWriteRegistry::Record record);
+  TargetPublicationRegistry::Record insert_target_publication_for_testing(TargetPublicationRegistry::Record record);
 
  private:
   Dep d_;

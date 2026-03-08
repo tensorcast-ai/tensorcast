@@ -139,6 +139,13 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("unregister_worker not supported in test stub");
   }
 
+  absl::StatusOr<std::vector<components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_workers not supported in test stub");
+  }
+
   absl::StatusOr<std::string> register_replica(
       std::string_view artifact_id,
       std::string_view,
@@ -415,6 +422,43 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const components::StateSyncToken&,
       const components::RpcOptions&) override {
     return absl::UnimplementedError("reconcile_worker_state not supported in test stub");
+  }
+
+  absl::StatusOr<components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t,
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("acquire_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("keepalive_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<components::ShardHomeLeaseKeepaliveInput>&,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_keepalive_shard_home_leases not supported in test stub");
+  }
+
+  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const components::RpcOptions&) override {
+    return absl::UnimplementedError("release_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<components::ShardHomeRouteInfo> get_shard_home_lease(uint64_t, const components::RpcOptions&)
+      override {
+    return absl::UnimplementedError("get_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_get_shard_home_leases not supported in test stub");
   }
 
   bool is_connected() const override {

@@ -9,12 +9,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <unistd.h>
+#include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/capability_token.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/testing/recording_global_store_client.h"
-#include "daemon/state/target_write_registry.h"
+#include "daemon/state/target_publication_registry.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/common/v1/capability_token.pb.h"
 #include "tensorcast/common/v1/common.pb.h"
@@ -54,14 +55,14 @@ std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
   return harness;
 }
 
-tensorcast::common::v1::TargetWriteScope make_scope(
-    std::string write_id,
+tensorcast::common::v1::TargetPublicationScope make_scope(
+    std::string publication_id,
     std::string artifact_id,
     std::string device_uuid,
     int owner_pid,
     bool publishable) {
-  tensorcast::common::v1::TargetWriteScope scope;
-  scope.set_write_id(std::move(write_id));
+  tensorcast::common::v1::TargetPublicationScope scope;
+  scope.set_publication_id(std::move(publication_id));
   scope.set_device_uuid(std::move(device_uuid));
   scope.set_owner_pid(owner_pid);
   scope.set_target_layout_hash("layout-hash");
@@ -79,13 +80,13 @@ tensorcast::common::v1::TargetWriteScope make_scope(
   return scope;
 }
 
-tensorcast::common::v1::TargetWriteScope make_view_subset_scope(
-    std::string write_id,
+tensorcast::common::v1::TargetPublicationScope make_view_subset_scope(
+    std::string publication_id,
     std::string artifact_id,
     std::string device_uuid,
     int owner_pid) {
   auto scope = make_scope(
-      std::move(write_id),
+      std::move(publication_id),
       std::move(artifact_id),
       std::move(device_uuid),
       owner_pid,
@@ -100,21 +101,41 @@ tensorcast::common::v1::TargetWriteScope make_view_subset_scope(
 std::string mint_token(
     const tensorcast::common::CapabilityTokenManager& manager,
     std::string_view issuer,
-    const tensorcast::common::v1::TargetWriteScope& scope) {
+    const tensorcast::common::v1::TargetPublicationScope& scope) {
   auto scope_bytes_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
   REQUIRE(scope_bytes_or.ok());
   const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(5)));
-  auto token_or =
-      manager.mint(issuer, tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE, *scope_bytes_or, expires_at_ms);
+  auto token_or = manager.mint(
+      issuer, tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION, *scope_bytes_or, expires_at_ms);
   REQUIRE(token_or.ok());
   return *token_or;
 }
 
-tensorcast::daemon::TargetWriteRegistry::Record make_record_from_scope(
-    const tensorcast::common::v1::TargetWriteScope& scope) {
-  tensorcast::daemon::TargetWriteRegistry::Record record;
-  record.write_id = scope.write_id();
-  record.layout_key = "layout-hash";
+tensorcast::daemon::TargetPublicationRegistry::Record make_record_from_scope(
+    const tensorcast::common::v1::TargetPublicationScope& scope) {
+  tensorcast::daemon::TargetPublicationRegistry::Record record;
+  record.publication_id = scope.publication_id();
+  record.publication_key = absl::StrCat(
+      scope.selection().artifact_id(),
+      "|",
+      scope.selection().view_id(),
+      "|",
+      scope.selection().logical_layout_hash(),
+      "|",
+      scope.selection().selection_hash(),
+      "|",
+      scope.selection().view_subset_hash(),
+      "|",
+      static_cast<int>(scope.byte_space().kind()),
+      "|",
+      scope.byte_space().id(),
+      "|layout-hash|",
+      scope.owner_pid(),
+      "|",
+      scope.device_uuid());
+  for (const auto& name : scope.selection().tensor_names()) {
+    absl::StrAppend(&record.publication_key, "|t:", name);
+  }
   record.target_layout_hash = "layout-hash";
   record.selection.CopyFrom(scope.selection());
   record.byte_space.CopyFrom(scope.byte_space());
@@ -142,7 +163,7 @@ TEST_CASE("PublishTargetReplica rejects owner mismatch", "[daemon][publish]") {
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_write_token(token);
+  req.set_target_publication_token(token);
   req.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   req.set_owner_pid(owner_pid + 1);
 
@@ -162,12 +183,12 @@ TEST_CASE("PublishTargetReplica rejects packed selections", "[daemon][publish]")
   const std::string token = mint_token(*tokens, "daemon-test", scope);
 
   auto record = make_record_from_scope(scope);
-  harness->materialization_controller().insert_target_write_for_testing(std::move(record));
+  harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_write_token(token);
+  req.set_target_publication_token(token);
   req.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   req.set_owner_pid(owner_pid);
 
@@ -187,18 +208,18 @@ TEST_CASE("PublishTargetReplica allows packed selection for view byte-space", "[
   const std::string token = mint_token(*tokens, "daemon-test", scope);
 
   auto record = make_record_from_scope(scope);
-  harness->materialization_controller().insert_target_write_for_testing(std::move(record));
+  harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_write_token(token);
+  req.set_target_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
 
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
-  REQUIRE(st.error_message() == "target_write_token has empty segments");
+  REQUIRE(st.error_message() == "target_publication_token has empty segments");
   REQUIRE(resp.lease_id().empty());
   REQUIRE(resp.replica_id().empty());
   REQUIRE(gs->registered_replicas.empty());

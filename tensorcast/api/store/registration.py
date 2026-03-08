@@ -65,13 +65,7 @@ logger = logging.getLogger(__name__)
 
 def _uses_fake_cuda_backend() -> bool:
     backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
-    if backend == "fake":
-        return True
-    with contextlib.suppress(Exception):
-        from tensorcast._C import is_fake_cuda
-
-        return bool(is_fake_cuda())
-    return False
+    return backend == "fake"
 
 
 class RegistrationPipeline:
@@ -172,15 +166,12 @@ class RegistrationPipeline:
         view_id: str | None = None,
         placement: str | None = None,
         ttl_ms: int | None = None,
-        allow_partial: bool = False,
         options: RegisterArtifactOptions | None = None,
         canonical_index_bytes: bytes | None = None,
         registration_kind: str | int | None = None,
         resolver: Callable[..., ResolvedViewInputs] | None = None,
     ) -> RegisteredArtifact:
-        resolved_kind = self._normalize_registration_kind(
-            registration_kind, allow_partial=allow_partial
-        )
+        resolved_kind = self._normalize_registration_kind(registration_kind)
         if (
             resolved_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
             and not artifact_id
@@ -349,16 +340,10 @@ class RegistrationPipeline:
     @staticmethod
     def _normalize_registration_kind(
         registration_kind: str | int | None,
-        *,
-        allow_partial: bool,
     ) -> store_daemon_pb2.ViewRegistrationKind:
         resolved: store_daemon_pb2.ViewRegistrationKind | None = None
         if registration_kind is None:
-            resolved = (
-                store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
-                if allow_partial
-                else store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
-            )
+            resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
         elif isinstance(registration_kind, str):
             normalized = registration_kind.strip().lower()
             if normalized in {"piece", "partial"}:
@@ -376,14 +361,6 @@ class RegistrationPipeline:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if allow_partial:
-            if resolved != store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
-                raise ArtifactError(
-                    "allow_partial is deprecated; use registration_kind='piece'",
-                    status_code="INVALID_ARGUMENT",
-                    retryable=False,
-                )
-            logger.warning("allow_partial is deprecated; use registration_kind='piece'")
         return resolved
 
     def _build_view_registration(

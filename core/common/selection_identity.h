@@ -17,4 +17,8 @@ std::string compute_view_subset_hash_bytes(absl::Span<const std::string> names);
 
 std::string compute_selection_hash_bytes(std::string_view view_id, std::optional<std::string_view> view_subset_hash);
 
+std::string compute_byte_artifact_logical_layout_hash_bytes();
+
+std::string compute_byte_artifact_selection_hash_bytes();
+
 } // namespace tensorcast::common

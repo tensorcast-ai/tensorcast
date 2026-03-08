@@ -14,6 +14,7 @@
 
 #include "absl/hash/hash.h"
 #include "absl/status/status.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "folly/futures/Future.h"
 
 #include "core/common/ready_signal.h"
@@ -63,6 +64,28 @@ struct InlineBufferSource {
   std::shared_ptr<const void> data;
   uint64_t size_bytes;
 };
+
+inline std::string build_synthetic_payload_canonical_index_json(uint64_t byte_length) {
+  return std::string("{\"payload\":[0,") + std::to_string(byte_length) + ",[" + std::to_string(byte_length) +
+      "],[1],\"torch.uint8\",0]}";
+}
+
+inline loader::ByteRangeMap build_identity_byte_range_map(uint64_t total_bytes) {
+  loader::ByteRangeMap map;
+  map.total_bytes = total_bytes;
+  map.num_sources = 1;
+  if (total_bytes > 0) {
+    map.segments.push_back(
+        loader::ByteRangeSegment{
+            .kind = loader::ByteRangeSegment::Kind::kData,
+            .dst_offset = 0,
+            .length = total_bytes,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return map;
+}
 
 using ArtifactSource = std::variant<
     DiskSource,

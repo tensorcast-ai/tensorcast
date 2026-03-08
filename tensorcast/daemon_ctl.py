@@ -998,6 +998,259 @@ class DaemonCtl:
                 raise
         return response
 
+    def batch_exists(
+        self,
+        *,
+        selections: Iterable[common_pb2.ArtifactSelection],
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.BatchExistsResponse:
+        request = store_daemon_pb2.BatchExistsRequest()
+        for selection in selections:
+            request.selections.add().CopyFrom(selection)
+        with self._client_span("Client/BatchExists") as span:
+            try:
+                response: store_daemon_pb2.BatchExistsResponse = self._unary_call(
+                    self.stub_v2.BatchExists,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchExists RPC failed")
+                ) from e
+        return response
+
+    def batch_get_into_region(
+        self,
+        *,
+        selections: Iterable[common_pb2.ArtifactSelection],
+        target_layout: store_daemon_pb2.TargetLayout,
+        pid: int,
+        device_uuid: str,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.BatchGetIntoRegionResponse:
+        request = store_daemon_pb2.BatchGetIntoRegionRequest(
+            target_layout=target_layout,
+            pid=int(pid),
+            device_uuid=str(device_uuid),
+        )
+        for selection in selections:
+            request.selections.add().CopyFrom(selection)
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/BatchGetIntoRegion") as span:
+            try:
+                response: store_daemon_pb2.BatchGetIntoRegionResponse = (
+                    self._unary_call(
+                        self.stub_v2.BatchGetIntoRegion,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchGetIntoRegion RPC failed")
+                ) from e
+        return response
+
+    def batch_put_if_absent_from_region(
+        self,
+        *,
+        items: Iterable[store_daemon_pb2.BatchPutIfAbsentFromRegionItem],
+        source_layout: store_daemon_pb2.TargetLayout,
+        pid: int,
+        device_uuid: str,
+        ttl_ms: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.BatchPutIfAbsentFromRegionResponse:
+        request = store_daemon_pb2.BatchPutIfAbsentFromRegionRequest(
+            source_layout=source_layout,
+            pid=int(pid),
+            device_uuid=str(device_uuid),
+        )
+        for item in items:
+            request.items.add().CopyFrom(item)
+        if ttl_ms is not None:
+            request.ttl_ms = int(ttl_ms)
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/BatchPutIfAbsentFromRegion") as span:
+            try:
+                response: store_daemon_pb2.BatchPutIfAbsentFromRegionResponse = (
+                    self._unary_call(
+                        self.stub_v2.BatchPutIfAbsentFromRegion,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchPutIfAbsentFromRegion RPC failed")
+                ) from e
+        return response
+
+    def batch_touch_ttl(
+        self,
+        *,
+        artifact_ids: Iterable[str],
+        ttl_ms: int,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.BatchTouchTtlResponse:
+        request = store_daemon_pb2.BatchTouchTtlRequest(
+            artifact_ids=[
+                str(artifact_id) for artifact_id in artifact_ids if str(artifact_id)
+            ],
+            ttl_ms=int(ttl_ms),
+        )
+        with self._client_span("Client/BatchTouchTtl") as span:
+            try:
+                response: store_daemon_pb2.BatchTouchTtlResponse = self._unary_call(
+                    self.stub_v2.BatchTouchTtl,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchTouchTtl RPC failed")
+                ) from e
+        return response
+
+    def home_batch_exists(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        artifact_ids: Iterable[str],
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchExistsResponse:
+        request = store_daemon_pb2.HomeBatchExistsRequest(
+            fence=fence,
+            artifact_ids=[str(item) for item in artifact_ids if str(item)],
+        )
+        with self._client_span("Client/HomeBatchExists") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchExistsResponse = self._unary_call(
+                    self.stub_v2.HomeBatchExists,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchExists RPC failed")
+                ) from e
+        return response
+
+    def home_batch_get(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        artifact_ids: Iterable[str],
+        operation_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchGetResponse:
+        request = store_daemon_pb2.HomeBatchGetRequest(
+            fence=fence,
+            artifact_ids=[str(item) for item in artifact_ids if str(item)],
+        )
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/HomeBatchGet") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchGetResponse = self._unary_call(
+                    self.stub_v2.HomeBatchGet,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchGet RPC failed")
+                ) from e
+        return response
+
+    def home_batch_put_if_absent(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        items: Iterable[store_daemon_pb2.HomeBatchPutIfAbsentItem],
+        ttl_ms: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchPutIfAbsentResponse:
+        request = store_daemon_pb2.HomeBatchPutIfAbsentRequest(
+            fence=fence,
+        )
+        for item in items:
+            request.items.add().CopyFrom(item)
+        if ttl_ms is not None:
+            request.ttl_ms = int(ttl_ms)
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/HomeBatchPutIfAbsent") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchPutIfAbsentResponse = (
+                    self._unary_call(
+                        self.stub_v2.HomeBatchPutIfAbsent,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchPutIfAbsent RPC failed")
+                ) from e
+        return response
+
+    def home_batch_touch_ttl(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        artifact_ids: Iterable[str],
+        ttl_ms: int,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchTouchTtlResponse:
+        request = store_daemon_pb2.HomeBatchTouchTtlRequest(
+            fence=fence,
+            artifact_ids=[str(item) for item in artifact_ids if str(item)],
+            ttl_ms=int(ttl_ms),
+        )
+        with self._client_span("Client/HomeBatchTouchTtl") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchTouchTtlResponse = self._unary_call(
+                    self.stub_v2.HomeBatchTouchTtl,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchTouchTtl RPC failed")
+                ) from e
+        return response
+
     def wait_replica_status(
         self,
         ticket: store_daemon_pb2.ReplicaTicket,
@@ -1820,7 +2073,12 @@ class DaemonCtl:
             )
             view_id = resp.view_id or None
             view_data_hash = resp.view_data_hash or None
-            registration_kind = "piece" if resp.allow_partial else "canonical"
+            registration_kind = (
+                "piece"
+                if resp.registration_kind
+                == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+                else "canonical"
+            )
             local_stable_tier = None
             if resp.HasField("local_stable_tier"):
                 status = resp.local_stable_tier.status
@@ -1842,7 +2100,6 @@ class DaemonCtl:
                 view_data_hash=view_data_hash,
                 canonical_ranges=canonical_ranges,
                 registration_kind=registration_kind,
-                allow_partial=bool(resp.allow_partial),
                 local_stable_tier=local_stable_tier,
             )
 
@@ -2175,19 +2432,19 @@ class DaemonCtl:
     def publish_target_replica(
         self,
         *,
-        target_write_token: bytes,
+        target_publication_token: bytes,
         byte_space: common_pb2.ByteSpaceRef,
         ttl_ms: int | None = None,
         owner_pid: int | None = None,
         operation_id: str | None = None,
         timeout_s: float = 60.0,
     ) -> store_daemon_pb2.PublishTargetReplicaResponse:
-        if not target_write_token:
-            raise ValueError("target_write_token is required")
+        if not target_publication_token:
+            raise ValueError("target_publication_token is required")
         if byte_space is None:
             raise ValueError("byte_space is required")
         req = store_daemon_pb2.PublishTargetReplicaRequest(
-            target_write_token=bytes(target_write_token),
+            target_publication_token=bytes(target_publication_token),
             byte_space=byte_space,
         )
         if ttl_ms is not None:

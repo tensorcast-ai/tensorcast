@@ -15,6 +15,8 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/ha/worker_lifecycle_manager.h"
+#include "daemon/service/controllers/byte_artifact_controller.h"
+#include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/grpc_service_impl.h"
 #include "daemon/state/daemon_kernel.h"
 #include "daemon/state/daemon_options.h"
@@ -71,6 +73,8 @@ class DaemonApp {
 
   Options options_;
   std::unique_ptr<DaemonKernel> kernel_;
+  std::unique_ptr<ExternalTargetAccessService> external_target_access_service_;
+  std::unique_ptr<ByteArtifactController> byte_artifact_controller_;
   std::unique_ptr<MaterializationController> materialization_controller_;
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;

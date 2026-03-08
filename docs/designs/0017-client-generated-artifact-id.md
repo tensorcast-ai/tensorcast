@@ -22,8 +22,8 @@ Key outcomes
 - Low‑overhead registration: CGID path skips `index_multihash`/`data_multihash` computation; daemon trusts a client‑supplied identifier.
 - Same verbs and flows: Keep `register/put` and handle-based materialization from the API design doc; a single optional `artifact_id` parameter (when set to a `cgid:`) selects the CGID path.
 - Short‑lived/ephemeral by default: CGID artifacts are intended for runtime residency with TTL/explicit deregistration; no tree‑hash leaves or de‑dup semantics.
-- Namespace profiles may define tighter authority/routing rules on top of generic CGID. In particular, `cgid:cache_blob~...`
-  follows the cache-blob profile defined by `0056`/`0084`.
+- Namespace profiles may define tighter authority/routing rules on top of generic CGID. In particular, `cgid:byte_artifact~...`
+  follows the byte artifact profile defined by `0087`.
 
 # Goals / Non‑Goals
 
@@ -52,8 +52,8 @@ Non‑Goals
       CGID suffix (it is only used for the `cgid:` prefix itself).
     - Generic profile example: `cgid:<block_hash_hex64>` where `<block_hash_hex64>` is caller‑computed SHA‑256 hex of
       a logical block (or other collision‑resistant hash used by the engine).
-    - Cache-blob namespace profile: `cgid:cache_blob~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>`
-      (see `0056`/`0084`).
+    - Byte artifact namespace profile: `cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>`
+      (see `0087`).
 
 Semantics
 - `cgid:` denotes an ephemeral identity: no de‑dup, no tree‑hash, no GS leaves. Routing and transport are keyed by the id string and device residency.
@@ -85,7 +85,7 @@ Rules
 - Supplying an `artifact_id` that does not start with `cgid:` is invalid (SDK or daemon rejects to avoid forged mi2 ids).
 - `ttl_ms` continues to control lease keepalive for LIP replicas; CGID favors short to medium TTL.
 - `get/get_into` accept either `artifact_id` (which can be `mi2:` or `cgid:`) or `key`, unchanged from the current Store API design.
-- Namespace note: `cgid:cache_blob~...` is governed by cache-blob profile authority/routing (home shard + fencing) and is
+- Namespace note: `cgid:byte_artifact~...` is governed by byte artifact profile authority/routing (home shard + fencing) and is
   not a normal GS per-blob catalog entry.
 
 ## 3. Daemon changes (registration/commit identity)
@@ -126,9 +126,9 @@ Persistence model
 - `ArtifactRepository` upserts descriptors with explicit `id_kind`. `mi2:` records retain digests; `cgid:` records store `NULL` digests.
 - `ReplicaRepository` persists `expires_at` when supplied (favoring short-lived CGID replicas) while keeping existing write paths for MI2 replicas untouched.
 - Key mappings continue to target either identity kind; consumers must be prepared for empty digest fields when resolving CGID entries.
-- Namespace override (required): this per-blob persistence model does **not** apply to `cgid:cache_blob~...`.
-  Cache-blob ids MUST NOT be inserted into `artifacts` / `artifact_replicas`; GS authority for that namespace is limited
-  to shard-lease metadata (see `0056`/`0084`).
+- Namespace override (required): this per-blob persistence model does **not** apply to `cgid:byte_artifact~...`.
+  Byte artifact ids MUST NOT be inserted into `artifacts` / `artifact_replicas`; GS authority for that namespace is limited
+  to shard-lease metadata (see `0087`).
 
 Minimal schema evolution (illustrative; exact patch in the plan that changes `schema.sql`):
 ```sql
@@ -145,7 +145,7 @@ ALTER TABLE replicas
 
 Routing behavior
 - `GetArtifactInfoById` must accept both id kinds. When the id has prefix `cgid:`, fields specific to mi2 (leaves, digests) are empty/omitted; callers should not request `include_leaves`.
-- For `cgid:cache_blob~...`, route/authority is profile-specific and does not rely on GS per-blob `GetArtifactInfoById`
+- For `cgid:byte_artifact~...`, route/authority is profile-specific and does not rely on GS per-blob `GetArtifactInfoById`
   as source of truth.
 
 ## 5. Error model & invariants
@@ -155,7 +155,7 @@ Invariants
 - `cgid:` artifacts are not verifiable by tree hash within TensorCast; integrity is the caller’s responsibility. Transport correctness is still enforced (locks, PAD zero‑fill, range checks).
 - Canonical index bytes, when present, must remain self‑consistent with the provided storage/alias metadata; the daemon continues to enforce index layout rules in registration.
 - CGID descriptors intentionally propagate empty digest fields; consumers should treat `index_multihash` / `data_multihash` as unset when `id_kind` is `CGID`.
-- Namespace profiles may further constrain authority and persistence. `cgid:cache_blob~...` is the required exception in
+- Namespace profiles may further constrain authority and persistence. `cgid:byte_artifact~...` is the required exception in
   which per-blob GS cataloging is disabled.
 
 Errors
@@ -179,9 +179,9 @@ Compatibility
 Acceptance criteria
 - Registering with `artifact_id="cgid:..."` returns the same `artifact_id` and does not compute/return mi2 digests.
 - `get/get_into` successfully materialize replicas by CGID across nodes, using existing transport locks.
-- GS can list/resolve replicas for generic `cgid:` namespaces (non-cache-blob) and omit mi2‑specific fields without
+- GS can list/resolve replicas for generic `cgid:` namespaces (non-byte artifact) and omit mi2‑specific fields without
   breaking consumers.
-- `cgid:cache_blob~...` is excluded from GS per-blob catalogs and uses shard-lease authority + home routing semantics.
+- `cgid:byte_artifact~...` is excluded from GS per-blob catalogs and uses shard-lease authority + home routing semantics.
 - Mixed deployments (some clients using mi2, some using CGID) operate without behavioral regressions.
 
 # Trade‑offs & Risks
@@ -197,8 +197,8 @@ Risks & mitigations
 # References
 
 - Identity (mi2): [0007 Content‑Addressed Artifact ID](./0007-content-addressed-artifact-id.md)
-- Cache blob profile authority/routing: [0056 Programmable Framework Advanced Design](./0056-programmable-framework-adv.md)
-- Unified cache-blob runtime contract: [0084 Unified Artifact-Binding KV Runtime](./0084-unified-artifact-binding-kv-runtime.md)
+- Byte artifact profile authority/routing: [0056 Programmable Framework Advanced Design](./0056-programmable-framework-adv.md)
+- Unified byte artifact runtime contract: [0087 Unified Artifact Runtime and Routed Byte Artifact Architecture](./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
 - Session API: [api-design](../architecture/api/api-design.md#store-and-entry-points)
 - Views: [Artifact Views and Retrieval](../architecture/artifact-views-and-retrieval.md)
 

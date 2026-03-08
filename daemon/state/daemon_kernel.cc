@@ -2,6 +2,7 @@
 
 #include "daemon/state/daemon_kernel.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "absl/log/log.h"
@@ -14,7 +15,8 @@ namespace tensorcast::daemon {
 DaemonKernel::DaemonKernel(
     std::shared_ptr<store::StoreEngine> engine,
     std::shared_ptr<common::AsyncRuntime> async_runtime,
-    DaemonOptions options)
+    DaemonOptions options,
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client)
     : engine_(std::move(engine)),
       async_runtime_(async_runtime ? std::move(async_runtime) : std::make_shared<common::AsyncRuntime>()),
       options_(std::move(options)),
@@ -105,6 +107,37 @@ DaemonKernel::DaemonKernel(
 
   identity_store_ = std::make_unique<WorkerIdentityStore>(persistence_mgr_.get());
   identity_store_->set_daemon_id(options_.daemon_id);
+  byte_artifact_runtime_state_ = std::make_unique<ByteArtifactRuntimeState>();
+  byte_artifact_body_store_ = std::make_unique<ByteArtifactBodyStore>(*byte_artifact_runtime_state_);
+  worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client);
+  const std::string local_daemon_id = options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id;
+  byte_artifact_route_resolver_ = std::make_unique<ByteArtifactRouteResolver>(
+      *byte_artifact_runtime_state_,
+      global_store_client,
+      local_daemon_id,
+      ByteArtifactRouteResolver::Options{
+          .route_staleness_budget = absl::Milliseconds(
+              std::max<int64_t>(
+                  1, static_cast<int64_t>(options_.byte_artifact_routing.route_staleness_budget.count()))),
+          .route_refresh_timeout = absl::Milliseconds(
+              std::max<int64_t>(
+                  1, static_cast<int64_t>(options_.byte_artifact_routing.route_staleness_budget.count()))),
+          .lease_ttl = absl::Milliseconds(
+              std::max<int64_t>(1, static_cast<int64_t>(options_.byte_artifact_routing.lease_ttl.count()))),
+          .keepalive_interval = absl::Milliseconds(
+              std::max<int64_t>(1, static_cast<int64_t>(options_.byte_artifact_routing.keepalive_interval.count()))),
+          .routing_epoch = options_.byte_artifact_routing.routing_epoch,
+          .shard_home_eligible = options_.byte_artifact_routing.shard_home_eligible,
+      });
+  payload_transport_broker_ = std::make_unique<PayloadTransportBroker>(
+      local_daemon_id,
+      capability_tokens_.get(),
+      PayloadTransportBroker::Options{
+          .ttl = options_.byte_artifact_routing.payload_transport.ref_ttl,
+          .max_chunk_bytes = options_.byte_artifact_routing.payload_transport.max_chunk_bytes,
+          .fetch_deadline = options_.byte_artifact_routing.payload_transport.fetch_deadline,
+          .cleanup_interval = options_.byte_artifact_routing.payload_transport.cleanup_interval,
+      });
   retire_gates_ = std::make_unique<RetireGates>(refs_, *lifecycle_mgr_, locks_);
 }
 

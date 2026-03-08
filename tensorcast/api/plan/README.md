@@ -18,14 +18,19 @@ best-effort cancellation.
   index bytes or view index bytes plus view/subset inputs.
 - **TargetSpec**: Capability-based reference to engine-owned buffers.
 - **TransformSpec**: Named transform invocation with structured arguments.
+- **Artifact actions**: Canonical instance actions for artifact lifecycle orchestration:
+  `manifest`, `publish`, `hydrate`, `evict_local`.
 
 ## Current surface (Phase-4)
 
 - `tensorcast.plan(ctx)` builds a plan with a single `CallContext`.
 - Worker steps: `prefetch`, `pin_device_residency`, `unpin_device_residency`.
 - Instance steps: `transform_into`, `transform_register` (executed via Node Agent).
+- Instance artifact steps: `manifest`, `publish`, `hydrate`, `evict_local`.
 - `Plan.run()` executes worker steps locally; instance steps require submitting
   the `PlanSpec` to a node agent with an engine adapter.
+- Node Agent executes artifact instance actions through the engine adapter
+  hooks (`register_artifact_fns(...)`).
 - Instance targets must be expressed as `TargetSpec` capabilities minted by the
   engine adapter on the target process.
 - Worker prefetch supports both GPU and daemon-owned CPU/DRAM warm replicas:

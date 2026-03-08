@@ -2,9 +2,9 @@
 
 #include "daemon/service/grpc_service_impl.h"
 
-#include <nlohmann/json.hpp>
 #include <unistd.h>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,7 +20,6 @@
 #include "core/store/components/global_store_client.h"
 #include "daemon/service/artifact_retire_utils.h"
 #include "daemon/util/status_utils.h"
-#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -363,6 +362,7 @@ absl::StatusOr<DrainedLeaseResolution> drain_lease_for_retire(
 StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
     : engine_(&deps.engine),
       materialization_controller_(&deps.materialization_controller),
+      byte_artifact_controller_(&deps.byte_artifact_controller),
       registration_controller_(&deps.registration_controller),
       transport_controller_(&deps.transport_controller),
       status_controller_(&deps.status_controller),

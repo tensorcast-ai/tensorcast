@@ -155,7 +155,6 @@ class CommitResult(BaseModel):
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     registration_kind: ViewRegistrationKind = "canonical"
-    allow_partial: bool = False
     local_stable_tier: LocalStableTierResult | None = None
 
 

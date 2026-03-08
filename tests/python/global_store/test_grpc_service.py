@@ -354,6 +354,40 @@ class TestGRPCService:
             w.worker_id != register_response.worker_id for w in list_response.workers
         )
 
+    def test_worker_routing_capability_flags_filtering(self, servicer, test_context):
+        flags = (
+            1
+            << global_store_pb2.WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED
+        ) | (
+            1
+            << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
+        )
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="routing_cap_worker",
+            node_address="192.168.2.30",
+            grpc_port=8030,
+            p2p_port=8031,
+            mem_pool_total_size=1000000000,
+            mem_pool_available_size=900000000,
+            daemon_id="daemon_routing_cap_worker",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=(
+                    1
+                    << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
+                )
+            ),
+            test_context,
+        )
+        assert any(
+            w.worker_id == register_response.worker_id for w in list_response.workers
+        )
+
     def test_instance_capability_flags_filtering(self, servicer, test_context):
         flags = 1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
         register_request = global_store_pb2.RegisterInstanceRequest(

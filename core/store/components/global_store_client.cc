@@ -307,6 +307,29 @@ std::optional<absl::Time> timestamp_to_absl(const google::protobuf::Timestamp& t
   return absl::UnixEpoch() + absl::Seconds(ts.seconds()) + absl::Nanoseconds(ts.nanos());
 }
 
+ShardHomeRouteInfo parse_shard_home_route(const global_store::ShardHomeRoute& route) {
+  ShardHomeRouteInfo out;
+  out.shard_id = route.shard_id();
+  out.holder_daemon_id = route.holder_daemon_id();
+  out.lease_generation = route.lease_generation();
+  if (auto expires_at = timestamp_to_absl(route.expires_at()); expires_at.has_value()) {
+    out.expires_at = *expires_at;
+  }
+  return out;
+}
+
+ShardHomeLeaseDescriptor parse_shard_home_lease(const global_store::ShardHomeLease& lease) {
+  ShardHomeLeaseDescriptor out;
+  out.shard_id = lease.shard_id();
+  out.holder_daemon_id = lease.holder_daemon_id();
+  out.lease_token = lease.lease_token();
+  out.lease_generation = lease.lease_generation();
+  if (auto expires_at = timestamp_to_absl(lease.expires_at()); expires_at.has_value()) {
+    out.expires_at = *expires_at;
+  }
+  return out;
+}
+
 uint64_t fnv1a64(std::string_view payload) {
   constexpr uint64_t kOffset = 14695981039346656037ULL;
   constexpr uint64_t kPrime = 1099511628211ULL;
@@ -783,6 +806,44 @@ absl::Status GlobalStoreClient::unregister_worker_idempotent(
   return absl::InternalError(
       absl::StrFormat(
           "UnregisterWorker failed: %s (%d)", status_to_cstr(response.status()), static_cast<int>(response.status())));
+}
+
+absl::StatusOr<std::vector<ActiveWorkerInfo>> GlobalStoreClient::list_active_workers(
+    bool include_unavailable,
+    uint64_t required_capability_flags,
+    const RpcOptions& rpc_options) {
+  global_store::ListActiveWorkersRequest request;
+  request.set_include_unavailable(include_unavailable);
+  request.set_required_capability_flags(required_capability_flags);
+
+  global_store::ListActiveWorkersResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->ListActiveWorkers(ctx, req, resp);
+      },
+      "ListActiveWorkers",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<ActiveWorkerInfo> out;
+  out.reserve(response.workers_size());
+  for (const auto& w : response.workers()) {
+    ActiveWorkerInfo info;
+    info.worker_id = w.worker_id();
+    info.node_id = w.node_id();
+    info.node_address = w.node_address();
+    info.grpc_port = w.grpc_port();
+    info.p2p_port = w.p2p_port();
+    info.accepting_new_requests = w.accepting_new_requests();
+    info.daemon_id = w.daemon_id();
+    info.capability_flags = w.capability_flags();
+    out.push_back(std::move(info));
+  }
+  return out;
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::register_replica(
@@ -2506,6 +2567,170 @@ absl::StatusOr<StateSyncResult> GlobalStoreClient::reconcile_worker_state(
     result.expected_replicas.push_back(rep);
   }
   return result;
+}
+
+absl::StatusOr<AcquireShardHomeLeaseResult> GlobalStoreClient::acquire_shard_home_lease(
+    uint64_t shard_id,
+    std::string_view holder_daemon_id,
+    uint64_t ttl_ms,
+    const RpcOptions& rpc_options) {
+  global_store::AcquireShardHomeLeaseRequest request;
+  request.set_shard_id(shard_id);
+  request.set_holder_daemon_id(std::string(holder_daemon_id));
+  request.set_ttl_ms(ttl_ms);
+
+  global_store::AcquireShardHomeLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->AcquireShardHomeLease(ctx, req, resp);
+      },
+      "AcquireShardHomeLease",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+
+  AcquireShardHomeLeaseResult out;
+  out.acquired = response.acquired();
+  out.lease = parse_shard_home_lease(response.lease());
+  return out;
+}
+
+absl::StatusOr<ShardHomeLeaseDescriptor> GlobalStoreClient::keepalive_shard_home_lease(
+    std::string_view lease_token,
+    uint64_t ttl_ms,
+    const RpcOptions& rpc_options) {
+  global_store::KeepaliveShardHomeLeaseRequest request;
+  request.set_lease_token(std::string(lease_token));
+  request.set_ttl_ms(ttl_ms);
+
+  global_store::KeepaliveShardHomeLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->KeepaliveShardHomeLease(ctx, req, resp);
+      },
+      "KeepaliveShardHomeLease",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return parse_shard_home_lease(response.lease());
+}
+
+absl::StatusOr<std::vector<ShardHomeLeaseKeepaliveOutcome>> GlobalStoreClient::batch_keepalive_shard_home_leases(
+    const std::vector<ShardHomeLeaseKeepaliveInput>& leases,
+    uint64_t ttl_ms,
+    const RpcOptions& rpc_options) {
+  global_store::BatchKeepaliveShardHomeLeasesRequest request;
+  request.set_ttl_ms(ttl_ms);
+  for (const auto& lease : leases) {
+    auto* entry = request.add_leases();
+    entry->set_shard_id(lease.shard_id);
+    entry->set_lease_generation(lease.lease_generation);
+    entry->set_lease_token(lease.lease_token);
+  }
+
+  global_store::BatchKeepaliveShardHomeLeasesResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->BatchKeepaliveShardHomeLeases(ctx, req, resp);
+      },
+      "BatchKeepaliveShardHomeLeases",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<ShardHomeLeaseKeepaliveOutcome> out;
+  out.reserve(response.outcomes_size());
+  for (const auto& outcome : response.outcomes()) {
+    ShardHomeLeaseKeepaliveOutcome item;
+    item.shard_id = outcome.shard_id();
+    item.lease_generation = outcome.lease_generation();
+    item.lease_token = outcome.lease_token();
+    item.ok = outcome.ok();
+    item.lease = parse_shard_home_lease(outcome.lease());
+    item.message = outcome.message();
+    out.push_back(std::move(item));
+  }
+  return out;
+}
+
+absl::StatusOr<bool> GlobalStoreClient::release_shard_home_lease(
+    std::string_view lease_token,
+    const RpcOptions& rpc_options) {
+  global_store::ReleaseShardHomeLeaseRequest request;
+  request.set_lease_token(std::string(lease_token));
+
+  global_store::ReleaseShardHomeLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->ReleaseShardHomeLease(ctx, req, resp);
+      },
+      "ReleaseShardHomeLease",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response.released();
+}
+
+absl::StatusOr<ShardHomeRouteInfo> GlobalStoreClient::get_shard_home_lease(
+    uint64_t shard_id,
+    const RpcOptions& rpc_options) {
+  global_store::GetShardHomeLeaseRequest request;
+  request.set_shard_id(shard_id);
+
+  global_store::GetShardHomeLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->GetShardHomeLease(ctx, req, resp);
+      },
+      "GetShardHomeLease",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return parse_shard_home_route(response.lease());
+}
+
+absl::StatusOr<std::vector<ShardHomeRouteInfo>> GlobalStoreClient::batch_get_shard_home_leases(
+    const std::vector<uint64_t>& shard_ids,
+    const RpcOptions& rpc_options) {
+  global_store::BatchGetShardHomeLeasesRequest request;
+  for (uint64_t shard_id : shard_ids) {
+    request.add_shard_ids(shard_id);
+  }
+
+  global_store::BatchGetShardHomeLeasesResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->BatchGetShardHomeLeases(ctx, req, resp);
+      },
+      "BatchGetShardHomeLeases",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<ShardHomeRouteInfo> out;
+  out.reserve(response.leases_size());
+  for (const auto& lease : response.leases()) {
+    out.push_back(parse_shard_home_route(lease));
+  }
+  return out;
 }
 
 // ========== Key Mapping ==========

@@ -30,6 +30,7 @@ from tensorcast.api.operation import (
     TimeoutErrorDetails,
 )
 from tensorcast.api.plan import (
+    ArtifactActionResult,
     Instance,
     Plan,
     PlanFailedError,
@@ -95,6 +96,7 @@ __all__ = [
     "TimeoutErrorDetails",
     "context",
     "Instance",
+    "ArtifactActionResult",
     "Plan",
     "PlanFailedError",
     "PlanResult",

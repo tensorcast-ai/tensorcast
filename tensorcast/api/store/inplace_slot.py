@@ -148,7 +148,7 @@ class InplaceSlot:
         commit_result: "DeferredCommitResult",
         artifact_id: str,
         canonical_index_bytes: bytes,
-        target_write_token: bytes | None,
+        target_publication_token: bytes | None,
         copy_plan: Sequence[CopyPlanEntry] | None = None,
     ) -> None:
         if not tensors:
@@ -177,8 +177,8 @@ class InplaceSlot:
         self._fallback = fallback
         self._artifact_id = str(artifact_id)
         self._canonical_index_bytes = bytes(canonical_index_bytes)
-        self._target_write_token = (
-            bytes(target_write_token) if target_write_token else None
+        self._target_publication_token = (
+            bytes(target_publication_token) if target_publication_token else None
         )
         self._copy_plan = tuple(copy_plan) if copy_plan is not None else None
 
@@ -293,9 +293,9 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_write_token:
+        if not self._target_publication_token:
             raise ArtifactError(
-                "target_write_token missing; daemon publish not available",
+                "target_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -304,7 +304,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_write_token=self._target_write_token,
+                target_publication_token=self._target_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -509,7 +509,9 @@ class InplaceSlot:
                 view_spec=view_spec_proto,
                 artifact_id=artifact_id,
                 canonical_index_bytes=canonical_index_bytes,
-                target_write_token=getattr(response, "target_write_token", None),
+                target_publication_token=getattr(
+                    response, "target_publication_token", None
+                ),
                 fallback=resolved._fallback,
             )
             if publish:
@@ -628,7 +630,9 @@ class InplaceSlot:
             view_spec=view_spec_proto,
             artifact_id=artifact_id,
             canonical_index_bytes=canonical_index_bytes,
-            target_write_token=getattr(response, "target_write_token", None),
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
             fallback=resolved._fallback,
         )
 
@@ -813,9 +817,9 @@ class InplaceSlot:
         owner_pid: int | None = None,
         ctx: CallContext | None,
     ) -> None:
-        if not self._target_write_token:
+        if not self._target_publication_token:
             raise ArtifactError(
-                "target_write_token missing; daemon publish not available",
+                "target_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -823,7 +827,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_write_token=self._target_write_token,
+                target_publication_token=self._target_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -867,7 +871,7 @@ class InplaceSlot:
         view_spec: common_pb2.ViewSpec | None,
         artifact_id: str,
         canonical_index_bytes: bytes,
-        target_write_token: bytes | None,
+        target_publication_token: bytes | None,
         fallback: FallbackOptions | None,
     ) -> None:
         self._region_layout = region_layout
@@ -894,8 +898,8 @@ class InplaceSlot:
             view_subset_hash=self._view_subset_hash,
         )
         self._fallback = fallback
-        self._target_write_token = (
-            bytes(target_write_token) if target_write_token else None
+        self._target_publication_token = (
+            bytes(target_publication_token) if target_publication_token else None
         )
         storage_ids = tuple(
             storage.storage_id for storage in region_layout.layout.storages

@@ -961,12 +961,23 @@ void ReplicaRuntime::record_ingestion_result(const IngestionResultEvent& event) 
   auto& metrics = context_->metrics_collector();
   const bool success = event.status.ok();
   const bool from_p2p = event.source == IngestionSource::kP2P;
+  const bool from_memory = event.source == IngestionSource::kMemory;
 
   if (from_p2p) {
     metrics.record_p2p_transfer(success ? event.bytes_transferred : 0, success);
   }
 
-  metrics.record_operation(from_p2p ? "load_from_p2p" : "load_from_disk", event.duration_seconds);
+  const char* operation_name = "load_from_disk";
+  const char* source_scope = "disk";
+  if (from_p2p) {
+    operation_name = "load_from_p2p";
+    source_scope = "remote";
+  } else if (from_memory) {
+    operation_name = "load_from_memory";
+    source_scope = "memory";
+  }
+
+  metrics.record_operation(operation_name, event.duration_seconds);
 
   const std::string device_scope = (event.target_device.type == DeviceType::GPU) ? "gpu" : "cpu";
   std::optional<std::string_view> view_scope;
@@ -974,7 +985,7 @@ void ReplicaRuntime::record_ingestion_result(const IngestionResultEvent& event) 
     view_scope = std::string_view(*event.view_id);
   }
   metrics.record_artifact_load(
-      from_p2p ? "remote" : "disk", device_scope, success ? "finalize" : "error", event.duration_seconds, view_scope);
+      source_scope, device_scope, success ? "finalize" : "error", event.duration_seconds, view_scope);
 
   if (success) {
     if (event.replica_key.has_value()) {

@@ -410,7 +410,7 @@ We standardize two distinct user concepts:
    - API: `InplaceSlot.publish_replica()` (and `swap(..., publish=True)`)
    - Behavior: publishes routable transport keys + registers a Global Store replica for the already-known
      `(artifact_id, byte_space)` identity.
-   - Critical property: no GPU re-hash; publish is bound to a daemon-minted `target_write_token`.
+   - Critical property: no GPU re-hash; publish is bound to a daemon-minted `target_publication_token`.
 
 2) "Register these bytes as a new artifact identity"
    - API: `tc.register(...)` / `tc.put(...)` (content-addressed ingestion)
@@ -484,9 +484,9 @@ sequenceDiagram
   D-->>SDK: "retired (not routable, transports drained)"
   SDK->>D: MaterializeIntoTarget(TargetLayout, view/subset)
   D->>IO: read bytes
-  D-->>SDK: OK (+ target_write_token)
+  D-->>SDK: OK (+ target_publication_token)
   opt publish new
-    SDK->>D: PublishTargetReplica(target_write_token, ByteSpaceRef)
+    SDK->>D: PublishTargetReplica(target_publication_token, ByteSpaceRef)
     D->>GS: register_memory_replica(remote_keys)
     D-->>SDK: published (lease_id)
   end
@@ -637,8 +637,8 @@ All publish/materialize surfaces SHOULD accept and propagate `operation_id` for 
 If we publish without re-hashing GPU memory, we must prevent clients from "publishing arbitrary bytes" under an
 arbitrary `(artifact_id, byte_space)` identity. We do this by binding publish to a daemon-minted write capability:
 
-- Extend `MaterializeIntoTargetResponse` with an optional `target_write_token` (opaque, short-lived).
-- `PublishTargetReplicaRequest` MUST include `target_write_token`.
+- Extend `MaterializeIntoTargetResponse` with an optional `target_publication_token` (opaque, short-lived).
+- `PublishTargetReplicaRequest` MUST include `target_publication_token`.
 - The daemon validates:
   - token is unexpired and owned by `(pid, device_uuid)`
   - token matches `ArtifactSelection` (`artifact_id`, `view_id`, `view_subset_hash`, `logical_layout_hash`,
@@ -646,7 +646,7 @@ arbitrary `(artifact_id, byte_space)` identity. We do this by binding publish to
   - selection is publishable in Phase 1 (canonical/view full coverage only; reject subset-packed and packed reorder with
     `FAILED_PRECONDITION`)
   - the referenced VRAM regions are still present and not poisoned
-  - token permits safe retries: `PublishTargetReplica` SHOULD be idempotent for the same `(target_write_token,
+  - token permits safe retries: `PublishTargetReplica` SHOULD be idempotent for the same `(target_publication_token,
     operation_id)` and MAY allow reusing the token within its TTL to retry after GS/transient failures
   - token MUST be rejected if a newer materialization occurred for the same target regions since the token was minted
     (prevents stale-token publish mistakes / ABA)
@@ -656,12 +656,12 @@ This preserves correctness while keeping the dataplane primitive single-pass, bu
 malicious caller mutating client-owned VRAM after materialization. TensorCast assumes cooperative clients for
 client-owned replicas; follow-on work may optionally add a configurable “publish-time verification” mode.
 
-Token format (preferred): reuse the existing `CapabilityTokenEnvelope` machinery (`tensorcast.common.v1`) with a new
-audience (e.g., `CAPABILITY_AUDIENCE_TARGET_WRITE_TOKEN`) and a scope message that includes the bound selection
+Token format (preferred): reuse the existing `CapabilityTokenEnvelope` machinery (`tensorcast.common.v1`) with the
+publication audience (`CAPABILITY_AUDIENCE_TARGET_PUBLICATION`) and a scope message that includes the bound selection
 identity. This avoids introducing a parallel ad-hoc token registry and keeps mint/verify semantics uniform.
 
 Publish inputs (conceptual):
-- `target_write_token` (minted by the daemon after a successful `MaterializeIntoTarget`)
+- `target_publication_token` (minted by the daemon after a successful `MaterializeIntoTarget`)
 - `byte_space` (canonical/view; validated against token)
 - `target_layout` (optional when token already pins it; otherwise must be region-backed and dense)
 - `pid`, `device_uuid`

@@ -662,7 +662,7 @@ class DeferredLoader:
             logical_size_bytes=region_layout.logical_total_size,
             published_artifact=None,
         )
-        target_write_token = getattr(response, "target_write_token", None)
+        target_publication_token = getattr(response, "target_publication_token", None)
         slot = InplaceSlot(
             store=self._store,
             runtime=self._runtime,
@@ -677,7 +677,7 @@ class DeferredLoader:
             commit_result=commit_result,
             artifact_id=artifact_id,
             canonical_index_bytes=canonical_index_bytes,
-            target_write_token=target_write_token or None,
+            target_publication_token=target_publication_token or None,
         )
         self._region_id = None
         return slot

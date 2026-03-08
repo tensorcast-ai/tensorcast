@@ -202,7 +202,7 @@ class _FakeMappedClient:
         self._token_counter += 1
         return types.SimpleNamespace(
             status=1,  # MATERIALIZE_REPLICA_STATUS_ALLOCATED
-            target_write_token=f"token-{self._token_counter}".encode("utf-8"),
+            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
         )
 
     def materialize_into_mapped_target(self, **kwargs: Any) -> Any:
@@ -210,7 +210,7 @@ class _FakeMappedClient:
         self._token_counter += 1
         return types.SimpleNamespace(
             status=1,  # MATERIALIZE_REPLICA_STATUS_ALLOCATED
-            target_write_token=f"token-{self._token_counter}".encode("utf-8"),
+            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
         )
 
     def publish_target_replica(self, **kwargs: Any) -> Any:

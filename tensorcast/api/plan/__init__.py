@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tensorcast.api.plan.plan import (
+    ArtifactActionResult,
     Instance,
     Plan,
     PlanFailedError,
@@ -16,6 +17,7 @@ from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 
 __all__ = [
+    "ArtifactActionResult",
     "Instance",
     "Plan",
     "PlanFailedError",

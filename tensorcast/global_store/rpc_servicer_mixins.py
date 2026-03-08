@@ -38,6 +38,9 @@ from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
 from tensorcast.global_store.rpc.replica_registration_rpc_handler import (
     ReplicaRegistrationRpcHandler,
 )
+from tensorcast.global_store.rpc.shard_home_lease_rpc_handler import (
+    ShardHomeLeaseRpcHandler,
+)
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.view_proof_rpc_handler import ViewProofRpcHandler
 from tensorcast.global_store.rpc.worker_rpc_handler import WorkerRpcHandler
@@ -220,6 +223,7 @@ class ClusterRuntimeRpcServicerMixin:
     instance_rpc_handler: InstanceRpcHandler
     worker_state_sync_rpc_handler: WorkerStateSyncRpcHandler
     chunk_rpc_handler: ChunkRpcHandler
+    shard_home_lease_rpc_handler: ShardHomeLeaseRpcHandler
 
     def RegisterReplica(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.replica_registration_rpc_handler.register_replica(request, context)
@@ -304,3 +308,37 @@ class ClusterRuntimeRpcServicerMixin:
         self, request: Any, context: grpc.ServicerContext
     ) -> Any:
         return self.chunk_rpc_handler.batch_update_chunk_states(request, context)
+
+    def AcquireShardHomeLease(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.shard_home_lease_rpc_handler.acquire_shard_home_lease(
+            request, context
+        )
+
+    def KeepaliveShardHomeLease(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.shard_home_lease_rpc_handler.keepalive_shard_home_lease(
+            request, context
+        )
+
+    def BatchKeepaliveShardHomeLeases(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.shard_home_lease_rpc_handler.batch_keepalive_shard_home_leases(
+            request, context
+        )
+
+    def ReleaseShardHomeLease(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.shard_home_lease_rpc_handler.release_shard_home_lease(
+            request, context
+        )
+
+    def GetShardHomeLease(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.shard_home_lease_rpc_handler.get_shard_home_lease(request, context)
+
+    def BatchGetShardHomeLeases(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.shard_home_lease_rpc_handler.batch_get_shard_home_leases(
+            request, context
+        )

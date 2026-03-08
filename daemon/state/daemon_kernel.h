@@ -10,8 +10,13 @@
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/byte_artifact_body_store.h"
+#include "daemon/service/byte_artifact_route_resolver.h"
+#include "daemon/service/byte_artifact_runtime_state.h"
+#include "daemon/service/payload_transport_broker.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/daemon_options.h"
@@ -32,6 +37,7 @@
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/transport_lock_manager.h"
 #include "daemon/state/verification_tracker.h"
+#include "daemon/state/worker_directory_cache.h"
 #include "daemon/state/worker_identity_store.h"
 
 namespace tensorcast::daemon {
@@ -41,7 +47,8 @@ class DaemonKernel {
   DaemonKernel(
       std::shared_ptr<store::StoreEngine> engine,
       std::shared_ptr<common::AsyncRuntime> async_runtime,
-      DaemonOptions options);
+      DaemonOptions options,
+      std::shared_ptr<store::components::IGlobalStoreClient> global_store_client = nullptr);
 
   ~DaemonKernel();
 
@@ -131,6 +138,26 @@ class DaemonKernel {
     return *identity_store_;
   }
 
+  [[nodiscard]] ByteArtifactRuntimeState& byte_artifact_runtime_state() const {
+    return *byte_artifact_runtime_state_;
+  }
+
+  [[nodiscard]] ByteArtifactBodyStore& byte_artifact_body_store() const {
+    return *byte_artifact_body_store_;
+  }
+
+  [[nodiscard]] ByteArtifactRouteResolver& byte_artifact_route_resolver() const {
+    return *byte_artifact_route_resolver_;
+  }
+
+  [[nodiscard]] PayloadTransportBroker& payload_transport_broker() const {
+    return *payload_transport_broker_;
+  }
+
+  [[nodiscard]] WorkerDirectoryCache& worker_directory_cache() const {
+    return *worker_directory_cache_;
+  }
+
   [[nodiscard]] PlacementLeaseTokens& placement_lease_tokens() const {
     return *placement_lease_tokens_;
   }
@@ -189,6 +216,11 @@ class DaemonKernel {
   DeviceResolver devices_;
   ShutdownSignal shutdown_signal_;
   std::unique_ptr<WorkerIdentityStore> identity_store_;
+  std::unique_ptr<ByteArtifactRuntimeState> byte_artifact_runtime_state_;
+  std::unique_ptr<ByteArtifactBodyStore> byte_artifact_body_store_;
+  std::unique_ptr<ByteArtifactRouteResolver> byte_artifact_route_resolver_;
+  std::unique_ptr<PayloadTransportBroker> payload_transport_broker_;
+  std::unique_ptr<WorkerDirectoryCache> worker_directory_cache_;
   std::unique_ptr<RetireGates> retire_gates_;
 
   std::atomic<bool> started_{false};

@@ -290,7 +290,7 @@ Outcome: parameters update in place, pointers are stable, no Python copy loop.
 
 - Fully compatible with Binding design (0063); mapped binding is a specialization.
 - Mapped binding supports publish in v1 when full destination coverage validation passes and the daemon mints a
-  `target_write_token`; otherwise publish fails with a clear precondition error.
+  `target_publication_token`; otherwise publish fails with a clear precondition error.
 - Works with artifact.view(...): selection is captured and reused on swap.
 - If a new artifact has incompatible shapes or dtypes, swap must fail or trigger a rebind (caller decision).
 
@@ -303,4 +303,4 @@ Outcome: parameters update in place, pointers are stable, no Python copy loop.
 5) Mismatch detection: wrong dtype or shape causes clean failure without partial overwrite.
 6) Swap failure semantics: dirty state on overwrite failure.
 7) Publish gating: mapped bindings publish only under the documented v1 constraints (full coverage + valid
-   `target_write_token`), otherwise fail without partial publish state.
+   `target_publication_token`), otherwise fail without partial publish state.

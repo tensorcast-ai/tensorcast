@@ -49,6 +49,14 @@ service ClusterRuntimeService {
   // Chunk directory operations
   rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
   rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
+
+  // Shard-home leases (byte artifacts): low-cardinality fencing authority.
+  rpc AcquireShardHomeLease(AcquireShardHomeLeaseRequest) returns (AcquireShardHomeLeaseResponse) {}
+  rpc KeepaliveShardHomeLease(KeepaliveShardHomeLeaseRequest) returns (KeepaliveShardHomeLeaseResponse) {}
+  rpc BatchKeepaliveShardHomeLeases(BatchKeepaliveShardHomeLeasesRequest) returns (BatchKeepaliveShardHomeLeasesResponse) {}
+  rpc ReleaseShardHomeLease(ReleaseShardHomeLeaseRequest) returns (ReleaseShardHomeLeaseResponse) {}
+  rpc GetShardHomeLease(GetShardHomeLeaseRequest) returns (GetShardHomeLeaseResponse) {}
+  rpc BatchGetShardHomeLeases(BatchGetShardHomeLeasesRequest) returns (BatchGetShardHomeLeasesResponse) {}
 }
 
 // Artifact metadata domain: durable identity and addressing metadata.
@@ -158,6 +166,8 @@ enum WorkerCapabilityFlag {
   WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED = 1;
   WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED = 2;
   WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED = 3;
+  WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED = 4;
+  WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE = 5;
 }
 
 // Instance capability flags (bit positions in capability_flags).
@@ -165,6 +175,93 @@ enum InstanceCapabilityFlag {
   INSTANCE_CAPABILITY_FLAG_UNSPECIFIED = 0;
   INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED = 1;
   INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED = 2;
+}
+
+// Shard-home lease (byte artifact) used for routed home authority fencing.
+message ShardHomeLease {
+  uint64 shard_id = 1;
+  string holder_daemon_id = 2;
+  string lease_token = 3;
+  uint64 lease_generation = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+// Shard-home route used for routing decisions (no lease_token).
+message ShardHomeRoute {
+  uint64 shard_id = 1;
+  string holder_daemon_id = 2;
+  uint64 lease_generation = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message AcquireShardHomeLeaseRequest {
+  uint64 shard_id = 1;
+  // Stable daemon identity for the acquiring daemon.
+  string holder_daemon_id = 2;
+  // Requested lease TTL.
+  uint64 ttl_ms = 3;
+}
+
+message AcquireShardHomeLeaseResponse {
+  bool acquired = 1;
+  ShardHomeLease lease = 2;
+}
+
+message KeepaliveShardHomeLeaseRequest {
+  string lease_token = 1;
+  uint64 ttl_ms = 2;
+}
+
+message KeepaliveShardHomeLeaseResponse {
+  ShardHomeLease lease = 1;
+}
+
+message ShardHomeLeaseKeepalive {
+  uint64 shard_id = 1;
+  uint64 lease_generation = 2;
+  string lease_token = 3;
+}
+
+message ShardHomeLeaseKeepaliveOutcome {
+  uint64 shard_id = 1;
+  uint64 lease_generation = 2;
+  string lease_token = 3;
+  bool ok = 4;
+  ShardHomeLease lease = 5;
+  string message = 6;
+}
+
+message BatchKeepaliveShardHomeLeasesRequest {
+  repeated ShardHomeLeaseKeepalive leases = 1;
+  uint64 ttl_ms = 2;
+}
+
+message BatchKeepaliveShardHomeLeasesResponse {
+  repeated ShardHomeLeaseKeepaliveOutcome outcomes = 1;
+}
+
+message ReleaseShardHomeLeaseRequest {
+  string lease_token = 1;
+}
+
+message ReleaseShardHomeLeaseResponse {
+  bool released = 1;
+}
+
+message GetShardHomeLeaseRequest {
+  uint64 shard_id = 1;
+}
+
+message GetShardHomeLeaseResponse {
+  ShardHomeRoute lease = 1;
+}
+
+message BatchGetShardHomeLeasesRequest {
+  repeated uint64 shard_ids = 1;
+}
+
+message BatchGetShardHomeLeasesResponse {
+  repeated ShardHomeRoute leases = 1;
 }
 
 // ========== Worker管理相关消息 ==========

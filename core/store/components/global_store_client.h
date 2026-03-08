@@ -83,6 +83,17 @@ struct WorkerRegistrationInfo {
   uint32_t heartbeat_interval_ms{0};
 };
 
+struct ActiveWorkerInfo {
+  std::string worker_id;
+  std::string node_id;
+  std::string node_address;
+  uint32_t grpc_port{0};
+  uint32_t p2p_port{0};
+  bool accepting_new_requests{false};
+  std::string daemon_id;
+  uint64_t capability_flags{0};
+};
+
 // Information about a remote replica replica
 struct RemoteReplicaInfo {
   std::string node_id;
@@ -219,6 +230,41 @@ struct ViewMetadata {
   std::optional<std::string> view_data_hash;
 };
 
+struct ShardHomeRouteInfo {
+  uint64_t shard_id{0};
+  std::string holder_daemon_id;
+  uint64_t lease_generation{0};
+  absl::Time expires_at{absl::UnixEpoch()};
+};
+
+struct ShardHomeLeaseDescriptor {
+  uint64_t shard_id{0};
+  std::string holder_daemon_id;
+  std::string lease_token;
+  uint64_t lease_generation{0};
+  absl::Time expires_at{absl::UnixEpoch()};
+};
+
+struct AcquireShardHomeLeaseResult {
+  bool acquired{false};
+  ShardHomeLeaseDescriptor lease;
+};
+
+struct ShardHomeLeaseKeepaliveInput {
+  uint64_t shard_id{0};
+  uint64_t lease_generation{0};
+  std::string lease_token;
+};
+
+struct ShardHomeLeaseKeepaliveOutcome {
+  uint64_t shard_id{0};
+  uint64_t lease_generation{0};
+  std::string lease_token;
+  bool ok{false};
+  ShardHomeLeaseDescriptor lease;
+  std::string message;
+};
+
 enum class MemoryTierLeaseKind { kStable, kPreemptible };
 enum class MemoryTierLeaseState { kPending, kActive, kRevoking, kExpired };
 enum class MemoryTierAckAction { kAcquired, kReleased };
@@ -353,6 +399,11 @@ class IGlobalStoreClient {
       uint64_t capability_flags = 0) = 0;
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
+
+  virtual absl::StatusOr<std::vector<ActiveWorkerInfo>> list_active_workers(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual absl::Status unregister_worker_idempotent(
       std::string_view worker_id,
@@ -502,6 +553,34 @@ class IGlobalStoreClient {
       const std::vector<common::v1::ReplicaInfo>& inventory,
       bool snapshot_request,
       const StateSyncToken& token,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t shard_id,
+      std::string_view holder_daemon_id,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view lease_token,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<std::vector<ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<ShardHomeLeaseKeepaliveInput>& leases,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<bool> release_shard_home_lease(
+      std::string_view lease_token,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<ShardHomeRouteInfo> get_shard_home_lease(
+      uint64_t shard_id,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<std::vector<ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>& shard_ids,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual bool is_connected() const = 0;
@@ -683,6 +762,12 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t capability_flags = 0) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
+
+  absl::StatusOr<std::vector<ActiveWorkerInfo>> list_active_workers(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
   absl::Status unregister_worker_idempotent(
       std::string_view worker_id,
       bool is_graceful_shutdown = true,
@@ -810,6 +895,34 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::vector<common::v1::ReplicaInfo>& inventory,
       bool snapshot_request,
       const StateSyncToken& token,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t shard_id,
+      std::string_view holder_daemon_id,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view lease_token,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<std::vector<ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<ShardHomeLeaseKeepaliveInput>& leases,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<bool> release_shard_home_lease(
+      std::string_view lease_token,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<ShardHomeRouteInfo> get_shard_home_lease(
+      uint64_t shard_id,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<std::vector<ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>& shard_ids,
       const RpcOptions& rpc_options = RpcOptions{}) override;
 
   bool is_connected() const override;

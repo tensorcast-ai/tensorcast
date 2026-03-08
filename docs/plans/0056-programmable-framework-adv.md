@@ -7,7 +7,7 @@ created: 2026-03-04
 last_updated: 2026-03-04
 related_code:
   - docs/designs/0056-programmable-framework-adv.md
-  - docs/designs/0084-unified-artifact-binding-kv-runtime.md
+  - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0055-programmable-framework.md
   - tensorcast/api/plan/plan.py
   - tensorcast/api/runtime.py
@@ -28,18 +28,18 @@ Deliver the advanced programmable framework control plane on top of `0055`:
 - daemon-run plan ingress without semantic drift from local runner,
 - daemon-served signals and directory snapshots with explicit staleness bounds,
 - lane/policy propagation across plan and non-plan RPCs,
-- cache blob routing and shard-fencing control flow only (cache blob data model and IO primitives are implemented via `0084`).
+- byte artifact routing and shard-fencing control flow only (byte artifact data model and IO primitives are implemented via `0087`).
 
 # Current State and Grounding
 
 - `0055` already defines plan/spec semantics and local PlanExecutor behavior.
 - `0056` design includes runtime, ingress, signals, and KV sections but lacks a paired execution plan.
-- Cache-blob data model rules are defined in `0084`; `0056` remains focused on control-plane orchestration and routing.
+- Byte artifact data model rules are defined in `0087`; `0056` remains focused on control-plane orchestration and routing.
 
 # Phases and Milestones
 
 - [ ] Phase 0: Scope split and contract alignment
-  - [ ] Milestone 0.1: update `0056` to reference `0084` for KV data-path semantics.
+  - [ ] Milestone 0.1: update `0056` to reference `0087` for KV data-path semantics.
   - [ ] Milestone 0.2: preserve one execution semantics between local and daemon-run PlanExecutor.
   - [ ] Milestone 0.3: freeze ingress and signals API boundaries.
 
@@ -53,15 +53,15 @@ Deliver the advanced programmable framework control plane on top of `0055`:
   - [ ] Milestone 2.2: GS watch streams and daemon-side cache controllers.
   - [ ] Milestone 2.3: expose SDK `TensorCastSignals` and `ExecutionSignals`.
 
-- [ ] Phase 3: Cache blob routing and lease fencing control path
+- [ ] Phase 3: Byte artifact routing and lease fencing control path
   - [ ] Milestone 3.1: add shard lease watch/cache and fail-closed ownership transitions.
-  - [ ] Milestone 3.2: add home-scoped `CacheBlobBatch*` routing with fenced redirect behavior.
+  - [ ] Milestone 3.2: add home-scoped `HomeBatch*` routing with fenced redirect behavior.
   - [ ] Milestone 3.3: ensure plan actions route through instance-agent boundary with no direct SDK->GS calls.
 
 - [ ] Phase 4: Plan IR and node-agent execution
   - [ ] Milestone 4.1: add required actions (`prefetch_many`, `materialize_into`, cache aliases).
   - [ ] Milestone 4.2: execute instance-scoped actions via node-agent with bounded concurrency.
-  - [ ] Milestone 4.3: avoid re-entrant deadlocks between instance-step execution and local cache blob frontend calls.
+  - [ ] Milestone 4.3: avoid re-entrant deadlocks between instance-step execution and local byte artifact frontend calls.
 
 - [ ] Phase 5: Validation and rollout
   - [ ] Milestone 5.1: control-plane chaos tests for cache staleness, redirect, and lease generation changes.

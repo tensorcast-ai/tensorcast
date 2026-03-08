@@ -8,6 +8,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/time/time.h"
 #include "core/store/device_registry.h"
 #include "daemon/util/status_utils.h"
 
@@ -118,6 +119,44 @@ grpc::Status TransportController::unlock(
   }
   // UMA V3: No engine-level unlock; treat daemon unlock as idempotent bookkeeping: just erase the token.
   d_.locks.erase(req.lock_token());
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status TransportController::fetch_payload_ref_chunk(
+    RpcContext& rctx,
+    const v2::FetchPayloadRefChunkRequest& req,
+    v2::FetchPayloadRefChunkResponse& resp) {
+  if (d_.payload_transport_broker == nullptr) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "payload transport broker unavailable"};
+  }
+  if (req.payload_ref().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "payload_ref is required"};
+  }
+  if (req.artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+
+  const std::uint64_t max_bytes =
+      req.max_bytes() == 0 ? d_.payload_transport_broker->max_chunk_bytes() : req.max_bytes();
+  auto chunk_or = d_.payload_transport_broker->read_local_payload_ref_chunk(
+      req.payload_ref(),
+      req.artifact_id(),
+      absl::Now(),
+      req.offset(),
+      max_bytes,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
+      req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
+  if (!chunk_or.ok()) {
+    resp.set_status(v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+    resp.set_message(std::string(chunk_or.status().message()));
+    rctx.mark_success();
+    return Status::OK;
+  }
+  resp.set_status(v2::BATCH_ITEM_STATUS_OK);
+  resp.set_total_size(chunk_or->metadata.payload_size);
+  resp.set_eof(chunk_or->eof);
+  resp.set_chunk(chunk_or->chunk);
   rctx.mark_success();
   return Status::OK;
 }

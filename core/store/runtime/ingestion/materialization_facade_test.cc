@@ -8,15 +8,20 @@
 #include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/synchronization/mutex.h"
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmacro-redefined"
 #endif
 #include "catch2/catch_test_macros.hpp"
+#include "core/common/artifact_hash.h"
 #include "core/store/components/worker_identity.h"
+#include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context_events.h"
+#include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/materialization_facade.h"
 #include "core/store/runtime/ingestion/testing/fake_ingestion_pipeline.h"
 #include "core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h"
@@ -43,6 +48,7 @@ using tensorcast::store::runtime::MaterializationHooks;
 using tensorcast::store::runtime::ReplicaRuntime;
 using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::RuntimeContextEvents;
+using tensorcast::store::runtime::ingestion::ArtifactLoweringPlan;
 using tensorcast::store::runtime::ingestion::MaterializationFacade;
 using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
@@ -149,6 +155,15 @@ struct FacadeHarness {
     return harness.options();
   }
 };
+
+std::string sha256_hex(std::string_view payload) {
+  const auto digest = tensorcast::common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  std::string hex =
+      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+  absl::AsciiStrToLower(&hex);
+  return hex;
+}
 
 } // namespace
 
@@ -262,6 +277,45 @@ TEST_CASE("MaterializationFacade registers stored publish contexts on demand", "
   auto status = harness.facade->register_replica_with_global_store(ready_handle.key(), {});
   CHECK(status.ok());
   CHECK(register_calls == 1);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade execute_artifact_lowering_plan returns verified content for replica staging",
+    "[materialization_facade][artifact_lowering]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_artifact_lowering";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  const auto payload = std::make_shared<std::string>("body-bytes-for-verification");
+  ArtifactLoweringPlan plan;
+  plan.identity.logical_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE";
+  plan.identity.physical_artifact_id = "__tc_body__:verified";
+  plan.target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  plan.source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+      .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+      .size_bytes = payload->size(),
+  });
+  plan.byte_range_map = loading::build_identity_byte_range_map(payload->size());
+  plan.canonical_index_json = loading::build_synthetic_payload_canonical_index_json(payload->size());
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+  plan.replica_target = target;
+  plan.source_kind = loading::MaterializationSource::kLocalReplica;
+
+  auto result_or = harness.facade->execute_artifact_lowering_plan(std::move(plan));
+  REQUIRE(result_or.ok());
+  REQUIRE(result_or->replica_handle.has_value());
+  REQUIRE(result_or->verified_content.has_value());
+  CHECK(result_or->verified_content->size_bytes == payload->size());
+  CHECK(result_or->verified_content->payload_digest_alg == "sha256");
+  CHECK(result_or->verified_content->payload_digest_hex == sha256_hex(*payload));
 
   harness.shutdown();
   std::error_code cleanup_ec;

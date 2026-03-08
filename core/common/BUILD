@@ -66,7 +66,17 @@ sc_cc_library(
     hdrs = ["artifact_identity.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "@abseil-cpp//absl/strings:strings",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "artifact_identity_test",
+    size = "small",
+    srcs = ["artifact_identity_test.cc"],
+    deps = [
+        ":artifact_identity_lib",
+        "@catch2//:catch2_main",
     ],
 )
 

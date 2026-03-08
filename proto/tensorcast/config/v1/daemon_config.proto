@@ -211,6 +211,8 @@ message DaemonConfig {
 
   message CapabilityDirectory {
     bool enabled = 1;
+    optional bool gateway_ingress_enabled = 2;
+    optional bool shard_home_eligible = 3;
   }
   CapabilityDirectory capability_directory = 24;
 
@@ -237,6 +239,32 @@ message DaemonConfig {
     Cuda cuda = 1;
   }
   Debug debug = 9;
+
+  message ByteArtifactRouting {
+    message PayloadTransport {
+      google.protobuf.Duration ref_ttl = 1;
+      uint64 max_chunk_bytes = 2;
+      google.protobuf.Duration fetch_deadline = 3;
+      google.protobuf.Duration cleanup_interval = 4;
+    }
+
+    // Stable shard count for shard_id derivation.
+    uint32 shard_count = 1;
+    // Inline payload threshold for HomeBatchGet/puts before payload_ref transport is required.
+    uint64 inline_payload_threshold_bytes = 2;
+    // Bounded staleness budget for cached shard->holder routes.
+    google.protobuf.Duration route_staleness_budget = 3;
+    // Shard-home lease TTL requested from Global Store.
+    google.protobuf.Duration lease_ttl = 4;
+    // Best-effort keepalive interval while holding shard-home leases.
+    google.protobuf.Duration keepalive_interval = 5;
+    // Staleness budget for daemon_id -> address resolution via worker directory.
+    google.protobuf.Duration worker_directory_staleness_budget = 6;
+    // Cluster-wide compatibility epoch/fingerprint for routed byte-artifact semantics.
+    uint64 routing_epoch = 7;
+    PayloadTransport payload_transport = 8;
+  }
+  ByteArtifactRouting byte_artifact_routing = 30;
 
   // Optional metadata for auditing/versioning
   tensorcast.config.v1.ConfigMeta meta = 100;

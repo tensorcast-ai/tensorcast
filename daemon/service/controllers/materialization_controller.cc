@@ -57,6 +57,7 @@ MaterializationController::MaterializationController(Dep d)
               .disk_imports = d.disk_imports,
               .shutdown_signal = d.shutdown_signal,
               .identity = d.identity,
+              .external_target_access_service = d.external_target_access_service,
               .global_store_client = d.global_store_client,
               .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
@@ -64,9 +65,9 @@ MaterializationController::MaterializationController(Dep d)
               .storage_path = d.storage_path,
           }) {}
 
-TargetWriteRegistry::Record MaterializationController::insert_target_write_for_testing(
-    TargetWriteRegistry::Record record) {
-  return target_materialization_service_.insert_target_write_for_testing(std::move(record));
+TargetPublicationRegistry::Record MaterializationController::insert_target_publication_for_testing(
+    TargetPublicationRegistry::Record record) {
+  return target_materialization_service_.insert_target_publication_for_testing(std::move(record));
 }
 
 grpc::Status MaterializationController::materialize_replica(

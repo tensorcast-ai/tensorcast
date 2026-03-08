@@ -150,6 +150,17 @@ store::StoreEngine::ViewRegistrationKind ToRegistrationKind(v2::ViewRegistration
   }
 }
 
+v2::ViewRegistrationKind ToProtoRegistrationKind(store::StoreEngine::ViewRegistrationKind kind) {
+  switch (kind) {
+    case store::StoreEngine::ViewRegistrationKind::kPiece:
+      return v2::VIEW_REGISTRATION_KIND_PIECE;
+    case store::StoreEngine::ViewRegistrationKind::kCanonical:
+    case store::StoreEngine::ViewRegistrationKind::kUnspecified:
+    default:
+      return v2::VIEW_REGISTRATION_KIND_CANONICAL;
+  }
+}
+
 void record_view_bytes_metric(double bytes) {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -1147,7 +1158,7 @@ grpc::Status commit_piece_view_registration(
     response_range->set_offset(range.offset);
     response_range->set_length(range.length);
   }
-  resp.set_allow_partial(true);
+  resp.set_registration_kind(v2::VIEW_REGISTRATION_KIND_PIECE);
 
   auto* local_stable = resp.mutable_local_stable_tier();
   auto local_stable_status = apply_local_stable_tier(
@@ -1364,7 +1375,7 @@ grpc::Status commit_engine_registration(
     r->set_offset(range.offset);
     r->set_length(range.length);
   }
-  resp.set_allow_partial(out.registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece);
+  resp.set_registration_kind(ToProtoRegistrationKind(out.registration_kind));
   if (out.view_id.has_value()) {
     meta.view_registration = true;
     meta.view_id = *out.view_id;
@@ -1454,11 +1465,6 @@ grpc::Status apply_begin_view_registration(
     store::StoreEngine::ArtifactRegistration& reg) {
   if (!req.has_view()) {
     return Status::OK;
-  }
-  if (req.view().allow_partial()) {
-    return {
-        StatusCode::INVALID_ARGUMENT,
-        "allow_partial is deprecated; use registration_kind=VIEW_REGISTRATION_KIND_PIECE"};
   }
   if (!req.has_tensor_index_data()) {
     return {StatusCode::INVALID_ARGUMENT, "view registration requires tensor_index_data"};

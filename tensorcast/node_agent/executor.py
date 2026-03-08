@@ -20,10 +20,18 @@ from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
-from tensorcast.engine_adapter import EngineAdapter
+from tensorcast.engine_adapter import (
+    BatchResult,
+    EngineAdapter,
+    HydrateResult,
+    ManifestResult,
+    PublishResult,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+
+ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +40,7 @@ class NodeAgentStepResult:
     target_id: str
     action: str
     status: OperationStatus
+    artifact_result: ArtifactActionResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +102,28 @@ def _derive_action_idempotency_key(
     if extra:
         digest.update(b"|extra=")
         digest.update(extra.encode("utf-8"))
+    return f"tc.plan.action.v1:{digest.hexdigest()}"
+
+
+def _derive_instance_action_idempotency_key(
+    *,
+    base_key: str,
+    action: str,
+    target_id: str,
+    engine_request_id: str | None,
+    ttl_ms: int | None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(base_key.encode("utf-8"))
+    digest.update(b"|")
+    digest.update(action.encode("utf-8"))
+    digest.update(b"|target=")
+    digest.update(target_id.encode("utf-8"))
+    if engine_request_id:
+        digest.update(b"|engine_request_id=")
+        digest.update(engine_request_id.encode("utf-8"))
+    if ttl_ms is not None:
+        digest.update(f"|ttl={int(ttl_ms)}".encode("utf-8"))
     return f"tc.plan.action.v1:{digest.hexdigest()}"
 
 
@@ -455,6 +486,14 @@ class NodeAgentExecutor:
             return self._transform_register(
                 plan, step, action.transform_register, call_ctx
             )
+        if action_kind == "manifest":
+            return self._manifest(plan, step, action.manifest, call_ctx)
+        if action_kind == "publish":
+            return self._publish(plan, step, action.publish, call_ctx)
+        if action_kind == "hydrate":
+            return self._hydrate(plan, step, action.hydrate, call_ctx)
+        if action_kind == "evict_local":
+            return self._evict_local(plan, step, action.evict_local, call_ctx)
         return NodeAgentStepResult(
             step_id=step.step_id,
             target_id=step.target.target_id,
@@ -486,6 +525,33 @@ class NodeAgentExecutor:
             device_id=None,
             ttl_ms=None,
             extra=extra,
+        )
+        return CallContext(
+            request_id=call_ctx.request_id,
+            qos=call_ctx.qos,
+            deadline_ms=call_ctx.deadline_ms,
+            idempotency_key=derived_key,
+            tags=call_ctx.tags,
+        )
+
+    def _instance_action_context(
+        self,
+        *,
+        plan: plan_pb2.PlanSpec,
+        action: str,
+        target_id: str,
+        engine_request_id: str | None,
+        ttl_ms: int | None,
+        call_ctx: CallContext,
+    ) -> CallContext:
+        if not plan.context.idempotency_key:
+            return call_ctx
+        derived_key = _derive_instance_action_idempotency_key(
+            base_key=plan.context.idempotency_key,
+            action=action,
+            target_id=target_id,
+            engine_request_id=engine_request_id,
+            ttl_ms=ttl_ms,
         )
         return CallContext(
             request_id=call_ctx.request_id,
@@ -627,6 +693,243 @@ class NodeAgentExecutor:
             target_id=target_id,
             action="transform_register",
             status=_status_success("transform_register completed"),
+        )
+
+    def _manifest(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.ManifestAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="manifest",
+                target_id=target_id,
+                engine_request_id=action.engine_request_id,
+                ttl_ms=None,
+                call_ctx=call_ctx,
+            )
+            manifest_result = engine_adapter.execute_manifest(
+                engine_request_id=action.engine_request_id,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="manifest",
+                status=_status_failed(
+                    f"manifest failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="manifest",
+                status=_status_failed(
+                    f"manifest failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="manifest",
+            status=_status_success("manifest completed"),
+            artifact_result=manifest_result,
+        )
+
+    def _publish(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.PublishAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        ttl_ms = int(action.ttl_ms) if action.HasField("ttl_ms") else None
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="publish",
+                target_id=target_id,
+                engine_request_id=action.engine_request_id,
+                ttl_ms=ttl_ms,
+                call_ctx=call_ctx,
+            )
+            publish_result = engine_adapter.execute_publish(
+                engine_request_id=action.engine_request_id,
+                ttl_ms=ttl_ms,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="publish",
+                status=_status_failed(
+                    f"publish failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="publish",
+                status=_status_failed(
+                    f"publish failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="publish",
+            status=_status_success("publish completed"),
+            artifact_result=publish_result,
+        )
+
+    def _hydrate(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.HydrateAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="hydrate",
+                target_id=target_id,
+                engine_request_id=action.engine_request_id,
+                ttl_ms=None,
+                call_ctx=call_ctx,
+            )
+            hydrate_result = engine_adapter.execute_hydrate(
+                engine_request_id=action.engine_request_id,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="hydrate",
+                status=_status_failed(
+                    f"hydrate failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="hydrate",
+                status=_status_failed(
+                    f"hydrate failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="hydrate",
+            status=_status_success("hydrate completed"),
+            artifact_result=hydrate_result,
+        )
+
+    def _evict_local(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.EvictLocalAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        engine_request_id = (
+            action.engine_request_id if action.HasField("engine_request_id") else None
+        )
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="evict_local",
+                target_id=target_id,
+                engine_request_id=engine_request_id,
+                ttl_ms=None,
+                call_ctx=call_ctx,
+            )
+            evict_result = engine_adapter.execute_evict_local(
+                engine_request_id=engine_request_id,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="evict_local",
+                status=_status_failed(
+                    f"evict_local failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="evict_local",
+                status=_status_failed(
+                    f"evict_local failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="evict_local",
+            status=_status_success("evict_local completed"),
+            artifact_result=evict_result,
         )
 
     def _prefetch(

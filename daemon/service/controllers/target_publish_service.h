@@ -10,7 +10,7 @@
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/target_write_registry.h"
+#include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -29,9 +29,9 @@ class TargetPublishService {
 
   explicit TargetPublishService(Dep d);
 
-  static absl::Duration target_write_token_ttl();
+  static absl::Duration target_publication_token_ttl();
 
-  TargetWriteRegistry::Record remember_target_write(TargetWriteRegistry::Record record);
+  TargetPublicationRegistry::Record remember_target_publication(TargetPublicationRegistry::Record record);
 
   grpc::Status publish_target_replica(
       RpcContext& rctx,
@@ -41,7 +41,7 @@ class TargetPublishService {
  private:
   Dep d_;
   common::CapabilityTokenManager* capability_tokens_{nullptr};
-  TargetWriteRegistry target_write_registry_;
+  TargetPublicationRegistry target_publication_registry_;
 };
 
 } // namespace tensorcast::daemon

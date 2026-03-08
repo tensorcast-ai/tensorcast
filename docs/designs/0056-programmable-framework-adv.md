@@ -1,7 +1,7 @@
 ---
 slug: 0056-programmable-framework-adv
 title: Programmable Framework (Advanced Runtime + LLM Integration) (Design)
-description: Planned extensions on top of 0055 to unify phased plan execution (local runner + optional daemon ingress), a unified process runtime, signals, and engine-agnostic cache-blob orchestration (paged KV motivating case) for LLM applications.
+description: Planned extensions on top of 0055 to unify phased plan execution (local runner + optional daemon ingress), a unified process runtime, signals, and engine-agnostic byte artifact orchestration (paged KV motivating case) for LLM applications.
 status: draft
 areas:
   - sdk
@@ -20,7 +20,7 @@ related_code:
   - proto/tensorcast/global_store/v1/global_store.proto
 related_docs:
   - docs/designs/0055-programmable-framework.md
-  - docs/designs/0084-unified-artifact-binding-kv-runtime.md
+  - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0001-docs-system-design.md
@@ -33,7 +33,7 @@ links:
     - ./0055-programmable-framework.md
   dependencies:
     - ./0055-programmable-framework.md
-    - ./0084-unified-artifact-binding-kv-runtime.md
+    - ./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
     - ./0017-client-generated-artifact-id.md
     - ./0001-docs-system-design.md
     - ./0004-unified-runtime-config.md
@@ -68,7 +68,7 @@ Planned extensions:
   consulted via daemon caches / watch streams, not per caller request.
 - **Engine-agnostic KV orchestration control flow**: instance actions, routing, and lease/fencing integration for KV
   cache operations. The KV data model, batch IO primitives, and open/sealed lifecycle are specified in
-  `docs/designs/0084-unified-artifact-binding-kv-runtime.md`.
+  `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`.
 
 This design intentionally keeps TensorCast core **KV-semantics-free**: TensorCast stores/moves blobs; inference engines
 remain the source of truth for request→token→KV-key mapping.
@@ -108,7 +108,7 @@ Goals
   control loops.
 - Define an engine‑agnostic **KV cache orchestration control contract** compatible with SGLang HiCache/Mooncake.
   Data semantics (object model, open/sealed states, batch IO and identity encoding) are delegated to
-  `docs/designs/0084-unified-artifact-binding-kv-runtime.md`.
+  `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`.
 
 Non‑Goals
 
@@ -121,22 +121,22 @@ Non‑Goals
 
 ---
 
-# Scope Boundary with 0084 (required)
+# Scope Boundary with 0087 (required)
 
-`0056` and `0084` are intentionally layered:
+`0056` and `0087` are intentionally layered:
 
 - `0056` owns control-plane semantics:
   - daemon ingress execution model,
   - signals and directory caching,
-  - cache blob routing with shard leases and fencing,
+  - byte artifact routing with shard leases and fencing,
   - instance-agent orchestration boundaries.
-- `0084` owns cache blob and weight data semantics:
+- `0087` owns byte artifact and weight data semantics:
   - unified `Artifact` + `Binding` + mapping model,
   - blob `open` -> `sealed` lifecycle,
   - batch external-target IO primitives and VRAM-first fast paths,
   - CGID field encoding constraints and helper contracts.
 
-When sections overlap, `0084` is normative for cache blob data-path behavior and `0056` is normative for distributed
+When sections overlap, `0087` is normative for byte artifact data-path behavior and `0056` is normative for distributed
 control-plane behavior.
 
 ---
@@ -293,16 +293,16 @@ Remote-safety rules (unchanged from 0055; reiterated):
 
 ## Home shard / home daemon (planned)
 
-- **Home shard (abstract partition)**: a fixed partition of cache blob artifact key space used for routing/ownership
-  (e.g., 4096 or 16384 shards). Sharding is by cache blob identity (CGID), not by request.
+- **Home shard (abstract partition)**: a fixed partition of byte artifact key space used for routing/ownership
+  (e.g., 4096 or 16384 shards). Sharding is by byte artifact identity (CGID), not by request.
 - **Home daemon (dynamic responsibility; concrete process)**: the Store Daemon that currently holds the lease for a
   shard. Only `shard_home_eligible` daemons may acquire shard-home leases and become home. The home daemon is the authoritative
   place for:
   - `PUT_IF_ABSENT_JOIN` enforcement (immutability invariants),
-  - existence truth for cache blob artifacts (for the current lease generation),
+  - existence truth for byte artifacts (for the current lease generation),
   - and shard-scoped TTL / resource governance decisions.
 - **Fencing token (`lease_generation`)**: a monotonically increasing generation number attached to the shard lease. All
-  shard-scoped cache blob operations must be fenced by the current `lease_generation` to prevent split-brain under partitions
+  shard-scoped byte artifact operations must be fenced by the current `lease_generation` to prevent split-brain under partitions
   and failover.
 
 ## Instance
@@ -341,7 +341,7 @@ semantics.
 
 - Allow deploying a **gateway pool** (ingress) distinct from general workers, without changing APIs.
 - Allow constraining **shard home** eligibility to a subset of daemons (e.g., DRAM-heavy nodes), without involving
-  Global Store in the cache blob hot path.
+  Global Store in the byte artifact hot path.
 - Keep roles **low-cardinality** and **update-on-change** so Global Store remains scalable.
 
 ## Role model
@@ -643,13 +643,13 @@ Semantics:
 
 - batch materializes the provided selections to daemon-owned residency on the target Worker.
 - DRAM placement is allowed under `NO_LEASE` (prefetch does not export CPU handles); see 0055 `Artifact.prefetch`.
-- Cache-blob note (required): for `cgid:cache_blob~...` selections, any daemon-owned cached copy MUST be fenced by the
+- Byte artifact note (required): for `cgid:byte_artifact~...` selections, any daemon-owned cached copy MUST be fenced by the
   current shard `lease_generation` (epoch-scoped cache). A cached blob from an older generation MUST be treated as
-  absent (miss) and re-fetched (see `docs/designs/0084-unified-artifact-binding-kv-runtime.md`).
+  absent (miss) and re-fetched (see `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`).
 - action result must be **per-item** so the app can decide proceed/retry/abort without losing partial information.
 - result classification (required):
   - `missing`: the selection does not exist in its authoritative namespace resolver (e.g., registry-backed `NOT_FOUND`,
-    or cache blob home-shard miss).
+    or byte artifact home-shard miss).
   - `failures`: any non-`NOT_FOUND` failure (transport, deadline, permission, precondition, etc.).
 - step-level status (required):
   - the plan step MUST fail only for systemic errors that prevent producing a meaningful `PrefetchManyResult`
@@ -773,28 +773,28 @@ class TensorCastSignals:
 Refactor note (2026-03-04):
 
 - This section is now integration-oriented and control-plane-oriented.
-- Normative cache-blob requirements (sealing boundary, `PUT_IF_ABSENT_JOIN` invariants, batch IO primitives, CGID
+- Normative byte artifact requirements (sealing boundary, `PUT_IF_ABSENT_JOIN` invariants, batch IO primitives, CGID
   helper contracts, and unified weight/cache object model) are defined in
-  `docs/designs/0084-unified-artifact-binding-kv-runtime.md`.
+  `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`.
 
 ## Key idea
 
 TensorCast integrates with inference engines’ KV caches by treating KV cache as:
 
 - deterministic **engine-defined keys** (prefix-hash keys), mapping to
-- **opaque cache blob bytes** stored as **cache blob artifacts** (no paged-attention semantics in TensorCast core).
+- **opaque byte-payload bytes** stored as **byte artifacts** (no paged-attention semantics in TensorCast core).
 
 This matches SGLang+Mooncake integration: Mooncake does not understand RadixAttention; it stores/transfers blobs by key.
 TensorCast’s integration follows the same rule, but uses TensorCast’s data plane for movement and daemon-owned tiers for
 residency.
 
-## Cache blob identity: CGID (cross-instance, non content-addressed)
+## Byte artifact identity: CGID (cross-instance, non content-addressed)
 
-LLM KV blobs (and other high-cardinality cache blobs) should use **Client-Generated Artifact IDs** (CGID) so multiple
+LLM KV blobs (and other high-cardinality byte artifacts) should use **Client-Generated Artifact IDs** (CGID) so multiple
 instances can converge on a stable key without content hashing:
 
 ```
-cgid:cache_blob~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>
+cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>
 ```
 
 This aligns with `docs/designs/0017-client-generated-artifact-id.md`.
@@ -889,7 +889,7 @@ Implications for 0056 KV orchestration (this design):
 - `engine_request_id` is feasible for SGLang and maps to `Req.rid`. It is required to locate request context (token ids,
   committed KV length, KV index ownership), but it is **not** part of KV blob identity.
 - `kvcache_key_set(engine_request_id)` is implementable as a read-only inspection: compute the request’s page keys from
-  engine state (page-aligned) and map them to deterministic `cgid:cache_blob~...` cache blob identities.
+  engine state (page-aligned) and map them to deterministic `cgid:byte_artifact~...` byte artifact identities.
 - `kvcache_flush(engine_request_id, ...)` is the publish barrier: for pages that are still only on-device, it must force
   backend visibility via the engine storage backend, using batch-first publish paths. Direct region/VRAM export paths
   are preferred when available; device→host staging is a fallback compatibility path. (SGLang provides
@@ -899,37 +899,37 @@ Implications for 0056 KV orchestration (this design):
   engines like SGLang (token ids are required to make the imported pages usable by token-keyed prefix caches). It cannot
   be specified as a pure `key_set`-only operation without additional engine support.
 
-## Cache blob artifact schema (transport contract)
+## Byte artifact schema (transport contract)
 
 Even though payload is opaque, TensorCast needs a stable tensor schema:
 
-- each cache blob artifact contains exactly one tensor named `blob`,
-- `blob.dtype == uint8` and `blob.shape == [byte_length]`.
+- each byte artifact contains exactly one tensor named `payload`,
+- `payload.dtype == uint8` and `payload.shape == [byte_length]`.
 
-### Selection identity for cache blob artifacts (required; see `0084`)
+### Selection identity for byte artifacts (required; see `0087`)
 
 0055 defines selection identity as `(artifact_id, logical_layout_hash, selection_hash)` and uses it for deterministic
-operation ids and batch actions. Cache blob artifacts must support these identities **without** any Global Store (GS)
+operation ids and batch actions. Byte artifacts must support these identities **without** any Global Store (GS)
 catalog lookup.
 
-For `artifact_id` in the `cgid:cache_blob~...` namespace:
+For `artifact_id` in the `cgid:byte_artifact~...` namespace:
 
-- cache blob artifacts support only the **canonical view** and the **full selection** (no view/subset variants).
+- byte artifacts support only the **canonical view** and the **full selection** (no view/subset variants).
 - The `artifact_id` is fully resolved/self-describing: selection identity derivation MUST NOT require any GS registry
   lookup.
 - API restrictions (required):
-  - `Artifact.view(...)` / view specs MUST be rejected for cache blob artifacts (`FAILED_PRECONDITION` or SDK `ValueError`).
+  - `Artifact.view(...)` / view specs MUST be rejected for byte artifacts (`FAILED_PRECONDITION` or SDK `ValueError`).
   - subset selection MUST be rejected:
-    - `tensor_names` MUST be either omitted/None (full selection) or exactly `("blob",)` where applicable.
-    - `tensor_dict_into(...)` targets MUST contain exactly one tensor named `"blob"` for cache blob artifacts.
+    - `tensor_names` MUST be either omitted/None (full selection) or exactly `("payload",)` where applicable.
+    - `tensor_dict_into(...)` targets MUST contain exactly one tensor named `"payload"` for byte artifacts.
   - resolved selection shape MUST be canonicalized to:
     - `view_id == ""`,
     - no `view_spec`,
-    - `tensor_names` omitted (optional `("blob",)` input normalized away),
+    - `tensor_names` omitted (optional `("payload",)` input normalized away),
     - empty `view_subset_hash`.
 - `logical_layout_hash` and `selection_hash` are fixed, deterministic digests:
-  - `logical_layout_hash = sha256(utf8("tensorcast.cache_blob.layout.v1\\n")).digest()`
-  - `selection_hash = sha256(utf8("tensorcast.cache_blob.selection.v1\\n")).digest()`
+  - `logical_layout_hash = sha256(utf8("tensorcast.byte_artifact.layout.v1\\n")).digest()`
+  - `selection_hash = sha256(utf8("tensorcast.byte_artifact.selection.v1\\n")).digest()`
 - `byte_length` and payload digests are **home-enforced invariants** and MUST NOT be required to derive selection
   identity (they are verified by `PUT_IF_ABSENT_JOIN`).
 - daemon MUST enforce/cache this profile branch directly (without requiring canonical index or selected-index json
@@ -939,22 +939,22 @@ For `artifact_id` in the `cgid:cache_blob~...` namespace:
 
 ### Immutability + conflict writes
 
-Writes to `cgid:cache_blob~...` MUST be **PUT_IF_ABSENT_JOIN** (never overwrite):
+Writes to `cgid:byte_artifact~...` MUST be **PUT_IF_ABSENT_JOIN** (never overwrite):
 
 - first write establishes invariants (`layout_id` + `byte_length` + payload digest),
 - re-writes must match; mismatch fails fast with `FAILED_PRECONDITION`.
 
 ### Digest contract (required)
 
-To make join enforceable across languages (Python/C++/Rust), cache blob writes MUST carry an explicit digest contract:
+To make join enforceable across languages (Python/C++/Rust), byte artifact writes MUST carry an explicit digest contract:
 
 - `payload_digest_alg = "sha256"`.
 - `payload_digest_hex = sha256(blob_bytes).hexdigest()` (lowercase hex).
-- Cache blob put/flush actions MUST provide, per blob:
+- Byte artifact put/flush actions MUST provide, per blob:
   - `byte_length`,
   - `payload_digest_alg`,
   - `payload_digest_hex`.
-- The home daemon MUST persist the first-writer invariants for a `cgid:cache_blob~...` blob and enforce join on
+- The home daemon MUST persist the first-writer invariants for a `cgid:byte_artifact~...` blob and enforce join on
   subsequent writes using at least `(layout_id, byte_length, payload_digest_alg, payload_digest_hex)`, scoped to the
   current shard `lease_generation` (epoch-scoped cache).
 
@@ -970,9 +970,9 @@ To make join enforceable across languages (Python/C++/Rust), cache blob writes M
 
 ---
 
-## Cache blob storage + routing (planned): GS-not-hot-path home shards with leases and fencing
+## Byte artifact storage + routing (planned): GS-not-hot-path home shards with leases and fencing
 
-This section defines how TensorCast can serve HiCache-style LLM KV blobs (as cache blob artifacts) at cluster scale
+This section defines how TensorCast can serve HiCache-style LLM KV blobs (as byte artifacts) at cluster scale
 **without** putting per-blob metadata into Global Store (GS), while still enforcing the correctness floor:
 
 - no incorrect hits (never return wrong bytes for a key),
@@ -980,33 +980,33 @@ This section defines how TensorCast can serve HiCache-style LLM KV blobs (as cac
 
 ### Contract: cache is cache (performance only)
 
-- Cache blobs are a cache: hits improve latency; misses MUST fall back to recompute/prefill in the engine/app.
-- A daemon crash invalidates any cache blobs it owned: after crash/restart, previously cached blobs MUST be treated as
+- Byte artifacts are a cache: hits improve latency; misses MUST fall back to recompute/prefill in the engine/app.
+- A daemon crash invalidates any byte artifacts it owned: after crash/restart, previously cached blobs MUST be treated as
   absent (miss), even if some bytes remain on local disk.
 
-### Cache blob artifacts do not enter the Global Store artifact registry
+### Byte artifacts do not enter the Global Store artifact registry
 
-- Cache blob artifacts use `artifact_id = cgid:cache_blob~...` as **self-describing cache keys**.
-- Global Store MUST NOT maintain per-blob catalog/GC/indexing for cache blobs (high cardinality).
-- Global Store’s cache-blob responsibilities are limited to **shard lease authority** (low cardinality, strong consistency).
+- Byte artifacts use `artifact_id = cgid:byte_artifact~...` as **self-describing cache keys**.
+- Global Store MUST NOT maintain per-blob catalog/GC/indexing for byte artifacts (high cardinality).
+- Global Store’s byte artifact responsibilities are limited to **shard lease authority** (low cardinality, strong consistency).
 - This is a namespace-scoped override to generic `cgid:` behavior in `0017`:
-  - the override applies to `cgid:cache_blob~...` only,
+  - the override applies to `cgid:byte_artifact~...` only,
   - other `cgid:` namespaces can continue to use normal GS artifact/replica catalogs.
 
 ### Artifact model note (required)
 
-Cache blob artifacts are still **Artifacts** (tensor dicts) with a fixed schema (`blob:uint8[byte_length]`). The
+Byte artifacts are still **Artifacts** (tensor dicts) with a fixed schema (`payload:uint8[byte_length]`). The
 difference is
 **authority and routing**, not object model:
 
 - Registry-backed artifacts use Global Store (GS) as the authoritative catalog/index.
-- Cache blob artifacts (`cgid:cache_blob~...`) use the **home shard** (for the current `lease_generation`) as the
+- Byte artifacts (`cgid:byte_artifact~...`) use the **home shard** (for the current `lease_generation`) as the
   authoritative catalog/index for:
   - existence truth,
   - `PUT_IF_ABSENT_JOIN` invariants,
   - TTL/resource governance.
 
-The `CacheBlobBatch*` RPCs are an internal, batch-first routed implementation of standard artifact operations
+The `HomeBatch*` RPCs are an internal, batch-first routed implementation of standard artifact operations
 (`exists/get/put_if_absent/touch_ttl`) for this high-cardinality, epoch-scoped namespace. They are **not** a parallel
 data-object abstraction.
 
@@ -1014,7 +1014,7 @@ Implementation note (planned):
 
 - Store Daemons effectively act as a **namespace router** for artifact ids:
   - registry-backed artifacts resolve/route via GS-backed catalogs and existing StoreEngine paths,
-  - `cgid:cache_blob~...` artifacts resolve/route via shard leases and cache blob homes (`CacheBlobBatch*`).
+  - `cgid:byte_artifact~...` artifacts resolve/route via shard leases and byte artifact homes (`HomeBatch*`).
   Callers keep using `Artifact` handles uniformly; routing is a daemon-internal concern.
 
 ### Sharding: `shard_id = hash64(artifact_id) % S`
@@ -1050,9 +1050,9 @@ Lease interface (planned; minimal):
 To avoid lease thrash and hotspots during membership churn, daemons SHOULD use a stable expected-owner strategy and
 only the expected owner should attempt shard acquisition.
 
-Recommended minimal strategy: **Rendezvous hashing (HRW)** over the current set of cache-blob-capable daemons.
+Recommended minimal strategy: **Rendezvous hashing (HRW)** over the current set of byte artifact-capable daemons.
 
-- Candidate set: daemons with a cache blob capability flag (derived from daemon membership signals; cached via GS watches).
+- Candidate set: daemons with a byte artifact capability flag (derived from daemon membership signals; cached via GS watches).
 - Expected owners: for each `shard_id`, compute a stable **top‑k** ordering by HRW score
   (`ranked_daemons = sort_by(HRW(shard_id, daemon_id), desc)`), with `k >= 2` (recommended: `k = 3`).
 - Acquisition rule:
@@ -1077,7 +1077,7 @@ of caller processes.
 
 Configuration source rule (required):
 
-- Cache-blob routing invariants (`S`, `hash64` algorithm/version, `inline_threshold_bytes`, lease policy, retention
+- Byte artifact routing invariants (`S`, `hash64` algorithm/version, `inline_threshold_bytes`, lease policy, retention
   defaults/limits) MUST come from unified runtime config (`0004`) and be consistent cluster-wide.
 - Rolling incompatible values MUST be treated as cache-epoch cutover (invalidate to miss), not mixed-semantics serving.
 
@@ -1094,10 +1094,10 @@ Configuration source rule (required):
 For shards it currently owns (valid lease), the home daemon is the authority for:
 
 1. **First-writer invariants** (`PUT_IF_ABSENT_JOIN`)
-   - For each cache blob `artifact_id`, store the first-writer invariants (epoch-scoped):
+   - For each byte artifact `artifact_id`, store the first-writer invariants (epoch-scoped):
 
      ```
-     CacheBlobInvariant {
+     PutIfAbsentInvariant {
        layout_id
        byte_length
        payload_digest_alg  # sha256
@@ -1115,9 +1115,9 @@ For shards it currently owns (valid lease), the home daemon is the authority for
    - Exists truth is defined by the home’s current `{shard_id, lease_generation}` map.
    - `Get` returns bytes only for keys that exist in the current generation’s map.
 
-### Fencing on every cache blob operation (required)
+### Fencing on every byte artifact operation (required)
 
-All shard-scoped cache blob RPCs executed at the home MUST be fenced by `{shard_id, lease_generation}`:
+All shard-scoped byte artifact RPCs executed at the home MUST be fenced by `{shard_id, lease_generation}`:
 
 - if request’s `lease_generation` does not match the home’s current generation:
   - return `FAILED_PRECONDITION` (optionally include redirect info: new `holder_daemon_id`, new generation),
@@ -1127,7 +1127,7 @@ All shard-scoped cache blob RPCs executed at the home MUST be fenced by `{shard_
 
 To satisfy cache semantics, home storage is scoped by `{shard_id, lease_generation}`:
 
-- The home daemon MUST NOT serve cache blob bytes written under an old `lease_generation`.
+- The home daemon MUST NOT serve byte artifact bytes written under an old `lease_generation`.
 - When generation changes (failover), the shard’s visible cache set becomes empty (global cache invalidation for that
   shard).
 
@@ -1139,11 +1139,11 @@ Two valid implementation profiles (planned; pick one per deployment):
 
 ### Epoch-scoped caching for all replicas (required)
 
-Epoch scoping applies to **any** cached copy of cache blob bytes, not just the home’s authoritative map.
+Epoch scoping applies to **any** cached copy of byte artifact bytes, not just the home’s authoritative map.
 
 Rule (required):
 
-- Any daemon-owned cache blob replica (home store + any non-home caches created by `prefetch`/`prefetch_many`) MUST be
+- Any daemon-owned byte artifact replica (home store + any non-home caches created by `prefetch`/`prefetch_many`) MUST be
   keyed by `(artifact_id, shard_id, lease_generation)`.
 - Once a daemon observes a newer `lease_generation` for a shard, any cached blob bytes for older generations MUST be
   treated as absent (miss) and MUST NOT be served as hits.
@@ -1155,16 +1155,16 @@ Acceptable enforcement strategies (planned):
 - **Proactive invalidation**: when the daemon’s lease watch observes a generation change, drop all cached blob replicas
   for the old `(shard_id, lease_generation)` bucket (coarse invalidation is fine; KV is cache).
   - Implementation note: this can be realized by extending the daemon’s internal replica keying for the
-    `cgid:cache_blob~...` namespace with `lease_generation`, or by storing blob replicas in a dedicated generation-keyed
+    `cgid:byte_artifact~...` namespace with `lease_generation`, or by storing blob replicas in a dedicated generation-keyed
     cache separate from registry-backed artifacts. The choice is internal as long as the rule holds.
 
-### Cache blob request path (single-entry caller; daemon-run routing)
+### Byte artifact request path (single-entry caller; daemon-run routing)
 
 - Caller connects to one gateway daemon (potentially via a VIP/LB/DNS).
 - The gateway (and all daemons) maintain:
   - a directory cache for `daemon_id -> routing` and `instance_id -> daemon_id`,
   - a lease cache for `ShardHomeLease` (populated via GS watch streams; bounded staleness).
-- For any cache blob operation, the receiving daemon:
+- For any byte artifact operation, the receiving daemon:
   - computes `shard_id` from `artifact_id`,
   - resolves the current `{holder_daemon_id, lease_generation}`,
   - forwards the shard-scoped batch to the home daemon,
@@ -1175,10 +1175,10 @@ Acceptable enforcement strategies (planned):
 Authorization note (planned):
 
 - The home daemon MUST enforce namespace-level authorization for KV operations based on the namespace embedded in
-  `cgid:cache_blob~<namespace>~...` (once namespaces/ACLs are enabled), so routing does not become an authorization
+  `cgid:byte_artifact~<namespace>~...` (once namespaces/ACLs are enabled), so routing does not become an authorization
   bypass.
 
-### Suggested minimal cache blob RPC set (planned)
+### Suggested minimal byte artifact RPC set (planned)
 
 Layering boundary (required):
 
@@ -1189,27 +1189,27 @@ Layering boundary (required):
 
 Between daemons (home-scoped, fenced):
 
-- `CacheBlobBatchExists(shard_id, lease_generation, keys_in_prefix_order[]) -> {hit_len, per_key_status?}`  
+- `HomeBatchExists(shard_id, lease_generation, keys_in_prefix_order[]) -> {hit_len, per_key_status?}`  
   `hit_len` is the number of **consecutive existing keys from the start** (HiCache fast-path). `per_key_status` is
   optional debug detail and SHOULD be omittable for efficiency.
-- `CacheBlobBatchGet(shard_id, lease_generation, keys[]) -> {per_key {status, payload_ref}}`
-- `CacheBlobBatchPutIfAbsent(shard_id, lease_generation, items[]) -> per_item_status`
+- `HomeBatchGet(shard_id, lease_generation, keys[]) -> {per_key {status, payload_ref}}`
+- `HomeBatchPutIfAbsent(shard_id, lease_generation, items[]) -> per_item_status`
   - item includes: `artifact_id, layout_id, byte_length, digest_alg, digest_hex, payload` where `payload` is
     either:
     - `inline_bytes` (small blobs only), or
     - `payload_ref` (preferred; reuse TensorCast data plane; home pulls/receives bytes out-of-band).
-- `CacheBlobTouchTtl(shard_id, lease_generation, keys[], ttl_ms)` (optional; monotonic extend)
+- `ByteArtifactTouchTtl(shard_id, lease_generation, keys[], ttl_ms)` (optional; monotonic extend)
 
 Note: a daemon MAY expose a proxy-friendly front-door that accepts mixed-shard key lists (for local engine backends),
 but the home boundary MUST be fenced and shard-scoped.
 
 Payload transport note (required):
 
-- Cache blobs can be large (page-first, all layers). RPCs MUST avoid inlining large payloads in gRPC messages.
+- Byte artifacts can be large (page-first, all layers). RPCs MUST avoid inlining large payloads in gRPC messages.
 - For `byte_length > inline_threshold_bytes` (recommended default: 1 MiB; configurable), payloads MUST be carried via
   TensorCast’s data plane using a transfer handle (represented as `payload_ref` here).
-  - `CacheBlobBatchGet` MUST return `payload_ref` (not inline bytes) above the threshold.
-  - `CacheBlobBatchPutIfAbsent` MUST accept `payload_ref` above the threshold (not inline bytes).
+  - `HomeBatchGet` MUST return `payload_ref` (not inline bytes) above the threshold.
+  - `HomeBatchPutIfAbsent` MUST accept `payload_ref` above the threshold (not inline bytes).
 - Inlining small blobs (`inline_bytes`) is acceptable below the threshold.
 
 ### Recommended integration layering (SGLang motivating case)
@@ -1266,7 +1266,7 @@ Minimal interface:
 @dataclass(frozen=True, slots=True)
 class KvBlobRef:
     engine_key_enc: str
-    artifact_id: str            # recommended: "cgid:cache_blob~..."
+    artifact_id: str            # recommended: "cgid:byte_artifact~..."
     # Hints vs invariants:
     # - size_bytes_estimate: optional planning hint (may be absent/approximate).
     # - byte_length + payload_digest_*: required invariants for put/flush JoinIfMatch enforcement.
@@ -1349,23 +1349,23 @@ Canonicalization note (required):
   Recommended computation:
   - `key_set_digest_alg = "sha256"` and `key_set_digest_hex` is lowercase hex.
   - input bytes are UTF-8 with domain separation:
-    - prefix: `"tensorcast.cache_blob.keyset.v1\\n"`
+    - prefix: `"tensorcast.byte_artifact.keyset.v1\\n"`
     - then `layout_id + "\\n" + "\\n".join(sorted(unique(artifact_id)))`
 - `KvKeySet.blobs` ordering (e.g., prefix order) is an engine convenience only and MUST NOT participate in idempotency
   fingerprints. `hit_len` and size estimates are hints and MUST NOT participate in fingerprints.
 
 ## Planned `InstanceStepBuilder.kvcache_*` semantics
 
-`kvcache_*` is an LLM-facing alias layer. Core IR semantics should be generic cache actions (see `0084`):
+`kvcache_*` is an LLM-facing alias layer. Core IR semantics should be neutral artifact actions (see `0087`):
 
-- `kvcache_key_set` -> `cache_manifest`
-- `kvcache_flush` -> `cache_flush`
-- `kvcache_prefetch` -> `cache_hydrate`
-- `kvcache_evict_local` -> `cache_evict_local`
+- `kvcache_key_set` -> `manifest`
+- `kvcache_flush` -> `publish`
+- `kvcache_prefetch` -> `hydrate`
+- `kvcache_evict_local` -> `evict_local`
 
-The daemon and plan engine should execute canonical `cache_*` actions; alias names are preserved for API ergonomics.
-Idempotency fingerprints, metrics, and audit/event action labels MUST use canonical `cache_*` names; `kvcache_*` should
-be retained only as an alias tag/metadata dimension.
+The daemon and plan engine should execute canonical neutral artifact actions; alias names are preserved for API
+ergonomics. Idempotency fingerprints, metrics, and audit/event action labels MUST use canonical
+`manifest/publish/hydrate/evict_local` names; `kvcache_*` should be retained only as an alias tag/metadata dimension.
 
 These are **instance-scoped** plan steps executed by the Instance Agent (invoked by the target Store Daemon).
 
@@ -1458,7 +1458,7 @@ Planned call flow (control plane + node-local boundaries):
    - gateway/runner -> target daemon dispatch path (subplan for `inst_a`’s daemon),
    - target daemon PlanExecutor -> instance-agent RPC -> Instance Agent executes `plan_fragment_for_inst_a`
    - Instance Agent calls `EngineKvCacheAdapter.kv_flush(...)`
-   - Adapter enumerates per-page keys (SGLang page hashes) and writes missing `cgid:cache_blob~...` blobs to backend
+   - Adapter enumerates per-page keys (SGLang page hashes) and writes missing `cgid:byte_artifact~...` blobs to backend
      using batch put (`PUT_IF_ABSENT_JOIN`).
 4. **Gateway/runner dispatches worker step (prefetch_many)** (optional):
    - gateway/runner -> target daemon dispatch path (subplan for Worker B)
@@ -1502,15 +1502,15 @@ This section is illustrative and intentionally separated from 0055.
 - Add LaneContext/policy propagation plumbing for plan and non-plan hot paths:
   - short term: metadata + audit fields (no proto bloat on every request),
   - long term: explicit wire fields where interoperability/observability requires stronger contracts.
-- Extend `proto/tensorcast/daemon/v2/store_daemon.proto` with cache blob shard/data-plane RPCs (planned):
-  - home-scoped, fenced: `CacheBlobBatchExists/CacheBlobBatchGet/CacheBlobBatchPutIfAbsent/CacheBlobTouchTtl`
+- Extend `proto/tensorcast/daemon/v2/store_daemon.proto` with byte artifact shard/data-plane RPCs (planned):
+  - home-scoped, fenced: `HomeBatchExists/HomeBatchGet/HomeBatchPutIfAbsent/HomeBatchTouchTtl`
   - shard lease caches + redirect semantics (`FAILED_PRECONDITION` with updated `{holder_daemon_id, lease_generation}`).
 - Extend `proto/tensorcast/plan/v1/plan.proto` with:
   - `PrefetchManyAction` (batch prefetch),
   - `MintTargetAction` (instance-scoped capability minting for remote `into/transform_into`),
   - `MaterializeIntoAction` (instance-scoped remote `into(...)`),
-  - generic `Cache*` instance actions (`manifest`, `flush`, `hydrate`, `evict_local`) with optional
-    `KvCache*` aliases in SDK-facing APIs,
+  - generic instance actions (`manifest`, `publish`, `hydrate`, `evict_local`) with optional
+    `kvcache_*` aliases in SDK-facing APIs,
   - Optional: step-output references (to express flush→warm in a single daemon-run plan).
 - Extend `proto/tensorcast/global_store/v1/global_store.proto` + `schema.sql` with shard-lease coordination (planned):
   - `ShardHomeLease` records (`shard_id`, `holder_daemon_id`, `lease_generation`, `expires_at_ms`)
@@ -1561,15 +1561,15 @@ Suggested code locations for implementing the planned features in this design:
   - `proto/tensorcast/common/v1/common.proto` (optional future: add explicit `Placement` message; keep `device_id=-1`
     encoding for HOST_DRAM compatibility)
 - Instance Agent boundary (node_agent):
-  - `tensorcast/node_agent/executor.py` (extend to execute new instance actions: cache blob orchestration, signals)
+  - `tensorcast/node_agent/executor.py` (extend to execute new instance actions: byte artifact orchestration, signals)
   - `proto/tensorcast/node_agent/v1/node_agent.proto` (extend if adding step-level dispatch; or reuse `ExecutePlan`)
   - `proto/tensorcast/config/v1/node_agent_config.proto` (instance-agent RPC endpoint configuration (TCP/UDS); should not be reachable from external app networks)
 - Plan and action IR (batch + cache steps):
-  - `proto/tensorcast/plan/v1/plan.proto` (add `PrefetchManyAction`, generic `Cache*` actions, and optional `KvCache*`
-    alias fields)
+  - `proto/tensorcast/plan/v1/plan.proto` (add `PrefetchManyAction`, generic
+    `manifest/publish/hydrate/evict_local` actions, and optional `kvcache_*` alias fields)
   - `tensorcast/api/plan/plan.py` (add `WorkerStepBuilder.prefetch_many`, `InstanceStepBuilder.materialize_into`,
-    canonical `InstanceStepBuilder.cache_*`, and `InstanceStepBuilder.kvcache_*` aliases)
-  - `tensorcast/api/plan/targets.py` and `tensorcast/api/plan/transforms.py` (cache blob layout ids / transform hooks as needed)
+    canonical `InstanceStepBuilder.manifest/publish/hydrate/evict_local`, and `InstanceStepBuilder.kvcache_*` aliases)
+  - `tensorcast/api/plan/targets.py` and `tensorcast/api/plan/transforms.py` (byte artifact layout ids / transform hooks as needed)
 - Global Store (registry + watches for daemon caches):
   - `proto/tensorcast/global_store/v1/global_store.proto` (add `WatchWorkers/WatchInstances` streams)
   - `proto/tensorcast/global_store/v1/global_store.proto` (add worker role flags/capabilities; add `instance_agent_endpoint` routing attribute on `Instance`)
@@ -1583,11 +1583,11 @@ Suggested code locations for implementing the planned features in this design:
   - `tensorcast/global_store/services/shard_home_lease_service.py` (new; fencing + monotonic generation)
   - `schema.sql` (planned: add worker role flags/capabilities + `instance_agent_endpoint` routing attribute)
   - `schema.sql` (new `shard_home_leases` table)
-- Cache blob service (home shards + fencing; GS-not-hot-path):
-  - `daemon/service/controllers/cache_blob_shard_controller.cc` (new; home-scoped exists/get/put + invariants)
-  - `daemon/state/cache_blob_shard_store.*` (new; `{shard_id, lease_generation}` scoped maps + TTL)
+- Byte artifact service (home shards + fencing; GS-not-hot-path):
+  - `daemon/service/controllers/byte_artifact_shard_controller.cc` (new; home-scoped exists/get/put + invariants)
+  - `daemon/state/byte_artifact_shard_store.*` (new; `{shard_id, lease_generation}` scoped maps + TTL)
   - `daemon/state/cache_shard_lease_manager.*` (new; keepalive/fail-closed ownership transitions)
-  - `daemon/service/mesh/cache_blob_router_client.*` (new; proxy routing to shard homes; handles redirects)
+  - `daemon/service/mesh/byte_artifact_router_client.*` (new; proxy routing to shard homes; handles redirects)
 - Engine KV integration (engine-owned adapter layer; TensorCast core remains KV-semantics-free):
   - `tensorcast/engine_adapter/kvcache_adapter.py` (new; `EngineKvCacheAdapter` interface + typed results)
   - `tensorcast/integrations/llm/` (new; engine-specific adapters such as SGLang HiCache implementation)

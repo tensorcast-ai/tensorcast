@@ -9,6 +9,7 @@
 
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 
 #include "daemon/util/status_utils.h"
 
@@ -41,19 +42,52 @@ absl::StatusOr<tensorcast::common::v1::ByteSpaceRef> normalize_byte_space(
   }
 }
 
+std::string build_publication_key(
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const tensorcast::common::v1::ByteSpaceRef& byte_space,
+    std::string_view target_layout_hash,
+    int owner_pid,
+    std::string_view device_uuid) {
+  std::string key = absl::StrCat(
+      selection.artifact_id(),
+      "|",
+      selection.view_id(),
+      "|",
+      selection.logical_layout_hash(),
+      "|",
+      selection.selection_hash(),
+      "|",
+      selection.view_subset_hash(),
+      "|",
+      static_cast<int>(byte_space.kind()),
+      "|",
+      byte_space.id(),
+      "|",
+      target_layout_hash,
+      "|",
+      owner_pid,
+      "|",
+      device_uuid);
+  for (const auto& name : selection.tensor_names()) {
+    absl::StrAppend(&key, "|t:", name);
+  }
+  return key;
+}
+
 } // namespace
 
 TargetPublishService::TargetPublishService(Dep d)
     : d_(std::move(d)),
       capability_tokens_(d_.capability_tokens),
-      target_write_registry_(TargetWriteRegistry::Options{.ttl = target_write_token_ttl()}) {}
+      target_publication_registry_(TargetPublicationRegistry::Options{.ttl = target_publication_token_ttl()}) {}
 
-absl::Duration TargetPublishService::target_write_token_ttl() {
+absl::Duration TargetPublishService::target_publication_token_ttl() {
   return absl::Minutes(5);
 }
 
-TargetWriteRegistry::Record TargetPublishService::remember_target_write(TargetWriteRegistry::Record record) {
-  return target_write_registry_.insert(std::move(record));
+TargetPublicationRegistry::Record TargetPublishService::remember_target_publication(
+    TargetPublicationRegistry::Record record) {
+  return target_publication_registry_.insert(std::move(record));
 }
 
 grpc::Status TargetPublishService::publish_target_replica(
@@ -64,8 +98,8 @@ grpc::Status TargetPublishService::publish_target_replica(
   if (rctx.allow_high_card_attrs() && req.has_operation_id()) {
     span->SetAttribute("tc.operation.id", req.operation_id());
   }
-  if (req.target_write_token().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "target_write_token is required"};
+  if (req.target_publication_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "target_publication_token is required"};
   }
   if (capability_tokens_ == nullptr || !capability_tokens_->configured()) {
     return {StatusCode::FAILED_PRECONDITION, "capability tokens not configured"};
@@ -81,8 +115,8 @@ grpc::Status TargetPublishService::publish_target_replica(
   tensorcast::common::v1::ByteSpaceRef normalized_req = std::move(*normalized_req_or);
 
   auto env_or = capability_tokens_->verify(
-      req.target_write_token(),
-      tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE,
+      req.target_publication_token(),
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION,
       d_.identity.daemon_id(),
       absl::Now(),
       /*require_not_expired=*/true);
@@ -90,12 +124,12 @@ grpc::Status TargetPublishService::publish_target_replica(
     return to_grpc_status(env_or.status());
   }
 
-  tensorcast::common::v1::TargetWriteScope scope;
+  tensorcast::common::v1::TargetPublicationScope scope;
   if (!scope.ParseFromString(env_or->scope())) {
-    return {StatusCode::INVALID_ARGUMENT, "target_write_token scope parse failed"};
+    return {StatusCode::INVALID_ARGUMENT, "target_publication_token scope parse failed"};
   }
   if (req.has_owner_pid() && scope.owner_pid() != req.owner_pid()) {
-    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for target_write_token"};
+    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for target_publication_token"};
   }
 
   auto normalized_scope_or = normalize_byte_space(scope.byte_space());
@@ -104,32 +138,50 @@ grpc::Status TargetPublishService::publish_target_replica(
   }
   tensorcast::common::v1::ByteSpaceRef normalized_scope = std::move(*normalized_scope_or);
   if (normalized_scope.kind() != normalized_req.kind() || normalized_scope.id() != normalized_req.id()) {
-    return {StatusCode::INVALID_ARGUMENT, "byte_space does not match target_write_token"};
+    return {StatusCode::INVALID_ARGUMENT, "byte_space does not match target_publication_token"};
   }
 
-  if (scope.write_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "target_write_token missing write_id"};
+  if (!scope.operation_id().empty()) {
+    if (!req.has_operation_id() || req.operation_id().empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "operation_id is required for target_publication_token"};
+    }
+    if (scope.operation_id() != req.operation_id()) {
+      return {StatusCode::FAILED_PRECONDITION, "operation_id mismatch for target_publication_token"};
+    }
   }
 
-  auto record_opt = target_write_registry_.lookup(scope.write_id(), absl::Now(), /*require_not_expired=*/true);
+  if (scope.publication_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "target_publication_token missing publication_id"};
+  }
+
+  auto record_opt =
+      target_publication_registry_.lookup(scope.publication_id(), absl::Now(), /*require_not_expired=*/true);
   if (!record_opt.has_value()) {
-    return {StatusCode::NOT_FOUND, "target_write_token is no longer valid"};
+    return {StatusCode::NOT_FOUND, "target_publication_token is no longer valid"};
   }
   auto record = std::move(*record_opt);
-  if (!target_write_registry_.is_current_for_layout(record.layout_key, scope.write_id())) {
-    return {StatusCode::FAILED_PRECONDITION, "target_write_token is stale for layout"};
+  const std::string publication_key = build_publication_key(
+      scope.selection(), normalized_scope, scope.target_layout_hash(), scope.owner_pid(), scope.device_uuid());
+  if (!target_publication_registry_.is_current_for_target(record.publication_key, scope.publication_id())) {
+    return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
+  }
+  if (record.publication_key != publication_key) {
+    return {StatusCode::FAILED_PRECONDITION, "publication target mismatch for target_publication_token"};
   }
   if (record.device_uuid != scope.device_uuid()) {
-    return {StatusCode::FAILED_PRECONDITION, "device_uuid mismatch for target_write_token"};
+    return {StatusCode::FAILED_PRECONDITION, "device_uuid mismatch for target_publication_token"};
   }
   if (record.owner_pid != scope.owner_pid()) {
-    return {StatusCode::FAILED_PRECONDITION, "owner_pid mismatch for target_write_token"};
+    return {StatusCode::FAILED_PRECONDITION, "owner_pid mismatch for target_publication_token"};
   }
   if (record.target_layout_hash != scope.target_layout_hash()) {
-    return {StatusCode::FAILED_PRECONDITION, "target_layout_hash mismatch for target_write_token"};
+    return {StatusCode::FAILED_PRECONDITION, "target_layout_hash mismatch for target_publication_token"};
   }
   if (record.byte_space.kind() != normalized_scope.kind() || record.byte_space.id() != normalized_scope.id()) {
-    return {StatusCode::FAILED_PRECONDITION, "byte_space mismatch for target_write_token"};
+    return {StatusCode::FAILED_PRECONDITION, "byte_space mismatch for target_publication_token"};
+  }
+  if (!scope.operation_id().empty() && record.operation_id != scope.operation_id()) {
+    return {StatusCode::FAILED_PRECONDITION, "stored operation_id mismatch for target_publication_token"};
   }
   if (record.selection.artifact_id() != scope.selection().artifact_id() ||
       record.selection.view_id() != scope.selection().view_id() ||
@@ -137,11 +189,11 @@ grpc::Status TargetPublishService::publish_target_replica(
       record.selection.selection_hash() != scope.selection().selection_hash() ||
       record.selection.view_subset_hash() != scope.selection().view_subset_hash() ||
       record.selection.tensor_names_size() != scope.selection().tensor_names_size()) {
-    return {StatusCode::FAILED_PRECONDITION, "selection mismatch for target_write_token"};
+    return {StatusCode::FAILED_PRECONDITION, "selection mismatch for target_publication_token"};
   }
   for (int i = 0; i < record.selection.tensor_names_size(); ++i) {
     if (record.selection.tensor_names(i) != scope.selection().tensor_names(i)) {
-      return {StatusCode::FAILED_PRECONDITION, "selection tensor_names mismatch for target_write_token"};
+      return {StatusCode::FAILED_PRECONDITION, "selection tensor_names mismatch for target_publication_token"};
     }
   }
 
@@ -156,12 +208,12 @@ grpc::Status TargetPublishService::publish_target_replica(
     };
   }
   if (scope.selection().artifact_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id missing from target_write_token"};
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id missing from target_publication_token"};
   }
 
   const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, scope.device_uuid(), std::nullopt);
   if (device.type != DeviceType::GPU || device.ordinal < 0) {
-    return {StatusCode::INVALID_ARGUMENT, "invalid device_uuid for target_write_token"};
+    return {StatusCode::INVALID_ARGUMENT, "invalid device_uuid for target_publication_token"};
   }
 
   const std::string view_id =
@@ -170,12 +222,12 @@ grpc::Status TargetPublishService::publish_target_replica(
       .artifact_id = scope.selection().artifact_id(), .view_id = view_id, .device_id = device.ordinal};
 
   if (auto active = d_.lip_manager.find_active_by_key(key); active.has_value()) {
-    if (active->registration_id == scope.write_id()) {
+    if (active->registration_id == scope.publication_id()) {
       auto replica_id = d_.lip_manager.find_replica_id(key);
       if (!replica_id.has_value()) {
         return {StatusCode::FAILED_PRECONDITION, "target already published without replica_id"};
       }
-      resp.set_lease_id(scope.write_id());
+      resp.set_lease_id(scope.publication_id());
       resp.set_replica_id(*replica_id);
       rctx.mark_success();
       return Status::OK;
@@ -194,7 +246,7 @@ grpc::Status TargetPublishService::publish_target_replica(
     }
   }
   if (total_size == 0) {
-    return {StatusCode::FAILED_PRECONDITION, "target_write_token has empty segments"};
+    return {StatusCode::FAILED_PRECONDITION, "target_publication_token has empty segments"};
   }
 
   struct LipRollback {
@@ -215,12 +267,12 @@ grpc::Status TargetPublishService::publish_target_replica(
     void release() {
       active = false;
     }
-  } lip_rollback{.lip = &d_.lip_manager, .registration_id = scope.write_id()};
+  } lip_rollback{.lip = &d_.lip_manager, .registration_id = scope.publication_id()};
 
   const uint32_t ttl_ms = req.has_ttl_ms() ? req.ttl_ms() : 0U;
   const uint64_t epoch = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now()));
   auto lease_or = d_.lip_manager.commit_routable_view_lease_in_place(
-      scope.write_id(),
+      scope.publication_id(),
       scope.selection().artifact_id(),
       view_id,
       device.ordinal,
@@ -261,10 +313,10 @@ grpc::Status TargetPublishService::publish_target_replica(
     return to_grpc_status(replica_id_or.status());
   }
   const std::string replica_id = *replica_id_or;
-  d_.lip_manager.attach_replica_id(scope.write_id(), replica_id);
+  d_.lip_manager.attach_replica_id(scope.publication_id(), replica_id);
 
   lip_rollback.release();
-  resp.set_lease_id(scope.write_id());
+  resp.set_lease_id(scope.publication_id());
   resp.set_replica_id(replica_id);
   rctx.mark_success();
   return Status::OK;

@@ -252,12 +252,12 @@ This design touches multiple TTL-governed resources. The guiding rule is:
 
 | Surface | Where | Default | `ttl==0` meaning | After expiry |
 | --- | --- | --- | --- | --- |
-| `target_write_token` | `MaterializeIntoTarget` → `target_write_token` | 5 minutes | N/A | `PublishTargetReplica` fails (token no longer valid); caller must re-materialize to get a new token |
+| `target_publication_token` | `MaterializeIntoTarget` → `target_publication_token` | 5 minutes | N/A | `PublishTargetReplica` fails (token no longer valid); caller must re-materialize to get a new token |
 | VRAM region registration | `RegisterVramRegionRequest.ttl_ms` | `0` for Binding/Slot-managed regions | Disable time expiry (`expires_at` unset); cleanup via explicit unregister + PID-exit | Region is swept from daemon registry; later region-backed writes fail until re-registered (binding self-heal can retry once) |
 | Published replica lease (LIP) | `PublishTargetReplicaRequest.ttl_ms` (optional) | unset → `0` | Disable time expiry (lease stays active while PID lives) | Daemon treats lease inactive; best-effort unregisters replica from Global Store and drops export mappings |
 | Key mapping cache TTL | `ResolveKeyMappingResponse.cache_ttl_seconds` | server hint (e.g., 30s for IMMUTABLE; 0 for ALIAS) | Disable client caching for that key | SDK must re-resolve on each use (prevents stale activation for aliases) |
 
-#### 1) Target write token TTL (short-lived capability)
+#### 1) Target publication token TTL (short-lived capability)
 
 - **Default TTL**: 5 minutes (daemon policy).
 - **Behavior**:

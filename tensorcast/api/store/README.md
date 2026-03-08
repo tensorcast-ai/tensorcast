@@ -72,7 +72,7 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   and require server placement.
 - Pass `canonical_index_bytes` to bootstrap a new assembly without needing
   Global Store state. `register_view(..., registration_kind="piece")` is
-  equivalent, while `allow_partial` is deprecated.
+  equivalent.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
@@ -117,7 +117,7 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   enforces full dst coverage with no overlaps, and uses a local/loopback
   materialization RPC path for the overwrite step.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
-  mint `target_write_token` for mapped writes, and publish routes through a VIEW
+  mint `target_publication_token` for mapped writes, and publish routes through a VIEW
   byte-space id derived from canonical index + source view identity + copy plan +
   target layout.
 - View compatibility for mapped binding is narrow-only: transpose/permutation views

@@ -248,7 +248,7 @@ Key parameter:
 
 ### Store.register_view (register a view-derived artifact)
 
-Signature: `tensorcast.register_view(tensors, *, artifact_id=None, key=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None, canonical_index_bytes=None, registration_kind=None)`
+Signature: `tensorcast.register_view(tensors, *, artifact_id=None, key=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, options=None, canonical_index_bytes=None, registration_kind=None)`
 
 `register_view` is for cases where the canonical artifact can be derived from a
 view/slice/transpose of an existing tensor dict.
@@ -269,7 +269,6 @@ View inputs:
   partial coverage (full canonical coverage should use `"canonical"`).
 - `canonical_index_bytes`: optional bootstrap path for new assemblies; required to
   register the first piece without prior Global Store state.
-- `allow_partial`: deprecated compatibility flag mapped to `registration_kind="piece"`.
 
 Example:
 

@@ -658,7 +658,7 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
 
     assert commit_a.view_id == view_id_a
     assert commit_a.view_data_hash
-    assert commit_a.allow_partial is True
+    assert commit_a.registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
 
     index_resp = gs_stub.GetArtifactIndexById(
         global_store_pb2.GetArtifactIndexByIdRequest(artifact_id=assembly_id)

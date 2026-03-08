@@ -13,6 +13,7 @@
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/assembly_operation_service.h"
 #include "daemon/service/controllers/disk_artifact_service.h"
+#include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/controllers/replica_lifecycle_service.h"
 #include "daemon/service/controllers/replica_materialization_service.h"
 #include "daemon/service/controllers/target_materialization_service.h"
@@ -27,7 +28,7 @@
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
-#include "daemon/state/target_write_registry.h"
+#include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -47,6 +48,7 @@ class MaterializationController {
     ShutdownSignal& shutdown_signal;
     common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
+    ExternalTargetAccessService& external_target_access_service;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     uint32_t max_concurrency{4};
     SessionLifecycleManager* lifecycle{nullptr};
@@ -118,8 +120,8 @@ class MaterializationController {
       const v2::WaitReplicaVerificationRequest& req,
       v2::WaitReplicaVerificationResponse& resp);
 
-  // Test helper: inject a target write record without materialization.
-  TargetWriteRegistry::Record insert_target_write_for_testing(TargetWriteRegistry::Record record);
+  // Test helper: inject a target publication record without materialization.
+  TargetPublicationRegistry::Record insert_target_publication_for_testing(TargetPublicationRegistry::Record record);
 
  private:
   AssemblyOperationService assembly_operation_service_;

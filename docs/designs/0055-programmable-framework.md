@@ -60,7 +60,7 @@ links:
 
 This document proposes a **programmable** extension to the existing public Python SDK surface. The key design choice is:
 
-> **Weights, cache blobs (paged KV motivating case), checkpoints, etc. are all Artifacts (tensor dicts).**  
+> **Weights, byte artifacts (paged KV motivating case), checkpoints, etc. are all Artifacts (tensor dicts).**  
 > **Programmability must not introduce a parallel “data object” abstraction.**
 
 Instead, programmability is expressed by **composing existing Artifact primitives** (prefetch, into, register/put, persistence, view/subset) with a small set of new control-plane primitives:
@@ -175,7 +175,7 @@ vs what was true **before 0055** (historical motivation). This avoids ambiguity 
      - `Artifact.prefetch(...)`, `Artifact.tensor_dict_into(...)`
      - `Artifact.pin_device_residency(...)` (new)
      - `CallContext` (new) and `Plan` (new, advanced)
-   - Domain-specific data (e.g., weights, cache blobs (paged KV motivating case), checkpoints) is expressed as artifacts using stable key/view conventions; higher-level helper APIs are layered on top (see `docs/designs/0056-programmable-framework-adv.md`).
+   - Domain-specific data (e.g., weights, byte artifacts (paged KV motivating case), checkpoints) is expressed as artifacts using stable key/view conventions; higher-level helper APIs are layered on top (see `docs/designs/0056-programmable-framework-adv.md`).
 
 3. **Unified operation semantics (Phase-0: sync-only)**
    - Prefetch, persistence, and device residency pinning expose a unified `Operation[T]` interface with
@@ -1127,7 +1127,7 @@ from typing import Mapping
 
 @dataclass(frozen=True, slots=True)
 class TransformSpec:
-    name: str                      # e.g. "reshard.tp8_to_tp4.v1", "cache_blob.layout_v1_to_v2.v1"
+    name: str                      # e.g. "reshard.tp8_to_tp4.v1", "byte_artifact.layout_v1_to_v2.v1"
     args: Mapping[str, str | int]  # small, JSON-serializable, versioned
     layout_hash: str | None = None
 ```
@@ -1189,7 +1189,7 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
 ## Contracts and Invariants
 
 1. **Single-world artifact model**
-   - Weights/cache blobs/checkpoints are artifacts (tensor dicts).
+   - Weights/byte artifacts/checkpoints are artifacts (tensor dicts).
    - All data-plane actions are performed via `Store`/`Artifact` primitives.
 
 2. **Selection identity is explicit (required)**
@@ -1476,7 +1476,7 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
   explicit PID-bound lease mode for IPC-handle export flows only.
 - **Placement pins are best-effort**: daemon restart loses pins; mitigate by treating pinning as rebuildable intent
   and making plan executors tolerant (reconcile + re-pin).
-- **Alias and cache blob catalog scale/availability**: linearizable alias reads and large cache blob catalogs can hurt availability;
+- **Alias and byte artifact catalog scale/availability**: linearizable alias reads and large byte artifact catalogs can hurt availability;
   mitigate with explicit fallback policy (fixed-version keys) + admission control + bounded candidate LPM.
 - **Transform plugins risk semantic drift**: mitigate with versioned `TransformSpec.name` + `layout_hash` gating and
   fail-fast on mismatch.

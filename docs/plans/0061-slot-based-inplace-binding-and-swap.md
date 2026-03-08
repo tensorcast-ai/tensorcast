@@ -39,7 +39,7 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
 - Thread an explicit `operation_id` (SDK-generated UUID) through retire/materialize/publish and GS drain calls for
   correlation, debugging, and safe retries (without changing routing identity).
 - Enable publishing a filled target as a routable memory replica **without re-hashing GPU memory** by using a daemon-minted
-  write capability (`target_write_token`) and a new `PublishTargetReplica` RPC.
+  publication capability (`target_publication_token`) and a new `PublishTargetReplica` RPC.
 - Enforce publishability constraints: Phase-1 `publish_replica()` only supports full-coverage, routable ByteSpaces
   (canonical or view); packed subset layouts remain local-only until selection-aware routing exists.
 - (Optional) Improve artifact handle ergonomics with a non-ambiguous `tc.artifact(ref)` shorthand.
@@ -58,7 +58,7 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
   - Docs/tests currently encode this contract: `tensorcast/api/store/README.md` and `tests/python/test_deferred_loader.py`.
 - Daemon `MaterializeIntoTarget` is local-only and has no "publish capability":
   - Handler: `daemon/service/controllers/materialization_controller.cc:materialize_into_target(...)`.
-  - Proto: `proto/tensorcast/daemon/v2/store_daemon.proto:MaterializeIntoTargetResponse` has no `target_write_token`.
+  - Proto: `proto/tensorcast/daemon/v2/store_daemon.proto:MaterializeIntoTargetResponse` has no `target_publication_token`.
 - Daemon retire surface is canonical-only and does not target ByteSpace explicitly:
   - RPC: `proto/tensorcast/daemon/v2/store_daemon.proto:DeregisterArtifact`.
   - Handler: `daemon/service/grpc_service_impl.cc:DeregisterArtifact` calls `LipManager::quiesce_artifact(...)`, optionally waits for staged exports to drain, revokes the commit lease, and then calls `StoreEngine::unregister_replica_from_global_store(artifact_id, device_id)`.
@@ -88,7 +88,7 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
   - Daemon `MaterializeIntoTarget` currently sorts names and feeds the sorted list into view planning for subset layouts, which loses the caller’s packed-stream order (`daemon/service/controllers/materialization_controller.cc`).
   - Daemon rejects `index_kind=VIEW` for “packed reorder full coverage” (full canonical set + no view transform), which is required for local packed reorder layouts in the design (`daemon/service/controllers/materialization_controller.cc`).
   - `compute_view_subset_hash` empty-set semantics diverge across languages today (Python hashes `[]`; C++ returns empty bytes), which will make “full coverage” encoding and hash stability fragile unless normalized explicitly (`tensorcast/common/selection_identity.py`, `core/common/selection_identity.cc`).
-- Capability tokens already exist and should be reused for `target_write_token` rather than inventing a parallel token system:
+- Capability tokens already exist and should be reused for `target_publication_token` rather than inventing a parallel token system:
   - Proto: `proto/tensorcast/common/v1/capability_token.proto`
   - C++: `core/common/capability_token.{h,cc}`
 
@@ -115,7 +115,7 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
     - [x] Run codegen: `bash tools/build_proto_python.sh`.
   - [x] Milestone 0.3: Daemon proto scaffolding for slot retire/publish
     - [x] Extend `DeregisterArtifactRequest` with `tensorcast.common.v1.ByteSpaceRef byte_space` (compat wrapper; default canonical when absent).
-    - [x] Extend `MaterializeIntoTargetResponse` with `bytes target_write_token` (optional).
+    - [x] Extend `MaterializeIntoTargetResponse` with `bytes target_publication_token` (optional).
     - [x] Add `operation_id` (optional) to swap-related RPC requests (materialize/publish/retire and GS drain RPCs).
     - [x] Add RPC `PublishTargetReplica(...)` and `RetirePublishedReplica(...)` (stub-first; return `UNIMPLEMENTED` until implemented).
     - [x] Extend `proto/tensorcast/common/v1/capability_token.proto` with a target-write audience + scope message.
@@ -141,7 +141,7 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
     - [x] `InplaceSlot.swap(publish=True)` (Phase 4) calls `RetirePublishedReplica(wait=True)` before overwrite when currently published.
 
 - [x] Phase 3: Daemon publish-target replica (no GPU re-hash)
-  - [x] Milestone 3.1: `target_write_token` mint + validation
+  - [x] Milestone 3.1: `target_publication_token` mint + validation
   - [x] Milestone 3.2: Publish registers communicator keys + GS memory replica
   - [x] Milestone 3.3: Keepalive refreshes region TTLs
 
@@ -167,12 +167,13 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
   - No schema changes expected: use existing `artifact_replicas.is_available` and `replica_counters.current_requests`.
 - Update daemon proto (`proto/tensorcast/daemon/v2/store_daemon.proto`):
   - Extend `DeregisterArtifactRequest` with `tensorcast.common.v1.ByteSpaceRef byte_space` (compat wrapper; default canonical when omitted).
-  - Extend `MaterializeIntoTargetResponse` with `bytes target_write_token` (optional).
+  - Extend `MaterializeIntoTargetResponse` with `bytes target_publication_token` (optional).
   - Add optional `operation_id` to swap-related RPC requests (`MaterializeIntoTarget`, `PublishTargetReplica`, `RetirePublishedReplica`, and retire compat wrappers).
   - Add RPC `PublishTargetReplica(PublishTargetReplicaRequest) -> PublishTargetReplicaResponse`.
   - Add RPC `RetirePublishedReplica(RetirePublishedReplicaRequest) -> RetirePublishedReplicaResponse`.
 - Update capability token proto (`proto/tensorcast/common/v1/capability_token.proto`):
-  - Add a new `CapabilityAudience` for target write tokens and a scope message binding the written `ArtifactSelection`.
+  - Add a new `CapabilityAudience` for target publication tokens and a scope message binding the written
+    `ArtifactSelection`.
 - Run proto generation: `bash tools/build_proto_python.sh`.
 - Add minimal SDK plumbing for new RPCs (stubs only) so Python can compile/typecheck before full semantics land.
 
@@ -229,14 +230,14 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
 
 ## Phase 3: Daemon publish-target replica (no GPU re-hash)
 
-- Mint `target_write_token`:
+- Mint `target_publication_token`:
   - After successful `MaterializeIntoTarget`, mint a capability token and return it in `MaterializeIntoTargetResponse`.
   - Ensure the token binds to the actual `ArtifactSelection` realized by the daemon (`artifact_id`, `view_id`, `view_subset_hash`, `logical_layout_hash`, `selection_hash`) and the resulting `ByteSpaceRef`.
 - Implement `PublishTargetReplica`:
-  - Validate `target_write_token` ownership (pid/device), expiry, and identity fields.
+  - Validate `target_publication_token` ownership (pid/device), expiry, and identity fields.
   - Enforce Phase-1 publishability: only canonical/view full-coverage ByteSpaces (reject subset-packed / packed reorder with `FAILED_PRECONDITION`).
   - Token retry semantics:
-    - `PublishTargetReplica` SHOULD be idempotent for the same `(target_write_token, operation_id)` and MAY allow retrying publish within token TTL (to tolerate GS/transient failures).
+    - `PublishTargetReplica` SHOULD be idempotent for the same `(target_publication_token, operation_id)` and MAY allow retrying publish within token TTL (to tolerate GS/transient failures).
     - Reject stale tokens after a newer materialization for the same target regions (ABA protection).
   - Register communicator remote keys for the target layout (client-owned VRAM regions), producing `remote_memory_keys` + `buffer_sizes`.
   - Publish to Global Store via existing client methods (memory replica registration) without re-hashing GPU bytes.
@@ -255,7 +256,7 @@ Implement the slot-based inplace binding + safe swap flow defined in `docs/desig
   - Preflight: resolve selection + validate daemon capability and layout compatibility before retiring any published replica.
   - If currently `Published`, call `RetirePublishedReplica(... wait=True)` (or `DeregisterArtifact` with ByteSpaceRef if the surface is unified).
   - Call `MaterializeIntoTarget` into the existing arena layout.
-  - If `publish=True`, call `PublishTargetReplica(target_write_token, byte_space)`.
+  - If `publish=True`, call `PublishTargetReplica(target_publication_token, byte_space)`.
   - Update local state (`artifact_id`, `byte_space`, `published_lease_id`).
   - On failures after overwrite begins:
     - materialization failure → slot enters `Dirty` (bytes undefined)

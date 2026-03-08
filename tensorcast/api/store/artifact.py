@@ -63,6 +63,7 @@ from tensorcast.api.store.view_composer import (
     ViewSpecComposer,
     compute_view_id,
 )
+from tensorcast.common.identity import is_byte_artifact_id, validate_byte_artifact_cgid
 from tensorcast.common.selection_contract import (
     build_artifact_selection,
     compute_selected_index_bytes,
@@ -71,6 +72,21 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
+
+
+def _has_validated_byte_artifact_profile(artifact_id: str) -> bool:
+    if not is_byte_artifact_id(artifact_id):
+        return False
+    try:
+        validate_byte_artifact_cgid(artifact_id)
+    except ValueError as exc:
+        raise ArtifactError(
+            f"artifact_id must be a valid byte artifact cgid: {exc}",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        ) from exc
+    return True
+
 
 if TYPE_CHECKING:
     from tensorcast.api._config import GetArtifactOptions
@@ -1141,7 +1157,9 @@ class Artifact:
             commit_result=commit_result,
             artifact_id=self._ensure_identified(),
             canonical_index_bytes=canonical_index_bytes,
-            target_write_token=getattr(response, "target_write_token", None),
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
         )
         return Binding(slot, publish=publish, ctx=ctx)
 
@@ -1432,7 +1450,9 @@ class Artifact:
             commit_result=commit_result,
             artifact_id=self._ensure_identified(),
             canonical_index_bytes=canonical_index_bytes,
-            target_write_token=getattr(response, "target_write_token", None),
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
             copy_plan=copy_plan,
         )
         return Binding(slot, publish=publish, ctx=ctx)
@@ -1883,6 +1903,7 @@ class Artifact:
     def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
         artifact_id = self._ensure_identified()
         runtime = self._runtime_if_available()
+        byte_artifact_profile = _has_validated_byte_artifact_profile(artifact_id)
 
         view_spec_proto: common_pb2.ViewSpec | None = None
         if self._view_spec is not None and not self._view_spec.is_identity:
@@ -1899,11 +1920,15 @@ class Artifact:
             selection_names = tuple(self._view_metadata.tensor_names)
 
         canonical_index_bytes = self._canonical_index_bytes
-        if canonical_index_bytes is None and runtime is not None:
+        if (
+            canonical_index_bytes is None
+            and runtime is not None
+            and not byte_artifact_profile
+        ):
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
                 artifact_id
             )
-        if canonical_index_bytes is None:
+        if canonical_index_bytes is None and not byte_artifact_profile:
             raise ArtifactError(
                 "Canonical index bytes missing while building selection",
                 status_code="FAILED_PRECONDITION",
@@ -1916,6 +1941,13 @@ class Artifact:
         if self._view_metadata is not None and self._view_metadata.view_index_bytes:
             layout_index_bytes = bytes(self._view_metadata.view_index_bytes)
         elif has_transform or has_subset:
+            if byte_artifact_profile:
+                raise ArtifactError(
+                    "byte artifact selection does not support view/subset selection",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            assert canonical_index_bytes is not None
             layout_index_bytes = compute_selected_index_bytes(
                 canonical_index_bytes=canonical_index_bytes,
                 view_spec=view_spec_proto,
@@ -1925,7 +1957,7 @@ class Artifact:
         try:
             return build_artifact_selection(
                 artifact_id=artifact_id,
-                canonical_index_bytes=canonical_index_bytes,
+                canonical_index_bytes=canonical_index_bytes or b"",
                 layout_index_bytes=layout_index_bytes,
                 view_spec=view_spec_proto,
                 tensor_names=selection_names,
@@ -1944,13 +1976,18 @@ class Artifact:
         view_spec_proto: common_pb2.ViewSpec | None,
     ) -> common_pb2.ArtifactSelection:
         artifact_id = self._ensure_identified()
+        byte_artifact_profile = _has_validated_byte_artifact_profile(artifact_id)
         canonical_index_bytes = self._canonical_index_bytes
         runtime = self._runtime_if_available()
-        if canonical_index_bytes is None and runtime is not None:
+        if (
+            canonical_index_bytes is None
+            and runtime is not None
+            and not byte_artifact_profile
+        ):
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
                 artifact_id
             )
-        if canonical_index_bytes is None:
+        if canonical_index_bytes is None and not byte_artifact_profile:
             raise ArtifactError(
                 "Canonical index bytes missing while building region selection",
                 status_code="FAILED_PRECONDITION",
@@ -1966,9 +2003,16 @@ class Artifact:
             region_layout.layout.index_kind
             == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
         ):
+            if byte_artifact_profile:
+                raise ArtifactError(
+                    "byte artifact selection does not support view-index region layouts",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
             if region_layout.view_index_bytes:
                 layout_index_bytes = bytes(region_layout.view_index_bytes)
             else:
+                assert canonical_index_bytes is not None
                 layout_index_bytes = compute_selected_index_bytes(
                     canonical_index_bytes=canonical_index_bytes,
                     view_spec=view_spec_proto,
@@ -1978,7 +2022,7 @@ class Artifact:
         try:
             return build_artifact_selection(
                 artifact_id=artifact_id,
-                canonical_index_bytes=canonical_index_bytes,
+                canonical_index_bytes=canonical_index_bytes or b"",
                 layout_index_bytes=layout_index_bytes,
                 view_spec=view_spec_proto,
                 tensor_names=selection_names,
@@ -2171,6 +2215,15 @@ class Artifact:
             raise ArtifactError(
                 "Artifact handle is released",
                 status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        artifact_id = self._ensure_identified()
+        if _has_validated_byte_artifact_profile(artifact_id) and (
+            slices or transpose or subset
+        ):
+            raise ArtifactError(
+                "byte artifacts do not support view/subset derivation",
+                status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
         self._ensure_metadata()

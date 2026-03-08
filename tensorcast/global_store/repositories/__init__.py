@@ -23,6 +23,7 @@ from .placement_repository import (
 )
 from .proof_repository import ProofRepository
 from .replica_repository import ReplicaRepository
+from .shard_home_lease_repository import ShardHomeLeaseRepository
 from .transport_repository import TransportRepository
 from .view_coverage_repository import ViewCoverageRepository
 from .view_repository import ViewRepository
@@ -46,6 +47,7 @@ __all__ = [
     "PendingTransportRequestRepository",
     "ProofRepository",
     "ReplicaRepository",
+    "ShardHomeLeaseRepository",
     "TransportRepository",
     "ViewCoverageRepository",
     "ViewRepository",

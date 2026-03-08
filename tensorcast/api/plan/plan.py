@@ -30,13 +30,22 @@ from tensorcast.api.store.artifact import (
     _decode_capability_token,
 )
 from tensorcast.api.store.view_composer import compute_view_id
+from tensorcast.engine_adapter.kvcache_adapter import (
+    BatchOutcome,
+    BatchResult,
+    HydrateResult,
+    ManifestResult,
+    PublishResult,
+)
 from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
 
 T = TypeVar("T")
+ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +80,7 @@ class PlanStepResult:
     action: str
     status: OperationStatus
     value: Any | None = None
+    artifact_result: ArtifactActionResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +91,31 @@ class PlanResult:
 
     def step(self, ref: PlanStepRef[Any]) -> PlanStepResult:
         return self.steps[ref.step_id]
+
+    @classmethod
+    def from_node_agent_response(
+        cls, response: node_agent_pb2.ExecutePlanResponse
+    ) -> "PlanResult":
+        steps: dict[str, PlanStepResult] = {}
+        for step in response.steps:
+            artifact_result = (
+                _artifact_result_from_proto(step.artifact_result)
+                if step.HasField("artifact_result")
+                else None
+            )
+            steps[str(step.step_id)] = PlanStepResult(
+                step_id=str(step.step_id),
+                target_id=str(step.target_id),
+                action=str(step.action),
+                status=_operation_status_from_node_agent_proto(step.status),
+                value=None,
+                artifact_result=artifact_result,
+            )
+        return cls(
+            ok=bool(response.ok),
+            request_id=str(response.request_id),
+            steps=steps,
+        )
 
 
 class PlanFailedError(ArtifactError):
@@ -140,12 +175,37 @@ class _TransformRegisterAction:
     policy: StorePolicy | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ManifestAction:
+    engine_request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PublishAction:
+    engine_request_id: str
+    ttl_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _HydrateAction:
+    engine_request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _EvictLocalAction:
+    engine_request_id: str | None
+
+
 _PlanAction = (
     _PrefetchAction
     | _PinAction
     | _UnpinAction
     | _TransformIntoAction
     | _TransformRegisterAction
+    | _ManifestAction
+    | _PublishAction
+    | _HydrateAction
+    | _EvictLocalAction
 )
 
 
@@ -183,6 +243,108 @@ def _derive_action_idempotency_key(
     digest.update(b"|selection=")
     digest.update(selection.selection_hash)
     return f"tc.plan.action.v1:{digest.hexdigest()}"
+
+
+_NODE_AGENT_STATE_TO_OP_STATE = {
+    node_agent_pb2.OPERATION_STATE_PENDING: "pending",
+    node_agent_pb2.OPERATION_STATE_RUNNING: "running",
+    node_agent_pb2.OPERATION_STATE_SUCCESS: "success",
+    node_agent_pb2.OPERATION_STATE_FAILED: "failed",
+    node_agent_pb2.OPERATION_STATE_CANCELLED: "cancelled",
+    node_agent_pb2.OPERATION_STATE_DEGRADED: "degraded",
+}
+
+
+def _timestamp_to_epoch_ms(ts: object) -> int | None:
+    seconds = getattr(ts, "seconds", None)
+    nanos = getattr(ts, "nanos", None)
+    if seconds is None or nanos is None:
+        return None
+    return int(int(seconds) * 1000 + int(nanos) // 1_000_000)
+
+
+def _batch_outcome_from_proto(
+    outcome: node_agent_pb2.ArtifactBatchOutcome,
+) -> BatchOutcome:
+    return BatchOutcome(
+        artifact_id=str(outcome.artifact_id),
+        status_code=str(outcome.status_code),
+        message=str(outcome.message) if outcome.message else None,
+    )
+
+
+def _manifest_result_from_proto(
+    result: node_agent_pb2.ArtifactManifestResult,
+) -> ManifestResult:
+    return ManifestResult(
+        engine_request_id=str(result.engine_request_id),
+        layout_id=str(result.layout_id),
+        artifact_ids=tuple(str(item) for item in result.artifact_ids),
+        key_set_digest_alg=str(result.key_set_digest_alg),
+        key_set_digest_hex=str(result.key_set_digest_hex),
+    )
+
+
+def _artifact_result_from_proto(
+    result: node_agent_pb2.ArtifactActionResult,
+) -> ArtifactActionResult | None:
+    kind = result.WhichOneof("result")
+    if kind == "manifest":
+        return _manifest_result_from_proto(result.manifest)
+    if kind == "publish":
+        return PublishResult(
+            manifest=_manifest_result_from_proto(result.publish.manifest),
+            put_outcomes=tuple(
+                _batch_outcome_from_proto(item) for item in result.publish.put_outcomes
+            ),
+        )
+    if kind == "hydrate":
+        return HydrateResult(
+            manifest=(
+                _manifest_result_from_proto(result.hydrate.manifest)
+                if result.hydrate.HasField("manifest")
+                else None
+            ),
+            get_outcomes=tuple(
+                _batch_outcome_from_proto(item) for item in result.hydrate.get_outcomes
+            ),
+            missing_artifact_ids=tuple(
+                str(item) for item in result.hydrate.missing_artifact_ids
+            ),
+        )
+    if kind == "evict_local":
+        return BatchResult(
+            engine_request_id=(
+                str(result.evict_local.engine_request_id)
+                if result.evict_local.HasField("engine_request_id")
+                else None
+            ),
+            outcomes=tuple(
+                _batch_outcome_from_proto(item) for item in result.evict_local.outcomes
+            ),
+        )
+    return None
+
+
+def _operation_status_from_node_agent_proto(
+    status: node_agent_pb2.OperationStatus,
+) -> OperationStatus:
+    error: OperationError | None = None
+    if status.HasField("error"):
+        error = OperationError(
+            status_code=str(status.error.status_code or "UNKNOWN"),
+            message=str(status.error.message or ""),
+            retryable=bool(status.error.retryable),
+        )
+    return OperationStatus(
+        state=_NODE_AGENT_STATE_TO_OP_STATE.get(int(status.state), "running"),
+        message=str(status.message) if status.message else None,
+        progress=float(status.progress) if status.progress else None,
+        as_of_ms=_timestamp_to_epoch_ms(status.as_of)
+        if status.HasField("as_of")
+        else None,
+        error=error,
+    )
 
 
 def _resolve_device_id(*, device: str | int, allow_cpu: bool) -> int:
@@ -444,6 +606,17 @@ class InstanceStepBuilder:
         self._plan = plan
         self._inst = inst
 
+    @staticmethod
+    def _validated_engine_request_id(engine_request_id: str) -> str:
+        value = str(engine_request_id).strip()
+        if not value:
+            raise ArtifactError(
+                "engine_request_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return value
+
     def transform_into(
         self,
         art: Artifact,
@@ -516,6 +689,116 @@ class InstanceStepBuilder:
                 spec=spec,
                 out_key=out_key,
                 policy=policy,
+            ),
+            depends_on=depends_on,
+        )
+
+    def manifest(
+        self,
+        *,
+        engine_request_id: str,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[Any]:
+        return self._manifest(
+            engine_request_id=engine_request_id, depends_on=depends_on
+        )
+
+    def publish(
+        self,
+        *,
+        engine_request_id: str,
+        ttl_ms: int | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[Any]:
+        return self._publish(
+            engine_request_id=engine_request_id,
+            ttl_ms=ttl_ms,
+            depends_on=depends_on,
+        )
+
+    def hydrate(
+        self,
+        *,
+        engine_request_id: str,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[Any]:
+        return self._hydrate(engine_request_id=engine_request_id, depends_on=depends_on)
+
+    def evict_local(
+        self,
+        *,
+        engine_request_id: str | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[Any]:
+        return self._evict_local(
+            engine_request_id=engine_request_id, depends_on=depends_on
+        )
+
+    def _manifest(
+        self,
+        *,
+        engine_request_id: str,
+        depends_on: Sequence[PlanStepRef[Any]] | None,
+    ) -> PlanStepRef[Any]:
+        return self._plan._add_step(
+            target=self._inst,
+            action=_ManifestAction(
+                engine_request_id=self._validated_engine_request_id(engine_request_id),
+            ),
+            depends_on=depends_on,
+        )
+
+    def _publish(
+        self,
+        *,
+        engine_request_id: str,
+        ttl_ms: int | None,
+        depends_on: Sequence[PlanStepRef[Any]] | None,
+    ) -> PlanStepRef[Any]:
+        if ttl_ms is not None and int(ttl_ms) <= 0:
+            raise ArtifactError(
+                "ttl_ms must be positive when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return self._plan._add_step(
+            target=self._inst,
+            action=_PublishAction(
+                engine_request_id=self._validated_engine_request_id(engine_request_id),
+                ttl_ms=int(ttl_ms) if ttl_ms is not None else None,
+            ),
+            depends_on=depends_on,
+        )
+
+    def _hydrate(
+        self,
+        *,
+        engine_request_id: str,
+        depends_on: Sequence[PlanStepRef[Any]] | None,
+    ) -> PlanStepRef[Any]:
+        return self._plan._add_step(
+            target=self._inst,
+            action=_HydrateAction(
+                engine_request_id=self._validated_engine_request_id(engine_request_id),
+            ),
+            depends_on=depends_on,
+        )
+
+    def _evict_local(
+        self,
+        *,
+        engine_request_id: str | None,
+        depends_on: Sequence[PlanStepRef[Any]] | None,
+    ) -> PlanStepRef[Any]:
+        resolved_engine_request_id: str | None = None
+        if engine_request_id is not None:
+            resolved_engine_request_id = self._validated_engine_request_id(
+                engine_request_id
+            )
+        return self._plan._add_step(
+            target=self._inst,
+            action=_EvictLocalAction(
+                engine_request_id=resolved_engine_request_id,
             ),
             depends_on=depends_on,
         )
@@ -648,6 +931,21 @@ class Plan:
                     transform_register_action.policy.CopyFrom(
                         step.action.policy.to_proto()
                     )
+            elif isinstance(step.action, _ManifestAction):
+                manifest_action = step_msg.action.manifest
+                manifest_action.engine_request_id = str(step.action.engine_request_id)
+            elif isinstance(step.action, _PublishAction):
+                publish_action = step_msg.action.publish
+                publish_action.engine_request_id = str(step.action.engine_request_id)
+                if step.action.ttl_ms is not None:
+                    publish_action.ttl_ms = int(step.action.ttl_ms)
+            elif isinstance(step.action, _HydrateAction):
+                hydrate_action = step_msg.action.hydrate
+                hydrate_action.engine_request_id = str(step.action.engine_request_id)
+            elif isinstance(step.action, _EvictLocalAction):
+                evict_action = step_msg.action.evict_local
+                if step.action.engine_request_id:
+                    evict_action.engine_request_id = str(step.action.engine_request_id)
             else:
                 raise ArtifactError(
                     "Unknown plan action",
@@ -964,6 +1262,14 @@ def _action_name(action: _PlanAction) -> str:
         return "transform_into"
     if isinstance(action, _TransformRegisterAction):
         return "transform_register"
+    if isinstance(action, _ManifestAction):
+        return "manifest"
+    if isinstance(action, _PublishAction):
+        return "publish"
+    if isinstance(action, _HydrateAction):
+        return "hydrate"
+    if isinstance(action, _EvictLocalAction):
+        return "evict_local"
     return "unknown"
 
 
@@ -997,6 +1303,7 @@ def plan(ctx: CallContext) -> Plan:
 
 
 __all__ = [
+    "ArtifactActionResult",
     "Instance",
     "Plan",
     "PlanFailedError",

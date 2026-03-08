@@ -92,7 +92,7 @@ class FakeBindingClient:
         token = f"token-{self._token_counter}".encode("utf-8")
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-            target_write_token=token,
+            target_publication_token=token,
         )
 
     def publish_target_replica(self, **kwargs: Any) -> Any:

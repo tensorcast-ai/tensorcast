@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/byte_artifact_controller.h"
 #include "daemon/service/controllers/key_mapping_controller.h"
 #include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
@@ -36,6 +37,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   struct Deps {
     store::StoreEngine& engine;
     MaterializationController& materialization_controller;
+    ByteArtifactController& byte_artifact_controller;
     RegistrationController& registration_controller;
     TransportController& transport_controller;
     StatusController& status_controller;
@@ -277,9 +279,53 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetLoadedReplicasV2Request* req,
       v2::GetLoadedReplicasV2Response* resp) override;
 
+  grpc::Status BatchExists(grpc::ServerContext* ctx, const v2::BatchExistsRequest* req, v2::BatchExistsResponse* resp)
+      override;
+
+  grpc::Status BatchGetIntoRegion(
+      grpc::ServerContext* ctx,
+      const v2::BatchGetIntoRegionRequest* req,
+      v2::BatchGetIntoRegionResponse* resp) override;
+
+  grpc::Status BatchPutIfAbsentFromRegion(
+      grpc::ServerContext* ctx,
+      const v2::BatchPutIfAbsentFromRegionRequest* req,
+      v2::BatchPutIfAbsentFromRegionResponse* resp) override;
+
+  grpc::Status BatchTouchTtl(
+      grpc::ServerContext* ctx,
+      const v2::BatchTouchTtlRequest* req,
+      v2::BatchTouchTtlResponse* resp) override;
+
+  grpc::Status HomeBatchExists(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchExistsRequest* req,
+      v2::HomeBatchExistsResponse* resp) override;
+
+  grpc::Status HomeBatchGet(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchGetRequest* req,
+      v2::HomeBatchGetResponse* resp) override;
+
+  grpc::Status HomeBatchPutIfAbsent(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchPutIfAbsentRequest* req,
+      v2::HomeBatchPutIfAbsentResponse* resp) override;
+
+  grpc::Status HomeBatchTouchTtl(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchTouchTtlRequest* req,
+      v2::HomeBatchTouchTtlResponse* resp) override;
+
+  grpc::Status FetchPayloadRefChunk(
+      grpc::ServerContext* ctx,
+      const v2::FetchPayloadRefChunkRequest* req,
+      v2::FetchPayloadRefChunkResponse* resp) override;
+
  private:
   store::StoreEngine* engine_;
   MaterializationController* materialization_controller_;
+  ByteArtifactController* byte_artifact_controller_;
   RegistrationController* registration_controller_;
   TransportController* transport_controller_;
   StatusController* status_controller_;

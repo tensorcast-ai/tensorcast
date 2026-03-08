@@ -32,7 +32,7 @@ class _FakeBinding:
 
 class _FakeBindingPublishFail(_FakeBinding):
     def publish_replica(self, *_: object, **__: object) -> None:
-        raise RuntimeError("target_write_token missing; daemon publish not available")
+        raise RuntimeError("target_publication_token missing; daemon publish not available")
 
 
 class _FailingArtifact:
@@ -164,7 +164,7 @@ def test_tp_bind_publish_failure_is_non_fatal(
     assert pointer_stable is True
     captured = capsys.readouterr().out
     assert "publish=skipped" in captured
-    assert "target_write_token missing" in captured
+    assert "target_publication_token missing" in captured
 
 
 def test_binding_swap_uses_group_ctx_tags(
