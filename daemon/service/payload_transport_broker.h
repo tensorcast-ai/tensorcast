@@ -18,6 +18,8 @@
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "daemon/service/body_backing_types.h"
 #include "daemon/service/byte_artifact_body_handle.h"
+#include "daemon/state/lifecycle_kernel.h"
+#include "daemon/state/session_lifecycle.h"
 #include "tensorcast/common/v1/capability_token.pb.h"
 
 namespace tensorcast::daemon {
@@ -63,7 +65,12 @@ class PayloadTransportBroker {
     std::shared_ptr<const std::string> payload;
   };
 
-  PayloadTransportBroker(std::string daemon_id, common::CapabilityTokenManager* capability_tokens, Options options);
+  PayloadTransportBroker(
+      std::string daemon_id,
+      common::CapabilityTokenManager* capability_tokens,
+      SessionLifecycleManager* lifecycle_manager,
+      LifecycleKernel* lifecycle_kernel,
+      Options options);
 
   [[nodiscard]] absl::StatusOr<std::string> issue_payload_ref(
       std::string_view artifact_id,
@@ -184,6 +191,7 @@ class PayloadTransportBroker {
     BodyDescriptor descriptor;
     std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
     std::uint64_t backing_instance_generation{0};
+    SessionLifecycleManager::LeaseId lease_id{0};
   };
 
   [[nodiscard]] absl::StatusOr<LocalResolvedPayload> resolve_local_payload_ref_record(
@@ -197,6 +205,8 @@ class PayloadTransportBroker {
 
   std::string daemon_id_;
   common::CapabilityTokenManager* capability_tokens_{nullptr};
+  SessionLifecycleManager* lifecycle_manager_{nullptr};
+  LifecycleKernel* lifecycle_kernel_{nullptr};
   Options options_;
 
   mutable absl::Mutex mu_;

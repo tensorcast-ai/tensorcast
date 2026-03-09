@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "absl/status/statusor.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
@@ -14,7 +15,9 @@
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_manager.h"
+#include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
@@ -30,6 +33,8 @@ class TargetMaterializationService {
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
     ArtifactSourceRegistry& disk_imports;
+    SessionLifecycleManager& lifecycle;
+    LifecycleKernel& lifecycle_kernel;
     ShutdownSignal& shutdown_signal;
     WorkerIdentityStore& identity;
     ExternalTargetAccessService& external_target_access_service;
@@ -57,7 +62,8 @@ class TargetMaterializationService {
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
-  TargetPublicationRegistry::Record insert_target_publication_for_testing(TargetPublicationRegistry::Record record);
+  [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> insert_target_publication_for_testing(
+      TargetPublicationRegistry::Record record);
 
  private:
   Dep d_;

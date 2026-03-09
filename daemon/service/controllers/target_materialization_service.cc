@@ -443,6 +443,8 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
               .lip_manager = d_.lip_manager,
               .devices = d_.devices,
               .identity = d_.identity,
+              .lifecycle = d_.lifecycle,
+              .lifecycle_kernel = d_.lifecycle_kernel,
               .global_store_client = d_.global_store_client,
               .capability_tokens = d_.capability_tokens,
               .max_concurrency = d_.max_concurrency,
@@ -457,7 +459,7 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
   }
 }
 
-TargetPublicationRegistry::Record TargetMaterializationService::insert_target_publication_for_testing(
+absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::insert_target_publication_for_testing(
     TargetPublicationRegistry::Record record) {
   return target_publish_service_.remember_target_publication(std::move(record));
 }
@@ -792,9 +794,13 @@ grpc::Status TargetMaterializationService::materialize_into_target(
           record.expires_at = expires_at;
           record.segments = std::move(publish_segments);
           record.storages = std::move(publish_storages);
-          auto inserted = target_publish_service_.remember_target_publication(std::move(record));
-          (void)inserted;
-          resp.set_target_publication_token(*token_or);
+          auto inserted_or = target_publish_service_.remember_target_publication(std::move(record));
+          if (inserted_or.ok()) {
+            resp.set_target_publication_token(*token_or);
+          } else {
+            VLOG(1) << "MaterializeIntoTarget: failed to register target publication lifecycle: "
+                    << inserted_or.status();
+          }
         } else {
           VLOG(1) << "MaterializeIntoTarget: failed to mint target_publication_token: " << token_or.status();
         }
@@ -1076,9 +1082,13 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
           record.expires_at = expires_at;
           record.segments = std::move(publish_segments);
           record.storages = std::move(publish_storages);
-          auto inserted = target_publish_service_.remember_target_publication(std::move(record));
-          (void)inserted;
-          resp.set_target_publication_token(*token_or);
+          auto inserted_or = target_publish_service_.remember_target_publication(std::move(record));
+          if (inserted_or.ok()) {
+            resp.set_target_publication_token(*token_or);
+          } else {
+            VLOG(1) << "MaterializeIntoMappedTarget: failed to register target publication lifecycle: "
+                    << inserted_or.status();
+          }
         } else {
           VLOG(1) << "MaterializeIntoMappedTarget: failed to mint target_publication_token: " << token_or.status();
         }

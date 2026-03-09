@@ -23,6 +23,7 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/unified_memory_authority.h"
 #include "core/store/store_engine.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/session_lifecycle.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
@@ -47,7 +48,11 @@ class HandleLeaseRegistry {
     uint32_t max_mints_per_second{0};
   };
 
-  HandleLeaseRegistry(Options opts, store::StoreEngine& engine, SessionLifecycleManager& lifecycle);
+  HandleLeaseRegistry(
+      Options opts,
+      store::StoreEngine& engine,
+      SessionLifecycleManager& lifecycle,
+      LifecycleKernel& lifecycle_kernel);
 
   [[nodiscard]] absl::StatusOr<std::string> mint_cuda_ipc_lease(const store::loading::ReplicaKey& key, pid_t pid);
 
@@ -60,6 +65,15 @@ class HandleLeaseRegistry {
   [[nodiscard]] absl::Status release(const std::string& lease_token);
 
   [[nodiscard]] absl::StatusOr<CpuMemfdDescriptor> get_cpu_memfd_descriptor(const std::string& lease_token) const;
+
+  [[nodiscard]] absl::StatusOr<ParsedCredential> build_parsed_credential(
+      const std::string& lease_token,
+      LifecycleFrontDoorKind front_door_kind,
+      absl::Time now) const;
+
+  [[nodiscard]] LifecycleKernel* lifecycle_kernel() const {
+    return lifecycle_kernel_;
+  }
 
   [[nodiscard]] size_t size() const;
 
@@ -111,6 +125,7 @@ class HandleLeaseRegistry {
   const Options opts_;
   store::StoreEngine* engine_;
   SessionLifecycleManager* lifecycle_;
+  LifecycleKernel* lifecycle_kernel_;
 
   mutable absl::Mutex mu_;
   absl::BitGen bitgen_ ABSL_GUARDED_BY(mu_);

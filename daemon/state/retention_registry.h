@@ -18,6 +18,7 @@
 #include "core/common/selection_identity.h"
 #include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/session_lifecycle.h"
 
 namespace tensorcast::common::v1 {
@@ -81,6 +82,7 @@ class RetentionRegistry {
       Options opts,
       std::unique_ptr<RetentionBackend> backend,
       SessionLifecycleManager& lifecycle,
+      LifecycleKernel& lifecycle_kernel,
       common::CapabilityTokenManager* capability_tokens,
       std::string daemon_id);
 
@@ -151,6 +153,7 @@ class RetentionRegistry {
   Options opts_;
   std::unique_ptr<RetentionBackend> backend_;
   SessionLifecycleManager* lifecycle_;
+  LifecycleKernel* lifecycle_kernel_;
   common::CapabilityTokenManager* capability_tokens_;
   std::string daemon_id_;
 

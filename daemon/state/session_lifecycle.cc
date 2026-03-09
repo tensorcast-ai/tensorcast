@@ -170,6 +170,13 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
 absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create_placement_lease(
     const ReplicaSubject& subj,
     /*spec*/ absl::Duration ttl) {
+  return create_placement_lease(subj, ttl, {});
+}
+
+absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create_placement_lease(
+    const ReplicaSubject& subj,
+    /*spec*/ absl::Duration ttl,
+    std::vector<std::function<absl::Status()>> extra_finalizers) {
   LeaseId created_id = 0;
   std::optional<absl::Time> notify_when;
   {
@@ -197,6 +204,9 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
       g.generation = 1;
       guard_by_id_.emplace(g.id, g);
       r.guards.push_back(g.id);
+    }
+    for (auto& f : extra_finalizers) {
+      r.finalizers.emplace_back(std::move(f));
     }
     // Finalizer: attempt immediate reclaim if this was the last pin and no active uses remain
     r.finalizers.emplace_back([this, subj]() -> absl::Status {
@@ -381,6 +391,19 @@ absl::Status SessionLifecycleManager::renew_placement(LeaseId id, absl::Duration
 
 absl::Status SessionLifecycleManager::renew_retention(LeaseId id, absl::Duration ttl) {
   return renew_placement(id, ttl);
+}
+
+absl::Status SessionLifecycleManager::add_finalizer(LeaseId id, std::function<absl::Status()> finalizer) {
+  if (!finalizer) {
+    return absl::InvalidArgumentError("finalizer is required");
+  }
+  absl::MutexLock lock(&mu_);
+  auto it = by_id_.find(id);
+  if (it == by_id_.end()) {
+    return absl::NotFoundError("lease not found");
+  }
+  it->second.finalizers.emplace_back(std::move(finalizer));
+  return absl::OkStatus();
 }
 
 void SessionLifecycleManager::release_lease(LeaseId id) {

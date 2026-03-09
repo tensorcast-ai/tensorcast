@@ -183,7 +183,8 @@ TEST_CASE("PublishTargetReplica rejects packed selections", "[daemon][publish]")
   const std::string token = mint_token(*tokens, "daemon-test", scope);
 
   auto record = make_record_from_scope(scope);
-  harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
@@ -208,7 +209,8 @@ TEST_CASE("PublishTargetReplica allows packed selection for view byte-space", "[
   const std::string token = mint_token(*tokens, "daemon-test", scope);
 
   auto record = make_record_from_scope(scope);
-  harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;

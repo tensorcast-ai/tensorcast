@@ -3,9 +3,12 @@
 #include "daemon/service/controllers/target_publish_service.h"
 
 #include <algorithm>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
@@ -74,20 +77,109 @@ std::string build_publication_key(
   return key;
 }
 
+std::string publication_capability_id(std::string_view publication_id) {
+  return absl::StrCat("publication:", publication_id);
+}
+
+std::string publication_subject_id(const TargetPublicationRegistry::Record& record) {
+  return absl::StrCat("publication-target:", record.publication_key);
+}
+
+WorkflowCompanionRef publication_workflow_companion(const TargetPublicationRegistry::Record& record) {
+  return WorkflowCompanionRef{
+      .owner_kind = WorkflowOwnerKind::kPublication,
+      .workflow_id = record.publication_id,
+      .currentness_key = record.publication_key,
+      .operation_id = record.operation_id.empty() ? std::nullopt : std::optional<std::string>(record.operation_id),
+      .fencing_context = std::nullopt,
+  };
+}
+
+struct UseGuardScope {
+  LifecycleKernel* kernel{nullptr};
+  std::optional<LifecycleUseGuard> use_guard;
+
+  ~UseGuardScope() {
+    if (kernel == nullptr || !use_guard.has_value()) {
+      return;
+    }
+    auto st = kernel->release_use_guard(*use_guard);
+    LOG_IF(WARNING, !st.ok()) << "publish_target_replica: failed to release lifecycle use guard: " << st;
+  }
+};
+
 } // namespace
 
 TargetPublishService::TargetPublishService(Dep d)
     : d_(std::move(d)),
       capability_tokens_(d_.capability_tokens),
-      target_publication_registry_(TargetPublicationRegistry::Options{.ttl = target_publication_token_ttl()}) {}
+      target_publication_registry_(
+          std::make_shared<TargetPublicationRegistry>(
+              TargetPublicationRegistry::Options{.ttl = target_publication_token_ttl()})) {}
 
 absl::Duration TargetPublishService::target_publication_token_ttl() {
   return absl::Minutes(5);
 }
 
-TargetPublicationRegistry::Record TargetPublishService::remember_target_publication(
+absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember_target_publication(
     TargetPublicationRegistry::Record record) {
-  return target_publication_registry_.insert(std::move(record));
+  const absl::Time now = absl::Now();
+  const absl::Duration ttl =
+      record.expires_at == absl::InfinitePast() ? target_publication_token_ttl() : record.expires_at - now;
+  auto lease_or = d_.lifecycle.create_retention_lease(
+      ttl,
+      std::vector<std::function<absl::Status()>>{
+          [this, publication_id = record.publication_id]() -> absl::Status {
+            target_publication_registry_->erase(publication_id);
+            return d_.lifecycle_kernel.release_capability(publication_capability_id(publication_id));
+          },
+      });
+  if (!lease_or.ok()) {
+    return lease_or.status();
+  }
+  record.capability_id = publication_capability_id(record.publication_id);
+  record.lease_id = *lease_or;
+
+  LifecycleSubjectRecord subject;
+  subject.subject_id = publication_subject_id(record);
+  subject.epochs.subject_generation = 1;
+  subject.subject_kind = LifecycleSubjectKind::kPublicationTarget;
+  subject.created_at = now;
+  subject.last_observed_at = now;
+  subject.artifact_id = record.selection.artifact_id();
+  subject.semantic_ref_id = record.publication_id;
+  subject.workflow_companion = publication_workflow_companion(record);
+  auto capability_or = d_.lifecycle_kernel.mint_capability(
+      MintCapabilityRequest{
+          .subject = subject,
+          .address =
+              CapabilityBindingAddress{
+                  .route_principal = make_issuer_route_principal(d_.identity.daemon_id()),
+                  .family = LifecycleCapabilityFamily::kPublish,
+                  .binding_space = LifecycleBindingSpace::kPublication,
+                  .binding_key_kind = BindingKeyKind::kPublicationId,
+                  .binding_key = record.publication_id,
+                  .epochs = subject.epochs,
+              },
+          .front_door_kind = LifecycleFrontDoorKind::kTargetPublicationToken,
+          .capability_id = record.capability_id,
+          .lease_id = *lease_or,
+          .capability_expires_at = record.expires_at,
+          .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+          .binding_mode = LifecycleBindingMode::kAddressDerived,
+          .constraint_claims =
+              ConstraintClaims{
+                  .artifact_id = record.selection.artifact_id(),
+                  .operation_id = record.operation_id,
+              },
+          .workflow_companion = publication_workflow_companion(record),
+          .workflow_gate = WorkflowGateKind::kRequired,
+      });
+  if (!capability_or.ok()) {
+    d_.lifecycle.release_lease(*lease_or);
+    return capability_or.status();
+  }
+  return target_publication_registry_->insert(std::move(record));
 }
 
 grpc::Status TargetPublishService::publish_target_replica(
@@ -155,14 +247,42 @@ grpc::Status TargetPublishService::publish_target_replica(
   }
 
   auto record_opt =
-      target_publication_registry_.lookup(scope.publication_id(), absl::Now(), /*require_not_expired=*/true);
+      target_publication_registry_->lookup(scope.publication_id(), absl::Now(), /*require_not_expired=*/true);
   if (!record_opt.has_value()) {
     return {StatusCode::NOT_FOUND, "target_publication_token is no longer valid"};
   }
   auto record = std::move(*record_opt);
+  auto admitted_or = d_.lifecycle_kernel.admit_redemption(
+      ParsedCredential{
+          .address =
+              CapabilityBindingAddress{
+                  .route_principal = make_issuer_route_principal(d_.identity.daemon_id()),
+                  .family = LifecycleCapabilityFamily::kPublish,
+                  .binding_space = LifecycleBindingSpace::kPublication,
+                  .binding_key_kind = BindingKeyKind::kPublicationId,
+                  .binding_key = scope.publication_id(),
+                  .epochs =
+                      LifecycleEpochs{
+                          .subject_generation = 1,
+                      },
+              },
+          .front_door_kind = LifecycleFrontDoorKind::kTargetPublicationToken,
+          .credential_expires_at = absl::FromUnixMillis(static_cast<int64_t>(env_or->expires_at_ms())),
+          .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+          .binding_mode = LifecycleBindingMode::kAddressDerived,
+          .constraint_claims =
+              ConstraintClaims{
+                  .artifact_id = scope.selection().artifact_id(),
+                  .operation_id = scope.operation_id(),
+              },
+      });
+  if (!admitted_or.ok()) {
+    return to_grpc_status(admitted_or.status());
+  }
+  UseGuardScope use_guard_scope{.kernel = &d_.lifecycle_kernel, .use_guard = admitted_or->use_guard};
   const std::string publication_key = build_publication_key(
       scope.selection(), normalized_scope, scope.target_layout_hash(), scope.owner_pid(), scope.device_uuid());
-  if (!target_publication_registry_.is_current_for_target(record.publication_key, scope.publication_id())) {
+  if (!target_publication_registry_->is_current_for_target(record.publication_key, scope.publication_id())) {
     return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
   }
   if (record.publication_key != publication_key) {

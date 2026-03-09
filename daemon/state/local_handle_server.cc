@@ -21,6 +21,7 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/clock.h"
 
 namespace tensorcast::daemon {
 namespace {
@@ -249,19 +250,49 @@ absl::Status LocalHandleServer::handle_conn_(int conn_fd) {
         (void)write_exact_(conn_fd, &code, sizeof(code));
         return absl::FailedPreconditionError("cpu shared memory is disabled");
       }
+      auto parsed_or =
+          leases_->build_parsed_credential(token, LifecycleFrontDoorKind::kLocalCpuMemfdExport, absl::Now());
+      if (!parsed_or.ok()) {
+        const uint8_t code = static_cast<uint8_t>(map_status_(parsed_or.status()));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return parsed_or.status();
+      }
+      auto* lifecycle_kernel = leases_->lifecycle_kernel();
+      if (lifecycle_kernel == nullptr) {
+        const auto st = absl::FailedPreconditionError("lifecycle kernel is unavailable");
+        const uint8_t code = static_cast<uint8_t>(map_status_(st));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return st;
+      }
+      auto admitted_or = lifecycle_kernel->admit_redemption(*parsed_or);
+      if (!admitted_or.ok()) {
+        const uint8_t code = static_cast<uint8_t>(map_status_(admitted_or.status()));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return admitted_or.status();
+      }
       auto desc_or = leases_->get_cpu_memfd_descriptor(token);
       if (!desc_or.ok()) {
+        auto release_status = lifecycle_kernel->release_use_guard(admitted_or->use_guard);
+        LOG_IF(WARNING, !release_status.ok())
+            << "LocalHandleServer: failed to release export use guard: " << release_status;
         const uint8_t code = static_cast<uint8_t>(map_status_(desc_or.status()));
         (void)write_exact_(conn_fd, &code, sizeof(code));
         return desc_or.status();
       }
       const auto desc = *desc_or;
       if (desc.fd < 0) {
+        auto release_status = lifecycle_kernel->release_use_guard(admitted_or->use_guard);
+        LOG_IF(WARNING, !release_status.ok())
+            << "LocalHandleServer: failed to release export use guard: " << release_status;
         const uint8_t code = static_cast<uint8_t>(RespCode::kInternal);
         (void)write_exact_(conn_fd, &code, sizeof(code));
         return absl::InternalError("memfd is invalid");
       }
-      return send_fd_with_status(conn_fd, desc.fd, static_cast<uint8_t>(RespCode::kOk));
+      auto send_status = send_fd_with_status(conn_fd, desc.fd, static_cast<uint8_t>(RespCode::kOk));
+      auto release_status = lifecycle_kernel->release_use_guard(admitted_or->use_guard);
+      LOG_IF(WARNING, !release_status.ok())
+          << "LocalHandleServer: failed to release export use guard: " << release_status;
+      return send_status;
     }
     case OpCode::kReleaseHandle: {
       auto rel = leases_->release(token);

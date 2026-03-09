@@ -164,9 +164,11 @@ sc_cc_library(
         ":byte_artifact_region_layout_lib",
         ":external_target_access_service_lib",
         ":grpc_peer_utils_lib",
+        ":lifecycle_kernel_lib",
         ":materialization_target_storage_utils_lib",
         ":persistence_manager_lib",
         ":rpc_context_hdr",
+        ":session_lifecycle_lib",
         ":status_utils",
         ":worker_directory_cache_lib",
         ":worker_identity_store_lib",
@@ -283,10 +285,24 @@ cc_binary(
 )
 
 sc_cc_library(
+    name = "lifecycle_kernel_lib",
+    srcs = ["state/lifecycle_kernel.cc"],
+    hdrs = ["state/lifecycle_kernel.h"],
+    deps = [
+        "//core/store/runtime/ingestion:artifact_truth",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
     name = "handle_lease_registry_lib",
     srcs = ["state/handle_lease_registry.cc"],
     hdrs = ["state/handle_lease_registry.h"],
     deps = [
+        ":lifecycle_kernel_lib",
         ":session_lifecycle_lib",
         "//core/common:memory_location_lib",
         "//core/store:store_engine",
@@ -319,6 +335,7 @@ sc_cc_library(
     srcs = ["state/retention_registry.cc"],
     hdrs = ["state/retention_registry.h"],
     deps = [
+        ":lifecycle_kernel_lib",
         ":session_lifecycle_lib",
         ":store_policy_resolver_lib",
         "//core/common:capability_token_lib",
@@ -344,6 +361,7 @@ sc_cc_library(
     hdrs = ["state/local_handle_server.h"],
     deps = [
         ":handle_lease_registry_lib",
+        ":lifecycle_kernel_lib",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -759,6 +777,7 @@ sc_cc_library(
         ":device_resolver_hdr",
         ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
+        ":lifecycle_kernel_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
         ":persistence_manager_lib",
@@ -855,6 +874,7 @@ sc_cc_library(
     srcs = ["service/controllers/lease_controller.cc"],
     hdrs = ["service/controllers/lease_controller.h"],
     deps = [
+        ":lifecycle_kernel_lib",
         ":placement_lease_tokens_lib",
         ":retention_registry_lib",
         ":rpc_context_hdr",
@@ -937,6 +957,7 @@ sc_cc_library(
         ":external_target_access_service_lib",
         ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
+        ":lifecycle_kernel_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
         ":ref_tracker_hdr",
@@ -1050,6 +1071,7 @@ sc_cc_library(
         ":external_target_access_service_lib",
         ":grpc_peer_utils_lib",
         ":ipc_region_registry_lib",
+        ":lifecycle_kernel_lib",
         ":lip_manager_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_layout_utils_lib",
@@ -1059,6 +1081,7 @@ sc_cc_library(
         ":materialization_target_plan_utils_lib",
         ":materialization_target_storage_utils_lib",
         ":rpc_context_hdr",
+        ":session_lifecycle_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
         ":target_publication_registry_lib",
@@ -1101,8 +1124,10 @@ sc_cc_library(
     hdrs = ["service/controllers/target_publish_service.h"],
     deps = [
         ":device_resolver_hdr",
+        ":lifecycle_kernel_lib",
         ":lip_manager_lib",
         ":rpc_context_hdr",
+        ":session_lifecycle_lib",
         ":status_utils",
         ":target_publication_registry_lib",
         ":worker_identity_store_lib",
@@ -1613,6 +1638,16 @@ cc_test(
 )
 
 cc_test(
+    name = "lifecycle_kernel_test",
+    srcs = ["state/lifecycle_kernel_test.cc"],
+    deps = [
+        ":lifecycle_kernel_lib",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "transport_lock_manager_test",
     srcs = ["state/transport_lock_manager_test.cc"],
     deps = [
@@ -1770,6 +1805,9 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_batch_runtime_test",
     srcs = ["service/grpc_service_impl_batch_runtime_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",

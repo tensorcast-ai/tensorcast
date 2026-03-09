@@ -23,6 +23,7 @@
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/persistence_manager.h"
@@ -88,6 +89,10 @@ class DaemonKernel {
 
   [[nodiscard]] SessionLifecycleManager& lifecycle_manager() const {
     return *lifecycle_mgr_;
+  }
+
+  [[nodiscard]] LifecycleKernel& lifecycle_kernel() const {
+    return *lifecycle_kernel_;
   }
 
   [[nodiscard]] IpcRegionRegistry& region_registry() const {
@@ -199,6 +204,7 @@ class DaemonKernel {
 
   std::unique_ptr<BackgroundScheduler> scheduler_;
   std::shared_ptr<SessionLifecycleManager> lifecycle_mgr_;
+  std::unique_ptr<LifecycleKernel> lifecycle_kernel_;
   std::unique_ptr<PidMonitor> pid_monitor_;
 
   std::unique_ptr<VerificationTracker> verif_tracker_;

@@ -14,9 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
@@ -47,6 +49,40 @@ std::string compute_sha256_hex(std::string_view payload) {
       absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
   absl::AsciiStrToLower(&hex);
   return hex;
+}
+
+std::string payload_ref_capability_id(std::string_view payload_id) {
+  return absl::StrCat("payload-ref:", payload_id);
+}
+
+std::string payload_ref_subject_id_for_backing(const store::runtime::ingestion::BackingIdentity& backing_identity) {
+  return absl::StrCat(
+      "backing:",
+      backing_identity.replica_key.artifact_id,
+      "|",
+      backing_identity.replica_key.view_id.value_or(""),
+      "|",
+      static_cast<int>(backing_identity.replica_key.device.type),
+      "|",
+      backing_identity.replica_key.device.ordinal,
+      "|",
+      backing_identity.replica_key.replica);
+}
+
+std::string payload_ref_subject_id_for_inline(std::string_view payload_id) {
+  return absl::StrCat("inline-snapshot:", payload_id);
+}
+
+std::string payload_direction_label(tensorcast::common::v1::PayloadRefDirection direction) {
+  switch (direction) {
+    case tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET:
+      return "get";
+    case tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT:
+      return "put";
+    case tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED:
+    default:
+      return "unspecified";
+  }
 }
 
 absl::StatusOr<absl::Time> resolve_payload_ref_expiry(
@@ -315,8 +351,14 @@ absl::StatusOr<std::string> read_source_fully(store::loader::SeekableSource& sou
 PayloadTransportBroker::PayloadTransportBroker(
     std::string daemon_id,
     common::CapabilityTokenManager* capability_tokens,
+    SessionLifecycleManager* lifecycle_manager,
+    LifecycleKernel* lifecycle_kernel,
     Options options)
-    : daemon_id_(std::move(daemon_id)), capability_tokens_(capability_tokens), options_(std::move(options)) {}
+    : daemon_id_(std::move(daemon_id)),
+      capability_tokens_(capability_tokens),
+      lifecycle_manager_(lifecycle_manager),
+      lifecycle_kernel_(lifecycle_kernel),
+      options_(std::move(options)) {}
 
 absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     std::string_view artifact_id,
@@ -361,6 +403,9 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   if (direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED) {
     return absl::InvalidArgumentError("payload_ref direction is required");
   }
+  if (lifecycle_manager_ == nullptr || lifecycle_kernel_ == nullptr) {
+    return absl::FailedPreconditionError("payload_ref lifecycle kernel is unavailable");
+  }
 
   const absl::Time now = absl::Now();
   auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
@@ -385,6 +430,70 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   metadata.operation_id = std::string(operation_id);
   metadata.expires_at = expires_at;
 
+  const std::string capability_id = payload_ref_capability_id(payload_id);
+  auto lease_or = lifecycle_manager_->create_retention_lease(
+      expires_at - now,
+      std::vector<std::function<absl::Status()>>{
+          [this, payload_id, capability_id]() -> absl::Status {
+            {
+              absl::MutexLock lock(&mu_);
+              auto it = records_.find(payload_id);
+              if (it != records_.end()) {
+                if (!it->second.body_handle.empty() && it->second.body_handle.unique_owner()) {
+                  (void)it->second.body_handle.retire();
+                }
+                records_.erase(it);
+              }
+            }
+            return lifecycle_kernel_ ? lifecycle_kernel_->release_capability(capability_id) : absl::OkStatus();
+          },
+      });
+  if (!lease_or.ok()) {
+    return lease_or.status();
+  }
+
+  LifecycleSubjectRecord subject;
+  subject.subject_id = payload_ref_subject_id_for_inline(payload_id);
+  subject.epochs.subject_generation = 1;
+  subject.subject_kind = LifecycleSubjectKind::kInlineSnapshot;
+  subject.created_at = now;
+  subject.last_observed_at = now;
+  subject.artifact_id = std::string(artifact_id);
+  subject.semantic_ref_id = payload_id;
+  auto capability_or = lifecycle_kernel_->mint_capability(
+      MintCapabilityRequest{
+          .subject = subject,
+          .address =
+              CapabilityBindingAddress{
+                  .route_principal = make_issuer_route_principal(daemon_id_),
+                  .family = LifecycleCapabilityFamily::kServe,
+                  .binding_space = LifecycleBindingSpace::kPayload,
+                  .binding_key_kind = BindingKeyKind::kPayloadId,
+                  .binding_key = payload_id,
+                  .epochs = subject.epochs,
+              },
+          .front_door_kind = LifecycleFrontDoorKind::kPayloadRef,
+          .capability_id = capability_id,
+          .lease_id = *lease_or,
+          .capability_expires_at = expires_at,
+          .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+          .binding_mode = LifecycleBindingMode::kAddressDerived,
+          .constraint_claims =
+              ConstraintClaims{
+                  .artifact_id = std::string(artifact_id),
+                  .digest_alg = metadata.digest_alg,
+                  .digest_hex = metadata.digest_hex,
+                  .direction = payload_direction_label(direction),
+                  .operation_id = std::string(operation_id),
+              },
+          .direction = payload_direction_label(direction),
+          .workflow_gate = WorkflowGateKind::kNone,
+      });
+  if (!capability_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return capability_or.status();
+  }
+
   {
     absl::MutexLock lock(&mu_);
     records_[payload_id] = Record{
@@ -394,6 +503,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
         .descriptor = normalized_descriptor,
         .backing_identity = std::nullopt,
         .backing_instance_generation = 0,
+        .lease_id = *lease_or,
     };
   }
 
@@ -409,13 +519,19 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
   auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
   if (!scope_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
     return scope_or.status();
   }
-  return capability_tokens_->mint(
+  auto token_or = capability_tokens_->mint(
       daemon_id_,
       tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
       *scope_or,
       static_cast<std::uint64_t>(absl::ToUnixMillis(expires_at)));
+  if (!token_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return token_or.status();
+  }
+  return *token_or;
 }
 
 absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
@@ -438,6 +554,9 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
   if (direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED) {
     return absl::InvalidArgumentError("payload_ref direction is required");
+  }
+  if (lifecycle_manager_ == nullptr || lifecycle_kernel_ == nullptr) {
+    return absl::FailedPreconditionError("payload_ref lifecycle kernel is unavailable");
   }
 
   const absl::Time now = absl::Now();
@@ -463,6 +582,70 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   metadata.operation_id = std::string(operation_id);
   metadata.expires_at = expires_at;
 
+  const std::string capability_id = payload_ref_capability_id(payload_id);
+  auto lease_or = lifecycle_manager_->create_retention_lease(
+      expires_at - now,
+      std::vector<std::function<absl::Status()>>{
+          [this, payload_id, capability_id]() -> absl::Status {
+            {
+              absl::MutexLock lock(&mu_);
+              auto it = records_.find(payload_id);
+              if (it != records_.end()) {
+                if (!it->second.body_handle.empty() && it->second.body_handle.unique_owner()) {
+                  (void)it->second.body_handle.retire();
+                }
+                records_.erase(it);
+              }
+            }
+            return lifecycle_kernel_ ? lifecycle_kernel_->release_capability(capability_id) : absl::OkStatus();
+          },
+      });
+  if (!lease_or.ok()) {
+    return lease_or.status();
+  }
+
+  LifecycleSubjectRecord subject;
+  subject.subject_id = payload_ref_subject_id_for_inline(payload_id);
+  subject.epochs.subject_generation = 1;
+  subject.subject_kind = LifecycleSubjectKind::kInlineSnapshot;
+  subject.created_at = now;
+  subject.last_observed_at = now;
+  subject.artifact_id = std::string(artifact_id);
+  subject.semantic_ref_id = payload_id;
+  auto capability_or = lifecycle_kernel_->mint_capability(
+      MintCapabilityRequest{
+          .subject = subject,
+          .address =
+              CapabilityBindingAddress{
+                  .route_principal = make_issuer_route_principal(daemon_id_),
+                  .family = LifecycleCapabilityFamily::kServe,
+                  .binding_space = LifecycleBindingSpace::kPayload,
+                  .binding_key_kind = BindingKeyKind::kPayloadId,
+                  .binding_key = payload_id,
+                  .epochs = subject.epochs,
+              },
+          .front_door_kind = LifecycleFrontDoorKind::kPayloadRef,
+          .capability_id = capability_id,
+          .lease_id = *lease_or,
+          .capability_expires_at = expires_at,
+          .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+          .binding_mode = LifecycleBindingMode::kAddressDerived,
+          .constraint_claims =
+              ConstraintClaims{
+                  .artifact_id = std::string(artifact_id),
+                  .digest_alg = metadata.digest_alg,
+                  .digest_hex = metadata.digest_hex,
+                  .direction = payload_direction_label(direction),
+                  .operation_id = std::string(operation_id),
+              },
+          .direction = payload_direction_label(direction),
+          .workflow_gate = WorkflowGateKind::kNone,
+      });
+  if (!capability_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return capability_or.status();
+  }
+
   {
     absl::MutexLock lock(&mu_);
     records_[payload_id] = Record{
@@ -472,6 +655,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
         .descriptor = BodyDescriptor(),
         .backing_identity = std::nullopt,
         .backing_instance_generation = 0,
+        .lease_id = *lease_or,
     };
   }
 
@@ -487,13 +671,19 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
   auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
   if (!scope_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
     return scope_or.status();
   }
-  return capability_tokens_->mint(
+  auto token_or = capability_tokens_->mint(
       daemon_id_,
       tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
       *scope_or,
       static_cast<std::uint64_t>(absl::ToUnixMillis(expires_at)));
+  if (!token_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return token_or.status();
+  }
+  return *token_or;
 }
 
 absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
@@ -522,6 +712,9 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
   if (descriptor.payload_digest_alg.empty() || descriptor.payload_digest_hex.empty()) {
     return absl::InvalidArgumentError("descriptor digest is required for payload_ref issuance");
+  }
+  if (lifecycle_manager_ == nullptr || lifecycle_kernel_ == nullptr) {
+    return absl::FailedPreconditionError("payload_ref lifecycle kernel is unavailable");
   }
   if (backing_identity.has_value() &&
       !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
@@ -568,6 +761,71 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     return absl::InvalidArgumentError("body_handle metadata is incomplete for payload_ref issuance");
   }
 
+  const std::string capability_id = payload_ref_capability_id(payload_id);
+  auto lease_or = lifecycle_manager_->create_retention_lease(
+      expires_at - now,
+      std::vector<std::function<absl::Status()>>{
+          [this, payload_id, capability_id]() -> absl::Status {
+            {
+              absl::MutexLock lock(&mu_);
+              auto it = records_.find(payload_id);
+              if (it != records_.end()) {
+                if (!it->second.body_handle.empty() && it->second.body_handle.unique_owner()) {
+                  (void)it->second.body_handle.retire();
+                }
+                records_.erase(it);
+              }
+            }
+            return lifecycle_kernel_ ? lifecycle_kernel_->release_capability(capability_id) : absl::OkStatus();
+          },
+      });
+  if (!lease_or.ok()) {
+    return lease_or.status();
+  }
+
+  LifecycleSubjectRecord subject;
+  subject.subject_id = payload_ref_subject_id_for_backing(*backing_identity);
+  subject.epochs.subject_generation = backing_instance_generation;
+  subject.subject_kind = LifecycleSubjectKind::kBacking;
+  subject.created_at = now;
+  subject.last_observed_at = now;
+  subject.artifact_id = std::string(artifact_id);
+  subject.semantic_ref_id = subject.subject_id;
+  subject.verified_content_descriptor = body_descriptor_to_verified_content_descriptor(normalized_descriptor);
+  auto capability_or = lifecycle_kernel_->mint_capability(
+      MintCapabilityRequest{
+          .subject = subject,
+          .address =
+              CapabilityBindingAddress{
+                  .route_principal = make_issuer_route_principal(daemon_id_),
+                  .family = LifecycleCapabilityFamily::kServe,
+                  .binding_space = LifecycleBindingSpace::kPayload,
+                  .binding_key_kind = BindingKeyKind::kPayloadId,
+                  .binding_key = payload_id,
+                  .epochs = subject.epochs,
+              },
+          .front_door_kind = LifecycleFrontDoorKind::kPayloadRef,
+          .capability_id = capability_id,
+          .lease_id = *lease_or,
+          .capability_expires_at = expires_at,
+          .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+          .binding_mode = LifecycleBindingMode::kAddressDerived,
+          .constraint_claims =
+              ConstraintClaims{
+                  .artifact_id = std::string(artifact_id),
+                  .digest_alg = metadata.digest_alg,
+                  .digest_hex = metadata.digest_hex,
+                  .direction = payload_direction_label(direction),
+                  .operation_id = std::string(operation_id),
+              },
+          .direction = payload_direction_label(direction),
+          .workflow_gate = WorkflowGateKind::kNone,
+      });
+  if (!capability_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return capability_or.status();
+  }
+
   {
     absl::MutexLock lock(&mu_);
     records_[payload_id] = Record{
@@ -577,6 +835,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
         .descriptor = normalized_descriptor,
         .backing_identity = std::move(backing_identity),
         .backing_instance_generation = backing_instance_generation,
+        .lease_id = *lease_or,
     };
   }
 
@@ -592,13 +851,19 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
   auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
   if (!scope_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
     return scope_or.status();
   }
-  return capability_tokens_->mint(
+  auto token_or = capability_tokens_->mint(
       daemon_id_,
       tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
       *scope_or,
       static_cast<std::uint64_t>(absl::ToUnixMillis(expires_at)));
+  if (!token_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return token_or.status();
+  }
+  return *token_or;
 }
 
 absl::StatusOr<PayloadTransportBroker::RefMetadata> PayloadTransportBroker::inspect_payload_ref(
@@ -707,6 +972,40 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
     if (!local_or.ok()) {
       return local_or.status();
     }
+    if (lifecycle_kernel_ == nullptr) {
+      return absl::FailedPreconditionError("payload_ref lifecycle kernel is unavailable");
+    }
+    ParsedCredential credential{
+        .address =
+            CapabilityBindingAddress{
+                .route_principal = make_issuer_route_principal(daemon_id_),
+                .family = LifecycleCapabilityFamily::kServe,
+                .binding_space = LifecycleBindingSpace::kPayload,
+                .binding_key_kind = BindingKeyKind::kPayloadId,
+                .binding_key = local_or->metadata.payload_id,
+                .epochs =
+                    LifecycleEpochs{
+                        .subject_generation =
+                            local_or->backing_instance_generation == 0 ? 1 : local_or->backing_instance_generation,
+                    },
+            },
+        .front_door_kind = LifecycleFrontDoorKind::kPayloadRef,
+        .credential_expires_at = local_or->metadata.expires_at,
+        .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+        .binding_mode = LifecycleBindingMode::kAddressDerived,
+        .constraint_claims =
+            ConstraintClaims{
+                .artifact_id = local_or->metadata.artifact_id,
+                .digest_alg = local_or->metadata.digest_alg,
+                .digest_hex = local_or->metadata.digest_hex,
+                .direction = payload_direction_label(local_or->metadata.direction),
+                .operation_id = local_or->metadata.operation_id,
+            },
+    };
+    auto admitted_or = lifecycle_kernel_->admit_redemption(credential);
+    if (!admitted_or.ok()) {
+      return admitted_or.status();
+    }
     CapabilityResolution resolution;
     resolution.metadata = local_or->metadata;
     resolution.payload = local_or->payload;
@@ -746,10 +1045,15 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
               .backing_instance_generation = backing_instance_generation,
           });
       if (!capability_or.ok()) {
+        auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
+        LOG_IF(WARNING, !release_status.ok())
+            << "payload_ref: failed to release use guard after mint failure: " << release_status;
         return capability_or.status();
       }
       resolution.serving_capability = std::move(*capability_or);
       record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
+      auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
+      LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
       return resolution;
     }
     resolution.capability.mode = BodyCapabilityResolutionMode::kLoader;
@@ -768,10 +1072,15 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
                 },
         });
     if (!capability_or.ok()) {
+      auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
+      LOG_IF(WARNING, !release_status.ok())
+          << "payload_ref: failed to release use guard after loader mint failure: " << release_status;
       return capability_or.status();
     }
     resolution.serving_capability = std::move(*capability_or);
     record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
+    auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
+    LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
     return resolution;
   }
 

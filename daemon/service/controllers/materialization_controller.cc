@@ -55,6 +55,8 @@ MaterializationController::MaterializationController(Dep d)
               .devices = d.devices,
               .regions = d.regions,
               .disk_imports = d.disk_imports,
+              .lifecycle = *d.lifecycle,
+              .lifecycle_kernel = *d.lifecycle_kernel,
               .shutdown_signal = d.shutdown_signal,
               .identity = d.identity,
               .external_target_access_service = d.external_target_access_service,
@@ -65,7 +67,7 @@ MaterializationController::MaterializationController(Dep d)
               .storage_path = d.storage_path,
           }) {}
 
-TargetPublicationRegistry::Record MaterializationController::insert_target_publication_for_testing(
+absl::StatusOr<TargetPublicationRegistry::Record> MaterializationController::insert_target_publication_for_testing(
     TargetPublicationRegistry::Record record) {
   return target_materialization_service_.insert_target_publication_for_testing(std::move(record));
 }

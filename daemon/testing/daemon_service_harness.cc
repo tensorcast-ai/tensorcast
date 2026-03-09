@@ -178,6 +178,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .external_target_access_service = *external_target_access_service,
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
+      .lifecycle_kernel = &kernel->lifecycle_kernel(),
       .handle_leases = kernel->handle_leases(),
       .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
@@ -238,6 +239,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   LeaseController::Dep ldep{
       .engine = kernel->engine(),
       .lifecycle = kernel->lifecycle_manager(),
+      .lifecycle_kernel = kernel->lifecycle_kernel(),
       .placement_lease_tokens = kernel->placement_lease_tokens(),
       .capability_tokens = kernel->capability_tokens(),
       .retention_registry = kernel->retention_registry(),

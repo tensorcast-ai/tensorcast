@@ -35,6 +35,8 @@ DaemonKernel::DaemonKernel(
   verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
 
   lifecycle_mgr_ = std::make_shared<SessionLifecycleManager>(sessions_, refs_, *lip_mgr_, *engine_);
+  lifecycle_kernel_ =
+      std::make_unique<LifecycleKernel>(options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id);
   pid_monitor_ = std::make_unique<PidMonitor>(
       [this](pid_t pid) {
         if (this->lifecycle_mgr_) {
@@ -62,7 +64,7 @@ DaemonKernel::DaemonKernel(
       hl_opts.ttl = absl::Milliseconds(static_cast<int64_t>(ttl_ms.count()));
     }
     hl_opts.max_mints_per_second = options_.handle_lease_max_mints_per_second;
-    handle_leases_ = std::make_unique<HandleLeaseRegistry>(hl_opts, *engine_, *lifecycle_mgr_);
+    handle_leases_ = std::make_unique<HandleLeaseRegistry>(hl_opts, *engine_, *lifecycle_mgr_, *lifecycle_kernel_);
   }
 
   placement_lease_tokens_ = std::make_unique<PlacementLeaseTokens>(PlacementLeaseTokens::Options{});
@@ -81,6 +83,7 @@ DaemonKernel::DaemonKernel(
         retention_opts,
         make_store_engine_retention_backend(*engine_),
         *lifecycle_mgr_,
+        *lifecycle_kernel_,
         capability_tokens_.get(),
         options_.daemon_id);
   }
@@ -160,6 +163,8 @@ DaemonKernel::DaemonKernel(
   payload_transport_broker_ = std::make_unique<PayloadTransportBroker>(
       local_daemon_id,
       capability_tokens_.get(),
+      lifecycle_mgr_.get(),
+      lifecycle_kernel_.get(),
       PayloadTransportBroker::Options{
           .ttl = options_.byte_artifact_routing.payload_transport.ref_ttl,
           .max_chunk_bytes = options_.byte_artifact_routing.payload_transport.max_chunk_bytes,

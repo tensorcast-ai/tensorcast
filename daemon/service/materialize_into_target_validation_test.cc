@@ -148,6 +148,8 @@ struct ValidationFixture {
   tensorcast::daemon::ReplicaSessionManager session_mgr;
   tensorcast::daemon::VerificationTracker verif_tracker;
   tensorcast::daemon::BackgroundScheduler scheduler;
+  tensorcast::daemon::SessionLifecycleManager lifecycle_mgr;
+  tensorcast::daemon::LifecycleKernel lifecycle_kernel;
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
   tensorcast::daemon::ArtifactSourceRegistry disk_imports;
@@ -166,7 +168,9 @@ struct ValidationFixture {
         session_mgr(std::chrono::seconds(60)),
         verif_tracker(),
         scheduler(),
-        sessions_svc(session_mgr, verif_tracker, &scheduler, /*lifecycle=*/nullptr, absl::Seconds(60)),
+        lifecycle_mgr(session_mgr, refs, lip_mgr, *engine),
+        lifecycle_kernel("daemon-validation-test"),
+        sessions_svc(session_mgr, verif_tracker, &scheduler, &lifecycle_mgr, absl::Seconds(60)),
         devices(tensorcast::store::DeviceRegistry::instance()),
         storage_root(ensure_dir(test_tmpdir())),
         controller(MaterializationController(
@@ -183,7 +187,8 @@ struct ValidationFixture {
                 .async_runtime = async_runtime,
                 .identity = identity,
                 .global_store_client = global_store_client,
-                .lifecycle = nullptr,
+                .lifecycle = &lifecycle_mgr,
+                .lifecycle_kernel = &lifecycle_kernel,
                 .external_target_verification_enabled = external_target_verification_enabled,
                 .storage_path = storage_root,
             })) {

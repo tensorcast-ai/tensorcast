@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "absl/status/statusor.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
@@ -52,6 +53,7 @@ class MaterializationController {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     uint32_t max_concurrency{4};
     SessionLifecycleManager* lifecycle{nullptr};
+    LifecycleKernel* lifecycle_kernel{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     common::CapabilityTokenManager* capability_tokens{nullptr};
     bool cpu_shared_memory_enabled{true};
@@ -121,7 +123,8 @@ class MaterializationController {
       v2::WaitReplicaVerificationResponse& resp);
 
   // Test helper: inject a target publication record without materialization.
-  TargetPublicationRegistry::Record insert_target_publication_for_testing(TargetPublicationRegistry::Record record);
+  [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> insert_target_publication_for_testing(
+      TargetPublicationRegistry::Record record);
 
  private:
   AssemblyOperationService assembly_operation_service_;

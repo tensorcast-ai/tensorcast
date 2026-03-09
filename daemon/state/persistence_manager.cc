@@ -863,6 +863,17 @@ std::optional<PersistenceManager::PolicySourceRecord> PersistenceManager::policy
       !std::filesystem::exists(object_dir / "tensor_index.json")) {
     return std::nullopt;
   }
+  for (const auto& shard : task.shards) {
+    std::error_code ec;
+    const std::filesystem::path part_path = object_dir / std::format("tensor.data_{}", shard.shard_idx);
+    if (!std::filesystem::exists(part_path, ec) || ec) {
+      return std::nullopt;
+    }
+    const auto file_size = std::filesystem::file_size(part_path, ec);
+    if (ec || file_size != shard.size_bytes) {
+      return std::nullopt;
+    }
+  }
   return PolicySourceRecord{
       .artifact_id = task.artifact_id,
       .path_id = absl::StrCat("shared_disk:", task.task_id),
@@ -884,9 +895,13 @@ std::vector<PersistenceManager::PolicySourceRecord> PersistenceManager::list_pol
   }
   sources.reserve(artifact_sources_it->second.size());
   for (const auto& control_ref : artifact_sources_it->second) {
-    auto source_it = policy_sources_by_control_ref_.find(control_ref);
-    if (source_it != policy_sources_by_control_ref_.end()) {
-      sources.push_back(source_it->second);
+    auto task_it = tasks_.find(control_ref);
+    if (task_it == tasks_.end()) {
+      continue;
+    }
+    auto source = policy_source_record_locked(task_it->second);
+    if (source.has_value()) {
+      sources.push_back(std::move(*source));
     }
   }
   std::sort(sources.begin(), sources.end(), [](const PolicySourceRecord& lhs, const PolicySourceRecord& rhs) {
@@ -900,11 +915,11 @@ std::optional<PersistenceManager::PolicySourceRecord> PersistenceManager::resolv
     std::optional<absl::string_view> expected_control_ref) const {
   absl::MutexLock lock(&mu_);
   if (expected_control_ref.has_value()) {
-    auto source_it = policy_sources_by_control_ref_.find(std::string(*expected_control_ref));
-    if (source_it == policy_sources_by_control_ref_.end() || source_it->second.artifact_id != artifact_id) {
+    auto task_it = tasks_.find(std::string(*expected_control_ref));
+    if (task_it == tasks_.end() || task_it->second.artifact_id != artifact_id) {
       return std::nullopt;
     }
-    return source_it->second;
+    return policy_source_record_locked(task_it->second);
   }
 
   auto artifact_sources_it = artifact_policy_sources_.find(std::string(artifact_id));
@@ -913,12 +928,16 @@ std::optional<PersistenceManager::PolicySourceRecord> PersistenceManager::resolv
   }
   std::optional<PolicySourceRecord> best_source;
   for (const auto& control_ref : artifact_sources_it->second) {
-    auto source_it = policy_sources_by_control_ref_.find(control_ref);
-    if (source_it == policy_sources_by_control_ref_.end()) {
+    auto task_it = tasks_.find(control_ref);
+    if (task_it == tasks_.end()) {
       continue;
     }
-    if (!best_source.has_value() || best_source->control_ref < source_it->second.control_ref) {
-      best_source = source_it->second;
+    auto source = policy_source_record_locked(task_it->second);
+    if (!source.has_value()) {
+      continue;
+    }
+    if (!best_source.has_value() || best_source->control_ref < source->control_ref) {
+      best_source = std::move(source);
     }
   }
   return best_source;

@@ -218,6 +218,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .global_store_client = app->options_.global_store_client,
       .max_concurrency = app->options_.daemon_options.max_concurrency,
       .lifecycle = &app->kernel_->lifecycle_manager(),
+      .lifecycle_kernel = &app->kernel_->lifecycle_kernel(),
       .handle_leases = app->kernel_->handle_leases(),
       .capability_tokens = app->kernel_->capability_tokens(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
@@ -281,6 +282,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   LeaseController::Dep ldep{
       .engine = app->kernel_->engine(),
       .lifecycle = app->kernel_->lifecycle_manager(),
+      .lifecycle_kernel = app->kernel_->lifecycle_kernel(),
       .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
       .capability_tokens = app->kernel_->capability_tokens(),
       .retention_registry = app->kernel_->retention_registry(),

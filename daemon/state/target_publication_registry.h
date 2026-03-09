@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -34,6 +35,8 @@ class TargetPublicationRegistry {
     int owner_pid{0};
     std::string operation_id;
     absl::Time expires_at{absl::InfinitePast()};
+    std::string capability_id;
+    std::uint64_t lease_id{0};
     std::vector<LeaseSegMeta> segments;
     std::vector<RegisterStorageMeta> storages;
   };

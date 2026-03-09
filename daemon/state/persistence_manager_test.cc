@@ -244,6 +244,35 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "PersistenceManager drops shared-disk source once backing path disappears",
+    "[daemon][persistence][source_truth]") {
+  const auto storage_root = make_test_storage_root("shared_disk_source_missing");
+  tensorcast::store::StoreEngine engine(make_engine_opts(storage_root));
+  const uint64_t total_size = 8ULL * 1024 * 1024;
+  const auto artifact_id = register_stable_artifact(engine, "mi2:source_missing:index", total_size);
+
+  auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
+  auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());
+
+  PersistenceManager mgr(nullptr, nullptr, &engine, nullptr, engine.get_artifact_chunk_bytes());
+  mgr.set_global_store_client(client_ptr);
+  mgr.set_storage_path(storage_root);
+  mgr.set_local_node_id("node-local");
+
+  const auto task = mgr.start_task_for_test(artifact_id, PLACEMENT_POLICY_LOCAL_ONLY, true, total_size);
+  const auto final = advance_task_to_terminal(mgr, task.task_id);
+  REQUIRE(final.state == PERSISTENCE_STATE_SUCCESS);
+
+  auto source = mgr.resolve_policy_source(artifact_id);
+  REQUIRE(source.has_value());
+  std::filesystem::remove_all(source->local_path);
+
+  REQUIRE_FALSE(mgr.resolve_policy_source(artifact_id).has_value());
+  REQUIRE_FALSE(mgr.resolve_policy_source(artifact_id, task.task_id).has_value());
+  REQUIRE(mgr.list_policy_sources(artifact_id).empty());
+}
+
+TEST_CASE(
     "PersistenceManager keeps older actionable shared-disk source after a later failed task",
     "[daemon][persistence][source_truth]") {
   const auto storage_root = make_test_storage_root("shared_disk_source_truth");
