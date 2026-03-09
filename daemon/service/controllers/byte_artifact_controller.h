@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
@@ -14,6 +16,7 @@
 #include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/payload_transport_broker.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/persistence_manager.h"
 #include "daemon/state/worker_directory_cache.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -46,6 +49,7 @@ class ByteArtifactController {
     ExternalTargetAccessService& external_target_access_service;
     WorkerIdentityStore& identity_store;
     store::StoreEngine& engine;
+    PersistenceManager* persistence_manager{nullptr};
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
   };
 
@@ -83,6 +87,20 @@ class ByteArtifactController {
       v2::HomeBatchTouchTtlResponse& resp);
 
  private:
+  void reconcile_policy_visibility(
+      const std::vector<std::string>& artifact_ids,
+      const ByteArtifactAuthorityService::Context& context) const;
+
+  [[nodiscard]] std::optional<PolicyVisibilityRef> resolve_policy_visibility_ref(
+      const ByteArtifactBodyStore::AuthoritySnapshot& authority_snapshot) const;
+
+  [[nodiscard]] absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> restore_backing_from_policy_visibility(
+      std::string_view artifact_id,
+      const BodyDescriptor& descriptor,
+      const AuthorityRecord& authority_record,
+      const ByteArtifactAuthorityService::Context& context,
+      std::string_view operation_id) const;
+
   Dep d_;
   ByteArtifactAuthorityService authority_service_;
   BodyBackingManager body_backing_manager_;

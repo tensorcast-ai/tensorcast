@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "absl/strings/ascii.h"
@@ -17,6 +18,23 @@ namespace tensorcast::daemon {
 
 enum class BodyAccessClass : std::uint8_t {
   kHomeDefault = 0,
+  kLocalGpuHot = 1,
+  kTransientForward = 2,
+  kSmallObject = 3,
+};
+
+enum class BodyRouteRole : std::uint8_t {
+  kHomeAuthority = 0,
+  kTransientForwarder = 1,
+};
+
+enum class BodyConsumerLocality : std::uint8_t {
+  kLocalOnly = 0,
+  kRemoteOrMixed = 1,
+};
+
+enum class BodyAccessPattern : std::uint8_t {
+  kDefault = 0,
   kLocalGpuHot = 1,
   kTransientForward = 2,
   kSmallObject = 3,
@@ -51,6 +69,14 @@ struct BodyBackingIntent {
   BodySharingIntent sharing_intent{BodySharingIntent::kPrivateLocal};
 };
 
+struct BodyPlacementContext {
+  BodyRouteRole route_role{BodyRouteRole::kHomeAuthority};
+  BodyConsumerLocality locality{BodyConsumerLocality::kRemoteOrMixed};
+  BodyAccessPattern access_pattern{BodyAccessPattern::kDefault};
+  std::uint64_t size_bytes{0};
+  std::uint32_t expected_fanout{1};
+};
+
 enum class BodyStableRetentionState : std::uint8_t {
   kUnknown = 0,
   kNotRequested = 1,
@@ -83,6 +109,33 @@ enum class AuthorityClaimState : std::uint8_t {
   kClaimDeleted = 3,
 };
 
+enum class BackingLifecycleState : std::uint8_t {
+  kActive = 0,
+  kInvalidated = 1,
+  kSuperseded = 2,
+  kDraining = 3,
+  kRetired = 4,
+};
+
+enum class PolicyVisibilityPathKind : std::uint8_t {
+  kUnspecified = 0,
+  kSharedDisk = 1,
+  kRemoteStable = 2,
+};
+
+enum class ServingCapabilitySubjectKind : std::uint8_t {
+  kBacking = 0,
+  kCopiedPayload = 1,
+  kPolicyBackedPath = 2,
+};
+
+enum class LifecycleOwnerKind : std::uint8_t {
+  kInlineCopyWindow = 0,
+  kPayloadRefToken = 1,
+  kRetentionHandle = 2,
+  kPersistenceTask = 3,
+};
+
 struct BodyDescriptor {
   std::string physical_artifact_id;
   std::string layout_id;
@@ -91,6 +144,8 @@ struct BodyDescriptor {
   std::string payload_digest_hex;
   absl::Time created_at{absl::InfinitePast()};
   absl::Time verified_at{absl::InfinitePast()};
+
+  bool operator==(const BodyDescriptor&) const = default;
 };
 
 struct ResolvedBodyCapability {
@@ -100,11 +155,33 @@ struct ResolvedBodyCapability {
   BodyDescriptor descriptor;
 };
 
+struct PolicyVisibilityRef {
+  std::string path_id;
+  PolicyVisibilityPathKind path_kind{PolicyVisibilityPathKind::kUnspecified};
+  store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+  std::string control_ref;
+  absl::Time expires_at{absl::InfinitePast()};
+
+  bool operator==(const PolicyVisibilityRef&) const = default;
+};
+
+struct LifecycleOwnerRef {
+  LifecycleOwnerKind owner_kind{LifecycleOwnerKind::kInlineCopyWindow};
+  std::string owner_id;
+
+  bool operator==(const LifecycleOwnerRef&) const = default;
+};
+
 struct ServingCapability {
   std::string capability_id;
   absl::Time expires_at{absl::InfinitePast()};
   BodyCapabilityResolutionMode mode{BodyCapabilityResolutionMode::kLoader};
   bool local{true};
+  ServingCapabilitySubjectKind subject_kind{ServingCapabilitySubjectKind::kBacking};
+  LifecycleOwnerRef lifecycle_owner_ref;
+  std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
+  std::uint64_t backing_instance_generation{0};
+  std::optional<PolicyVisibilityRef> policy_visibility_ref;
 };
 
 struct AuthorityRecord {
@@ -115,6 +192,8 @@ struct AuthorityRecord {
   absl::Time expires_at{absl::InfinitePast()};
   AuthorityVisibilityKind visibility_kind{AuthorityVisibilityKind::kNone};
   AuthorityClaimState claim_state{AuthorityClaimState::kUnclaimed};
+  std::optional<store::runtime::ingestion::BackingIdentity> retained_backing_identity;
+  std::optional<PolicyVisibilityRef> policy_visibility_ref;
   bool visible{false};
 };
 
@@ -127,6 +206,17 @@ struct BodyBackingObservation {
   BodyCommunicatorExportState communicator_export_state{BodyCommunicatorExportState::kUnknown};
   BodyStableRetentionState stable_retention_state{BodyStableRetentionState::kUnknown};
   absl::Time observed_at{absl::InfinitePast()};
+};
+
+struct BackingRecord {
+  store::runtime::ingestion::BackingIdentity identity;
+  std::uint64_t instance_generation{0};
+  store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+  store::runtime::ingestion::VerificationRecord verification_record;
+  BodyDescriptor descriptor;
+  BodyBackingObservation last_observation;
+  BodyHandle retained_body_handle;
+  BackingLifecycleState lifecycle_state{BackingLifecycleState::kActive};
 };
 
 inline std::string normalize_body_digest_value(std::string_view value) {
@@ -181,20 +271,7 @@ inline store::runtime::ingestion::BackingIdentity body_descriptor_to_backing_ide
     const BodyHandle& body_handle) {
   return store::runtime::ingestion::BackingIdentity{
       .physical_artifact_id = descriptor.physical_artifact_id,
-      .device = body_handle.replica_handle().key().device,
-  };
-}
-
-inline ServingCapability resolve_serving_capability(
-    std::string_view capability_id,
-    absl::Time expires_at,
-    BodyCapabilityResolutionMode mode,
-    bool local) {
-  return ServingCapability{
-      .capability_id = std::string(capability_id),
-      .expires_at = expires_at,
-      .mode = mode,
-      .local = local,
+      .replica_key = body_handle.replica_handle().key(),
   };
 }
 

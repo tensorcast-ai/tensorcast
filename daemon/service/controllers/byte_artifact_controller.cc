@@ -14,8 +14,10 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/loaders/disk_loader.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "daemon/service/artifact_profile_registry.h"
 #include "daemon/util/grpc_peer_utils.h"
@@ -82,6 +84,21 @@ v2::BatchItemStatus batch_item_status_from_absl_status(const absl::Status& statu
     return v2::BATCH_ITEM_STATUS_UNAVAILABLE;
   }
   return v2::BATCH_ITEM_STATUS_INTERNAL_ERROR;
+}
+
+bool is_non_actionable_policy_path_error(const absl::Status& status) {
+  return absl::IsNotFound(status) || absl::IsFailedPrecondition(status) || absl::IsDataLoss(status) ||
+      absl::IsInvalidArgument(status);
+}
+
+PolicyVisibilityPathKind policy_visibility_path_kind_from_source(PersistenceManager::PolicySourceKind kind) {
+  switch (kind) {
+    case PersistenceManager::PolicySourceKind::kSharedDisk:
+      return PolicyVisibilityPathKind::kSharedDisk;
+    case PersistenceManager::PolicySourceKind::kUnspecified:
+    default:
+      return PolicyVisibilityPathKind::kUnspecified;
+  }
 }
 
 class SeekableSourceLoader final : public store::IArtifactLoader {
@@ -201,6 +218,147 @@ ByteArtifactController::ByteArtifactController(Dep d, Options options)
       body_backing_manager_(d_.engine),
       options_(std::move(options)) {}
 
+void ByteArtifactController::reconcile_policy_visibility(
+    const std::vector<std::string>& artifact_ids,
+    const ByteArtifactAuthorityService::Context& context) const {
+  for (const auto& artifact_id : artifact_ids) {
+    auto authority = d_.body_store.inspect_authority(
+        artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+    if (!authority.has_value()) {
+      continue;
+    }
+    if (authority->authority_record.claim_state == AuthorityClaimState::kClaimDeleted ||
+        authority->authority_record.claim_state == AuthorityClaimState::kUnclaimed) {
+      continue;
+    }
+    if (authority->authority_record.visibility_kind == AuthorityVisibilityKind::kReadyBacking &&
+        authority->authority_record.claim_state == AuthorityClaimState::kClaimedVisible) {
+      continue;
+    }
+
+    auto desired_ref = resolve_policy_visibility_ref(*authority);
+    if (desired_ref.has_value()) {
+      (void)d_.body_store.install_policy_visibility(
+          artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now, *desired_ref);
+      continue;
+    }
+    (void)d_.body_store.clear_policy_visibility(
+        artifact_id,
+        context.shard_id,
+        context.lease_generation,
+        context.routing_epoch,
+        context.now,
+        "policy_path_not_actionable");
+  }
+}
+
+std::optional<PolicyVisibilityRef> ByteArtifactController::resolve_policy_visibility_ref(
+    const ByteArtifactBodyStore::AuthoritySnapshot& authority_snapshot) const {
+  if (d_.persistence_manager == nullptr) {
+    return std::nullopt;
+  }
+  auto policy_source = d_.persistence_manager->resolve_policy_source(authority_snapshot.authority_record.artifact_id);
+  if (!policy_source.has_value()) {
+    return std::nullopt;
+  }
+  if (policy_source->path_kind != PersistenceManager::PolicySourceKind::kSharedDisk) {
+    return std::nullopt;
+  }
+  if (!policy_source->verified_content_descriptor.has_value() ||
+      *policy_source->verified_content_descriptor != authority_snapshot.verified_content_descriptor) {
+    return std::nullopt;
+  }
+  return PolicyVisibilityRef{
+      .path_id = policy_source->path_id,
+      .path_kind = policy_visibility_path_kind_from_source(policy_source->path_kind),
+      .verified_content_descriptor = authority_snapshot.verified_content_descriptor,
+      .control_ref = policy_source->control_ref,
+      .expires_at = authority_snapshot.expires_at,
+  };
+}
+
+absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> ByteArtifactController::restore_backing_from_policy_visibility(
+    std::string_view artifact_id,
+    const BodyDescriptor& descriptor,
+    const AuthorityRecord& authority_record,
+    const ByteArtifactAuthorityService::Context& context,
+    std::string_view operation_id) const {
+  if (d_.persistence_manager == nullptr || !authority_record.policy_visibility_ref.has_value()) {
+    return absl::FailedPreconditionError("policy-backed visibility requires persistence proof");
+  }
+  if (authority_record.policy_visibility_ref->path_kind != PolicyVisibilityPathKind::kSharedDisk) {
+    return absl::FailedPreconditionError("unsupported policy-backed path kind");
+  }
+  auto policy_source =
+      d_.persistence_manager->resolve_policy_source(artifact_id, authority_record.policy_visibility_ref->control_ref);
+  if (!policy_source.has_value()) {
+    (void)d_.body_store.clear_policy_visibility(
+        artifact_id,
+        context.shard_id,
+        context.lease_generation,
+        context.routing_epoch,
+        context.now,
+        "policy_path_not_found");
+    return absl::NotFoundError("policy-backed shared-disk path is no longer actionable");
+  }
+  if (policy_source->path_kind != PersistenceManager::PolicySourceKind::kSharedDisk) {
+    return absl::FailedPreconditionError("policy-backed source kind mismatch");
+  }
+
+  auto staged_body_or = body_backing_manager_.stage_body(
+      BodyBackingManager::StageRequest{
+          .artifact_id = std::string(artifact_id),
+          .invariant = body_descriptor_to_invariant(descriptor),
+          .loader = std::make_unique<store::DiskLoader>(store::loading::DiskSource{
+              .path = policy_source->local_path,
+              .expected_size = descriptor.size_bytes,
+              .require_descriptor = true,
+          }),
+          .source_kind = store::loading::MaterializationSource::kDisk,
+          .operation_id = std::string(operation_id),
+          .access_class = BodyAccessClass::kHomeDefault,
+          .route_role = BodyRouteRole::kHomeAuthority,
+      });
+  if (!staged_body_or.ok()) {
+    if (is_non_actionable_policy_path_error(staged_body_or.status())) {
+      (void)d_.body_store.clear_policy_visibility(
+          artifact_id,
+          context.shard_id,
+          context.lease_generation,
+          context.routing_epoch,
+          context.now,
+          "policy_materialization_failed");
+    }
+    return staged_body_or.status();
+  }
+
+  auto put_result = d_.body_store.put_if_absent(
+      artifact_id,
+      body_descriptor_to_invariant(descriptor),
+      staged_body_or->descriptor,
+      staged_body_or->verified_content_descriptor,
+      staged_body_or->verification_record,
+      staged_body_or->backing_identity,
+      staged_body_or->observation,
+      staged_body_or->body_handle,
+      context.shard_id,
+      context.lease_generation,
+      context.routing_epoch,
+      context.now,
+      std::nullopt);
+  if (put_result.outcome == ByteArtifactBodyStore::PutOutcome::kConflict) {
+    (void)staged_body_or->body_handle.retire();
+    return absl::FailedPreconditionError("policy-backed restore conflicted with current claim descriptor");
+  }
+
+  auto entry =
+      d_.body_store.get(artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+  if (!entry.has_value()) {
+    return absl::InternalError("policy-backed restore did not produce a visible backing");
+  }
+  return *entry;
+}
+
 grpc::Status ByteArtifactController::home_batch_exists(
     RpcContext& rctx,
     const v2::HomeBatchExistsRequest& req,
@@ -227,15 +385,15 @@ grpc::Status ByteArtifactController::home_batch_exists(
   for (const auto& artifact_id : req.artifact_ids()) {
     artifact_ids.push_back(artifact_id);
   }
-  for (auto outcome : authority_service_.batch_exists(
-           artifact_ids,
-           ByteArtifactAuthorityService::Context{
-               .shard_id = req.fence().shard_id(),
-               .lease_generation = home_lease_or->lease_generation,
-               .routing_epoch = options_.routing.routing_epoch,
-               .shard_count = options_.routing.shard_count,
-               .now = now,
-           })) {
+  ByteArtifactAuthorityService::Context authority_context{
+      .shard_id = req.fence().shard_id(),
+      .lease_generation = home_lease_or->lease_generation,
+      .routing_epoch = options_.routing.routing_epoch,
+      .shard_count = options_.routing.shard_count,
+      .now = now,
+  };
+  reconcile_policy_visibility(artifact_ids, authority_context);
+  for (auto outcome : authority_service_.batch_exists(artifact_ids, authority_context)) {
     *resp.add_outcomes() = std::move(outcome);
   }
   rctx.mark_success();
@@ -268,15 +426,15 @@ grpc::Status ByteArtifactController::home_batch_get(
   for (const auto& artifact_id : req.artifact_ids()) {
     artifact_ids.push_back(artifact_id);
   }
-  for (auto& result : authority_service_.batch_get(
-           artifact_ids,
-           ByteArtifactAuthorityService::Context{
-               .shard_id = req.fence().shard_id(),
-               .lease_generation = home_lease_or->lease_generation,
-               .routing_epoch = options_.routing.routing_epoch,
-               .shard_count = options_.routing.shard_count,
-               .now = now,
-           })) {
+  ByteArtifactAuthorityService::Context authority_context{
+      .shard_id = req.fence().shard_id(),
+      .lease_generation = home_lease_or->lease_generation,
+      .routing_epoch = options_.routing.routing_epoch,
+      .shard_count = options_.routing.shard_count,
+      .now = now,
+  };
+  reconcile_policy_visibility(artifact_ids, authority_context);
+  for (auto& result : authority_service_.batch_get(artifact_ids, authority_context)) {
     auto* item = resp.add_items();
     item->set_artifact_id(result.artifact_id);
     item->set_status(result.status);
@@ -286,7 +444,29 @@ grpc::Status ByteArtifactController::home_batch_get(
     if (result.status != v2::BATCH_ITEM_STATUS_OK) {
       continue;
     }
-    auto payload_or = result.body_handle.read_all_bytes();
+    BodyHandle body_handle = result.body_handle;
+    if (body_handle.empty() && result.authority_record.visibility_kind == AuthorityVisibilityKind::kPolicyBackedPath) {
+      auto restored_or = restore_backing_from_policy_visibility(
+          result.artifact_id,
+          result.descriptor,
+          result.authority_record,
+          authority_context,
+          req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
+      if (!restored_or.ok()) {
+        if (is_non_actionable_policy_path_error(restored_or.status())) {
+          *item = make_home_get_item(result.artifact_id, v2::BATCH_ITEM_STATUS_MISS, "artifact is no longer visible");
+        } else {
+          *item = make_home_get_item(
+              result.artifact_id,
+              batch_item_status_from_absl_status(restored_or.status()),
+              restored_or.status().message());
+        }
+        continue;
+      }
+      body_handle = restored_or->backing_record.retained_body_handle;
+      result.descriptor = restored_or->descriptor;
+    }
+    auto payload_or = body_handle.read_all_bytes();
     if (!payload_or.ok()) {
       d_.body_store.invalidate_artifact_visibility(result.artifact_id, now, "serve_read_failed");
       *item = make_home_get_item(result.artifact_id, v2::BATCH_ITEM_STATUS_MISS, "artifact is no longer visible");
@@ -387,7 +567,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
                 .body_handle = capability_or->capability.body_handle,
                 .operation_id = req.has_operation_id() ? req.operation_id() : "",
                 .access_class = BodyAccessClass::kHomeDefault,
-                .route_role = BodyBackingManager::RouteRole::kHomeAuthority,
+                .route_role = BodyRouteRole::kHomeAuthority,
             });
         if (!reused_or.ok()) {
           deferred_outcomes[index] = make_outcome(
@@ -458,7 +638,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
               .source_kind = source_kind,
               .operation_id = req.has_operation_id() ? req.operation_id() : "",
               .access_class = BodyAccessClass::kHomeDefault,
-              .route_role = BodyBackingManager::RouteRole::kHomeAuthority,
+              .route_role = BodyRouteRole::kHomeAuthority,
           });
       if (!staged_body_or.ok()) {
         deferred_outcomes[index] = make_outcome(
@@ -491,6 +671,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
             .descriptor = staged_body->descriptor,
             .verified_content_descriptor = staged_body->verified_content_descriptor,
             .verification_record = staged_body->verification_record,
+            .backing_identity = staged_body->backing_identity,
             .observation = staged_body->observation,
             .body_handle = staged_body->body_handle,
         });
@@ -1109,6 +1290,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     std::optional<BodyDescriptor> descriptor;
     std::optional<store::runtime::ingestion::VerifiedContentDescriptor> verified_content_descriptor;
     std::optional<store::runtime::ingestion::VerificationRecord> verification_record;
+    std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
     std::optional<BodyBackingObservation> observation;
     std::shared_ptr<const std::string> inline_payload;
     std::string payload_ref;
@@ -1233,9 +1415,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
                 .body_handle = capability_or->capability.body_handle,
                 .operation_id = operation_id,
                 .access_class = access_class,
-                .route_role = access_class == BodyAccessClass::kTransientForward
-                    ? BodyBackingManager::RouteRole::kTransientForwarder
-                    : BodyBackingManager::RouteRole::kHomeAuthority,
+                .route_role = access_class == BodyAccessClass::kTransientForward ? BodyRouteRole::kTransientForwarder
+                                                                                 : BodyRouteRole::kHomeAuthority,
             });
         if (!reused_or.ok()) {
           *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
@@ -1328,9 +1509,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
               .source_kind = source_kind,
               .operation_id = operation_id,
               .access_class = access_class,
-              .route_role = access_class == BodyAccessClass::kTransientForward
-                  ? BodyBackingManager::RouteRole::kTransientForwarder
-                  : BodyBackingManager::RouteRole::kHomeAuthority,
+              .route_role = access_class == BodyAccessClass::kTransientForward ? BodyRouteRole::kTransientForwarder
+                                                                               : BodyRouteRole::kHomeAuthority,
           });
       if (!staged_body_or.ok()) {
         *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
@@ -1362,6 +1542,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     pending->descriptor = staged_body->descriptor;
     pending->verified_content_descriptor = staged_body->verified_content_descriptor;
     pending->verification_record = staged_body->verification_record;
+    pending->backing_identity = staged_body->backing_identity;
     pending->observation = staged_body->observation;
     pending->needs_source_layout = false;
   };
@@ -1406,7 +1587,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
             continue;
           }
           if (!pending.descriptor.has_value() || !pending.verified_content_descriptor.has_value() ||
-              !pending.verification_record.has_value() || !pending.observation.has_value()) {
+              !pending.verification_record.has_value() || !pending.backing_identity.has_value() ||
+              !pending.observation.has_value()) {
             *resp.mutable_outcomes(pending.outcome_index) = make_outcome(
                 pending.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "staged body metadata is missing");
             continue;
@@ -1418,6 +1600,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
                   .descriptor = *pending.descriptor,
                   .verified_content_descriptor = *pending.verified_content_descriptor,
                   .verification_record = *pending.verification_record,
+                  .backing_identity = *pending.backing_identity,
                   .observation = *pending.observation,
                   .body_handle = *pending.body_handle,
               });
@@ -1522,6 +1705,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           pending.artifact_id,
           *pending.body_handle,
           *pending.descriptor,
+          pending.backing_identity,
+          pending.body_handle->binding_generation(),
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
           operation_id);
       if (!payload_ref_or.ok()) {

@@ -15,6 +15,11 @@ namespace tensorcast::daemon {
 
 namespace {
 
+std::uint64_t next_body_handle_binding_generation() {
+  static std::atomic<std::uint64_t> counter{1};
+  return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 std::string compute_sha256_hex_from_bytes(std::string_view payload) {
   const auto digest = common::sha256_digest_bytes(
       absl::Span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()));
@@ -42,6 +47,7 @@ absl::StatusOr<BodyHandle> BodyHandle::create(
   backing->engine = &engine;
   backing->replica_handle = std::move(replica_handle);
   backing->size_bytes = *size_or;
+  backing->binding_generation = next_body_handle_binding_generation();
   return BodyHandle(std::move(backing));
 }
 
@@ -57,6 +63,10 @@ std::uint64_t BodyHandle::size_bytes() const {
   return backing_ ? backing_->size_bytes : 0;
 }
 
+std::uint64_t BodyHandle::binding_generation() const {
+  return backing_ ? backing_->binding_generation : 0;
+}
+
 const store::loading::ReplicaHandle& BodyHandle::replica_handle() const {
   static const auto* empty_handle = new store::loading::ReplicaHandle();
   return backing_ ? backing_->replica_handle : *empty_handle;
@@ -68,6 +78,10 @@ common::memory::MemoryLocation BodyHandle::location() const {
   }
   return backing_->replica_handle.key().device.type == DeviceType::GPU ? common::memory::MemoryLocation::GPU
                                                                        : common::memory::MemoryLocation::CPU;
+}
+
+bool BodyHandle::unique_owner() const {
+  return backing_ && backing_.use_count() == 1;
 }
 
 absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> BodyHandle::make_loader() const {

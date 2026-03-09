@@ -145,6 +145,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
           .external_target_access_service = *external_target_access_service,
           .identity_store = kernel->worker_identity_store(),
           .engine = kernel->engine(),
+          .persistence_manager = kernel->persistence_manager(),
           .global_store_client = global_store_client,
       },
       ByteArtifactController::Options{

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 
+#include "absl/hash/hash.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/time/time.h"
@@ -83,10 +84,27 @@ struct VerificationRecord {
 
 struct BackingIdentity {
   std::string physical_artifact_id;
-  DeviceKey device;
+  loading::ReplicaKey replica_key;
 
   bool operator==(const BackingIdentity&) const = default;
 };
+
+struct BackingIdentityHash {
+  size_t operator()(const BackingIdentity& identity) const {
+    return absl::HashOf(
+        identity.physical_artifact_id,
+        identity.replica_key.artifact_id,
+        identity.replica_key.view_id,
+        static_cast<int>(identity.replica_key.device.type),
+        identity.replica_key.device.ordinal,
+        identity.replica_key.device.uuid,
+        identity.replica_key.replica);
+  }
+};
+
+inline bool backing_identity_matches_replica_key(const BackingIdentity& identity) {
+  return !identity.physical_artifact_id.empty() && identity.physical_artifact_id == identity.replica_key.artifact_id;
+}
 
 inline std::string normalize_content_digest_alg(std::string_view digest_alg) {
   std::string normalized(digest_alg);

@@ -2,6 +2,7 @@
 
 #include "daemon/service/body_backing_manager.h"
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <utility>
@@ -206,7 +207,7 @@ BodyBackingManager::BodyBackingManager(store::StoreEngine& engine) : engine_(eng
 
 absl::StatusOr<ResolvedStorePolicy> BodyBackingManager::resolve_body_store_policy(
     BodyAccessClass access_class,
-    RouteRole route_role,
+    BodyRouteRole route_role,
     const std::optional<ResolvedStorePolicy>& resolved_store_policy) const {
   ResolvedStorePolicy resolved;
   if (resolved_store_policy.has_value()) {
@@ -224,7 +225,7 @@ absl::StatusOr<ResolvedStorePolicy> BodyBackingManager::resolve_body_store_polic
     resolved.local_ttl.reset();
   };
 
-  if (route_role == RouteRole::kTransientForwarder) {
+  if (route_role == BodyRouteRole::kTransientForwarder) {
     clear_local_stable();
   }
   switch (access_class) {
@@ -240,8 +241,40 @@ absl::StatusOr<ResolvedStorePolicy> BodyBackingManager::resolve_body_store_polic
   return resolved;
 }
 
-BodyBackingIntent BodyBackingManager::classify_intent(
+BodyPlacementContext BodyBackingManager::normalize_placement_context(
     BodyAccessClass access_class,
+    BodyRouteRole route_role,
+    std::uint64_t size_bytes) const {
+  BodyPlacementContext context;
+  context.route_role = route_role;
+  context.size_bytes = size_bytes;
+  context.expected_fanout = route_role == BodyRouteRole::kTransientForwarder ? 2 : 1;
+  context.locality = route_role == BodyRouteRole::kTransientForwarder ? BodyConsumerLocality::kRemoteOrMixed
+                                                                      : BodyConsumerLocality::kLocalOnly;
+  switch (access_class) {
+    case BodyAccessClass::kLocalGpuHot:
+      context.access_pattern = BodyAccessPattern::kLocalGpuHot;
+      context.locality = BodyConsumerLocality::kLocalOnly;
+      break;
+    case BodyAccessClass::kTransientForward:
+      context.access_pattern = BodyAccessPattern::kTransientForward;
+      context.locality = BodyConsumerLocality::kRemoteOrMixed;
+      context.expected_fanout = std::max<std::uint32_t>(context.expected_fanout, 2);
+      break;
+    case BodyAccessClass::kSmallObject:
+      context.access_pattern = BodyAccessPattern::kSmallObject;
+      context.locality = BodyConsumerLocality::kLocalOnly;
+      break;
+    case BodyAccessClass::kHomeDefault:
+    default:
+      context.access_pattern = BodyAccessPattern::kDefault;
+      break;
+  }
+  return context;
+}
+
+BodyBackingIntent BodyBackingManager::classify_intent(
+    const BodyPlacementContext& context,
     const ResolvedStorePolicy& resolved_policy) const {
   const bool stable_requested = stable_cache_policy_from_resolved(resolved_policy).has_value();
   const auto stable_requirement = [&]() {
@@ -252,37 +285,37 @@ BodyBackingIntent BodyBackingManager::classify_intent(
                                                                         : BodyStableRetentionRequirement::kPreferStable;
   }();
 
-  switch (access_class) {
-    case BodyAccessClass::kLocalGpuHot:
-      return BodyBackingIntent{
-          .preferred_residency = BodyPreferredResidency::kGpu,
-          .retention_intent = BodyRetentionIntent::kRetained,
-          .stable_retention_requirement = stable_requirement,
-          .sharing_intent = BodySharingIntent::kLocalReadMostly,
-      };
-    case BodyAccessClass::kTransientForward:
-      return BodyBackingIntent{
-          .preferred_residency = BodyPreferredResidency::kCpu,
-          .retention_intent = BodyRetentionIntent::kEphemeral,
-          .stable_retention_requirement = BodyStableRetentionRequirement::kNone,
-          .sharing_intent = BodySharingIntent::kRemoteShareable,
-      };
-    case BodyAccessClass::kSmallObject:
-      return BodyBackingIntent{
-          .preferred_residency = BodyPreferredResidency::kCpu,
-          .retention_intent = BodyRetentionIntent::kEphemeral,
-          .stable_retention_requirement = BodyStableRetentionRequirement::kNone,
-          .sharing_intent = BodySharingIntent::kPrivateLocal,
-      };
-    case BodyAccessClass::kHomeDefault:
-    default:
-      return BodyBackingIntent{
-          .preferred_residency = BodyPreferredResidency::kCpu,
-          .retention_intent = BodyRetentionIntent::kRetained,
-          .stable_retention_requirement = stable_requirement,
-          .sharing_intent = BodySharingIntent::kRemoteShareable,
-      };
+  BodyBackingIntent intent;
+  intent.preferred_residency = BodyPreferredResidency::kCpu;
+  intent.retention_intent = BodyRetentionIntent::kRetained;
+  intent.stable_retention_requirement = stable_requirement;
+  intent.sharing_intent = context.locality == BodyConsumerLocality::kRemoteOrMixed
+      ? BodySharingIntent::kRemoteShareable
+      : BodySharingIntent::kLocalReadMostly;
+
+  if (context.route_role == BodyRouteRole::kTransientForwarder ||
+      context.access_pattern == BodyAccessPattern::kTransientForward) {
+    intent.retention_intent = BodyRetentionIntent::kEphemeral;
+    intent.stable_retention_requirement = BodyStableRetentionRequirement::kNone;
+    intent.preferred_residency = BodyPreferredResidency::kCpu;
+    intent.sharing_intent = BodySharingIntent::kRemoteShareable;
+    return intent;
   }
+
+  if (context.access_pattern == BodyAccessPattern::kLocalGpuHot) {
+    intent.preferred_residency = BodyPreferredResidency::kGpu;
+    intent.sharing_intent = BodySharingIntent::kLocalReadMostly;
+    return intent;
+  }
+
+  if (context.access_pattern == BodyAccessPattern::kSmallObject) {
+    intent.retention_intent = BodyRetentionIntent::kEphemeral;
+    intent.stable_retention_requirement = BodyStableRetentionRequirement::kNone;
+    intent.sharing_intent = BodySharingIntent::kPrivateLocal;
+    return intent;
+  }
+
+  return intent;
 }
 
 absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(StageRequest request) const {
@@ -301,7 +334,9 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   if (!resolved_policy_or.ok()) {
     return resolved_policy_or.status();
   }
-  const BodyBackingIntent intent = classify_intent(request.access_class, *resolved_policy_or);
+  const BodyPlacementContext context =
+      normalize_placement_context(request.access_class, request.route_role, request.invariant.byte_length());
+  const BodyBackingIntent intent = classify_intent(context, *resolved_policy_or);
   auto plan_or = store::runtime::ingestion::lower_to_artifact_plan(
       store::runtime::ingestion::LowerToArtifactPlanRequest{
           .identity =
@@ -355,6 +390,11 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   store::runtime::ingestion::BackingIdentity backing_identity = *result_or->backing_identity;
   if (backing_identity.physical_artifact_id.empty()) {
     backing_identity.physical_artifact_id = physical_artifact_id;
+  }
+  if (!store::runtime::ingestion::backing_identity_matches_replica_key(backing_identity)) {
+    (void)engine_.retire_replica_status(replica_handle.key());
+    record_body_backing_metrics("stage", request.access_class, intent, "backing_identity_mismatch");
+    return absl::InternalError("body staging returned inconsistent backing identity");
   }
   const store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor =
       *result_or->verified_content_descriptor;
@@ -418,7 +458,9 @@ absl::StatusOr<std::optional<BodyBackingManager::StageResult>> BodyBackingManage
   if (!resolved_policy_or.ok()) {
     return resolved_policy_or.status();
   }
-  const BodyBackingIntent intent = classify_intent(request.access_class, *resolved_policy_or);
+  const BodyPlacementContext context =
+      normalize_placement_context(request.access_class, request.route_role, request.descriptor.size_bytes);
+  const BodyBackingIntent intent = classify_intent(context, *resolved_policy_or);
   if (intent.stable_retention_requirement == BodyStableRetentionRequirement::kRequireStable) {
     record_body_backing_metrics("reuse", request.access_class, intent, "skipped_required_stable");
     return std::nullopt;

@@ -23,10 +23,23 @@ class ByteArtifactBodyStore {
     BodyDescriptor descriptor;
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
     store::runtime::ingestion::VerificationRecord verification_record;
-    BodyHandle body_handle;
+    BackingRecord backing_record;
     AuthorityRecord authority_record;
-    ServingCapability serving_capability;
     absl::Time expires_at{absl::InfinitePast()};
+  };
+
+  struct AuthoritySnapshot {
+    BodyDescriptor descriptor;
+    store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+    store::runtime::ingestion::VerificationRecord verification_record;
+    AuthorityRecord authority_record;
+    absl::Time expires_at{absl::InfinitePast()};
+  };
+
+  struct PersistenceSourceSnapshot {
+    std::string source_artifact_id;
+    std::uint64_t size_bytes{0};
+    store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
   };
 
   enum class PutOutcome {
@@ -55,12 +68,41 @@ class ByteArtifactBodyStore {
       std::uint64_t routing_epoch,
       absl::Time now);
 
+  [[nodiscard]] std::optional<AuthoritySnapshot> inspect_authority(
+      std::string_view artifact_id,
+      std::uint64_t shard_id,
+      std::uint64_t lease_generation,
+      std::uint64_t routing_epoch,
+      absl::Time now);
+
+  [[nodiscard]] std::optional<BackingRecord> inspect_backing(
+      const store::runtime::ingestion::BackingIdentity& identity) const;
+
+  [[nodiscard]] std::optional<PersistenceSourceSnapshot> inspect_persistence_source(std::string_view artifact_id) const;
+
+  [[nodiscard]] bool install_policy_visibility(
+      std::string_view artifact_id,
+      std::uint64_t shard_id,
+      std::uint64_t lease_generation,
+      std::uint64_t routing_epoch,
+      absl::Time now,
+      const PolicyVisibilityRef& policy_visibility_ref);
+
+  [[nodiscard]] bool clear_policy_visibility(
+      std::string_view artifact_id,
+      std::uint64_t shard_id,
+      std::uint64_t lease_generation,
+      std::uint64_t routing_epoch,
+      absl::Time now,
+      std::string_view reason);
+
   [[nodiscard]] PutResult put_if_absent(
       std::string_view artifact_id,
       const v2::PutIfAbsentInvariant& invariant,
       const BodyDescriptor& descriptor,
       const store::runtime::ingestion::VerifiedContentDescriptor& verified_content_descriptor,
       const store::runtime::ingestion::VerificationRecord& verification_record,
+      const store::runtime::ingestion::BackingIdentity& backing_identity,
       const BodyBackingObservation& observation,
       const BodyHandle& body_handle,
       std::uint64_t shard_id,

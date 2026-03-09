@@ -339,6 +339,9 @@ TEST_CASE(
           result_or->verified_content_descriptor->content_identity.digest_bytes) == sha256_hex(*payload));
   CHECK(result_or->verification_record->verified_at != absl::InfinitePast());
   CHECK(result_or->backing_identity->physical_artifact_id == "__tc_body__:verified");
+  CHECK(result_or->backing_identity->replica_key.artifact_id == "__tc_body__:verified");
+  CHECK_FALSE(result_or->backing_identity->replica_key.view_id.has_value());
+  CHECK(result_or->backing_identity->replica_key.replica == 0);
 
   harness.shutdown();
   std::error_code cleanup_ec;

@@ -13,6 +13,7 @@ related_code:
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
   - docs/designs/0089-core-backed-body-handles-and-backing-policy.md
+  - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
   - docs/architecture/api/policy-persistence.md
   - daemon/service/byte_artifact_body_store.h
   - daemon/service/byte_artifact_body_store.cc
@@ -62,7 +63,7 @@ Phase 0 is intentionally narrow:
   metadata.
 
 Phase 0 does not yet define repo-wide `ContentIdentity`, `VerifiedContentDescriptor`, or `BackingIdentity`. Those are
-handled by `0091` and later phases. This phase defines the routed authority semantics that those later phases must
+handled by `0091` and `0093`. This phase defines the routed authority semantics that those later phases must
 respect.
 
 # Implementation Status
@@ -155,8 +156,8 @@ That is architecturally wrong for four reasons:
 - Make home-daemon authority the repo-wide model for every artifact profile.
 - Redefine the repository-wide truth lattice from `0092`.
 - Define repo-wide `VerifiedContentDescriptor`. That is phase 1.
-- Define `BackingIdentity`. That is a later phase.
-- Define the shared capability-resolution layer. That is a later phase.
+- Define `BackingIdentity`. That is phase 2 in `0093`.
+- Define the shared capability-resolution layer. That is phase 2 in `0093`.
 - Provide durable routed claim-truth recovery across daemon restart or shard-home failover. That is a later phase.
 - Push routed byte-artifact per-blob truth back into Global Store.
 - Introduce a second user-facing policy surface beside `StorePolicy`.
@@ -466,6 +467,12 @@ The semantic rule is therefore:
   change the phase-0 deletion semantics of TTL expiry or explicit claim deletion,
 - until that path is implemented, routed byte-artifact existence remains a strict current-servability contract for the
   current home-epoch claim.
+
+This later integration is now scoped by `0093`, which defines:
+
+- when `policy_backed_path` becomes an actionable visibility proof,
+- how `ServingCapability` is minted by the lifecycle kernel rather than by authority-local storage,
+- how `StorePolicy` becomes the single declarative input to policy-backed restoration.
 
 This is deliberate. It avoids pretending that stable retention, retention handles, or durable placement policy already
 provide routed per-blob truth when the current implementation does not yet wire them into routed authority decisions.

@@ -109,6 +109,24 @@ DaemonKernel::DaemonKernel(
   identity_store_->set_daemon_id(options_.daemon_id);
   byte_artifact_runtime_state_ = std::make_unique<ByteArtifactRuntimeState>();
   byte_artifact_body_store_ = std::make_unique<ByteArtifactBodyStore>(*byte_artifact_runtime_state_);
+  if (persistence_mgr_) {
+    persistence_mgr_->set_external_source_resolver(
+        [this](std::string_view artifact_id) -> absl::StatusOr<PersistenceManager::PersistenceSource> {
+          if (!byte_artifact_body_store_) {
+            return absl::NotFoundError("byte_artifact_body_store_unavailable");
+          }
+          auto source_snapshot = byte_artifact_body_store_->inspect_persistence_source(artifact_id);
+          if (!source_snapshot.has_value()) {
+            return absl::NotFoundError("byte_artifact_persistence_source_not_found");
+          }
+          return PersistenceManager::PersistenceSource{
+              .artifact_id = std::string(artifact_id),
+              .source_artifact_id = source_snapshot->source_artifact_id,
+              .total_size_bytes = source_snapshot->size_bytes,
+              .verified_content_descriptor = source_snapshot->verified_content_descriptor,
+          };
+        });
+  }
   runtime_event_subscription_ = engine_->subscribe_to_runtime_events([this](const store::runtime::RuntimeEvent& event) {
     if (event.type != store::runtime::RuntimeEventType::kReplicaEvicted) {
       return;

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "absl/base/thread_annotations.h"
@@ -41,8 +42,8 @@ struct ByteArtifactRuntimeState {
     BodyDescriptor claim_descriptor;
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
     store::runtime::ingestion::VerificationRecord verification_record;
-    BodyBackingObservation last_observation;
-    BodyHandle visible_body_handle;
+    std::optional<store::runtime::ingestion::BackingIdentity> retained_backing_identity;
+    std::optional<PolicyVisibilityRef> policy_visibility_ref;
     absl::Time expires_at{absl::InfinitePast()};
     std::uint64_t shard_id{0};
     std::uint64_t lease_generation{0};
@@ -53,7 +54,21 @@ struct ByteArtifactRuntimeState {
 
   mutable absl::Mutex mu;
   absl::flat_hash_map<std::string, AuthorityEntry> authority_entries ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> replica_visibility_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<
+      store::runtime::ingestion::BackingIdentity,
+      BackingRecord,
+      store::runtime::ingestion::BackingIdentityHash>
+      backing_entries ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<
+      store::runtime::ingestion::BackingIdentity,
+      absl::flat_hash_set<std::string>,
+      store::runtime::ingestion::BackingIdentityHash>
+      backing_authority_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<
+      store::loading::ReplicaKey,
+      absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>,
+      store::loading::ReplicaKeyHash>
+      replica_visibility_index ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, ShardRouteCacheEntry> shard_routes ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, OwnedShardLeaseEntry> owned_shard_leases ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::string, DaemonEndpointCacheEntry> daemon_endpoints ABSL_GUARDED_BY(mu);

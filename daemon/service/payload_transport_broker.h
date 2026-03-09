@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -90,6 +91,8 @@ class PayloadTransportBroker {
       std::string_view artifact_id,
       const BodyHandle& body_handle,
       const BodyDescriptor& descriptor,
+      std::optional<store::runtime::ingestion::BackingIdentity> backing_identity,
+      std::uint64_t backing_instance_generation,
       tensorcast::common::v1::PayloadRefDirection direction,
       std::string_view operation_id = "",
       absl::Time capability_expires_at = absl::InfiniteFuture());
@@ -170,6 +173,8 @@ class PayloadTransportBroker {
     std::shared_ptr<const std::string> payload;
     BodyHandle body_handle;
     BodyDescriptor descriptor;
+    std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
+    std::uint64_t backing_instance_generation{0};
   };
 
   struct Record {
@@ -177,6 +182,8 @@ class PayloadTransportBroker {
     std::shared_ptr<const std::string> payload;
     BodyHandle body_handle;
     BodyDescriptor descriptor;
+    std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
+    std::uint64_t backing_instance_generation{0};
   };
 
   [[nodiscard]] absl::StatusOr<LocalResolvedPayload> resolve_local_payload_ref_record(

@@ -2468,7 +2468,7 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
   result.verification_record = verified_projection_or->verification_record;
   result.backing_identity = BackingIdentity{
       .physical_artifact_id = plan.identity.physical_artifact_id,
-      .device = plan.target_device,
+      .replica_key = result.replica_handle->key(),
   };
   return result;
 }

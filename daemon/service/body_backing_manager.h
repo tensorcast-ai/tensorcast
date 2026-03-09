@@ -18,11 +18,6 @@ namespace tensorcast::daemon {
 
 class BodyBackingManager {
  public:
-  enum class RouteRole : std::uint8_t {
-    kHomeAuthority = 0,
-    kTransientForwarder = 1,
-  };
-
   struct StageRequest {
     std::string artifact_id;
     v2::PutIfAbsentInvariant invariant;
@@ -30,7 +25,7 @@ class BodyBackingManager {
     store::loading::MaterializationSource source_kind{store::loading::MaterializationSource::kUnspecified};
     std::string operation_id;
     BodyAccessClass access_class{BodyAccessClass::kHomeDefault};
-    RouteRole route_role{RouteRole::kHomeAuthority};
+    BodyRouteRole route_role{BodyRouteRole::kHomeAuthority};
     std::optional<ResolvedStorePolicy> resolved_store_policy;
   };
 
@@ -50,7 +45,7 @@ class BodyBackingManager {
     BodyHandle body_handle;
     std::string operation_id;
     BodyAccessClass access_class{BodyAccessClass::kHomeDefault};
-    RouteRole route_role{RouteRole::kHomeAuthority};
+    BodyRouteRole route_role{BodyRouteRole::kHomeAuthority};
     std::optional<ResolvedStorePolicy> resolved_store_policy;
   };
 
@@ -62,10 +57,14 @@ class BodyBackingManager {
  private:
   [[nodiscard]] absl::StatusOr<ResolvedStorePolicy> resolve_body_store_policy(
       BodyAccessClass access_class,
-      RouteRole route_role,
+      BodyRouteRole route_role,
       const std::optional<ResolvedStorePolicy>& resolved_store_policy) const;
-  [[nodiscard]] BodyBackingIntent classify_intent(
+  [[nodiscard]] BodyPlacementContext normalize_placement_context(
       BodyAccessClass access_class,
+      BodyRouteRole route_role,
+      std::uint64_t size_bytes) const;
+  [[nodiscard]] BodyBackingIntent classify_intent(
+      const BodyPlacementContext& context,
       const ResolvedStorePolicy& resolved_policy) const;
 
   store::StoreEngine& engine_;

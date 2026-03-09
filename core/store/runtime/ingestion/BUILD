@@ -22,6 +22,7 @@ sc_header_only_library(
     deps = [
         "//core/store:device_types",
         "//core/store/materialization/contracts:loading_spec",
+        "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
     ],

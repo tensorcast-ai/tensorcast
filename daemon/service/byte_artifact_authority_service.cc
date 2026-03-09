@@ -9,6 +9,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "daemon/service/artifact_profile_registry.h"
+#include "daemon/service/serving_lifecycle.h"
 
 namespace tensorcast::daemon {
 
@@ -100,9 +101,9 @@ std::vector<ByteArtifactAuthorityService::GetResult> ByteArtifactAuthorityServic
       continue;
     }
 
-    auto entry =
-        body_store_.get(artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
-    if (!entry.has_value()) {
+    auto authority = body_store_.inspect_authority(
+        artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+    if (!authority.has_value() || !authority->authority_record.visible) {
       results.push_back(
           GetResult{
               .artifact_id = artifact_id,
@@ -111,14 +112,68 @@ std::vector<ByteArtifactAuthorityService::GetResult> ByteArtifactAuthorityServic
       continue;
     }
 
+    std::optional<ByteArtifactBodyStore::EntrySnapshot> entry;
+    if (authority->authority_record.visibility_kind == AuthorityVisibilityKind::kReadyBacking) {
+      entry =
+          body_store_.get(artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+      if (!entry.has_value()) {
+        results.push_back(
+            GetResult{
+                .artifact_id = artifact_id,
+                .status = v2::BATCH_ITEM_STATUS_MISS,
+            });
+        continue;
+      }
+    } else if (!authority->authority_record.policy_visibility_ref.has_value()) {
+      results.push_back(
+          GetResult{
+              .artifact_id = artifact_id,
+              .status = v2::BATCH_ITEM_STATUS_MISS,
+          });
+      continue;
+    }
+
+    MintServingCapabilityRequest capability_request{
+        .capability_id = artifact_id,
+        .expires_at = authority->expires_at,
+        .mode =
+            entry.has_value() ? BodyCapabilityResolutionMode::kLocalBodyHandle : BodyCapabilityResolutionMode::kLoader,
+        .local = true,
+        .subject_kind = entry.has_value() ? ServingCapabilitySubjectKind::kBacking
+                                          : ServingCapabilitySubjectKind::kPolicyBackedPath,
+        .lifecycle_owner_ref =
+            LifecycleOwnerRef{
+                .owner_kind =
+                    entry.has_value() ? LifecycleOwnerKind::kInlineCopyWindow : LifecycleOwnerKind::kPersistenceTask,
+                .owner_id =
+                    entry.has_value() ? artifact_id : authority->authority_record.policy_visibility_ref->control_ref,
+            },
+    };
+    if (entry.has_value()) {
+      capability_request.backing_identity = entry->backing_record.identity;
+      capability_request.backing_instance_generation = entry->backing_record.instance_generation;
+    } else {
+      capability_request.policy_visibility_ref = authority->authority_record.policy_visibility_ref;
+    }
+    auto capability_or = mint_serving_capability(std::move(capability_request));
+    if (!capability_or.ok()) {
+      results.push_back(
+          GetResult{
+              .artifact_id = artifact_id,
+              .status = v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+              .message = std::string(capability_or.status().message()),
+          });
+      continue;
+    }
+
     results.push_back(
         GetResult{
             .artifact_id = artifact_id,
             .status = v2::BATCH_ITEM_STATUS_OK,
-            .descriptor = entry->descriptor,
-            .body_handle = entry->body_handle,
-            .authority_record = entry->authority_record,
-            .serving_capability = entry->serving_capability,
+            .descriptor = authority->descriptor,
+            .body_handle = entry.has_value() ? entry->backing_record.retained_body_handle : BodyHandle(),
+            .authority_record = authority->authority_record,
+            .serving_capability = std::move(*capability_or),
         });
   }
   return results;
@@ -157,6 +212,7 @@ std::vector<v2::BatchItemOutcome> ByteArtifactAuthorityService::batch_put_if_abs
         item.descriptor,
         item.verified_content_descriptor,
         item.verification_record,
+        item.backing_identity,
         item.observation,
         item.body_handle,
         context.shard_id,

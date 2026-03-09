@@ -41,6 +41,7 @@ class ByteArtifactAuthorityService {
     BodyDescriptor descriptor;
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
     store::runtime::ingestion::VerificationRecord verification_record;
+    store::runtime::ingestion::BackingIdentity backing_identity;
     BodyBackingObservation observation;
     BodyHandle body_handle;
   };

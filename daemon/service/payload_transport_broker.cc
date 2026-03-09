@@ -20,6 +20,7 @@
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "daemon/service/serving_lifecycle.h"
 #include "daemon/state/worker_directory_cache.h"
 #include "grpcpp/grpcpp.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -391,6 +392,8 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
         .payload = std::move(payload),
         .body_handle = BodyHandle(),
         .descriptor = normalized_descriptor,
+        .backing_identity = std::nullopt,
+        .backing_instance_generation = 0,
     };
   }
 
@@ -467,6 +470,8 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
         .payload = std::move(payload),
         .body_handle = BodyHandle(),
         .descriptor = BodyDescriptor(),
+        .backing_identity = std::nullopt,
+        .backing_instance_generation = 0,
     };
   }
 
@@ -495,6 +500,8 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     std::string_view artifact_id,
     const BodyHandle& body_handle,
     const BodyDescriptor& descriptor,
+    std::optional<store::runtime::ingestion::BackingIdentity> backing_identity,
+    std::uint64_t backing_instance_generation,
     tensorcast::common::v1::PayloadRefDirection direction,
     std::string_view operation_id,
     absl::Time capability_expires_at) {
@@ -515,6 +522,24 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   }
   if (descriptor.payload_digest_alg.empty() || descriptor.payload_digest_hex.empty()) {
     return absl::InvalidArgumentError("descriptor digest is required for payload_ref issuance");
+  }
+  if (backing_identity.has_value() &&
+      !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
+    return absl::InvalidArgumentError("backing_identity must match replica_key.artifact_id");
+  }
+  const BodyDescriptor normalized_descriptor = normalized_body_descriptor(descriptor);
+  if (!backing_identity.has_value()) {
+    backing_identity = body_descriptor_to_backing_identity(normalized_descriptor, body_handle);
+  }
+  if (!backing_identity.has_value() ||
+      !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
+    return absl::InvalidArgumentError("descriptor and body_handle do not identify a valid backing");
+  }
+  if (backing_instance_generation == 0) {
+    backing_instance_generation = body_handle.binding_generation();
+  }
+  if (backing_instance_generation == 0) {
+    return absl::InvalidArgumentError("backing_instance_generation is required for live-backing payload_ref issuance");
   }
 
   const absl::Time now = absl::Now();
@@ -549,7 +574,9 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
         .metadata = metadata,
         .payload = nullptr,
         .body_handle = body_handle,
-        .descriptor = normalized_body_descriptor(descriptor),
+        .descriptor = normalized_descriptor,
+        .backing_identity = std::move(backing_identity),
+        .backing_instance_generation = backing_instance_generation,
     };
   }
 
@@ -688,15 +715,62 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
       resolution.capability.local = true;
       resolution.capability.body_handle = local_or->body_handle;
       resolution.capability.descriptor = local_or->descriptor;
-      resolution.serving_capability = resolve_serving_capability(
-          payload_ref, resolution.metadata.expires_at, resolution.capability.mode, /*local=*/true);
+      auto backing_identity = local_or->backing_identity;
+      if (!backing_identity.has_value()) {
+        backing_identity = body_descriptor_to_backing_identity(local_or->descriptor, local_or->body_handle);
+      }
+      if (!backing_identity.has_value() ||
+          !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
+        return absl::FailedPreconditionError("payload_ref backing_identity is missing or inconsistent");
+      }
+      std::uint64_t backing_instance_generation = local_or->backing_instance_generation;
+      if (backing_instance_generation == 0) {
+        backing_instance_generation = local_or->body_handle.binding_generation();
+      }
+      if (backing_instance_generation == 0) {
+        return absl::FailedPreconditionError("payload_ref backing_instance_generation is missing");
+      }
+      auto capability_or = mint_serving_capability(
+          MintServingCapabilityRequest{
+              .capability_id = std::string(payload_ref),
+              .expires_at = resolution.metadata.expires_at,
+              .mode = resolution.capability.mode,
+              .local = true,
+              .subject_kind = ServingCapabilitySubjectKind::kBacking,
+              .lifecycle_owner_ref =
+                  LifecycleOwnerRef{
+                      .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
+                      .owner_id = resolution.metadata.payload_id,
+                  },
+              .backing_identity = std::move(backing_identity),
+              .backing_instance_generation = backing_instance_generation,
+          });
+      if (!capability_or.ok()) {
+        return capability_or.status();
+      }
+      resolution.serving_capability = std::move(*capability_or);
       record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
       return resolution;
     }
     resolution.capability.mode = BodyCapabilityResolutionMode::kLoader;
     resolution.capability.local = true;
-    resolution.serving_capability = resolve_serving_capability(
-        payload_ref, resolution.metadata.expires_at, resolution.capability.mode, /*local=*/true);
+    auto capability_or = mint_serving_capability(
+        MintServingCapabilityRequest{
+            .capability_id = std::string(payload_ref),
+            .expires_at = resolution.metadata.expires_at,
+            .mode = resolution.capability.mode,
+            .local = true,
+            .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
+            .lifecycle_owner_ref =
+                LifecycleOwnerRef{
+                    .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
+                    .owner_id = resolution.metadata.payload_id,
+                },
+        });
+    if (!capability_or.ok()) {
+      return capability_or.status();
+    }
+    resolution.serving_capability = std::move(*capability_or);
     record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
     return resolution;
   }
@@ -705,8 +779,23 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
   resolution.metadata = *metadata_or;
   resolution.capability.mode = BodyCapabilityResolutionMode::kChunkRpcFallback;
   resolution.capability.local = false;
-  resolution.serving_capability = resolve_serving_capability(
-      payload_ref, resolution.metadata.expires_at, resolution.capability.mode, /*local=*/false);
+  auto capability_or = mint_serving_capability(
+      MintServingCapabilityRequest{
+          .capability_id = std::string(payload_ref),
+          .expires_at = resolution.metadata.expires_at,
+          .mode = resolution.capability.mode,
+          .local = false,
+          .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
+          .lifecycle_owner_ref =
+              LifecycleOwnerRef{
+                  .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
+                  .owner_id = resolution.metadata.payload_id,
+              },
+      });
+  if (!capability_or.ok()) {
+    return capability_or.status();
+  }
+  resolution.serving_capability = std::move(*capability_or);
   record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/false);
   return resolution;
 }
@@ -745,6 +834,9 @@ absl::StatusOr<PayloadTransportBroker::LocalResolvedPayload> PayloadTransportBro
     return absl::NotFoundError("payload_ref is no longer valid");
   }
   if (it->second.metadata.expires_at <= now) {
+    if (!it->second.body_handle.empty() && it->second.body_handle.unique_owner()) {
+      (void)it->second.body_handle.retire();
+    }
     records_.erase(it);
     return absl::PermissionDeniedError("payload_ref expired");
   }
@@ -774,6 +866,8 @@ absl::StatusOr<PayloadTransportBroker::LocalResolvedPayload> PayloadTransportBro
       .payload = it->second.payload,
       .body_handle = it->second.body_handle,
       .descriptor = it->second.descriptor,
+      .backing_identity = it->second.backing_identity,
+      .backing_instance_generation = it->second.backing_instance_generation,
   };
 }
 
@@ -934,7 +1028,14 @@ void PayloadTransportBroker::prune_locked(absl::Time now) {
     }
   }
   for (const auto& payload_id : expired) {
-    records_.erase(payload_id);
+    auto it = records_.find(payload_id);
+    if (it == records_.end()) {
+      continue;
+    }
+    if (!it->second.body_handle.empty() && it->second.body_handle.unique_owner()) {
+      (void)it->second.body_handle.retire();
+    }
+    records_.erase(it);
   }
 }
 

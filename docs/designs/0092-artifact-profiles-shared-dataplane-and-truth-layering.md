@@ -13,6 +13,7 @@ related_code:
   - docs/designs/0089-core-backed-body-handles-and-backing-policy.md
   - docs/designs/0090-existence-semantics-and-single-authority-truth.md
   - docs/designs/0091-selection-identity-resolved-source-and-verified-content-descriptor.md
+  - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
   - daemon/service/artifact_profile_registry.h
   - daemon/service/artifact_profile_registry.cc
   - daemon/service/controllers/replica_materialization_service.cc
@@ -55,7 +56,7 @@ This foundation defines the hard architectural split that later phases must pres
   claims rather than durable per-blob catalog truth,
 - any state that changes future join, idempotency, first-writer, or conflict outcomes must be recoverable truth or be
   explicitly scoped as ephemeral and non-HA,
-- `0090` and `0091` are follow-on phases that refine this foundation rather than redefining it.
+- `0090`, `0091`, and `0093` are follow-on phases that refine this foundation rather than redefining it.
 
 # Implementation Status
 
@@ -120,7 +121,8 @@ Without a foundation document, later phase docs can each fix a local problem whi
 - Define the execution order of follow-on work:
   - foundation first,
   - `0090` second,
-  - `0091` third.
+  - `0091` third,
+  - `0093` fourth.
 
 ## Non-Goals
 
@@ -187,8 +189,8 @@ flowchart LR
   B --> F["AuthorityRecord"]
   C --> G["ResolvedSourceDescriptor"]
   D --> H["VerifiedContentDescriptor"]
-  E --> I["BackingIdentity later"]
-  E --> J["ServingCapability / lifecycle layer"]
+  E --> I["BackingIdentity / 0093"]
+  E --> J["ServingCapability / lifecycle layer / 0093"]
 ```
 
 Architectural rule:
@@ -354,7 +356,7 @@ Normative rule:
 - daemon controllers may validate, batch, route, and authorize,
 - they must stop before steady-state execution and pass through the lowering seam.
 
-## 8. Relationship to `0090` and `0091`
+## 8. Relationship to `0090`, `0091`, and `0093`
 
 This foundation is executed first.
 
@@ -370,7 +372,17 @@ This foundation is executed first.
 - define how multiple proof families are canonicalized before they are allowed to mint stable content truth,
 - define how profile-specific join or conflict projections derive from shared content truth without redefining it.
 
-Neither follow-on phase may violate the foundation rules above.
+`0093` is then responsible for one thing:
+
+- define the shared backing-truth contract, including the exact relationship between `BackingIdentity` and
+  `ReplicaKey`,
+- define how `AuthorityRecord` references retained backing truth rather than hiding it inside authority-local handle
+  ownership,
+- define `ServingCapability` as the shared lifecycle-kernel contract,
+- define how high-cardinality routed artifacts become real `StorePolicy` clients for retained-backing and
+  rematerialization decisions.
+
+No follow-on phase may violate the foundation rules above.
 
 ## 9. Naming Compliance
 
@@ -422,9 +434,11 @@ Acceptance criteria:
   - authority-local state,
 - any truth that affects future join, idempotency, or conflict semantics is either recoverable or explicitly declared
   ephemeral/non-HA in the follow-on design,
-- `0090` and `0091` are updated to depend on this foundation and no longer redefine these boundaries independently,
+- `0090`, `0091`, and `0093` are updated to depend on this foundation and no longer redefine these boundaries
+  independently,
 - `0091` defines one canonical shared minting seam for stable content truth instead of allowing proof-kind-specific stable
   equalities,
+- `0093` defines one shared backing-truth and lifecycle-capability contract instead of leaving those layers implicit,
 - future implementation phases are rejected if they introduce:
   - a second steady-state copy engine,
   - a second profile-private lifecycle kernel for the same serve or export promises,

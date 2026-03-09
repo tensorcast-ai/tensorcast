@@ -11,6 +11,7 @@ related_code:
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
   - docs/designs/0089-core-backed-body-handles-and-backing-policy.md
   - docs/designs/0090-existence-semantics-and-single-authority-truth.md
+  - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
   - core/common/selection_identity.h
   - core/common/selection_identity.cc
   - tensorcast/common/selection_identity.py
@@ -80,7 +81,7 @@ The long-term rule is:
 - downstream consumers do not mint parallel content-truth objects of their own.
 
 Phase 1 does not yet define `BackingIdentity` or the shared serving-capability resolver. It unifies the truth chain that
-those later phases must consume.
+phase 2 in `0093` must consume.
 
 Implementation sequencing note:
 
@@ -179,8 +180,8 @@ That creates three long-term architectural risks:
 ## Non-Goals
 
 - Redefine profile authority modes or require every artifact to use home-daemon routing.
-- Define `BackingIdentity`. That is a later phase.
-- Define the shared capability-resolution layer. That is a later phase.
+- Define `BackingIdentity`. That is phase 2 in `0093`.
+- Define the shared capability-resolution layer. That is phase 2 in `0093`.
 - Put residency, exportability, lease state, or wall-clock observation into `VerifiedContentDescriptor`.
 - Put `SelectionIdentity` inside stable content equality.
 - Keep a body-private descriptor model as a second long-term source of truth under `daemon/service`.
@@ -206,8 +207,8 @@ flowchart LR
   C --> D["ContentIdentity"]
   D --> E["VerifiedContentDescriptor"]
   E --> F["ProfileJoinProjection / BodyDescriptor / payload_ref projection"]
-  E --> G["Future BackingIdentity"]
-  F --> H["Lifecycle / serving layer later"]
+  E --> G["BackingIdentity / 0093"]
+  F --> H["Lifecycle / serving layer / 0093"]
 ```
 
 Shared question split:
@@ -468,6 +469,8 @@ Additional rule:
 
 - until `BackingIdentity` lands, `BodyDescriptor` may continue to carry temporary backing-local fields such as
   `physical_artifact_id`, but those fields are not shared content truth and must not redefine descriptor equality.
+- `0093` is the follow-on phase that replaces those temporary backing-local fields with the shared backing-truth
+  contract.
 - in phase 1, routed byte-artifact join projection remains the current
   `{layout_id, byte_length, payload_digest_alg, payload_digest_hex}` tuple, but that tuple is explicitly a
   profile-specific projection from shared descriptor truth rather than the descriptor itself.

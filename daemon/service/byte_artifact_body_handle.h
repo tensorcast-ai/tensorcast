@@ -29,8 +29,10 @@ class BodyHandle {
   [[nodiscard]] bool empty() const;
   [[nodiscard]] Kind kind() const;
   [[nodiscard]] std::uint64_t size_bytes() const;
+  [[nodiscard]] std::uint64_t binding_generation() const;
   [[nodiscard]] const store::loading::ReplicaHandle& replica_handle() const;
   [[nodiscard]] common::memory::MemoryLocation location() const;
+  [[nodiscard]] bool unique_owner() const;
 
   [[nodiscard]] absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> make_loader() const;
   [[nodiscard]] absl::StatusOr<std::string> read_range(std::uint64_t offset, std::size_t bytes) const;
@@ -43,6 +45,7 @@ class BodyHandle {
     store::StoreEngine* engine{nullptr};
     store::loading::ReplicaHandle replica_handle;
     std::uint64_t size_bytes{0};
+    std::uint64_t binding_generation{0};
     std::atomic<bool> retired{false};
   };
 
