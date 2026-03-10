@@ -623,6 +623,10 @@ class TestServices:
         assert selected.replica_id == replica.replica_id
         assert selected.current_requests == 1
 
+        transport_row = repositories["transport"].find_by_id(transport_id)
+        assert transport_row is not None
+        assert transport_row.replica_memory_size_bytes == replica.memory_size
+
         # Complete transport
         current, max_conc = transport_service.complete_transport(
             transport_id,
@@ -1291,6 +1295,158 @@ class TestServices:
         assert transport_row.completion_detail is not None
         assert "cleanup_expired_transports" in transport_row.completion_detail
         assert replica_repo.get_current_requests(replica.replica_id) == 0
+
+    def test_cleanup_expired_transports_reclaims_malformed_in_progress_status(
+        self, services, repositories
+    ):
+        """Malformed in-progress rows should be reclaimed even before stale timeout."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+        replica_repo = repositories["replica"]
+        transport_repo = repositories["transport"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_cleanup_malformed",
+                node_id="node_cleanup_malformed",
+                node_address="192.168.33.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="cleanup_malformed_artifact",
+                node_id="node_cleanup_malformed",
+                node_address="192.168.33.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        _, transport_id = transport_service.request_transport(
+            artifact_id="cleanup_malformed_artifact",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="192.168.34.1",
+            source_port=9090,
+            request_id="cleanup-malformed-request-1",
+        )
+        assert replica_repo.get_current_requests(replica.replica_id) == 1
+
+        created_at = datetime.now(timezone.utc)
+        transport_repo.connection.execute(
+            """
+            UPDATE artifact_transports
+            SET status = ?, request_id = ?, created_at = ?, completed_at = NULL
+            WHERE transport_id = ?
+            """,
+            [
+                "in_progressin_progress",
+                (
+                    "transport:canonical:cleanup-malformed-request-1"
+                    "transport:canonical:cleanup-malformed-request-1"
+                ),
+                created_at,
+                str(transport_id),
+            ],
+        )
+
+        cleaned = transport_service.cleanup_expired_transports(expiration_seconds=3600)
+        assert cleaned == 1
+
+        transport_row = transport_repo.find_by_id(transport_id)
+        assert transport_row is not None
+        assert transport_row.status == "completed"
+        assert transport_row.completion_outcome == TransportCompletionOutcome.EXPIRED
+        assert transport_row.completion_detail is not None
+        assert "cleanup_malformed_inflight" in transport_row.completion_detail
+        assert replica_repo.get_current_requests(replica.replica_id) == 0
+
+    def test_cleanup_expired_transports_keeps_dispatched_request_after_queue_deadline(
+        self, services, repositories
+    ):
+        """Queue wait deadline only applies before dispatch and must not expire in-flight transport."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+        pending_repo = repositories["pending_transport_request"]
+        replica_repo = repositories["replica"]
+        transport_repo = repositories["transport"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_cleanup_dispatched_deadline",
+                node_id="node_cleanup_dispatched_deadline",
+                node_address="192.168.35.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="cleanup_dispatched_deadline_artifact",
+                node_id="node_cleanup_dispatched_deadline",
+                node_address="192.168.35.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        request_id = "cleanup-dispatched-deadline-request-1"
+        _, transport_id = transport_service.request_transport(
+            artifact_id="cleanup_dispatched_deadline_artifact",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="192.168.36.1",
+            source_port=9090,
+            wait_timeout_ms=5_000,
+            request_id=request_id,
+        )
+        assert replica_repo.get_current_requests(replica.replica_id) == 1
+
+        past_deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
+        pending_repo.connection.execute(
+            """
+            UPDATE pending_transport_requests
+            SET state = 'dispatched', deadline_at = ?, updated_at = now()
+            WHERE request_id = ?
+            """,
+            [past_deadline, request_id],
+        )
+
+        cleaned = transport_service.cleanup_expired_transports(expiration_seconds=3600)
+        assert cleaned == 0
+
+        pending_row = pending_repo.find_by_request_id(request_id)
+        assert pending_row is not None
+        assert pending_row.state == PendingTransportState.DISPATCHED
+
+        transport_row = transport_repo.find_by_id(transport_id)
+        assert transport_row is not None
+        assert transport_row.status == "in_progress"
+        assert transport_row.completed_at is None
+        assert transport_row.completion_outcome == TransportCompletionOutcome.UNSPECIFIED
+        assert replica_repo.get_current_requests(replica.replica_id) == 1
 
     def test_group_dispatch_honors_dispatch_batch_limit(
         self, tmp_path, repositories

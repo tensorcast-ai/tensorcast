@@ -725,6 +725,72 @@ class TestRepositories:
         assert progress.total_parts == 2
         assert progress.completion_ratio == pytest.approx(0.5)
 
+    def test_transport_window_keeps_bytes_after_replica_cleanup(self, repositories):
+        """Transport window rows should keep byte size even after replica row is removed."""
+        transport_repo = repositories["transport"]
+        replica_repo = repositories["replica"]
+
+        replica = Replica(
+            artifact_id="transport_window_snapshot_artifact",
+            node_id="node_snapshot",
+            node_address="192.168.20.1",
+            node_port=8080,
+            memory_size=4096,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            worker_id="worker_snapshot",
+        )
+        created_replica = replica_repo.create(replica)
+        transport = Transport(
+            replica_id=created_replica.replica_id,
+            artifact_id=replica.artifact_id,
+            source_node_id="source_snapshot",
+            source_address="192.168.20.2",
+            source_port=9000,
+            replica_memory_size_bytes=created_replica.memory_size,
+        )
+        transport_repo.create(transport)
+        assert transport_repo.complete_if_in_progress(
+            transport.transport_id,
+            completed_at=datetime.now(timezone.utc),
+            outcome=TransportCompletionOutcome.SUCCESS,
+        )
+
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0)
+        rows_before_cleanup = transport_repo.list_rows_in_created_window(
+            started_at=start,
+            finished_at=end,
+            limit=100,
+        )
+        matched_before_cleanup = [
+            row
+            for row in rows_before_cleanup
+            if row.transport_id == str(transport.transport_id)
+        ]
+        assert len(matched_before_cleanup) == 1
+        assert matched_before_cleanup[0].replica_memory_size_bytes == 4096
+
+        cursor = transport_repo.get_cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM artifact_replicas WHERE replica_id = ?",
+                [str(created_replica.replica_id)],
+            )
+        finally:
+            cursor.close()
+
+        rows_after_cleanup = transport_repo.list_rows_in_created_window(
+            started_at=start,
+            finished_at=end,
+            limit=100,
+        )
+        matched_after_cleanup = [
+            row for row in rows_after_cleanup if row.transport_id == str(transport.transport_id)
+        ]
+        assert len(matched_after_cleanup) == 1
+        assert matched_after_cleanup[0].replica_memory_size_bytes == 4096
+
     def test_replica_by_worker_cleanup(self, repositories):
         """Test marking replicas unavailable when worker is removed."""
         replica_repo = repositories["replica"]

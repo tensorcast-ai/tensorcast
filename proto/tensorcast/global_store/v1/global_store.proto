@@ -44,6 +44,7 @@ service ClusterRuntimeService {
   // Replica transport
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
+  rpc QueryTransportWindow(QueryTransportWindowRequest) returns (QueryTransportWindowResponse) {}
 
   // Chunk directory operations
   rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
@@ -814,6 +815,34 @@ message CompleteReplicaTransportRequest {
 
 message CompleteReplicaTransportResponse {
   Status status = 1;
+}
+
+message QueryTransportWindowRequest {
+  google.protobuf.Timestamp created_at_start = 1;
+  google.protobuf.Timestamp created_at_end = 2;
+  uint32 limit = 3;
+}
+
+message TransportWindowRow {
+  string transport_id = 1;
+  string replica_id = 2;
+  string artifact_id = 3;
+  string status = 4;
+  string completion_outcome = 5;
+  string request_id = 6;
+  string requester_worker_id = 7;
+  string group_id = 8;
+  string group_kind = 9;
+  string group_part_id = 10;
+  uint32 group_total_parts = 11;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp completed_at = 13;
+  uint64 replica_memory_size_bytes = 14;
+}
+
+message QueryTransportWindowResponse {
+  Status status = 1;
+  repeated TransportWindowRow rows = 2;
 }
 
 // ========== Health Check ==========

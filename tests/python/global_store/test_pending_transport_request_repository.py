@@ -131,3 +131,21 @@ def test_expire_enqueued_deadlines_only_expires_due_rows(repositories):
     assert future.state == PendingTransportState.ENQUEUED
     assert no_deadline.state == PendingTransportState.ENQUEUED
     assert dispatched.state == PendingTransportState.DISPATCHED
+
+
+def test_purge_malformed_rows_does_not_drop_request_id_by_token_pattern(repositories):
+    pending_repo = repositories["pending_transport_request"]
+    request_id = "user-transport:alpha-any-transport:beta"
+
+    with pending_repo.transaction() as tx:
+        pending_repo.create_if_absent_with_cursor(
+            _pending_request(request_id=request_id),
+            tx,
+        )
+        purged = pending_repo.purge_malformed_rows(cursor=tx)
+        assert purged == 0
+
+    row = pending_repo.find_by_request_id(request_id)
+    assert row is not None
+    assert row.request_id == request_id
+    assert row.state == PendingTransportState.ENQUEUED

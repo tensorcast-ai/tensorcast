@@ -52,7 +52,7 @@ class MaterializationController {
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     common::CapabilityTokenManager* capability_tokens{nullptr};
-    bool cpu_shared_memory_enabled{false};
+    bool cpu_shared_memory_enabled{true};
     bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
     DaemonOptions::PostSealPolicy post_seal_policy{};

@@ -58,6 +58,20 @@ std::chrono::milliseconds RemoteKeySource::remaining_request_budget() const {
   return options_.request_budget - elapsed;
 }
 
+void RemoteKeySource::abort_timed_out_channel(std::string_view key, uint64_t remote_offset, size_t bytes) const {
+  absl::Status close_status = options_.comm_engine->close_connection(options_.ip, options_.port);
+  if (!close_status.ok()) {
+    VLOG(1) << "RemoteKeySource timeout cleanup could not close channel"
+            << " artifact_id=" << options_.artifact_id << " key=" << key << " peer=" << options_.ip << ":"
+            << options_.port << " remote_offset=" << remote_offset << " bytes=" << bytes
+            << " status=" << close_status;
+    return;
+  }
+  LOG(WARNING) << "RemoteKeySource closed channel after request budget timeout"
+               << " artifact_id=" << options_.artifact_id << " key=" << key << " peer=" << options_.ip << ":"
+               << options_.port << " remote_offset=" << remote_offset << " bytes=" << bytes;
+}
+
 absl::StatusOr<communicator::transport::read_result_t> RemoteKeySource::await_read_result(
     communicator::transport::future_read_result_t& future,
     std::string_view key,
@@ -77,6 +91,7 @@ absl::StatusOr<communicator::transport::read_result_t> RemoteKeySource::await_re
         const auto waited_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start)
                 .count();
+        abort_timed_out_channel(key, remote_offset, bytes);
         return absl::DeadlineExceededError(
             absl::StrCat(
                 "RemoteKeySource read timed out: artifact_id=",

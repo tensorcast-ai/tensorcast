@@ -114,6 +114,44 @@ uint32_t resolve_view_transport_probe_timeout_ms(uint32_t wait_timeout_ms) {
   return std::min(wait_timeout_ms, kViewTransportProbeTimeoutMs);
 }
 
+std::string make_materialize_into_target_pinned_wait_context(
+    const loading::MaterializeHints& hints,
+    int target_device_ordinal,
+    size_t num_chunks,
+    size_t slice_bytes) {
+  std::string context = absl::StrCat(
+      "op=materialize_into_target",
+      " artifact_id=",
+      hints.artifact_id,
+      " device_id=",
+      target_device_ordinal,
+      " chunks=",
+      num_chunks,
+      " slice_bytes=",
+      slice_bytes,
+      " pipeline_concurrency=",
+      hints.pipeline_concurrency);
+  if (!hints.transport_request_id.empty()) {
+    absl::StrAppend(&context, " request_id=", hints.transport_request_id);
+  }
+  if (!hints.transport_requester_worker_id.empty()) {
+    absl::StrAppend(&context, " requester=", hints.transport_requester_worker_id);
+  }
+  if (hints.transport_scheduling_group.has_value()) {
+    const auto& group = *hints.transport_scheduling_group;
+    if (!group.group_id.empty()) {
+      absl::StrAppend(&context, " group_id=", group.group_id);
+    }
+    if (!group.part_id.empty()) {
+      absl::StrAppend(&context, " part_id=", group.part_id);
+    }
+    if (!group.group_kind.empty()) {
+      absl::StrAppend(&context, " group_kind=", group.group_kind);
+    }
+  }
+  return context;
+}
+
 absl::Status stale_local_route_status(std::string_view artifact_id) {
   return absl::UnavailableError(
       absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk source"));
@@ -1440,7 +1478,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
-      auto init_spb_status = session_spb->initialize(timeout);
+      auto init_spb_status = session_spb->initialize(
+          timeout,
+          make_materialize_into_target_pinned_wait_context(
+              hints,
+              target_device.ordinal,
+              num_chunks,
+              slice_bytes));
       if (!init_spb_status.ok()) {
         return init_spb_status;
       }

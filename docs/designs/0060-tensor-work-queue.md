@@ -5,7 +5,7 @@ description: A descriptor-only, at-least-once MPMC work queue for GB-scale tenso
 areas: ["daemon", "core", "global_store", "sdk", "proto"]
 status: draft
 created: 2026-01-31
-last_updated: 2026-02-01
+last_updated: 2026-02-10
 related_code:
   - docs/designs/0011-unified-session-lifecycle-leases.md
   - docs/designs/0016-artifact-view-v1.md
@@ -30,6 +30,8 @@ links:
   pinned_memory: ./0043-unified-pinned-memory-authority.md
   programmable: ./0055-programmable-framework.md
   config: ./0004-unified-runtime-config.md
+  coordination_framework: ../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework.md
+  coordination_playbook: ../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance.md
 ---
 
 # Summary
@@ -190,6 +192,21 @@ truth (SoT) and what survives failures.
 | Retain state (“rematerialization path exists”) | Artifact + StorePolicy + broker retention refs | Depends on StorePolicy | Medium | RetainLease does not create new byte-store; it tracks whether a valid path still exists. |
 | Bytes / replicas | Store daemons (StoreEngine) | Per StorePolicy tier | High | The queue never transports bytes and must not become a byte store. |
 
+## Component ownership and relationship guardrails (required)
+
+| Component | Primary ownership | Must not own | Why |
+| --- | --- | --- | --- |
+| SDK / callers | Request context, retries, bounded-stale directory cache | Queue SoT, leader arbitration, issuer validation | Keep clients lightweight and avoid split-brain logic in SDKs. |
+| Broker leader daemon | Work state, work lease, credit ledger, queue-local scheduling | Global fencing truth, issuer token trust decisions | Hot state stays local; cross-node correctness stays fenced. |
+| Global Store | Queue leadership lease (`queue_operation_id`, `lease_generation`), worker registry mapping | Per-item queue state progression | Global Store remains low-frequency arbitration, not hot-path write store. |
+| Issuer daemon | Retention token validation and renew/release authority | Queue leadership decisions for unrelated queues | Capability security requires issuer-only validation. |
+
+Relationship invariants (normative):
+
+1. QueueDirectory contract is advisory for routing, while correctness is enforced by epoch-fenced tokens.
+2. QueueDirectory MUST resolve exactly three facts: `queue identity -> leader_daemon_id -> endpoint + queue_epoch`.
+3. Broker-local optimizations (leader hints, local caches) MUST NOT bypass epoch fencing or issuer routing rules.
+
 ## Consistency levels (L0/L1/L2)
 
 Queue is explicitly versioned by consistency level so v1 semantics are unambiguous.
@@ -329,6 +346,16 @@ Operational guidance (v1, required):
 
 The capability directory described in `docs/designs/0055-programmable-framework.md` answers “which daemons can host
 brokers”, but it is not sufficient to route to the **current** leader for a specific `queue_name`.
+
+QueueDirectory minimal contract (required precondition):
+
+- Before enabling queue state-machine traffic in production, the system MUST provide a stable QueueDirectory contract
+  that resolves:
+  - queue identity: `(queue_namespace, queue_name)`,
+  - current leader identity: `leader_daemon_id`,
+  - fencing identity and routing: `(queue_epoch, leader_endpoint)`.
+- This contract MAY reuse capability-directory freshness/invalidation semantics, but implementations remain component-local
+  (SDK cache vs daemon cache); do not assume cross-language implementation reuse.
 
 Design rule (normative):
 
@@ -1089,11 +1116,19 @@ For interface consistency with existing daemon and Global Store gRPC surfaces, q
 - **Deadline**: `ctx.deadline_ms` sets the gRPC deadline (if unset, server defaults apply).
 - **Enqueue idempotency**: `ctx.idempotency_key` maps to `EnqueueWorkRequest.idempotency_key`.
 - **Tracing/tags**: `ctx.request_id` and `ctx.tags` are attached to OTel spans / gRPC metadata (not proto fields).
+- **Lane/policy metadata**: if callers provide queue lane/policy hints (for example `ctx.tags["lane"]`,
+  `ctx.tags["policy_version"]`), SDK MUST map them to metadata consistently for `enqueue/claim/ack/nack` and broker MUST
+  emit them in audit logs/metrics labels.
 
 Design rule (required):
 
 > `CallContext` is SDK-local. Proto requests remain minimal and stable; correctness is enforced by deterministic ids and
 > capability tokens, not by a per-RPC context message.
+
+Retry stability rule (required):
+
+- Within the same idempotency domain (`queue`, `group`, `idempotency_key`), lane/policy metadata SHOULD remain stable
+  across retries. If policy must change, callers SHOULD use a new idempotency key and keep an explicit audit trail.
 
 ### Proto sketch (shape)
 
@@ -1486,6 +1521,10 @@ Rationale for the chosen shape:
 4. **Operational**
    - Metrics and traces exist for queue depth/inflight/attempts/credit.
    - Bounded waits and clear errors for exhausted budgets.
+   - QueueDirectory minimal contract is validated in rollout (`queue identity -> leader_daemon_id -> endpoint +
+     queue_epoch`), with bounded-stale cache behavior and failover recovery checks.
+   - Lane/policy metadata mapped from `CallContext.tags` is visible in broker audit logs and remains stable across retry
+     attempts within the same idempotency domain.
 
 ---
 
@@ -1496,3 +1535,5 @@ Rationale for the chosen shape:
 - Views (partial pull): `docs/designs/0016-artifact-view-v1.md`
 - Stable memory tiers and budgets: `docs/designs/0034-stable-memory-tiers.md`, `core/store/memory_tier_budget.h`
 - Pinned memory authority: `docs/designs/0043-unified-pinned-memory-authority.md`
+- Distributed coordination framework: `docs/distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework.md`
+- Mode switching and governance playbook: `docs/distributed-coordination-series/02-mode-switching-workload-playbook-and-governance.md`

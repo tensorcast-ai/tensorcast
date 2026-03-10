@@ -64,8 +64,6 @@ cfg = WeightPublisherConfig(
     wait_persistence=True,          # default
     keep_last=2,                    # keep rollback window
     history_path="/tmp/weights_history.json",
-    pre_publish_trim_enabled=True,  # large-model OOM guard (optional)
-    pre_publish_keep_last=1,        # with keep_last=2: trim to 1 before put
     trigger_reload=False,           # publish only
 )
 
@@ -181,10 +179,7 @@ When `keep_last > 0`, the publisher records `(version, artifact_id)` in
 `history_path` and calls `tensorcast.deregister_artifact(...)` for versions
 older than the most recent `keep_last`.
 
-For large models, you can also enable pre-publish trimming:
-
-- `pre_publish_trim_enabled=true`: trim old versions before calling `put(...)`.
-- `pre_publish_keep_last` (default `keep_last-1`): versions to keep *before* publish.
+The publisher always performs pre-publish trimming before `put(...)`.
 
 This bounds publish-time overlap (for example, avoids transient 3-version overlap
 when `keep_last=2`) and reduces OOM risk in long-running publisher processes.
@@ -302,7 +297,6 @@ python ./tensorcast/tools/weight_publisher_e2e.py receiver \
   --start-version 1 \
   --num-versions 6 \
   --receiver-timeout-s 180 \
-  --fallback-prefer p2p \
   --materialize-device cuda:0 \
   --receiver-apply-mode binding_swap
 ```
@@ -318,6 +312,7 @@ Distributed checklist:
 - Use the same `model_name`, `start_version`, and `num_versions` on both roles.
 - Keep publisher and receiver running concurrently so receiver can observe each update.
 - App SDK only connects to local daemon in this workflow (`127.0.0.1:50052`).
+- Receiver materialization path in this harness is fixed to p2p-only (no disk/local fallback).
 - For retention validation, inspect publisher summary: with `keep_last=2` and
   `v1..v3`, `v1` should remain key-resolvable but become non-materializable,
   while `v2`/`v3` remain materializable.

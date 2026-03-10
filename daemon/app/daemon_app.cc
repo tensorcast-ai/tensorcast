@@ -124,10 +124,6 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (options.grpc.listen_addr.empty()) {
     return absl::InvalidArgumentError("DaemonApp requires listen_addr");
   }
-  if (options.daemon_options.cpu_shared_memory_enabled && options.daemon_options.local_handle_socket_path.empty()) {
-    return absl::InvalidArgumentError(
-        "cpu_shared_memory_enabled requires lifecycle.handle_leases.local_handle_socket_path to be set");
-  }
   if (options.daemon_options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.daemon_options.handle_lease_ttl;
     if (ttl_ms.count() < 0) {
@@ -150,6 +146,12 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   auto import_root_status = ensure_import_root_ready(options.daemon_options.import_root);
   if (!import_root_status.ok()) {
     return absl::FailedPreconditionError(absl::StrCat("IMPORT_ROOT_UNAVAILABLE: ", import_root_status.message()));
+  }
+  if (options.daemon_options.cpu_shared_memory_enabled && options.daemon_options.local_handle_socket_path.empty()) {
+    options.daemon_options.local_handle_socket_path =
+        (options.daemon_options.import_root / "local_handle.sock").string();
+    LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path="
+              << options.daemon_options.local_handle_socket_path;
   }
   LOG(INFO) << "Import metadata root initialized at " << options.daemon_options.import_root.string();
 

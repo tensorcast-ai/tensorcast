@@ -44,7 +44,7 @@ class UnifiedMemoryAuthority {
   struct Options {
     // When true, CPU allocations are backed by memfd + MAP_SHARED so they can be
     // exported cross-process for zero-copy CPU materialization.
-    bool cpu_shared_memory_enabled{false};
+    bool cpu_shared_memory_enabled{true};
   };
 
   struct ArtifactLayout {
@@ -430,7 +430,7 @@ class UnifiedMemoryAuthority {
   class CpuArena {
    public:
     struct Options {
-      bool cpu_shared_memory_enabled{false};
+      bool cpu_shared_memory_enabled{true};
     };
 
     explicit CpuArena(size_t chunk_bytes, Options options);

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -22,7 +22,8 @@ absl::StatusOr<tensorcast::config::v1::DaemonConfig> load_daemon_config_from_fil
 absl::StatusOr<tensorcast::config::v1::DaemonConfig> load_daemon_config_from_text(const std::string& content);
 
 // Apply runtime defaults to partially filled config (proto3 has no field defaults).
-// Only numeric/time-like defaults are applied to avoid overriding explicit false booleans.
+// Numeric/time-like defaults are applied, plus selected capability defaults when
+// fields are omitted (for example: engine.cpu_shared_memory.enabled=true).
 void normalize_defaults(tensorcast::config::v1::DaemonConfig* cfg);
 
 } // namespace tensorcast::common::config

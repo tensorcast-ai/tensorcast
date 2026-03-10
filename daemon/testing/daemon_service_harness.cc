@@ -2,10 +2,17 @@
 
 #include "daemon/testing/daemon_service_harness.h"
 
+#include <unistd.h>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 
 namespace tensorcast::daemon {
 namespace {
@@ -21,6 +28,28 @@ absl::StatusOr<std::filesystem::path> normalize_storage_root(const std::filesyst
     canonical = storage_root.lexically_normal();
   }
   return canonical;
+}
+
+absl::StatusOr<std::string> auto_local_handle_socket_path() {
+  static std::atomic<uint64_t> sequence{0};
+  const uint64_t suffix = sequence.fetch_add(1, std::memory_order_relaxed);
+  const auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::error_code ec;
+  const std::filesystem::path socket_root =
+      std::filesystem::temp_directory_path() / absl::StrCat("tensorcast_lh_", ::getuid());
+  std::filesystem::create_directories(socket_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("create local handle socket root failed: ", socket_root.string()));
+  }
+  std::filesystem::permissions(
+      socket_root, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("set local handle socket root permissions failed: ", socket_root.string()));
+  }
+  const std::string socket_name = absl::StrCat("tc_lh_", ::getpid(), "_", now_ns, "_", suffix, ".sock");
+  return (socket_root / socket_name).string();
 }
 
 } // namespace
@@ -70,15 +99,19 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   if (!async_runtime) {
     async_runtime = std::make_shared<common::AsyncRuntime>();
   }
-  if (options.cpu_shared_memory_enabled && options.local_handle_socket_path.empty()) {
-    return absl::InvalidArgumentError(
-        "cpu_shared_memory_enabled requires lifecycle.handle_leases.local_handle_socket_path to be set");
-  }
   if (options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.handle_lease_ttl;
     if (ttl_ms.count() < 0) {
       return absl::InvalidArgumentError("handle_lease_ttl must be >= 0ms");
     }
+  }
+  if (options.cpu_shared_memory_enabled && options.local_handle_socket_path.empty()) {
+    auto socket_path_or = auto_local_handle_socket_path();
+    if (!socket_path_or.ok()) {
+      return socket_path_or.status();
+    }
+    options.local_handle_socket_path = *socket_path_or;
+    LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path=" << options.local_handle_socket_path;
   }
   auto storage_root_or = normalize_storage_root(options.storage_path);
   if (!storage_root_or.ok()) {

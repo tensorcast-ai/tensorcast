@@ -199,6 +199,57 @@ def _ctx_timeout_s(ctx: CallContext | None) -> float | None:
     return max(0.001, timeout_s)
 
 
+def _is_active_reference_cleanup_error(exc: Exception) -> bool:
+    message = str(exc).strip().lower()
+    return "region has active references" in message or "active reference" in message
+
+
+def _cleanup_region_ids_best_effort(
+    *,
+    store: "Store",
+    region_ids: Sequence[str],
+    context: str,
+) -> None:
+    for region_id in region_ids:
+        try:
+            released = store.unregister_vram_region(region_id)
+            if not released:
+                logger.warning(
+                    "%s: unregister_vram_region returned False (region_id=%s)",
+                    context,
+                    region_id,
+                )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            if not _is_active_reference_cleanup_error(exc):
+                logger.warning(
+                    "%s: unregister_vram_region failed (region_id=%s): %s",
+                    context,
+                    region_id,
+                    exc,
+                )
+                continue
+            try:
+                forced = store.unregister_vram_region(region_id, force=True)
+            except Exception as force_exc:  # noqa: BLE001
+                logger.warning(
+                    "%s: active-reference cleanup failed for region_id=%s "
+                    "(normal=%s, force=%s)",
+                    context,
+                    region_id,
+                    exc,
+                    force_exc,
+                )
+                continue
+            if not forced:
+                logger.warning(
+                    "%s: region cleanup deferred due to active references "
+                    "(region_id=%s)",
+                    context,
+                    region_id,
+                )
+
+
 _TRANSPORT_GROUP_OPID_MARKER = "#tcg:"
 _TRANSPORT_GROUP_KIND_TAG = "tc.transport.group.kind"
 _TRANSPORT_GROUP_ID_TAG = "tc.transport.group.id"
@@ -914,8 +965,11 @@ class Artifact:
                     )
                     region_ids.append(handle.region_id)
             except Exception as exc:  # noqa: BLE001
-                for region_id in region_ids:
-                    store.unregister_vram_region(region_id)
+                _cleanup_region_ids_best_effort(
+                    store=store,
+                    region_ids=tuple(region_ids),
+                    context="bind_into.register_regions",
+                )
                 raise ArtifactError(
                     "bind_into requires user-owned CUDA memory (daemon-owned tensors cannot be used)",
                     status_code="FAILED_PRECONDITION",
@@ -1013,13 +1067,19 @@ class Artifact:
                         }
                         and attempt == 0
                     ):
-                        for region_id in region_ids:
-                            store.unregister_vram_region(region_id)
+                        _cleanup_region_ids_best_effort(
+                            store=store,
+                            region_ids=tuple(region_ids),
+                            context="bind_into.retry_rebind",
+                        )
                         region_ids = _register_regions()
                         attempt += 1
                         continue
-                    for region_id in region_ids:
-                        store.unregister_vram_region(region_id)
+                    _cleanup_region_ids_best_effort(
+                        store=store,
+                        region_ids=tuple(region_ids),
+                        context="bind_into.materialize_error",
+                    )
                     raise ArtifactError(
                         str(error),
                         status_code=error.status_code,
@@ -1030,8 +1090,11 @@ class Artifact:
                     response.status
                     != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
                 ):
-                    for region_id in region_ids:
-                        store.unregister_vram_region(region_id)
+                    _cleanup_region_ids_best_effort(
+                        store=store,
+                        region_ids=tuple(region_ids),
+                        context="bind_into.materialize_status",
+                    )
                     raise ArtifactError(
                         "MaterializeIntoTarget returned non-success status",
                         status_code="DATA_LOSS",
@@ -1046,8 +1109,11 @@ class Artifact:
                     retryable=False,
                 )
         except Exception:
-            for region_id in region_ids:
-                store.unregister_vram_region(region_id)
+            _cleanup_region_ids_best_effort(
+                store=store,
+                region_ids=tuple(region_ids),
+                context="bind_into.exception",
+            )
             raise
 
         storage_ids = tuple(
@@ -1172,8 +1238,11 @@ class Artifact:
                     )
                     region_ids.append(handle.region_id)
             except Exception as exc:  # noqa: BLE001
-                for region_id in region_ids:
-                    store.unregister_vram_region(region_id)
+                _cleanup_region_ids_best_effort(
+                    store=store,
+                    region_ids=tuple(region_ids),
+                    context="bind_into_mapped.register_regions",
+                )
                 raise ArtifactError(
                     "bind_into requires user-owned CUDA memory (daemon-owned tensors cannot be used)",
                     status_code="FAILED_PRECONDITION",
@@ -1289,13 +1358,19 @@ class Artifact:
                         }
                         and attempt == 0
                     ):
-                        for region_id in region_ids:
-                            store.unregister_vram_region(region_id)
+                        _cleanup_region_ids_best_effort(
+                            store=store,
+                            region_ids=tuple(region_ids),
+                            context="bind_into_mapped.retry_rebind",
+                        )
                         region_ids = _register_regions()
                         attempt += 1
                         continue
-                    for region_id in region_ids:
-                        store.unregister_vram_region(region_id)
+                    _cleanup_region_ids_best_effort(
+                        store=store,
+                        region_ids=tuple(region_ids),
+                        context="bind_into_mapped.materialize_error",
+                    )
                     raise ArtifactError(
                         str(error),
                         status_code=error.status_code,
@@ -1306,8 +1381,11 @@ class Artifact:
                     response.status
                     != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
                 ):
-                    for region_id in region_ids:
-                        store.unregister_vram_region(region_id)
+                    _cleanup_region_ids_best_effort(
+                        store=store,
+                        region_ids=tuple(region_ids),
+                        context="bind_into_mapped.materialize_status",
+                    )
                     raise ArtifactError(
                         "MaterializeIntoMappedTarget returned non-success status",
                         status_code="DATA_LOSS",
@@ -1322,8 +1400,11 @@ class Artifact:
                     retryable=False,
                 )
         except Exception:
-            for region_id in region_ids:
-                store.unregister_vram_region(region_id)
+            _cleanup_region_ids_best_effort(
+                store=store,
+                region_ids=tuple(region_ids),
+                context="bind_into_mapped.exception",
+            )
             raise
 
         storage_ids = tuple(

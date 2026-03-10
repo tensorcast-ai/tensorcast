@@ -13,8 +13,10 @@ import torch
 
 import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
+from tensorcast.api import context as tc_context
 from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store import deferred_loader as deferred_loader_mod
+from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -260,3 +262,72 @@ def test_binding_activation_cas(monkeypatch: pytest.MonkeyPatch) -> None:
             expected_active_artifact_id="artifact-1",
         )
     assert excinfo.value.status_code == "FAILED_PRECONDITION"
+
+
+class _FakeBindingRuntimeClient:
+    def keep_alive_registered_artifact(
+        self,
+        registration_id: str,
+        ttl_ms: int,
+        epoch: int,
+    ) -> bool:
+        return True
+
+
+class _FakeBindingRuntime:
+    def __init__(self) -> None:
+        self.closed = False
+        self._client = _FakeBindingRuntimeClient()
+
+    def ensure_client(self) -> _FakeBindingRuntimeClient:
+        return self._client
+
+    def invalidate_artifact(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+class _FakeBindingSlot:
+    def __init__(self) -> None:
+        self._runtime = _FakeBindingRuntime()
+        self.tensors: dict[str, object] = {}
+        self.artifact_id = "artifact-1"
+        self.selection = types.SimpleNamespace()
+        self.published_lease_id: str | None = None
+        self.swap_calls: list[dict[str, object]] = []
+
+    def swap(self, artifact: object, **kwargs: object) -> None:
+        self.swap_calls.append(kwargs)
+        self.artifact_id = str(artifact)
+
+    def publish_replica(self, *, ttl_ms: int = 0, ctx: object | None = None) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:
+    slot = _FakeBindingSlot()
+    binding = Binding(slot)
+    ctx = tc_context(
+        tags={
+            "tc.transport.group.kind": "tp_version",
+            "tc.transport.group.id": "case-a1:v2",
+            "tc.transport.group.total_parts": 16,
+            "tc.transport.group.part_id": "rx1:r0",
+            "tc.transport.group.priority": 0,
+            "tc.transport.group.epoch": 0,
+            "tc.transport.request_id": "case-a1:v2:rx1:r0",
+        }
+    )
+
+    binding.swap("artifact-2", ctx=ctx)
+
+    assert len(slot.swap_calls) == 1
+    operation_id = str(slot.swap_calls[0].get("operation_id", ""))
+    assert "#tcg:" in operation_id
+    assert "kind=tp_version" in operation_id
+    assert "gid=case-a1:v2" in operation_id
+    assert "tot=16" in operation_id
+    assert "part=rx1:r0" in operation_id
+    assert "rid=case-a1:v2:rx1:r0" in operation_id

@@ -73,7 +73,7 @@ struct DaemonOptions {
   uint32_t handle_lease_max_mints_per_second{0};
 
   // CPU shared-memory materialization (memfd-backed UMA CPU arena).
-  bool cpu_shared_memory_enabled{false};
+  bool cpu_shared_memory_enabled{true};
   // Enable verification for MaterializeIntoTarget external target writes.
   bool external_target_verification_enabled{false};
   // Max concurrent transport requests per registered memory replica.

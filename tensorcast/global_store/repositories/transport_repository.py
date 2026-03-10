@@ -28,12 +28,31 @@ class TransportGroupProgress:
         return min(1.0, float(self.completed_parts) / float(self.total_parts))
 
 
+@dataclass(frozen=True)
+class TransportWindowRow:
+    transport_id: str
+    replica_id: str
+    artifact_id: str
+    status: str
+    completion_outcome: str
+    request_id: str
+    requester_worker_id: str
+    group_id: str
+    group_kind: str
+    group_part_id: str
+    group_total_parts: int
+    created_at: datetime
+    completed_at: datetime | None
+    replica_memory_size_bytes: int
+
+
 class TransportRepository(BaseRepository):
     """Repository for managing transports in the database."""
 
     _TRANSPORT_PROJECTION = (
         "transport_id, replica_id, artifact_id, requested_view_id, disk_path, "
-        "source_node_id, source_address, source_port, request_id, request_fingerprint, "
+        "source_node_id, source_address, source_port, replica_memory_size_bytes, "
+        "request_id, request_fingerprint, "
         "requester_worker_id, group_id, group_kind, group_total_parts, "
         "group_part_id, group_priority, group_epoch, completion_outcome, "
         "completion_detail, created_at, completed_at, status"
@@ -104,13 +123,13 @@ class TransportRepository(BaseRepository):
             """
             INSERT INTO artifact_transports (
                 transport_id, replica_id, artifact_id, requested_view_id, disk_path,
-                source_node_id, source_address, source_port,
+                source_node_id, source_address, source_port, replica_memory_size_bytes,
                 request_id, request_fingerprint, requester_worker_id,
                 group_id, group_kind, group_total_parts, group_part_id,
                 group_priority, group_epoch,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(transport.transport_id),
@@ -121,6 +140,7 @@ class TransportRepository(BaseRepository):
                 transport.source_node_id,
                 transport.source_address,
                 int(transport.source_port),
+                self._normalize_optional_int(transport.replica_memory_size_bytes),
                 normalized_request_id,
                 self._normalize_optional_text(transport.request_fingerprint),
                 self._normalize_optional_text(transport.requester_worker_id),
@@ -152,46 +172,55 @@ class TransportRepository(BaseRepository):
             created = self.create_with_cursor(transport, cursor)
             return created, True
 
-        cursor.execute(
-            """
-            INSERT INTO artifact_transports (
-                transport_id, replica_id, artifact_id, requested_view_id, disk_path,
-                source_node_id, source_address, source_port,
-                request_id, request_fingerprint, requester_worker_id,
-                group_id, group_kind, group_total_parts, group_part_id,
-                group_priority, group_epoch,
-                status
+        existing = self.find_by_request_id(normalized_request_id, cursor=cursor)
+        if existing is not None:
+            return existing, False
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO artifact_transports (
+                    transport_id, replica_id, artifact_id, requested_view_id, disk_path,
+                    source_node_id, source_address, source_port, replica_memory_size_bytes,
+                    request_id, request_fingerprint, requester_worker_id,
+                    group_id, group_kind, group_total_parts, group_part_id,
+                    group_priority, group_epoch,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(transport.transport_id),
+                    str(transport.replica_id),
+                    transport.artifact_id,
+                    self._normalize_optional_text(transport.requested_view_id),
+                    transport.disk_path,
+                    transport.source_node_id,
+                    transport.source_address,
+                    int(transport.source_port),
+                    self._normalize_optional_int(transport.replica_memory_size_bytes),
+                    normalized_request_id,
+                    self._normalize_optional_text(transport.request_fingerprint),
+                    self._normalize_optional_text(transport.requester_worker_id),
+                    self._normalize_optional_text(transport.group_id),
+                    self._normalize_optional_text(transport.group_kind),
+                    self._normalize_optional_int(transport.group_total_parts),
+                    self._normalize_optional_text(transport.group_part_id),
+                    self._normalize_optional_int(transport.group_priority),
+                    self._normalize_optional_int(transport.group_epoch),
+                    "in_progress",
+                ],
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (request_id) DO NOTHING
-            """,
-            [
-                str(transport.transport_id),
-                str(transport.replica_id),
-                transport.artifact_id,
-                self._normalize_optional_text(transport.requested_view_id),
-                transport.disk_path,
-                transport.source_node_id,
-                transport.source_address,
-                int(transport.source_port),
-                normalized_request_id,
-                self._normalize_optional_text(transport.request_fingerprint),
-                self._normalize_optional_text(transport.requester_worker_id),
-                self._normalize_optional_text(transport.group_id),
-                self._normalize_optional_text(transport.group_kind),
-                self._normalize_optional_int(transport.group_total_parts),
-                self._normalize_optional_text(transport.group_part_id),
-                self._normalize_optional_int(transport.group_priority),
-                self._normalize_optional_int(transport.group_epoch),
-                "in_progress",
-            ],
-        )
+        except Exception as exc:  # noqa: BLE001
+            if self._looks_like_unique_violation(exc):
+                existing = self.find_by_request_id(normalized_request_id, cursor=cursor)
+                if existing is not None:
+                    return existing, False
+            raise
+
         existing = self.find_by_request_id(normalized_request_id, cursor=cursor)
         if existing is None:
-            raise RuntimeError(
-                "Transport missing after insert-or-ignore "
-                f"request_id={normalized_request_id}"
-            )
+            raise RuntimeError(f"Transport missing after insert request_id={normalized_request_id}")
         created_now = existing.transport_id == transport.transport_id
         if created_now:
             transport.request_id = normalized_request_id
@@ -256,7 +285,12 @@ class TransportRepository(BaseRepository):
         outcome_detail: str | None = None,
         cursor=None,
     ) -> bool:
-        """Atomically mark transport completed only when status is in_progress."""
+        """
+        Atomically complete an active transport row.
+
+        Accept canonical status ``in_progress`` and malformed variants that still
+        contain ``in_progress`` (for example, ``in_progressin_progress``).
+        """
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
@@ -269,7 +303,11 @@ class TransportRepository(BaseRepository):
                     completion_outcome = ?,
                     completion_detail = ?
                 WHERE transport_id = ?
-                  AND status = 'in_progress'
+                  AND completed_at IS NULL
+                  AND (
+                    status = 'in_progress'
+                    OR status LIKE '%in_progress%'
+                  )
                 RETURNING transport_id
                 """,
                 [
@@ -280,6 +318,39 @@ class TransportRepository(BaseRepository):
                 ],
             ).fetchone()
             return row is not None
+        finally:
+            if owns_cursor:
+                cursor.close()
+
+    def list_inflight(self, *, limit: int = 10_000, cursor=None) -> list[Transport]:
+        """
+        List active (not yet completed) transport rows.
+
+        This query intentionally tolerates malformed status strings that still
+        carry ``in_progress`` so cleanup logic can reclaim leaked rows.
+        """
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                f"""
+                SELECT {self._TRANSPORT_PROJECTION}
+                FROM artifact_transports
+                WHERE completed_at IS NULL
+                  AND (
+                    status = 'in_progress'
+                    OR status LIKE '%in_progress%'
+                  )
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                [int(limit)],
+            )
+            rows = result.fetchall()
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            return [self._row_to_model(row, columns) for row in rows]
         finally:
             if owns_cursor:
                 cursor.close()
@@ -342,6 +413,66 @@ class TransportRepository(BaseRepository):
                 params.append(status)
             row = cursor.execute(query, params).fetchone()
             return int(row[0]) if row else 0
+        finally:
+            cursor.close()
+
+    def list_rows_in_created_window(
+        self,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+        limit: int,
+    ) -> list[TransportWindowRow]:
+        cursor = self.get_cursor()
+        try:
+            rows = cursor.execute(
+                """
+                SELECT
+                    CAST(t.transport_id AS VARCHAR) AS transport_id,
+                    CAST(t.replica_id AS VARCHAR) AS replica_id,
+                    COALESCE(t.artifact_id, '') AS artifact_id,
+                    COALESCE(t.status, '') AS status,
+                    COALESCE(t.completion_outcome, '') AS completion_outcome,
+                    COALESCE(t.request_id, '') AS request_id,
+                    COALESCE(t.requester_worker_id, '') AS requester_worker_id,
+                    COALESCE(t.group_id, '') AS group_id,
+                    COALESCE(t.group_kind, '') AS group_kind,
+                    COALESCE(t.group_part_id, '') AS group_part_id,
+                    COALESCE(t.group_total_parts, 0) AS group_total_parts,
+                    t.created_at AS created_at,
+                    t.completed_at AS completed_at,
+                    COALESCE(t.replica_memory_size_bytes, 0) AS replica_memory_size_bytes
+                FROM artifact_transports t
+                WHERE t.created_at >= ?
+                  AND t.created_at <= ?
+                ORDER BY t.created_at ASC
+                LIMIT ?
+                """,
+                [started_at, finished_at, int(limit)],
+            ).fetchall()
+            result: list[TransportWindowRow] = []
+            for row in rows:
+                created_at = self._coerce_datetime(row[11])
+                completed_at = self._coerce_datetime_optional(row[12])
+                result.append(
+                    TransportWindowRow(
+                        transport_id=str(row[0] or ""),
+                        replica_id=str(row[1] or ""),
+                        artifact_id=str(row[2] or ""),
+                        status=str(row[3] or ""),
+                        completion_outcome=str(row[4] or ""),
+                        request_id=str(row[5] or ""),
+                        requester_worker_id=str(row[6] or ""),
+                        group_id=str(row[7] or ""),
+                        group_kind=str(row[8] or ""),
+                        group_part_id=str(row[9] or ""),
+                        group_total_parts=int(row[10] or 0),
+                        created_at=created_at,
+                        completed_at=completed_at,
+                        replica_memory_size_bytes=int(row[13] or 0),
+                    )
+                )
+            return result
         finally:
             cursor.close()
 
@@ -415,6 +546,16 @@ class TransportRepository(BaseRepository):
         return normalized if normalized else None
 
     @staticmethod
+    def _looks_like_unique_violation(exc: Exception) -> bool:
+        message = str(exc).lower()
+        unique_markers = (
+            "duplicate key",
+            "unique constraint",
+            "violates unique",
+        )
+        return any(marker in message for marker in unique_markers)
+
+    @staticmethod
     def _normalize_completion_outcome(outcome: TransportCompletionOutcome) -> str:
         if outcome == TransportCompletionOutcome.UNSPECIFIED:
             return "unspecified"
@@ -427,6 +568,20 @@ class TransportRepository(BaseRepository):
         if outcome == TransportCompletionOutcome.CANCELLED:
             return "cancelled"
         return "unspecified"
+
+    @staticmethod
+    def _coerce_datetime(raw: Any) -> datetime:
+        if isinstance(raw, datetime):
+            return raw
+        if raw is None:
+            raise ValueError("created_at is missing")
+        return datetime.fromisoformat(str(raw))
+
+    @classmethod
+    def _coerce_datetime_optional(cls, raw: Any) -> datetime | None:
+        if raw is None:
+            return None
+        return cls._coerce_datetime(raw)
 
     def _row_to_model(self, row: tuple[Any, ...], columns: list[str]) -> Transport:
         idx = {column: i for i, column in enumerate(columns)}
@@ -455,6 +610,9 @@ class TransportRepository(BaseRepository):
             source_node_id=str(get("source_node_id", "")),
             source_address=str(get("source_address", "")),
             source_port=int(get("source_port", 0)),
+            replica_memory_size_bytes=self._normalize_optional_int(
+                get("replica_memory_size_bytes")
+            ),
             request_id=self._normalize_request_id(get("request_id")),
             request_fingerprint=self._normalize_optional_text(
                 get("request_fingerprint")

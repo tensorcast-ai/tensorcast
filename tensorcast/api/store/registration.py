@@ -500,8 +500,9 @@ class RegistrationPipeline:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        # `put` always requires a CUDA device for staging and IPC; fail early to
-        # produce a clearer error than a deeper runtime path.
+        # With fake CUDA, CPU tensors are accepted for smoke/testing workflows.
+        # `put` otherwise requires a CUDA device for staging and IPC; fail early
+        # to produce a clearer error than a deeper runtime path.
         if saw_cpu and not torch.cuda.is_available() and not _uses_fake_cuda_backend():
             raise ArtifactError(
                 "put requires CUDA to be available for staging CPU tensors",
