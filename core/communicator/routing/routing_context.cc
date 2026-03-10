@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/routing/read_helpers.h"
@@ -80,6 +81,39 @@ bool endpoint_has_pool(const topology::Endpoint& endpoint, std::string_view pool
 
 bool is_nic_binding_id(std::string_view endpoint_id) {
   return endpoint_id.starts_with(kNicEndpointPrefix);
+}
+
+std::string_view device_type_to_string(int dev_type) {
+  switch (dev_type) {
+    case base::COMMUNICATE_ENGINE_DEV_GPU:
+      return "GPU";
+    case base::COMMUNICATE_ENGINE_DEV_CPU:
+      return "CPU";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+std::string_view protocol_adapter_name(ConnectionProtocol protocol) {
+  switch (protocol) {
+    case ConnectionProtocol::kNvlink:
+      return "NVLINK";
+    case ConnectionProtocol::kPcie:
+      return "PCIE";
+    default:
+      return "ENGINE";
+  }
+}
+
+std::string describe_binding(const EndpointBinding& binding) {
+  return std::format(
+      "endpoint={},node={},dev={}#{},rail={},addr={}",
+      binding.endpoint_id,
+      binding.node_id,
+      device_type_to_string(binding.dev_type),
+      binding.dev_id,
+      binding.rail_id,
+      binding.has_network_address() ? std::format("{}:{}", binding.ip, binding.port) : "none");
 }
 
 DevicePoolHint infer_device_pool_hint(
@@ -312,6 +346,7 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
   const topology::Endpoint* protocol_src_endpoint = src_endpoint;
   const topology::Endpoint* protocol_dst_endpoint = dst_endpoint;
   const topology::Link* link = nullptr;
+  bool used_rail_fallback = false;
   if (src_endpoint && dst_endpoint) {
     link = find_link_locked(src_endpoint_id, dst_endpoint_id);
   }
@@ -341,6 +376,7 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
     }
 
     RailMatchedPath rail_path = std::move(rail_path_or).value();
+    used_rail_fallback = true;
     if (rail_path.src_topology_endpoint != nullptr) {
       protocol_src_endpoint = rail_path.src_topology_endpoint;
     }
@@ -367,6 +403,21 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
       protocol,
       local_binding,
       remote_binding);
+  const bool same_node = !local_binding.node_id.empty() && local_binding.node_id == remote_binding.node_id;
+  const std::string_view path_kind =
+      used_rail_fallback
+      ? "cross_node_rail_fallback"
+      : (same_node ? (src_endpoint_id == dst_endpoint_id ? "same_node_loopback" : "local_fanout")
+                   : "cross_node_direct");
+  LOG(INFO) << "[routing] route resolved: src=" << src_endpoint_id
+            << " dst=" << dst_endpoint_id
+            << " path=" << path_kind
+            << " protocol=" << to_string(protocol)
+            << " adapter=" << protocol_adapter_name(protocol)
+            << " link=" << (link == nullptr ? "none" : link->id)
+            << " link_type=" << to_string(connection->type())
+            << " local={" << describe_binding(local_binding) << "}"
+            << " remote={" << describe_binding(remote_binding) << "}";
   std::vector<std::shared_ptr<Connection>> hops;
   hops.push_back(connection);
 
@@ -392,6 +443,9 @@ std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
   ConnectionKey key{src_endpoint_id, dst_endpoint_id, protocol};
   auto it = connections_.find(key);
   if (it != connections_.end()) {
+    VLOG(1) << "[routing] reusing cached connection: src=" << src_endpoint_id
+            << " dst=" << dst_endpoint_id
+            << " protocol=" << to_string(protocol);
     return it->second;
   }
   auto link_state = get_or_create_link_state_locked(link);
@@ -413,6 +467,12 @@ std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
       std::move(link_state),
       async_runtime_);
   connections_.emplace(std::move(key), connection);
+  LOG(INFO) << "[routing] connection created: src=" << src_endpoint_id
+            << " dst=" << dst_endpoint_id
+            << " protocol=" << to_string(protocol)
+            << " adapter=" << protocol_adapter_name(protocol)
+            << " type=" << to_string(type)
+            << " link=" << (link == nullptr ? "none" : link->id);
   return connection;
 }
 
@@ -714,6 +774,14 @@ absl::StatusOr<RoutingContext::RailMatchedPath> RoutingContext::resolve_rail_mat
     selected_link = find_any_link_for_endpoint_locked(local_nic.endpoint->id);
   }
 
+  LOG(INFO) << "[routing] rail fallback selected: src=" << src_endpoint_id
+            << " dst=" << dst_endpoint_id
+            << " local_nic=" << local_nic.endpoint->id
+            << " local_rail=" << local_nic.rail_id
+            << " preferred_rail=" << preferred_rail_id
+            << " remote_endpoint=" << remote_binding.endpoint_id
+            << " remote_rail=" << remote_binding.rail_id
+            << " link=" << (selected_link == nullptr ? "none" : selected_link->id);
   return RailMatchedPath{
       .src_topology_endpoint = local_nic.endpoint,
       .dst_topology_endpoint = remote_topology_endpoint,

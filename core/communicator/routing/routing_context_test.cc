@@ -322,6 +322,99 @@ Topology build_eight_rail_switch_topology() {
   return std::move(topology_or).value();
 }
 
+Topology build_two_node_transfer_and_fanout_topology() {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"cpu1", "cpu1", PoolType::kCpu});
+  for (int gpu_id = 0; gpu_id < 8; ++gpu_id) {
+    pools.push_back(Pool{
+        "gpu" + std::to_string(gpu_id),
+        "gpu" + std::to_string(gpu_id),
+        PoolType::kGpu,
+    });
+  }
+
+  std::vector<Endpoint> endpoints;
+  for (int rail_id = 0; rail_id < 8; ++rail_id) {
+    Endpoint nic;
+    nic.id = "nic_" + std::to_string(rail_id);
+    nic.name = nic.id;
+    nic.kind = EndpointKind::kClient;
+    nic.type = EndpointType::kNic;
+    nic.pool_ids = {
+        rail_id < 4 ? "cpu0" : "cpu1",
+        "gpu" + std::to_string(rail_id),
+    };
+    endpoints.push_back(std::move(nic));
+
+    Endpoint rail_switch;
+    rail_switch.id = "netsw_rail_" + std::to_string(rail_id);
+    rail_switch.name = rail_switch.id;
+    rail_switch.kind = EndpointKind::kSwitch;
+    rail_switch.type = EndpointType::kNic;
+    endpoints.push_back(std::move(rail_switch));
+  }
+
+  for (int gpu_id = 0; gpu_id < 8; ++gpu_id) {
+    Endpoint node_gpu;
+    node_gpu.id = "node1/dev/gpu/" + std::to_string(gpu_id);
+    node_gpu.name = node_gpu.id;
+    node_gpu.kind = EndpointKind::kClient;
+    node_gpu.type = EndpointType::kPcie;
+    node_gpu.pool_ids = {
+        "cpu0",
+        "gpu" + std::to_string(gpu_id),
+    };
+    endpoints.push_back(std::move(node_gpu));
+  }
+
+  Endpoint node_cpu;
+  node_cpu.id = "node1/dev/cpu/0";
+  node_cpu.name = node_cpu.id;
+  node_cpu.kind = EndpointKind::kClient;
+  node_cpu.type = EndpointType::kPcie;
+  node_cpu.pool_ids = {"cpu0", "gpu0"};
+  endpoints.push_back(std::move(node_cpu));
+
+  std::vector<Link> links;
+  for (int rail_id = 0; rail_id < 8; ++rail_id) {
+    Link link;
+    link.id =
+        "nic_" + std::to_string(rail_id) + "_to_netsw_rail_" + std::to_string(rail_id);
+    link.name = link.id;
+    link.type = LinkType::kSwitch;
+    link.src_endpoint_id = "nic_" + std::to_string(rail_id);
+    link.dst_endpoint_id = "netsw_rail_" + std::to_string(rail_id);
+    links.push_back(std::move(link));
+  }
+
+  for (int gpu_id = 1; gpu_id < 8; ++gpu_id) {
+    Link fanout_link;
+    fanout_link.id = "node1_gpu0_to_gpu" + std::to_string(gpu_id);
+    fanout_link.name = fanout_link.id;
+    fanout_link.type = LinkType::kP2P;
+    fanout_link.src_endpoint_id = "node1/dev/gpu/0";
+    fanout_link.dst_endpoint_id = "node1/dev/gpu/" + std::to_string(gpu_id);
+    links.push_back(std::move(fanout_link));
+  }
+
+  Link fanout_mem_link;
+  fanout_mem_link.id = "node1_gpu0_to_cpu0";
+  fanout_mem_link.name = fanout_mem_link.id;
+  fanout_mem_link.type = LinkType::kP2P;
+  fanout_mem_link.src_endpoint_id = "node1/dev/gpu/0";
+  fanout_mem_link.dst_endpoint_id = "node1/dev/cpu/0";
+  links.push_back(std::move(fanout_mem_link));
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      {.require_endpoint_links = true, .require_connected = false});
+  REQUIRE(topology_or.ok());
+  return std::move(topology_or).value();
+}
+
 } // namespace
 
 TEST_CASE("Connection records success and failure", "[communicator][routing]") {
@@ -781,4 +874,81 @@ TEST_CASE(
   CHECK(connection->remote_binding().endpoint_id == "nic_0");
   REQUIRE(connection->link() != nullptr);
   CHECK(connection->link()->id == "nic_4_to_netsw_rail_4");
+}
+
+TEST_CASE(
+    "RoutingContext supports cross-node GPU bootstrap then same-node GPU and memory fanout",
+    "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_two_node_transfer_and_fanout_topology()).ok());
+
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node0/dev/gpu/0",
+      .node_id = "node0",
+      .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+      .dev_id = 0,
+  });
+  for (int gpu_id = 0; gpu_id < 8; ++gpu_id) {
+    bindings.push_back(EndpointBinding{
+        .endpoint_id = "node1/dev/gpu/" + std::to_string(gpu_id),
+        .node_id = "node1",
+        .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+        .dev_id = gpu_id,
+    });
+  }
+  bindings.push_back(EndpointBinding{
+      .endpoint_id = "node1/dev/cpu/0",
+      .node_id = "node1",
+      .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      .dev_id = 0,
+  });
+  for (int rail_id = 0; rail_id < 8; ++rail_id) {
+    bindings.push_back(EndpointBinding{
+        .endpoint_id = "nic_" + std::to_string(rail_id),
+        .node_id = "node1",
+        .ip = "10.2.0." + std::to_string(20 + rail_id),
+        .port = static_cast<uint16_t>(4500 + rail_id),
+    });
+  }
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  auto cross_node_comm_or = context->get_communicator("node0/dev/gpu/0", "node1/dev/gpu/0");
+  REQUIRE(cross_node_comm_or.ok());
+  auto cross_node_channel_or = cross_node_comm_or.value()->primary_channel();
+  REQUIRE(cross_node_channel_or.ok());
+  REQUIRE(cross_node_channel_or.value()->hops().size() == 1);
+  const std::shared_ptr<Connection>& cross_node_connection = cross_node_channel_or.value()->hops().front();
+  CHECK(cross_node_connection->type() == ConnectionType::kSwitch);
+  CHECK(cross_node_connection->remote_binding().endpoint_id == "nic_0");
+  REQUIRE(cross_node_connection->link() != nullptr);
+  CHECK(cross_node_connection->link()->id == "nic_0_to_netsw_rail_0");
+
+  for (int gpu_id = 1; gpu_id < 8; ++gpu_id) {
+    auto fanout_comm_or = context->get_communicator(
+        "node1/dev/gpu/0",
+        "node1/dev/gpu/" + std::to_string(gpu_id));
+    REQUIRE(fanout_comm_or.ok());
+    auto fanout_channel_or = fanout_comm_or.value()->primary_channel();
+    REQUIRE(fanout_channel_or.ok());
+    REQUIRE(fanout_channel_or.value()->hops().size() == 1);
+
+    const std::shared_ptr<Connection>& fanout_connection = fanout_channel_or.value()->hops().front();
+    CHECK(fanout_connection->type() == ConnectionType::kP2P);
+    CHECK(fanout_connection->remote_binding().endpoint_id == "node1/dev/gpu/" + std::to_string(gpu_id));
+    REQUIRE(fanout_connection->link() != nullptr);
+    CHECK(fanout_connection->link()->id == "node1_gpu0_to_gpu" + std::to_string(gpu_id));
+  }
+
+  auto fanout_mem_comm_or = context->get_communicator("node1/dev/gpu/0", "node1/dev/cpu/0");
+  REQUIRE(fanout_mem_comm_or.ok());
+  auto fanout_mem_channel_or = fanout_mem_comm_or.value()->primary_channel();
+  REQUIRE(fanout_mem_channel_or.ok());
+  REQUIRE(fanout_mem_channel_or.value()->hops().size() == 1);
+  const std::shared_ptr<Connection>& fanout_mem_connection = fanout_mem_channel_or.value()->hops().front();
+  CHECK(fanout_mem_connection->type() == ConnectionType::kP2P);
+  CHECK(fanout_mem_connection->remote_binding().endpoint_id == "node1/dev/cpu/0");
+  REQUIRE(fanout_mem_connection->link() != nullptr);
+  CHECK(fanout_mem_connection->link()->id == "node1_gpu0_to_cpu0");
 }

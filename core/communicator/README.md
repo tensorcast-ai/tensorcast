@@ -96,6 +96,7 @@ Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the 
   - PCIE endpoint pair + `prefer_pcie=true` + available PCIE adapter => `PCIE`
   - otherwise => `AUTO` (engine path)
 - **Cross-node rail-matched fallback** is now supported for direct-channel construction: when no direct topology link exists and source/destination bindings are on different nodes, routing infers source/destination device hints (`gpu<id>` / `cpu<id>`) from endpoint ids or binding metadata. It then selects the local NIC by rail + pool affinity and picks a destination-node network binding by weighted scoring (preferred rail, destination rail, NIC topology presence, GPU/CPU pool affinity, endpoint-id/NIC heuristics, network address). This keeps fallback routing affinity-aware for GPU↔GPU, GPU↔CPU-memory, and CPU-memory↔CPU-memory traffic.
+- Routing tests now include a two-stage transfer scenario: `node0/dev/gpu/0 -> node1/dev/gpu/0` over cross-node rail fallback, followed by same-node fanout from `node1/dev/gpu/0` to `node1` GPUs and CPU memory via direct local links.
 - **Topology/bindings are immutable after setup**: `set_topology` and `set_endpoint_bindings` are one-shot; `update_endpoint_binding` returns `FAILED_PRECONDITION`. Create a new `RoutingContext` to change configuration.
 - **Channel caching** captures the topology generation used to build the channel and only reuses cached channels when the current generation matches, preventing stale channel reuse on mid-build changes.
 - **Connection reads** bound waits on adapter futures (default: 60s); timeouts return `DEADLINE_EXCEEDED` and are recorded as failures.
@@ -243,6 +244,8 @@ Recent instrumentation adds explicit logging around the control-plane receive lo
 - `[on_receive_response]` emits whether we reused an existing RDMA transport or created a new QP, and now records queued pending reads plus peer QP parameters when the handshake finishes.
 - `[rdma_transport]` traces QP readiness, segmented RDMA READ postings, and work completions (`IBV_WC_*` statuses); it refuses to post READ WRs until the peer's QP info has been applied, so the log clearly differentiates "handshake pending" from genuine RDMA failures.
 - `[on_receive_request]` VLOG entries annotate each step of the READ_REQUEST server flow, from tensor-store lookup through RDMA segmentation/staging or MTCP streaming headers, making it easier to pinpoint where a read stalls.
+- `[RdmaContext]` startup logs now print two-phase RNIC selection (`candidate accepted`, per-rail `primary/backup` role) after scanning all usable ports, which makes rail pinning and local failover behavior auditable.
+- `[routing]` logs now emit per-channel route resolution and connection creation with `path` (`cross_node_rail_fallback`, `cross_node_direct`, `local_fanout`), selected `protocol`, adapter (`ENGINE`/`NVLINK`/`PCIE`), link id/type, and endpoint bindings. This explicitly surfaces same-node fanout adapter behavior in logs.
 
 When debugging replica hangs with `enable_rdma=true`, start by verifying that these log lines appear on both peers. Absence of `[recv_func]` or `[on_receive_response]` indicates the control channel never processed the server’s response, while missing `[rdma_transport]` completions typically points to QP handshake or remote memory registration failures.
 

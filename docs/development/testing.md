@@ -81,15 +81,26 @@ The script enforces the runtime constraints:
 - It discovers verbs-visible RNIC sets and uses the 8-device
   intersection as `TENSORCAST_IB_HCA` on both nodes (`HCA_SELECTION_MODE=first|last`
   or `IB_HCA_OVERRIDE=mlx5_x,...`), then runs a short communicator probe and
-  keeps only `Dev: mlx5_* added` devices as final candidates.
+  keeps only accepted devices (`Dev: mlx5_* added` or
+  `RDMA candidate accepted: dev=mlx5_*`) as final candidates.
 - It runs transfer verification with bounded retries (`MAX_TRANSFER_ATTEMPTS`,
   default `3`). On handshake timeout (`[rdma_handshake] transport connect failed`
-  with `local_dev=mlx5_*`), it excludes failed RNICs from candidate set, rebuilds
-  an 8-device selection from remaining common HCAs, and retries automatically.
+  with `local_dev=mlx5_*`), it cumulatively excludes failed RNICs from candidate
+  set, rebuilds an 8-device selection from remaining common HCAs, and retries
+  automatically.
 - It asserts 8 successful with-regmr + 8 successful no-regmr reads, full
   read-path coverage for all 8 tensor keys, and affinity spread/handshake
   evidence with a strict minimum of 7 unique NIC/connect pairs (for 8-GPU run)
   to tolerate one shared rail while still catching collapsed routing.
+- It enforces `TRANSFER_CHUNK=1` because bandwidth verification parses one
+  no-regmr sample per GPU key (`gpu-ce-test-tensor-<i>-0`).
+- It computes per-link no-regmr bandwidth from client logs and, by default
+  enforces two pass conditions:
+  - absolute floor: `min(per_link_gbps) >= PER_LINK_MIN_GBPS` (default `120`)
+  - balance floor: `min(per_link_gbps) >= max(per_link_gbps) * PER_LINK_MIN_OF_PEAK_RATIO`
+    (default ratio `0.75`)
+- It prints per-GPU bandwidth detail (`gpu`, `nic`, `gbps`) and fails if sample
+  count is not equal to `TRANSFER_GPU_COUNT`.
 - It bounds client runtime with `CLIENT_TIMEOUT_SEC` (default 600s) and fails
   fast with server/client log tails on timeout or transfer failure.
 
@@ -101,6 +112,14 @@ device/plugin exposure):
 
 ```bash
 EXTRA_LAUNCH_FLAGS='--custom-resources rdma/mlnx_shared=8 --host-network=true' \
+tools/testing/topology_guided_routing_2node_h800_smoke.sh
+```
+
+Example (tune bandwidth gates for cluster policy):
+
+```bash
+PER_LINK_MIN_GBPS=140 \
+PER_LINK_MIN_OF_PEAK_RATIO=0.80 \
 tools/testing/topology_guided_routing_2node_h800_smoke.sh
 ```
 

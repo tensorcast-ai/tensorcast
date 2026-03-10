@@ -9,11 +9,15 @@ worker_gpu_count="${WORKER_GPU_COUNT:-8}"
 worker_cpu_count="${WORKER_CPU_COUNT:-32}"
 worker_memory_mb="${WORKER_MEMORY_MB:-512000}"
 max_wait_duration="${MAX_WAIT_DURATION:-20m}"
+ready_poll_interval_sec="${READY_POLL_INTERVAL_SEC:-5}"
 repo_path="${REPO_PATH:-$(pwd)}"
 transfer_gpu_count="${TRANSFER_GPU_COUNT:-8}"
 transfer_port="${TRANSFER_PORT:-19099}"
 transfer_chunk="${TRANSFER_CHUNK:-1}"
 transfer_count="${TRANSFER_COUNT:-16777216}"
+per_link_min_gbps="${PER_LINK_MIN_GBPS:-120}"
+per_link_min_of_peak_ratio="${PER_LINK_MIN_OF_PEAK_RATIO:-0.75}"
+enforce_bandwidth="${ENFORCE_BANDWIDTH:-1}"
 client_timeout_sec="${CLIENT_TIMEOUT_SEC:-600}"
 hca_selection_mode="${HCA_SELECTION_MODE:-first}"
 ib_hca_override="${IB_HCA_OVERRIDE:-}"
@@ -33,6 +37,10 @@ if (( transfer_gpu_count < 8 )); then
   echo "TRANSFER_GPU_COUNT must be >= 8 to validate RDMA 8-rail affinity." >&2
   exit 2
 fi
+if (( transfer_chunk != 1 )); then
+  echo "TRANSFER_CHUNK must be 1. Current verification logic expects one tensor per GPU key." >&2
+  exit 2
+fi
 if (( worker_gpu_count < 8 )); then
   echo "WORKER_GPU_COUNT must be >= 8 because RDMA verification requires explicit 8-GPU launch." >&2
   exit 2
@@ -45,8 +53,24 @@ if (( client_timeout_sec <= 0 )); then
   echo "CLIENT_TIMEOUT_SEC must be > 0." >&2
   exit 2
 fi
+if (( ready_poll_interval_sec <= 0 )); then
+  echo "READY_POLL_INTERVAL_SEC must be > 0." >&2
+  exit 2
+fi
 if (( max_transfer_attempts <= 0 )); then
   echo "MAX_TRANSFER_ATTEMPTS must be > 0." >&2
+  exit 2
+fi
+if [[ "${enforce_bandwidth}" != "0" && "${enforce_bandwidth}" != "1" ]]; then
+  echo "ENFORCE_BANDWIDTH must be 0 or 1." >&2
+  exit 2
+fi
+if ! awk -v v="${per_link_min_gbps}" 'BEGIN { exit !(v + 0 > 0) }'; then
+  echo "PER_LINK_MIN_GBPS must be > 0." >&2
+  exit 2
+fi
+if ! awk -v v="${per_link_min_of_peak_ratio}" 'BEGIN { exit !(v + 0 > 0 && v + 0 <= 1) }'; then
+  echo "PER_LINK_MIN_OF_PEAK_RATIO must be in (0, 1]." >&2
   exit 2
 fi
 
@@ -67,6 +91,35 @@ fi
 
 server_worker_pid=""
 client_worker_pid=""
+
+duration_to_seconds() {
+  local duration="$1"
+  if [[ "${duration}" =~ ^([0-9]+)([smhd])$ ]]; then
+    local value="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[2]}"
+    case "${unit}" in
+      s) echo "${value}" ;;
+      m) echo $((value * 60)) ;;
+      h) echo $((value * 3600)) ;;
+      d) echo $((value * 86400)) ;;
+      *)
+        break
+        ;;
+    esac
+    return 0
+  fi
+  echo "MAX_WAIT_DURATION must be in <number><unit> format, e.g. 20m/600s/1h." >&2
+  return 1
+}
+
+if ! max_wait_sec="$(duration_to_seconds "${max_wait_duration}")"; then
+  exit 2
+fi
+max_wait_rounds=$(((max_wait_sec + ready_poll_interval_sec - 1) / ready_poll_interval_sec))
+if (( max_wait_rounds <= 0 )); then
+  echo "derived max wait rounds must be > 0." >&2
+  exit 2
+fi
 
 brain_exec_as_user() {
   local pid="$1"
@@ -280,7 +333,31 @@ fi
     exit 1
   fi
 
-  printf '%s\n' "${output}" | sed -n 's/.*Dev: \(mlx5_[0-9]\+\) added.*/\1/p' | sort -Vu
+  printf '%s\n' "${output}" | sed -n \
+    -e 's/.*Dev: \(mlx5_[0-9]\+\) added.*/\1/p' \
+    -e 's/.*RDMA candidate accepted: dev=\(mlx5_[0-9]\+\).*/\1/p' \
+    | sort -Vu
+}
+
+collect_no_regmr_read_cost_us() {
+  local pid="$1"
+  local log_path="$2"
+  brain_exec_as_user "${pid}" "
+sed -n 's/^no regmr result: key=gpu-ce-test-tensor-\\([0-9]\\+\\)-0, status=0, .*rdma_read=\\([0-9]\\+\\).*/\\1 \\2/p' \"${log_path}\" \
+  | awk '\$2 + 0 > 0 { print \$1, \$2 }' \
+  | sort -n -k1,1
+"
+}
+
+collect_latest_gpu_nic_map() {
+  local pid="$1"
+  local log_path="$2"
+  brain_exec_as_user "${pid}" "
+grep 'read tensor:' \"${log_path}\" \
+  | sed -n 's/.*key=gpu-ce-test-tensor-\\([0-9]\\+\\)-0 .*net_dev=\\([^ ,]*\\).*/\\1 \\2/p' \
+  | awk '\$2 != \"none\" { nic[\$1] = \$2 } END { for (gpu in nic) { print gpu, nic[gpu] } }' \
+  | sort -n -k1,1
+"
 }
 
 echo "[preflight] brainctl version"
@@ -338,7 +415,7 @@ echo "client worker pid: ${client_worker_pid}"
 print_process_status "${client_worker_pid}"
 
 for pid in "${server_worker_pid}" "${client_worker_pid}"; do
-  wait_for_process_ready "${pid}"
+  wait_for_process_ready "${pid}" "${max_wait_rounds}" "${ready_poll_interval_sec}"
 done
 
 echo "[remote] validate user + workspace"
@@ -397,6 +474,8 @@ if (( ${#common_hcas[@]} < transfer_gpu_count )); then
 fi
 
 declare -A excluded_hcas=()
+declare -a excluded_hca_order=()
+declare -A observed_failed_hcas=()
 declare -a selected_hcas=()
 hca_failover_enabled=0
 
@@ -537,6 +616,8 @@ fi
   unique_read_nics_raw="$(brain_exec_as_user "${client_worker_pid}" "grep 'read tensor:' \"${client_log_path}\" | sed -n 's/.*net_dev=\\([^ ,]*\\).*/\\1/p' | grep -v '^none$' | sort -u | wc -l || true")"
   client_ready_pairs_raw="$(brain_exec_as_user "${client_worker_pid}" "grep '\\[rdma_handshake\\].* -> ready' \"${client_log_path}\" | sed -n 's/.*dev=\\([^ ]*\\) peer=\\([^ ]*\\).*/\\1->\\2/p' | sort -u | wc -l || true")"
   server_connect_pairs_raw="$(brain_exec_as_user "${server_worker_pid}" "grep 'recv rdma connect' \"${server_log_path}\" | sed -n 's/.*net_dev=\\([^ ]*\\).*/\\1/p' | sort -u | wc -l || true")"
+  no_regmr_read_costs_raw="$(collect_no_regmr_read_cost_us "${client_worker_pid}" "${client_log_path}" || true)"
+  gpu_nic_map_raw="$(collect_latest_gpu_nic_map "${client_worker_pid}" "${client_log_path}" || true)"
 
   with_regmr_ok="$(trim_number "${with_regmr_ok_raw}")"
   no_regmr_ok="$(trim_number "${no_regmr_ok_raw}")"
@@ -544,6 +625,21 @@ fi
   unique_read_nics="$(trim_number "${unique_read_nics_raw}")"
   client_ready_pairs="$(trim_number "${client_ready_pairs_raw}")"
   server_connect_pairs="$(trim_number "${server_connect_pairs_raw}")"
+  bandwidth_table="$(
+    printf '%s\n' "${no_regmr_read_costs_raw}" \
+      | awk -v bytes="${transfer_count}" '
+          NF == 2 && $2 + 0 > 0 {
+            gbps = (bytes * 8.0) / $2 / 1000.0;
+            printf "%d %.2f\n", $1, gbps;
+          }
+        ' \
+      | sort -n -k1,1
+  )"
+  bandwidth_count="$(printf '%s\n' "${bandwidth_table}" | awk 'NF == 2 { c += 1 } END { print c + 0 }')"
+  bandwidth_min="$(printf '%s\n' "${bandwidth_table}" | awk 'NF == 2 { if (c == 0 || $2 < min) { min = $2 } c += 1 } END { if (c == 0) { print 0 } else { printf "%.2f", min } }')"
+  bandwidth_max="$(printf '%s\n' "${bandwidth_table}" | awk 'NF == 2 { if (c == 0 || $2 > max) { max = $2 } c += 1 } END { if (c == 0) { print 0 } else { printf "%.2f", max } }')"
+  bandwidth_avg="$(printf '%s\n' "${bandwidth_table}" | awk 'NF == 2 { sum += $2; c += 1 } END { if (c == 0) { print 0 } else { printf "%.2f", sum / c } }')"
+  bandwidth_floor_by_peak="$(awk -v max="${bandwidth_max}" -v ratio="${per_link_min_of_peak_ratio}" 'BEGIN { printf "%.2f", max * ratio }')"
 
   echo "with_regmr_ok=${with_regmr_ok}"
   echo "no_regmr_ok=${no_regmr_ok}"
@@ -551,6 +647,30 @@ fi
   echo "unique_read_nics=${unique_read_nics}"
   echo "client_ready_pairs=${client_ready_pairs}"
   echo "server_connect_pairs=${server_connect_pairs}"
+  if [[ "${enforce_bandwidth}" == "1" ]]; then
+    echo "bandwidth_count=${bandwidth_count}"
+    echo "bandwidth_min_gbps=${bandwidth_min}"
+    echo "bandwidth_max_gbps=${bandwidth_max}"
+    echo "bandwidth_avg_gbps=${bandwidth_avg}"
+    echo "bandwidth_floor_by_peak_gbps=${bandwidth_floor_by_peak}"
+    if [[ -n "${bandwidth_table}" ]]; then
+      echo "[verify] per-gpu no-regmr bandwidth (Gbps)"
+      awk '
+        FNR == NR {
+          if (NF == 2) {
+            nic[$1] = $2;
+          }
+          next;
+        }
+        NF == 2 {
+          gpu = $1;
+          gbps = $2;
+          nic_name = (gpu in nic) ? nic[gpu] : "unknown";
+          printf "  gpu=%s nic=%s gbps=%s\n", gpu, nic_name, gbps;
+        }
+      ' <(printf '%s\n' "${gpu_nic_map_raw}") <(printf '%s\n' "${bandwidth_table}")
+    fi
+  fi
 
   declare -a failure_reasons=()
   if (( client_command_ok == 0 )); then
@@ -573,6 +693,19 @@ fi
   fi
   if (( server_connect_pairs < min_unique_nics )); then
     failure_reasons+=("server accepted RDMA connect pairs too low: ${server_connect_pairs} (min=${min_unique_nics})")
+  fi
+  if [[ "${enforce_bandwidth}" == "1" ]]; then
+    if [[ "${bandwidth_count}" != "${transfer_gpu_count}" ]]; then
+      failure_reasons+=("unexpected no-regmr bandwidth sample count: ${bandwidth_count}")
+    fi
+    if ! awk -v min_bw="${bandwidth_min}" -v threshold="${per_link_min_gbps}" 'BEGIN { exit !(min_bw + 0 >= threshold + 0) }'; then
+      failure_reasons+=(
+        "per-link bandwidth below absolute threshold: min=${bandwidth_min}Gbps threshold=${per_link_min_gbps}Gbps")
+    fi
+    if ! awk -v min_bw="${bandwidth_min}" -v floor_bw="${bandwidth_floor_by_peak}" 'BEGIN { exit !(min_bw + 0 >= floor_bw + 0) }'; then
+      failure_reasons+=(
+        "per-link bandwidth imbalance: min=${bandwidth_min}Gbps floor_by_peak=${bandwidth_floor_by_peak}Gbps ratio=${per_link_min_of_peak_ratio}")
+    fi
   fi
 
   final_attempt="${attempt}"
@@ -633,21 +766,40 @@ fi
     continue
   fi
 
-  excluded_hcas=()
   applied_exclusions=0
+  replaced_exclusions=0
+  declare -a replacement_pairs=()
+  current_exclusions=${#excluded_hcas[@]}
   for dev in "${failed_hcas[@]}"; do
+    observed_failed_hcas["${dev}"]=1
     if ! printf '%s\n' "${common_hcas[@]}" | grep -qx "${dev}"; then
       continue
     fi
-    excluded_hcas["${dev}"]=1
-    applied_exclusions=$(( applied_exclusions + 1 ))
-    if (( applied_exclusions >= max_exclusions )); then
-      break
+    if [[ -n "${excluded_hcas[${dev}]:-}" ]]; then
+      continue
     fi
+    if (( current_exclusions < max_exclusions )); then
+      excluded_hcas["${dev}"]=1
+      excluded_hca_order+=("${dev}")
+      current_exclusions=$(( current_exclusions + 1 ))
+      applied_exclusions=$(( applied_exclusions + 1 ))
+      continue
+    fi
+    if (( ${#excluded_hca_order[@]} == 0 )); then
+      continue
+    fi
+    evicted="${excluded_hca_order[0]}"
+    excluded_hca_order=("${excluded_hca_order[@]:1}")
+    unset "excluded_hcas[${evicted}]"
+    excluded_hcas["${dev}"]=1
+    excluded_hca_order+=("${dev}")
+    replaced_exclusions=$(( replaced_exclusions + 1 ))
+    applied_exclusions=$(( applied_exclusions + 1 ))
+    replacement_pairs+=("${evicted}->${dev}")
   done
 
   if (( applied_exclusions == 0 )); then
-    echo "[retry] failed RNICs are outside common candidate set: ${failed_hcas[*]}" >&2
+    echo "[retry] failed RNICs already excluded/outside common set/no replacement room: ${failed_hcas[*]}" >&2
     continue
   fi
 
@@ -656,7 +808,14 @@ fi
     continue
   fi
   ib_hca_csv="$(IFS=,; echo "${selected_hcas[*]}")"
-  echo "[retry] excluded failed RNICs (attempt-local): ${failed_hcas[*]}"
+  current_excluded="$(printf '%s\n' "${!excluded_hcas[@]}" | sort -V | paste -sd, -)"
+  cumulative_failed="$(printf '%s\n' "${!observed_failed_hcas[@]}" | sort -V | paste -sd, -)"
+  echo "[retry] failed RNICs (attempt-local): ${failed_hcas[*]}"
+  if (( replaced_exclusions > 0 )); then
+    echo "[retry] exclusion window rotated: $(IFS=,; echo "${replacement_pairs[*]}")"
+  fi
+  echo "[retry] currently excluded RNICs: ${current_excluded:-none}"
+  echo "[retry] cumulative failed RNICs: ${cumulative_failed:-none}"
   echo "[retry] next attempt RNICs: ${ib_hca_csv}"
 done
 

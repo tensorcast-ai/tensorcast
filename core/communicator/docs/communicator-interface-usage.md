@@ -47,6 +47,7 @@ Notes:
 - `close_connection(...)` is not used in store/daemon product paths (only tests and routing adapter scaffolding).
 - `set_dram_lease_provider(...)` / `set_residency_provider(...)` currently have no product callsites.
 - RDMA NIC selection (`RdmaContext::get_best_dev`) now degrades safely on sparse HCA sets: no visible RDMA device returns `nullptr` with warnings, and GPU affinity selection falls back to max PCI-prefix candidates when `max GID + max prefix` intersection is empty.
+- RDMA RNIC endpoint initialization now uses two-phase selection in `RdmaContext::ibv_init`: scan all usable IB ports first, then instantiate/register devices and elect deterministic per-rail primaries while retaining backups in `devs_`. This prevents scan-order-dependent rail jitter during partial local failover.
 - RDMA handshake failure signaling is now strict and backward-safe: server-side connect failures always send `ENGINE_OP_RDMA_CONNECT_FAILED`, and client-side response handling validates payload size so malformed/legacy failure payloads are treated as connect-failed instead of crashing in payload decode.
 
 ### 1.2 Initialization and wiring
@@ -126,6 +127,11 @@ Current code constraints:
   - `NvlinkAdapter` is wired for protocol selection and executes through `engine::Communicator::read_tensor_local(...)` when the source tensor is present in the same process.
   - `PcieAdapter` is wired for protocol selection and executes via current engine-backed path.
   - same-node protocol selection is deterministic: NVLINK first (`prefer_nvlink` + adapter available), then PCIE (`prefer_pcie` + adapter available), else `AUTO`.
+- Route observability:
+  - each channel build now emits `[routing] route resolved` with `path` (`cross_node_rail_fallback`, `cross_node_direct`, `local_fanout`, `same_node_loopback`), selected `protocol`, adapter label (`ENGINE` / `NVLINK` / `PCIE`), link id/type, and local/remote binding details.
+  - each new connection emits `[routing] connection created`, and cache hits emit `[routing] reusing cached connection` at `VLOG(1)`.
+  - rail fallback selection emits `[routing] rail fallback selected` with source/destination endpoints, selected local NIC/rail, preferred rail, and resolved link.
+- Routing regression coverage now includes a composite path: cross-node bootstrap (`node0/dev/gpu/0 -> node1/dev/gpu/0`) through rail-matched fallback plus same-node fanout from `node1/dev/gpu/0` to the remaining local GPUs and CPU memory endpoints.
 
 Important:
 - Store read paths now call `RoutingContext::get_communicator(...)` in routed-first mode when endpoint metadata and context are available.
