@@ -9,7 +9,6 @@
 
 #include "absl/time/time.h"
 #include "daemon/service/body_backing_types.h"
-#include "daemon/service/byte_artifact_body_handle.h"
 #include "daemon/service/byte_artifact_body_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -29,10 +28,7 @@ class ByteArtifactAuthorityService {
     std::string artifact_id;
     v2::BatchItemStatus status{v2::BATCH_ITEM_STATUS_UNSPECIFIED};
     std::string message;
-    BodyDescriptor descriptor;
-    BodyHandle body_handle;
-    AuthorityRecord authority_record;
-    ServingCapability serving_capability;
+    std::optional<ResolvedSourceCapability> source_capability;
   };
 
   struct PutItem {

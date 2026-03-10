@@ -58,13 +58,6 @@ class PayloadTransportBroker {
     bool remote{false};
   };
 
-  struct CapabilityResolution {
-    RefMetadata metadata;
-    ResolvedBodyCapability capability;
-    ServingCapability serving_capability;
-    std::shared_ptr<const std::string> payload;
-  };
-
   PayloadTransportBroker(
       std::string daemon_id,
       common::CapabilityTokenManager* capability_tokens,
@@ -117,7 +110,7 @@ class PayloadTransportBroker {
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
       std::string_view expected_operation_id = "");
 
-  [[nodiscard]] absl::StatusOr<CapabilityResolution> resolve_payload_ref_capability(
+  [[nodiscard]] absl::StatusOr<ResolvedSourceCapability> resolve_payload_ref_capability(
       std::string_view payload_ref,
       std::string_view expected_artifact_id,
       absl::Time now,

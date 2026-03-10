@@ -40,7 +40,7 @@ related_code:
   - daemon/state/persistence_manager.h
   - daemon/state/persistence_manager.cc
 links:
-  plan: ../plans/0093-backing-identity-and-retained-backing-ownership.md
+  plan: ../plans/0093-01-authority-to-dataplane-convergence.md
   dependencies:
     - ./0049-cpu-shared-memory-materialization.md
     - ./0092-artifact-profiles-shared-dataplane-and-truth-layering.md
@@ -79,6 +79,7 @@ This design defines:
 - the split between stable backing-subject identity and per-binding instance generation,
 - how `AuthorityRecord` references retained backing truth,
 - how `BodyStore` remains an authority-local index while pointing to backing truth rather than owning it,
+- the authority-to-dataplane bridge through `ResolvedSourceCapability`,
 - the authoritative state machine for backing replacement, invalidation, retirement, and claim loss in an executable
   phase-2 scope,
 - `ServingCapability` as a real lifecycle-kernel contract rather than a body-store convenience struct,
@@ -239,6 +240,7 @@ Phase 2 is the required next step:
 - it defines backing truth precisely,
 - it defines how authority points to that truth,
 - it makes lifecycle-backed serving capability real,
+- it defines the normalized result that authority and lifecycle hand to shared lowering,
 - it makes routed high-cardinality artifacts consume `StorePolicy` as policy input rather than as an optional afterthought.
 
 ```mermaid
@@ -248,8 +250,9 @@ flowchart LR
   C -->|replica_key| D["core backing truth"]
   B -->|policy_visibility_ref| E["StorePolicy-backed path"]
   B -->|mint through lifecycle kernel| F["ServingCapability"]
-  F --> G["payload_ref / loader / local handle / remote source"]
-  E --> F
+  F --> G["ResolvedSourceCapability"]
+  E --> G
+  G --> H["payload_ref / loader / local handle / remote source"]
 ```
 
 Constitutional rules:
@@ -257,8 +260,9 @@ Constitutional rules:
 1. `AuthorityRecord` is allowed to reference backing truth, but not to replace it.
 2. `BodyStore` remains authority-local state, not a second physical lifecycle owner.
 3. `ServingCapability` is lifecycle-kernel state, not authority truth.
-4. `StorePolicy` remains the only declarative placement and durability surface.
-5. `BodyBackingIntent` remains a derived lowering hint only.
+4. Any path that will move bytes must cross one shared authority-to-dataplane bridge before realization.
+5. `StorePolicy` remains the only declarative placement and durability surface.
+6. `BodyBackingIntent` remains a derived lowering hint only.
 
 ### 1.1 Executable intermediate target
 
@@ -276,6 +280,38 @@ This phase must be implementable by:
 
 This phase does **not** require every existing lease or token system to collapse into one physical storage table
 immediately. It does require one shared semantic mint/release contract over them.
+
+### 1.2 `ResolvedSourceCapability`
+
+Phase 2 introduces one normalized bridge object between authority semantics and shared dataplane lowering.
+
+`ResolvedSourceCapability` means:
+
+- authority and lifecycle have already validated that a bounded serve or source-resolution promise may be used now,
+- the result is now ready to be lowered into shared execution,
+- but target-specific lowering has not happened yet.
+
+Minimum required fields:
+
+- `selection_identity`
+- `verified_content_descriptor`
+- `serving_capability`
+- optional `backing_identity`
+- `source_kind`
+- one concrete source-resolution form:
+  - loader-backed source,
+  - `payload_ref`,
+  - local handle-backed source,
+  - policy-backed source reference.
+
+Normative rules:
+
+1. `ResolvedSourceCapability` is not authority truth and is not persisted as the source of future claim or join answers.
+2. `ResolvedSourceCapability` is not a public SDK routing primitive.
+3. Any distributed or routed path that will move bytes must first produce `ResolvedSourceCapability` before it lowers to
+   `ArtifactLoweringPlan` or a mechanically equivalent core-owned lowering object.
+4. Paths that do not move bytes yet must return an explicit attach/resume handle rather than inventing an ad hoc partial
+   source result.
 
 ## 2. `BackingIdentity` and `ReplicaKey`
 
@@ -659,11 +695,7 @@ The lifecycle kernel is responsible for:
 - binding the capability either to a live backing or to a policy-backed path,
 - adapting to the concrete existing lifecycle owner used in this phase,
 - acquiring the lease, pin, finalizer, or other bounded lifecycle ownership needed for that promise,
-- producing the actual consumer-facing resolution result:
-  - loader,
-  - `payload_ref`,
-  - local handle lease,
-  - remote source,
+- producing `ResolvedSourceCapability`,
 - releasing the backing once the capability expires or is explicitly released.
 
 Executable phase-2 target:
@@ -679,7 +711,7 @@ Executable phase-2 target:
 That means:
 
 - `BodyStore::get(...)` may return authority and backing snapshots,
-- the get path must then ask the lifecycle kernel to mint a capability,
+- the get path must then ask the lifecycle kernel to mint a capability and project `ResolvedSourceCapability`,
 - `PayloadTransportBroker` must consume the same kernel instead of being a second capability owner,
 - `PayloadTransportBroker` may remain the physical holder of payload records in this phase, but not a second semantic
   lifecycle system,
@@ -910,6 +942,8 @@ Acceptance criteria:
   - draining after claim loss,
   - final retirement,
 - `ServingCapability` is minted only by the lifecycle kernel and is not stored as authority truth,
+- `ResolvedSourceCapability` is the required bridge from authority/lifecycle success to shared lowering for any path that
+  will move bytes,
 - `ServingCapability` binds to an explicit `lifecycle_owner_ref` and supports at least:
   - `backing`,
   - `copied_payload`,

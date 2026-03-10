@@ -94,10 +94,8 @@ class ByteArtifactController {
   [[nodiscard]] std::optional<PolicyVisibilityRef> resolve_policy_visibility_ref(
       const ByteArtifactBodyStore::AuthoritySnapshot& authority_snapshot) const;
 
-  [[nodiscard]] absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> restore_backing_from_policy_visibility(
-      std::string_view artifact_id,
-      const BodyDescriptor& descriptor,
-      const AuthorityRecord& authority_record,
+  [[nodiscard]] absl::StatusOr<ResolvedSourceCapability> restore_backing_from_policy_visibility(
+      ResolvedSourceCapability source_capability,
       const ByteArtifactAuthorityService::Context& context,
       std::string_view operation_id) const;
 

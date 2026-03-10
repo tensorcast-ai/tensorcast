@@ -32,7 +32,6 @@ related_code:
   - proto/tensorcast/common/v1/common.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
 links:
-  plan: ../plans/0088-unified-artifact-profiles-with-shared-dataplane.md
   dependencies:
     - ./0017-client-generated-artifact-id.md
     - ./0039-artifact-first-sdk.md
@@ -57,6 +56,13 @@ profile. Its differences are intentionally limited to:
 - where semantic truth lives,
 - how source ownership and routing are resolved,
 - what lifecycle invariants apply (`seal`, `PUT_IF_ABSENT_JOIN`, TTL, fencing).
+
+The long-term bridge out of that specialization must also stay explicit:
+
+- authority-specialized paths may validate, route, fence, and mint bounded serving promises,
+- but any path that will move bytes must next converge on one shared source-capability shape,
+- then lower through one shared `ArtifactLoweringPlan`,
+- then execute through the same core-owned dataplane runtime as every other artifact profile.
 
 After source resolution, all byte movement must reuse the existing TensorCast dataplane:
 
@@ -209,7 +215,24 @@ Normative rule:
 - profiles may differ in layer `B`,
 - profiles must converge before layer `D`.
 
-### 1.1 Project-wide constitutional rules
+### 1.1 Authority-to-dataplane bridge
+
+There is one required bridge between profile-specific authority and shared execution.
+
+Long-term rule:
+
+- profile authority may produce either:
+  - a resolved source-capability result for byte movement,
+  - or an attach/resume result for long-lived observe, wait, replay, or status flows.
+- if the next step is byte movement, the profile runtime must convert the authority answer into one shared lowering shape.
+
+Required interpretation:
+
+- authority answers semantic questions such as route ownership, fencing, current validity, replay, or lifecycle minting,
+- lowering answers execution questions such as source adapter, byte-range map, target layout, and execution hints,
+- no profile may stop at a private authority-local success result and then handcraft a private copy path after that point.
+
+### 1.2 Project-wide constitutional rules
 
 This design is not only a byte-artifact cleanup. It is a project-wide architectural constraint line that must remain
 compatible with:
@@ -231,7 +254,7 @@ The following rules are normative:
 6. Observability, operation identity, and completion semantics must remain unified after lowering; profiles must not
    create private success/failure accounting for the same byte movement.
 
-### 1.2 Dataplane ownership rule
+### 1.3 Dataplane ownership rule
 
 The shared executor is a core runtime responsibility.
 
@@ -242,6 +265,7 @@ Normative rules:
   `MaterializationFacade` plus the memory-backed ingest entrypoints in `StoreEngine`,
 - daemon/service code may validate, authorize, batch, and lower requests, but it must not become a second execution
   runtime,
+- distributed authority code must terminate in shared lowering or an explicit attach/resume handle before realization,
 - any new helper introduced on the daemon side must end before source/map/target execution begins.
 
 This preserves the project’s long-term invariant from the daemon and programmable-framework architecture: control plane
@@ -753,6 +777,8 @@ Acceptance criteria:
 - route acquisition and redirect policy are centralized; byte-artifact controllers do not own route cache policy.
 - lowered byte-artifact execution emits the shared operation / completion / publish-context semantics.
 - no new byte-artifact-specific copy substrate is introduced in daemon or core.
+- any distributed authority path that will move bytes first produces a shared source-capability result and then lowers to
+  the same `ArtifactLoweringPlan` / shared executor path as other artifact flows.
 
 # References
 

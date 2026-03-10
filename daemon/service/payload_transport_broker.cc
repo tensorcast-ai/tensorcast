@@ -58,6 +58,8 @@ std::string payload_ref_capability_id(std::string_view payload_id) {
 std::string payload_ref_subject_id_for_backing(const store::runtime::ingestion::BackingIdentity& backing_identity) {
   return absl::StrCat(
       "backing:",
+      backing_identity.physical_artifact_id,
+      "|",
       backing_identity.replica_key.artifact_id,
       "|",
       backing_identity.replica_key.view_id.value_or(""),
@@ -65,6 +67,8 @@ std::string payload_ref_subject_id_for_backing(const store::runtime::ingestion::
       static_cast<int>(backing_identity.replica_key.device.type),
       "|",
       backing_identity.replica_key.device.ordinal,
+      "|",
+      backing_identity.replica_key.device.uuid,
       "|",
       backing_identity.replica_key.replica);
 }
@@ -121,6 +125,21 @@ void record_payload_ref_resolution_metrics(BodyCapabilityResolutionMode mode, bo
     counter->Add(1, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
   } catch (...) {
   }
+}
+
+tensorcast::common::SelectionIdentity make_byte_artifact_selection_identity(std::string_view artifact_id) {
+  return tensorcast::common::SelectionIdentity{
+      .artifact_id = std::string(artifact_id),
+      .logical_layout_hash = tensorcast::common::compute_byte_artifact_logical_layout_hash_bytes(),
+      .selection_hash = tensorcast::common::compute_byte_artifact_selection_hash_bytes(),
+  };
+}
+
+store::runtime::ingestion::VerifiedContentDescriptor payload_metadata_to_verified_content_descriptor(
+    const PayloadTransportBroker::RefMetadata& metadata,
+    std::string_view layout_id) {
+  return body_descriptor_to_verified_content_descriptor_with_layout(
+      layout_id, metadata.payload_size, metadata.digest_alg, metadata.digest_hex);
 }
 
 absl::Status absl_status_from_batch_item_status(v2::BatchItemStatus status, std::string_view message) {
@@ -734,6 +753,14 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   if (backing_instance_generation == 0) {
     return absl::InvalidArgumentError("backing_instance_generation is required for live-backing payload_ref issuance");
   }
+  std::shared_ptr<const std::string> payload_snapshot;
+  if (direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET) {
+    auto payload_or = body_handle.read_all_bytes();
+    if (!payload_or.ok()) {
+      return payload_or.status();
+    }
+    payload_snapshot = std::make_shared<const std::string>(std::move(*payload_or));
+  }
 
   const absl::Time now = absl::Now();
   auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
@@ -830,7 +857,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
     absl::MutexLock lock(&mu_);
     records_[payload_id] = Record{
         .metadata = metadata,
-        .payload = nullptr,
+        .payload = std::move(payload_snapshot),
         .body_handle = body_handle,
         .descriptor = normalized_descriptor,
         .backing_identity = std::move(backing_identity),
@@ -942,7 +969,7 @@ absl::StatusOr<PayloadTransportBroker::ResolvedPayload> PayloadTransportBroker::
   };
 }
 
-absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBroker::resolve_payload_ref_capability(
+absl::StatusOr<ResolvedSourceCapability> PayloadTransportBroker::resolve_payload_ref_capability(
     std::string_view payload_ref,
     std::string_view expected_artifact_id,
     absl::Time now,
@@ -1006,20 +1033,32 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
     if (!admitted_or.ok()) {
       return admitted_or.status();
     }
-    CapabilityResolution resolution;
-    resolution.metadata = local_or->metadata;
-    resolution.payload = local_or->payload;
-    if (!local_or->body_handle.empty()) {
-      resolution.capability.mode = BodyCapabilityResolutionMode::kLocalBodyHandle;
-      resolution.capability.local = true;
-      resolution.capability.body_handle = local_or->body_handle;
-      resolution.capability.descriptor = local_or->descriptor;
+    const auto release_use_guard = [&]() {
+      auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
+      LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
+    };
+    ResolvedSourceCapability resolution;
+    resolution.selection_identity = make_byte_artifact_selection_identity(local_or->metadata.artifact_id);
+    resolution.verified_content_descriptor = local_or->descriptor.layout_id.empty()
+        ? payload_metadata_to_verified_content_descriptor(local_or->metadata, /*layout_id=*/"")
+        : body_descriptor_to_verified_content_descriptor(local_or->descriptor);
+    const bool prefer_payload_snapshot =
+        local_or->metadata.direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET && local_or->payload;
+    if (!local_or->body_handle.empty() && !prefer_payload_snapshot) {
+      resolution.source_kind = store::loading::MaterializationSource::kLocalReplica;
+      resolution.body_capability = ResolvedBodyCapability{
+          .mode = BodyCapabilityResolutionMode::kLocalBodyHandle,
+          .local = true,
+          .body_handle = local_or->body_handle,
+          .descriptor = local_or->descriptor,
+      };
       auto backing_identity = local_or->backing_identity;
       if (!backing_identity.has_value()) {
         backing_identity = body_descriptor_to_backing_identity(local_or->descriptor, local_or->body_handle);
       }
       if (!backing_identity.has_value() ||
           !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
+        release_use_guard();
         return absl::FailedPreconditionError("payload_ref backing_identity is missing or inconsistent");
       }
       std::uint64_t backing_instance_generation = local_or->backing_instance_generation;
@@ -1027,85 +1066,96 @@ absl::StatusOr<PayloadTransportBroker::CapabilityResolution> PayloadTransportBro
         backing_instance_generation = local_or->body_handle.binding_generation();
       }
       if (backing_instance_generation == 0) {
+        release_use_guard();
         return absl::FailedPreconditionError("payload_ref backing_instance_generation is missing");
       }
       auto capability_or = mint_serving_capability(
           MintServingCapabilityRequest{
               .capability_id = std::string(payload_ref),
-              .expires_at = resolution.metadata.expires_at,
-              .mode = resolution.capability.mode,
+              .expires_at = local_or->metadata.expires_at,
+              .mode = resolution.body_capability->mode,
               .local = true,
               .subject_kind = ServingCapabilitySubjectKind::kBacking,
               .lifecycle_owner_ref =
                   LifecycleOwnerRef{
                       .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
-                      .owner_id = resolution.metadata.payload_id,
+                      .owner_id = local_or->metadata.payload_id,
                   },
-              .backing_identity = std::move(backing_identity),
+              .backing_identity = backing_identity,
               .backing_instance_generation = backing_instance_generation,
           });
       if (!capability_or.ok()) {
-        auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
-        LOG_IF(WARNING, !release_status.ok())
-            << "payload_ref: failed to release use guard after mint failure: " << release_status;
+        release_use_guard();
         return capability_or.status();
       }
+      resolution.backing_identity = std::move(backing_identity);
       resolution.serving_capability = std::move(*capability_or);
-      record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
-      auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
-      LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
+      auto source_status = validate_resolved_source_capability(resolution);
+      if (!source_status.ok()) {
+        release_use_guard();
+        return source_status;
+      }
+      record_payload_ref_resolution_metrics(resolution.body_capability->mode, /*local=*/true);
+      release_use_guard();
       return resolution;
     }
-    resolution.capability.mode = BodyCapabilityResolutionMode::kLoader;
-    resolution.capability.local = true;
+    resolution.source_kind = store::loading::MaterializationSource::kLocalReplica;
+    resolution.inline_payload = local_or->payload;
     auto capability_or = mint_serving_capability(
         MintServingCapabilityRequest{
             .capability_id = std::string(payload_ref),
-            .expires_at = resolution.metadata.expires_at,
-            .mode = resolution.capability.mode,
+            .expires_at = local_or->metadata.expires_at,
+            .mode = BodyCapabilityResolutionMode::kLoader,
             .local = true,
             .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
             .lifecycle_owner_ref =
                 LifecycleOwnerRef{
                     .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
-                    .owner_id = resolution.metadata.payload_id,
+                    .owner_id = local_or->metadata.payload_id,
                 },
         });
     if (!capability_or.ok()) {
-      auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
-      LOG_IF(WARNING, !release_status.ok())
-          << "payload_ref: failed to release use guard after loader mint failure: " << release_status;
+      release_use_guard();
       return capability_or.status();
     }
     resolution.serving_capability = std::move(*capability_or);
-    record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/true);
-    auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
-    LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
+    auto source_status = validate_resolved_source_capability(resolution);
+    if (!source_status.ok()) {
+      release_use_guard();
+      return source_status;
+    }
+    record_payload_ref_resolution_metrics(resolution.serving_capability.mode, /*local=*/true);
+    release_use_guard();
     return resolution;
   }
 
-  CapabilityResolution resolution;
-  resolution.metadata = *metadata_or;
-  resolution.capability.mode = BodyCapabilityResolutionMode::kChunkRpcFallback;
-  resolution.capability.local = false;
+  ResolvedSourceCapability resolution;
+  resolution.selection_identity = make_byte_artifact_selection_identity(metadata_or->artifact_id);
+  resolution.verified_content_descriptor = payload_metadata_to_verified_content_descriptor(*metadata_or, "");
+  resolution.source_kind = store::loading::MaterializationSource::kP2P;
+  resolution.payload_ref = std::string(payload_ref);
   auto capability_or = mint_serving_capability(
       MintServingCapabilityRequest{
           .capability_id = std::string(payload_ref),
-          .expires_at = resolution.metadata.expires_at,
-          .mode = resolution.capability.mode,
+          .expires_at = metadata_or->expires_at,
+          .mode = BodyCapabilityResolutionMode::kChunkRpcFallback,
           .local = false,
           .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
           .lifecycle_owner_ref =
               LifecycleOwnerRef{
                   .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
-                  .owner_id = resolution.metadata.payload_id,
+                  .owner_id = metadata_or->payload_id,
               },
       });
   if (!capability_or.ok()) {
     return capability_or.status();
   }
   resolution.serving_capability = std::move(*capability_or);
-  record_payload_ref_resolution_metrics(resolution.capability.mode, /*local=*/false);
+  auto source_status = validate_resolved_source_capability(resolution);
+  if (!source_status.ok()) {
+    return source_status;
+  }
+  record_payload_ref_resolution_metrics(resolution.serving_capability.mode, /*local=*/false);
   return resolution;
 }
 
@@ -1269,48 +1319,52 @@ absl::StatusOr<PayloadTransportBroker::PayloadLoader> PayloadTransportBroker::op
     std::string_view expected_artifact_id,
     tensorcast::common::v1::PayloadRefDirection expected_direction,
     std::string_view expected_operation_id) {
+  auto metadata_or = inspect_payload_ref(payload_ref, now, /*require_not_expired=*/true);
+  if (!metadata_or.ok()) {
+    return metadata_or.status();
+  }
   auto resolution_or = resolve_payload_ref_capability(
       payload_ref, expected_artifact_id, now, local_daemon_id, expected_direction, expected_operation_id);
   if (!resolution_or.ok()) {
     return resolution_or.status();
   }
-  if (resolution_or->capability.local) {
-    if (resolution_or->capability.mode == BodyCapabilityResolutionMode::kLocalBodyHandle) {
-      auto loader_or = resolution_or->capability.body_handle.make_loader();
+  if (resolution_or->serving_capability.local) {
+    if (resolution_or->body_capability.has_value()) {
+      auto loader_or = resolution_or->body_capability->body_handle.make_loader();
       if (!loader_or.ok()) {
         return loader_or.status();
       }
       return PayloadLoader{
-          .metadata = resolution_or->metadata,
+          .metadata = *metadata_or,
           .loader = std::move(*loader_or),
           .remote = false,
       };
     }
-    if (!resolution_or->payload) {
+    if (!resolution_or->inline_payload) {
       return absl::FailedPreconditionError("payload_ref local record has no body_handle or payload");
     }
     return PayloadLoader{
-        .metadata = resolution_or->metadata,
+        .metadata = *metadata_or,
         .loader = std::make_unique<store::InlineBufferLoader>(store::loading::InlineBufferSource{
             .data = std::shared_ptr<const void>(
-                resolution_or->payload, static_cast<const void*>(resolution_or->payload->data())),
-            .size_bytes = resolution_or->payload->size(),
+                resolution_or->inline_payload, static_cast<const void*>(resolution_or->inline_payload->data())),
+            .size_bytes = resolution_or->inline_payload->size(),
         }),
         .remote = false,
     };
   }
 
   auto address_or = worker_directory_cache.resolve_daemon_address(
-      resolution_or->metadata.issuer_daemon_id, now, worker_directory_staleness_budget);
+      metadata_or->issuer_daemon_id, now, worker_directory_staleness_budget);
   if (!address_or.ok()) {
     return address_or.status();
   }
   return PayloadLoader{
-      .metadata = resolution_or->metadata,
+      .metadata = *metadata_or,
       .loader = std::make_unique<PayloadRefLoader>(PayloadRefLoader::RemoteOptions{
           .source =
               RemotePayloadRefSource::Options{
-                  .metadata = resolution_or->metadata,
+                  .metadata = *metadata_or,
                   .payload_ref = std::string(payload_ref),
                   .artifact_id = std::string(expected_artifact_id),
                   .operation_id = std::string(expected_operation_id),

@@ -210,6 +210,70 @@ absl::StatusOr<store::runtime::ingestion::ArtifactLoweringPlan> build_into_targe
       });
 }
 
+struct LoaderSourceResolution {
+  std::unique_ptr<store::IArtifactLoader> loader;
+  store::loading::MaterializationSource source_kind{store::loading::MaterializationSource::kUnspecified};
+  std::uint64_t payload_bytes{0};
+};
+
+absl::StatusOr<LoaderSourceResolution> open_loader_from_resolved_source_capability(
+    PayloadTransportBroker& payload_transport_broker,
+    WorkerDirectoryCache& worker_directory_cache,
+    const ResolvedSourceCapability& source_capability,
+    absl::Time now,
+    absl::Duration worker_directory_staleness_budget,
+    std::string_view local_daemon_id,
+    tensorcast::common::v1::PayloadRefDirection direction,
+    std::string_view operation_id) {
+  auto source_status = validate_resolved_source_capability(source_capability);
+  if (!source_status.ok()) {
+    return source_status;
+  }
+  if (source_capability.body_capability.has_value()) {
+    auto loader_or = source_capability.body_capability->body_handle.make_loader();
+    if (!loader_or.ok()) {
+      return loader_or.status();
+    }
+    return LoaderSourceResolution{
+        .loader = std::move(*loader_or),
+        .source_kind = source_capability.source_kind,
+        .payload_bytes = source_capability.body_capability->descriptor.size_bytes,
+    };
+  }
+  if (source_capability.inline_payload) {
+    return LoaderSourceResolution{
+        .loader = std::make_unique<store::InlineBufferLoader>(store::loading::InlineBufferSource{
+            .data = std::shared_ptr<const void>(
+                source_capability.inline_payload, static_cast<const void*>(source_capability.inline_payload->data())),
+            .size_bytes = source_capability.inline_payload->size(),
+        }),
+        .source_kind = source_capability.source_kind,
+        .payload_bytes = source_capability.inline_payload->size(),
+    };
+  }
+  if (!source_capability.payload_ref.empty()) {
+    auto loader_or = payload_transport_broker.open_payload_ref_loader(
+        worker_directory_cache,
+        now,
+        worker_directory_staleness_budget,
+        local_daemon_id,
+        source_capability.payload_ref,
+        source_capability.selection_identity.artifact_id,
+        direction,
+        operation_id);
+    if (!loader_or.ok()) {
+      return loader_or.status();
+    }
+    return LoaderSourceResolution{
+        .loader = std::move(loader_or->loader),
+        .source_kind = loader_or->remote ? store::loading::MaterializationSource::kP2P
+                                         : store::loading::MaterializationSource::kLocalReplica,
+        .payload_bytes = loader_or->metadata.payload_size,
+    };
+  }
+  return absl::FailedPreconditionError("ResolvedSourceCapability does not provide a loader-backed source");
+}
+
 } // namespace
 
 ByteArtifactController::ByteArtifactController(Dep d, Options options)
@@ -277,20 +341,31 @@ std::optional<PolicyVisibilityRef> ByteArtifactController::resolve_policy_visibi
   };
 }
 
-absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> ByteArtifactController::restore_backing_from_policy_visibility(
-    std::string_view artifact_id,
-    const BodyDescriptor& descriptor,
-    const AuthorityRecord& authority_record,
+absl::StatusOr<ResolvedSourceCapability> ByteArtifactController::restore_backing_from_policy_visibility(
+    ResolvedSourceCapability source_capability,
     const ByteArtifactAuthorityService::Context& context,
     std::string_view operation_id) const {
-  if (d_.persistence_manager == nullptr || !authority_record.policy_visibility_ref.has_value()) {
+  const std::string_view artifact_id = source_capability.selection_identity.artifact_id;
+  if (d_.persistence_manager == nullptr || !source_capability.policy_source_ref.has_value()) {
     return absl::FailedPreconditionError("policy-backed visibility requires persistence proof");
   }
-  if (authority_record.policy_visibility_ref->path_kind != PolicyVisibilityPathKind::kSharedDisk) {
+  if (source_capability.policy_source_ref->path_kind != PolicyVisibilityPathKind::kSharedDisk) {
     return absl::FailedPreconditionError("unsupported policy-backed path kind");
   }
+  const auto& content_identity = source_capability.verified_content_descriptor.content_identity;
+  if (content_identity.semantic_layout_identity.kind != store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId ||
+      content_identity.semantic_layout_identity.value.empty()) {
+    return absl::FailedPreconditionError(
+        "policy-backed visibility requires a named-layout verified content descriptor");
+  }
+  BodyDescriptor expected_descriptor;
+  expected_descriptor.layout_id = content_identity.semantic_layout_identity.value;
+  expected_descriptor.size_bytes = content_identity.logical_size_bytes;
+  expected_descriptor.payload_digest_alg = normalize_body_digest_value(content_identity.digest_alg);
+  expected_descriptor.payload_digest_hex = normalize_body_digest_value(
+      store::runtime::ingestion::content_digest_bytes_to_hex(content_identity.digest_bytes));
   auto policy_source =
-      d_.persistence_manager->resolve_policy_source(artifact_id, authority_record.policy_visibility_ref->control_ref);
+      d_.persistence_manager->resolve_policy_source(artifact_id, source_capability.policy_source_ref->control_ref);
   if (!policy_source.has_value()) {
     (void)d_.body_store.clear_policy_visibility(
         artifact_id,
@@ -308,10 +383,10 @@ absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> ByteArtifactController::res
   auto staged_body_or = body_backing_manager_.stage_body(
       BodyBackingManager::StageRequest{
           .artifact_id = std::string(artifact_id),
-          .invariant = body_descriptor_to_invariant(descriptor),
+          .invariant = body_descriptor_to_invariant(expected_descriptor),
           .loader = std::make_unique<store::DiskLoader>(store::loading::DiskSource{
               .path = policy_source->local_path,
-              .expected_size = descriptor.size_bytes,
+              .expected_size = expected_descriptor.size_bytes,
               .require_descriptor = true,
           }),
           .source_kind = store::loading::MaterializationSource::kDisk,
@@ -334,7 +409,7 @@ absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> ByteArtifactController::res
 
   auto put_result = d_.body_store.put_if_absent(
       artifact_id,
-      body_descriptor_to_invariant(descriptor),
+      body_descriptor_to_invariant(expected_descriptor),
       staged_body_or->descriptor,
       staged_body_or->verified_content_descriptor,
       staged_body_or->verification_record,
@@ -356,7 +431,23 @@ absl::StatusOr<ByteArtifactBodyStore::EntrySnapshot> ByteArtifactController::res
   if (!entry.has_value()) {
     return absl::InternalError("policy-backed restore did not produce a visible backing");
   }
-  return *entry;
+  source_capability.verified_content_descriptor = entry->verified_content_descriptor;
+  source_capability.backing_identity = entry->backing_record.identity;
+  source_capability.source_kind = store::loading::MaterializationSource::kLocalReplica;
+  source_capability.body_capability = ResolvedBodyCapability{
+      .mode = BodyCapabilityResolutionMode::kLocalBodyHandle,
+      .local = true,
+      .body_handle = entry->backing_record.retained_body_handle,
+      .descriptor = entry->descriptor,
+  };
+  source_capability.inline_payload.reset();
+  source_capability.payload_ref.clear();
+  source_capability.policy_source_ref.reset();
+  auto source_status = validate_resolved_source_capability(source_capability);
+  if (!source_status.ok()) {
+    return source_status;
+  }
+  return source_capability;
 }
 
 grpc::Status ByteArtifactController::home_batch_exists(
@@ -444,12 +535,15 @@ grpc::Status ByteArtifactController::home_batch_get(
     if (result.status != v2::BATCH_ITEM_STATUS_OK) {
       continue;
     }
-    BodyHandle body_handle = result.body_handle;
-    if (body_handle.empty() && result.authority_record.visibility_kind == AuthorityVisibilityKind::kPolicyBackedPath) {
+    if (!result.source_capability.has_value()) {
+      *item = make_home_get_item(result.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing source capability");
+      continue;
+    }
+
+    ResolvedSourceCapability source_capability = *result.source_capability;
+    if (source_capability.policy_source_ref.has_value()) {
       auto restored_or = restore_backing_from_policy_visibility(
-          result.artifact_id,
-          result.descriptor,
-          result.authority_record,
+          std::move(source_capability),
           authority_context,
           req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
       if (!restored_or.ok()) {
@@ -463,33 +557,70 @@ grpc::Status ByteArtifactController::home_batch_get(
         }
         continue;
       }
-      body_handle = restored_or->backing_record.retained_body_handle;
-      result.descriptor = restored_or->descriptor;
+      source_capability = std::move(*restored_or);
     }
-    auto payload_or = body_handle.read_all_bytes();
-    if (!payload_or.ok()) {
-      d_.body_store.invalidate_artifact_visibility(result.artifact_id, now, "serve_read_failed");
-      *item = make_home_get_item(result.artifact_id, v2::BATCH_ITEM_STATUS_MISS, "artifact is no longer visible");
-      continue;
-    }
-    auto payload = std::make_shared<const std::string>(std::move(*payload_or));
-    if (payload->size() > options_.routing.inline_payload_threshold_bytes) {
-      auto payload_ref_or = d_.payload_transport_broker.issue_payload_ref(
-          result.artifact_id,
-          payload,
-          result.descriptor,
-          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-          req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""),
-          result.serving_capability.expires_at);
-      if (!payload_ref_or.ok()) {
-        *item = make_home_get_item(
-            result.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, payload_ref_or.status().message());
+
+    if (source_capability.body_capability.has_value()) {
+      const auto& body_source = *source_capability.body_capability;
+      if (body_source.descriptor.size_bytes > options_.routing.inline_payload_threshold_bytes) {
+        std::uint64_t backing_instance_generation = source_capability.serving_capability.backing_instance_generation;
+        if (backing_instance_generation == 0) {
+          backing_instance_generation = body_source.body_handle.binding_generation();
+        }
+        auto payload_ref_or = d_.payload_transport_broker.issue_payload_ref(
+            result.artifact_id,
+            body_source.body_handle,
+            body_source.descriptor,
+            source_capability.backing_identity,
+            backing_instance_generation,
+            tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+            req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""),
+            source_capability.serving_capability.expires_at);
+        if (!payload_ref_or.ok()) {
+          *item = make_home_get_item(
+              result.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, payload_ref_or.status().message());
+          continue;
+        }
+        item->set_payload_ref(*payload_ref_or);
         continue;
       }
-      item->set_payload_ref(*payload_ref_or);
+      auto payload_or = body_source.body_handle.read_all_bytes();
+      if (!payload_or.ok()) {
+        d_.body_store.invalidate_artifact_visibility(result.artifact_id, now, "serve_read_failed");
+        *item = make_home_get_item(result.artifact_id, v2::BATCH_ITEM_STATUS_MISS, "artifact is no longer visible");
+        continue;
+      }
+      item->set_inline_payload(*payload_or);
       continue;
     }
-    item->set_inline_payload(*payload);
+
+    if (source_capability.inline_payload) {
+      if (source_capability.inline_payload->size() > options_.routing.inline_payload_threshold_bytes) {
+        auto payload_ref_or = d_.payload_transport_broker.issue_payload_ref(
+            result.artifact_id,
+            source_capability.inline_payload,
+            tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+            req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""),
+            source_capability.serving_capability.expires_at);
+        if (!payload_ref_or.ok()) {
+          *item = make_home_get_item(
+              result.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, payload_ref_or.status().message());
+          continue;
+        }
+        item->set_payload_ref(*payload_ref_or);
+        continue;
+      }
+      item->set_inline_payload(*source_capability.inline_payload);
+      continue;
+    }
+
+    if (!source_capability.payload_ref.empty()) {
+      item->set_payload_ref(source_capability.payload_ref);
+      continue;
+    }
+
+    *item = make_home_get_item(
+        result.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "resolved source capability is not readable");
   }
   rctx.mark_success();
   return Status::OK;
@@ -544,27 +675,27 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           .size_bytes = payload->size(),
       });
     } else if (!item.payload_ref().empty()) {
-      auto capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
+      auto source_capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
           item.payload_ref(),
           artifact_id,
           now,
           local_daemon_id,
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
           req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
-      if (!capability_or.ok()) {
+      if (!source_capability_or.ok()) {
         deferred_outcomes[index] = make_outcome(
             artifact_id,
-            batch_item_status_from_absl_status(capability_or.status()),
-            std::string(capability_or.status().message()));
+            batch_item_status_from_absl_status(source_capability_or.status()),
+            std::string(source_capability_or.status().message()));
         continue;
       }
-      if (capability_or->capability.mode == BodyCapabilityResolutionMode::kLocalBodyHandle) {
+      if (source_capability_or->body_capability.has_value()) {
         auto reused_or = body_backing_manager_.try_reuse_body(
             BodyBackingManager::ReuseRequest{
                 .artifact_id = artifact_id,
                 .invariant = item.invariant(),
-                .descriptor = capability_or->capability.descriptor,
-                .body_handle = capability_or->capability.body_handle,
+                .descriptor = source_capability_or->body_capability->descriptor,
+                .body_handle = source_capability_or->body_capability->body_handle,
                 .operation_id = req.has_operation_id() ? req.operation_id() : "",
                 .access_class = BodyAccessClass::kHomeDefault,
                 .route_role = BodyRouteRole::kHomeAuthority,
@@ -578,38 +709,16 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
         }
         if (reused_or->has_value()) {
           staged_body = std::move(**reused_or);
-        } else {
-          auto loader_or = capability_or->capability.body_handle.make_loader();
-          if (!loader_or.ok()) {
-            deferred_outcomes[index] = make_outcome(
-                artifact_id,
-                batch_item_status_from_absl_status(loader_or.status()),
-                std::string(loader_or.status().message()));
-            continue;
-          }
-          loader = std::move(*loader_or);
         }
-      } else if (capability_or->capability.local) {
-        if (!capability_or->payload) {
-          deferred_outcomes[index] = make_outcome(
-              artifact_id,
-              v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION,
-              "payload_ref resolved locally without payload bytes");
-          continue;
-        }
-        loader = std::make_unique<store::InlineBufferLoader>(store::loading::InlineBufferSource{
-            .data = std::shared_ptr<const void>(
-                capability_or->payload, static_cast<const void*>(capability_or->payload->data())),
-            .size_bytes = capability_or->payload->size(),
-        });
-      } else {
-        auto loader_or = d_.payload_transport_broker.open_payload_ref_loader(
+      }
+      if (!staged_body.has_value()) {
+        auto loader_or = open_loader_from_resolved_source_capability(
+            d_.payload_transport_broker,
             d_.worker_directory_cache,
+            *source_capability_or,
             now,
             absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
             local_daemon_id,
-            item.payload_ref(),
-            artifact_id,
             tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
             req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
         if (!loader_or.ok()) {
@@ -619,8 +728,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
               std::string(loader_or.status().message()));
           continue;
         }
-        source_kind = loader_or->remote ? store::loading::MaterializationSource::kP2P
-                                        : store::loading::MaterializationSource::kLocalReplica;
+        source_kind = loader_or->source_kind;
         loader = std::move(loader_or->loader);
       }
     } else {
@@ -1391,28 +1499,28 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           .size_bytes = pending->inline_payload->size(),
       });
     } else if (!pending->payload_ref.empty()) {
-      auto capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
+      auto source_capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
           pending->payload_ref,
           pending->artifact_id,
           now,
           local_daemon_id,
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
           operation_id);
-      if (!capability_or.ok()) {
+      if (!source_capability_or.ok()) {
         *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
             pending->artifact_id,
-            batch_item_status_from_absl_status(capability_or.status()),
-            std::string(capability_or.status().message()));
+            batch_item_status_from_absl_status(source_capability_or.status()),
+            std::string(source_capability_or.status().message()));
         return;
       }
       const bool allow_reuse = access_class == BodyAccessClass::kHomeDefault;
-      if (allow_reuse && capability_or->capability.mode == BodyCapabilityResolutionMode::kLocalBodyHandle) {
+      if (allow_reuse && source_capability_or->body_capability.has_value()) {
         auto reused_or = body_backing_manager_.try_reuse_body(
             BodyBackingManager::ReuseRequest{
                 .artifact_id = pending->artifact_id,
                 .invariant = pending->invariant,
-                .descriptor = capability_or->capability.descriptor,
-                .body_handle = capability_or->capability.body_handle,
+                .descriptor = source_capability_or->body_capability->descriptor,
+                .body_handle = source_capability_or->body_capability->body_handle,
                 .operation_id = operation_id,
                 .access_class = access_class,
                 .route_role = access_class == BodyAccessClass::kTransientForward ? BodyRouteRole::kTransientForwarder
@@ -1430,50 +1538,24 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
         }
       }
       if (!staged_body.has_value()) {
-        if (capability_or->capability.mode == BodyCapabilityResolutionMode::kLocalBodyHandle) {
-          auto loader_or = capability_or->capability.body_handle.make_loader();
-          if (!loader_or.ok()) {
-            *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
-                pending->artifact_id,
-                batch_item_status_from_absl_status(loader_or.status()),
-                std::string(loader_or.status().message()));
-            return;
-          }
-          loader = std::move(*loader_or);
-        } else if (capability_or->capability.local) {
-          if (!capability_or->payload) {
-            *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
-                pending->artifact_id,
-                v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION,
-                "payload_ref resolved locally without payload bytes");
-            return;
-          }
-          loader = std::make_unique<store::InlineBufferLoader>(store::loading::InlineBufferSource{
-              .data = std::shared_ptr<const void>(
-                  capability_or->payload, static_cast<const void*>(capability_or->payload->data())),
-              .size_bytes = capability_or->payload->size(),
-          });
-        } else {
-          auto loader_or = d_.payload_transport_broker.open_payload_ref_loader(
-              d_.worker_directory_cache,
-              now,
-              absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
-              local_daemon_id,
-              pending->payload_ref,
+        auto loader_or = open_loader_from_resolved_source_capability(
+            d_.payload_transport_broker,
+            d_.worker_directory_cache,
+            *source_capability_or,
+            now,
+            absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
+            local_daemon_id,
+            tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+            operation_id);
+        if (!loader_or.ok()) {
+          *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
               pending->artifact_id,
-              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
-              operation_id);
-          if (!loader_or.ok()) {
-            *resp.mutable_outcomes(pending->outcome_index) = make_outcome(
-                pending->artifact_id,
-                batch_item_status_from_absl_status(loader_or.status()),
-                std::string(loader_or.status().message()));
-            return;
-          }
-          source_kind = loader_or->remote ? store::loading::MaterializationSource::kP2P
-                                          : store::loading::MaterializationSource::kLocalReplica;
-          loader = std::move(loader_or->loader);
+              batch_item_status_from_absl_status(loader_or.status()),
+              std::string(loader_or.status().message()));
+          return;
         }
+        source_kind = loader_or->source_kind;
+        loader = std::move(loader_or->loader);
       }
     } else if (pending->needs_source_layout) {
       if (!source_layout.has_value()) {

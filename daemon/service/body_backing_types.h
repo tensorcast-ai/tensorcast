@@ -3,13 +3,16 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
+#include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/time/time.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/selection_identity.h"
 #include "core/store/runtime/ingestion/artifact_truth.h"
 #include "daemon/service/byte_artifact_body_handle.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
@@ -184,6 +187,18 @@ struct ServingCapability {
   std::optional<PolicyVisibilityRef> policy_visibility_ref;
 };
 
+struct ResolvedSourceCapability {
+  tensorcast::common::SelectionIdentity selection_identity;
+  store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+  ServingCapability serving_capability;
+  std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
+  store::loading::MaterializationSource source_kind{store::loading::MaterializationSource::kUnspecified};
+  std::optional<ResolvedBodyCapability> body_capability;
+  std::shared_ptr<const std::string> inline_payload;
+  std::string payload_ref;
+  std::optional<PolicyVisibilityRef> policy_source_ref;
+};
+
 struct AuthorityRecord {
   std::string artifact_id;
   std::uint64_t shard_id{0};
@@ -273,6 +288,67 @@ inline store::runtime::ingestion::BackingIdentity body_descriptor_to_backing_ide
       .physical_artifact_id = descriptor.physical_artifact_id,
       .replica_key = body_handle.replica_handle().key(),
   };
+}
+
+inline store::runtime::ingestion::VerifiedContentDescriptor body_descriptor_to_verified_content_descriptor_with_layout(
+    std::string_view layout_id,
+    std::uint64_t size_bytes,
+    std::string_view digest_alg,
+    std::string_view digest_hex) {
+  store::runtime::ingestion::VerifiedContentDescriptor verified;
+  if (!layout_id.empty()) {
+    verified.content_identity.semantic_layout_identity.kind =
+        store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId;
+    verified.content_identity.semantic_layout_identity.value = std::string(layout_id);
+  }
+  verified.content_identity.logical_size_bytes = size_bytes;
+  verified.content_identity.digest_alg = normalize_body_digest_value(digest_alg);
+  std::string digest_bytes;
+  if (!absl::HexStringToBytes(normalize_body_digest_value(digest_hex), &digest_bytes)) {
+    digest_bytes = std::string(digest_hex);
+  }
+  verified.content_identity.digest_bytes = std::move(digest_bytes);
+  return verified;
+}
+
+inline std::size_t resolved_source_capability_form_count(const ResolvedSourceCapability& capability) {
+  std::size_t forms = 0;
+  forms += capability.body_capability.has_value() ? 1 : 0;
+  forms += capability.inline_payload ? 1 : 0;
+  forms += capability.payload_ref.empty() ? 0 : 1;
+  forms += capability.policy_source_ref.has_value() ? 1 : 0;
+  return forms;
+}
+
+inline absl::Status validate_resolved_source_capability(const ResolvedSourceCapability& capability) {
+  if (capability.selection_identity.artifact_id.empty()) {
+    return absl::InvalidArgumentError("ResolvedSourceCapability requires selection_identity.artifact_id");
+  }
+  if (resolved_source_capability_form_count(capability) != 1) {
+    return absl::InvalidArgumentError("ResolvedSourceCapability requires exactly one concrete source form");
+  }
+  if (capability.serving_capability.capability_id.empty()) {
+    return absl::InvalidArgumentError("ResolvedSourceCapability requires serving_capability");
+  }
+  if (capability.body_capability.has_value()) {
+    if (!capability.body_capability->local || capability.body_capability->body_handle.empty()) {
+      return absl::InvalidArgumentError("ResolvedSourceCapability local body source requires a local body_handle");
+    }
+    if (capability.source_kind == store::loading::MaterializationSource::kUnspecified) {
+      return absl::InvalidArgumentError("ResolvedSourceCapability local body source requires source_kind");
+    }
+  }
+  if (capability.inline_payload && capability.source_kind == store::loading::MaterializationSource::kUnspecified) {
+    return absl::InvalidArgumentError("ResolvedSourceCapability inline payload source requires source_kind");
+  }
+  if (!capability.payload_ref.empty() &&
+      capability.source_kind == store::loading::MaterializationSource::kUnspecified) {
+    return absl::InvalidArgumentError("ResolvedSourceCapability payload_ref source requires source_kind");
+  }
+  if (capability.policy_source_ref.has_value() && capability.policy_source_ref->path_id.empty()) {
+    return absl::InvalidArgumentError("ResolvedSourceCapability policy-backed source requires policy_source_ref");
+  }
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::daemon

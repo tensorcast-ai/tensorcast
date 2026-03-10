@@ -49,6 +49,14 @@ absl::Status validate_artifact_for_context(
   return absl::OkStatus();
 }
 
+tensorcast::common::SelectionIdentity make_byte_artifact_selection_identity(std::string_view artifact_id) {
+  return tensorcast::common::SelectionIdentity{
+      .artifact_id = std::string(artifact_id),
+      .logical_layout_hash = tensorcast::common::compute_byte_artifact_logical_layout_hash_bytes(),
+      .selection_hash = tensorcast::common::compute_byte_artifact_selection_hash_bytes(),
+  };
+}
+
 void retire_put_item_backing(const ByteArtifactAuthorityService::PutItem& item) {
   (void)item.body_handle.retire();
 }
@@ -166,14 +174,43 @@ std::vector<ByteArtifactAuthorityService::GetResult> ByteArtifactAuthorityServic
       continue;
     }
 
+    ResolvedSourceCapability source_capability;
+    source_capability.selection_identity = make_byte_artifact_selection_identity(artifact_id);
+    source_capability.verified_content_descriptor = authority->verified_content_descriptor;
+    source_capability.serving_capability = *capability_or;
+    if (entry.has_value()) {
+      source_capability.backing_identity = entry->backing_record.identity;
+      source_capability.source_kind = store::loading::MaterializationSource::kLocalReplica;
+      source_capability.body_capability = ResolvedBodyCapability{
+          .mode = BodyCapabilityResolutionMode::kLocalBodyHandle,
+          .local = true,
+          .body_handle = entry->backing_record.retained_body_handle,
+          .descriptor = entry->descriptor,
+      };
+    } else {
+      source_capability.backing_identity = authority->authority_record.retained_backing_identity;
+      source_capability.source_kind =
+          authority->authority_record.policy_visibility_ref->path_kind == PolicyVisibilityPathKind::kSharedDisk
+          ? store::loading::MaterializationSource::kDisk
+          : store::loading::MaterializationSource::kUnspecified;
+      source_capability.policy_source_ref = authority->authority_record.policy_visibility_ref;
+    }
+    auto source_status = validate_resolved_source_capability(source_capability);
+    if (!source_status.ok()) {
+      results.push_back(
+          GetResult{
+              .artifact_id = artifact_id,
+              .status = v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+              .message = std::string(source_status.message()),
+          });
+      continue;
+    }
+
     results.push_back(
         GetResult{
             .artifact_id = artifact_id,
             .status = v2::BATCH_ITEM_STATUS_OK,
-            .descriptor = authority->descriptor,
-            .body_handle = entry.has_value() ? entry->backing_record.retained_body_handle : BodyHandle(),
-            .authority_record = authority->authority_record,
-            .serving_capability = std::move(*capability_or),
+            .source_capability = std::move(source_capability),
         });
   }
   return results;

@@ -581,10 +581,11 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
       tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
       "op-reuse-body");
   REQUIRE(capability_or.ok());
-  REQUIRE(capability_or->capability.local);
-  REQUIRE(capability_or->capability.mode == tensorcast::daemon::BodyCapabilityResolutionMode::kLocalBodyHandle);
-  REQUIRE_FALSE(capability_or->capability.body_handle.empty());
-  REQUIRE(capability_or->capability.descriptor.payload_digest_hex == entry->descriptor.payload_digest_hex);
+  REQUIRE(capability_or->body_capability.has_value());
+  REQUIRE(capability_or->body_capability->local);
+  REQUIRE(capability_or->body_capability->mode == tensorcast::daemon::BodyCapabilityResolutionMode::kLocalBodyHandle);
+  REQUIRE_FALSE(capability_or->body_capability->body_handle.empty());
+  REQUIRE(capability_or->body_capability->descriptor.payload_digest_hex == entry->descriptor.payload_digest_hex);
   REQUIRE(capability_or->serving_capability.capability_id == *payload_ref_or);
   REQUIRE(capability_or->serving_capability.local);
   REQUIRE(capability_or->serving_capability.mode == tensorcast::daemon::BodyCapabilityResolutionMode::kLocalBodyHandle);
@@ -595,14 +596,15 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
   REQUIRE(capability_or->serving_capability.backing_identity.has_value());
   REQUIRE(capability_or->serving_capability.backing_identity == entry->authority_record.retained_backing_identity);
   REQUIRE(capability_or->serving_capability.backing_instance_generation == entry->backing_record.instance_generation);
+  REQUIRE(capability_or->backing_identity == entry->authority_record.retained_backing_identity);
 
   tensorcast::daemon::BodyBackingManager manager(*engine);
   auto reused_or = manager.try_reuse_body(
       tensorcast::daemon::BodyBackingManager::ReuseRequest{
           .artifact_id = artifact_id,
           .invariant = put_req.items(0).invariant(),
-          .descriptor = capability_or->capability.descriptor,
-          .body_handle = capability_or->capability.body_handle,
+          .descriptor = capability_or->body_capability->descriptor,
+          .body_handle = capability_or->body_capability->body_handle,
           .operation_id = "op-reuse-body",
           .access_class = tensorcast::daemon::BodyAccessClass::kHomeDefault,
       });
@@ -678,6 +680,72 @@ TEST_CASE(
   REQUIRE(
       capability_or->serving_capability.backing_instance_generation ==
       entry->backing_record.retained_body_handle.binding_generation());
+  REQUIRE(capability_or->body_capability.has_value());
+  REQUIRE(capability_or->body_capability->body_handle.binding_generation() != 0);
+}
+
+TEST_CASE(
+    "GET payload_ref issued from a live body resolves to copied-payload source capability",
+    "[daemon][batch][payload_ref][get_snapshot]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Z2V0LXNuYXBzaG90~layout_v1~b64u.azg";
+  const std::string payload = "payload-ref-get-snapshot";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-get-snapshot");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  const auto entry = harness->kernel().byte_artifact_body_store().get(
+      artifact_id,
+      shard_id,
+      /*lease_generation=*/1,
+      /*routing_epoch=*/1,
+      absl::Now());
+  REQUIRE(entry.has_value());
+
+  auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id,
+      entry->backing_record.retained_body_handle,
+      entry->descriptor,
+      entry->authority_record.retained_backing_identity,
+      entry->backing_record.instance_generation,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-get-snapshot");
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      kDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-get-snapshot");
+  REQUIRE(capability_or.ok());
+  REQUIRE_FALSE(capability_or->body_capability.has_value());
+  REQUIRE(capability_or->inline_payload);
+  REQUIRE(*capability_or->inline_payload == payload);
+  REQUIRE(
+      capability_or->serving_capability.subject_kind ==
+      tensorcast::daemon::ServingCapabilitySubjectKind::kCopiedPayload);
 }
 
 TEST_CASE(
