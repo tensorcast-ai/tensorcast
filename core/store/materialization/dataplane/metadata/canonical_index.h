@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -42,5 +42,12 @@ absl::StatusOr<std::string> build_canonical_index_json(
     const std::unordered_map<std::string, uint64_t>& offsets,
     const std::unordered_map<std::string, uint64_t>& sizes,
     const std::unordered_map<std::string, CanonicalTensorMeta>& metas);
+
+// Build a coalesced canonical index JSON from a source index JSON string.
+// Offsets are re-assigned by sorted tensor names with fixed alignment and do
+// NOT depend on the source offsets.
+absl::StatusOr<std::string> build_coalesced_canonical_index_from_source_index_json(
+    std::string_view source_index_json,
+    uint64_t align_bytes = 8);
 
 } // namespace tensorcast::store::loader

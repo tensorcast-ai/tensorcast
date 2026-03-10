@@ -10,6 +10,7 @@ from .placement_service import PlacementService
 from .recovery_service import RecoveryService
 from .transport_service import TransportService
 from .view_state_service import ViewStateService
+from .worker_control_reducer import WorkerControlReducer
 from .worker_service import WorkerService
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "ViewStateService",
     "MemoryTierService",
     "PlacementService",
+    "WorkerControlReducer",
 ]

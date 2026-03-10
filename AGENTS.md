@@ -8,11 +8,62 @@ TensorCast is a high-performance distributed artifact storage and loading system
 
 ## Command Execution
 
-- When running any Python script or module, you MUST use `uv run <script>`.
-- Never invoke `python`, `python3`, or `python -m` directly; this applies to ad-hoc scripts, tooling helpers, tests, `setup.py`, and all other Python entry points.
-- You must use `uv run pytest tests/python/xxxx` to run python tests
+- You must use `pytest tests/python/xxxx` to run python tests
 - You must use `bazel test //core/component:xxx_test` to run cxx tests
 - These policies keep virtualenv isolation consistent; violating them can break the build and introduce environment skew.
+
+## Python SDK Daemon Startup (Quick Map)
+
+- Store API calls (e.g., `tc.from_disk`) go through `tensorcast.api.store.runtime.get_context()`; if no runtime exists it tries `startup.init(mode="connect")` and falls back to `startup.init(mode="create")`.
+- `startup.init(mode="connect")` resolves the daemon address from an explicit parameter or the current local session (`runtime.status()` / service manager); it errors if no session is found or the daemon is unreachable.
+- `startup.init(mode="create")` launches a local daemon via `runtime.start(...)` using a daemon config path selected in order: explicit `daemon_config_path` → `$TENSORCAST_DAEMON_CONFIG` → `examples/config/store_daemon_config.yaml` (repo or packaged wheel).
+- If the chosen config enables HA or disk operations, the daemon must have `daemon_id` set (for Global Store registration) and `server.storage_path` set (for disk materialization). Missing values cause startup to exit early with clear errors.
+- **Hard rule (required)**: Python SDK code MUST NOT connect to Global Store directly (no direct gRPC channel/stub, no Global Store endpoint usage). SDK key-mapping, artifact metadata, and control-path operations MUST go through the Store Daemon APIs only.
+
+### Local GS/Daemon Startup (Blocking, Repro Baseline)
+
+Use the following startup order for local debugging/repro:
+
+```bash
+# Terminal 1: start Global Store (blocking)
+source .venv/bin/activate
+tensorcast-cli global start --blocking
+
+# Terminal 2: start Store Daemon (blocking), connect to local GS
+source .venv/bin/activate
+LD_LIBRARY_PATH=/data/cuda/compat tensorcast-cli daemon start --blocking \
+  --global-store-mode connect \
+  --global-store-address 127.0.0.1:50051
+```
+
+Optional cleanup commands:
+
+```bash
+source .venv/bin/activate
+tensorcast-cli daemon stop
+tensorcast-cli global stop
+```
+
+### Multi-host Daemon Orchestration (Required)
+
+For cross-host tests (including WeightPublisher and fanout benchmarks), use the
+following daemon orchestration rules:
+
+- Assign a unique local daemon listen/connect port per node (or per role process)
+  and keep it stable for the whole case. Do not reuse a single default port
+  across all roles.
+- Manage daemon lifecycle explicitly in the runner:
+  - Pre-clean stale daemon sessions/processes before starting a case.
+  - Start daemon with an explicit session id and verify ready status before
+    launching role workloads.
+  - Stop the same explicit session during teardown (including failure paths).
+- Run Global Store on the local control host by default for cross-host cases.
+  Do not colocate GS with role workers unless the case explicitly requires it.
+  This avoids worker-scoped daemon lifecycle cleanup from stopping GS.
+- Do not rely on implicit SDK auto-create startup in multi-host tests; role
+  scripts should connect to a known local daemon endpoint.
+- Keep SDK connectivity local-only on each node: app processes connect to their
+  own node-local daemon address, never directly to a remote daemon or GS.
 
 ## Architecture Overview
 
@@ -87,11 +138,11 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 ### Doc sync rule (required for agents)
 
-- When you change any module code, you must also update its docs:
-  - Update the module’s README.md and any linked docs under docs/ that describe behavior you changed.
-  - Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
-  - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
-  - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
+- Update module docs **only when** a change affects external behavior, configuration, or user/operator workflow.
+- Skip doc updates for internal-only refactors, guardrails, or error-path tweaks that do not change the public contract.
+- If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
+- Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
+- In PRs, include doc updates in the same change set so readers can rely on documentation being current.
 
 - When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
 - `docs/designs/` and `docs/plans/` filenames begin with a zero-padded sequence number: `0001-<slug>.md`, `0002-<slug>.md`, etc.
@@ -117,7 +168,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 #  BUILD_EXTENSION means cxx files in tensorcast/csrc and the output is tensorcast._C
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.
-BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+BUILD_CORE=1 BUILD_EXTENSION=1 python -vvv setup.py build_ext
 
 # Build and run tests
 # Tests are now colocated with their implementation
@@ -155,10 +206,10 @@ Backend selection is **runtime**, via `TENSORCAST_CUDA_BACKEND`:
 
 ```bash
 # Build Python extension (single binary supports real/fake at runtime)
-BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py build_ext
 
 # Run Python tests with fake CUDA backend
-TENSORCAST_CUDA_BACKEND=fake uv run pytest tests/python/...
+TENSORCAST_CUDA_BACKEND=fake pytest tests/python/...
 
 # Run C++ tests with fake CUDA backend
 # Select fake explicitly via test env:
@@ -174,18 +225,18 @@ bazel test //daemon:grpc_service_impl_registration_test
 #### C++ Code Formatting
 ```bash
 # It's not necessary to add other arguments to the command, just run it directly
-uv run clang-tidy ./core/xxx.cc
+clang-tidy ./core/xxx.cc
 ```
 
 #### Python Code Quality
 ```bash
 # Run Python linting (After you write code, run this command to check if your code is correct)
-uv run ruff check .
-uv run ruff format .
+ruff check .
+ruff format .
 
 # Type checking
-uv run pyright ./tensorcast
-uv run mypy ./tensorcast
+pyright ./tensorcast
+mypy ./tensorcast
 ```
 
 ### Protocol Buffer Code Generation
@@ -366,11 +417,11 @@ if (fd < 0) {
 
 ### Python Guidelines
 - **Python Environment**: MUST use `source .venv/bin/activate` to activate the virtual environment before running any python scripts (including pytest tests)
-- **Package Management**: `uv` (MUST)
-- **Testing**: `pytest` in `tests/python/`; run with `uv run pytest tests/python/...`
+- **Package Management**: `uv` (MUST) NOT use `pip`. Use `uv pip install <package>` to install packages.
+- **Testing**: `pytest` in `tests/python/`; run with `pytest tests/python/...`
 - **Type Checking & Linting**: `mypy` and `ruff`
-  - `uv run mypy ./tensorcast`
-  - `uv run ruff check .` and `uv run ruff format .`
+  - `mypy ./tensorcast`
+  - `ruff check .` and `ruff format .`
 - **Data Modeling**: Prefer Pydantic models over raw dictionaries for validation
 
 #### Python Naming Conventions

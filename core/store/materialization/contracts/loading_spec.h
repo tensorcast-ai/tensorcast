@@ -36,6 +36,9 @@ enum class SourcePreference : uint8_t { kUnspecified, kAuto, kPreferP2P, kPrefer
 
 enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalReplica };
 
+enum class ExportPolicy : uint8_t { kUnspecified, kNever, kAuto, kForce };
+enum class SourceMutationPolicy : uint8_t { kUnspecified, kReadWrite, kReadOnly };
+
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
 };
@@ -86,18 +89,39 @@ struct DiskMetadata {
   bool descriptor_present{false};
   std::optional<std::string> schema_version;
   std::optional<std::string> canonical_index_json;
+  std::optional<std::string> source_index_json;
   std::optional<std::string> index_multihash;
   std::optional<std::string> data_multihash;
   std::optional<uint64_t> logical_total_size;
+  std::optional<uint64_t> source_total_size_bytes;
   std::optional<bool> is_safetensors;
+};
+
+struct TransportSchedulingGroupHint {
+  std::string group_id;
+  std::string group_kind;
+  uint32_t total_parts{0};
+  std::string part_id;
+  uint32_t priority{0};
+  uint64_t epoch{0};
 };
 
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
+  // Request-level budget propagated from upper layers (e.g., RPC deadline).
+  // 0 means "unspecified".
+  std::chrono::milliseconds request_budget{0};
+  // Upper bound for each Global Store transport wait call. 0 means default.
+  std::chrono::milliseconds transport_wait_timeout{0};
+  // Optional requester identity used by Global Store transport scheduler.
+  std::string transport_requester_worker_id;
+  // Optional request idempotency key for transport scheduling.
+  std::string transport_request_id;
+  // Optional scheduler group hint for fairness/completion-aware dispatch.
+  std::optional<TransportSchedulingGroupHint> transport_scheduling_group;
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
-  std::string disk_path;
   bool prefer_pageable_cpu{false};
   std::optional<DiskMetadata> disk_metadata;
 
@@ -106,6 +130,8 @@ struct MaterializeHints {
   SourcePreference source_preference{SourcePreference::kAuto};
   bool allow_p2p{true};
   bool allow_disk{true};
+  ExportPolicy export_policy{ExportPolicy::kNever};
+  SourceMutationPolicy source_mutation_policy{SourceMutationPolicy::kReadWrite};
 
   std::optional<VariantIdentity> variant;
 };

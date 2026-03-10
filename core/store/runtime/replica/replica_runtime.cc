@@ -65,6 +65,67 @@ uint64_t compute_bytes_for_chunks(
   return total;
 }
 
+struct ResolvedUmaReplica {
+  loading::ReplicaKey registry_key;
+  loading::ReplicaKey uma_key;
+  std::shared_ptr<replica::Replica> replica;
+};
+
+std::optional<loading::ReplicaKey> resolve_uma_key_for_replica(
+    const loading::ReplicaKey& requested_key,
+    const std::shared_ptr<replica::Replica>& replica_instance) {
+  auto uma = replica_instance->get_memory_manager().memory_authority();
+  if (!uma) {
+    return std::nullopt;
+  }
+  const loading::ReplicaKey normalized_requested = normalize_replica_key(requested_key);
+  if (uma->has_allocation(normalized_requested)) {
+    return normalized_requested;
+  }
+  const loading::ReplicaKey physical_key = normalize_replica_key(replica_instance->replica_key());
+  if (uma->has_allocation(physical_key)) {
+    return physical_key;
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<ResolvedUmaReplica> resolve_replica_and_uma_key(
+    const components::ReplicaRegistry& registry,
+    const loading::ReplicaKey& requested_key) {
+  const loading::ReplicaKey normalized_requested = normalize_replica_key(requested_key);
+  auto replica_or = registry.find(normalized_requested);
+  if (replica_or.ok()) {
+    auto uma_key = resolve_uma_key_for_replica(normalized_requested, *replica_or);
+    if (!uma_key.has_value()) {
+      return absl::NotFoundError("Replica not found in unified memory");
+    }
+    return ResolvedUmaReplica{
+        .registry_key = normalized_requested,
+        .uma_key = *uma_key,
+        .replica = *replica_or,
+    };
+  }
+
+  const auto candidates = registry.find_by_device(normalize_device_key(normalized_requested.device));
+  for (const auto& candidate_key : candidates) {
+    auto candidate_or = registry.find(candidate_key);
+    if (!candidate_or.ok()) {
+      continue;
+    }
+    auto uma = candidate_or.value()->get_memory_manager().memory_authority();
+    if (uma == nullptr || !uma->has_allocation(normalized_requested)) {
+      continue;
+    }
+    return ResolvedUmaReplica{
+        .registry_key = candidate_key,
+        .uma_key = normalized_requested,
+        .replica = *candidate_or,
+    };
+  }
+
+  return absl::NotFoundError("Replica not found");
+}
+
 } // namespace
 
 ReplicaRuntime::ReplicaRuntime(gsl::not_null<RuntimeContext*> context)
@@ -183,7 +244,7 @@ std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
     }
 
     const auto publish_state = get_replica_publish_state(key);
-    if (publish_state == ReplicaPublishState::kLocalOnly || publish_state == ReplicaPublishState::kRetiring) {
+    if (publish_state != ReplicaPublishState::kPublishPending && publish_state != ReplicaPublishState::kPublished) {
       continue;
     }
 
@@ -191,20 +252,14 @@ std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
     entry.key = key;
     entry.size_bytes = get_replica_size_or_zero(key);
     entry.memory_location = location;
-    std::optional<ExportRegistration> comm_info;
-    if (communication_manager()->is_enabled()) {
-      comm_info = replica->get_memory_manager().get_comm_registration_info(location);
-    }
-    const bool comm_ready = comm_info.has_value() && !comm_info->remote_memory_keys.empty() &&
-        comm_info->remote_memory_keys.size() == comm_info->buffer_sizes.size();
-    entry.is_available = communication_manager()->is_enabled() && state == replica::MemoryState::LOADED && comm_ready;
-    if (comm_ready) {
-      entry.remote_memory_keys = comm_info->remote_memory_keys;
-      entry.buffer_sizes.reserve(comm_info->buffer_sizes.size());
-      for (const auto size : comm_info->buffer_sizes) {
-        entry.buffer_sizes.push_back(static_cast<uint64_t>(size));
-      }
-    }
+    const auto transport_state = get_transport_state(key);
+    entry.export_state = transport_state.export_state;
+    entry.export_generation = transport_state.export_generation;
+    entry.remote_memory_keys = transport_state.remote_memory_keys;
+    entry.buffer_sizes = transport_state.buffer_sizes;
+    entry.verification_json = transport_state.verification_json;
+    const bool comm_enabled = communication_manager()->is_enabled();
+    entry.is_available = comm_enabled && state == replica::MemoryState::LOADED;
     entry.publish_state = publish_state;
     result.push_back(std::move(entry));
   }
@@ -355,6 +410,19 @@ absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& ke
       ? common::memory::MemoryLocation::CPU
       : common::memory::MemoryLocation::GPU;
 
+  absl::Status unexport_status = disable_remote_access_for_replica(normalized_key, replica, loc);
+  if (!unexport_status.ok()) {
+    return absl::Status(
+        unexport_status.code(),
+        std::format(
+            "ReplicaRuntime::unload_replica: disable_remote_memory_access failed for artifact={} device={} "
+            "location={} status={}",
+            normalized_key.artifact_id,
+            normalized_key.device.ordinal,
+            common::memory::location_to_string(loc),
+            unexport_status.ToString()));
+  }
+
   replica::MemoryState before_state = replica->get_memory_state(loc);
 
   if (before_state <= replica::MemoryState::UNALLOCATED) {
@@ -434,6 +502,47 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
   return -1;
 }
 
+absl::Status ReplicaRuntime::retire_replica_status(const loading::ReplicaKey& key) {
+  const auto normalized_key = normalize_replica_key(key);
+  auto removed = registry().erase(normalized_key);
+  if (!removed.has_value()) {
+    return absl::NotFoundError(
+        std::format(
+            "ReplicaRuntime::retire_replica: artifact={} device={} not found in registry",
+            normalized_key.artifact_id,
+            normalized_key.device.ordinal));
+  }
+
+  auto [removed_key, replica] = std::move(*removed);
+  const loading::ReplicaKey canonical_key = normalize_replica_key(removed_key);
+  size_t replica_size = 0;
+  if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
+    replica_size = *size_or;
+  }
+  bool released_any = false;
+  std::vector<absl::Status> release_errors;
+  teardown_replica_memory(
+      canonical_key,
+      replica,
+      /*release_cpu=*/true,
+      /*release_gpu=*/true,
+      &released_any,
+      &release_errors);
+  if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
+    stable_cache->on_replica_evicted(canonical_key, replica, "deregister");
+  }
+  if (released_any) {
+    publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
+  }
+  clear_replica_runtime_state(canonical_key);
+  metrics().update_all_metrics(*pinned_pool(), registry(), device_manager());
+
+  if (!release_errors.empty()) {
+    return release_errors.front();
+  }
+  return absl::OkStatus();
+}
+
 replica::MemoryState ReplicaRuntime::get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const {
   auto replica_or = registry().find(normalize_replica_key(key));
   if (!replica_or.ok()) {
@@ -485,6 +594,47 @@ ReplicaPublishState ReplicaRuntime::get_replica_publish_state(const loading::Rep
   return it->second;
 }
 
+ReplicaTransportState ReplicaRuntime::get_transport_state(const loading::ReplicaKey& key) const {
+  absl::MutexLock lock(&transport_state_mu_);
+  auto it = transport_states_.find(normalize_replica_key(key));
+  if (it == transport_states_.end()) {
+    return ReplicaTransportState{};
+  }
+  return it->second;
+}
+
+void ReplicaRuntime::update_transport_state(const loading::ReplicaKey& key, const ReplicaTransportState& state) {
+  absl::MutexLock lock(&transport_state_mu_);
+  transport_states_[normalize_replica_key(key)] = state;
+}
+
+void ReplicaRuntime::clear_transport_state(const loading::ReplicaKey& key) {
+  absl::MutexLock lock(&transport_state_mu_);
+  transport_states_.erase(normalize_replica_key(key));
+}
+
+void ReplicaRuntime::set_replica_global_id(const loading::ReplicaKey& key, std::string replica_id) {
+  if (replica_id.empty()) {
+    return;
+  }
+  absl::MutexLock lock(&replica_id_mu_);
+  replica_ids_[normalize_replica_key(key)] = std::move(replica_id);
+}
+
+std::optional<std::string> ReplicaRuntime::get_replica_global_id(const loading::ReplicaKey& key) const {
+  absl::MutexLock lock(&replica_id_mu_);
+  auto it = replica_ids_.find(normalize_replica_key(key));
+  if (it == replica_ids_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+void ReplicaRuntime::clear_replica_global_id(const loading::ReplicaKey& key) {
+  absl::MutexLock lock(&replica_id_mu_);
+  replica_ids_.erase(normalize_replica_key(key));
+}
+
 absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location) const {
@@ -528,31 +678,29 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> ReplicaRunti
     common::memory::MemoryLocation location,
     absl::Span<const uint32_t> chunks,
     bool on) const {
-  const auto normalized_key = normalize_replica_key(key);
-  auto replica_or = registry().find(normalized_key);
-  if (!replica_or.ok()) {
-    return absl::NotFoundError("Replica not found");
+  auto resolved_or = resolve_replica_and_uma_key(registry(), key);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
   }
-  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  auto uma = resolved_or->replica->get_memory_manager().memory_authority();
   if (!uma) {
     return absl::FailedPreconditionError("UMA is unavailable for replica");
   }
-  return uma->set_exported(normalized_key, location, chunks, on);
+  return uma->set_exported(resolved_or->uma_key, location, chunks, on);
 }
 
 absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acquire_replica_stable_lease(
     const loading::ReplicaKey& key,
     absl::Span<const uint32_t> chunks) const {
-  const auto normalized_key = normalize_replica_key(key);
-  auto replica_or = registry().find(normalized_key);
-  if (!replica_or.ok()) {
-    return absl::NotFoundError("Replica not found");
+  auto resolved_or = resolve_replica_and_uma_key(registry(), key);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
   }
-  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  auto uma = resolved_or->replica->get_memory_manager().memory_authority();
   if (!uma) {
     return absl::FailedPreconditionError("UMA is unavailable for replica");
   }
-  auto lease_or = uma->acquire_stable_lease(normalized_key, chunks);
+  auto lease_or = uma->acquire_stable_lease(resolved_or->uma_key, chunks);
   if (lease_or.ok() || !absl::IsResourceExhausted(lease_or.status())) {
     return lease_or;
   }
@@ -560,7 +708,7 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acq
   if (!stable_cache) {
     return lease_or;
   }
-  auto layout_or = uma->get_layout(normalized_key);
+  auto layout_or = uma->get_layout(resolved_or->uma_key);
   if (!layout_or.ok()) {
     return lease_or;
   }
@@ -568,31 +716,27 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acq
   if (required_bytes == 0) {
     return lease_or;
   }
-  const absl::Status evict_status = stable_cache->preempt_for_export(required_bytes, normalized_key);
+  const absl::Status evict_status = stable_cache->preempt_for_export(required_bytes, resolved_or->registry_key);
   if (!evict_status.ok()) {
-    LOG(WARNING) << "stable_cache.preempt_for_export failed: key=" << normalized_key << " bytes=" << required_bytes
-                 << " status=" << evict_status;
+    LOG(WARNING) << "stable_cache.preempt_for_export failed: key=" << resolved_or->registry_key
+                 << " bytes=" << required_bytes << " status=" << evict_status;
     return lease_or;
   }
-  return uma->acquire_stable_lease(normalized_key, chunks);
+  return uma->acquire_stable_lease(resolved_or->uma_key, chunks);
 }
 
 absl::Status ReplicaRuntime::release_replica_stable_lease(
     const replica::UnifiedMemoryAuthority::StableLease& lease) const {
-  const auto normalized_key = normalize_replica_key(lease.key);
-  auto replica_or = registry().find(normalized_key);
-  if (!replica_or.ok()) {
-    return absl::NotFoundError("Replica not found");
+  auto resolved_or = resolve_replica_and_uma_key(registry(), lease.key);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
   }
-  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  auto uma = resolved_or->replica->get_memory_manager().memory_authority();
   if (!uma) {
     return absl::FailedPreconditionError("UMA is unavailable for replica");
   }
-  if (normalized_key == lease.key) {
-    return uma->release_stable_lease(lease);
-  }
   auto adjusted = lease;
-  adjusted.key = normalized_key;
+  adjusted.key = resolved_or->uma_key;
   return uma->release_stable_lease(adjusted);
 }
 
@@ -643,6 +787,7 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
   if (!config.memory_tier_config.has_value() && context_->options().memory_tier_config.has_value()) {
     config.memory_tier_config = context_->options().memory_tier_config;
   }
+  config.byte_mapping_config = context_->options().byte_mapping;
   config.cpu_shared_memory_enabled = context_->options().cpu_shared_memory_enabled;
 
   if (auto existing_or = registry().find(inst_key); existing_or.ok()) {
@@ -694,30 +839,43 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
 
 int ReplicaRuntime::clear_mem() {
   auto replicas = registry().clear_all();
+  absl::flat_hash_set<const replica::Replica*> processed;
+  processed.reserve(replicas.size());
   std::vector<absl::Status> errors;
 
-  for (const auto& [inst_key, replica] : replicas) {
+  for (const auto& [inst_key, _] : replicas) {
+    clear_replica_runtime_state(inst_key);
+  }
+
+  for (const auto& entry : replicas) {
+    const auto& replica = entry.second;
+    if (!replica) {
+      continue;
+    }
+    if (!processed.insert(replica.get()).second) {
+      continue;
+    }
+
+    const loading::ReplicaKey canonical_key = normalize_replica_key(replica->replica_key());
+    clear_replica_runtime_state(canonical_key);
+
     size_t replica_size = 0;
     if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
       replica_size = *size_or;
     }
-    bool published = false;
-
-    auto cpu_status = replica->release_memory(common::memory::MemoryLocation::CPU);
-    if (!cpu_status.ok()) {
-      LOG(WARNING) << "Failed to release CPU memory for " << inst_key << ": " << cpu_status.message();
-      errors.push_back(cpu_status);
-    } else {
-      publish_replica_event(RuntimeEventType::kReplicaEvicted, inst_key, replica_size);
-      published = true;
+    bool released_any = false;
+    teardown_replica_memory(
+        canonical_key,
+        replica,
+        /*release_cpu=*/true,
+        /*release_gpu=*/true,
+        &released_any,
+        &errors);
+    if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
+      stable_cache->on_replica_evicted(canonical_key, replica, "clear_mem");
     }
-
-    auto gpu_status = replica->release_memory(common::memory::MemoryLocation::GPU);
-    if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
-      LOG(WARNING) << "Failed to release GPU memory for " << inst_key << ": " << gpu_status.message();
-      errors.push_back(gpu_status);
-    } else if (gpu_status.ok() && !published) {
-      publish_replica_event(RuntimeEventType::kReplicaEvicted, inst_key, replica_size);
+    if (released_any) {
+      publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
     }
   }
 
@@ -862,6 +1020,74 @@ MetricsCollector& ReplicaRuntime::metrics() {
 
 const MetricsCollector& ReplicaRuntime::metrics() const {
   return context_->metrics_collector();
+}
+
+absl::Status ReplicaRuntime::disable_remote_access_for_replica(
+    const loading::ReplicaKey& key,
+    const std::shared_ptr<replica::Replica>& replica,
+    common::memory::MemoryLocation location) const {
+  auto comm = communication_manager();
+  if (!comm || !comm->is_enabled() || !replica) {
+    return absl::OkStatus();
+  }
+  absl::Status status = replica->disable_remote_memory_access(location, comm->get_engine());
+  if (absl::IsNotFound(status)) {
+    return absl::OkStatus();
+  }
+  if (status.ok()) {
+    publish_remote_access_event(key, location, /*enabled=*/false);
+  }
+  return status;
+}
+
+void ReplicaRuntime::teardown_replica_memory(
+    const loading::ReplicaKey& key,
+    const std::shared_ptr<replica::Replica>& replica,
+    bool release_cpu,
+    bool release_gpu,
+    bool* released_any,
+    std::vector<absl::Status>* errors) const {
+  if (released_any == nullptr || errors == nullptr || !replica) {
+    return;
+  }
+
+  auto release_location = [&](common::memory::MemoryLocation location) {
+    const std::string location_name = common::memory::location_to_string(location);
+    absl::Status unexport_status = disable_remote_access_for_replica(key, replica, location);
+    if (!unexport_status.ok()) {
+      LOG(WARNING) << "Failed to disable remote access for " << key << " at " << location_name << ": "
+                   << unexport_status;
+      errors->push_back(unexport_status);
+      return;
+    }
+
+    absl::Status release_status = replica->release_memory(location);
+    if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+      LOG(WARNING) << "Failed to release " << location_name << " memory for " << key << ": " << release_status;
+      errors->push_back(release_status);
+      return;
+    }
+    if (release_status.ok()) {
+      *released_any = true;
+    }
+  };
+
+  if (release_cpu) {
+    release_location(common::memory::MemoryLocation::CPU);
+  }
+  if (release_gpu) {
+    release_location(common::memory::MemoryLocation::GPU);
+  }
+}
+
+void ReplicaRuntime::clear_replica_runtime_state(const loading::ReplicaKey& key) {
+  const loading::ReplicaKey normalized_key = normalize_replica_key(key);
+  {
+    absl::MutexLock lock(&publish_state_mu_);
+    publish_states_.erase(normalized_key);
+  }
+  clear_transport_state(normalized_key);
+  clear_replica_global_id(normalized_key);
 }
 
 void ReplicaRuntime::publish_replica_event(RuntimeEventType type, const loading::ReplicaKey& key, size_t size_bytes)

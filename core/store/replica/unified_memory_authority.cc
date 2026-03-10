@@ -348,6 +348,22 @@ absl::Status UnifiedMemoryAuthority::release_gpu_device(
 
   DeviceKey dev_key = DeviceRegistry::instance().gpu_key(device_id);
 
+  size_t exported_chunks = 0;
+  for (const auto& rec : it->second.chunk_records) {
+    auto export_it = rec.exported_gpu.find(dev_key);
+    if (export_it != rec.exported_gpu.end() && export_it->second) {
+      exported_chunks++;
+    }
+  }
+  if (exported_chunks > 0) {
+    return absl::FailedPreconditionError(
+        absl::StrFormat(
+            "Replica %s GPU device %d has %zu exported chunks; release blocked",
+            key.artifact_id,
+            device_id,
+            exported_chunks));
+  }
+
   // Reset per-chunk GPU residency for this device and update counters
   size_t& counter = it->second.loaded_chunk_counts[dev_key];
   counter = 0;
@@ -1508,7 +1524,12 @@ absl::StatusOr<std::shared_ptr<void>> UnifiedMemoryAuthority::CpuArena::pin_chun
       return absl::OutOfRangeError("Chunk index out of range");
     }
     alloc.chunk_records[idx].pin_refcnt += 1;
-    if (SystemCapabilities::instance().mlock_enabled()) {
+    // memfd-backed CPU exports are shared mappings. Calling mlock on every
+    // exported chunk can force eager page-in of very large regions and explode
+    // cgroup RSS during publish begin. Stable lease + pin refcounts already
+    // provide correctness/liveness guarantees for these ranges, so skip mlock
+    // on memfd-backed regions and keep pinning logical-only.
+    if (SystemCapabilities::instance().mlock_enabled() && alloc.cpu_region.memfd < 0) {
       void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(idx) * chunk_bytes_;
       if (::mlock(addr, chunk_bytes_) == 0) {
         if (idx >= alloc.mlock_refcnt.size()) {

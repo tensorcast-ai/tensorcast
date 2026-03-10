@@ -282,6 +282,7 @@ misc::result_t RdmaTransport::do_post_send() {
   read_wr.sg_list = &read_sge;
   read_sge.addr = local_tensor->get_uint64_addr();
   read_sge.length = local_tensor->get_bytes();
+  req->enqueue_completion_bytes(read_sge.length);
   read_sge.lkey = mr->lkey;
 
   auto res = misc::wrap_ibv_post_send(selected_qp, &read_wr, &read_bad_wr);
@@ -345,15 +346,16 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   auto res = misc::wrap_ibv_post_send(selected_qp, wrs.data(), &bad_wr);
   if (res) {
-    size_t posted_count = (bad_wr != nullptr) 
-      ? static_cast<size_t>(bad_wr - wrs.data()) 
-      : 0;
+    size_t posted_count = (bad_wr != nullptr) ? static_cast<size_t>(bad_wr - wrs.data()) : 0;
     if (posted_count > 0) {
+      for (size_t i = 0; i < posted_count; ++i) {
+        request->enqueue_completion_bytes(segs[i].length);
+      }
       for (size_t i = 0; i < posted_count; ++i) {
         per_qp_inflight_queues_[qp_index].push(request);
       }
-      LOG(WARNING) << "[rdma_transport] partial post: " << posted_count << "/" << segs.size() 
-                    << " WRs posted before failure";
+      LOG(WARNING) << "[rdma_transport] partial post: " << posted_count << "/" << segs.size()
+                   << " WRs posted before failure";
     }
     request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
     LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " res=" << res
@@ -363,6 +365,7 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   // Track N inflight completions for this request in per-QP queue
   for (size_t i = 0; i < segs.size(); ++i) {
+    request->enqueue_completion_bytes(segs[i].length);
     per_qp_inflight_queues_[qp_index].push(request);
   }
 

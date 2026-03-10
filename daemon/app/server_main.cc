@@ -5,16 +5,21 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <ranges>
 #include <string>
+#include <string_view>
 
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <grpc/grpc.h>
@@ -26,6 +31,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
+#include "core/common/capability_token.h"
 #include "core/common/config/daemon_config_io.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/pinned_memory_authority.h"
@@ -37,10 +43,12 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/app/daemon_app.h"
+#include "daemon/app/startup_memory_preflight.h"
 #include "daemon/util/identity_utils.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 #include "gsl/pointers"
+#include "tensorcast/global_store/v1/global_store.pb.h"
 
 #include <pthread.h>
 #include <csignal>
@@ -118,6 +126,22 @@ absl::Status ensure_local_handle_parent_dir(const std::filesystem::path& dir) {
   return absl::OkStatus();
 }
 
+absl::Status ensure_local_handle_socket_path_ready(const std::string& socket_path) {
+  if (socket_path.empty()) {
+    return absl::InvalidArgumentError("local_handle_socket_path is empty");
+  }
+  if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("local_handle_socket_path is too long for AF_UNIX (len=", socket_path.size(), "): ", socket_path));
+  }
+  const std::filesystem::path parent = std::filesystem::path(socket_path).parent_path();
+  if (parent.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("local_handle_socket_path must include a parent directory: ", socket_path));
+  }
+  return ensure_local_handle_parent_dir(parent);
+}
+
 absl::StatusOr<std::filesystem::path> tensorcast_home_dir() {
   if (const char* override = std::getenv("TENSORCAST_HOME"); override && *override) {
     return std::filesystem::path(override);
@@ -129,11 +153,81 @@ absl::StatusOr<std::filesystem::path> tensorcast_home_dir() {
   return std::filesystem::path(home) / ".tensorcast";
 }
 
-absl::StatusOr<std::filesystem::path> discover_daemon_state_dir() {
-  const char* instance = std::getenv("TENSORCAST_INSTANCE");
-  if (!instance || !*instance) {
-    return absl::InvalidArgumentError("TENSORCAST_INSTANCE is not set; auto-discovery requires a daemon session id");
+std::string trim_copy(std::string_view value) {
+  size_t begin = 0;
+  size_t end = value.size();
+  while (begin < end && std::isspace(static_cast<unsigned char>(value[begin]))) {
+    ++begin;
   }
+  while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+    --end;
+  }
+  return std::string(value.substr(begin, end - begin));
+}
+
+uint64_t fnv1a_hash_64(std::string_view value) {
+  uint64_t hash = 1469598103934665603ULL;
+  for (unsigned char c : value) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+std::string short_socket_name(std::string_view seed) {
+  const uint64_t hash = fnv1a_hash_64(seed);
+  return std::format("lh-{:016x}.sock", hash);
+}
+
+uint64_t saturating_mul_u64(uint64_t lhs, uint64_t rhs) {
+  if (lhs == 0 || rhs == 0) {
+    return 0;
+  }
+  if (lhs > (std::numeric_limits<uint64_t>::max() / rhs)) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return lhs * rhs;
+}
+
+std::string format_binary_bytes(uint64_t bytes) {
+  constexpr double kKiB = 1024.0;
+  constexpr double kMiB = kKiB * 1024.0;
+  constexpr double kGiB = kMiB * 1024.0;
+  const double value = static_cast<double>(bytes);
+  if (value >= kGiB) {
+    return std::format("{:.2f}GiB", value / kGiB);
+  }
+  if (value >= kMiB) {
+    return std::format("{:.2f}MiB", value / kMiB);
+  }
+  if (value >= kKiB) {
+    return std::format("{:.2f}KiB", value / kKiB);
+  }
+  return std::format("{}B", bytes);
+}
+
+absl::StatusOr<std::string> shorten_socket_path_if_needed(const std::filesystem::path& preferred) {
+  const std::string preferred_str = preferred.string();
+  if (preferred_str.size() < sizeof(sockaddr_un::sun_path)) {
+    return preferred_str;
+  }
+  auto home_or = tensorcast_home_dir();
+  if (!home_or.ok()) {
+    return home_or.status();
+  }
+  const std::filesystem::path fallback = *home_or / "uds" / short_socket_name(preferred_str);
+  const std::string fallback_str = fallback.string();
+  if (fallback_str.size() >= sizeof(sockaddr_un::sun_path)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "local_handle_socket_path too long even after shortening (len=", fallback_str.size(), "): ", fallback_str));
+  }
+  LOG(WARNING) << "local_handle_socket_path too long (len=" << preferred_str.size()
+               << "); using shortened path=" << fallback_str;
+  return fallback_str;
+}
+
+absl::StatusOr<std::filesystem::path> tensorcast_host_root_dir() {
   auto home_or = tensorcast_home_dir();
   if (!home_or.ok()) {
     return home_or.status();
@@ -142,21 +236,188 @@ absl::StatusOr<std::filesystem::path> discover_daemon_state_dir() {
   if (hid.empty()) {
     return absl::InvalidArgumentError("Host id is empty; cannot resolve TensorCast runtime root");
   }
-  return *home_or / "hosts" / hid / "sessions" / instance / "session";
+  auto root = *home_or / "hosts" / hid;
+  absl::Status st = ensure_local_handle_parent_dir(root);
+  if (!st.ok()) {
+    return st;
+  }
+  return root;
 }
 
-absl::StatusOr<std::string> discover_local_handle_socket_path() {
-  auto state_dir_or = discover_daemon_state_dir();
-  if (!state_dir_or.ok()) {
-    return state_dir_or.status();
+absl::StatusOr<std::filesystem::path> tensorcast_runtime_root_dir() {
+  auto host_root_or = tensorcast_host_root_dir();
+  if (!host_root_or.ok()) {
+    return host_root_or.status();
   }
-  const std::filesystem::path& dir = *state_dir_or;
+  auto runtime_root = *host_root_or / "runtime";
+  absl::Status st = ensure_local_handle_parent_dir(runtime_root);
+  if (!st.ok()) {
+    return st;
+  }
+  return runtime_root;
+}
+
+absl::StatusOr<std::filesystem::path> daemon_id_state_path() {
+  auto runtime_root_or = tensorcast_runtime_root_dir();
+  if (!runtime_root_or.ok()) {
+    return runtime_root_or.status();
+  }
+  return *runtime_root_or / "daemon_id";
+}
+
+absl::StatusOr<std::string> read_daemon_id_file(const std::filesystem::path& path) {
+  int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    if (errno == ENOENT) {
+      return absl::NotFoundError(absl::StrCat("daemon_id file not found: ", path.string()));
+    }
+    return absl::ErrnoToStatus(errno, absl::StrCat("open failed for ", path.string()));
+  }
+  std::string contents;
+  char buf[256];
+  for (;;) {
+    const ssize_t n = ::read(fd, buf, sizeof(buf));
+    if (n < 0) {
+      const int err = errno;
+      ::close(fd);
+      return absl::ErrnoToStatus(err, absl::StrCat("read failed for ", path.string()));
+    }
+    if (n == 0) {
+      break;
+    }
+    contents.append(buf, static_cast<size_t>(n));
+  }
+  if (::close(fd) < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close failed for ", path.string()));
+  }
+  std::string trimmed = trim_copy(contents);
+  if (trimmed.empty()) {
+    return absl::NotFoundError(absl::StrCat("daemon_id file empty: ", path.string()));
+  }
+  return trimmed;
+}
+
+absl::Status write_daemon_id_file(const std::filesystem::path& path, std::string_view value) {
+  const std::filesystem::path parent = path.parent_path();
+  if (parent.empty()) {
+    return absl::InvalidArgumentError("daemon_id file path missing parent directory");
+  }
+  absl::Status st = ensure_local_handle_parent_dir(parent);
+  if (!st.ok()) {
+    return st;
+  }
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open failed for ", path.string()));
+  }
+  size_t written = 0;
+  const size_t total = value.size();
+  while (written < total) {
+    const ssize_t n = ::write(fd, value.data() + written, total - written);
+    if (n < 0) {
+      const int err = errno;
+      ::close(fd);
+      return absl::ErrnoToStatus(err, absl::StrCat("write failed for ", path.string()));
+    }
+    written += static_cast<size_t>(n);
+  }
+  if (::fsync(fd) < 0) {
+    const int err = errno;
+    ::close(fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync failed for ", path.string()));
+  }
+  if (::close(fd) < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close failed for ", path.string()));
+  }
+  return absl::OkStatus();
+}
+
+std::string generate_random_daemon_id() {
+  std::random_device rd;
+  std::mt19937_64 rng(rd());
+  std::uniform_int_distribution<uint64_t> dist;
+  const uint64_t hi = dist(rng);
+  const uint64_t lo = dist(rng);
+  return std::format("daemon-{:016x}{:016x}", hi, lo);
+}
+
+absl::StatusOr<std::string> resolve_daemon_id(std::string_view configured) {
+  const std::string configured_trimmed = trim_copy(configured);
+  auto path_or = daemon_id_state_path();
+  if (!path_or.ok()) {
+    return path_or.status();
+  }
+  const auto& path = *path_or;
+  if (!configured_trimmed.empty()) {
+    absl::Status st = write_daemon_id_file(path, configured_trimmed);
+    if (!st.ok()) {
+      return st;
+    }
+    return configured_trimmed;
+  }
+  auto stored_or = read_daemon_id_file(path);
+  if (stored_or.ok()) {
+    return *stored_or;
+  }
+  if (stored_or.status().code() != absl::StatusCode::kNotFound) {
+    return stored_or.status();
+  }
+  const std::string generated = generate_random_daemon_id();
+  absl::Status st = write_daemon_id_file(path, generated);
+  if (!st.ok()) {
+    return st;
+  }
+  return generated;
+}
+
+absl::StatusOr<std::filesystem::path> discover_session_state_dir() {
+  const char* instance = std::getenv("TENSORCAST_INSTANCE");
+  if (!instance || !*instance) {
+    return absl::InvalidArgumentError("TENSORCAST_INSTANCE is not set; auto-discovery requires a daemon session id");
+  }
+  auto host_root_or = tensorcast_host_root_dir();
+  if (!host_root_or.ok()) {
+    return host_root_or.status();
+  }
+  return *host_root_or / "sessions" / instance / "session";
+}
+
+absl::StatusOr<std::filesystem::path> discover_daemon_runtime_dir(std::string_view daemon_id) {
+  if (daemon_id.empty()) {
+    return absl::InvalidArgumentError("daemon_id is empty; cannot resolve daemon runtime directory");
+  }
+  auto runtime_root_or = tensorcast_runtime_root_dir();
+  if (!runtime_root_or.ok()) {
+    return runtime_root_or.status();
+  }
+  return *runtime_root_or / "daemons" / std::string(daemon_id);
+}
+
+absl::StatusOr<std::string> discover_local_handle_socket_path(std::string_view daemon_id) {
+  if (const char* instance = std::getenv("TENSORCAST_INSTANCE"); instance && *instance) {
+    auto state_dir_or = discover_session_state_dir();
+    if (!state_dir_or.ok()) {
+      return state_dir_or.status();
+    }
+    const std::filesystem::path& dir = *state_dir_or;
+    absl::Status st = ensure_local_handle_parent_dir(dir);
+    if (!st.ok()) {
+      return st;
+    }
+    std::filesystem::path sock = dir / "local_handle.sock";
+    return shorten_socket_path_if_needed(sock);
+  }
+  auto runtime_dir_or = discover_daemon_runtime_dir(daemon_id);
+  if (!runtime_dir_or.ok()) {
+    return runtime_dir_or.status();
+  }
+  const std::filesystem::path& dir = *runtime_dir_or;
   absl::Status st = ensure_local_handle_parent_dir(dir);
   if (!st.ok()) {
     return st;
   }
   std::filesystem::path sock = dir / "local_handle.sock";
-  return sock.string();
+  return shorten_socket_path_if_needed(sock);
 }
 
 absl::StatusOr<std::optional<uint64_t>> read_cgroup_v2_memory_max() {
@@ -214,10 +475,24 @@ int main(int argc, char** argv) {
     return 2;
   }
   auto cfg = *cfg_or;
+  const std::string configured_daemon_id = trim_copy(cfg.daemon_id());
+  auto daemon_id_or = resolve_daemon_id(configured_daemon_id);
+  if (!daemon_id_or.ok()) {
+    LOG(ERROR) << "Failed to resolve daemon_id: " << daemon_id_or.status();
+    return 2;
+  }
+  if (configured_daemon_id.empty()) {
+    LOG(INFO) << "Auto-selected daemon_id=" << *daemon_id_or;
+  } else {
+    LOG(INFO) << "Using configured daemon_id=" << *daemon_id_or;
+  }
+  if (cfg.daemon_id() != *daemon_id_or) {
+    cfg.set_daemon_id(*daemon_id_or);
+  }
   const std::filesystem::path storage_root_cfg = cfg.server().storage_path();
   std::filesystem::path storage_root;
   if (storage_root_cfg.empty()) {
-    LOG(INFO) << "server.storage_path is empty; disk materialization is disabled";
+    LOG(INFO) << "server.storage_path is empty; disk materialization allows absolute disk_path only";
   } else {
     std::error_code storage_ec;
     const bool storage_exists = std::filesystem::exists(storage_root_cfg, storage_ec);
@@ -299,6 +574,14 @@ int main(int argc, char** argv) {
     pm_cfg.classes.push_back(std::move(cc));
   }
 
+  const uint64_t stable_bytes =
+      (cfg.engine().has_memory_tiers() ? static_cast<uint64_t>(cfg.engine().memory_tiers().stable_bytes()) : 0);
+  const absl::Status startup_mem = daemon::preflight_startup_memory(pinned_total_bytes, stable_bytes);
+  if (!startup_mem.ok()) {
+    LOG(ERROR) << "RESOURCE_EXHAUSTED: startup memory preflight failed: " << startup_mem;
+    return 2;
+  }
+
   absl::StatusOr<std::shared_ptr<common::memory::PinnedMemoryAuthority>> pma_or =
       common::memory::PinnedMemoryAuthority::create(std::move(pm_cfg));
   if (!pma_or.ok()) {
@@ -330,6 +613,42 @@ int main(int argc, char** argv) {
     streaming_buffer_chunks = 16;
   }
 
+  int detected_gpu_count = 0;
+  const absl::Status gpu_count_status = cuda::get_device_count(&detected_gpu_count);
+  if (!gpu_count_status.ok()) {
+    LOG(ERROR) << "INVALID_ARGUMENT: failed to query CUDA device count for pinned_memory sizing: " << gpu_count_status;
+    return 2;
+  }
+  if (detected_gpu_count < 0) {
+    LOG(ERROR) << "INTERNAL: cuda::get_device_count returned a negative value: " << detected_gpu_count;
+    return 2;
+  }
+  const bool fake_cuda_backend = cuda::is_fake();
+  const daemon::EnginePinnedConcurrencySizing engine_sizing =
+      daemon::compute_engine_pinned_concurrency_sizing(streaming_buffer_chunks, detected_gpu_count, fake_cuda_backend);
+  if (engine_sizing.required_slices > 0) {
+    const uint64_t capacity_engine_slices = engine_pool->capacity_slices();
+    if (capacity_engine_slices < engine_sizing.required_slices) {
+      LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=engine] cannot cover GPU concurrency: "
+                 << "capacity_slices=" << capacity_engine_slices << " required_slices=" << engine_sizing.required_slices
+                 << " (detected_gpu_count=" << detected_gpu_count
+                 << " effective_gpu_count=" << engine_sizing.effective_gpu_count
+                 << " fake_cuda_backend=" << (fake_cuda_backend ? "true" : "false")
+                 << " streaming_buffer_chunks=" << streaming_buffer_chunks
+                 << " slice_bytes=" << engine_pool->slice_bytes()
+                 << "). Increase pinned_memory.classes[name=engine].pool_bytes "
+                 << "or lower engine.streaming_buffer_chunks.";
+      return 2;
+    }
+    LOG(INFO) << "Engine pinned pool startup check passed: capacity_slices=" << capacity_engine_slices
+              << " required_slices=" << engine_sizing.required_slices << " (detected_gpu_count=" << detected_gpu_count
+              << ", effective_gpu_count=" << engine_sizing.effective_gpu_count
+              << ", fake_cuda_backend=" << (fake_cuda_backend ? "true" : "false")
+              << ", streaming_buffer_chunks=" << streaming_buffer_chunks << ")";
+  } else {
+    LOG(WARNING) << "No CUDA devices detected at startup; skipping engine pinned concurrency coverage check";
+  }
+
   // Fail fast on communicator pinned sizing before starting communicator threads.
   const int buffers_per_flow = cfg.communicator().stager().buffers_per_flow();
   if (buffers_per_flow <= 0) {
@@ -344,13 +663,51 @@ int main(int argc, char** argv) {
   tcp_conn_count = std::max(2, tcp_conn_count);
 
   const size_t num_buffers = static_cast<size_t>(buffers_per_flow);
-  const size_t required_gpu_slices = num_buffers + (num_buffers * static_cast<size_t>(tcp_conn_count));
+  const size_t stager_reserve_slices = num_buffers;
+  const size_t tcp_transport_slices = num_buffers * static_cast<size_t>(tcp_conn_count);
+  const size_t required_gpu_slices = stager_reserve_slices + tcp_transport_slices;
   const size_t capacity_gpu_slices = comm_gpu_pool->capacity_slices();
+  const uint32_t expected_gpu_channels = cfg.communicator().stager().expected_gpu_channels();
+  const size_t expected_channel_required_slices = expected_gpu_channels > 0
+      ? (stager_reserve_slices + (num_buffers * static_cast<size_t>(expected_gpu_channels)))
+      : 0;
+  const size_t recommended_gpu_slices = std::max(required_gpu_slices, expected_channel_required_slices);
+  const uint64_t recommended_pool_bytes =
+      saturating_mul_u64(static_cast<uint64_t>(recommended_gpu_slices), comm_gpu_pool->slice_bytes());
+  const uint64_t required_pool_bytes =
+      saturating_mul_u64(static_cast<uint64_t>(required_gpu_slices), comm_gpu_pool->slice_bytes());
+  const uint64_t capacity_pool_bytes =
+      saturating_mul_u64(static_cast<uint64_t>(capacity_gpu_slices), comm_gpu_pool->slice_bytes());
+
+  LOG(INFO) << "comm_gpu startup sizing: capacity_slices=" << capacity_gpu_slices << " ("
+            << format_binary_bytes(capacity_pool_bytes) << ")"
+            << " required_slices=" << required_gpu_slices << " (" << format_binary_bytes(required_pool_bytes)
+            << ") [stager_reserve_slices=" << stager_reserve_slices << ", tcp_transport_slices=" << tcp_transport_slices
+            << ", buffers_per_flow=" << buffers_per_flow << ", tcp_conn_count=" << tcp_conn_count << "]"
+            << " expected_gpu_channels=" << expected_gpu_channels
+            << (expected_gpu_channels > 0 ? std::format(
+                                                " expected_channel_required_slices={} recommended_pool_bytes>={} ({})",
+                                                expected_channel_required_slices,
+                                                recommended_pool_bytes,
+                                                format_binary_bytes(recommended_pool_bytes))
+                                          : std::format(
+                                                " recommended_pool_bytes>={} ({})",
+                                                required_pool_bytes,
+                                                format_binary_bytes(required_pool_bytes)));
+
   if (capacity_gpu_slices < required_gpu_slices) {
+    const size_t missing_slices = required_gpu_slices - capacity_gpu_slices;
+    const uint64_t missing_bytes =
+        saturating_mul_u64(static_cast<uint64_t>(missing_slices), comm_gpu_pool->slice_bytes());
     LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=comm_gpu] too small: capacity_slices="
                << capacity_gpu_slices << " required_slices=" << required_gpu_slices
-               << " slice_bytes=" << comm_gpu_pool->slice_bytes() << " (buffers_per_flow=" << buffers_per_flow
-               << " tcp_conn_count=" << tcp_conn_count << ")";
+               << " slice_bytes=" << comm_gpu_pool->slice_bytes() << " missing_slices=" << missing_slices << " ("
+               << format_binary_bytes(missing_bytes) << ")"
+               << " [stager_reserve_slices=" << stager_reserve_slices
+               << ", tcp_transport_slices=" << tcp_transport_slices << ", buffers_per_flow=" << buffers_per_flow
+               << ", tcp_conn_count=" << tcp_conn_count << "]"
+               << " recommended_pool_bytes>=" << required_pool_bytes << " (" << format_binary_bytes(required_pool_bytes)
+               << ")";
     return 2;
   }
 
@@ -365,7 +722,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  const uint32_t expected_gpu_channels = cfg.communicator().stager().expected_gpu_channels();
   if (expected_gpu_channels > 0) {
     const size_t stager_reserve = num_buffers;
     const size_t available_gpu_slices =
@@ -373,12 +729,16 @@ int main(int argc, char** argv) {
     const size_t computed_limit =
         (buffers_per_flow > 0) ? (available_gpu_slices / static_cast<size_t>(buffers_per_flow)) : 0;
     if (static_cast<size_t>(expected_gpu_channels) > computed_limit) {
+      const uint64_t recommended_expected_pool_bytes =
+          saturating_mul_u64(static_cast<uint64_t>(expected_channel_required_slices), comm_gpu_pool->slice_bytes());
       LOG(ERROR) << "INVALID_ARGUMENT: communicator.stager.expected_gpu_channels=" << expected_gpu_channels
                  << " exceeds staging capacity: computed_limit=" << computed_limit
                  << " (gpu_pool_slices=" << capacity_gpu_slices << " reserve=" << stager_reserve
                  << " buffers_per_flow=" << buffers_per_flow
-                 << "). Increase pinned_memory.classes[name=comm_gpu].pool_bytes "
-                 << "or reduce expected_gpu_channels.";
+                 << " required_slices_for_expected_channels=" << expected_channel_required_slices
+                 << " recommended_pool_bytes>=" << recommended_expected_pool_bytes << " ("
+                 << format_binary_bytes(recommended_expected_pool_bytes)
+                 << ")). Increase pinned_memory.classes[name=comm_gpu].pool_bytes or reduce expected_gpu_channels.";
       return 2;
     }
   }
@@ -397,7 +757,7 @@ int main(int argc, char** argv) {
   opts.pinned_memory_timeout = pinned_allocation_timeout_ms;
   opts.cpu_shared_memory_enabled = cfg.engine().cpu_shared_memory().enabled();
   if (opts.cpu_shared_memory_enabled && cfg.lifecycle().handle_leases().local_handle_socket_path().empty()) {
-    auto path_or = discover_local_handle_socket_path();
+    auto path_or = discover_local_handle_socket_path(cfg.daemon_id());
     if (!path_or.ok()) {
       LOG(ERROR) << "INVALID_ARGUMENT: lifecycle.handle_leases.local_handle_socket_path is empty and auto-discovery "
                     "failed: "
@@ -406,6 +766,14 @@ int main(int argc, char** argv) {
     }
     cfg.mutable_lifecycle()->mutable_handle_leases()->set_local_handle_socket_path(*path_or);
     LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path=" << *path_or;
+  }
+  if (!cfg.lifecycle().handle_leases().local_handle_socket_path().empty()) {
+    const std::string socket_path = cfg.lifecycle().handle_leases().local_handle_socket_path();
+    const absl::Status st = ensure_local_handle_socket_path_ready(socket_path);
+    if (!st.ok()) {
+      LOG(ERROR) << "INVALID_ARGUMENT: local handle socket path is invalid: " << st;
+      return 2;
+    }
   }
   if (cfg.engine().has_memory_tiers()) {
     store::MemoryTierConfig tiers;
@@ -417,6 +785,69 @@ int main(int argc, char** argv) {
     opts.memory_tier_config = tiers;
   }
 
+  if (cfg.engine().has_byte_mapping()) {
+    const auto& bm = cfg.engine().byte_mapping();
+    opts.byte_mapping.enable_strided_execution =
+        bm.has_enable_strided_execution() ? bm.enable_strided_execution() : true;
+    opts.byte_mapping.enable_direct_write_at = bm.has_enable_direct_write_at() ? bm.enable_direct_write_at() : true;
+    if (bm.program_cache_entries() > 0) {
+      opts.byte_mapping.program_cache_entries = bm.program_cache_entries();
+    }
+    if (bm.strided_run_min_ranges() > 0) {
+      opts.byte_mapping.strided_run_min_ranges = bm.strided_run_min_ranges();
+    }
+    if (bm.strided_min_row_len_bytes() > 0) {
+      opts.byte_mapping.strided_min_row_len_bytes = bm.strided_min_row_len_bytes();
+    }
+    if (bm.strided_max_amplification() > 0) {
+      opts.byte_mapping.strided_max_amplification = bm.strided_max_amplification();
+    }
+    if (bm.strided_block_target_bytes() > 0) {
+      opts.byte_mapping.strided_block_target_bytes = bm.strided_block_target_bytes();
+    }
+    if (bm.strided_block_max_bytes() > 0) {
+      opts.byte_mapping.strided_block_max_bytes = bm.strided_block_max_bytes();
+    }
+    opts.byte_mapping.disk_source_ordered_read =
+        bm.has_disk_source_ordered_read() ? bm.disk_source_ordered_read() : true;
+    if (bm.disk_source_merge_max_gap_bytes() > 0) {
+      opts.byte_mapping.disk_source_merge_max_gap_bytes = bm.disk_source_merge_max_gap_bytes();
+    }
+    if (bm.disk_source_merge_max_amplification() > 0) {
+      opts.byte_mapping.disk_source_merge_max_amplification = bm.disk_source_merge_max_amplification();
+    }
+    if (bm.disk_source_prefetch_depth() > 0) {
+      opts.byte_mapping.disk_source_prefetch_depth = bm.disk_source_prefetch_depth();
+    }
+  }
+
+  if (cfg.has_promotion()) {
+    const auto& promo = cfg.promotion();
+    switch (promo.policy()) {
+      case tensorcast::config::v1::PROMOTION_POLICY_ON_MATERIALIZE:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kOnMaterialize;
+        break;
+      case tensorcast::config::v1::PROMOTION_POLICY_ON_HOTNESS:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kOnHotness;
+        break;
+      case tensorcast::config::v1::PROMOTION_POLICY_ON_POLICY:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kOnPolicy;
+        break;
+      case tensorcast::config::v1::PROMOTION_POLICY_NEVER:
+      case tensorcast::config::v1::PROMOTION_POLICY_UNSPECIFIED:
+      default:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kNever;
+        break;
+    }
+    opts.promotion.require_verified = promo.require_verified();
+    if (promo.has_demotion_drain_timeout()) {
+      opts.promotion.demotion_drain_timeout = duration_to_millis(promo.demotion_drain_timeout());
+    }
+    if (promo.max_concurrency() > 0) {
+      opts.promotion.max_concurrency = promo.max_concurrency();
+    }
+  }
+
   if (opts.cpu_shared_memory_enabled) {
     if (!cfg.engine().has_memory_tiers() || cfg.engine().memory_tiers().stable_bytes() == 0) {
       LOG(ERROR) << "INVALID_ARGUMENT: engine.cpu_shared_memory.enabled requires engine.memory_tiers.stable_bytes > 0";
@@ -424,8 +855,8 @@ int main(int argc, char** argv) {
     }
     if (cfg.lifecycle().handle_leases().local_handle_socket_path().empty()) {
       LOG(ERROR) << "INVALID_ARGUMENT: engine.cpu_shared_memory.enabled requires "
-                    "lifecycle.handle_leases.local_handle_socket_path (auto-discovery needs TENSORCAST_INSTANCE; "
-                    "set explicitly when daemon and client run in different pods)";
+                    "lifecycle.handle_leases.local_handle_socket_path (auto-discovery uses TENSORCAST_INSTANCE when "
+                    "set, otherwise falls back to the daemon_id runtime directory)";
       return 2;
     }
     const absl::Status memfd_probe = probe_memfd_shared_mapping();
@@ -472,7 +903,7 @@ int main(int argc, char** argv) {
     };
     auto st = comm_mgr->initialize_with_config_and_pools(p2p_host, p2p_port, cfg.communicator(), std::move(pools));
     if (!st.ok()) {
-      LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
+      LOG(FATAL) << "Failed to initialize communication engine: " << st.message();
     } else {
       const uint16_t actual_port = comm_mgr->listen_port();
       if (actual_port != 0) {
@@ -520,7 +951,10 @@ int main(int argc, char** argv) {
   // Async runtime shared by daemon + embedded store.
   auto async_runtime = std::make_shared<common::AsyncRuntime>(common::AsyncRuntime::Options{
       .cpu_threads = static_cast<size_t>(std::max<int>(1, opts.num_thread)),
-      .blocking_threads = static_cast<size_t>(std::max<int>(2, opts.num_thread)),
+      // blocking_executor() may schedule nested fan-out (e.g., pump producers) while the
+      // parent task blocks waiting for completion. Keep a small headroom to avoid
+      // thread-pool starvation deadlocks for low thread-count configurations.
+      .blocking_threads = static_cast<size_t>(std::max<int>(4, opts.num_thread)),
       .thread_name_prefix = "tensorcast",
   });
   opts.async_runtime = async_runtime;
@@ -567,11 +1001,64 @@ int main(int argc, char** argv) {
   daemon_opts.handle_lease_max_mints_per_second = cfg.lifecycle().handle_leases().max_mints_per_second();
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
+  daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);
+  const auto& post_seal = cfg.post_seal();
+  daemon_opts.post_seal_policy.migrate_views = post_seal.migrate_views();
+  daemon_opts.post_seal_policy.migrate_transpose_only = post_seal.migrate_transpose_only();
+  daemon_opts.post_seal_policy.reuse_views_if_safe = post_seal.reuse_views_if_safe();
+  daemon_opts.post_seal_policy.retire_pieces = post_seal.retire_pieces();
   if (cfg.daemon_id().empty()) {
-    LOG(ERROR) << "DaemonConfig.daemon_id is required for Global Store registration.";
+    LOG(ERROR) << "Resolved daemon_id is empty; cannot start daemon.";
     return 1;
   }
   daemon_opts.daemon_id = cfg.daemon_id();
+  auto daemon_runtime_dir_or = discover_daemon_runtime_dir(daemon_opts.daemon_id);
+  if (!daemon_runtime_dir_or.ok()) {
+    LOG(ERROR) << "Failed to resolve daemon runtime dir for import root: " << daemon_runtime_dir_or.status();
+    return 1;
+  }
+  daemon_opts.import_root = *daemon_runtime_dir_or / "import";
+
+  if (cfg.has_capability_tokens() && cfg.capability_tokens().has_active()) {
+    const auto& active = cfg.capability_tokens().active();
+    if (active.version() != 0 && !active.secret().empty()) {
+      daemon_opts.capability_tokens.active.version = active.version();
+      daemon_opts.capability_tokens.active.secret = active.secret();
+      for (const auto& prev : cfg.capability_tokens().previous()) {
+        if (prev.version() == 0 || prev.secret().empty()) {
+          continue;
+        }
+        if (prev.version() == daemon_opts.capability_tokens.active.version) {
+          continue;
+        }
+        daemon_opts.capability_tokens.previous.push_back(
+            common::CapabilityTokenKey{.version = prev.version(), .secret = prev.secret()});
+      }
+    }
+  }
+  if (cfg.has_retention_handles()) {
+    const auto& retention_cfg = cfg.retention_handles();
+    daemon_opts.retention_handles.enabled = retention_cfg.enabled();
+    if (retention_cfg.has_default_ttl()) {
+      daemon_opts.retention_handles.default_ttl = duration_to_millis(retention_cfg.default_ttl());
+    }
+    if (retention_cfg.has_max_ttl()) {
+      daemon_opts.retention_handles.max_ttl = duration_to_millis(retention_cfg.max_ttl());
+    }
+  }
+
+  uint64_t capability_flags = 0;
+  const bool cap_dir_enabled = cfg.has_capability_directory() && cfg.capability_directory().enabled();
+  const bool tokens_configured =
+      daemon_opts.capability_tokens.active.version != 0 && !daemon_opts.capability_tokens.active.secret.empty();
+  if (cap_dir_enabled) {
+    if (tokens_configured) {
+      capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED);
+    }
+    if (daemon_opts.retention_handles.enabled && tokens_configured) {
+      capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED);
+    }
+  }
   // Observability high-cardinality attributes: default off (config hook TBD)
   daemon_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)
@@ -640,6 +1127,7 @@ int main(int argc, char** argv) {
       lopts.advertise_host = cfg.server().advertise().host();
     }
     lopts.p2p_port = p2p_port;
+    lopts.max_concurrency = std::max<uint32_t>(1, daemon_opts.max_concurrency);
     if (cfg.high_availability().has_heartbeat_interval()) {
       const auto& d = cfg.high_availability().heartbeat_interval();
       lopts.heartbeat_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
@@ -648,6 +1136,7 @@ int main(int argc, char** argv) {
       const auto& d = cfg.high_availability().heartbeat_rpc_timeout();
       lopts.heartbeat_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
     }
+    lopts.capability_flags = capability_flags;
     if (cfg.high_availability().has_heartbeat_rpc_max_retries()) {
       lopts.heartbeat_rpc_max_retries = cfg.high_availability().heartbeat_rpc_max_retries();
     }
@@ -662,14 +1151,6 @@ int main(int argc, char** argv) {
     if (cfg.high_availability().has_state_sync_rpc_max_retries()) {
       lopts.state_sync_rpc_max_retries = cfg.high_availability().state_sync_rpc_max_retries();
     }
-    if (cfg.high_availability().has_full_sync_rpc_timeout()) {
-      const auto& d = cfg.high_availability().full_sync_rpc_timeout();
-      lopts.full_sync_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
-    }
-    if (cfg.high_availability().has_full_sync_rpc_max_retries()) {
-      lopts.full_sync_rpc_max_retries = cfg.high_availability().full_sync_rpc_max_retries();
-    }
-    lopts.force_full_sync_on_empty_inventory = cfg.high_availability().force_full_sync_on_empty_inventory();
     lopts.cluster_token = cfg.meta().cluster_token();
     lopts.global_store_client = shared_global_store_client;
     lifecycle_opts = lopts;

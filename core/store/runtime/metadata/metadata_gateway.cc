@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
@@ -36,8 +37,11 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
  public:
   GlobalStoreRegistrationPublisher(
       gsl::not_null<RuntimeContext*> runtime_context,
-      std::shared_ptr<components::IGlobalStoreClient>* override_slot)
-      : runtime_context_(runtime_context), override_slot_(override_slot) {}
+      std::shared_ptr<components::IGlobalStoreClient>* override_slot,
+      uint32_t max_concurrency)
+      : runtime_context_(runtime_context),
+        override_slot_(override_slot),
+        max_concurrency_(std::max<uint32_t>(1, max_concurrency)) {}
 
   absl::Status publish_registration(const RegistrationPublication& publication) override {
     auto client_or = get_connected_client();
@@ -64,7 +68,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
               : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
       descriptor = std::move(desc);
     }
-    auto reg_or = client->register_memory_replica(
+    auto reg_or = client->register_memory_replica_idempotent(
         publication.artifact_id,
         worker_id(),
         publication.device,
@@ -75,17 +79,18 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
         publication.tensor_index_data,
         publication.encoding,
         publication.schema_version,
-        /*max_concurrency=*/1,
+        max_concurrency_,
         publication.verification_json,
         publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
-        descriptor);
+        descriptor,
+        std::nullopt);
     if (!reg_or.ok()) {
       return reg_or.status();
     }
     return absl::OkStatus();
   }
 
-  absl::Status update_variant_view(const components::VariantViewUpdate& update) override {
+  absl::Status update_view_state(const components::ViewStateUpdate& update) override {
     auto client_or = get_connected_client();
     if (!client_or.ok()) {
       return client_or.status();
@@ -112,6 +117,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
 
   gsl::not_null<RuntimeContext*> runtime_context_;
   std::shared_ptr<components::IGlobalStoreClient>* override_slot_;
+  uint32_t max_concurrency_{4};
 };
 
 } // namespace
@@ -119,11 +125,14 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
 MetadataGateway::MetadataGateway(Config config)
     : runtime_context_(gsl::not_null<RuntimeContext*>{config.runtime_context}),
       replica_runtime_(gsl::not_null<ReplicaRuntime*>{config.replica_runtime}),
+      promotion_manager_(config.promotion_manager),
       event_publisher_(runtime_context_->event_publisher()),
       artifact_chunk_bytes_(config.artifact_chunk_bytes),
       pinned_memory_timeout_(config.pinned_memory_timeout),
+      max_concurrency_(std::max<uint32_t>(1, config.max_concurrency)),
       replica_factory_(config.replica_factory ? config.replica_factory : make_default_replica_factory()) {
-  registration_publisher_ = std::make_unique<GlobalStoreRegistrationPublisher>(runtime_context_, &override_client_);
+  registration_publisher_ =
+      std::make_unique<GlobalStoreRegistrationPublisher>(runtime_context_, &override_client_, max_concurrency_);
   registration_backend_ = std::make_unique<RegistrationBackend>(
       make_registration_resources(),
       replica_factory_,
@@ -178,63 +187,83 @@ absl::Status MetadataGateway::register_replica(
     const loading::ReplicaKey& key,
     std::string_view artifact_id_override,
     std::string_view publish_context_id) {
-  if (should_skip_publish_for_context(publish_context_id, key)) {
-    VLOG(1) << "Publish context " << publish_context_id << " already registered for artifact=" << key.artifact_id
-            << " device=" << key.device.to_string();
-    replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
-    return absl::OkStatus();
+  const PublishContextDecision context_decision = begin_publish_for_context(publish_context_id, key);
+  switch (context_decision) {
+    case PublishContextDecision::kSkipPublished:
+      VLOG(1) << "Publish context " << publish_context_id << " already succeeded for artifact=" << key.artifact_id
+              << " device=" << key.device.to_string();
+      replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
+      return absl::OkStatus();
+    case PublishContextDecision::kSkipInFlight:
+      VLOG(1) << "Publish context " << publish_context_id << " already in flight for artifact=" << key.artifact_id
+              << " device=" << key.device.to_string();
+      return absl::OkStatus();
+    case PublishContextDecision::kConflict:
+      return absl::FailedPreconditionError("publish_context_id reused for a different replica key");
+    case PublishContextDecision::kProceed:
+      break;
   }
+
+  absl::Status register_status = absl::InternalError("register_replica exited without final status");
+  auto finalize_publish_context =
+      absl::MakeCleanup([&]() { record_publish_context_result(publish_context_id, key, register_status); });
 
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
-    return client_or.status();
+    register_status = client_or.status();
+    return register_status;
   }
   auto client = std::move(*client_or);
 
   if (key.view_id.has_value()) {
-    VLOG(1) << "MetadataGateway registering variant view_id=" << *key.view_id
-            << " (canonical_artifact_id=" << key.artifact_id << ")";
+    VLOG(1) << "MetadataGateway registering view_id=" << *key.view_id << " (canonical_artifact_id=" << key.artifact_id
+            << ")";
   }
 
   auto size_or = replica_runtime_->get_replica_size(key);
   if (!size_or.ok()) {
-    return size_or.status();
+    register_status = size_or.status();
+    return register_status;
   }
 
   auto canonical_id_or = canonical_artifact_id(key, artifact_id_override);
   if (!canonical_id_or.ok()) {
-    return canonical_id_or.status();
+    register_status = canonical_id_or.status();
+    return register_status;
   }
   const std::string& artifact_id = *canonical_id_or;
 
   const common::memory::MemoryLocation loc =
       (key.device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
 
-  absl::Status register_status = materialization::control::ReplicaRegistrationHelper::register_local_replica(
+  auto register_or = materialization::control::ReplicaRegistrationHelper::register_local_replica(
       gsl::not_null<components::IGlobalStoreClient*>{client.get()},
       worker_id(),
       artifact_id,
       key.device,
       loc,
       *size_or,
-      key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt);
-  if (!register_status.ok()) {
-    return register_status;
-  }
+      max_concurrency_,
+      key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
+      publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
+  if (register_or.ok()) {
+    replica_runtime_->set_replica_global_id(key, *register_or);
 
-  if (key.view_id.has_value()) {
-    auto variant_status = client->record_variant_residency(key.artifact_id, *key.view_id, *size_or);
-    if (!variant_status.ok()) {
-      if (absl::IsUnimplemented(variant_status)) {
-        VLOG(1) << "Global Store does not yet accept variant residency updates: " << variant_status.message();
-      } else {
-        LOG(WARNING) << "record_variant_residency failed for view_id=" << *key.view_id << ": " << variant_status;
+    if (key.view_id.has_value()) {
+      auto view_status = client->record_view_residency(key.artifact_id, *key.view_id, *size_or);
+      if (!view_status.ok()) {
+        if (absl::IsUnimplemented(view_status)) {
+          VLOG(1) << "Global Store does not yet accept view residency updates: " << view_status.message();
+        } else {
+          LOG(WARNING) << "record_view_residency failed for view_id=" << *key.view_id << ": " << view_status;
+        }
       }
     }
   }
-  record_publish_context_result(publish_context_id, key, register_status);
-  if (register_status.ok()) {
+  register_status = register_or.ok() ? absl::OkStatus() : register_or.status();
+  if (register_or.ok()) {
     replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
+    return absl::OkStatus();
   }
   return register_status;
 }
@@ -249,12 +278,14 @@ absl::Status MetadataGateway::unregister_replica(std::string_view artifact_id, i
       artifact_id, worker_id(), common::memory::MemoryLocation::GPU, static_cast<uint32_t>(device_id));
 }
 
-absl::StatusOr<components::KeyMapping> MetadataGateway::resolve_key_mapping(std::string_view key) const {
+absl::StatusOr<components::KeyMapping> MetadataGateway::resolve_key_mapping(
+    std::string_view key,
+    const components::RpcOptions& rpc_options) const {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
   }
-  return (*client_or)->resolve_key_mapping(key);
+  return (*client_or)->resolve_key_mapping_with_options(key, rpc_options);
 }
 
 absl::StatusOr<std::string> MetadataGateway::get_canonical_index(std::string_view artifact_id) const {
@@ -278,13 +309,24 @@ absl::StatusOr<components::ViewMetadata> MetadataGateway::get_view_metadata(
 absl::Status MetadataGateway::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,
-    std::string_view disk_path,
     absl::Duration ttl) {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
   }
-  return (*client_or)->upsert_key_mapping(key, artifact_id, disk_path, ttl);
+  return (*client_or)->upsert_key_mapping(key, artifact_id, ttl);
+}
+
+absl::StatusOr<components::KeyMappingSwapResult> MetadataGateway::swap_key_mapping(
+    std::string_view key,
+    std::string_view new_artifact_id,
+    std::optional<std::string_view> expected_artifact_id,
+    std::optional<uint64_t> expected_generation) {
+  auto client_or = get_connected_client();
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
 }
 
 absl::Status MetadataGateway::revoke_key_mapping(std::string_view key) {
@@ -349,6 +391,14 @@ absl::StatusOr<uint64_t> MetadataGateway::get_registration_gpu_ptr(std::string_v
   return registration_backend_->get_registration_gpu_ptr(registration_id);
 }
 
+absl::StatusOr<RegistrationCpuMemfdInfo> MetadataGateway::get_registration_cpu_memfd_info(
+    std::string_view registration_id) const {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->get_registration_cpu_memfd_info(registration_id);
+}
+
 absl::Status MetadataGateway::ingest_view_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
@@ -357,6 +407,26 @@ absl::Status MetadataGateway::ingest_view_chunk(
     return absl::FailedPreconditionError("registration backend is not initialized");
   }
   return registration_backend_->ingest_view_chunk(registration_id, view_offset, data);
+}
+
+absl::Status MetadataGateway::ingest_registration_chunk(
+    std::string_view registration_id,
+    uint64_t offset,
+    absl::Span<const std::byte> data) {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->ingest_registration_chunk(registration_id, offset, data);
+}
+
+absl::Status MetadataGateway::ingest_registration_written_range(
+    std::string_view registration_id,
+    uint64_t offset,
+    uint64_t length) {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->ingest_registration_written_range(registration_id, offset, length);
 }
 
 absl::StatusOr<uint64_t> MetadataGateway::get_view_ingested_bytes(std::string_view registration_id) const {
@@ -416,6 +486,9 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .async_runtime = runtime_context_->async_runtime(),
       .memory_tier_budget = runtime_context_->memory_tier_budget(),
       .memory_tier_config = runtime_context_->options().memory_tier_config,
+      .byte_mapping_config = runtime_context_->options().byte_mapping,
+      .promotion_manager = promotion_manager_,
+      .cpu_shared_memory_enabled = runtime_context_->options().cpu_shared_memory_enabled,
   };
   return resources;
 }
@@ -430,21 +503,40 @@ ReplicaFactory MetadataGateway::make_default_replica_factory() const {
   };
 }
 
-bool MetadataGateway::should_skip_publish_for_context(
+MetadataGateway::PublishContextDecision MetadataGateway::begin_publish_for_context(
     std::string_view publish_context_id,
     const loading::ReplicaKey& key) const {
   if (publish_context_id.empty()) {
-    return false;
+    return PublishContextDecision::kProceed;
   }
   absl::MutexLock lock(&publish_context_mu_);
+  const absl::Time now = absl::Now();
   auto it = publish_contexts_.find(publish_context_id);
   if (it == publish_contexts_.end()) {
-    return false;
+    publish_contexts_[std::string(publish_context_id)] = PublishContextRecord{
+        .key = key,
+        .in_flight = true,
+        .status = absl::UnavailableError("publish in progress"),
+        .updated_at = now,
+    };
+    if (publish_contexts_.size() > kMaxPublishContextRecords) {
+      cleanup_publish_contexts_locked(now);
+    }
+    return PublishContextDecision::kProceed;
   }
-  if (!it->second.status.ok()) {
-    return false;
+  if (it->second.key != key) {
+    return PublishContextDecision::kConflict;
   }
-  return it->second.key == key;
+  it->second.updated_at = now;
+  if (it->second.in_flight) {
+    return PublishContextDecision::kSkipInFlight;
+  }
+  if (it->second.status.ok()) {
+    return PublishContextDecision::kSkipPublished;
+  }
+  it->second.in_flight = true;
+  it->second.status = absl::UnavailableError("publish in progress");
+  return PublishContextDecision::kProceed;
 }
 
 void MetadataGateway::record_publish_context_result(
@@ -454,13 +546,12 @@ void MetadataGateway::record_publish_context_result(
   if (publish_context_id.empty()) {
     return;
   }
-  PublishContextRecord record{
-      .key = key,
-      .status = status,
-      .updated_at = absl::Now(),
-  };
   absl::MutexLock lock(&publish_context_mu_);
-  publish_contexts_[std::string(publish_context_id)] = std::move(record);
+  auto& record = publish_contexts_[std::string(publish_context_id)];
+  record.key = key;
+  record.in_flight = false;
+  record.status = status;
+  record.updated_at = absl::Now();
   if (publish_contexts_.size() > kMaxPublishContextRecords) {
     cleanup_publish_contexts_locked(absl::Now());
   }

@@ -4,7 +4,10 @@ load("@rules_proto_grpc_cpp//:defs.bzl", "cpp_proto_library")
 
 proto_library(
     name = "common_proto",
-    srcs = ["common.proto"],
+    srcs = [
+        "capability_token.proto",
+        "common.proto",
+    ],
     strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
     deps = ["@protobuf//:timestamp_proto"],

@@ -1,9 +1,10 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
 import grpc
 
+from tensorcast.global_store.exceptions import DatabaseError
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
@@ -135,3 +136,51 @@ def test_report_persistence_status_rejects_unspecified_state(
 
     assert response.status == global_store_pb2.Status.STATUS_ERROR
     assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_report_persistence_status_tx_conflict_returns_aborted(
+    servicer, test_context, registered_worker, monkeypatch
+):
+    assert registered_worker
+    plan = servicer.PlanPlacement(_plan_request(), test_context)
+
+    def _raise_conflict(*args, **kwargs):
+        del args, kwargs
+        raise DatabaseError(
+            "Transaction failed: Failed to commit: write-write conflict on key: "
+            '"plan-1, 0, node-1"'
+        )
+
+    monkeypatch.setattr(
+        servicer.placement_persistence_rpc_handler._placement_service,
+        "record_status",
+        _raise_conflict,
+    )
+
+    response = servicer.ReportPersistenceStatus(
+        global_store_pb2.ReportPersistenceStatusRequest(
+            task_id="task-conflict-1",
+            artifact_id="artifact-1",
+            plan_id=plan.plan_id,
+            state=global_store_pb2.PERSISTENCE_STATE_RUNNING,
+            progress=0.1,
+            shard_statuses=[
+                global_store_pb2.PersistenceShardStatus(
+                    shard_id="shard-0",
+                    shard_idx=0,
+                    state=global_store_pb2.PERSISTENCE_STATE_RUNNING,
+                    progress=0.1,
+                    targets=[
+                        global_store_pb2.PlacementTarget(
+                            node_id="test_node_1",
+                            target_state=global_store_pb2.PLACEMENT_TARGET_STATE_PENDING,
+                        )
+                    ],
+                )
+            ],
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.ABORTED

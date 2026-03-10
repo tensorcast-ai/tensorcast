@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
@@ -28,6 +29,8 @@ namespace tcfg = tensorcast::config::v1;
 namespace tensorcast::common::config {
 
 namespace {
+
+constexpr uint64_t kDefaultCpuSharedMemoryStableBytes = 64ULL * 1024 * 1024;
 
 // Convert a YAML::Node tree into nlohmann::json for uniform JsonStringToMessage parsing.
 nlohmann::json yaml_node_to_json(const YAML::Node& node, std::string_view key = {}) {
@@ -193,6 +196,35 @@ void normalize_enum_aliases(nlohmann::json& root) {
         c["verification_timeout_status"] = "VERIFICATION_TIMEOUT_STATUS_DEADLINE";
     }
   }
+  if (root.contains("promotion") && root["promotion"].is_object()) {
+    auto& p = root["promotion"];
+    if (p.contains("policy") && p["policy"].is_string()) {
+      std::string v = absl::AsciiStrToLower(p["policy"].get<std::string>());
+      if (v == "never")
+        p["policy"] = "PROMOTION_POLICY_NEVER";
+      else if (v == "on_materialize" || v == "materialize")
+        p["policy"] = "PROMOTION_POLICY_ON_MATERIALIZE";
+      else if (v == "on_hotness" || v == "hotness")
+        p["policy"] = "PROMOTION_POLICY_ON_HOTNESS";
+      else if (v == "on_policy" || v == "policy")
+        p["policy"] = "PROMOTION_POLICY_ON_POLICY";
+    }
+  }
+}
+
+void normalize_capability_defaults(nlohmann::json& root) {
+  if (!root.contains("engine") || !root["engine"].is_object()) {
+    return;
+  }
+  auto& engine = root["engine"];
+  if (!engine.contains("cpu_shared_memory")) {
+    engine["cpu_shared_memory"] = nlohmann::json::object({{"enabled", true}});
+    return;
+  }
+  auto& cpu_shared = engine["cpu_shared_memory"];
+  if (cpu_shared.is_object() && !cpu_shared.contains("enabled")) {
+    cpu_shared["enabled"] = true;
+  }
 }
 
 // Convert size-like string fields to numeric bytes in-place on JSON tree
@@ -283,10 +315,15 @@ void normalize_duration_fields(nlohmann::json& root) {
     }
     if (lf.contains("handle_leases") && lf["handle_leases"].is_object()) {
       auto& hl = lf["handle_leases"];
-      if (hl.contains("ttl")) {
+      if (hl.contains("ttl"))
         to_duration(hl["ttl"]);
-      }
     }
+  }
+
+  if (root.contains("promotion") && root["promotion"].is_object()) {
+    auto& promo = root["promotion"];
+    if (promo.contains("demotion_drain_timeout"))
+      to_duration(promo["demotion_drain_timeout"]);
   }
 
   if (root.contains("high_availability") && root["high_availability"].is_object()) {
@@ -296,12 +333,19 @@ void normalize_duration_fields(nlohmann::json& root) {
         "periodic_sync_interval",
         "registration_retry_delay",
         "heartbeat_rpc_timeout",
-        "state_sync_rpc_timeout",
-        "full_sync_rpc_timeout"};
+        "state_sync_rpc_timeout"};
     for (const char* f : ha_fields) {
       if (ha.contains(f))
         to_duration(ha[f]);
     }
+  }
+
+  if (root.contains("retention_handles") && root["retention_handles"].is_object()) {
+    auto& rh = root["retention_handles"];
+    if (rh.contains("default_ttl"))
+      to_duration(rh["default_ttl"]);
+    if (rh.contains("max_ttl"))
+      to_duration(rh["max_ttl"]);
   }
 }
 
@@ -317,11 +361,60 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     e->set_artifact_chunk_bytes(256ULL * 1024 * 1024);
   if (e->streaming_buffer_chunks() == 0)
     e->set_streaming_buffer_chunks(16);
+  if (!e->has_cpu_shared_memory()) {
+    e->mutable_cpu_shared_memory()->set_enabled(true);
+  }
+  if (e->cpu_shared_memory().enabled()) {
+    auto* mt = e->mutable_memory_tiers();
+    if (mt->stable_bytes() == 0) {
+      mt->set_stable_bytes(kDefaultCpuSharedMemoryStableBytes);
+    }
+  }
   if (e->has_memory_tiers()) {
     auto* mt = e->mutable_memory_tiers();
     if (mt->preemptible_low_watermark_ratio() <= 0.0) {
       mt->set_preemptible_low_watermark_ratio(0.4);
     }
+  }
+  if (!e->has_byte_mapping()) {
+    e->mutable_byte_mapping();
+  }
+  auto* bm = e->mutable_byte_mapping();
+  if (!bm->has_enable_strided_execution()) {
+    bm->set_enable_strided_execution(true);
+  }
+  if (!bm->has_enable_direct_write_at()) {
+    bm->set_enable_direct_write_at(true);
+  }
+  if (bm->program_cache_entries() == 0) {
+    bm->set_program_cache_entries(256);
+  }
+  if (bm->strided_run_min_ranges() == 0) {
+    bm->set_strided_run_min_ranges(128);
+  }
+  if (bm->strided_min_row_len_bytes() == 0) {
+    bm->set_strided_min_row_len_bytes(4096);
+  }
+  if (bm->strided_max_amplification() == 0) {
+    bm->set_strided_max_amplification(8);
+  }
+  if (bm->strided_block_target_bytes() == 0) {
+    bm->set_strided_block_target_bytes(16ULL * 1024 * 1024);
+  }
+  if (bm->strided_block_max_bytes() == 0) {
+    bm->set_strided_block_max_bytes(64ULL * 1024 * 1024);
+  }
+  if (!bm->has_disk_source_ordered_read()) {
+    bm->set_disk_source_ordered_read(true);
+  }
+  if (bm->disk_source_merge_max_gap_bytes() == 0) {
+    bm->set_disk_source_merge_max_gap_bytes(256ULL * 1024);
+  }
+  if (bm->disk_source_merge_max_amplification() == 0) {
+    bm->set_disk_source_merge_max_amplification(4);
+  }
+  if (bm->disk_source_prefetch_depth() == 0) {
+    bm->set_disk_source_prefetch_depth(2);
   }
 
   if (cfg->has_pinned_memory()) {
@@ -331,6 +424,11 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
       d->set_seconds(30);
       d->set_nanos(0);
     }
+  }
+
+  auto* promo = cfg->mutable_promotion();
+  if (promo->max_concurrency() == 0) {
+    promo->set_max_concurrency(4);
   }
 
   // Lifecycle defaults (durations left at 0s unless specified)
@@ -348,6 +446,19 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   auto* log = obs->mutable_logging();
   if (log->level() == tcfg::Observability::LOG_LEVEL_UNSPECIFIED)
     log->set_level(tcfg::Observability::LOG_LEVEL_INFO);
+
+  // Retention handle defaults (durations)
+  auto* rh = cfg->mutable_retention_handles();
+  if (!rh->has_default_ttl()) {
+    auto* d = rh->mutable_default_ttl();
+    d->set_seconds(600);
+    d->set_nanos(0);
+  }
+  if (!rh->has_max_ttl()) {
+    auto* d = rh->mutable_max_ttl();
+    d->set_seconds(24 * 60 * 60);
+    d->set_nanos(0);
+  }
 
   // Communicator defaults via existing helper
   tensorcast::communicator::normalize_defaults(cfg->mutable_communicator());
@@ -379,6 +490,7 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_file(const std::strin
 
   // Normalize before protobuf parsing
   normalize_enum_aliases(root_json);
+  normalize_capability_defaults(root_json);
   normalize_size_fields(root_json);
   normalize_duration_fields(root_json);
 
@@ -423,6 +535,7 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_text(const std::strin
 
   // Normalize before protobuf parsing
   normalize_enum_aliases(root_json);
+  normalize_capability_defaults(root_json);
   normalize_size_fields(root_json);
   normalize_duration_fields(root_json);
 

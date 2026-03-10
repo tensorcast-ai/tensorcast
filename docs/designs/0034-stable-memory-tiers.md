@@ -6,7 +6,12 @@ areas: ["core", "daemon", "global_store"]
 related_code:
   - "core/store/replica/*"
   - "daemon/runtime/*"
+  - "daemon/state/retention_registry.{h,cc}"
   - "tensorcast/global_store/*"
+  - "tensorcast/retention/__init__.py"
+  - "proto/tensorcast/common/v1/capability_token.proto"
+  - "proto/tensorcast/daemon/v2/store_daemon.proto"
+  - "proto/tensorcast/config/v1/daemon_config.proto"
   - "schema.sql"
 links:
   design: ./0022-distributed-preemptible-memory.md
@@ -158,6 +163,99 @@ All interfaces and fields must keep these prefixes. Avoid ambiguous names such a
 3. When chunks are released (export complete, replica unloaded, etc.), `release_stable_lease` returns the same number of bytes to the `MemoryTierBudget` and updates UMA. Budget changes are propagated to the Global Store in the next `MemoryTierStatus`.
 4. This makes the stable pool the combination of "available budget + leased chunks" instead of anonymous allocations that cannot be bound.
 5. Stable capacity is driven entirely by the `stable_bytes` configuration; we no longer infer it from current free memory. If `uma_cpu_capacity_bytes` is smaller than the configured value, bootstrap fails and asks operators to lower the config or free host DRAM.
+
+## Retention handles (daemon-scoped, control-plane retention refs)
+
+TensorCast needs a way for control-plane components (queue brokers, controllers, node agents) to keep a daemon-owned
+payload rematerializable for a bounded time **without PID coupling**. A *retention handle* is the platform primitive
+for this: a daemon-issued, renewable + releasable reference whose renew/release authority is carried only by an
+unforgeable capability token.
+
+Retention handles are enabled/disabled by `DaemonConfig.retention_handles.enabled` and require configured capability
+token keys (`DaemonConfig.capability_tokens`).
+
+This is intentionally separate from data-plane materialization: retention handles adjust *retention intent* for an
+already-known selection; they do not move bytes.
+
+### V1 definition (required)
+
+In v1, "a rematerialization path exists" means:
+
+- **Issuer-local and policy-scoped**: the issuing daemon can provide at least one serving path for the referenced
+  `ArtifactSelection` from its own StoreEngine, consistent with the provided `StorePolicy`.
+- **Stable-DRAM anchored (v1)**: the intended path is a daemon-owned CPU replica held in the stable tier (UMA stable
+  leases / stable cache admission). This is not a cluster-wide durability guarantee.
+
+Acquire semantics boundary (required):
+
+> `AcquireRetentionHandle` / `RenewRetentionHandle` / `ReleaseRetentionHandle` are control-plane only and MUST NOT
+> trigger payload materialization, transfer, or registration. They only adjust retention intent for an already-known
+> selection.
+
+### API (RPC + SDK)
+
+- Daemon RPCs: `AcquireRetentionHandle` / `RenewRetentionHandle` / `ReleaseRetentionHandle` in
+  `proto/tensorcast/daemon/v2/store_daemon.proto`.
+- Python SDK helpers: `tensorcast.retention.acquire_retention_handle(...)`,
+  `tensorcast.retention.renew_retention_handle(...)`, `tensorcast.retention.release_retention_handle(...)`.
+  - `CallContext` is client-side only (deadlines/timeouts); it is not part of the retention RPC request payload.
+
+Request requirements (v1):
+
+- `ArtifactSelection` MUST include `artifact_id` and MUST include selection fingerprints
+  (`logical_layout_hash`, `selection_hash`), since the daemon keys downgrade-on-last-release by canonical selection
+  identity.
+- `ttl_ms=0` means "use the daemon default TTL" (`DaemonConfig.retention_handles.default_ttl`).
+  - The issuer clamps effective TTL to `DaemonConfig.retention_handles.max_ttl`.
+  - If `StorePolicy` carries a stable-retention TTL, the effective TTL is also clamped to that policy TTL.
+
+`RetentionHandle` is represented (SDK-level) as:
+
+- `handle_id` (debuggable id)
+- `expires_at_ms`
+- `capability_token` (required for renew/release; MUST use the unified capability token envelope described in
+  `docs/designs/0055-programmable-framework.md`; requires `DaemonConfig.capability_tokens` to be configured)
+- `charged_bytes` (authoritative bytes charged for retention/accounting)
+- optional `diagnostics` (admission/skip reason, tier status)
+
+### Key properties (normative)
+
+- **Issuer-scoped**: bound to one issuer daemon (`daemon_id`).
+- **Time-bounded**: handles MUST expire; renewals MUST be bounded by caller deadlines.
+- **TTL caps (required)**: issuer MUST clamp requested TTL to a configured maximum
+  (`DaemonConfig.retention_handles.max_ttl`).
+- **Idempotent release**: repeated release MUST be safe.
+- **Downgrade on last release (required)**: when the last handle for a canonicalized selection identity is released or
+  expires, the daemon MUST reduce effective stable retention intent so stable bytes become reclaimable under pressure.
+
+### Error model (normative)
+
+- `AcquireRetentionHandle`
+  - `RESOURCE_EXHAUSTED`: cannot admit under current tier budgets/policies.
+  - `FAILED_PRECONDITION`: retention handles disabled/unconfigured, or selection/policy invalid, or selection cannot be
+    made rematerializable under v1 rules (e.g., policy does not allow local stable DRAM retention).
+  - `UNAVAILABLE`: issuer not able to serve control-plane requests (starting, fenced, shutting down).
+- `RenewRetentionHandle`
+  - `FAILED_PRECONDITION`: token invalid/expired/unknown (non-retryable; callers treat as "path lost").
+  - `UNAVAILABLE` / `DEADLINE_EXCEEDED`: transient issuer unreachability (retryable within bounded deadlines).
+- `ReleaseRetentionHandle`
+  - MUST be idempotent and safe to retry; repeated release MUST NOT return an error.
+  - SHOULD treat "unknown handle" as already-released (success), so cleanup is safely retryable. The RPC response may
+    return `released=false` for already-released handles without raising an error.
+
+### Implementation sketch (daemon)
+
+The daemon maintains a local `RetentionRegistry` that:
+
+- tracks active handles and aggregates them into an effective retention intent per canonical selection identity
+  (refcount + max expiry + policy rank),
+- enforces stable admission by charging against `MemoryTierBudget` and applying stable retention policy,
+- expresses expiry + cleanup using the daemon's Lease/Guard/Finalizer discipline (`SessionLifecycleManager`):
+  - `DeadlineGuard(expires_at)` retires handles,
+  - idempotent finalizers decrement refs and trigger downgrade-on-last-release logic.
+
+Important boundary (required): retention handles MUST NOT introduce a second "pinned memory" concept. They express
+stable-tier intent over UMA-managed CPU replicas; pinned pools remain data-plane resources.
 
 ## Preemptible strategy
 

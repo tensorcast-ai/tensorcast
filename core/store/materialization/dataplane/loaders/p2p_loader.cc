@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/loaders/p2p_loader.h"
 
@@ -106,7 +106,10 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       .local_endpoint_id = source_.local_endpoint_id,
       .remote_endpoint_id = source_.remote_endpoint_id,
       .routing_context = source_.routing_context,
-      .total_size = source_.size_bytes};
+      .total_size = source_.size_bytes,
+      .request_budget = source_.request_budget,
+      .artifact_id = source_.artifact_id,
+  };
   auto remote_src = std::make_shared<store::loader::RemoteKeySource>(src_opts);
 
   // Optional disk fallback via configured directory
@@ -125,6 +128,10 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
   struct Wrapper : public loader::SeekableSource {
     explicit Wrapper(std::shared_ptr<loader::SeekableSource> inner) : inner_(std::move(inner)) {}
 
+    [[nodiscard]] uint64_t total_bytes() const override {
+      return inner_->total_bytes();
+    }
+
     absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
       return inner_->read(dst, max_bytes);
     }
@@ -133,12 +140,16 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       return inner_->read_at(offset, dst, bytes);
     }
 
-    [[nodiscard]] bool supports_direct_write() const override {
-      return inner_->supports_direct_write();
+    [[nodiscard]] bool supports_direct_write_at() const override {
+      return inner_->supports_direct_write_at();
     }
 
-    absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override {
-      return inner_->read_into(dest_va_offset, bytes, grant);
+    absl::StatusOr<size_t> read_into_at(
+        uint64_t src_offset,
+        uint64_t dest_va_offset,
+        size_t bytes,
+        const DirectWriteGrant& grant) override {
+      return inner_->read_into_at(src_offset, dest_va_offset, bytes, grant);
     }
 
    private:

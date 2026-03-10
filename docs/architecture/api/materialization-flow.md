@@ -14,23 +14,25 @@ Related docs:
 - Public surface and fallbacks: [API Design](./api-design.md)
 - Region-backed lifecycles and teardown: [Region-Backed](./region-backed.md)
 - Error/retry semantics: [Error, Retry, Observability](./error-retry-observability.md)
+- View semantics: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 
 ## Definitions and Payloads
 
 - **Canonical index**: JSON mapping `tensor_name -> [logical_offset, logical_length, shape, stride, dtype, storage_offset]`.
   It defines the logical layout and is used to build payload descriptors. See
   `core/store/materialization/dataplane/metadata/canonical_index.h` for the stable format.
-- **View id (`view_id`)**: Deterministic identity of a variant ByteSpace (see `docs/designs/0016-artifact-view-v1.md`).
+- **View id (`view_id`)**: Deterministic identity of a variant ByteSpace (see `docs/architecture/artifact-views-and-retrieval.md`).
   Non-identity views must have a resolved `view_id` so `ReplicaKey` disambiguation and variant verification apply.
 - **View data hash (`view_data_hash`)**: Integrity hash of the realized view byte stream (post-transform). It is distinct
   from `view_id` and is not used as a subset identifier.
 - **View subset hash (`view_subset_hash` / `ViewSubset.subset_hash`)**: Opaque raw digest bytes identifying a selection
   (e.g., sorted+unique `tensor_names`). These bytes must not be UTF-8/hex-string bytes; see
-  `docs/designs/0036-01-materialization-pipeline-v2.md` and `docs/designs/0042-region-backed-tensor-dict-into.md`.
+  `docs/architecture/artifact-views-and-retrieval.md` and `docs/architecture/api/region-backed.md`.
 - **Replica**: An engine-managed memory instance backed by UMA/VS. It can be loaded
   into CPU and/or GPU memory states and exported via CUDA IPC handles (GPU) or a local CPU memfd handle (CPU).
-- **Materialization**: Resolving an artifact reference (artifact_id/key/disk path)
-  into GPU-visible tensors plus descriptors and canonical index bytes.
+- **Materialization**: Resolving an `ArtifactSelection` (with
+  `selection.artifact_id` as request identity) into GPU-visible tensors plus
+  descriptors and canonical index bytes.
 - **Handle lease (lease_token)**: An opaque daemon capability returned alongside the exported handle (CUDA IPC or CPU
   memfd). The SDK binds it to returned tensor lifetimes and releases it over the local handle plane.
 - **Region-backed get_into**: A no-replica path that writes directly into a
@@ -40,16 +42,19 @@ Related docs:
 
 The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/store_daemon.proto`):
 
-- `MaterializeReplica`: by `artifact_id` and/or disk fallback path. Supports views.
-- `MaterializeByKey`: resolves key mapping in Global Store, then materializes.
+- `ResolveKeyMapping`: resolves key to `artifact_id` on the control path.
+- `MaterializeReplica`: selection-first replica materialization.
 - `MaterializeIntoTarget`: region-backed `get_into` into an existing CUDA region.
-- `ResolveArtifactFromDisk`: validates disk path and returns canonical index.
+- `ImportArtifactFromPath` / `ImportArtifactFromPathStream`: explicit local-only
+  disk import that returns `artifact_id` + canonical index metadata for
+  reference-only registration.
 - `ConfirmReplica` / `WaitReplicaVerification`: readiness + verification waits.
 - `GetServerConfig`: advertises `local_handle_socket_path` and `cpu_shared_memory_enabled` for lease-aware imports. When the socket path is unset in config, the daemon auto-selects
   `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to
   `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session` or
   `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery relies on
-  `TENSORCAST_INSTANCE`); set it explicitly for cross-pod deployments.
+  `TENSORCAST_INSTANCE`); if `TENSORCAST_INSTANCE` is not set, it falls back to
+  `$TENSORCAST_HOME/hosts/<host_id>/runtime/daemons/<daemon_id>/local_handle.sock`. If the selected path exceeds AF_UNIX limits, the daemon falls back to `$TENSORCAST_HOME/uds/lh-<hash>.sock`. Set it explicitly for cross-pod deployments.
 
 The SDK builds these requests in `tensorcast/api/_materialize.py` and
 `tensorcast/api/store/materialization.py`.
@@ -66,7 +71,8 @@ sequenceDiagram
   participant SRC as Disk or P2P Source
 
   H->>SDK: get/get_view/get_into
-  SDK->>DM: MaterializeReplica/ByKey/IntoTarget
+  SDK->>DM: ResolveKeyMapping (optional)
+  SDK->>DM: MaterializeReplica/IntoTarget
   DM->>SE: materialize_replica()/materialize_into_target()
   SE->>PL: ingest_from_disk()/ingest_from_p2p() or load/copy
   PL->>SRC: read data (disk or P2P)
@@ -86,20 +92,21 @@ Key controller behavior lives in `daemon/service/controllers/materialization_con
 allow flags) so local-only requests are enforced server-side:
 
 - `prefer=auto` -> `SourcePreference=AUTO`, `allow_p2p=true`, `allow_disk=true`.
-- `prefer=local` -> `allow_p2p=false`, `allow_disk=false` unless an explicit disk path is provided.
+- `prefer=local` -> `allow_p2p=false`, `allow_disk=false`.
 - `prefer=p2p` -> `SourcePreference=PREFER_P2P` (requires `artifact_id`).
-- `prefer=disk` -> `SourcePreference=PREFER_DISK` (requires disk path or key mapping).
+- `prefer=disk` -> `SourcePreference=PREFER_DISK` (daemon resolves disk source
+  from managed/shared-disk bindings or local import registry).
 - `allow_p2p=False` disables P2P but still allows local replica reuse; disk is allowed unless `prefer=local`.
 
 See `tensorcast/api/store/materialization.py` for the exact decision logic.
 
-### Daemon control path (MaterializeReplica / MaterializeByKey)
+### Daemon control path (MaterializeReplica)
 
-1. **Validate inputs**: require `artifact_id` or disk path; `prefer_p2p` requires
-   `artifact_id`; device UUID/ID must be valid.
-2. **Normalize disk path**: disk paths are normalized under `storage_path` and
-   rejected if they escape the configured root; when `server.storage_path` is
-   empty, disk paths are rejected and disk materialization is disabled.
+1. **Validate inputs**: require `selection.artifact_id`; `prefer_p2p` requires
+   `selection.artifact_id`; device UUID/ID must be valid.
+2. **Resolve disk source internally**: when disk is allowed, the daemon chooses a
+   managed shared-disk path or local-import source binding by `artifact_id`, and
+   validates source fingerprints for local-import bindings before read.
 3. **Disk descriptor checks**:
    - If `verify_checksums=true`, `artifact_descriptor.json` is required and
      validated against the computed index multihash.
@@ -115,10 +122,10 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
-     disk_path, source policy allow flags, variant/view info).
+     typed disk-source selection, source policy allow flags, variant/view info).
    - Determine materialize mode:
-     - Disk-only (no artifact_id, no prefer_disk) -> `LOAD_ONLY`.
-     - Otherwise -> `AUTO`.
+     - Disk-only policy path -> `LOAD_ONLY`.
+     - Mixed/auto source policy path -> `AUTO`.
    - Call `StoreEngine::materialize_replica`.
 
 ### StoreEngine materialization service
@@ -154,14 +161,17 @@ Materialization ingestion uses a structured pipeline in
    - Load asynchronously and wait for LOADED state (with pinned timeout).
    - GPU loads may retry after eviction.
 3. **VerificationStage**
-   - Disk: compute full digest when requested or forced (e.g., safetensors),
-     verify descriptor multihashes, emit `verification.json`.
+   - Disk: compute full digest when requested or forced (e.g., safetensors) and
+     verify descriptor multihashes. For reference-only imported sources, source
+     mutation policy is read-only (no descriptor/index/verification writes).
    - P2P: validate `verification_json` key points when provided.
    - Compute view data hash when applicable.
 4. **HandleStage**
    - Build `ReplicaHandle`, attach CUDA IPC handle and view index JSON if present.
 
 ## Data Plane: Loaders, Pump, and Sinks
+
+Byte-range mapping and execution semantics are documented in `docs/internals/byte-range-mapping-and-execution.md`.
 
 ### Sources
 

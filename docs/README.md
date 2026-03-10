@@ -16,6 +16,20 @@ Understand how TensorCast works:
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
+- **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
+- **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics
+
+## 🧭 Coordination Strategy Series
+
+Cross-cutting high-level reasoning for centralized vs decentralized coordination, hot/cold state placement, and workload-driven mode switching:
+
+- **[Distributed Coordination Series](distributed-coordination-series/README.md)** - Index for the full strategy and trade-off document set
+
+## 📘 User Guides
+
+Integration-oriented guides for SDK consumers:
+
+- **[SDK Startup User Guide](guides/sdk-startup-user-guide.md)** - Best practices for `tensorcast.init`, daemon lifecycle ownership, API/SDK startup modes, and TP/multi-process integration.
 
 ## 🔧 Component Development
 
@@ -26,6 +40,9 @@ Guides for developing specific components:
 - **[Adding New Metrics](internals/adding-metrics.md)** - How to create and expose metrics
 - **[tensor_dict_into Dataflow](internals/tensor_dict_into_dataflow.md)** - Legacy vs region-backed into paths
 - **[Preemptible Memory Internals](internals/preemptible-memory.md)** - UMA/VS preemption workflow and tuning
+- **[Byte-Range Mapping and Execution](internals/byte-range-mapping-and-execution.md)** - Unified byte-range executor semantics
+- **[Chaos Report Template](internals/chaos-report-template.md)** - Standard handoff template for multi-host chaos runs
+- **[Chaos Gate Checklist](internals/chaos-gate-checklist.md)** - Phase gate review checklist and required artifacts
 
 ## ⚙️ Core Modules (C++)
 

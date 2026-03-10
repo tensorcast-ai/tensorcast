@@ -17,12 +17,16 @@ from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
+    AssemblyLayoutBindingRepository,
     InstanceRepository,
     LeafRepository,
+    LayoutSpecRepository,
+    PendingTransportRequestRepository,
+    ProofRepository,
     ReplicaRepository,
     TransportRepository,
-    VariantCoverageRepository,
-    VariantRepository,
+    ViewCoverageRepository,
+    ViewRepository,
     WorkerRepository,
 )
 from tensorcast.global_store.services import (
@@ -141,15 +145,20 @@ def test_context():
 @pytest.fixture
 def memory_info():
     """Create a sample memory info for testing"""
-    return common_pb2.MemoryInfo(
+    info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
-        remote_memory_keys=["test_key"],
         memory_size=1000000000,
         memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
+    transport = info.transport
+    transport.export_state = common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+    transport.export_generation = 1
+    transport.remote_memory_keys.append("test_key")
+    transport.buffer_sizes.append(info.memory_size)
+    return info
 
 
 @pytest.fixture
@@ -187,11 +196,15 @@ def repositories(db_connection):
     return {
         "replica": ReplicaRepository(db_connection),
         "transport": TransportRepository(db_connection),
-        "variant": VariantRepository(db_connection),
-        "coverage": VariantCoverageRepository(db_connection),
+        "pending_transport_request": PendingTransportRequestRepository(db_connection),
+        "view": ViewRepository(db_connection),
+        "coverage": ViewCoverageRepository(db_connection),
         "leaf": LeafRepository(db_connection),
         "worker": WorkerRepository(db_connection),
         "instance": InstanceRepository(db_connection),
+        "layout_spec": LayoutSpecRepository(db_connection),
+        "assembly_layout_binding": AssemblyLayoutBindingRepository(db_connection),
+        "proof": ProofRepository(db_connection),
     }
 
 
@@ -225,14 +238,19 @@ observability:
     return {
         "artifact": ArtifactService(repositories["replica"]),
         "transport": TransportService(
-            repositories["replica"], repositories["transport"]
+            repositories["replica"],
+            repositories["transport"],
+            repositories["pending_transport_request"],
         ),
         "worker": WorkerService(repositories["worker"], repositories["replica"]),
         "instance": InstanceService(repositories["instance"], repositories["worker"]),
         "view_state": ViewStateService(
-            repositories["variant"],
+            repositories["view"],
             repositories["leaf"],
             repositories["coverage"],
+            repositories["layout_spec"],
+            repositories["assembly_layout_binding"],
+            repositories["proof"],
         ),
     }
 

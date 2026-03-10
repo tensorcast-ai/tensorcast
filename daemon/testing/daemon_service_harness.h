@@ -11,8 +11,12 @@
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/key_mapping_controller.h"
+#include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
+#include "daemon/service/controllers/persistence_rpc_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
 #include "daemon/service/grpc_service_impl.h"
@@ -46,6 +50,10 @@ class DaemonServiceHarness {
     return *kernel_;
   }
 
+  MaterializationController& materialization_controller() const {
+    return *materialization_controller_;
+  }
+
   std::shared_ptr<common::AsyncRuntime> async_runtime_shared() const {
     return async_runtime_;
   }
@@ -58,6 +66,10 @@ class DaemonServiceHarness {
       std::unique_ptr<RegistrationController> registration_controller,
       std::unique_ptr<TransportController> transport_controller,
       std::unique_ptr<StatusController> status_controller,
+      std::unique_ptr<KeyMappingController> key_mapping_controller,
+      std::unique_ptr<PersistenceRpcController> persistence_rpc_controller,
+      std::unique_ptr<ReplicaSessionController> replica_session_controller,
+      std::unique_ptr<LeaseController> lease_controller,
       std::unique_ptr<StoreDaemonServiceImpl> service,
       std::unique_ptr<LocalHandleServer> local_handle_server);
 
@@ -67,6 +79,10 @@ class DaemonServiceHarness {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<KeyMappingController> key_mapping_controller_;
+  std::unique_ptr<PersistenceRpcController> persistence_rpc_controller_;
+  std::unique_ptr<ReplicaSessionController> replica_session_controller_;
+  std::unique_ptr<LeaseController> lease_controller_;
   std::unique_ptr<StoreDaemonServiceImpl> service_;
   std::unique_ptr<LocalHandleServer> local_handle_server_;
   std::atomic<bool> stop_called_{false};

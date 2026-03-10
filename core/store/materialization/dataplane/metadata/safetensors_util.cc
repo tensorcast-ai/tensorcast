@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 
@@ -11,12 +11,13 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "absl/status/status.h"
-#include "absl/strings/str_format.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
 // Use nlohmann/json for header parsing and canonical index serialization
 #include <nlohmann/json.hpp>
 
@@ -61,11 +62,12 @@ absl::StatusOr<SafetensorsHeaderInfo> ParseSafetensorsHeader(int fd) {
 }
 
 namespace {
-// Map safetensors dtype token to torch dtype string used across the system
-std::string map_safetensors_dtype_to_torch(const std::string& dtype) {
+const std::map<std::string, std::string>& safetensors_dtype_map() {
   static const std::map<std::string, std::string> kMap = {
       {"F16", "torch.float16"},
       {"BF16", "torch.bfloat16"},
+      {"F8_E4M3", "torch.float8_e4m3fn"},
+      {"F8_E5M2", "torch.float8_e5m2"},
       {"F32", "torch.float32"},
       {"F64", "torch.float64"},
       {"I8", "torch.int8"},
@@ -75,8 +77,28 @@ std::string map_safetensors_dtype_to_torch(const std::string& dtype) {
       {"U8", "torch.uint8"},
       {"BOOL", "torch.uint8"},
   };
-  auto it = kMap.find(dtype);
-  if (it == kMap.end()) {
+  return kMap;
+}
+
+std::string supported_safetensors_dtype_tokens() {
+  std::string tokens;
+  bool first = true;
+  for (const auto& entry : safetensors_dtype_map()) {
+    const auto& dtype_token = entry.first;
+    if (!first) {
+      tokens += ", ";
+    }
+    tokens += dtype_token;
+    first = false;
+  }
+  return tokens;
+}
+
+// Map safetensors dtype token to torch dtype string used across the system
+std::string map_safetensors_dtype_to_torch(const std::string& dtype) {
+  const auto& dtype_map = safetensors_dtype_map();
+  auto it = dtype_map.find(dtype);
+  if (it == dtype_map.end()) {
     return std::string();
   }
   return it->second;
@@ -96,7 +118,7 @@ std::vector<int64_t> compute_row_major_stride(const std::vector<int64_t>& shape)
 }
 } // namespace
 
-absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector<std::filesystem::path>& files) {
+absl::StatusOr<std::string> BuildSourceIndexFromSafetensors(const std::vector<std::filesystem::path>& files) {
   using nlohmann::json;
   if (files.empty()) {
     return absl::InvalidArgumentError("No safetensors files provided");
@@ -121,7 +143,7 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
   for (const auto& p : paths) {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0) {
-      return absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open %s", p.string()));
+      return absl::ErrnoToStatus(errno, std::format("Failed to open {}", p.string()));
     }
     auto header_info = ParseSafetensorsHeader(fd);
     if (!header_info.ok()) {
@@ -161,7 +183,14 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
       const std::string dtype_token = meta.at("dtype").get<std::string>();
       const std::string torch_dtype = map_safetensors_dtype_to_torch(dtype_token);
       if (torch_dtype.empty()) {
-        return absl::InvalidArgumentError("Unsupported safetensors dtype");
+        return absl::InvalidArgumentError(
+            std::format(
+                "Unsupported safetensors dtype '{}' for tensor '{}' in file '{}'. "
+                "Supported dtype tokens: {}",
+                dtype_token,
+                name,
+                p.string(),
+                supported_safetensors_dtype_tokens()));
       }
       const auto offsets = meta.at("data_offsets").get<std::vector<uint64_t>>();
       if (offsets.size() != 2 || offsets[1] < offsets[0]) {
@@ -200,6 +229,14 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
     out[name].push_back(e.storage_offset);
   }
   return out.dump();
+}
+
+absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector<std::filesystem::path>& files) {
+  auto source_or = BuildSourceIndexFromSafetensors(files);
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+  return build_coalesced_canonical_index_from_source_index_json(*source_or, /*align_bytes=*/8);
 }
 
 } // namespace tensorcast::store::loader

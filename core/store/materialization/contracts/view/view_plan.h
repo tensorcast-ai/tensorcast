@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -6,21 +6,13 @@
 #include <string>
 #include <vector>
 
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
+
 namespace tensorcast::store::materialization::view {
 
 struct SelectionPlan {
-  struct Range {
-    enum class Kind : uint8_t { kData = 0, kPad = 1 };
-    Kind kind{Kind::kData};
-    uint64_t src_offset{0};
-    uint64_t dst_offset{0};
-    uint64_t length{0};
-  };
-
-  std::vector<Range> ranges;
+  ::tensorcast::store::loader::ByteRangeMap map;
   bool is_contiguous{false};
-  uint32_t num_ranges{0};
-  uint64_t total_bytes{0};
   bool is_segment_aligned{false};
   bool requires_materialization{false};
 };

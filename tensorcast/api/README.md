@@ -16,6 +16,10 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
+## Error Verbosity (SDK)
+
+By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC debug noise. For full RPC error chains and debug strings, set `TENSORCAST_DEBUG_ERRORS=1`.
+
 ## Store Policy, Local Stable Tier, and Persistence
 
 - `Store.register`/`register_async` and `Store.put`/`put_async` accept a first-class `policy: StorePolicy | str | None`; `RegisterArtifactOptions(policy=...)` remains as an advanced escape hatch. See `../../docs/architecture/api/policy-persistence.md`.
@@ -30,7 +34,7 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
 
 - `tensorcast.artifact(...)` / `Store.artifact(...)` provide lazy handles that
   expose metadata (`tensor_names`, `tensor_meta`, `describe`) and selective
-  materialization (`tensor_dict(names=...)`, `tensor(name, ...)`, `tensor_into(...)`) as the canonical retrieval surface.
+  materialization (`subset(...).tensor_dict(...)`, `tensor(name, ...)`, `tensor_into(...)`) as the canonical retrieval surface.
 - Handles accept whichever identifiers are available (`artifact_id`, key, or
   disk path). At least one identifier is required, but resolved handles keep all
   known hints so `with_fallback(...)` and `to_dict()/from_dict()` remain valid
@@ -52,8 +56,10 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
   artifact/view identity, but `ctx.idempotency_key` seeds deterministic operation ids for joinable actions.
 - Long-tail control-plane actions return `Operation[T]` (sync/blocking): use `status()` / `result()` / `cancel()` to
   implement wait/cancel without ad-hoc polling loops.
-- `Artifact.prefetch(...)` is GPU-only; CPU materialization requires explicit `device="cpu"` fetches that mint
-  PID-bound handle leases.
+- `Artifact.prefetch(...)` warms a **daemon-owned** replica and supports both GPU and CPU/DRAM placement:
+  - GPU VRAM: `device="cuda:0"` or `0`
+  - daemon-owned host DRAM: `device="cpu"`, `"dram"`, or `-1`
+  Prefetch defaults to `NO_LEASE` and does not export handles to the caller; handle-exporting APIs remain PID/lease-bound.
 - `ctx.deadline_ms` is enforced end-to-end: materialization retries and polling operations clamp their budgets to the
   remaining deadline, and worker/agent RPCs inherit the same timeout budget.
 - `tensorcast.plan(ctx)` builds a programmable orchestration plan. Plan steps target stable worker identities
@@ -63,7 +69,7 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
 ## Materialization v2 (descriptor streaming)
 
 - `MaterializationPipeline` streams `TensorPayloadDescriptor` + tensor pairs from the daemon v2 surface (`tensorcast.proto.daemon.v2`) by default; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.
-- Selective fetch (`tensor_names`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
+- Selective fetch via handle selection (`artifact.subset(...)`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
 - Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
 - Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePolicy` (preference + allow flags). Disk‑first sets `preference=PREFER_DISK` and all disk reads stay in the daemon data path.
 - `MemCopyHandle` is lease-aware: the daemon returns a handle (`cuda_ipc_handle` for GPU or `cpu_memfd` for CPU) plus an opaque `lease_token`. The SDK binds that lease token to the returned `torch.Tensor` lifetimes and releases it over the daemon’s local handle plane (UDS).
@@ -102,8 +108,11 @@ materialization (`engine.cpu_shared_memory.enabled=true`). If
 auto-selects `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs
 (daemon_state_dir defaults to `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session`
 or `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery
-relies on `TENSORCAST_INSTANCE`); set it
-explicitly when daemon and client SDK run in different pods.
+relies on `TENSORCAST_INSTANCE`; when `TENSORCAST_INSTANCE` is not set, the daemon
+falls back to `$TENSORCAST_HOME/hosts/<host_id>/runtime/daemons/<daemon_id>/local_handle.sock`).
+If the selected socket path exceeds AF_UNIX limits, the daemon falls back to
+`$TENSORCAST_HOME/uds/lh-<hash>.sock`. Set it explicitly when daemon and client SDK
+run in different pods.
 When connecting to the current local session and the daemon does not advertise
 the socket path, the SDK falls back to the same daemon_state_dir location.
 Otherwise the API raises `ArtifactError("CUDA device required for retrieval")`
@@ -137,9 +146,9 @@ canonical artifact. Key behaviours:
   requiring prior Global Store state.
 
 The API returns a `RegisteredArtifact` whose `registration_result` carries the
-view identifier, canonical coverage ranges, and variant hash for downstream
+view identifier, canonical coverage ranges, and view hash for downstream
 automation.
-See the [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) guide for the full daemon ↔ Global Store ↔ SDK flow.
+See the [View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#view-registration-telemetry) guide for the full daemon ↔ Global Store ↔ SDK flow.
 
 ## Tensor Storage Graph Helper
 

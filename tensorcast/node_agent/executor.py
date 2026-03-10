@@ -11,6 +11,7 @@ from typing import Callable, Mapping
 
 from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for
+from tensorcast.api._errors import DeviceMismatch
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
 from tensorcast.api.errors import ArtifactError
@@ -20,6 +21,7 @@ from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.engine_adapter import EngineAdapter
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
@@ -67,7 +69,7 @@ def _derive_action_idempotency_key(
     base_key: str,
     action: str,
     target_id: str,
-    selection: plan_pb2.ArtifactSelection,
+    selection: common_pb2.ArtifactSelection,
     device_id: int | None,
     ttl_ms: int | None,
     extra: str | None = None,
@@ -78,6 +80,8 @@ def _derive_action_idempotency_key(
     digest.update(action.encode("utf-8"))
     digest.update(b"|target=")
     digest.update(target_id.encode("utf-8"))
+    digest.update(b"|artifact=")
+    digest.update(str(selection.artifact_id).encode("utf-8"))
     if device_id is not None:
         digest.update(f"|device={int(device_id)}".encode("utf-8"))
     if ttl_ms is not None:
@@ -115,7 +119,7 @@ def _ctx_timeout_s(ctx: CallContext) -> float | None:
 
 
 def _view_spec_from_proto(
-    view_spec: store_daemon_pb2.ViewSpec,
+    view_spec: common_pb2.ViewSpec,
 ) -> ViewSpecBuildResult | None:
     if view_spec is None or not view_spec.tensors:
         return None
@@ -468,7 +472,7 @@ class NodeAgentExecutor:
         plan: plan_pb2.PlanSpec,
         action: str,
         target_id: str,
-        selection: plan_pb2.ArtifactSelection,
+        selection: common_pb2.ArtifactSelection,
         extra: str | None,
         call_ctx: CallContext,
     ) -> CallContext:
@@ -492,7 +496,7 @@ class NodeAgentExecutor:
         )
 
     def _artifact_from_selection(
-        self, selection: plan_pb2.ArtifactSelection
+        self, selection: common_pb2.ArtifactSelection
     ) -> tuple[Artifact, tuple[str, ...] | None]:
         view_spec = None
         if selection.HasField("view_spec"):
@@ -505,7 +509,7 @@ class NodeAgentExecutor:
         )
         tensor_names = tuple(selection.tensor_names) if selection.tensor_names else None
         if tensor_names:
-            artifact = artifact.view(names=list(tensor_names))
+            artifact = artifact.subset(list(tensor_names))
         return artifact, tensor_names
 
     def _transform_into(
@@ -649,20 +653,6 @@ class NodeAgentExecutor:
             replica_uuid = str(uuid.uuid5(ns, action_key))
         else:
             replica_uuid = uuid.uuid4().hex
-        view_spec = None
-        if selection.HasField("view_spec"):
-            view_spec = selection.view_spec
-        view_id = selection.view_id or None
-        view_subset_hash = (
-            selection.view_subset_hash if selection.view_subset_hash else None
-        )
-        device_id = int(action.device_id)
-        if device_id == CPU_DEVICE_ID:
-            target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-            device_uuid = ""
-        else:
-            target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
-            device_uuid = device_uuid_for(device_id)
         timeout_s = _ctx_timeout_s(call_ctx)
         if timeout_s is not None and timeout_s <= 0:
             return NodeAgentStepResult(
@@ -676,18 +666,33 @@ class NodeAgentExecutor:
                 ),
             )
         try:
+            device_id = int(action.device_id)
+            if device_id == CPU_DEVICE_ID:
+                target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                device_uuid = ""
+            else:
+                target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
+                device_uuid = device_uuid_for(device_id)
             self._client.materialize_by_artifact_id_v2(
-                artifact_id=selection.artifact_id,
+                selection=selection,
                 replica_uuid=replica_uuid,
                 device_uuid=device_uuid,
                 wait_for_completion=False,
                 return_response=True,
-                view=view_spec,
-                view_id=view_id,
-                view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
                 lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
                 timeout_s=timeout_s,
+            )
+        except DeviceMismatch as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="prefetch",
+                status=_status_failed(
+                    f"prefetch failed: {exc}",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             return NodeAgentStepResult(

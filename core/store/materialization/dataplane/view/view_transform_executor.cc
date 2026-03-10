@@ -23,6 +23,12 @@ absl::StatusOr<at::ScalarType> to_scalar_type(std::string_view dtype) {
   if (dtype == "torch.bfloat16") {
     return at::kBFloat16;
   }
+  if (dtype == "torch.float8_e4m3fn") {
+    return at::kFloat8_e4m3fn;
+  }
+  if (dtype == "torch.float8_e5m2") {
+    return at::kFloat8_e5m2;
+  }
   if (dtype == "torch.float32" || dtype == "torch.float") {
     return at::kFloat;
   }

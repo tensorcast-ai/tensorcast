@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/safetensors_source.h"
 
@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -46,6 +47,15 @@ SafetensorsSource::~SafetensorsSource() {
     ::close(fd_);
     fd_ = -1;
   }
+}
+
+uint64_t SafetensorsSource::total_bytes() const {
+  auto* self = const_cast<SafetensorsSource*>(this);
+  if (auto st = self->OpenFile(); !st.ok()) {
+    LOG(WARNING) << "SafetensorsSource: OpenFile failed in total_bytes: " << st;
+    return 0;
+  }
+  return data_size_;
 }
 
 absl::Status SafetensorsSource::OpenFile() {
@@ -104,6 +114,9 @@ absl::StatusOr<size_t> SafetensorsSource::read(void* dst, size_t max_bytes) {
   auto got = pread_fully(fd_, data_start_ + current_offset_, dst, to_read);
   if (!got.ok())
     return got.status();
+  if (*got != to_read) {
+    return absl::DataLossError("SafetensorsSource short read before expected EOF");
+  }
   current_offset_ += *got;
   return got;
 }
@@ -116,7 +129,14 @@ absl::StatusOr<size_t> SafetensorsSource::read_at(uint64_t offset, void* dst, si
     return static_cast<size_t>(0);
   }
   size_t to_read = std::min(bytes, static_cast<size_t>(data_size_ - offset));
-  return pread_fully(fd_, data_start_ + offset, dst, to_read);
+  auto got = pread_fully(fd_, data_start_ + offset, dst, to_read);
+  if (!got.ok()) {
+    return got.status();
+  }
+  if (*got != to_read) {
+    return absl::DataLossError("SafetensorsSource short read before expected EOF");
+  }
+  return got;
 }
 
 } // namespace tensorcast::store::loader

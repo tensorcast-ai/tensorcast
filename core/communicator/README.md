@@ -692,7 +692,7 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 
 - `enable_rdma`: enables RDMA transports and MR caching.
 - `transport.tcp_conn_count` / `transport.tcp_tos` / `transport.connect_timeout_sec`: MTCP fan-out, socket TOS, and control connect timeouts. The engine now honors the configured TCP fan-out during both the server listener setup and client dial; values ≤1 are automatically raised to the default multi-socket budget so staging credit math stays consistent.
-- `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT`. Leave enabled in production multi-tenant deployments; tests disable it to force deterministic single-owner control sockets when running communicator suites in parallel.
+- `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT` (default: disabled). Enable explicitly for multi-tenant deployments; keep it disabled in tests to force deterministic single-owner control sockets.
 - `stager.buffers_per_flow`: staging pipeline depth.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.
 - `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets); node IDs and GPU IDs must be unique, and each node must list at least one NIC and one GPU.
@@ -856,6 +856,7 @@ sequenceDiagram
 #### Operational Monitoring
 - `[staging_credit]` INFO logs emit whenever a window is staged or released; the log includes the request key, transport, window sequence, credit granted, and the current outstanding credit. Use these entries to verify that credit is cycling while transfers are in flight.
 - The GC reaper logs `[staging_credit]` WARN entries when a lease exceeds `ack_ttl_ms`; if these appear, confirm that clients are issuing `RDMA_READ_DONE_EX`/MTCP send completions promptly.
+- `[xfer_progress]` INFO/WARN logs provide low-frequency transfer progress for large requests (>=64MiB) on both sides: `side=source` advances from MTCP send-complete callbacks / RDMA ACK release, and `side=target` advances from MTCP recv chunk completion / RDMA work completions. Each update includes a textual bar, completion ratio, and instantaneous/average GiB/s.
 - Tune `stager.max_window_segments` (0 → auto) when operators need to bound the number of segments per window without increasing `buffers_per_flow`.
 - When running with the Fake CUDA backend the runtime automatically caps `buffers_per_flow_limit` to `1` so MTCP staging windows advance even though GPU copies are serviced synchronously.
 

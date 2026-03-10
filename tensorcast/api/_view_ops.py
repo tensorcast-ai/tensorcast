@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping, Sequence, Union
 
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.common.v1 import common_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ TensorViewOp = Union[NarrowOp, TransposeOp]
 class ViewSpecBuildResult:
     """Structured result from view spec construction."""
 
-    proto: store_daemon_pb2.ViewSpec | None
+    proto: common_pb2.ViewSpec | None
     tensor_ops: Mapping[str, Sequence[TensorViewOp]]
 
     def __post_init__(self) -> None:
@@ -105,7 +105,6 @@ class ResolvedViewInputs:
     artifact_id: str
     canonical_index_bytes: bytes | None
     build_result: ViewSpecBuildResult | None
-    disk_path_hint: str | None
     view_id: str | None
 
     def __post_init__(self) -> None:
@@ -121,7 +120,7 @@ class ResolvedViewInputs:
         return "build" if self.build_result is not None else "id"
 
     @property
-    def view_spec(self) -> store_daemon_pb2.ViewSpec | None:
+    def view_spec(self) -> common_pb2.ViewSpec | None:
         return self.build_result.proto if self.build_result else None
 
     @property
@@ -141,13 +140,11 @@ class ResolvedViewInputs:
         artifact_id: str,
         canonical_index_bytes: bytes,
         build_result: ViewSpecBuildResult,
-        disk_path_hint: str | None = None,
     ) -> "ResolvedViewInputs":
         return cls(
             artifact_id=artifact_id,
             canonical_index_bytes=canonical_index_bytes,
             build_result=build_result,
-            disk_path_hint=disk_path_hint,
             view_id=None,
         )
 
@@ -157,13 +154,11 @@ class ResolvedViewInputs:
         *,
         artifact_id: str,
         view_id: str,
-        disk_path_hint: str | None = None,
     ) -> "ResolvedViewInputs":
         return cls(
             artifact_id=artifact_id,
             canonical_index_bytes=None,
             build_result=None,
-            disk_path_hint=disk_path_hint,
             view_id=view_id,
         )
 
@@ -347,7 +342,7 @@ def build_view_spec(
         return ViewSpecBuildResult.identity()
 
     ordered_ops = {name: tensor_ops[name] for name in sorted(tensor_ops.keys())}
-    view_spec_proto = store_daemon_pb2.ViewSpec()
+    view_spec_proto = common_pb2.ViewSpec()
     for name, view_ops in ordered_ops.items():
         op_container = view_spec_proto.tensors[name]
         for view_op in view_ops:

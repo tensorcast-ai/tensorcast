@@ -69,3 +69,34 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
   st = service.RevokeRegisteredArtifact(&ctx, &rreq, &rresp);
   REQUIRE(st.ok());
 }
+
+TEST_CASE("RevokeRegisteredArtifact is a no-op for unknown registration", "[daemon][registration]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  auto harness = make_harness(engine);
+  auto& service = harness->service();
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactRequest rreq;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactResponse rresp;
+  rreq.set_registration_id("missing-registration");
+  rreq.set_reason("test");
+  auto st = service.RevokeRegisteredArtifact(&ctx, &rreq, &rresp);
+  REQUIRE(st.ok());
+}
+
+TEST_CASE("KeepAliveRegisterArtifact rejects unknown registration", "[daemon][registration]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  auto harness = make_harness(engine);
+  auto& service = harness->service();
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactRequest kreq;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactResponse kresp;
+  kreq.set_registration_id("missing-registration");
+  kreq.set_ttl_ms(2000);
+  kreq.set_epoch(1);
+  kreq.set_owner_pid(getpid());
+  auto st = service.KeepAliveRegisterArtifact(&ctx, &kreq, &kresp);
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::NOT_FOUND);
+}

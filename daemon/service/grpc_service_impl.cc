@@ -4,14 +4,11 @@
 
 #include <nlohmann/json.hpp>
 #include <unistd.h>
-#include <algorithm>
-#include <chrono>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
@@ -21,12 +18,8 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/device_registry.h"
-#include "daemon/state/store_policy_resolver.h"
-#include "daemon/util/path_utils.h"
+#include "daemon/service/artifact_retire_utils.h"
 #include "daemon/util/status_utils.h"
-#include "folly/futures/Future.h"
-#include "google/protobuf/util/time_util.h"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
@@ -37,95 +30,332 @@ using status_utils::to_grpc_status;
 
 namespace {
 
-std::string status_code_name(grpc::StatusCode code) {
-  switch (code) {
-    case grpc::StatusCode::OK:
-      return "OK";
-    case grpc::StatusCode::CANCELLED:
-      return "CANCELLED";
-    case grpc::StatusCode::UNKNOWN:
-      return "UNKNOWN";
-    case grpc::StatusCode::INVALID_ARGUMENT:
-      return "INVALID_ARGUMENT";
-    case grpc::StatusCode::DEADLINE_EXCEEDED:
-      return "DEADLINE_EXCEEDED";
-    case grpc::StatusCode::NOT_FOUND:
-      return "NOT_FOUND";
-    case grpc::StatusCode::ALREADY_EXISTS:
-      return "ALREADY_EXISTS";
-    case grpc::StatusCode::PERMISSION_DENIED:
-      return "PERMISSION_DENIED";
-    case grpc::StatusCode::RESOURCE_EXHAUSTED:
-      return "RESOURCE_EXHAUSTED";
-    case grpc::StatusCode::FAILED_PRECONDITION:
-      return "FAILED_PRECONDITION";
-    case grpc::StatusCode::ABORTED:
-      return "ABORTED";
-    case grpc::StatusCode::OUT_OF_RANGE:
-      return "OUT_OF_RANGE";
-    case grpc::StatusCode::UNIMPLEMENTED:
-      return "UNIMPLEMENTED";
-    case grpc::StatusCode::INTERNAL:
-      return "INTERNAL";
-    case grpc::StatusCode::UNAVAILABLE:
-      return "UNAVAILABLE";
-    case grpc::StatusCode::DATA_LOSS:
-      return "DATA_LOSS";
-    case grpc::StatusCode::UNAUTHENTICATED:
-      return "UNAUTHENTICATED";
+absl::StatusOr<std::optional<std::string>> parse_view_id(const tensorcast::common::v1::ByteSpaceRef& space) {
+  switch (space.kind()) {
+    case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
+    case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
+      return std::nullopt;
+    case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
+      if (space.id().empty()) {
+        return absl::InvalidArgumentError("byte_space VIEW requires id");
+      }
+      return std::optional<std::string>(space.id());
     default:
-      return "UNKNOWN";
+      return absl::InvalidArgumentError("unsupported byte_space kind");
   }
 }
 
-bool is_retryable(grpc::StatusCode code) {
-  switch (code) {
-    case grpc::StatusCode::UNAVAILABLE:
-    case grpc::StatusCode::DEADLINE_EXCEEDED:
-    case grpc::StatusCode::RESOURCE_EXHAUSTED:
-    case grpc::StatusCode::ABORTED:
-      return true;
-    default:
-      return false;
+struct ActiveLeaseResolution {
+  ArtifactDeviceKey key;
+  LipLeaseEntry lease;
+};
+
+absl::StatusOr<ActiveLeaseResolution> resolve_active_lease_by_artifact(
+    LipManager* lip_manager,
+    std::string_view artifact_id,
+    const std::optional<std::string>& view_id,
+    const std::optional<int32_t>& device_id) {
+  if (device_id.has_value()) {
+    ArtifactDeviceKey key{
+        .artifact_id = std::string(artifact_id),
+        .view_id = view_id.value_or(""),
+        .device_id = *device_id,
+    };
+    auto lease = lip_manager->find_active_by_key(key);
+    if (!lease.has_value()) {
+      return absl::NotFoundError("no active lease for artifact");
+    }
+    return ActiveLeaseResolution{.key = std::move(key), .lease = std::move(*lease)};
   }
+
+  auto leases = lip_manager->list_active_by_artifact_id(std::string(artifact_id), view_id);
+  if (leases.empty()) {
+    return absl::NotFoundError("no active lease for artifact");
+  }
+  if (leases.size() > 1) {
+    return absl::InvalidArgumentError("device_id required to disambiguate replicas");
+  }
+
+  ArtifactDeviceKey key{
+      .artifact_id = std::string(artifact_id),
+      .view_id = view_id.value_or(""),
+      .device_id = leases.front().device_id,
+  };
+  return ActiveLeaseResolution{.key = std::move(key), .lease = std::move(leases.front())};
 }
 
-std::string replica_key_hash_bytes(const store::loading::ReplicaKey& key) {
-  const uint64_t h = static_cast<uint64_t>(store::loading::ReplicaKeyHash{}(key));
-  std::string out(sizeof(h), '\0');
-  std::memcpy(out.data(), &h, sizeof(h));
+absl::StatusOr<ActiveLeaseResolution> resolve_active_lease_for_retire(
+    LipManager* lip_manager,
+    const v2::RetirePublishedReplicaRequest& req,
+    const std::optional<std::string>& view_id) {
+  if (req.has_lease_id() && !req.lease_id().empty()) {
+    auto key_opt = lip_manager->find_key_by_registration_id(req.lease_id());
+    if (!key_opt.has_value()) {
+      return absl::NotFoundError("lease_id not found");
+    }
+    ArtifactDeviceKey key = *key_opt;
+    auto lease = lip_manager->find_active_by_key(key);
+    if (!lease.has_value()) {
+      return absl::NotFoundError("no active lease for lease_id");
+    }
+    if (key.artifact_id != req.artifact_id()) {
+      return absl::InvalidArgumentError("lease_id does not match artifact_id");
+    }
+    if (view_id.has_value() && key.view_id != *view_id) {
+      return absl::InvalidArgumentError("lease_id does not match byte_space");
+    }
+    if (req.has_device_id() && key.device_id != req.device_id()) {
+      return absl::InvalidArgumentError("lease_id does not match device_id");
+    }
+    return ActiveLeaseResolution{.key = std::move(key), .lease = std::move(*lease)};
+  }
+
+  std::optional<int32_t> device_id;
+  if (req.has_device_id()) {
+    device_id = req.device_id();
+  }
+  return resolve_active_lease_by_artifact(lip_manager, req.artifact_id(), view_id, device_id);
+}
+
+absl::Status ensure_owner_pid_matches(const std::optional<int32_t>& owner_pid, const LipLeaseEntry& lease) {
+  if (owner_pid.has_value() && lease.owner_pid != *owner_pid) {
+    return absl::PermissionDeniedError("owner_pid mismatch for active lease");
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<artifact_retire::DrainOutcome> drain_and_revoke_active_lease(
+    LipManager* lip_manager,
+    store::components::IGlobalStoreClient* global_store_client,
+    std::string_view artifact_id,
+    const ArtifactDeviceKey& key,
+    const LipLeaseEntry& lease,
+    bool wait_for_drain,
+    uint32_t timeout_ms,
+    std::optional<std::string_view> operation_id) {
+  auto drain_or = artifact_retire::retire_replica_with_drain(
+      lip_manager, global_store_client, artifact_id, key, wait_for_drain, timeout_ms, operation_id);
+  if (!drain_or.ok()) {
+    return drain_or.status();
+  }
+
+  absl::Status revoke_status = lip_manager->revoke_by_registration_id(lease.registration_id);
+  if (!revoke_status.ok()) {
+    return revoke_status;
+  }
+  return *drain_or;
+}
+
+struct DrainedLeaseResolution {
+  ArtifactDeviceKey key;
+  LipLeaseEntry lease;
+  artifact_retire::DrainOutcome drain;
+  std::optional<std::string> view_id;
+};
+
+bool matches_view_id(
+    const std::optional<std::string>& requested_view_id,
+    const std::optional<std::string>& key_view_id) {
+  if (requested_view_id.has_value()) {
+    if (requested_view_id->empty()) {
+      return !key_view_id.has_value() || key_view_id->empty();
+    }
+    return key_view_id.has_value() && *key_view_id == *requested_view_id;
+  }
+  return !key_view_id.has_value() || key_view_id->empty();
+}
+
+bool matches_requested_device(const std::optional<int32_t>& requested_device_id, const store::DeviceKey& device) {
+  if (!requested_device_id.has_value()) {
+    return true;
+  }
+  if (*requested_device_id < 0) {
+    return device.type == DeviceType::CPU;
+  }
+  return device.type == DeviceType::GPU && device.ordinal == *requested_device_id;
+}
+
+std::vector<store::loading::ReplicaKey> resolve_retire_replica_keys(
+    store::StoreEngine* engine,
+    std::string_view artifact_id,
+    const std::optional<std::string>& view_id,
+    const std::optional<int32_t>& requested_device_id,
+    const std::optional<ArtifactDeviceKey>& drained_key) {
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> keys;
+  for (const auto& info : engine->get_all_replicas_info()) {
+    if (info.artifact_id != artifact_id) {
+      continue;
+    }
+    if (!matches_view_id(view_id, info.key.view_id)) {
+      continue;
+    }
+    if (!matches_requested_device(requested_device_id, info.key.device)) {
+      continue;
+    }
+    keys.insert(info.key);
+  }
+
+  std::vector<store::loading::ReplicaKey> out;
+  out.reserve(keys.size() + 1);
+  for (const auto& key : keys) {
+    out.push_back(key);
+  }
+  if (!out.empty()) {
+    return out;
+  }
+
+  std::optional<store::DeviceKey> fallback_device;
+  if (requested_device_id.has_value()) {
+    const DeviceType type = *requested_device_id < 0 ? DeviceType::CPU : DeviceType::GPU;
+    fallback_device = store::DeviceKey{.type = type, .ordinal = *requested_device_id, .uuid = ""};
+  } else if (drained_key.has_value()) {
+    const DeviceType type = drained_key->device_id < 0 ? DeviceType::CPU : DeviceType::GPU;
+    fallback_device = store::DeviceKey{.type = type, .ordinal = drained_key->device_id, .uuid = ""};
+  } else {
+    // Stateless deregister may not carry lease/device hints. Publisher-side replicas
+    // are CPU-stable by default; probe canonical CPU key so local memory can retire
+    // instead of becoming metadata-only tombstones.
+    fallback_device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  }
+  if (fallback_device.has_value()) {
+    out.push_back(
+        store::loading::ReplicaKey{
+            .artifact_id = std::string(artifact_id),
+            .view_id = view_id,
+            .device = *fallback_device,
+            .replica = 0,
+        });
+  }
   return out;
 }
 
-void fill_success_status(v2::ReplicaOperationStatus& out) {
-  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_SUCCESS);
-  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+void retire_local_replicas(
+    store::StoreEngine* engine,
+    std::string_view artifact_id,
+    const std::optional<std::string>& view_id,
+    const std::optional<int32_t>& requested_device_id,
+    const std::optional<ArtifactDeviceKey>& drained_key,
+    v2::DeregisterArtifactResponse* resp) {
+  const std::vector<store::loading::ReplicaKey> replica_keys =
+      resolve_retire_replica_keys(engine, artifact_id, view_id, requested_device_id, drained_key);
+  for (const auto& replica_key : replica_keys) {
+    absl::Status st = engine->retire_replica_status(replica_key);
+    if (!st.ok() && !absl::IsNotFound(st)) {
+      artifact_retire::append_deregister_message(
+          resp, absl::StrCat("local retire failed for device_id=", replica_key.device.ordinal, ": ", st.message()));
+    }
+  }
 }
 
-void fill_running_status(v2::ReplicaOperationStatus& out) {
-  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_RUNNING);
-  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+absl::StatusOr<DrainedLeaseResolution> drain_lease_for_deregister(
+    LipManager* lip_manager,
+    store::components::IGlobalStoreClient* global_store_client,
+    const v2::DeregisterArtifactRequest& req) {
+  auto view_id_or = parse_view_id(req.byte_space());
+  if (!view_id_or.ok()) {
+    return view_id_or.status();
+  }
+  std::optional<std::string> view_id = *view_id_or;
+
+  std::optional<int32_t> device_id;
+  if (req.has_device_id()) {
+    device_id = req.device_id();
+  }
+  auto active_lease_or = resolve_active_lease_by_artifact(lip_manager, req.artifact_id(), view_id, device_id);
+  if (!active_lease_or.ok()) {
+    return active_lease_or.status();
+  }
+  ActiveLeaseResolution active_lease = std::move(*active_lease_or);
+
+  std::optional<int32_t> owner_pid;
+  if (req.has_owner_pid()) {
+    owner_pid = req.owner_pid();
+  }
+  auto owner_status = ensure_owner_pid_matches(owner_pid, active_lease.lease);
+  if (!owner_status.ok()) {
+    return owner_status;
+  }
+
+  if (req.has_extend_ttl_ms() && req.extend_ttl_ms() > 0) {
+    auto st = lip_manager->extend_ttl_for_artifact(req.artifact_id(), req.extend_ttl_ms(), view_id);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+
+  lip_manager->quiesce_lease(active_lease.key);
+
+  const uint32_t timeout_ms = req.has_drain_timeout_ms() ? req.drain_timeout_ms() : 30000U;
+  auto drain_or = drain_and_revoke_active_lease(
+      lip_manager,
+      global_store_client,
+      req.artifact_id(),
+      active_lease.key,
+      active_lease.lease,
+      req.wait_for_drain(),
+      timeout_ms,
+      req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt);
+  if (!drain_or.ok()) {
+    return drain_or.status();
+  }
+
+  DrainedLeaseResolution out{
+      .key = std::move(active_lease.key),
+      .lease = std::move(active_lease.lease),
+      .drain = std::move(*drain_or),
+      .view_id = std::move(view_id),
+  };
+  return out;
 }
 
-void fill_failed_status(v2::ReplicaOperationStatus& out, const absl::Status& st) {
-  grpc::Status grpc_st = status_utils::to_grpc_status(st);
-  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_FAILED);
-  out.set_message(std::string(st.message()));
-  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
-  auto* err = out.mutable_error();
-  err->set_status_code(status_code_name(grpc_st.error_code()));
-  err->set_message(std::string(st.message()));
-  err->set_retryable(is_retryable(grpc_st.error_code()));
-}
+absl::StatusOr<DrainedLeaseResolution> drain_lease_for_retire(
+    LipManager* lip_manager,
+    store::components::IGlobalStoreClient* global_store_client,
+    const v2::RetirePublishedReplicaRequest& req) {
+  auto view_id_or = parse_view_id(req.byte_space());
+  if (!view_id_or.ok()) {
+    return view_id_or.status();
+  }
+  std::optional<std::string> view_id = *view_id_or;
 
-void fill_degraded_timeout_status(v2::ReplicaOperationStatus& out, std::string_view message) {
-  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_DEGRADED);
-  out.set_message(std::string(message));
-  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
-  auto* err = out.mutable_error();
-  err->set_status_code("DEADLINE_EXCEEDED");
-  err->set_message(std::string(message));
-  err->set_retryable(true);
+  auto active_lease_or = resolve_active_lease_for_retire(lip_manager, req, view_id);
+  if (!active_lease_or.ok()) {
+    return active_lease_or.status();
+  }
+  ActiveLeaseResolution active_lease = std::move(*active_lease_or);
+
+  std::optional<int32_t> owner_pid;
+  if (req.has_owner_pid()) {
+    owner_pid = req.owner_pid();
+  }
+  auto owner_status = ensure_owner_pid_matches(owner_pid, active_lease.lease);
+  if (!owner_status.ok()) {
+    return owner_status;
+  }
+
+  lip_manager->quiesce_lease(active_lease.key);
+
+  const uint32_t timeout_ms = req.has_drain_timeout_ms() ? req.drain_timeout_ms() : 30000U;
+  auto drain_or = drain_and_revoke_active_lease(
+      lip_manager,
+      global_store_client,
+      req.artifact_id(),
+      active_lease.key,
+      active_lease.lease,
+      req.wait_for_drain(),
+      timeout_ms,
+      req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt);
+  if (!drain_or.ok()) {
+    return drain_or.status();
+  }
+
+  DrainedLeaseResolution out{
+      .key = std::move(active_lease.key),
+      .lease = std::move(active_lease.lease),
+      .drain = std::move(*drain_or),
+      .view_id = std::move(view_id),
+  };
+  return out;
 }
 
 } // namespace
@@ -138,489 +368,15 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       status_controller_(&deps.status_controller),
       region_registry_(&deps.region_registry),
       lip_manager_(&deps.lip_manager),
-      persistence_manager_(deps.persistence_manager),
-      sessions_service_(&deps.sessions_service),
+      global_store_client_(std::move(deps.global_store_client)),
       lifecycle_manager_(&deps.lifecycle_manager),
-      placement_lease_tokens_(&deps.placement_lease_tokens),
+      key_mapping_controller_(&deps.key_mapping_controller),
+      persistence_rpc_controller_(&deps.persistence_rpc_controller),
+      replica_session_controller_(&deps.replica_session_controller),
+      lease_controller_(&deps.lease_controller),
       shutdown_signal_(&deps.shutdown_signal),
+      source_registry_(deps.source_registry),
       opts_(std::move(opts)) {}
-
-Status StoreDaemonServiceImpl::MaterializeReplica(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeReplicaRequest* req,
-    v2::MaterializeReplicaResponse* resp) {
-  RpcContext rctx{"MaterializeReplica", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->materialize_replica(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::MaterializeIntoTarget(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeIntoTargetRequest* req,
-    v2::MaterializeIntoTargetResponse* resp) {
-  RpcContext rctx{"MaterializeIntoTarget", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->materialize_into_target(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::ConfirmReplica(
-    grpc::ServerContext* ctx,
-    const v2::ConfirmReplicaRequest* req,
-    v2::ConfirmReplicaResponse* resp) {
-  RpcContext rctx{"ConfirmReplica", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->confirm(rctx, *req, *resp);
-}
-
-// Key-based materialization via Global Store mapping.
-Status StoreDaemonServiceImpl::MaterializeByKey(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeByKeyRequest* req,
-    v2::MaterializeByKeyResponse* resp) {
-  RpcContext rctx{"MaterializeByKey", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->materialize_by_key(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::ResolveArtifactFromDisk(
-    grpc::ServerContext* ctx,
-    const v2::ResolveArtifactFromDiskRequest* req,
-    v2::ResolveArtifactFromDiskResponse* resp) {
-  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->resolve_artifact_from_disk(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::QueryReplicaStatus(
-    grpc::ServerContext* ctx,
-    const v2::QueryReplicaStatusRequest* req,
-    v2::QueryReplicaStatusResponse* resp) {
-  RpcContext rctx{"QueryReplicaStatus", *ctx, opts_.allow_high_card_attrs};
-  if (!req->has_ticket() || req->ticket().replica_uuid().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
-  }
-  const std::string& replica_uuid = req->ticket().replica_uuid();
-  auto entry = sessions_service_->get(replica_uuid);
-  if (!entry.has_value()) {
-    return {StatusCode::NOT_FOUND, "replica_uuid not found"};
-  }
-
-  resp->mutable_ticket()->set_replica_uuid(replica_uuid);
-  resp->set_replica_key_hash(replica_key_hash_bytes(entry->key));
-
-  auto* status = resp->mutable_status();
-  if (!entry->ready_signal) {
-    fill_success_status(*status);
-  } else if (!entry->ready_signal->is_ready()) {
-    fill_running_status(*status);
-  } else {
-    const absl::Status st = entry->wait_ready(std::chrono::milliseconds(0));
-    if (st.ok()) {
-      fill_success_status(*status);
-    } else {
-      fill_failed_status(*status, st);
-    }
-  }
-
-  rctx.mark_success();
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::WaitReplicaStatus(
-    grpc::ServerContext* ctx,
-    const v2::WaitReplicaStatusRequest* req,
-    v2::WaitReplicaStatusResponse* resp) {
-  RpcContext rctx{"WaitReplicaStatus", *ctx, opts_.allow_high_card_attrs};
-  if (!req->has_ticket() || req->ticket().replica_uuid().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
-  }
-  const std::string& replica_uuid = req->ticket().replica_uuid();
-  auto entry = sessions_service_->get(replica_uuid);
-  if (!entry.has_value()) {
-    return {StatusCode::NOT_FOUND, "replica_uuid not found"};
-  }
-
-  resp->mutable_ticket()->set_replica_uuid(replica_uuid);
-  resp->set_replica_key_hash(replica_key_hash_bytes(entry->key));
-
-  auto* status = resp->mutable_status();
-  if (!entry->ready_signal) {
-    fill_success_status(*status);
-    rctx.mark_success();
-    return Status::OK;
-  }
-  if (entry->ready_signal->is_ready()) {
-    const absl::Status st = entry->wait_ready(std::chrono::milliseconds(0));
-    if (st.ok()) {
-      fill_success_status(*status);
-    } else {
-      fill_failed_status(*status, st);
-    }
-    rctx.mark_success();
-    return Status::OK;
-  }
-
-  // timeout_ms is a server-side wait budget. When unset/0, the server waits until the replica reaches a terminal
-  // state or until the RPC deadline expires.
-  const std::chrono::milliseconds user_timeout(static_cast<int64_t>(req->timeout_ms()));
-  const auto start = std::chrono::steady_clock::now();
-  const std::optional<std::chrono::steady_clock::time_point> user_deadline = user_timeout.count() > 0
-      ? std::optional<std::chrono::steady_clock::time_point>(start + user_timeout)
-      : std::nullopt;
-
-  constexpr std::chrono::milliseconds k_wait_slice(250);
-
-  while (true) {
-    std::optional<std::chrono::milliseconds> remaining;
-    if (user_deadline.has_value()) {
-      remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(*user_deadline - std::chrono::steady_clock::now());
-    }
-
-    using clock = std::chrono::system_clock;
-    const auto grpc_deadline = ctx->deadline();
-    if (grpc_deadline != clock::time_point::max()) {
-      const auto now = clock::now();
-      const auto d = grpc_deadline <= now ? std::chrono::milliseconds(0)
-                                          : std::chrono::duration_cast<std::chrono::milliseconds>(grpc_deadline - now);
-      remaining = remaining.has_value() ? std::min(*remaining, d) : d;
-    }
-
-    if (remaining.has_value() && remaining->count() <= 0) {
-      fill_degraded_timeout_status(*status, "replica wait budget exhausted");
-      rctx.mark_success();
-      return Status::OK;
-    }
-
-    if (ctx->IsCancelled()) {
-      return {StatusCode::CANCELLED, "request cancelled"};
-    }
-
-    const std::chrono::milliseconds slice = remaining.has_value() ? std::min(*remaining, k_wait_slice) : k_wait_slice;
-    if (slice.count() <= 0) {
-      fill_degraded_timeout_status(*status, "replica wait budget exhausted");
-      rctx.mark_success();
-      return Status::OK;
-    }
-
-    absl::Status wait_st;
-    try {
-      wait_st = std::move(entry->subscribe_ready()).get(slice);
-    } catch (const folly::FutureTimeout&) {
-      continue;
-    } catch (const std::exception& ex) {
-      wait_st = absl::InternalError(ex.what());
-    } catch (...) {
-      wait_st = absl::InternalError("replica wait_ready failed with unknown exception");
-    }
-
-    if (wait_st.ok()) {
-      fill_success_status(*status);
-    } else if (absl::IsDeadlineExceeded(wait_st)) {
-      fill_degraded_timeout_status(*status, wait_st.message());
-    } else {
-      fill_failed_status(*status, wait_st);
-    }
-    rctx.mark_success();
-    return Status::OK;
-  }
-}
-
-Status StoreDaemonServiceImpl::ReleaseReplica(
-    grpc::ServerContext* ctx,
-    const v2::ReleaseReplicaRequest* req,
-    v2::ReleaseReplicaResponse* resp) {
-  RpcContext rctx{"ReleaseReplica", *ctx, opts_.allow_high_card_attrs};
-  if (!req->has_ticket() || req->ticket().replica_uuid().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
-  }
-  const std::string& replica_uuid = req->ticket().replica_uuid();
-  const bool erased = sessions_service_->erase(replica_uuid);
-  lifecycle_manager_->release_session(replica_uuid);
-  resp->set_released(erased);
-  rctx.mark_success();
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::CreatePlacementLease(
-    grpc::ServerContext* ctx,
-    const v2::CreatePlacementLeaseRequest* req,
-    v2::CreatePlacementLeaseResponse* resp) {
-  RpcContext rctx{"CreatePlacementLease", *ctx, opts_.allow_high_card_attrs};
-  if (req->artifact_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
-  }
-  const int device_id = req->device_id();
-  if (device_id < 0 || device_id >= engine_->get_num_gpus()) {
-    return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
-  }
-
-  store::loading::ReplicaKey key;
-  key.artifact_id = req->artifact_id();
-  if (!req->view_id().empty()) {
-    key.view_id = req->view_id();
-  }
-  key.device = store::DeviceRegistry::instance().gpu_key(device_id);
-  key.replica = 0;
-
-  const absl::Duration ttl =
-      req->has_ttl_ms() ? absl::Milliseconds(static_cast<int64_t>(req->ttl_ms())) : absl::ZeroDuration();
-  auto lease_or = lifecycle_manager_->create_placement_lease(key, ttl);
-  if (!lease_or.ok()) {
-    return to_grpc_status(lease_or.status());
-  }
-  const auto token_or = placement_lease_tokens_->mint(*lease_or, ttl);
-  if (!token_or.ok()) {
-    lifecycle_manager_->release_lease(*lease_or);
-    return to_grpc_status(token_or.status());
-  }
-
-  resp->set_lease_id(*lease_or);
-  resp->set_lease_token(*token_or);
-  if (ttl > absl::ZeroDuration()) {
-    const absl::Time expires_at = absl::Now() + ttl;
-    google::protobuf::Timestamp ts;
-    ts.set_seconds(absl::ToUnixSeconds(expires_at));
-    ts.set_nanos(static_cast<int32_t>(absl::ToInt64Nanoseconds(expires_at - absl::FromUnixSeconds(ts.seconds()))));
-    *resp->mutable_expires_at() = ts;
-  }
-  rctx.mark_success();
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::RenewPlacementLease(
-    grpc::ServerContext* ctx,
-    const v2::RenewPlacementLeaseRequest* req,
-    v2::RenewPlacementLeaseResponse* resp) {
-  RpcContext rctx{"RenewPlacementLease", *ctx, opts_.allow_high_card_attrs};
-  if (req->lease_token().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "lease_token is required"};
-  }
-  if (req->ttl_ms() == 0) {
-    return {StatusCode::INVALID_ARGUMENT, "ttl_ms is required"};
-  }
-  const absl::Duration ttl = absl::Milliseconds(static_cast<int64_t>(req->ttl_ms()));
-  auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
-  if (!lease_or.ok()) {
-    return to_grpc_status(lease_or.status());
-  }
-  auto st = lifecycle_manager_->renew_placement(*lease_or, ttl);
-  if (!st.ok()) {
-    return to_grpc_status(st);
-  }
-  st = placement_lease_tokens_->refresh(req->lease_token(), ttl);
-  if (!st.ok()) {
-    return to_grpc_status(st);
-  }
-  resp->set_lease_id(*lease_or);
-  const absl::Time expires_at = absl::Now() + ttl;
-  google::protobuf::Timestamp ts;
-  ts.set_seconds(absl::ToUnixSeconds(expires_at));
-  ts.set_nanos(static_cast<int32_t>(absl::ToInt64Nanoseconds(expires_at - absl::FromUnixSeconds(ts.seconds()))));
-  *resp->mutable_expires_at() = ts;
-  rctx.mark_success();
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::ReleasePlacementLease(
-    grpc::ServerContext* ctx,
-    const v2::ReleasePlacementLeaseRequest* req,
-    v2::ReleasePlacementLeaseResponse* resp) {
-  RpcContext rctx{"ReleasePlacementLease", *ctx, opts_.allow_high_card_attrs};
-  if (req->lease_token().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "lease_token is required"};
-  }
-  auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
-  if (!lease_or.ok()) {
-    return to_grpc_status(lease_or.status());
-  }
-  lifecycle_manager_->release_lease(*lease_or);
-  const bool erased = placement_lease_tokens_->erase(req->lease_token());
-  resp->set_released(erased);
-  rctx.mark_success();
-  return Status::OK;
-}
-
-// Publish key mapping via Global Store.
-Status StoreDaemonServiceImpl::PublishReplicaKey(
-    grpc::ServerContext* ctx,
-    const v2::PublishReplicaKeyRequest* req,
-    v2::PublishReplicaKeyResponse* resp) {
-  RpcContext rctx{"PublishReplicaKey", *ctx, opts_.allow_high_card_attrs};
-  auto& span = rctx.span();
-  span->SetAttribute("tc.key", req->key());
-
-  if (req->key().empty() || !req->has_artifact_descriptor() || req->artifact_descriptor().artifact_id().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "key and artifact_descriptor.artifact_id are required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-
-  std::string normalized_disk_path;
-  if (!req->disk_path().empty()) {
-    auto normalized_or = normalize_disk_path(req->disk_path(), opts_.storage_path);
-    if (!normalized_or.ok()) {
-      return to_grpc_status(normalized_or.status());
-    }
-    normalized_disk_path = normalized_or->string();
-  }
-
-  // Use engine's configured Global Store client for upsert.
-  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), normalized_disk_path);
-  if (!up.ok()) {
-    // For conflicts, return OK with ok=false for idempotency.
-    if (absl::IsAlreadyExists(up)) {
-      resp->set_ok(false);
-      resp->set_conflict_reason(std::string(up.message()));
-      rctx.mark_success();
-      return grpc::Status::OK;
-    }
-    return to_grpc_status(up);
-  }
-  resp->set_ok(true);
-  rctx.mark_success();
-  return grpc::Status::OK;
-}
-
-Status StoreDaemonServiceImpl::ResolveKeyMapping(
-    grpc::ServerContext* ctx,
-    const v2::ResolveKeyMappingRequest* req,
-    v2::ResolveKeyMappingResponse* resp) {
-  RpcContext rctx{"ResolveKeyMapping", *ctx, opts_.allow_high_card_attrs};
-  auto& span = rctx.span();
-  span->SetAttribute("tc.key", req->key());
-
-  if (req->key().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-
-  auto mapping_or = engine_->resolve_key_mapping(req->key());
-  if (!mapping_or.ok()) {
-    return to_grpc_status(mapping_or.status());
-  }
-  const auto& m = *mapping_or;
-  resp->set_artifact_id(m.artifact_id);
-  resp->set_used_disk_path(m.disk_path);
-  rctx.mark_success();
-  return grpc::Status::OK;
-}
-
-Status StoreDaemonServiceImpl::GetArtifactIndexById(
-    grpc::ServerContext* ctx,
-    const v2::GetArtifactIndexByIdRequest* req,
-    v2::GetArtifactIndexByIdResponse* resp) {
-  RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::SealAssembly(
-    grpc::ServerContext* ctx,
-    const v2::SealAssemblyRequest* req,
-    v2::SealAssemblyResponse* resp) {
-  RpcContext rctx{"SealAssembly", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->seal_assembly(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::StartPersistence(
-    grpc::ServerContext* ctx,
-    const v2::StartPersistenceRequest* req,
-    v2::StartPersistenceResponse* resp) {
-  RpcContext rctx{"StartPersistence", *ctx, opts_.allow_high_card_attrs};
-  if (req->artifact_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-  if (!persistence_manager_) {
-    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
-  }
-  auto policy_or = resolve_store_policy(req->has_policy() ? &req->policy() : nullptr);
-  if (!policy_or.ok()) {
-    return to_grpc_status(policy_or.status());
-  }
-  auto task_or = persistence_manager_->start_task(req->artifact_id(), *policy_or);
-  if (!task_or.ok()) {
-    return to_grpc_status(task_or.status());
-  }
-  const auto& task = *task_or;
-
-  resp->set_task_id(task.task_id);
-  resp->set_plan_id(task.plan_id);
-  resp->set_state(task.state);
-  resp->set_progress(task.progress);
-  if (!task.degraded_reason.empty()) {
-    resp->set_degraded_reason(task.degraded_reason);
-  }
-  rctx.mark_success();
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::QueryPersistenceStatus(
-    grpc::ServerContext* ctx,
-    const v2::QueryPersistenceStatusRequest* req,
-    v2::QueryPersistenceStatusResponse* resp) {
-  RpcContext rctx{"QueryPersistenceStatus", *ctx, opts_.allow_high_card_attrs};
-  if (req->task_id().empty() && req->artifact_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "task_id or artifact_id is required"};
-  }
-  std::optional<std::string> task_key;
-  if (!req->task_id().empty()) {
-    task_key = req->task_id();
-  }
-  if (!persistence_manager_) {
-    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
-  }
-  absl::optional<PersistenceTaskState> task;
-  if (task_key.has_value()) {
-    task = persistence_manager_->get_by_task_id(*task_key);
-  } else {
-    task = persistence_manager_->get_latest_for_artifact(req->artifact_id());
-  }
-
-  if (!task.has_value()) {
-    return {StatusCode::NOT_FOUND, "persistence task not found"};
-  }
-  resp->set_task_id(task_key.value_or(task->task_id));
-  resp->set_artifact_id(task->artifact_id);
-  resp->set_plan_id(task->plan_id);
-  resp->set_state(task->state);
-  resp->set_progress(task->progress);
-  if (!task->degraded_reason.empty()) {
-    resp->set_degraded_reason(task->degraded_reason);
-  }
-  if (!task->last_error.empty()) {
-    resp->set_last_error(task->last_error);
-  }
-  for (const auto& shard : task->shards) {
-    auto* out = resp->add_shards();
-    out->set_shard_id(shard.shard_id);
-    out->set_shard_idx(shard.shard_idx);
-    out->set_state(shard.state);
-    out->set_progress(shard.progress);
-    if (!shard.degraded_reason.empty()) {
-      out->set_degraded_reason(shard.degraded_reason);
-    }
-    if (!shard.last_error.empty()) {
-      out->set_last_error(shard.last_error);
-    }
-    out->mutable_target_nodes()->Reserve(static_cast<int>(shard.targets.size()));
-    out->mutable_lease_ids()->Reserve(static_cast<int>(shard.targets.size()));
-    for (const auto& target : shard.targets) {
-      out->add_target_nodes(target.node_id);
-      out->add_lease_ids(target.lease_id);
-    }
-  }
-  rctx.mark_success();
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::UnloadReplica(
-    grpc::ServerContext* ctx,
-    const v2::UnloadReplicaRequest* req,
-    v2::UnloadReplicaResponse* resp) {
-  RpcContext rctx{"UnloadReplica", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->unload(rctx, *req, *resp);
-}
 
 Status StoreDaemonServiceImpl::ClearMem(
     grpc::ServerContext* ctx,
@@ -633,36 +389,6 @@ Status StoreDaemonServiceImpl::ClearMem(
     return Status::OK;
   }
   return {StatusCode::INTERNAL, absl::StrFormat("clear_mem() returned %d", rc)};
-}
-
-Status StoreDaemonServiceImpl::GetServerConfig(
-    grpc::ServerContext* ctx,
-    const v2::GetServerConfigRequest* /*req*/,
-    v2::GetServerConfigResponse* resp) {
-  RpcContext rctx{"GetServerConfig", *ctx, opts_.allow_high_card_attrs};
-  return status_controller_->get_server_config(rctx, *resp);
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────────
-
-// Legacy device/key helpers have been removed in favor of DeviceResolver
-
-Status StoreDaemonServiceImpl::WaitReplicaVerification(
-    grpc::ServerContext* ctx,
-    const v2::WaitReplicaVerificationRequest* req,
-    v2::WaitReplicaVerificationResponse* resp) {
-  RpcContext rctx{"WaitReplicaVerification", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->wait_verification(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::LockTransportChunks(
-    grpc::ServerContext* ctx,
-    const v2::LockTransportChunksRequest* req,
-    v2::LockTransportChunksResponse* resp) {
-  RpcContext rctx{"LockTransportChunks", *ctx, opts_.allow_high_card_attrs};
-  return transport_controller_->lock(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::RegisterVramRegion(
@@ -687,9 +413,6 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
   if (req->size_bytes() == 0) {
     return {StatusCode::INVALID_ARGUMENT, "size_bytes must be > 0"};
   }
-  if (req->ttl_ms() == 0) {
-    return {StatusCode::INVALID_ARGUMENT, "ttl_ms must be > 0"};
-  }
   if (req->cuda_ipc_handle().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "cuda_ipc_handle must not be empty"};
   }
@@ -712,6 +435,9 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
     return to_grpc_status(desc_or.status());
   }
   const auto& desc = *desc_or;
+  if (desc.ttl_ms == 0 && lifecycle_manager_ != nullptr) {
+    lifecycle_manager_->watch_pid(static_cast<pid_t>(desc.owner_pid));
+  }
   resp->set_region_id(desc.region_id);
   resp->set_ttl_ms(desc.ttl_ms);
   if (desc.expires_at != absl::InfiniteFuture()) {
@@ -745,6 +471,9 @@ Status StoreDaemonServiceImpl::UnregisterVramRegion(
     return to_grpc_status(released_or.status());
   }
   resp->set_released(*released_or);
+  if (*released_or && lifecycle_manager_ != nullptr) {
+    lifecycle_manager_->unwatch_pid(static_cast<pid_t>(req->owner_pid()));
+  }
   rctx.mark_success();
   return Status::OK;
 }
@@ -754,8 +483,12 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
     const v2::DeregisterArtifactRequest* req,
     v2::DeregisterArtifactResponse* resp) {
   RpcContext rctx{"DeregisterArtifact", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
   if (!req->artifact_id().empty()) {
-    rctx.span()->SetAttribute("tc.artifact.id", req->artifact_id());
+    span->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  if (rctx.allow_high_card_attrs() && req->has_operation_id()) {
+    span->SetAttribute("tc.operation.id", req->operation_id());
   }
   if (shutdown_signal_->is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
@@ -764,146 +497,124 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
   const std::string artifact_id = req->artifact_id();
-  auto lip_opt = lip_manager_->find_active_by_artifact_id(artifact_id);
-  if (!lip_opt.has_value()) {
-    return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+  const bool keep_shared_disk_copy = req->has_keep_shared_disk_copy() ? req->keep_shared_disk_copy() : false;
+  auto view_id_or = parse_view_id(req->byte_space());
+  if (!view_id_or.ok()) {
+    return to_grpc_status(view_id_or.status());
   }
-  const auto& lip = *lip_opt;
-  if (req->has_owner_pid() && lip.owner_pid != req->owner_pid()) {
-    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for active lease"};
+  std::optional<std::string> view_id = *view_id_or;
+  std::optional<int32_t> requested_device_id;
+  if (req->has_device_id()) {
+    requested_device_id = req->device_id();
   }
-  // Optional TTL extension before quiesce
-  if (req->has_extend_ttl_ms() && req->extend_ttl_ms() > 0) {
-    auto st = lip_manager_->extend_ttl_for_artifact(artifact_id, req->extend_ttl_ms());
-    if (!st.ok())
-      return to_grpc_status(st);
+
+  std::optional<ArtifactDeviceKey> drained_key;
+  std::optional<LipLeaseEntry> drained_lease;
+  artifact_retire::DrainOutcome drain{.drained = true, .replica_id = std::nullopt};
+  auto drained_or = drain_lease_for_deregister(lip_manager_, global_store_client_.get(), *req);
+  if (drained_or.ok()) {
+    DrainedLeaseResolution drained = std::move(*drained_or);
+    drained_key = std::move(drained.key);
+    drained_lease = std::move(drained.lease);
+    drain = std::move(drained.drain);
+    view_id = std::move(drained.view_id);
+  } else if (!absl::IsNotFound(drained_or.status())) {
+    return to_grpc_status(drained_or.status());
+  } else {
+    artifact_retire::append_deregister_message(resp, "no active lease found; proceeding with stateless retire");
   }
-  // Quiesce new staged exports
-  lip_manager_->quiesce_artifact(artifact_id);
-  bool drained = true;
-  if (req->wait_for_drain()) {
-    const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
-    absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
-    drained = lip_manager_->wait_exports_drained(artifact_id, deadline);
-    if (!drained) {
-      return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
+
+  resp->set_drained(drain.drained);
+  resp->set_removed(true);
+
+  if (!view_id.has_value()) {
+    absl::flat_hash_set<int32_t> unregister_device_ids;
+    if (drained_key.has_value()) {
+      unregister_device_ids.insert(drained_key->device_id);
+    }
+    if (requested_device_id.has_value()) {
+      unregister_device_ids.insert(*requested_device_id);
+    }
+    if (unregister_device_ids.empty()) {
+      const auto local_keys =
+          resolve_retire_replica_keys(engine_, artifact_id, view_id, requested_device_id, drained_key);
+      for (const auto& key : local_keys) {
+        if (key.device.type != DeviceType::GPU || key.device.ordinal < 0) {
+          continue;
+        }
+        unregister_device_ids.insert(key.device.ordinal);
+      }
+    }
+
+    for (const int32_t device_id : unregister_device_ids) {
+      absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, device_id);
+      if (!gs_st.ok() && !absl::IsNotFound(gs_st)) {
+        artifact_retire::append_deregister_message(
+            resp, absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+      }
     }
   }
-  // Remove active lease if owner matches (or no owner provided)
-  bool removed = lip_manager_->revoke_commit_lease_if_owner_matches(artifact_id, lip.device_id, lip.owner_pid);
-  resp->set_drained(drained);
-  resp->set_removed(removed);
-  if (removed) {
-    // Best-effort: synchronize removal with Global Store
-    absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, lip.device_id);
-    if (!gs_st.ok()) {
-      // Do not fail the RPC; attach message for observability
-      resp->set_message(absl::StrCat("Global Store deregister failed: ", gs_st.message()));
-    }
-  }
-  // Return referenced region ids for observability
+
   absl::flat_hash_set<std::string> unique_regions;
-  for (const auto& s : lip.storages) {
-    if (s.has_region())
-      unique_regions.insert(s.region_id);
+  if (drained_lease.has_value()) {
+    for (const auto& s : drained_lease->storages) {
+      if (s.has_region()) {
+        unique_regions.insert(s.region_id);
+      }
+    }
   }
   for (const auto& rid : unique_regions) {
     resp->add_released_region_ids(rid);
   }
+
+  retire_local_replicas(engine_, artifact_id, view_id, requested_device_id, drained_key, resp);
+
+  if (!keep_shared_disk_copy && !view_id.has_value()) {
+    artifact_retire::purge_managed_shared_disk_artifact(
+        global_store_client_.get(), artifact_id, opts_.storage_path, resp);
+  }
+
+  // Keep version keys append-only, but retire local disk-import fallback for this artifact
+  // so old versions cannot be re-materialized through daemon-local source paths.
+  if (source_registry_ != nullptr) {
+    const bool erased = source_registry_->erase_binding(artifact_id);
+    if (!erased) {
+      VLOG(1) << "DeregisterArtifact: no local disk import entry for artifact_id=" << artifact_id;
+    }
+  }
+
   rctx.mark_success();
   return grpc::Status::OK;
 }
 
-Status StoreDaemonServiceImpl::UnlockTransportChunks(
+Status StoreDaemonServiceImpl::RetirePublishedReplica(
     grpc::ServerContext* ctx,
-    const v2::UnlockTransportChunksRequest* req,
-    v2::UnlockTransportChunksResponse* /*resp*/) {
-  RpcContext rctx{"UnlockTransportChunks", *ctx, opts_.allow_high_card_attrs};
-  v2::UnlockTransportChunksResponse dummy;
-  return transport_controller_->unlock(rctx, *req, dummy);
-}
+    const v2::RetirePublishedReplicaRequest* req,
+    v2::RetirePublishedReplicaResponse* resp) {
+  RpcContext rctx{"RetirePublishedReplica", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  if (!req->artifact_id().empty()) {
+    span->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  if (rctx.allow_high_card_attrs() && req->has_operation_id()) {
+    span->SetAttribute("tc.operation.id", req->operation_id());
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  auto drained_or = drain_lease_for_retire(lip_manager_, global_store_client_.get(), *req);
+  if (!drained_or.ok()) {
+    return to_grpc_status(drained_or.status());
+  }
+  const auto& drain = drained_or->drain;
 
-Status StoreDaemonServiceImpl::BeginRegisterArtifact(
-    grpc::ServerContext* ctx,
-    const v2::BeginRegisterArtifactRequest* req,
-    v2::BeginRegisterArtifactResponse* resp) {
-  RpcContext rctx{"BeginRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->begin(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
-    grpc::ServerContext* ctx,
-    const v2::CommitRegisteredArtifactRequest* req,
-    v2::CommitRegisteredArtifactResponse* resp) {
-  RpcContext rctx{"CommitRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->commit(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
-    grpc::ServerContext* ctx,
-    const v2::AbortRegisteredArtifactRequest* req,
-    v2::AbortRegisteredArtifactResponse* resp) {
-  RpcContext rctx{"AbortRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->abort(rctx, *req, *resp);
-}
-
-// Removed unary FeedRegisterArtifact; use streaming variant only
-
-Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
-    grpc::ServerContext* ctx,
-    ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>* reader,
-    v2::FeedRegisterArtifactStreamResponse* resp) {
-  RpcContext rctx{"FeedRegisterArtifactStream", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->feed_stream(rctx, *reader, *resp);
-}
-
-grpc::Status StoreDaemonServiceImpl::feed_register_artifact_stream_vector(
-    const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs) {
-  return registration_controller_->feed_vector(reqs);
-}
-
-Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
-    grpc::ServerContext* ctx,
-    const v2::KeepAliveRegisterArtifactRequest* req,
-    v2::KeepAliveRegisterArtifactResponse* resp) {
-  RpcContext rctx{"KeepAliveRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->keep_alive(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
-    grpc::ServerContext* ctx,
-    const v2::RevokeRegisteredArtifactRequest* req,
-    v2::RevokeRegisteredArtifactResponse* resp) {
-  RpcContext rctx{"RevokeRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->revoke(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceImpl::GetWorkerStatus(
-    grpc::ServerContext* ctx,
-    const v2::GetWorkerStatusRequest* /*req*/,
-    v2::GetWorkerStatusResponse* resp) {
-  RpcContext rctx{"GetWorkerStatus", *ctx, opts_.allow_high_card_attrs};
-  return status_controller_->get_worker_status(rctx, *resp);
-}
-
-Status StoreDaemonServiceImpl::GetDetailedStatus(
-    grpc::ServerContext* ctx,
-    const v2::GetDetailedStatusRequest* /*req*/,
-    v2::GetDetailedStatusResponse* resp) {
-  RpcContext rctx{"GetDetailedStatus", *ctx, opts_.allow_high_card_attrs};
-  return status_controller_->get_detailed_status(rctx, *resp);
-}
-
-// verification tracking moved to VerificationTracker
-
-// Legacy GetLoadedReplicas removed; use V2
-
-Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
-    grpc::ServerContext* ctx,
-    const v2::GetLoadedReplicasV2Request* req,
-    v2::GetLoadedReplicasV2Response* resp) {
-  RpcContext rctx{"GetLoadedReplicasV2", *ctx, opts_.allow_high_card_attrs};
-  return status_controller_->get_loaded_replicas_v2(rctx, *req, *resp, opts_.use_cursor_pagination);
+  resp->set_drained(drain.drained);
+  resp->set_removed(true);
+  rctx.mark_success();
+  return Status::OK;
 }
 
 } // namespace tensorcast::daemon

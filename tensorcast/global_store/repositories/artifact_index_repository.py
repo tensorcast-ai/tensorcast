@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for deduplicated tensor indices (artifact_indices).
 
@@ -22,36 +22,42 @@ class ArtifactIndexRepository(BaseRepository):
         index_data: bytes,
         encoding: str,
         schema_version: str,
+        cursor=None,
     ) -> str:
         """Insert or replace canonical index by its SHA-256 key.
 
         Returns the computed index_key (hex).
         """
         index_key = hashlib.sha256(index_data).hexdigest()
-        cursor = self.get_cursor()
-        cursor.execute(
-            """
-            INSERT INTO artifact_indices (
-                index_key,
-                schema_version,
-                encoding,
-                size_bytes,
-                index_data
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (index_key) DO UPDATE SET
-                schema_version = EXCLUDED.schema_version,
-                encoding = EXCLUDED.encoding,
-                size_bytes = EXCLUDED.size_bytes,
-                index_data = EXCLUDED.index_data
-            """,
-            [index_key, schema_version, encoding, len(index_data), index_data],
-        )
+        owns_cursor = cursor is None
+        cursor = cursor if cursor is not None else self.get_cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO artifact_indices (
+                    index_key,
+                    schema_version,
+                    encoding,
+                    size_bytes,
+                    index_data
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (index_key) DO NOTHING
+                """,
+                [index_key, schema_version, encoding, len(index_data), index_data],
+            )
+        finally:
+            if owns_cursor:
+                cursor.close()
         return index_key
 
     def get(self, index_key: str) -> Optional[bytes]:
         """Fetch canonical index bytes by key; returns None if not found."""
         cursor = self.get_cursor()
-        row = cursor.execute(
-            "SELECT index_data FROM artifact_indices WHERE index_key = ?", [index_key]
-        ).fetchone()
-        return row[0] if row else None
+        try:
+            row = cursor.execute(
+                "SELECT index_data FROM artifact_indices WHERE index_key = ?",
+                [index_key],
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            cursor.close()

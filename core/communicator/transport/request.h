@@ -1,12 +1,13 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 #define CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 
 #include <atomic>
+#include <cstdint>
 #include <deque>
-#include <future>
 #include <functional>
+#include <future>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -83,14 +84,40 @@ class ReadRequest {
     }
   }
 
+  void set_mtcp_stage_unit_hint_bytes(uint64_t bytes) {
+    mtcp_stage_unit_hint_bytes_.store(bytes, std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] uint64_t mtcp_stage_unit_hint_bytes() const {
+    return mtcp_stage_unit_hint_bytes_.load(std::memory_order_relaxed);
+  }
+
+  void enqueue_completion_bytes(uint32_t bytes) {
+    absl::MutexLock lk(&ack_mu_);
+    completion_bytes_queue_.push_back(bytes);
+  }
+
+  void set_progress_callbacks(
+      std::function<void(uint64_t, uint64_t)> on_progress,
+      std::function<void(const absl::Status&)> on_complete = {}) {
+    absl::MutexLock lk(&progress_mu_);
+    progress_callback_ = std::move(on_progress);
+    completion_callback_ = std::move(on_complete);
+  }
+
   // Returns true if all segments have completed
-  bool mark_completion_and_is_done() {
+  bool mark_completion_and_is_done(uint64_t completion_bytes = 0) {
     int done = completed_.fetch_add(1) + 1;
+    uint64_t bytes_to_report = completion_bytes;
 
     std::vector<PendingAckWindow> ready;
     std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> sender;
     {
       absl::MutexLock lk(&ack_mu_);
+      if (bytes_to_report == 0 && !completion_bytes_queue_.empty()) {
+        bytes_to_report = completion_bytes_queue_.front();
+        completion_bytes_queue_.pop_front();
+      }
       if (!segment_window_queue_.empty()) {
         uint32_t window_seq = segment_window_queue_.front();
         segment_window_queue_.pop_front();
@@ -112,6 +139,9 @@ class ReadRequest {
         }
       }
       sender = ack_sender_;
+    }
+    if (bytes_to_report > 0) {
+      notify_bytes_progress(bytes_to_report);
     }
     for (auto& window : ready) {
       if (sender) {
@@ -161,6 +191,7 @@ class ReadRequest {
   read_result_t status_;
   uint64_t remote_offset_;
   int16_t rail_id_;
+  std::atomic<uint64_t> mtcp_stage_unit_hint_bytes_{0};
 
   // Number of expected RDMA READ completions for this request
   std::atomic<int> expected_completions_{0};
@@ -178,7 +209,16 @@ class ReadRequest {
   absl::Mutex ack_mu_;
   std::deque<PendingAckWindow> pending_ack_windows_ ABSL_GUARDED_BY(ack_mu_);
   std::deque<uint32_t> segment_window_queue_ ABSL_GUARDED_BY(ack_mu_);
+  std::deque<uint32_t> completion_bytes_queue_ ABSL_GUARDED_BY(ack_mu_);
   std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> ack_sender_ ABSL_GUARDED_BY(ack_mu_);
+
+  void notify_bytes_progress(uint64_t bytes_delta);
+  void notify_completion(const absl::Status& status);
+
+  std::atomic<uint64_t> completed_bytes_{0};
+  absl::Mutex progress_mu_;
+  std::function<void(uint64_t, uint64_t)> progress_callback_ ABSL_GUARDED_BY(progress_mu_);
+  std::function<void(const absl::Status&)> completion_callback_ ABSL_GUARDED_BY(progress_mu_);
 };
 
 using read_request_t = std::shared_ptr<ReadRequest>;

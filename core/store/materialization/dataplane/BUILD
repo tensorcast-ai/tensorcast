@@ -76,6 +76,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
+        ":multi_safetensors_source",
         ":source_hash",
         "@nlohmann_json//:json",
     ],
@@ -98,6 +99,7 @@ sc_cc_library(
     hdrs = ["metadata/safetensors_util.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":canonical_index",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
     ],
@@ -156,6 +158,76 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "byte_range_map_builder",
+    srcs = ["sources/byte_range_map_builder.cc"],
+    hdrs = ["sources/byte_range_map_builder.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "byte_range_program",
+    srcs = ["sources/byte_range_program.cc"],
+    hdrs = ["sources/byte_range_program.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "byte_range_mapped_source",
+    srcs = ["sources/byte_range_mapped_source.cc"],
+    hdrs = ["sources/byte_range_mapped_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":byte_range_program",
+        ":source",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/synchronization",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "source_window_scheduler",
+    srcs = ["sources/source_window_scheduler.cc"],
+    hdrs = ["sources/source_window_scheduler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sink",
+        ":source",
+        "//core/common:streaming_pinned_buffer_lib",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "memory_source",
+    srcs = ["sources/memory_source.cc"],
+    hdrs = ["sources/memory_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        "//core/cuda:cuda_api_lib",
+        "@gsl",
+    ],
+)
+
+sc_cc_library(
     name = "mux_seekable_source",
     srcs = ["sources/mux_seekable_source.cc"],
     hdrs = ["sources/mux_seekable_source.h"],
@@ -176,6 +248,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
+        ":memory_source",
         ":source",
         "//core/common:artifact_hash_lib",
         "//core/cuda:cuda_api_lib",
@@ -203,23 +276,6 @@ sc_cc_library(
     ],
 )
 
-# Segment plan linearization (AVBS) over GPU memory with PAD=0 semantics
-sc_cc_library(
-    name = "segment_plan_source",
-    srcs = ["sources/segment_plan_source.cc"],
-    hdrs = ["sources/segment_plan_source.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":source",
-        ":source_hash",
-        "//core/cuda:cuda_api_lib",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/types:span",
-        "@gsl",
-        "@nlohmann_json//:json",
-    ],
-)
-
 sc_cc_library(
     name = "view_planner",
     srcs = ["view/view_planner.cc"],
@@ -227,6 +283,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":canonical_index",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/contracts:view_spec",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -239,18 +296,31 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "view_identity",
+    srcs = ["view/view_identity.cc"],
+    hdrs = ["view/view_identity.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store/materialization/contracts:view_spec",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
     name = "view_plan_source",
     srcs = ["view/view_plan_source.cc"],
     hdrs = ["view/view_plan_source.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":byte_range_mapped_source",
+        ":byte_range_program",
         ":source",
         ":view_planner",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/contracts:view_spec",
-        "@abseil-cpp//absl/synchronization",
         "@gsl",
-        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -463,6 +533,17 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_loader_partition_order_test",
+    srcs = ["loaders/tests/disk_loader_partition_order_test.cc"],
+    deps = [
+        ":disk_loader",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "disk_error_test",
     srcs = ["loaders/tests/disk_error_test.cc"],
     tags = ["requires_cuda"],
@@ -523,11 +604,45 @@ cc_test(
 )
 
 cc_test(
+    name = "byte_range_map_builder_test",
+    srcs = ["sources/tests/byte_range_map_builder_test.cc"],
+    deps = [
+        ":byte_range_map_builder",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "source_window_scheduler_test",
+    srcs = ["sources/tests/source_window_scheduler_test.cc"],
+    deps = [
+        ":source_window_scheduler",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "index_reader_test",
     srcs = ["metadata/tests/index_reader_test.cc"],
     deps = [
         ":index_reader",
         "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "disk_dir_hash_test",
+    srcs = ["metadata/tests/disk_dir_hash_test.cc"],
+    deps = [
+        ":disk_dir_hash",
+        ":source_hash",
+        "//core/testing:catch_main",
+        "//core/testing:common",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],
@@ -587,6 +702,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "view_identity_test",
+    srcs = ["view/tests/view_identity_test.cc"],
+    deps = [
+        ":view_identity",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 
@@ -758,6 +883,20 @@ cc_test(
         "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
         "@gsl",
+    ],
+)
+
+cc_test(
+    name = "streaming_buffer_adapter_test",
+    srcs = [
+        "runtime/tests/streaming_buffer_adapter_test.cc",
+    ],
+    deps = [
+        ":streaming_buffer_adapter",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:streaming_pinned_buffer_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

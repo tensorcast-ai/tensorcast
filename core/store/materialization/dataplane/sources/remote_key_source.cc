@@ -1,10 +1,12 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/remote_key_source.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <exception>
+#include <future>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -22,7 +24,7 @@ bool can_use_routed_read(const RemoteKeySource::Options& options, bool routed_pa
       !options.local_endpoint_id.empty() && !options.remote_endpoint_id.empty();
 }
 
-communicator::transport::read_result_t read_direct(
+communicator::transport::future_read_result_t read_direct(
     const RemoteKeySource::Options& options,
     const std::string& key,
     uint64_t local_addr,
@@ -39,10 +41,10 @@ communicator::transport::read_result_t read_direct(
       options.ip,
       options.port,
       remote_offset);
-  return future.get();
+  return future;
 }
 
-absl::StatusOr<communicator::transport::read_result_t> read_routed(
+absl::StatusOr<communicator::transport::future_read_result_t> read_routed(
     const RemoteKeySource::Options& options,
     const std::string& key,
     uint64_t local_addr,
@@ -65,18 +67,13 @@ absl::StatusOr<communicator::transport::read_result_t> read_routed(
       .remote_offset = remote_offset,
   };
   try {
-    auto future = communicator_or.value()->read_tensor(request);
-    auto result = future.get();
-    if (!result.status.ok()) {
-      return result.status;
-    }
-    return result;
+    return communicator_or.value()->read_tensor(request);
   } catch (const std::exception& ex) {
     return absl::InternalError(absl::StrCat("routed read future failed: ", ex.what()));
   }
 }
 
-communicator::transport::read_result_t read_with_strict_fallback(
+communicator::transport::future_read_result_t read_with_strict_fallback(
     const RemoteKeySource::Options& options,
     const std::string& key,
     uint64_t local_addr,
@@ -86,17 +83,37 @@ communicator::transport::read_result_t read_with_strict_fallback(
     int dev_id,
     bool* routed_path_enabled) {
   if (can_use_routed_read(options, *routed_path_enabled)) {
-    auto routed_or = read_routed(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
-    if (routed_or.ok()) {
-      return *routed_or;
+    auto routed_future_or = read_routed(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
+    if (routed_future_or.ok()) {
+      return std::move(*routed_future_or);
     }
     *routed_path_enabled = false;
     LOG(WARNING) << "Routed read failed for src_endpoint=" << options.local_endpoint_id
                  << " dst_endpoint=" << options.remote_endpoint_id << ", fallback to direct ip/port " << options.ip
-                 << ":" << options.port << " reason=" << routed_or.status();
+                 << ":" << options.port << " reason=" << routed_future_or.status();
   }
 
   return read_direct(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
+}
+
+constexpr uint64_t kSlowQueueCostUs = 1'000'000; // 1s
+constexpr uint64_t kSlowReadCostUs = 5'000'000; // 5s
+
+bool should_log_cost_breakdown(const communicator::transport::read_result_t& result) {
+  return result.request_cost >= kSlowQueueCostUs || result.rdma_queue_cost >= kSlowQueueCostUs ||
+      result.read_cost >= kSlowReadCostUs || !result.status.ok();
+}
+
+std::string format_cost_breakdown(const communicator::transport::read_result_t& result) {
+  return absl::StrCat(
+      "request_cost_us=",
+      result.request_cost,
+      " read_cost_us=",
+      result.read_cost,
+      " rdma_queue_cost_us=",
+      result.rdma_queue_cost,
+      " rdma_regmr_cost_us=",
+      result.rdma_regmr_cost);
 }
 
 } // namespace
@@ -104,6 +121,103 @@ communicator::transport::read_result_t read_with_strict_fallback(
 RemoteKeySource::RemoteKeySource(Options options) : options_(std::move(options)) {
   if (options_.memory_keys.size() != options_.buffer_sizes.size()) {
     LOG(ERROR) << "Memory keys and buffer sizes mismatch";
+  }
+}
+
+std::chrono::milliseconds RemoteKeySource::remaining_request_budget() const {
+  if (options_.request_budget.count() <= 0) {
+    return std::chrono::milliseconds(0);
+  }
+  const auto now = std::chrono::steady_clock::now();
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - request_start_);
+  if (elapsed >= options_.request_budget) {
+    return std::chrono::milliseconds(0);
+  }
+  return options_.request_budget - elapsed;
+}
+
+void RemoteKeySource::abort_timed_out_channel(std::string_view key, uint64_t remote_offset, size_t bytes) const {
+  absl::Status close_status = options_.comm_engine->close_connection(options_.ip, options_.port);
+  if (!close_status.ok()) {
+    VLOG(1) << "RemoteKeySource timeout cleanup could not close channel"
+            << " artifact_id=" << options_.artifact_id << " key=" << key << " peer=" << options_.ip << ":"
+            << options_.port << " remote_offset=" << remote_offset << " bytes=" << bytes
+            << " status=" << close_status;
+    return;
+  }
+  LOG(WARNING) << "RemoteKeySource closed channel after request budget timeout"
+               << " artifact_id=" << options_.artifact_id << " key=" << key << " peer=" << options_.ip << ":"
+               << options_.port << " remote_offset=" << remote_offset << " bytes=" << bytes;
+}
+
+absl::StatusOr<communicator::transport::read_result_t> RemoteKeySource::await_read_result(
+    communicator::transport::future_read_result_t& future,
+    std::string_view key,
+    uint64_t remote_offset,
+    size_t bytes) {
+  const std::chrono::milliseconds wait_slice =
+      options_.wait_slice.count() > 0 ? options_.wait_slice : std::chrono::seconds(5);
+  const std::chrono::milliseconds stalled_log_interval =
+      options_.stalled_log_interval.count() > 0 ? options_.stalled_log_interval : std::chrono::seconds(30);
+  const auto wait_start = std::chrono::steady_clock::now();
+
+  while (true) {
+    std::chrono::milliseconds wait_budget = wait_slice;
+    if (options_.request_budget.count() > 0) {
+      const std::chrono::milliseconds remaining = remaining_request_budget();
+      if (remaining.count() <= 0) {
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start)
+                .count();
+        abort_timed_out_channel(key, remote_offset, bytes);
+        return absl::DeadlineExceededError(
+            absl::StrCat(
+                "RemoteKeySource read timed out: artifact_id=",
+                options_.artifact_id,
+                " key=",
+                key,
+                " remote_offset=",
+                remote_offset,
+                " bytes=",
+                bytes,
+                " waited_ms=",
+                waited_ms,
+                " request_budget_ms=",
+                options_.request_budget.count()));
+      }
+      wait_budget = std::min(wait_budget, remaining);
+    }
+
+    const std::future_status status = future.wait_for(wait_budget);
+    if (status == std::future_status::ready) {
+      auto result = future.get();
+      if (should_log_cost_breakdown(result)) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_cost_log_ >= stalled_log_interval) {
+          last_cost_log_ = now;
+          const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - wait_start).count();
+          LOG(WARNING) << "RemoteKeySource read completed with slow stage or error"
+                       << " artifact_id=" << options_.artifact_id << " key=" << key
+                       << " remote_offset=" << remote_offset << " bytes=" << bytes << " waited_ms=" << waited_ms
+                       << " remaining_budget_ms=" << remaining_request_budget().count() << " "
+                       << format_cost_breakdown(result) << " status=" << result.status;
+        }
+      }
+      return result;
+    }
+    if (status == std::future_status::deferred) {
+      return future.get();
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_stalled_log_ >= stalled_log_interval) {
+      last_stalled_log_ = now;
+      const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - wait_start).count();
+      const auto remaining_ms = remaining_request_budget().count();
+      LOG(WARNING) << "RemoteKeySource read still pending"
+                   << " artifact_id=" << options_.artifact_id << " key=" << key << " remote_offset=" << remote_offset
+                   << " bytes=" << bytes << " waited_ms=" << waited_ms << " remaining_budget_ms=" << remaining_ms;
+    }
   }
 }
 
@@ -137,7 +251,7 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto result = read_with_strict_fallback(
+    auto future = read_with_strict_fallback(
         options_,
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
@@ -146,12 +260,22 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
         communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         &routed_path_enabled_);
+    auto result_or = await_read_result(future, key, current_key_offset_, to_read);
+    if (!result_or.ok()) {
+      evt_span->SetAttribute("error", true);
+      evt_span->AddEvent("recv_error", {{"message", std::string(result_or.status().message())}});
+      evt_span->End();
+      LOG(ERROR) << "Failed to read from remote key " << key << " at offset " << current_key_offset_ << " : "
+                 << result_or.status();
+      return result_or.status();
+    }
+    auto result = *result_or;
     if (!result.status.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
       evt_span->End();
       LOG(ERROR) << "Failed to read from remote key " << key << " at offset " << current_key_offset_ << " : "
-                 << result.status.message();
+                 << result.status.message() << " " << format_cost_breakdown(result);
       return result.status;
     }
 
@@ -171,6 +295,9 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
   VLOG(3) << "Read " << bytes_read << " bytes from remote. "
           << "Total read: " << total_bytes_read_ << "/" << options_.total_size;
 
+  if (bytes_read != bytes_to_read) {
+    return absl::DataLossError("RemoteKeySource short read before expected EOF");
+  }
   return bytes_read;
 }
 
@@ -236,7 +363,7 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto result = read_with_strict_fallback(
+    auto future = read_with_strict_fallback(
         options_,
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
@@ -245,10 +372,20 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
         communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         &routed_path_enabled_);
+    auto result_or = await_read_result(future, key, key_offset, to_read);
+    if (!result_or.ok()) {
+      evt_span->SetAttribute("error", true);
+      evt_span->AddEvent("recv_error", {{"message", std::string(result_or.status().message())}});
+      evt_span->End();
+      return result_or.status();
+    }
+    auto result = *result_or;
     if (!result.status.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
       evt_span->End();
+      LOG(ERROR) << "read_at failed for key=" << key << " key_offset=" << key_offset << " bytes=" << to_read << " "
+                 << format_cost_breakdown(result) << " status=" << result.status;
       return result.status;
     }
 
@@ -262,18 +399,22 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     evt_span->End();
   }
 
+  if (bytes_read != bytes_to_read) {
+    return absl::DataLossError("RemoteKeySource short read before expected EOF");
+  }
   return bytes_read;
 }
 
-bool RemoteKeySource::supports_direct_write() const {
+bool RemoteKeySource::supports_direct_write_at() const {
   return options_.comm_engine->is_rdma_enabled();
 }
 
-absl::StatusOr<size_t> RemoteKeySource::read_into(
+absl::StatusOr<size_t> RemoteKeySource::read_into_at(
+    uint64_t src_offset,
     uint64_t dest_va_offset,
     size_t bytes,
     const DirectWriteGrant& grant) {
-  if (dest_va_offset >= options_.total_size) {
+  if (src_offset >= options_.total_size) {
     return 0; // Beyond EOF
   }
 
@@ -287,9 +428,9 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
     return nullptr;
   };
 
-  size_t to_read_total = std::min<uint64_t>(bytes, options_.total_size - dest_va_offset);
+  size_t to_read_total = std::min<uint64_t>(bytes, options_.total_size - src_offset);
   size_t bytes_done = 0;
-  uint64_t src_global_offset = dest_va_offset; // assume linear global mapping
+  uint64_t src_global_offset = src_offset;
 
   while (bytes_done < to_read_total) {
     const uint64_t cur_va = dest_va_offset + bytes_done;
@@ -332,7 +473,7 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(step));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto result = read_with_strict_fallback(
+    auto future = read_with_strict_fallback(
         options_,
         key,
         local_addr,
@@ -341,10 +482,20 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
         communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         &routed_path_enabled_);
+    auto result_or = await_read_result(future, key, key_offset, step);
+    if (!result_or.ok()) {
+      evt_span->SetAttribute("error", true);
+      evt_span->AddEvent("recv_error", {{"message", std::string(result_or.status().message())}});
+      evt_span->End();
+      return result_or.status();
+    }
+    auto result = *result_or;
     if (!result.status.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
       evt_span->End();
+      LOG(ERROR) << "read_into_at failed for key=" << key << " key_offset=" << key_offset << " bytes=" << step << " "
+                 << format_cost_breakdown(result) << " status=" << result.status;
       return result.status;
     }
 

@@ -36,7 +36,9 @@ StreamingPinnedBuffer::~StreamingPinnedBuffer() {
   }
 }
 
-absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& timeout) {
+absl::Status StreamingPinnedBuffer::initialize(
+    const std::chrono::milliseconds& timeout,
+    std::string_view request_context) {
   absl::MutexLock lock(&mutex_);
 
   if (initialized_) {
@@ -45,7 +47,7 @@ absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& 
 
   // Allocate all chunks from the pool (with optional timeout)
   size_t total_size = num_chunks_ * chunk_size_;
-  int result = pool_->allocate(total_size, chunk_buffers_, timeout);
+  int result = pool_->allocate(total_size, chunk_buffers_, timeout, request_context);
   if (result != 0) {
     if (result > 0 && timeout.count() > 0) {
       const std::string_view pool_name = pool_ ? pool_->name() : std::string_view();
@@ -55,6 +57,8 @@ absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& 
               result,
               " pinned slices from pool",
               (pool_name.empty() ? "" : absl::StrCat("[name=", pool_name, "]")),
+              " request_context=",
+              (request_context.empty() ? "<unspecified>" : request_context),
               " after ",
               timeout.count(),
               "ms"));
@@ -63,7 +67,9 @@ absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& 
     return absl::ResourceExhaustedError(
         absl::StrCat(
             "Failed to allocate pinned slices from pool",
-            (pool_name.empty() ? "" : absl::StrCat("[name=", pool_name, "]"))));
+            (pool_name.empty() ? "" : absl::StrCat("[name=", pool_name, "]")),
+            " request_context=",
+            (request_context.empty() ? "<unspecified>" : request_context)));
   }
 
   if (chunk_buffers_.size() != num_chunks_) {
@@ -84,7 +90,8 @@ absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& 
 
   initialized_ = true;
   VLOG(1) << "Initialized streaming buffer with " << num_chunks_ << " chunks of " << chunk_size_ << " bytes each"
-          << (timeout.count() > 0 ? absl::StrCat(" (timeout: ", timeout.count(), "ms)") : "");
+          << (timeout.count() > 0 ? absl::StrCat(" (timeout: ", timeout.count(), "ms)") : "")
+          << " request_context=" << (request_context.empty() ? "<unspecified>" : request_context);
 
   return absl::OkStatus();
 }

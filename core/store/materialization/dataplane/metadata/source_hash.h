@@ -1,8 +1,9 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include "gsl/pointers"
 
@@ -23,13 +24,15 @@ namespace tensorcast::store::loader {
 absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
     SeekableSource& source,
     uint64_t total_size,
-    size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
+    size_t leaf_chunk_bytes = 4ULL * 1024 * 1024,
+    std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)> progress_cb = {});
 
 // Convenience adapters over SeekableSource for common in-memory sources
 absl::StatusOr<std::string> compute_data_multihash_from_cpu_memory(
     gsl::not_null<const void*> base_ptr,
     uint64_t total_size,
-    size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
+    size_t leaf_chunk_bytes = 4ULL * 1024 * 1024,
+    std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)> progress_cb = {});
 
 absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(
     gsl::not_null<void*> device_ptr,

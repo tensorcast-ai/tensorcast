@@ -31,6 +31,7 @@ from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import map_registration_error
 from tensorcast.api.store.views import ViewOrchestrator
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
@@ -127,7 +128,7 @@ class _DummyRuntime:
         self.opts = StoreOptions()
         self.retry_policies: dict[str, object] = {}
         self.executor = _DummyExecutor()
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, str | None] = {}
 
     def ensure_client(self) -> Any:
         return self._client
@@ -144,11 +145,11 @@ class _DummyRuntime:
     def track_future(self, _future: Any) -> None:
         return None
 
-    def resolve_key_mapping_cached(self, key: str) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key, (None, None))
+    def resolve_key_mapping_cached(self, key: str) -> str | None:
+        return self._key_cache.get(key)
 
-    def cache_key_mapping(self, key: str, artifact_id: str | None, disk_path: str | None) -> None:
-        self._key_cache[key] = (artifact_id, disk_path)
+    def cache_key_mapping(self, key: str, artifact_id: str | None) -> None:
+        self._key_cache[key] = artifact_id
 
 
 def _fresh_store() -> Store:
@@ -237,7 +238,7 @@ def test_build_view_spec_rejects_non_mapping_inputs() -> None:
 
 def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_spec = store_daemon_pb2.ViewSpec()
+    fake_spec = common_pb2.ViewSpec()
     fake_spec.tensors["weights"].ops.add().narrow.dim = 0
     fake_spec.tensors["weights"].ops[-1].narrow.start = 0
     fake_spec.tensors["weights"].ops[-1].narrow.length = 16
@@ -399,7 +400,7 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
     store = _fresh_store()
 
     canonical_index = b'{"weights":[0,16,[4],[1],"torch.float32",0]}'
-    view_spec = store_daemon_pb2.ViewSpec()
+    view_spec = common_pb2.ViewSpec()
     narrow = view_spec.tensors["weights"].ops.add().narrow
     narrow.dim = 0
     narrow.start = 1

@@ -347,6 +347,7 @@ def _resolve_global_store(
     *,
     mode: Literal["connect", "start", "none"],
     address: str | None,
+    config_path: Path | None,
     allow_gs_fallback: bool,
     cluster_id: str | None,
     fate_share: bool = True,
@@ -423,7 +424,9 @@ def _resolve_global_store(
                 cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
             )
 
-        raise ServiceError("Global Store connect mode requires a reachable address")
+        raise ServiceError(
+            f"Global Store connect mode requires a reachable address, got {candidates}"
+        )
 
     if runtime_gs_address:
         health = ping_global_store(runtime_gs_address, timeout=2.0)
@@ -461,6 +464,7 @@ def _resolve_global_store(
 
     try:
         inst = global_store_manager.start_global_store(
+            config_path=config_path,
             cluster_token=cluster_id or cluster_token_hint,
             fate_share=fate_share,
             to_console=to_console,
@@ -493,6 +497,7 @@ def start(
     daemon_config: Path | None = None,
     session_id: str | None = None,
     global_store_address: str | None = None,
+    global_store_config: Path | None = None,
     global_store_mode: Literal["connect", "start", "none"] = "none",
     config_overrides: list[str] | tuple[str, ...] | None = None,
     ha_endpoints: list[str] | tuple[str, ...] | None = None,
@@ -520,6 +525,7 @@ def start(
     resolved_gs = _resolve_global_store(
         mode=global_store_mode,
         address=global_store_address,
+        config_path=global_store_config,
         allow_gs_fallback=allow_gs_fallback,
         cluster_id=cluster_id,
         fate_share=fate_share,

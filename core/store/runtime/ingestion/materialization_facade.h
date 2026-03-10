@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
@@ -17,8 +18,8 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/device_types.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/control/materialization_backend.h"
-#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion/ingestion_event_hub.h"
@@ -70,6 +71,8 @@ namespace store = tensorcast::store;
 
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
+  using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
+
   struct Config {
     gsl::not_null<RuntimeContext*> runtime_context;
     gsl::not_null<ReplicaRuntime*> replica_runtime;
@@ -91,11 +94,30 @@ class MaterializationFacade : public materialization::control::MaterializationBa
   absl::StatusOr<loading::ReplicaHandle> materialize_replica(
       const DeviceKey& target_device,
       loading::MaterializeMode mode,
-      const loading::MaterializeHints& hints);
+      const loading::MaterializeHints& hints,
+      std::optional<loading::DiskSource> disk_source = std::nullopt);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints,
+      std::optional<loading::DiskSource> disk_source = std::nullopt);
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      const loader::ByteRangeMap& mapping,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints,
+      std::optional<loading::DiskSource> disk_source);
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      const loader::ByteRangeMap& mapping,
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints);
@@ -113,6 +135,14 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::MaterializeHints& hints) override;
 
   void prepare_p2p_source(P2PSource* source) const override;
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
+      std::string_view assembly_id,
+      std::string_view target_artifact_id,
+      std::string_view view_id,
+      std::string_view view_spec_json,
+      const DeviceKey& target_device,
+      loading::TransformPlacement placement,
+      const std::vector<std::string>* allowed_view_ids = nullptr);
 
   absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
@@ -133,10 +163,17 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
 
-  absl::StatusOr<store::SealAssemblyResult> seal_assembly(std::string_view assembly_id, bool publish_canonical);
+  absl::StatusOr<store::SealAssemblyResult> seal_assembly(
+      std::string_view assembly_id,
+      bool publish_canonical,
+      SealProgressCallback progress_cb = {},
+      const std::vector<std::string>* allowed_view_ids = nullptr);
 
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
+
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_local_canonical(
+      const loading::MaterializationRequest& request);
 
   template <typename SourceT, typename RunnerFn>
   absl::StatusOr<loading::ReplicaHandle> run_pipeline_ingestion(
@@ -196,9 +233,9 @@ class MaterializationFacade : public materialization::control::MaterializationBa
   std::unique_ptr<MaterializationService> materialization_service_;
   ingestion::IngestionEventHub* ingestion_event_hub_;
   std::atomic<uint64_t> request_counter_{1};
-  mutable absl::Mutex segment_plan_mu_;
-  absl::flat_hash_map<std::string, std::shared_ptr<std::vector<loader::SegmentPiece>>> segment_plan_cache_
-      ABSL_GUARDED_BY(segment_plan_mu_);
+  mutable absl::Mutex byte_range_map_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<loader::ByteRangeMap>> byte_range_map_cache_
+      ABSL_GUARDED_BY(byte_range_map_mu_);
   mutable absl::Mutex publish_context_mu_;
   absl::flat_hash_map<loading::ReplicaKey, std::string, loading::ReplicaKeyHash> publish_context_by_replica_
       ABSL_GUARDED_BY(publish_context_mu_);

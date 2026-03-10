@@ -29,8 +29,8 @@ from tensorcast.api.store.artifact import (
     PrefetchedReplica,
     _decode_capability_token,
 )
-from tensorcast.api.store.view_composer import compute_view_id, compute_view_subset_hash
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.api.store.view_composer import compute_view_id
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ class _ArtifactSelection:
     logical_layout_hash: bytes
     selection_hash: bytes
     view_subset_hash: bytes | None
-    view_spec: store_daemon_pb2.ViewSpec | None
+    view_spec: common_pb2.ViewSpec | None
     tensor_names: tuple[str, ...] | None
 
 
@@ -157,26 +157,6 @@ class _PlanStep:
     depends_on: tuple[str, ...]
 
 
-def _compute_logical_layout_hash(
-    *, index_bytes: bytes, needs_view_index: bool
-) -> bytes:
-    digest = hashlib.sha256()
-    digest.update(index_bytes)
-    digest.update(b"|view" if needs_view_index else b"|canonical")
-    return digest.digest()
-
-
-def _compute_selection_hash(*, view_id: str, view_subset_hash: bytes | None) -> bytes:
-    digest = hashlib.sha256()
-    digest.update(view_id.encode("utf-8"))
-    if view_subset_hash is not None:
-        digest.update(view_subset_hash)
-    else:
-        digest.update(b"|all")
-    digest.update(b"|v1")
-    return digest.digest()
-
-
 def _derive_action_idempotency_key(
     *,
     base_key: str,
@@ -192,6 +172,8 @@ def _derive_action_idempotency_key(
     digest.update(action.encode("utf-8"))
     digest.update(b"|target=")
     digest.update(target_id.encode("utf-8"))
+    digest.update(b"|artifact=")
+    digest.update(selection.artifact_id.encode("utf-8"))
     if device_id is not None:
         digest.update(f"|device={int(device_id)}".encode("utf-8"))
     if ttl_ms is not None:
@@ -205,9 +187,25 @@ def _derive_action_idempotency_key(
 
 def _resolve_device_id(*, device: str | int, allow_cpu: bool) -> int:
     if isinstance(device, int):
+        if device < 0:
+            if not allow_cpu:
+                raise ArtifactError(
+                    "CPU device is not supported for this operation",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return CPU_DEVICE_ID
         return int(device)
     import torch
 
+    if device.strip().lower() == "dram":
+        if not allow_cpu:
+            raise ArtifactError(
+                "CPU device is not supported for this operation",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return CPU_DEVICE_ID
     device_obj = torch.device(device)
     if device_obj.type == "cpu":
         if not allow_cpu:
@@ -235,7 +233,7 @@ def _ensure_index_bytes(artifact: Artifact) -> bytes:
 
 def _resolve_view_id(
     *, artifact: Artifact, canonical_index_bytes: bytes
-) -> tuple[str, store_daemon_pb2.ViewSpec | None]:
+) -> tuple[str, common_pb2.ViewSpec | None]:
     if artifact._view_metadata is not None:
         return str(artifact._view_metadata.view_id), None
     if artifact._view_spec is None or artifact._view_spec.is_identity:
@@ -260,7 +258,7 @@ def _resolve_view_id(
 def _resolve_view_index_bytes(
     *,
     artifact: Artifact,
-    view_proto: store_daemon_pb2.ViewSpec | None,
+    view_proto: common_pb2.ViewSpec | None,
     canonical_index_bytes: bytes,
 ) -> bytes:
     if artifact._view_metadata is not None and artifact._view_metadata.view_index_bytes:
@@ -302,41 +300,20 @@ def _resolve_view_index_bytes(
 
 
 def _resolve_artifact_selection(artifact: Artifact) -> _ArtifactSelection:
-    artifact_id = artifact._artifact_id or artifact._ensure_identified()
-    canonical_index_bytes = _ensure_index_bytes(artifact)
-    view_id, view_proto = _resolve_view_id(
-        artifact=artifact, canonical_index_bytes=canonical_index_bytes
+    selection = artifact._build_artifact_selection()
+    view_subset_hash = (
+        bytes(selection.view_subset_hash) if selection.view_subset_hash else None
     )
-    needs_view_index = bool(view_id)
-    if needs_view_index:
-        view_index_bytes = _resolve_view_index_bytes(
-            artifact=artifact,
-            view_proto=view_proto,
-            canonical_index_bytes=canonical_index_bytes,
-        )
-        logical_layout_hash = _compute_logical_layout_hash(
-            index_bytes=view_index_bytes, needs_view_index=True
-        )
-    else:
-        logical_layout_hash = _compute_logical_layout_hash(
-            index_bytes=canonical_index_bytes, needs_view_index=False
-        )
-
-    view_subset_hash: bytes | None = None
-    tensor_names: tuple[str, ...] | None = None
-    if artifact._view_metadata is not None and artifact._view_metadata.tensor_names:
-        tensor_names = tuple(artifact._view_metadata.tensor_names)
-        view_subset_hash = compute_view_subset_hash(tensor_names)
-
-    selection_hash = _compute_selection_hash(
-        view_id=view_id, view_subset_hash=view_subset_hash
+    view_proto: common_pb2.ViewSpec | None = (
+        selection.view_spec if selection.HasField("view_spec") else None
     )
+    tensor_names = tuple(selection.tensor_names) if selection.tensor_names else None
 
     return _ArtifactSelection(
-        artifact_id=artifact_id,
-        view_id=view_id,
-        logical_layout_hash=logical_layout_hash,
-        selection_hash=selection_hash,
+        artifact_id=str(selection.artifact_id),
+        view_id=str(selection.view_id),
+        logical_layout_hash=bytes(selection.logical_layout_hash),
+        selection_hash=bytes(selection.selection_hash),
         view_subset_hash=view_subset_hash,
         view_spec=view_proto,
         tensor_names=tensor_names,
@@ -348,7 +325,6 @@ def _clone_artifact_for_store(artifact: Artifact, store: "Store") -> Artifact:
         store_ref=weakref.ref(store),
         artifact_id=artifact._artifact_id,
         key=artifact._key_hint,
-        disk_path=artifact._disk_path_hint,
         fallback=artifact._fallback,
         canonical_index_bytes=artifact._canonical_index_bytes,
         canonical_index=artifact._canonical_index,
@@ -413,7 +389,7 @@ class WorkerStepBuilder:
         device: str | int,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[PrefetchedReplica]:
-        device_id = _resolve_device_id(device=device, allow_cpu=False)
+        device_id = _resolve_device_id(device=device, allow_cpu=True)
         device_input: str | int = device
         return self._plan._add_step(
             target=self._worker,
@@ -473,7 +449,8 @@ class InstanceStepBuilder:
         art: Artifact,
         *,
         spec: TransformSpec,
-        targets: TargetSpec,
+        target: TargetSpec | None = None,
+        targets: TargetSpec | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[None]:
         if not spec.name:
@@ -482,7 +459,20 @@ class InstanceStepBuilder:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if targets.instance_id != self._inst.instance_id:
+        if target is not None and targets is not None:
+            raise ArtifactError(
+                "Specify only one of target or targets",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        resolved_target = target if target is not None else targets
+        if resolved_target is None:
+            raise ArtifactError(
+                "target is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if resolved_target.instance_id != self._inst.instance_id:
             raise ArtifactError(
                 "TargetSpec instance_id does not match instance target",
                 status_code="FAILED_PRECONDITION",
@@ -493,7 +483,7 @@ class InstanceStepBuilder:
             action=_TransformIntoAction(
                 artifact=art,
                 spec=spec,
-                targets=targets,
+                targets=resolved_target,
             ),
             depends_on=depends_on,
         )
@@ -949,7 +939,7 @@ class Plan:
 
 
 def _fill_selection_proto(
-    selection: _ArtifactSelection, target: plan_pb2.ArtifactSelection
+    selection: _ArtifactSelection, target: common_pb2.ArtifactSelection
 ) -> None:
     target.artifact_id = selection.artifact_id
     target.view_id = selection.view_id

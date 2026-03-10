@@ -35,17 +35,88 @@ using loading::InlineBufferSource;
 using loading::TransformPlacement;
 using replica::MemoryState;
 
+absl::Status copy_local_cpu_source_to_gpu_replica(
+    const std::shared_ptr<replica::Replica>& src_replica,
+    const std::shared_ptr<replica::Replica>& dst_replica,
+    const loading::MaterializationRequest& request,
+    const MaterializationDeps& deps,
+    void* cpu_src_ptr,
+    uint64_t expected_size) {
+  if (cpu_src_ptr == nullptr) {
+    return absl::FailedPreconditionError("CPU source pointer unavailable for local CPU copy");
+  }
+  if (expected_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    return absl::OutOfRangeError("Artifact size exceeds host copy limits");
+  }
+
+  const auto current_gpu_state = dst_replica->get_memory_state(MemoryLocation::GPU);
+  if (current_gpu_state == MemoryState::LOADED) {
+    return absl::OkStatus();
+  }
+
+  // Reset stale GPU state and ready signal so this copy can publish a fresh completion signal.
+  absl::Status release_status = dst_replica->release_memory(MemoryLocation::GPU);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    return release_status;
+  }
+
+  auto& memory_manager = dst_replica->get_memory_manager();
+  absl::Status alloc_status = memory_manager.allocate_memory(MemoryLocation::GPU);
+  if (!alloc_status.ok()) {
+    return alloc_status;
+  }
+  const auto gpu_ptrs = memory_manager.get_pointer(MemoryLocation::GPU);
+  if (gpu_ptrs.empty() || gpu_ptrs[0] == nullptr) {
+    return absl::FailedPreconditionError("GPU pointer unavailable for local CPU copy");
+  }
+
+  const auto total_bytes = static_cast<size_t>(expected_size);
+  if (total_bytes > 0) {
+    const size_t slice_bytes = deps.memory_pool->slice_bytes();
+    if (slice_bytes == 0) {
+      return absl::FailedPreconditionError("Pinned buffer pool slice size is zero");
+    }
+    const size_t needed_chunks = (total_bytes + slice_bytes - 1) / slice_bytes;
+    const size_t pool_capacity = deps.memory_pool->capacity_slices();
+    const size_t max_chunks = std::max<size_t>(1, deps.streaming_buffer_chunks);
+    const size_t num_chunks = std::max<size_t>(1, std::min({needed_chunks, max_chunks, pool_capacity}));
+    auto streaming_buf =
+        std::make_shared<common::memory::StreamingPinnedBuffer>(num_chunks, slice_bytes, deps.memory_pool);
+    auto init_status = streaming_buf->initialize(deps.pinned_memory_timeout);
+    if (!init_status.ok()) {
+      return init_status;
+    }
+    auto copy_status = replica::perform_copy_cpu_to_gpu_streaming(
+        src_replica->artifact_id(),
+        static_cast<uint32_t>(request.target_device().ordinal),
+        streaming_buf,
+        gsl::not_null<void*>{gpu_ptrs[0]},
+        total_bytes,
+        gsl::not_null<void*>{cpu_src_ptr},
+        src_replica->get_memory_manager().memory_authority(),
+        src_replica->replica_key());
+    if (!copy_status.ok()) {
+      return copy_status;
+    }
+  }
+
+  auto mark_status = dst_replica->mark_loaded(MemoryLocation::GPU);
+  if (!mark_status.ok()) {
+    return mark_status;
+  }
+  dst_replica->set_ready_signal(MemoryLocation::GPU, absl::OkStatus());
+  return absl::OkStatus();
+}
+
 absl::Status validate_mi2_descriptor_matches_request(const loading::MaterializationRequest& request) {
   if (!absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
     return absl::OkStatus();
   }
-  if (!request.has_disk_path()) {
+  if (!request.has_disk_source()) {
     return absl::InvalidArgumentError(
-        "Content-addressed load requires MaterializeHints.disk_path so the descriptor can be validated");
+        "Content-addressed load requires a disk source so the descriptor can be validated");
   }
-
-  const std::filesystem::path descriptor_path =
-      std::filesystem::path(request.hints().disk_path) / "artifact_descriptor.json";
+  const std::filesystem::path descriptor_path = request.disk_source()->path / "artifact_descriptor.json";
   std::error_code ec;
   if (!std::filesystem::exists(descriptor_path, ec)) {
     return absl::FailedPreconditionError(
@@ -124,11 +195,27 @@ absl::StatusOr<ReplicaHandle> MaterializationService::try_reuse_replica(const Ma
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
   (void)replica->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
-  return build_handle(
-      request,
-      replica,
-      replica->ready_signal_for(request.target_location()),
-      loading::MaterializationSource::kLocalReplica);
+  if (request.target_is_gpu()) {
+    const auto gpu_state = replica->get_memory_state(MemoryLocation::GPU);
+    const auto cpu_state = replica->get_memory_state(MemoryLocation::CPU);
+    if (gpu_state == MemoryState::ALLOCATED && cpu_state != MemoryState::LOADED) {
+      return absl::NotFoundError("reuse replica has no loaded CPU source; falling back");
+    }
+  }
+  auto ready_signal = replica->ready_signal_for(request.target_location());
+  if (ready_signal && ready_signal->is_ready()) {
+    const absl::Status load_status = std::move(ready_signal->subscribe()).get();
+    if (!load_status.ok()) {
+      // Reuse path is advisory. If we can detect an immediate load failure (e.g.
+      // source CPU already evicted), downgrade to NotFound so execute() can fall
+      // through to local CPU copy / orchestrator / disk fallback.
+      if (absl::IsFailedPrecondition(load_status) || absl::IsNotFound(load_status)) {
+        return absl::NotFoundError(load_status.message());
+      }
+      return load_status;
+    }
+  }
+  return build_handle(request, replica, std::move(ready_signal), loading::MaterializationSource::kLocalReplica);
 }
 
 absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const MaterializationRequest& request) const {
@@ -171,6 +258,24 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const 
       return sz_or.status();
     }
 
+    auto existing_dst_or = deps_.replica_registry->find(request.replica_key());
+    if (existing_dst_or.ok()) {
+      const auto& existing_dst = existing_dst_or.value();
+      auto copy_status =
+          copy_local_cpu_source_to_gpu_replica(src_replica, existing_dst, request, deps_, cpu_ptrs[0], expected_size);
+      if (!copy_status.ok()) {
+        return copy_status;
+      }
+      return build_handle(
+          request,
+          existing_dst,
+          existing_dst->ready_signal_for(request.target_location()),
+          loading::MaterializationSource::kLocalReplica);
+    }
+    if (!absl::IsNotFound(existing_dst_or.status())) {
+      return existing_dst_or.status();
+    }
+
     replica::ReplicaConfig cfg = build_copy_replica_config(
         request, expected_size, src_replica, src_replica->get_memory_manager().memory_tier_config());
 
@@ -179,53 +284,11 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const 
       return dst_or.status();
     }
     auto dst_replica = std::shared_ptr<replica::Replica>(std::move(dst_or.value()));
-
-    auto& memory_manager = dst_replica->get_memory_manager();
-    absl::Status alloc_status = memory_manager.allocate_memory(MemoryLocation::GPU);
-    if (!alloc_status.ok()) {
-      return alloc_status;
+    auto copy_status =
+        copy_local_cpu_source_to_gpu_replica(src_replica, dst_replica, request, deps_, cpu_ptrs[0], expected_size);
+    if (!copy_status.ok()) {
+      return copy_status;
     }
-    const auto gpu_ptrs = memory_manager.get_pointer(MemoryLocation::GPU);
-    if (gpu_ptrs.empty() || gpu_ptrs[0] == nullptr) {
-      return absl::FailedPreconditionError("GPU pointer unavailable for local CPU copy");
-    }
-    if (expected_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-      return absl::OutOfRangeError("Artifact size exceeds host copy limits");
-    }
-    const auto total_bytes = static_cast<size_t>(expected_size);
-    if (total_bytes > 0) {
-      const size_t slice_bytes = deps_.memory_pool->slice_bytes();
-      if (slice_bytes == 0) {
-        return absl::FailedPreconditionError("Pinned buffer pool slice size is zero");
-      }
-      const size_t needed_chunks = (total_bytes + slice_bytes - 1) / slice_bytes;
-      const size_t pool_capacity = deps_.memory_pool->capacity_slices();
-      const size_t max_chunks = std::max<size_t>(1, deps_.streaming_buffer_chunks);
-      const size_t num_chunks = std::max<size_t>(1, std::min({needed_chunks, max_chunks, pool_capacity}));
-      auto streaming_buf =
-          std::make_shared<common::memory::StreamingPinnedBuffer>(num_chunks, slice_bytes, deps_.memory_pool);
-      auto init_status = streaming_buf->initialize(deps_.pinned_memory_timeout);
-      if (!init_status.ok()) {
-        return init_status;
-      }
-      auto copy_status = replica::perform_copy_cpu_to_gpu_streaming(
-          src_replica->artifact_id(),
-          static_cast<uint32_t>(request.target_device().ordinal),
-          streaming_buf,
-          gsl::not_null<void*>{gpu_ptrs[0]},
-          total_bytes,
-          gsl::not_null<void*>{cpu_ptrs[0]},
-          src_replica->get_memory_manager().memory_authority(),
-          src_replica->replica_key());
-      if (!copy_status.ok()) {
-        return copy_status;
-      }
-    }
-    auto mark_status = dst_replica->mark_loaded(MemoryLocation::GPU);
-    if (!mark_status.ok()) {
-      return mark_status;
-    }
-    dst_replica->set_ready_signal(MemoryLocation::GPU, absl::OkStatus());
 
     absl::Status emplace_status = deps_.replica_registry->emplace(request.replica_key(), gsl::not_null{dst_replica});
     if (absl::IsAlreadyExists(emplace_status)) {
@@ -316,9 +379,8 @@ absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const Mater
   if (!request.hints().allow_disk) {
     return absl::InvalidArgumentError("source_policy disallows disk ingestion");
   }
-  if (!request.has_disk_path()) {
-    return absl::InvalidArgumentError(
-        "LOAD_ONLY materialize paths require MaterializeHints.disk_path for disk ingestion");
+  if (!request.has_disk_source()) {
+    return absl::InvalidArgumentError("LOAD_ONLY materialize paths require a disk source for disk ingestion");
   }
   if (absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
     auto validate_st = validate_mi2_descriptor_matches_request(request);
@@ -327,8 +389,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const Mater
     }
   }
 
-  DiskSource disk_src;
-  disk_src.path = std::filesystem::path(request.hints().disk_path);
+  DiskSource disk_src = *request.disk_source();
   // Content-addressed (mi2) loads require descriptor + index for verification; CGID/local ids can stream without it.
   disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(request.canonical_artifact_id());
 
@@ -362,21 +423,25 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
     if (orchestrated_or.ok()) {
       return *orchestrated_or;
     }
-    if (!allow_disk || !request.has_disk_path()) {
+    if (!allow_disk || !request.has_disk_source()) {
+      return orchestrated_or.status();
+    }
+    if (deps_.run_auto_handles_disk_fallback) {
+      LOG(WARNING) << "Materialize AUTO callback failed (callback owns disk fallback): " << orchestrated_or.status();
       return orchestrated_or.status();
     }
     LOG(WARNING) << "Materialize AUTO callback failed: " << orchestrated_or.status() << "; falling back to disk load";
   }
 
-  if (allow_disk && request.has_disk_path()) {
+  if (allow_disk && request.has_disk_source()) {
     return load_from_disk(request);
   }
-  if (!allow_disk && request.has_disk_path()) {
+  if (!allow_disk && request.has_disk_source()) {
     return absl::FailedPreconditionError("source_policy disallows disk fallback");
   }
 
   return absl::FailedPreconditionError(
-      "AUTO materialize_replica requires a canonical artifact identifier (mi2: or cgid:) with Global Store routing or an explicit hints.disk_path");
+      "AUTO materialize_replica requires a canonical artifact identifier (mi2: or cgid:) with Global Store routing or an explicit disk source");
 }
 
 replica::ReplicaConfig MaterializationService::build_copy_replica_config(
@@ -395,6 +460,7 @@ replica::ReplicaConfig MaterializationService::build_copy_replica_config(
       .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
       .expected_artifact_size = expected_size,
       .view_plan = src_replica->view_plan(),
+      .byte_mapping_config = deps_.byte_mapping_config,
       .memory_tier_config = std::move(memory_tier_config)};
   cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
   cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;
@@ -414,7 +480,24 @@ absl::StatusOr<ReplicaHandle> MaterializationService::reuse_existing_replica(
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
   (void)existing->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
-  return build_handle(request, existing, existing->ready_signal_for(request.target_location()), source);
+  if (request.target_is_gpu()) {
+    const auto gpu_state = existing->get_memory_state(MemoryLocation::GPU);
+    const auto cpu_state = existing->get_memory_state(MemoryLocation::CPU);
+    if (gpu_state == MemoryState::ALLOCATED && cpu_state != MemoryState::LOADED) {
+      return absl::NotFoundError("reuse replica has no loaded CPU source; falling back");
+    }
+  }
+  auto ready_signal = existing->ready_signal_for(request.target_location());
+  if (ready_signal && ready_signal->is_ready()) {
+    const absl::Status load_status = std::move(ready_signal->subscribe()).get();
+    if (!load_status.ok()) {
+      if (absl::IsFailedPrecondition(load_status) || absl::IsNotFound(load_status)) {
+        return absl::NotFoundError(load_status.message());
+      }
+      return load_status;
+    }
+  }
+  return build_handle(request, existing, std::move(ready_signal), source);
 }
 
 ReplicaHandle MaterializationService::build_handle(
@@ -440,7 +523,8 @@ ReplicaHandle MaterializationService::build_handle(
   } else {
     auto uma = replica->get_memory_manager().memory_authority();
     if (uma) {
-      auto region_or = uma->get_cpu_memfd_region(handle.replica_key);
+      const loading::ReplicaKey& allocation_key = replica->replica_key();
+      auto region_or = uma->get_cpu_memfd_region(allocation_key);
       if (region_or.ok()) {
         handle.cpu_memfd_region = loading::CpuMemfdRegion{
             .fd = region_or->fd,

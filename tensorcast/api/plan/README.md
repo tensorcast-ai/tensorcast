@@ -10,10 +10,12 @@ best-effort cancellation.
 - **Plan**: A collection of steps targeting workers and instances.
 - **PlanSpec**: A versioned proto representation of a plan for deterministic
   replay and idempotent retries (`proto/tensorcast/plan/v1/plan.proto`).
+- **ArtifactSelection**: Shared selection message owned by
+  `proto/tensorcast/common/v1/common.proto` and embedded in PlanSpec actions.
 - **Selection identity**: Each step binds a selection fingerprint derived from
-  `(logical_layout_hash, selection_hash)` so retries join the same operation.
-  `logical_layout_hash` is computed from canonical index bytes or view index
-  bytes derived from view specs and optional tensor subsets.
+  `(artifact_id, logical_layout_hash, selection_hash)` so retries join the same operation.
+  Hashes are computed via `tensorcast.common.selection_identity` from canonical
+  index bytes or view index bytes plus view/subset inputs.
 - **TargetSpec**: Capability-based reference to engine-owned buffers.
 - **TransformSpec**: Named transform invocation with structured arguments.
 
@@ -26,7 +28,10 @@ best-effort cancellation.
   the `PlanSpec` to a node agent with an engine adapter.
 - Instance targets must be expressed as `TargetSpec` capabilities minted by the
   engine adapter on the target process.
-- Worker prefetch is GPU-only; CPU devices are rejected for `prefetch` steps.
+- Worker prefetch supports both GPU and daemon-owned CPU/DRAM warm replicas:
+  - GPU: `device="cuda:0"` or `0`
+  - daemon-owned DRAM: `device="cpu"`, `"dram"`, or `-1`
+  `pin_device_residency` remains GPU-only (`device_id >= 0`).
 
 ## Execution semantics
 

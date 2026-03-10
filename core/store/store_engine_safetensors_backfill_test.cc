@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -16,6 +16,7 @@ using tensorcast::DeviceType;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::DiskSource;
 
 namespace {
 
@@ -82,10 +83,12 @@ TEST_CASE("Safetensors backfill writes descriptor and CBOR index", "[store_engin
   REQUIRE_FALSE(std::filesystem::exists(dir / "tensor_index.cbor"));
 
   StoreEngine store = make_store(root);
+  const std::string artifact_id = "cgid:st_model";
   tensorcast::store::loading::MaterializeHints hints;
-  hints.disk_path = artifact;
-  auto handle_or =
-      store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  hints.artifact_id = artifact_id;
+  DiskSource disk_source{.path = dir, .expected_size = std::nullopt};
+  auto handle_or = store.materialize_replica(
+      cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
 
   // If there is an error, log it and continue
   if (!handle_or.ok()) {

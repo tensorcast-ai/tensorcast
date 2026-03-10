@@ -317,10 +317,22 @@ void MetricsCollector::record_operation(const std::string& operation_type, doubl
 }
 
 void MetricsCollector::record_p2p_transfer(size_t bytes_transferred, bool success) {
+  p2p_total_transfers_.fetch_add(1, std::memory_order_relaxed);
   if (success) {
+    p2p_total_bytes_transferred_.fetch_add(static_cast<std::uint64_t>(bytes_transferred), std::memory_order_relaxed);
     // Unified counter for P2P throughput only
     p2p_bytes_total_->Add(static_cast<double>(bytes_transferred));
+  } else {
+    p2p_total_transfer_errors_.fetch_add(1, std::memory_order_relaxed);
   }
+}
+
+MetricsCollector::P2PTransferSnapshot MetricsCollector::get_p2p_transfer_snapshot() const {
+  return P2PTransferSnapshot{
+      .total_transfers = p2p_total_transfers_.load(std::memory_order_relaxed),
+      .total_bytes_transferred = p2p_total_bytes_transferred_.load(std::memory_order_relaxed),
+      .total_transfer_errors = p2p_total_transfer_errors_.load(std::memory_order_relaxed),
+  };
 }
 
 void MetricsCollector::record_registration_pending(size_t pending_count) {
@@ -363,7 +375,7 @@ void MetricsCollector::record_artifact_load(
   attrs.emplace("source", opentelemetry::common::AttributeValue(source));
   attrs.emplace("device", opentelemetry::common::AttributeValue(device));
   attrs.emplace("phase", opentelemetry::common::AttributeValue(phase));
-  attrs.emplace("view_scope", opentelemetry::common::AttributeValue(view_id.has_value() ? "variant" : "canonical"));
+  attrs.emplace("view_scope", opentelemetry::common::AttributeValue(view_id.has_value() ? "view" : "canonical"));
   if (view_id.has_value() && !view_id->empty()) {
     std::string truncated{*view_id};
     constexpr size_t kMaxLen = 24;

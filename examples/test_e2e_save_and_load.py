@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import torch
 
@@ -48,8 +48,7 @@ tmp_dir = "/mnt/host0/tensorcast/DeepSeek-R1-0528-layer-8-tp-1/rank_test"  # ssd
 # tmp_dir = "/tmp/rank_test" # tmpfs
 descriptor = save_dict(ori_dict, tmp_dir)
 fallback = FallbackOptions(
-    disk_path=tmp_dir,
-    prefer_disk=True,
+    prefer="disk",
     allow_p2p=False,
     verify_checksums=False,
 )

@@ -404,6 +404,13 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "mtcp_transfer_completion_tracker_lib",
+    srcs = ["engine/mtcp_transfer_completion_tracker.cc"],
+    hdrs = ["engine/mtcp_transfer_completion_tracker.h"],
+    visibility = ["//visibility:public"],
+)
+
+sc_cc_library(
     name = "engine_lib",
     srcs = ["engine/engine.cc"],
     hdrs = ["engine/engine.h"],
@@ -416,6 +423,7 @@ sc_cc_library(
         ":host_pinned_gpu_stager_lib",
         ":message_lib",
         ":mr_cache_lib",
+        ":mtcp_transfer_completion_tracker_lib",
         ":mtcp_transport_lib",
         ":protocol_lib",
         ":rdma_lib",
@@ -688,6 +696,16 @@ cc_test(
 )
 
 cc_test(
+    name = "mtcp_transfer_completion_tracker_test",
+    srcs = ["engine/mtcp_transfer_completion_tracker_test.cc"],
+    deps = [
+        ":mtcp_transfer_completion_tracker_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "rdma_stage_fn_test",
     srcs = ["engine/rdma_stage_fn_test.cc"],
     deps = [
@@ -704,6 +722,28 @@ cc_test(
         ":engine_lib",
         "//core/testing:catch_main",
         "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "unregister_drain_test",
+    srcs = ["engine/unregister_drain_test.cc"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "store_test",
+    srcs = ["engine/store_test.cc"],
+    deps = [
+        ":constants_lib",
+        ":store_lib",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )

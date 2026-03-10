@@ -4,10 +4,12 @@ package tensorcast.daemon.v2;
 
 import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/operation/v1/operation.proto";
 
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
   rpc UnloadReplica(UnloadReplicaRequest) returns (UnloadReplicaResponse) {}
 
@@ -54,24 +56,36 @@ service StoreDaemonService {
   rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+  rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
+  rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
 
-  // ========== Key-based materialization and publish ==========
-  // See docs/architecture/api/materialization-flow.md for semantics.
-  rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
-  rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
+  // ========== Key mapping and publish ==========
+  rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
+  rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
   rpc CreatePlacementLease(CreatePlacementLeaseRequest) returns (CreatePlacementLeaseResponse) {}
   rpc RenewPlacementLease(RenewPlacementLeaseRequest) returns (RenewPlacementLeaseResponse) {}
   rpc ReleasePlacementLease(ReleasePlacementLeaseRequest) returns (ReleasePlacementLeaseResponse) {}
+  rpc AcquireRetentionHandle(AcquireRetentionHandleRequest) returns (AcquireRetentionHandleResponse) {}
+  rpc RenewRetentionHandle(RenewRetentionHandleRequest) returns (RenewRetentionHandleResponse) {}
+  rpc ReleaseRetentionHandle(ReleaseRetentionHandleRequest) returns (ReleaseRetentionHandleResponse) {}
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
   // Resolve a human-friendly key to an artifact id and optional disk hint.
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+  // Swap a key mapping to a new artifact id with optional CAS guardrails.
+  rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
   // Seal an assembly (cgid) into a stable mi2 identity.
   rpc SealAssembly(SealAssemblyRequest) returns (SealAssemblyResponse) {}
+  // Start sealing as a long-tail Operation.
+  rpc StartSealAssembly(StartSealAssemblyRequest) returns (StartSealAssemblyResponse) {}
+  // Query a long-tail operation by operation_id.
+  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
+  // Wait for a long-tail operation to reach a terminal state.
+  rpc WaitOperation(WaitOperationRequest) returns (WaitOperationResponse) {}
 
   // ========== Persistence ==========
   // See docs/architecture/api/policy-persistence.md for policy and task flow.
@@ -128,6 +142,13 @@ enum SourcePreference {
   SOURCE_PREFERENCE_AUTO = 1;
   SOURCE_PREFERENCE_PREFER_P2P = 2;
   SOURCE_PREFERENCE_PREFER_DISK = 3;
+}
+
+enum ExportPolicy {
+  EXPORT_POLICY_UNSPECIFIED = 0;
+  EXPORT_POLICY_NEVER = 1;
+  EXPORT_POLICY_AUTO = 2;
+  EXPORT_POLICY_FORCE = 3;
 }
 
 // Source selection policy that can further gate which sources are allowed.
@@ -229,32 +250,6 @@ message CpuMemfdHandle {
   uint64 offset_bytes = 2;
 }
 
-message NarrowOp {
-  uint32 dim = 1;
-  int64 start = 2;
-  uint64 length = 3;
-}
-
-message TransposeOp {
-  uint32 dim0 = 1;
-  uint32 dim1 = 2;
-}
-
-message Op {
-  oneof kind {
-    NarrowOp narrow = 1;
-    TransposeOp transpose = 2;
-  }
-}
-
-message TensorViewOps {
-  repeated Op ops = 1;
-}
-
-message ViewSpec {
-  map<string, TensorViewOps> tensors = 1;
-}
-
 message CanonicalRange {
   uint64 offset = 1;
   uint64 length = 2;
@@ -279,7 +274,7 @@ message StorePolicy {
 
 message ViewRegistrationOptions {
   string view_id = 1;
-  ViewSpec spec = 2;
+  tensorcast.common.v1.ViewSpec spec = 2;
   TransformPlacement placement = 3;
   uint64 canonical_size_bytes = 4;
   repeated CanonicalRange ranges = 5;
@@ -381,9 +376,9 @@ message ReplicaOperationStatus {
 }
 
 message MaterializeReplicaRequest {
-  // RFC-0007: Use content-addressed artifact_id when available.
-  optional string artifact_id = 1;
-  DiskFallbackHint disk_fallback = 2;
+  tensorcast.common.v1.ArtifactSelection selection = 1;
+  reserved 2;
+  reserved "disk_fallback";
 
   string replica_uuid = 3;
   string device_uuid = 4;
@@ -396,21 +391,16 @@ message MaterializeReplicaRequest {
   SourcePolicy source_policy = 14;
   LeaseMode lease_mode = 15;
 
-  // Selective materialization
-  repeated string tensor_names = 10;
-  bytes view_subset_hash = 11;
-
-  // Legacy disk fallback fields; prefer disk_fallback instead.
-  optional bool verify_checksums = 12;
-  optional string disk_path = 13;
-
-  oneof view_identity {
-    ViewSpec view = 1001;
-    string view_id = 1002;
-  }
+  reserved 10, 11, 12, 13, 1001, 1002;
+  reserved "tensor_names", "view_subset_hash", "verify_checksums", "disk_path", "view", "view_id";
 
   TransformPlacement placement = 1003;
   bool wait_for_completion = 1004;
+  // Server-side wait budget for managed shared-disk readiness. When >0 and the
+  // initial materialization attempt fails, the daemon waits for a managed disk
+  // location in the local cluster before retrying disk-only.
+  uint32 wait_for_shared_disk_ms = 16;
+  ExportPolicy export_policy = 17;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
@@ -433,18 +423,44 @@ message MaterializeReplicaResponse {
   ReplicaTicket ticket = 9;
   bytes view_index_bytes = 10;
   uint64 generation = 11;
+  tensorcast.common.v1.ArtifactSelection resolved_selection = 12;
 
   // Legacy view metadata for compatibility with view-based callers.
   bytes view_index_json = 1001;
   string view_data_hash = 1002;
 }
 
-message MaterializeIntoTargetRequest {
-  oneof artifact_ref {
-    string artifact_id = 1;
-    string key = 2;
-  }
-  DiskFallbackHint disk_fallback = 3;
+message CopyPlanRange {
+  int32 dim = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+message CopyPlanEntry {
+  string ckpt_name = 1;
+  CopyPlanRange ckpt_range = 2;
+  string dst_name = 3;
+  CopyPlanRange dst_range = 4;
+}
+
+message CopyPlan {
+  uint32 version = 1;
+  repeated CopyPlanEntry entries = 2;
+}
+
+message MappedTensorSpec {
+  string name = 1;
+  repeated int64 shape = 2;
+  repeated int64 stride = 3;
+  string dtype = 4;
+  uint64 storage_offset = 5;
+  uint64 logical_length = 6;
+}
+
+message MaterializeIntoMappedTargetRequest {
+  tensorcast.common.v1.ArtifactSelection selection = 1;
+  reserved 3;
+  reserved "disk_fallback";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
@@ -453,13 +469,31 @@ message MaterializeIntoTargetRequest {
   SourcePreference preference = 7;
   SourcePolicy source_policy = 12;
 
-  repeated string tensor_names = 8;
-  bytes view_subset_hash = 9;
+  CopyPlan copy_plan = 8;
+  repeated MappedTensorSpec dst_tensors = 9;
 
-  oneof view_identity {
-    ViewSpec view = 1001;
-    string view_id = 1002;
-  }
+  optional string operation_id = 11;
+  reserved 2, 10, 1001, 1002;
+  reserved "key", "view_subset_hash", "view", "view_id";
+
+  TransformPlacement placement = 1003;
+}
+
+message MaterializeIntoTargetRequest {
+  tensorcast.common.v1.ArtifactSelection selection = 1;
+  reserved 3;
+  reserved "disk_fallback";
+
+  TargetLayout target_layout = 4;
+  int32 pid = 5;
+  string device_uuid = 6;
+
+  SourcePreference preference = 7;
+  SourcePolicy source_policy = 12;
+
+  optional string operation_id = 10;
+  reserved 2, 8, 9, 1001, 1002;
+  reserved "key", "tensor_names", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
 }
@@ -472,6 +506,8 @@ message MaterializeIntoTargetResponse {
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
   uint64 generation = 7;
+  bytes target_write_token = 8;
+  tensorcast.common.v1.ArtifactSelection resolved_selection = 9;
 }
 
 message ConfirmReplicaRequest {
@@ -756,6 +792,8 @@ message LeaseHandshake {}
 
 message StableDramHandshake {
   bytes staging_cuda_ipc_handle = 1;
+  CpuMemfdHandle publish_cpu_memfd = 2;
+  bytes publish_cpu_memfd_lease_token = 3;
 }
 
 // Stream variants must not reuse unary messages per lint
@@ -764,6 +802,7 @@ message FeedRegisterArtifactStreamRequest {
   oneof feed {
     LeaseSegments lease_segments = 11;
     ViewUploadChunk view_chunk = 12;
+    StableDramWriteProgress stable_dram_write_progress = 13;
   }
   // Optional deduplicated storage table and tensor alias metadata. Clients send
   // these fields when using the unified registration flow; legacy clients omit them.
@@ -776,6 +815,16 @@ message ViewUploadChunk {
   uint64 canonical_offset = 1;
   uint64 view_offset = 2;
   bytes data = 3;
+}
+
+message StableDramWriteProgress {
+  repeated StableDramWrittenRange ranges = 1;
+  bool upload_complete = 2;
+}
+
+message StableDramWrittenRange {
+  uint64 canonical_offset = 1;
+  uint64 length = 2;
 }
 
 message LeaseSegments {
@@ -924,6 +973,10 @@ message DeregisterArtifactRequest {
   optional int32 device_id = 7;
   // When true, release region references once deregistration completes.
   optional bool release_regions = 8;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 9;
+  optional string operation_id = 10;
+  // When true, keep any managed shared-disk copies (default: purge on deregister).
+  optional bool keep_shared_disk_copy = 11;
 }
 
 message DeregisterArtifactResponse {
@@ -933,48 +986,86 @@ message DeregisterArtifactResponse {
   optional string message = 4;
 }
 
-// Key-based materialization request.
-message MaterializeByKeyRequest {
-  string key = 1;
-  int32 device_id = 2;
-  int32 pinned_allocation_timeout_ms = 3;
-  string replica_uuid = 4;
-  int32 pid = 5;
-  DeviceType target_device_type = 6;
-  LeaseMode lease_mode = 7;
-
-  // Selective materialization
-  repeated string tensor_names = 10;
-  bytes view_subset_hash = 11;
-
-  SourcePreference preference = 12;
-  SourcePolicy source_policy = 13;
-  bool wait_for_completion = 20;
+message PublishTargetReplicaRequest {
+  bytes target_write_token = 1;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 2;
+  optional uint32 ttl_ms = 3;
+  optional int32 owner_pid = 4;
+  optional string operation_id = 5;
 }
-message MaterializeByKeyResponse {
-  MaterializeReplicaStatus status = 1;
+
+message PublishTargetReplicaResponse {
+  string lease_id = 1;
+  string replica_id = 2;
+}
+
+message RetirePublishedReplicaRequest {
+  optional string lease_id = 1;
   string artifact_id = 2;
-  string used_disk_path = 3;
-  MemCopyHandle mem_handle = 4;
-  MaterializationSource source = 5;
-  bytes canonical_index_bytes = 6;
-  ViewSubset view_subset = 7;
-  repeated TensorPayloadDescriptor payloads = 8;
-  ReplicaTicket ticket = 9;
-  bytes view_index_bytes = 10;
-  uint64 generation = 11;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 3;
+  optional int32 owner_pid = 4;
+  optional int32 device_id = 5;
+  bool wait_for_drain = 6;
+  optional uint32 drain_timeout_ms = 7;
+  optional string operation_id = 8;
 }
 
-message ResolveArtifactFromDiskRequest {
-  string disk_path = 1;
+message RetirePublishedReplicaResponse {
+  bool drained = 1;
+  bool removed = 2;
+  optional string message = 3;
+}
+
+message ImportArtifactFromPathRequest {
+  string path = 1;
   bool verify_checksums = 2;
 }
 
-message ResolveArtifactFromDiskResponse {
+enum ImportArtifactState {
+  IMPORT_ARTIFACT_STATE_UNSPECIFIED = 0;
+  IMPORT_ARTIFACT_STATE_READY = 1;
+}
+
+message ImportArtifactFromPathResponse {
   string artifact_id = 1;
-  string disk_path = 2;
-  bytes canonical_index_bytes = 3;
-  uint64 generation = 4;
+  bytes canonical_index_bytes = 2;
+  uint64 generation = 3;
+  ImportArtifactState import_state = 4;
+}
+
+enum ImportArtifactPhase {
+  IMPORT_ARTIFACT_PHASE_UNSPECIFIED = 0;
+  IMPORT_ARTIFACT_PHASE_PREPARE = 1;
+  IMPORT_ARTIFACT_PHASE_SCAN_SOURCE = 2;
+  IMPORT_ARTIFACT_PHASE_READ_HEADERS = 3;
+  IMPORT_ARTIFACT_PHASE_BUILD_CANONICAL_INDEX = 4;
+  IMPORT_ARTIFACT_PHASE_HASH_DATA = 5;
+  IMPORT_ARTIFACT_PHASE_WRITE_REGISTRY = 6;
+  IMPORT_ARTIFACT_PHASE_DONE = 7;
+  IMPORT_ARTIFACT_PHASE_ERROR = 8;
+}
+
+enum ImportArtifactErrorCode {
+  IMPORT_ARTIFACT_ERROR_CODE_UNSPECIFIED = 0;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_NOT_FOUND = 1;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_PERMISSION_DENIED = 2;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_FORMAT_INVALID = 3;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_MUTATED = 4;
+  IMPORT_ARTIFACT_ERROR_CODE_REGISTRY_IO_FAILURE = 5;
+  IMPORT_ARTIFACT_ERROR_CODE_POLICY_DENIED_NON_LOCAL_PEER = 6;
+}
+
+message ImportArtifactFromPathStreamEvent {
+  uint64 seq = 1;
+  ImportArtifactPhase phase = 2;
+  uint64 processed_bytes = 3;
+  uint64 total_bytes = 4;
+  double percent = 5;
+  bool done = 6;
+  bool error = 7;
+  ImportArtifactErrorCode error_code = 8;
+  string message = 9;
+  ImportArtifactFromPathResponse result = 10;
 }
 
 message QueryReplicaStatusResponse {
@@ -1032,6 +1123,7 @@ message RenewPlacementLeaseRequest {
 message RenewPlacementLeaseResponse {
   uint64 lease_id = 1;
   optional google.protobuf.Timestamp expires_at = 2;
+  bytes lease_token = 3;
 }
 
 message ReleasePlacementLeaseRequest {
@@ -1042,12 +1134,49 @@ message ReleasePlacementLeaseResponse {
   bool released = 1;
 }
 
+// ========== Retention handles ==========
+message RetentionHandle {
+  string handle_id = 1;
+  uint64 expires_at_ms = 2;
+  bytes capability_token = 3;
+  uint64 charged_bytes = 4;
+  string diagnostics = 5;
+}
+
+message AcquireRetentionHandleRequest {
+  tensorcast.common.v1.ArtifactSelection selection = 1;
+  StorePolicy policy = 2;
+  uint64 ttl_ms = 3;
+}
+
+message AcquireRetentionHandleResponse {
+  RetentionHandle handle = 1;
+}
+
+message RenewRetentionHandleRequest {
+  bytes handle_token = 1;
+  uint64 extend_ttl_ms = 2;
+}
+
+message RenewRetentionHandleResponse {
+  RetentionHandle handle = 1;
+}
+
+message ReleaseRetentionHandleRequest {
+  bytes handle_token = 1;
+}
+
+message ReleaseRetentionHandleResponse {
+  bool released = 1;
+}
+
 message PublishReplicaKeyRequest {
   string key = 1;
   // Content-addressed artifact descriptor (RFC-0007)
   tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 2;
   string replica_uuid = 3;
-  string disk_path = 4; // optional
+  reserved 4;
+  reserved "disk_path";
   bool fail_if_exists = 5; // default semantics: true
 }
 message PublishReplicaKeyResponse {
@@ -1061,7 +1190,23 @@ message ResolveKeyMappingRequest {
 }
 message ResolveKeyMappingResponse {
   string artifact_id = 1;
-  string used_disk_path = 2;
+  reserved 2;
+  reserved "used_disk_path";
+  uint64 generation = 3;
+  uint32 cache_ttl_seconds = 4;
+}
+
+message SwapKeyMappingRequest {
+  string key = 1;
+  string new_artifact_id = 2;
+  string expected_artifact_id = 3;
+  optional uint64 expected_generation = 4;
+  string operation_id = 5;
+}
+message SwapKeyMappingResponse {
+  bool ok = 1;
+  string artifact_id = 2;
+  uint64 generation = 3;
 }
 
 message GetArtifactIndexByIdRequest {
@@ -1082,6 +1227,43 @@ message SealAssemblyResponse {
   bool already_sealed = 3;
 }
 
+message SealAssemblyResult {
+  tensorcast.common.v1.ArtifactDescriptor artifact = 1;
+}
+
+message StartSealAssemblyRequest {
+  string assembly_id = 1;
+  // Optional explicit layout selection; if absent, sealing uses the current assembly layout binding (if any).
+  string layout_id = 2;
+}
+
+message StartSealAssemblyResponse {
+  tensorcast.operation.v1.OperationRef operation = 1;
+}
+
+// Immutable seal snapshot stored inside Operation.snapshot.
+message SealAssemblySnapshotView {
+  string view_id = 1;
+  // Raw 32-byte SHA-256 digest over immutable view metadata (e.g., coverage ranges + view_data_hash).
+  bytes meta_digest = 2;
+}
+
+message SealAssemblySnapshot {
+  string assembly_id = 1;
+  string layout_id = 2;
+  uint64 assembly_layout_binding_version = 3;
+  repeated SealAssemblySnapshotView views = 4;
+}
+
+message WaitOperationRequest {
+  string operation_id = 1;
+  uint64 timeout_ms = 2;
+}
+
+message WaitOperationResponse {
+  tensorcast.operation.v1.GetOperationResponse operation = 1;
+}
+
 // ========== Persistence ==========
 message PersistenceShardStatus {
   string shard_id = 1;
@@ -1099,6 +1281,7 @@ message StartPersistenceRequest {
   StorePolicy policy = 2;
   reserved 3;
   reserved "placement_policy", "persist_to_shared_disk";
+  string key_hint = 4;
 }
 
 message StartPersistenceResponse {

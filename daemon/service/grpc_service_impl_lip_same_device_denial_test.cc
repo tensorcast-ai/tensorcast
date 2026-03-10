@@ -6,6 +6,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "core/cuda/cuda_api.h"
+#include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/testing/cuda_ipc_spawn_helper.h"
@@ -107,11 +108,19 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   st = svc.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   REQUIRE(cresp.has_artifact_descriptor());
+  auto lip_key = harness->kernel().lip_manager().find_key_by_registration_id(bresp.registration_id());
+  REQUIRE(lip_key.has_value());
+  REQUIRE(lip_key->view_id.empty());
+  auto active_lease = harness->kernel().lip_manager().find_active_by_artifact_id(lip_key->artifact_id);
+  REQUIRE(active_lease.has_value());
+  REQUIRE(active_lease->device_id == 0);
+  REQUIRE(harness->kernel().lip_manager().has_active_on_device(lip_key->artifact_id, 0));
 
   // Attempt to materialize on the same device (0) using artifact_id; must be denied.
   tensorcast::daemon::v2::MaterializeReplicaRequest mreq;
-  mreq.set_artifact_id(cresp.artifact_descriptor().artifact_id());
-  // Default target_device_type = GPU → resolves to device 0
+  mreq.mutable_selection()->set_artifact_id(lip_key->artifact_id);
+  mreq.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  mreq.set_device_uuid(tensorcast::store::DeviceRegistry::instance().gpu_key(0).uuid);
   tensorcast::daemon::v2::MaterializeReplicaResponse mresp;
   st = svc.MaterializeReplica(&ctx, &mreq, &mresp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);

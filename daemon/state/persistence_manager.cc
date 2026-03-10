@@ -3,8 +3,12 @@
 #include "daemon/state/persistence_manager.h"
 
 #include <algorithm>
+#include <cctype>
+#include <format>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <random>
 #include <sstream>
 #include <utility>
 
@@ -15,12 +19,16 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/lip_manager.h"
+#include "folly/futures/Future.h"
 #include "nlohmann/json.hpp"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
@@ -39,6 +47,64 @@ constexpr uint64_t kShardThresholdBytes = 128ULL * 1024 * 1024;
 constexpr uint64_t kDefaultChunkBytes = 4ULL * 1024 * 1024;
 constexpr uint32_t kMaxLeaseAttempts = 3;
 constexpr uint32_t kMaxCooldownTicks = 8;
+constexpr auto kUnchangedReportMinInterval = std::chrono::seconds(1);
+
+enum class DiskFailureStage { kWrite, kFinalize, kRegister };
+
+uint32_t quantize_progress_bucket(double progress) {
+  if (progress <= 0.0) {
+    return 0;
+  }
+  if (progress >= 1.0) {
+    return 1000;
+  }
+  return static_cast<uint32_t>(progress * 1000.0);
+}
+
+uint64_t compute_persistence_report_signature(const PersistenceTaskState& task) {
+  std::string signature;
+  absl::StrAppend(
+      &signature,
+      static_cast<int>(task.state),
+      "|",
+      quantize_progress_bucket(task.progress),
+      "|",
+      task.degraded_reason,
+      "|",
+      task.last_error,
+      "|",
+      task.disk_location_registered ? "1" : "0",
+      "|");
+
+  for (const auto& shard : task.shards) {
+    absl::StrAppend(
+        &signature,
+        shard.shard_idx,
+        ":",
+        static_cast<int>(shard.state),
+        ":",
+        quantize_progress_bucket(shard.progress),
+        ":",
+        shard.degraded_reason,
+        ":",
+        shard.last_error,
+        "|");
+    for (const auto& target : shard.targets) {
+      absl::StrAppend(
+          &signature,
+          target.node_id,
+          ":",
+          target.lease_id,
+          ":",
+          static_cast<int>(target.target_state),
+          ":",
+          target.degraded_reason,
+          "|");
+    }
+  }
+
+  return std::hash<std::string>{}(signature);
+}
 
 std::string make_digest(absl::string_view artifact_id, uint32_t shard_idx, uint64_t start, uint64_t length) {
   const std::string payload = absl::StrCat(artifact_id, ":", shard_idx, ":", start, ":", length);
@@ -108,10 +174,102 @@ void record_retry_metric(absl::string_view stage) {
   }
 }
 
+constexpr std::string_view kClustersDir = "clusters";
+constexpr std::string_view kObjectsDir = "objects";
+constexpr std::string_view kByKeyDir = "by_key";
+
+std::string sanitize_segment(std::string_view input) {
+  std::string out;
+  out.reserve(input.size());
+  for (char c : input) {
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.') {
+      out.push_back(c);
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty()) {
+    out = "unnamed";
+  }
+  return out;
+}
+
+absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_identity(std::string_view artifact_id) {
+  if (!absl::StartsWith(artifact_id, "mi2:")) {
+    return absl::InvalidArgumentError("artifact_id must start with mi2:");
+  }
+  const std::string_view rest = artifact_id.substr(4);
+  const auto pos = rest.find(':');
+  if (pos == std::string_view::npos) {
+    return absl::InvalidArgumentError("artifact_id must be of form mi2:<index_multihash>:<data_multihash>");
+  }
+  const std::string_view index_mh = rest.substr(0, pos);
+  const std::string_view data_mh = rest.substr(pos + 1);
+  if (index_mh.empty() || data_mh.empty()) {
+    return absl::InvalidArgumentError("artifact_id must include index and data multihash");
+  }
+  return std::make_pair(std::string(index_mh), std::string(data_mh));
+}
+
+std::string short_artifact_hint(std::string_view artifact_id) {
+  auto parsed = parse_mi2_identity(artifact_id);
+  if (parsed.ok()) {
+    const std::string& data_mh = parsed->second;
+    return sanitize_segment(data_mh.substr(0, std::min<size_t>(12, data_mh.size())));
+  }
+  return sanitize_segment(std::string(artifact_id).substr(0, 12));
+}
+
+std::string format_persist_timestamp(absl::Time now) {
+  const std::string base = absl::FormatTime("%Y%m%dT%H%M%S", now, absl::UTCTimeZone());
+  const int64_t millis = absl::ToUnixMillis(now) % 1000;
+  return std::format("{}{:03d}Z", base, static_cast<int>(millis));
+}
+
 uint32_t compute_backoff_ticks(uint32_t attempts) {
   const uint32_t shift = std::min<uint32_t>(attempts, 3);
   const uint32_t backoff = 1u << shift;
   return std::min<uint32_t>(backoff, kMaxCooldownTicks);
+}
+
+bool is_safe_relative_path(const std::filesystem::path& path) {
+  if (path.empty() || path.is_absolute()) {
+    return false;
+  }
+  for (const auto& part : path) {
+    if (part == "." || part == "..") {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool has_path_prefix(const std::filesystem::path& path, const std::filesystem::path& prefix) {
+  auto path_it = path.begin();
+  for (auto prefix_it = prefix.begin(); prefix_it != prefix.end(); ++prefix_it) {
+    if (path_it == path.end() || *path_it != *prefix_it) {
+      return false;
+    }
+    ++path_it;
+  }
+  return true;
+}
+
+std::string disk_failure_token(const absl::Status& status, DiskFailureStage stage) {
+  const std::string_view message = status.message();
+  if (absl::StartsWith(message, "storage_path_missing")) {
+    return "storage_path_missing";
+  }
+  if (absl::StartsWith(message, "cluster_id_missing")) {
+    return "cluster_id_missing";
+  }
+  if (absl::StartsWith(message, "disk_relative_path_missing")) {
+    return "disk_relative_path_missing";
+  }
+  if (stage == DiskFailureStage::kRegister) {
+    return "disk_location_upsert_failed";
+  }
+  return "shared_disk_write_failed";
 }
 
 void send_reports(comps::IGlobalStoreClient* client, const std::vector<comps::PersistenceReport>& reports) {
@@ -252,12 +410,14 @@ PersistenceManager::PersistenceManager(
     BackgroundScheduler* scheduler,
     LipManager* lip_mgr,
     store::StoreEngine* store_engine,
+    std::shared_ptr<common::AsyncRuntime> async_runtime,
     size_t artifact_chunk_bytes,
     std::chrono::milliseconds tick_interval,
     std::filesystem::path task_log_path)
     : lip_mgr_(lip_mgr),
       store_engine_(store_engine),
       global_store_(nullptr),
+      async_runtime_(async_runtime ? std::move(async_runtime) : std::make_shared<common::AsyncRuntime>()),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       local_node_id_("local"),
       scheduler_(scheduler),
@@ -271,24 +431,34 @@ PersistenceManager::PersistenceManager(
 
 absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task(
     std::string artifact_id,
-    const ResolvedStorePolicy& policy) {
+    const ResolvedStorePolicy& policy,
+    std::string_view key_hint) {
   auto source_or = resolve_source(artifact_id);
   if (!source_or.ok()) {
     return source_or.status();
   }
-  return start_task_with_source(std::move(*source_or), policy);
+  return start_task_with_source(std::move(*source_or), policy, key_hint);
 }
 
 absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
     PersistenceSource source,
-    const ResolvedStorePolicy& policy) {
+    const ResolvedStorePolicy& policy,
+    std::string_view key_hint) {
   const uint64_t id = ++counter_;
+  std::filesystem::path storage_root_copy;
+  std::string cluster_id_copy;
+  {
+    absl::MutexLock lock(&mu_);
+    storage_root_copy = storage_root_;
+    cluster_id_copy = cluster_id_;
+  }
   const v2::PlacementPolicy placement_policy = select_placement_policy(policy, source.total_size_bytes);
   const bool persist_to_shared_disk = policy.shared_disk_requirement != RequirementLevel::kNone;
   PersistenceTaskState task{
       .task_id = absl::StrFormat("persist-%016x", id),
       .plan_id = absl::StrFormat("plan-%016x", id),
       .artifact_id = source.artifact_id,
+      .key_hint = std::string(key_hint),
       .placement_policy = placement_policy,
       .persist_to_shared_disk = persist_to_shared_disk,
       .remote_requirement = policy.remote_requirement,
@@ -298,24 +468,34 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
       .progress = 0.0,
       .degraded_reason = "",
       .last_error = "",
+      .total_size_bytes = source.total_size_bytes,
   };
 
-  auto shards_or = plan_shards(source, policy.layout);
-  if (!shards_or.ok()) {
+  const bool shared_disk_required = policy.shared_disk_requirement == RequirementLevel::kMust;
+  if (shared_disk_required && storage_root_copy.empty()) {
     task.state = v2::PERSISTENCE_STATE_FAILED;
-    task.last_error = std::string(shards_or.status().message());
+    task.last_error = "storage_path_missing";
+  } else if (shared_disk_required && cluster_id_copy.empty()) {
+    task.state = v2::PERSISTENCE_STATE_FAILED;
+    task.last_error = "cluster_id_missing";
   } else {
-    auto shards = std::move(*shards_or);
-    const absl::Status plan_status = apply_placement_plan(task, shards);
-    if (!plan_status.ok()) {
+    auto shards_or = plan_shards(source, policy.layout);
+    if (!shards_or.ok()) {
       task.state = v2::PERSISTENCE_STATE_FAILED;
-      task.last_error = std::string(plan_status.message());
+      task.last_error = std::string(shards_or.status().message());
+    } else {
+      auto shards = std::move(*shards_or);
+      const absl::Status plan_status = apply_placement_plan(task, shards);
+      if (!plan_status.ok()) {
+        task.state = v2::PERSISTENCE_STATE_FAILED;
+        task.last_error = std::string(plan_status.message());
+      }
+      {
+        absl::MutexLock lock(&mu_);
+        attach_shared_disk_targets(task.persist_to_shared_disk, shards);
+      }
+      task.shards = std::move(shards);
     }
-    {
-      absl::MutexLock lock(&mu_);
-      attach_shared_disk_targets(task.persist_to_shared_disk, shards);
-    }
-    task.shards = std::move(shards);
   }
   propagate_degraded_reason(task);
   task.progress = compute_task_progress(task);
@@ -444,8 +624,29 @@ void PersistenceManager::set_local_node_id(std::string node_id) {
 }
 
 void PersistenceManager::set_global_store_client(store::components::IGlobalStoreClient* client) {
+  std::string cluster_id;
+  if (client != nullptr) {
+    auto cluster_or = client->get_cluster_id();
+    if (cluster_or.ok()) {
+      cluster_id = *cluster_or;
+    } else {
+      LOG(WARNING) << "persistence.cluster_id_unavailable: " << cluster_or.status().message();
+    }
+  }
   absl::MutexLock lock(&mu_);
   global_store_ = client;
+  if (!cluster_id.empty()) {
+    cluster_id_ = std::move(cluster_id);
+  }
+}
+
+void PersistenceManager::set_storage_path(std::filesystem::path storage_root) {
+  absl::MutexLock lock(&mu_);
+  storage_root_ = std::move(storage_root);
+}
+
+void PersistenceManager::set_max_concurrency(uint32_t max_concurrency) {
+  max_concurrency_.store(std::max<uint32_t>(1, max_concurrency), std::memory_order_relaxed);
 }
 
 absl::Status PersistenceManager::ack_and_register_remote(
@@ -480,7 +681,7 @@ absl::Status PersistenceManager::ack_and_register_remote(
       device,
       common::memory::MemoryLocation::CPU,
       shard.size_bytes,
-      /*max_concurrency=*/1);
+      max_concurrency_.load(std::memory_order_relaxed));
   if (!reg_or.ok()) {
     return reg_or.status();
   }
@@ -686,6 +887,278 @@ void PersistenceManager::attach_shared_disk_targets(
   }
 }
 
+absl::StatusOr<std::filesystem::path> PersistenceManager::disk_object_dir(const PersistenceTaskState& task) const {
+  if (storage_root_.empty()) {
+    return absl::FailedPreconditionError("storage_path_missing");
+  }
+  if (cluster_id_.empty()) {
+    return absl::FailedPreconditionError("cluster_id_missing");
+  }
+  std::filesystem::path relative;
+  if (!task.disk_relative_path.empty()) {
+    relative = task.disk_relative_path;
+  } else {
+    const std::string artifact_segment = sanitize_segment(task.artifact_id);
+    relative = std::filesystem::path(kClustersDir) / cluster_id_ / kObjectsDir / artifact_segment;
+  }
+  if (!is_safe_relative_path(relative)) {
+    return absl::FailedPreconditionError("disk_relative_path_missing");
+  }
+  const std::filesystem::path expected_prefix = std::filesystem::path(kClustersDir) / cluster_id_;
+  if (!has_path_prefix(relative, expected_prefix)) {
+    return absl::FailedPreconditionError("disk_relative_path_missing");
+  }
+  return storage_root_ / relative;
+}
+
+absl::StatusOr<std::filesystem::path> PersistenceManager::ensure_disk_directory(PersistenceTaskState& task) {
+  if (storage_root_.empty()) {
+    return absl::FailedPreconditionError("storage_path_missing");
+  }
+  if (cluster_id_.empty()) {
+    return absl::FailedPreconditionError("cluster_id_missing");
+  }
+  if (task.disk_relative_path.empty()) {
+    const std::string artifact_segment = sanitize_segment(task.artifact_id);
+    const std::filesystem::path relative =
+        std::filesystem::path(kClustersDir) / cluster_id_ / kObjectsDir / artifact_segment;
+    task.disk_relative_path = relative.generic_string();
+  }
+  const std::filesystem::path object_dir = storage_root_ / task.disk_relative_path;
+  if (!is_safe_relative_path(task.disk_relative_path)) {
+    return absl::FailedPreconditionError("disk_relative_path_missing");
+  }
+  const std::filesystem::path expected_prefix = std::filesystem::path(kClustersDir) / cluster_id_;
+  if (!has_path_prefix(task.disk_relative_path, expected_prefix)) {
+    return absl::FailedPreconditionError("disk_relative_path_missing");
+  }
+  if (!task.disk_directory_ready) {
+    std::error_code ec;
+    std::filesystem::create_directories(object_dir, ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), "shared_disk_directory_create_failed");
+    }
+    task.disk_directory_ready = true;
+  }
+
+  if (!task.by_key_linked && !task.key_hint.empty()) {
+    const std::string key_segment = sanitize_segment(task.key_hint);
+    const std::filesystem::path by_key_root =
+        storage_root_ / std::filesystem::path(kClustersDir) / cluster_id_ / kByKeyDir / key_segment;
+    std::error_code ec;
+    std::filesystem::create_directories(by_key_root, ec);
+    if (!ec) {
+      const std::string base_name =
+          std::format("{}_{}", format_persist_timestamp(absl::Now()), short_artifact_hint(task.artifact_id));
+      std::filesystem::path link_path = by_key_root / base_name;
+      std::filesystem::path target_rel;
+      std::error_code rel_ec;
+      target_rel = std::filesystem::relative(object_dir, link_path.parent_path(), rel_ec);
+      if (rel_ec) {
+        target_rel = object_dir;
+      }
+      auto pick_suffix = []() {
+        static thread_local std::mt19937 rng{std::random_device{}()};
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string out;
+        out.reserve(6);
+        for (int i = 0; i < 6; ++i) {
+          out.push_back(kHex[rng() % 16]);
+        }
+        return out;
+      };
+      for (int attempt = 0; attempt < 3; ++attempt) {
+        if (std::filesystem::exists(link_path, ec)) {
+          link_path = by_key_root / std::format("{}_{}", base_name, pick_suffix());
+          continue;
+        }
+        std::filesystem::create_symlink(target_rel, link_path, ec);
+        if (!ec) {
+          task.by_key_linked = true;
+          break;
+        }
+      }
+      if (!task.by_key_linked) {
+        LOG(WARNING) << "persistence.by_key_symlink_failed path=" << link_path.string() << " error=" << ec.message();
+      }
+    }
+  }
+
+  return object_dir;
+}
+
+absl::Status PersistenceManager::start_disk_write(
+    PersistenceTaskState& task,
+    const PersistenceShardState& shard,
+    PersistenceTargetState& target) {
+  if (store_engine_ == nullptr) {
+    return absl::FailedPreconditionError("store_engine_unavailable");
+  }
+  auto object_dir_or = ensure_disk_directory(task);
+  if (!object_dir_or.ok()) {
+    return object_dir_or.status();
+  }
+  const std::filesystem::path part_path = *object_dir_or / std::format("tensor.data_{}", shard.shard_idx);
+  std::error_code ec;
+  if (std::filesystem::exists(part_path, ec)) {
+    if (!ec && std::filesystem::file_size(part_path, ec) == shard.size_bytes) {
+      auto state = std::make_shared<DiskWriteState>();
+      state->total_bytes = shard.size_bytes;
+      state->bytes_written.store(shard.size_bytes);
+      state->part_path = part_path.string();
+      state->done.store(true);
+      target.disk_write_state = state;
+      target.target_state = gs::PLACEMENT_TARGET_STATE_COPYING;
+      return absl::OkStatus();
+    }
+  }
+
+  if (!async_runtime_) {
+    return absl::FailedPreconditionError("async_runtime_unavailable");
+  }
+
+  auto base_ptr_or = store_engine_->get_replica_cpu_base_ptr(task.artifact_id);
+  if (!base_ptr_or.ok()) {
+    return base_ptr_or.status();
+  }
+  const auto base_ptr = static_cast<const uint8_t*>(*base_ptr_or);
+  const uint64_t offset = shard.byte_range_start;
+  const uint64_t length = shard.size_bytes;
+
+  auto state = std::make_shared<DiskWriteState>();
+  state->total_bytes = length;
+  state->part_path = part_path.string();
+  target.disk_write_state = state;
+  target.target_state = gs::PLACEMENT_TARGET_STATE_COPYING;
+
+  auto executor = async_runtime_->blocking_executor();
+  executor->add([state, base_ptr, offset, length, part_path]() {
+    absl::Status st = absl::OkStatus();
+    std::ofstream out(part_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+      st = absl::FailedPreconditionError("shared_disk_write_failed");
+    } else {
+      constexpr uint64_t kChunk = 4ULL * 1024 * 1024;
+      uint64_t remaining = length;
+      const uint8_t* src = base_ptr + offset;
+      while (st.ok() && remaining > 0) {
+        const uint64_t to_write = std::min<uint64_t>(remaining, kChunk);
+        out.write(reinterpret_cast<const char*>(src), static_cast<std::streamsize>(to_write));
+        if (!out.good()) {
+          st = absl::FailedPreconditionError("shared_disk_write_failed");
+          break;
+        }
+        state->bytes_written.fetch_add(to_write);
+        remaining -= to_write;
+        src += to_write;
+      }
+      out.flush();
+      if (st.ok() && !out.good()) {
+        st = absl::FailedPreconditionError("shared_disk_write_failed");
+      }
+    }
+    state->set_status(std::move(st));
+    state->done.store(true);
+  });
+
+  return absl::OkStatus();
+}
+
+absl::Status PersistenceManager::finalize_disk_directory(PersistenceTaskState& task) {
+  if (task.disk_metadata_written) {
+    return absl::OkStatus();
+  }
+  auto object_dir_or = disk_object_dir(task);
+  if (!object_dir_or.ok()) {
+    return object_dir_or.status();
+  }
+  const std::filesystem::path object_dir = *object_dir_or;
+  std::error_code ec;
+  std::filesystem::create_directories(object_dir, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), "shared_disk_directory_create_failed");
+  }
+
+  for (const auto& shard : task.shards) {
+    const std::filesystem::path part_path = object_dir / std::format("tensor.data_{}", shard.shard_idx);
+    if (!std::filesystem::exists(part_path, ec)) {
+      return absl::NotFoundError("shared_disk_part_missing");
+    }
+    if (std::filesystem::file_size(part_path, ec) != shard.size_bytes) {
+      return absl::FailedPreconditionError("shared_disk_part_size_mismatch");
+    }
+  }
+
+  if (store_engine_ == nullptr) {
+    return absl::FailedPreconditionError("store_engine_unavailable");
+  }
+  auto index_or = store_engine_->get_canonical_index_by_id(task.artifact_id);
+  if (!index_or.ok()) {
+    return index_or.status();
+  }
+  const std::filesystem::path index_path = object_dir / "tensor_index.json";
+  std::ofstream idx_out(index_path, std::ios::trunc);
+  if (!idx_out.is_open()) {
+    return absl::FailedPreconditionError("shared_disk_index_write_failed");
+  }
+  idx_out << *index_or;
+  idx_out.flush();
+  if (!idx_out.good()) {
+    return absl::FailedPreconditionError("shared_disk_index_write_failed");
+  }
+
+  auto parsed_or = parse_mi2_identity(task.artifact_id);
+  if (!parsed_or.ok()) {
+    return parsed_or.status();
+  }
+  const auto& index_mh = parsed_or->first;
+  const auto& data_mh = parsed_or->second;
+
+  nlohmann::json desc;
+  desc["artifact_id"] = task.artifact_id;
+  desc["index_multihash"] = index_mh;
+  desc["data_multihash"] = data_mh;
+  desc["schema_version"] = "v3";
+  desc["encoding"] = "json";
+  desc["total_size"] = task.total_size_bytes;
+
+  const std::filesystem::path descriptor_path = object_dir / "artifact_descriptor.json";
+  std::ofstream desc_out(descriptor_path, std::ios::trunc);
+  if (!desc_out.is_open()) {
+    return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+  }
+  desc_out << desc.dump(2);
+  desc_out.flush();
+  if (!desc_out.good()) {
+    return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+  }
+
+  task.disk_metadata_written = true;
+  return absl::OkStatus();
+}
+
+absl::Status PersistenceManager::register_disk_location(PersistenceTaskState& task) {
+  if (task.disk_location_registered) {
+    return absl::OkStatus();
+  }
+  if (global_store_ == nullptr) {
+    return absl::FailedPreconditionError("global_store_unavailable");
+  }
+  if (cluster_id_.empty()) {
+    return absl::FailedPreconditionError("cluster_id_missing");
+  }
+  if (task.disk_relative_path.empty()) {
+    return absl::FailedPreconditionError("disk_relative_path_missing");
+  }
+  const absl::Status st = global_store_->upsert_artifact_disk_location(
+      task.artifact_id, cluster_id_, task.disk_relative_path, gs::DISK_LOCATION_KIND_MANAGED);
+  if (!st.ok()) {
+    return st;
+  }
+  task.disk_location_registered = true;
+  return absl::OkStatus();
+}
+
 void PersistenceManager::propagate_degraded_reason(PersistenceTaskState& task) const {
   if (task.state == v2::PERSISTENCE_STATE_FAILED) {
     return;
@@ -724,6 +1197,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
   }
   size_t done_targets = 0;
   const size_t total_targets = shard.targets.size();
+  double progress_sum = 0.0;
   bool shard_failed = false;
   bool shard_degraded = !shard.degraded_reason.empty();
   bool remote_seen = false;
@@ -738,14 +1212,18 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
   const bool remote_should = task.remote_requirement == RequirementLevel::kShould;
   const bool disk_required = task.shared_disk_requirement == RequirementLevel::kMust;
   const bool disk_should = task.shared_disk_requirement == RequirementLevel::kShould;
+  const bool disk_commit_ready = task.disk_location_registered;
 
   for (auto& target : shard.targets) {
     if (target.is_shared_disk) {
       disk_seen = true;
+      double target_progress = 0.0;
       if (target.target_state == gs::PLACEMENT_TARGET_STATE_COMPLETE ||
           target.target_state == gs::PLACEMENT_TARGET_STATE_SKIPPED) {
         ++done_targets;
         disk_success = true;
+        target_progress = 1.0;
+        progress_sum += target_progress;
         continue;
       }
       if (target.target_state == gs::PLACEMENT_TARGET_STATE_FAILED) {
@@ -754,20 +1232,8 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
           disk_failure_reason = target.degraded_reason;
         }
         ++done_targets;
-        continue;
-      }
-      bool dedup_hit = false;
-      {
-        dedup_hit = shared_disk_index_.contains(shard.content_digest);
-      }
-      if (dedup_hit) {
-        target.target_state = gs::PLACEMENT_TARGET_STATE_SKIPPED;
-        ++done_targets;
-        disk_success = true;
-        continue;
-      }
-      if (target.target_state == gs::PLACEMENT_TARGET_STATE_PENDING) {
-        target.target_state = gs::PLACEMENT_TARGET_STATE_COPYING;
+        target_progress = 1.0;
+        progress_sum += target_progress;
         continue;
       }
       if (fail_shared_disk_for_test_.load()) {
@@ -778,15 +1244,57 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
           disk_failure_reason = target.degraded_reason;
         }
         ++done_targets;
+        target_progress = 1.0;
+        progress_sum += target_progress;
         continue;
       }
-      // COPY->COMPLETE on the next tick to simulate async disk writes.
-      target.target_state = gs::PLACEMENT_TARGET_STATE_COMPLETE;
-      {
-        shared_disk_index_.insert(shard.content_digest);
+      if (target.disk_write_state) {
+        const auto state = target.disk_write_state;
+        if (state->total_bytes > 0) {
+          target_progress = static_cast<double>(state->bytes_written.load()) / static_cast<double>(state->total_bytes);
+          target_progress = std::min(1.0, target_progress);
+        }
+        if (state->done.load()) {
+          const absl::Status st = state->get_status();
+          if (!st.ok()) {
+            target.target_state = gs::PLACEMENT_TARGET_STATE_FAILED;
+            target.degraded_reason = disk_failure_token(st, DiskFailureStage::kWrite);
+            disk_failed = true;
+            if (disk_failure_reason.empty()) {
+              disk_failure_reason = target.degraded_reason;
+            }
+            ++done_targets;
+            target_progress = 1.0;
+          } else if (disk_commit_ready) {
+            target.target_state = gs::PLACEMENT_TARGET_STATE_COMPLETE;
+            ++done_targets;
+            disk_success = true;
+            target_progress = 1.0;
+          } else {
+            target.target_state = gs::PLACEMENT_TARGET_STATE_COPYING;
+          }
+        } else {
+          target.target_state = gs::PLACEMENT_TARGET_STATE_COPYING;
+        }
+        progress_sum += target_progress;
+        continue;
       }
-      ++done_targets;
-      disk_success = true;
+      if (target.target_state == gs::PLACEMENT_TARGET_STATE_PENDING) {
+        auto st = start_disk_write(task, shard, target);
+        if (!st.ok()) {
+          target.target_state = gs::PLACEMENT_TARGET_STATE_FAILED;
+          target.degraded_reason = disk_failure_token(st, DiskFailureStage::kWrite);
+          disk_failed = true;
+          if (disk_failure_reason.empty()) {
+            disk_failure_reason = target.degraded_reason;
+          }
+          ++done_targets;
+          target_progress = 1.0;
+        }
+        progress_sum += target_progress;
+        continue;
+      }
+      progress_sum += target_progress;
       continue;
     }
 
@@ -800,6 +1308,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
       if (is_remote) {
         remote_success = true;
       }
+      progress_sum += 1.0;
       continue;
     }
     if (target.target_state == gs::PLACEMENT_TARGET_STATE_FAILED) {
@@ -809,6 +1318,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
           remote_failure_reason = target.degraded_reason;
         }
         ++done_targets;
+        progress_sum += 1.0;
         continue;
       }
       if (target.cooldown_ticks > 0) {
@@ -838,6 +1348,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
             remote_failure_reason = target.degraded_reason;
           }
           ++done_targets;
+          progress_sum += 1.0;
         }
         continue;
       }
@@ -846,6 +1357,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
       if (is_remote) {
         remote_success = true;
       }
+      progress_sum += 1.0;
       continue;
     }
     if (target.node_id.empty()) {
@@ -856,11 +1368,13 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
         remote_failure_reason = target.degraded_reason;
       }
       ++done_targets;
+      progress_sum += 1.0;
       continue;
     }
     if (target.node_id == local_node_id_) {
       target.target_state = gs::PLACEMENT_TARGET_STATE_COMPLETE;
       ++done_targets;
+      progress_sum += 1.0;
       continue;
     }
     if (global_store_ == nullptr) {
@@ -871,6 +1385,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
         remote_failure_reason = target.degraded_reason;
       }
       ++done_targets;
+      progress_sum += 1.0;
       continue;
     }
     comps::MemoryTierLeaseDescriptor lease_req;
@@ -898,6 +1413,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
           remote_failure_reason = target.degraded_reason;
         }
         ++done_targets;
+        progress_sum += 1.0;
       }
       continue;
     }
@@ -906,7 +1422,7 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
     target.cooldown_ticks = 0;
   }
 
-  shard.progress = total_targets == 0 ? 1.0 : static_cast<double>(done_targets) / static_cast<double>(total_targets);
+  shard.progress = total_targets == 0 ? 1.0 : progress_sum / static_cast<double>(total_targets);
 
   if ((remote_required || remote_should) && !remote_seen) {
     if (remote_failure_reason.empty()) {
@@ -976,12 +1492,29 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
 }
 
 void PersistenceManager::maybe_report_status_locked(
-    const PersistenceTaskState& task,
+    PersistenceTaskState& task,
     std::vector<comps::PersistenceReport>& reports) {
   if (global_store_ == nullptr) {
     return;
   }
+  const int64_t now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  const auto min_interval = std::max<std::chrono::milliseconds>(
+      tick_interval_, std::chrono::duration_cast<std::chrono::milliseconds>(kUnchangedReportMinInterval));
+  const int64_t min_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(min_interval).count();
+  const uint64_t signature = compute_persistence_report_signature(task);
+  const bool first_report = task.last_report_ts_ns == 0;
+  const bool signature_changed = task.last_report_signature != signature;
+  const bool interval_elapsed = first_report || (now_ns - task.last_report_ts_ns) >= min_interval_ns;
+  const bool terminal = is_terminal(task.state);
+
+  if (!first_report && !signature_changed && !terminal && !interval_elapsed) {
+    return;
+  }
+
   reports.push_back(build_report(task));
+  task.last_report_signature = signature;
+  task.last_report_ts_ns = now_ns;
 }
 
 store::components::PersistenceReport PersistenceManager::build_report(const PersistenceTaskState& task) {
@@ -1091,15 +1624,6 @@ void PersistenceManager::load_task_log() {
       } else if (is_terminal(entry.second.state)) {
         entry.second.metrics_closed = true;
       }
-      for (const auto& shard : entry.second.shards) {
-        for (const auto& target : shard.targets) {
-          if (target.is_shared_disk &&
-              (target.target_state == gs::PLACEMENT_TARGET_STATE_COMPLETE ||
-               target.target_state == gs::PLACEMENT_TARGET_STATE_SKIPPED)) {
-            shared_disk_index_.insert(shard.content_digest);
-          }
-        }
-      }
       tasks_[entry.first] = std::move(entry.second);
       update_durability_locked(tasks_[entry.first]);
     }
@@ -1198,10 +1722,91 @@ void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& r
         all_done = false;
       }
     }
+
+    const bool disk_writes_complete = [&]() {
+      if (!task.persist_to_shared_disk) {
+        return false;
+      }
+      for (const auto& shard : task.shards) {
+        bool has_disk_target = false;
+        bool shard_written = false;
+        for (const auto& target : shard.targets) {
+          if (!target.is_shared_disk) {
+            continue;
+          }
+          has_disk_target = true;
+          if (target.target_state == gs::PLACEMENT_TARGET_STATE_FAILED) {
+            return false;
+          }
+          if (target.disk_write_state && target.disk_write_state->done.load()) {
+            const absl::Status st = target.disk_write_state->get_status();
+            if (!st.ok()) {
+              return false;
+            }
+            shard_written = true;
+            break;
+          }
+          if (target.target_state == gs::PLACEMENT_TARGET_STATE_COMPLETE ||
+              target.target_state == gs::PLACEMENT_TARGET_STATE_SKIPPED) {
+            shard_written = true;
+            break;
+          }
+        }
+        if (!has_disk_target || !shard_written) {
+          return false;
+        }
+      }
+      return true;
+    }();
+
+    if (disk_writes_complete && !task.disk_location_registered) {
+      absl::Status st = finalize_disk_directory(task);
+      DiskFailureStage stage = DiskFailureStage::kFinalize;
+      if (st.ok()) {
+        stage = DiskFailureStage::kRegister;
+        st = register_disk_location(task);
+      }
+      if (!st.ok()) {
+        const bool disk_required = task.shared_disk_requirement == RequirementLevel::kMust;
+        const bool disk_should = task.shared_disk_requirement == RequirementLevel::kShould;
+        const std::string token = disk_failure_token(st, stage);
+        if (disk_required) {
+          any_failed = true;
+          if (task.last_error.empty()) {
+            task.last_error = token;
+          }
+          for (auto& shard : task.shards) {
+            shard.state = v2::PERSISTENCE_STATE_FAILED;
+            if (shard.last_error.empty()) {
+              shard.last_error = token;
+            }
+          }
+        } else if (disk_should) {
+          any_degraded = true;
+          if (task.degraded_reason.empty()) {
+            task.degraded_reason = token;
+          }
+          for (auto& shard : task.shards) {
+            if (shard.degraded_reason.empty()) {
+              shard.degraded_reason = token;
+            }
+          }
+        }
+      }
+    }
+
     update_durability_locked(task);
 
     if (any_failed && task.last_error.empty()) {
-      task.last_error = "one or more persistence shards failed";
+      for (const auto& shard : task.shards) {
+        if (!shard.last_error.empty()) {
+          task.last_error = shard.last_error;
+          break;
+        }
+      }
+      if (task.last_error.empty()) {
+        task.last_error = "one or more persistence shards failed";
+      }
     }
     propagate_degraded_reason(task);
     if (any_failed) {
@@ -1228,7 +1833,7 @@ void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& r
 void PersistenceManager::update_durability_locked(const PersistenceTaskState& task) {
   bool shared_disk_complete = false;
   bool remote_stable_complete = false;
-  if (task.persist_to_shared_disk && !task.shards.empty()) {
+  if (task.persist_to_shared_disk && task.disk_location_registered && !task.shards.empty()) {
     shared_disk_complete = true;
     for (const auto& shard : task.shards) {
       bool has_disk_target = false;

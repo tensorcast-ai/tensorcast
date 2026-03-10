@@ -17,7 +17,6 @@ import click
 import psutil
 
 from tensorcast.cli_utils.config import (
-    discover_global_store_config,
     dump_global_store_config,
     load_or_create_cluster_token,
     select_free_port,
@@ -62,7 +61,11 @@ from tensorcast.cli_utils.process import (
     start_log_threads,
     update_runtime_global_store,
 )
-from tensorcast.global_store.config.settings import GlobalStoreConfig
+from tensorcast.global_store.launch_config import (
+    apply_global_store_proto_defaults,
+    load_global_store_config_with_overrides,
+    resolve_global_store_config_path,
+)
 from tensorcast.proto.config.v1 import global_store_config_pb2 as gsc_pb
 
 
@@ -186,6 +189,25 @@ def _current_global_session_id() -> str | None:
         return None
 
 
+def _has_live_recorded_global_store(inst: GlobalSession) -> bool:
+    records = read_json_default(inst.pids_json, {"processes": []})
+    processes = records.get("processes", [])
+    if not isinstance(processes, list):
+        return False
+    for entry in processes:
+        if not isinstance(entry, dict):
+            continue
+        pid = int(entry.get("pid", 0))
+        if pid <= 0 or not psutil.pid_exists(pid):
+            continue
+        with contextlib.suppress(Exception):
+            cmdline = psutil.Process(pid).cmdline()
+            cmd = " ".join(str(part) for part in cmdline)
+            if "tensorcast.global_store" in cmd:
+                return True
+    return False
+
+
 @contextlib.contextmanager
 def _locked(inst: GlobalSession):
     with (
@@ -216,46 +238,31 @@ def _resolve_config(
 ) -> tuple[gsc_pb.GlobalStoreConfig, Path]:
     """Load or build a GlobalStoreConfig and persist it under the session."""
 
-    pb: gsc_pb.GlobalStoreConfig | None = None
-    cfg_source: Path | None = None
-    if config_path is not None:
-        cfg_source = Path(config_path)
-    else:
-        discovered = discover_global_store_config()
-        if discovered:
-            cfg_source = Path(discovered)
-
-    if cfg_source is None:
-        raise ServiceError(
-            "No Global Store config found. Provide --config or set "
-            "TENSORCAST_GLOBAL_STORE_CONFIG. Expected examples/config/global_store_config.yaml "
-            "to be available in the repo or packaged wheel."
-        )
+    try:
+        cfg_source = resolve_global_store_config_path(config_path)
+    except FileNotFoundError as exc:
+        raise ServiceError(str(exc)) from exc
 
     try:
-        pb = GlobalStoreConfig.load_proto_from_file(str(cfg_source))
+        _, pb = load_global_store_config_with_overrides(
+            cfg_source,
+            listen_host=listen_host,
+            listen_port=listen_port,
+            metrics_port=metrics_port,
+        )
     except Exception as exc:  # noqa: BLE001
         raise ServiceError(
             f"Failed to load Global Store config from {cfg_source}: {exc}"
         ) from exc
 
-    assert pb is not None
-
-    if listen_host is not None:
-        pb.server.listen.host = listen_host
-    if listen_port is not None:
-        pb.server.listen.port = max(0, int(listen_port))
-    if not pb.server.listen.host:
-        pb.server.listen.host = "0.0.0.0"
-    if metrics_port is not None:
-        pb.server.metrics_port = max(0, int(metrics_port))
-    if not pb.observability.logging.file:
-        pb.observability.logging.file = str(inst.logs / "global_store.out")
-    if not pb.meta.schema_version:
-        pb.meta.schema_version = "v1"
-    if not pb.meta.description:
-        pb.meta.description = "generated-by-cli"
-    pb.meta.cluster_token = cluster_token
+    apply_global_store_proto_defaults(
+        pb,
+        default_listen_host="0.0.0.0",
+        default_log_file=str(inst.logs / "global_store.out"),
+        default_schema_version="v1",
+        default_description="generated-by-cli",
+        cluster_token=cluster_token,
+    )
 
     listen_host_eff = pb.server.listen.host or "0.0.0.0"
     if pb.server.listen.port <= 0:
@@ -371,6 +378,16 @@ def start_global_store(
             health = (
                 ping_global_store(existing_addr, timeout=1.0) if existing_addr else None
             )
+            if not health and isinstance(gs_state, dict):
+                listen_host_state = gs_state.get("listen_host")
+                listen_port_state = gs_state.get("listen_port")
+                if listen_host_state and listen_port_state:
+                    fallback_addr = (
+                        f"{resolve_connect_host(str(listen_host_state))}:"
+                        f"{int(listen_port_state)}"
+                    )
+                    if fallback_addr != existing_addr:
+                        health = ping_global_store(fallback_addr, timeout=1.0)
             if health:
                 if (
                     cluster_token
@@ -390,6 +407,12 @@ def start_global_store(
                     owner=bool(gs_state.get("owner"))
                     if isinstance(gs_state, dict)
                     else False,
+                )
+            if _has_live_recorded_global_store(inst):
+                raise ServiceError(
+                    "Global Store process appears to be running but is not healthy via "
+                    "recorded endpoints. Refusing to start a second instance on the "
+                    "same session. Run 'tensorcast-cli global stop --force' and retry."
                 )
 
             prune_process_records(

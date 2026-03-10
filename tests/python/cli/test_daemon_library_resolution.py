@@ -1,13 +1,16 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Validate daemon library environment discovery resolves required shared libs."""
 
 from __future__ import annotations
 
-import ctypes
+import json
 import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import pytest
 
@@ -54,43 +57,129 @@ def _collect_library_dirs(ld_library_path: str) -> tuple[Path, ...]:
     return tuple(dirs)
 
 
-def _find_missing_libraries(library_dirs: tuple[Path, ...], libs: tuple[str, ...]) -> list[str]:
-    return [
-        lib_name
-        for lib_name in libs
-        if not any((directory / lib_name).exists() for directory in library_dirs)
-    ]
-
-
-def _load_shared_objects(libraries: Iterable[str]) -> list[str]:
+def _resolve_library_entries(
+    library_dirs: tuple[Path, ...], libs: tuple[str, ...]
+) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
     missing: list[str] = []
-    for lib_name in libraries:
-        try:
-            ctypes.CDLL(lib_name)  # noqa: F401 - keep handle alive for validation
-        except OSError as exc:  # pragma: no cover - exercised during failures
-            missing.append(f"{lib_name}: {exc}")
-    return missing
+    for lib_name in libs:
+        if any((directory / lib_name).exists() for directory in library_dirs):
+            resolved.append(lib_name)
+            continue
+        if lib_name.startswith("libnvrtc-builtins.so."):
+            major_prefix = lib_name.rsplit(".", 1)[0]
+            candidates: list[Path] = []
+            for directory in library_dirs:
+                candidates.extend(directory.glob(f"{major_prefix}*"))
+            candidates = [candidate for candidate in candidates if candidate.is_file()]
+            if candidates:
+                candidates.sort()
+                resolved.append(str(candidates[-1]))
+                continue
+        missing.append(lib_name)
+    return resolved, missing
+
+
+def _load_shared_objects_in_subprocess(
+    env: Mapping[str, str], libraries: Iterable[str]
+) -> list[str]:
+    """Load shared objects in a fresh process.
+
+    Linux dynamic loaders typically parse ``LD_LIBRARY_PATH`` at process start;
+    mutating it inside the current pytest process does not reliably affect
+    subsequent ``dlopen`` calls. We therefore validate loadability in a child
+    process with the daemon environment applied from the start.
+    """
+
+    payload = json.dumps(list(libraries))
+    script = textwrap.dedent(
+        """\
+        from __future__ import annotations
+
+        import ctypes
+        import json
+        import sys
+
+        libs = json.loads(sys.argv[1])
+        missing: list[str] = []
+        for lib in libs:
+            try:
+                ctypes.CDLL(lib)  # noqa: F401 - validate loadability
+            except OSError as exc:
+                missing.append(f"{lib}: {exc}")
+        print(json.dumps(missing))
+        """
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script, payload],
+        env=dict(env),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        details = (proc.stderr or proc.stdout).strip()
+        return [f"subprocess failed (rc={proc.returncode}): {details}"]
+
+    try:
+        decoded = json.loads(proc.stdout.strip() or "[]")
+    except json.JSONDecodeError as exc:
+        combined = (proc.stdout + "\n" + proc.stderr).strip()
+        return [f"subprocess output not JSON ({exc}): {combined}"]
+
+    if not isinstance(decoded, list):
+        return [f"subprocess output not list: {decoded!r}"]
+
+    return [str(item) for item in decoded]
+
+
+def test_build_daemon_process_env_keeps_user_ld_library_path_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_prefix = "/data/cuda/compat:/usr/local/lib"
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._discover_daemon_library_paths",
+        lambda: (
+            Path("/data/cuda/compat"),
+            Path("/tensorcast/lib"),
+            Path("/torch/lib"),
+        ),
+    )
+
+    env = build_daemon_process_env({"LD_LIBRARY_PATH": user_prefix})
+    ld_library_path = env.get("LD_LIBRARY_PATH")
+    assert ld_library_path is not None
+
+    entries = [entry for entry in ld_library_path.split(":") if entry]
+    assert entries[0] == "/data/cuda/compat"
+    assert entries[1] == "/usr/local/lib"
+    assert "/tensorcast/lib" in entries
+    assert "/torch/lib" in entries
+    assert entries.count("/data/cuda/compat") == 1
 
 
 @pytest.mark.integration
-def test_daemon_library_environment_loads_required_shared_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_daemon_library_environment_loads_required_shared_objects() -> None:
     env = build_daemon_process_env(os.environ)
     ld_library_path = env.get("LD_LIBRARY_PATH")
     assert ld_library_path, "daemon environment must provide LD_LIBRARY_PATH"
 
-    monkeypatch.setenv("LD_LIBRARY_PATH", ld_library_path)
-
     library_dirs = _collect_library_dirs(ld_library_path)
     assert library_dirs, "expected at least one library directory from LD_LIBRARY_PATH"
 
-    env_missing = _find_missing_libraries(library_dirs, _ENV_MANAGED_LIBRARIES)
+    resolved_env_libs, env_missing = _resolve_library_entries(
+        library_dirs, _ENV_MANAGED_LIBRARIES
+    )
     assert not env_missing, (
         "expected CUDA/Torch libraries discoverable via LD_LIBRARY_PATH, missing: "
         + ", ".join(env_missing)
     )
 
-    load_missing = _load_shared_objects(_REQUIRED_LIBRARIES)
+    libraries_to_load: list[str] = list(resolved_env_libs)
+    libraries_to_load.append("libgomp.so.1")
+    load_missing = _load_shared_objects_in_subprocess(env, libraries_to_load)
     assert not load_missing, (
-        "ldd-listed libraries failed to load by exact name, missing: "
+        "required shared objects failed to load with daemon environment: "
         + ", ".join(load_missing)
     )

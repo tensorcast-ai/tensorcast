@@ -2,12 +2,14 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -27,10 +29,25 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool replica_transport_not_found{false};
   std::vector<std::string> view_requests;
   std::vector<std::string> replica_requests;
+  std::vector<std::optional<components::TransportSchedulingGroupHint>> view_request_groups;
+  std::vector<std::optional<components::TransportSchedulingGroupHint>> replica_request_groups;
+  std::vector<std::string> view_request_request_ids;
+  std::vector<std::string> replica_request_request_ids;
+  std::vector<std::string> view_request_requester_worker_ids;
+  std::vector<std::string> replica_request_requester_worker_ids;
+  std::vector<uint32_t> view_request_wait_timeouts_ms;
+  std::vector<uint32_t> replica_request_wait_timeouts_ms;
+  std::vector<std::string> completed_transport_ids;
+  std::vector<components::TransportCompletionOutcome> completed_transport_outcomes;
+  std::vector<std::string> completed_transport_outcome_details;
   std::vector<std::string> registered_replicas;
-  std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_variants;
-  std::vector<components::VariantViewUpdate> view_updates;
-  std::vector<components::VariantInfo> variant_infos;
+  std::vector<std::pair<std::string, std::string>> unregistered_replicas;
+  std::vector<std::string> marked_unavailable;
+  std::vector<std::string> drained_replicas;
+  std::vector<std::string> call_sequence;
+  std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_views;
+  std::vector<components::ViewStateUpdate> view_updates;
+  std::vector<components::ViewInfo> view_infos;
   std::optional<components::ArtifactBinding> artifact_binding;
   std::vector<components::MemoryTierStatusPayload> memory_tier_statuses;
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
@@ -41,11 +58,18 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool deny_leases{false};
   bool fail_register_replica{false};
   bool fail_acknowledge_lease{false};
+  bool fail_disk_location_upsert{false};
+  absl::Status unregister_replica_status{absl::OkStatus()};
+  absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
+  bool drain_success{true};
+  uint32_t drain_current_requests{0};
   std::string remote_node_id{"stub-remote"};
   std::string plan_degraded_reason{"insufficient_remote_capacity"};
   std::string remote_node_address{"127.0.0.1"};
   uint32_t remote_node_port{12345};
   std::optional<std::string> canonical_index_json;
+  std::string cluster_id{"cluster-test"};
+  std::vector<components::ArtifactDiskLocation> disk_locations;
 
   struct TransportReplicaInfo {
     std::string artifact_id;
@@ -57,7 +81,26 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     int device_id{0};
   };
 
+  struct UnregisterReplicaByWorkerCall {
+    std::string artifact_id;
+    std::string worker_id;
+    std::optional<common::memory::MemoryLocation> memory_type;
+    std::optional<uint32_t> device_id;
+  };
+
   std::unordered_map<std::string, TransportReplicaInfo> transport_replicas;
+  std::vector<UnregisterReplicaByWorkerCall> unregister_replica_by_worker_calls;
+  std::vector<components::TransportSession> scripted_transport_sessions;
+  size_t scripted_transport_next{0};
+
+  void push_scripted_transport_session(components::TransportSession session) {
+    scripted_transport_sessions.push_back(std::move(session));
+  }
+
+  void clear_scripted_transport_sessions() {
+    scripted_transport_sessions.clear();
+    scripted_transport_next = 0;
+  }
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -72,7 +115,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       uint64_t,
       bool,
       std::string_view,
-      std::string_view) override {
+      std::string_view,
+      uint64_t) override {
     return absl::UnimplementedError("register_worker not supported in test stub");
   }
 
@@ -86,7 +130,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       int64_t,
       tensorcast::global_store::v1::ConnectionStatus,
       const components::RpcOptions&,
-      std::string_view) override {
+      std::string_view,
+      uint64_t) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not supported in test stub");
   }
 
@@ -109,12 +154,12 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return std::string("replica-0");
   }
 
-  absl::Status record_variant_residency(
+  absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
       std::string_view view_id,
       uint64_t view_size_bytes,
       std::optional<std::string_view>) override {
-    recorded_variants.emplace_back(std::string(canonical_artifact_id), std::string(view_id), view_size_bytes);
+    recorded_views.emplace_back(std::string(canonical_artifact_id), std::string(view_id), view_size_bytes);
     return absl::OkStatus();
   }
 
@@ -149,26 +194,121 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return std::string("memory_replica");
   }
 
-  absl::Status unregister_replica(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("unregister_replica not supported in test stub");
+  absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override {
+    unregistered_replicas.emplace_back(std::string(artifact_id), std::string(replica_id));
+    return unregister_replica_status;
   }
 
   absl::Status unregister_replica_by_worker(
-      std::string_view,
-      std::string_view,
-      std::optional<common::memory::MemoryLocation>,
-      std::optional<uint32_t>) override {
-    return absl::UnimplementedError("unregister_replica_by_worker not supported in test stub");
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      std::optional<common::memory::MemoryLocation> memory_type,
+      std::optional<uint32_t> device_id) override {
+    unregister_replica_by_worker_calls.push_back(
+        UnregisterReplicaByWorkerCall{
+            .artifact_id = std::string(artifact_id),
+            .worker_id = std::string(worker_id),
+            .memory_type = memory_type,
+            .device_id = device_id});
+    return unregister_replica_by_worker_status;
   }
 
-  absl::Status update_artifact_view_state(const components::VariantViewUpdate& update) override {
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view,
+      std::string_view replica_id,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>) override {
+    if (replica_id.empty()) {
+      return absl::InvalidArgumentError("replica_id required");
+    }
+    call_sequence.emplace_back(absl::StrCat("mark:", replica_id));
+    marked_unavailable.emplace_back(std::string(replica_id));
+    return true;
+  }
+
+  absl::StatusOr<components::ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t,
+      std::optional<std::string_view>) override {
+    if (replica_id.empty()) {
+      return absl::InvalidArgumentError("replica_id required");
+    }
+    call_sequence.emplace_back(absl::StrCat("drain:", replica_id));
+    drained_replicas.emplace_back(std::string(replica_id));
+    components::ReplicaDrainStatus out;
+    out.drained = drain_success;
+    if (drain_success) {
+      out.current_requests = 0;
+    } else {
+      out.current_requests = drain_current_requests > 0 ? drain_current_requests : 1;
+    }
+    return out;
+  }
+
+  absl::Status update_artifact_view_state(const components::ViewStateUpdate& update) override {
     view_requests.emplace_back(update.view_id);
     view_updates.push_back(update);
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::vector<components::VariantInfo>> list_variants(std::string_view) override {
-    return variant_infos;
+  absl::StatusOr<std::vector<components::ViewInfo>> list_views(std::string_view) override {
+    return view_infos;
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_layout_binding not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
+    return absl::UnimplementedError("get_layout_spec not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
+    return absl::UnimplementedError("attach_layout_to_artifact not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
+    return absl::UnimplementedError("list_artifact_layouts not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const tensorcast::global_store::v1::WriteTensorProofCommitmentsRequest&) override {
+    return absl::UnimplementedError("write_tensor_proof_commitments not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
+    return absl::UnimplementedError("check_proof_commitments_match not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_runtime_policy not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
+    return absl::UnimplementedError("acquire_operation_lease not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
+    return absl::UnimplementedError("keepalive_operation_lease not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
+      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
+    return absl::UnimplementedError("release_operation_lease not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
+      const tensorcast::operation::v1::GetOperationRequest&) override {
+    return absl::UnimplementedError("get_operation not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
+    return absl::UnimplementedError("update_operation not supported in RecordingGlobalStoreClient");
   }
 
   absl::StatusOr<components::ArtifactBinding> get_artifact_binding(std::string_view) override {
@@ -194,8 +334,18 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       uint32_t,
       const tensorcast::store::DeviceKey& target_device,
-      uint32_t) override {
+      uint32_t wait_timeout_ms,
+      const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
+      std::string_view requester_worker_id,
+      std::string_view request_id) override {
     replica_requests.emplace_back(std::string(artifact_id));
+    replica_request_groups.push_back(scheduling_group);
+    replica_request_request_ids.emplace_back(std::string(request_id));
+    replica_request_requester_worker_ids.emplace_back(std::string(requester_worker_id));
+    replica_request_wait_timeouts_ms.push_back(wait_timeout_ms);
+    if (scripted_transport_next < scripted_transport_sessions.size()) {
+      return scripted_transport_sessions[scripted_transport_next++];
+    }
     if (replica_transport_not_found) {
       return absl::NotFoundError("replica transport not found in RecordingGlobalStoreClient");
     }
@@ -216,8 +366,15 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       uint32_t,
       const tensorcast::store::DeviceKey& target_device,
-      uint32_t) override {
+      uint32_t wait_timeout_ms,
+      const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
+      std::string_view requester_worker_id,
+      std::string_view request_id) override {
     view_requests.emplace_back(std::string(view_id));
+    view_request_groups.push_back(scheduling_group);
+    view_request_request_ids.emplace_back(std::string(request_id));
+    view_request_requester_worker_ids.emplace_back(std::string(requester_worker_id));
+    view_request_wait_timeouts_ms.push_back(wait_timeout_ms);
     if (!allow_view_transport) {
       return absl::NotFoundError("view transport disabled in RecordingGlobalStoreClient");
     }
@@ -228,7 +385,13 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return make_transport_session(it->second, target_device);
   }
 
-  absl::Status complete_replica_transport(std::string_view) override {
+  absl::Status complete_replica_transport(
+      std::string_view transport_id,
+      components::TransportCompletionOutcome outcome,
+      std::string_view outcome_detail) override {
+    completed_transport_ids.emplace_back(std::string(transport_id));
+    completed_transport_outcomes.push_back(outcome);
+    completed_transport_outcome_details.emplace_back(std::string(outcome_detail));
     return absl::OkStatus();
   }
 
@@ -244,20 +407,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("query_chunk_locations not supported in test stub");
   }
 
-  absl::StatusOr<components::StateSyncResult> synchronize_worker_state(
-      const tensorcast::global_store::v1::WorkerLocalState&,
+  absl::StatusOr<components::StateSyncResult> reconcile_worker_state(
+      std::string_view,
+      std::string_view,
+      const std::vector<tensorcast::common::v1::ReplicaInfo>&,
       bool,
       const components::StateSyncToken&,
       const components::RpcOptions&) override {
-    return absl::UnimplementedError("synchronize_worker_state not supported in test stub");
-  }
-
-  absl::StatusOr<components::FullStateSyncResult> request_full_state_sync(
-      std::string_view,
-      uint64_t,
-      const components::StateSyncToken&,
-      const components::RpcOptions&) override {
-    return absl::UnimplementedError("request_full_state_sync not supported in test stub");
+    return absl::UnimplementedError("reconcile_worker_state not supported in test stub");
   }
 
   bool is_connected() const override {
@@ -286,8 +443,79 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("get_view_metadata not supported in test stub");
   }
 
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
+  absl::Status upsert_key_mapping(std::string_view, std::string_view, absl::Duration) override {
     return absl::UnimplementedError("upsert_key_mapping not supported in test stub");
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    if (cluster_id.empty()) {
+      return absl::NotFoundError("cluster_id unavailable");
+    }
+    return cluster_id;
+  }
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view artifact_id,
+      std::string_view cluster_id_value,
+      std::string_view relative_path,
+      tensorcast::global_store::v1::DiskLocationKind kind,
+      bool is_deleted = false) override {
+    if (fail_disk_location_upsert) {
+      return absl::UnavailableError("disk_location_upsert_failed");
+    }
+    const absl::Time now = absl::Now();
+    for (auto& entry : disk_locations) {
+      if (entry.artifact_id == artifact_id && entry.cluster_id == cluster_id_value &&
+          entry.relative_path == relative_path) {
+        entry.kind = kind;
+        const bool prior_deleted = entry.is_deleted;
+        entry.is_deleted = entry.is_deleted || is_deleted;
+        if (!prior_deleted && entry.is_deleted) {
+          entry.deleted_at = now;
+        }
+        entry.updated_at = now;
+        return absl::OkStatus();
+      }
+    }
+    components::ArtifactDiskLocation entry;
+    entry.artifact_id = std::string(artifact_id);
+    entry.cluster_id = std::string(cluster_id_value);
+    entry.relative_path = std::string(relative_path);
+    entry.kind = kind;
+    entry.is_deleted = is_deleted;
+    entry.created_at = now;
+    entry.updated_at = now;
+    if (is_deleted) {
+      entry.deleted_at = now;
+    }
+    disk_locations.push_back(std::move(entry));
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<components::ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) override {
+    std::vector<components::ArtifactDiskLocation> out;
+    for (const auto& entry : disk_locations) {
+      if (entry.artifact_id == artifact_id) {
+        if (!include_deleted && entry.is_deleted) {
+          continue;
+        }
+        out.push_back(entry);
+      }
+    }
+    if (out.empty()) {
+      return absl::NotFoundError("disk_locations_not_found");
+    }
+    return out;
+  }
+
+  absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<uint64_t>) override {
+    return absl::UnimplementedError("swap_key_mapping not supported in test stub");
   }
 
   absl::Status revoke_key_mapping(std::string_view) override {

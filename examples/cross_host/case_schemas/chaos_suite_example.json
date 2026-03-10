@@ -1,0 +1,61 @@
+{
+  "defaults": {
+    "fanout_args": {
+      "mode": "fanout",
+      "seed_proc": "__SET_TC_SEED_PROC__",
+      "seed_adv_ip": "__SET_TC_SEED_IP__",
+      "get_procs": "__SET_TC_GET_PROCS__",
+      "get_adv_ips": "__SET_TC_GET_IPS__",
+      "gs_addr": "__SET_TC_GS_ADDR__",
+      "daemon_config": "examples/config/store_daemon_config_cross_host_bench.yaml",
+      "seed_grpc_port": 62001,
+      "seed_p2p_port": 63001,
+      "get_grpc_port": 62001,
+      "get_p2p_port": 63001,
+      "get_port_step": 10,
+      "lookup_mode": "key",
+      "put_policy": "pinned",
+      "put_device": "cuda:0",
+      "get_device": "cuda:0",
+      "size_mib": 1024,
+      "warmup": 1,
+      "iterations": 3,
+      "wave_size": 1,
+      "conn": 20,
+      "buffers": 16,
+      "maxw": 16,
+      "expected_gpu_channels": 0,
+      "payload_sample_verify": true,
+      "require_p2p": true,
+      "cleanup_artifacts": true,
+      "remote_timeout_sec": 900,
+      "daemon_start_timeout_sec": 600,
+      "stop_timeout_sec": 240
+    }
+  },
+  "cases": [
+    {
+      "name": "example_positive_single_fault",
+      "expected_outcome": "success",
+      "chaos_events": [
+        {
+          "offset_sec": 4.0,
+          "target_role": "getter",
+          "target_index": 0,
+          "action": "daemon_stop",
+          "duration_sec": 0.0,
+          "expected_impact": "transient retry and eventual completion"
+        }
+      ]
+    },
+    {
+      "name": "example_negative_expected_fail",
+      "expected_outcome": "failure",
+      "expected_error_pattern": "buffers_per_flow.*must be > 0",
+      "fanout_args": {
+        "buffers": 0
+      },
+      "chaos_events": []
+    }
+  ]
+}

@@ -63,7 +63,8 @@ class PinnedBufferPool {
   int allocate(
       size_t size,
       std::vector<char*>& buffers,
-      const std::chrono::milliseconds& timeout = std::chrono::milliseconds::zero());
+      const std::chrono::milliseconds& timeout = std::chrono::milliseconds::zero(),
+      std::string_view request_context = {});
   int deallocate(std::vector<char*>& buffers);
 
   // Canonical accessor: transfer slice/window size in bytes.

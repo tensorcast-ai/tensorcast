@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import threading
-import time
 from contextlib import contextmanager
 from typing import Callable
 
@@ -14,7 +13,6 @@ import torch
 
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
-from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import (
@@ -37,9 +35,7 @@ def _force_cuda(monkeypatch):
 def _patch_validate_targets(monkeypatch):
     from tensorcast.api.store import materialization as mat_mod
 
-    def _pair(
-        *, canonical_index, target, source, device_id, required_names=None
-    ):
+    def _pair(*, canonical_index, target, source, device_id, required_names=None):
         pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
         names = (
             required_names
@@ -97,20 +93,37 @@ class _FakeClient:
         del artifact_id
         return b"{}"
 
-    def resolve_artifact_from_disk_v2(
-        self, *, disk_path: str, verify_checksums: bool = True
-    ):
-        self.resolve_calls.append((disk_path, bool(verify_checksums)))
+    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+        self.resolve_calls.append((path, bool(verify_checksums)))
 
         class _Resp:
             pass
 
         resp = _Resp()
         resp.artifact_id = "aid"
-        resp.disk_path = disk_path
         resp.canonical_index_bytes = json.dumps({}).encode("utf-8")
         resp.generation = 0
         return resp
+
+    def import_artifact_from_path_stream_v2(
+        self, *, path: str, verify_checksums: bool = True
+    ):
+        resp = self.import_artifact_from_path_v2(
+            path=path,
+            verify_checksums=verify_checksums,
+        )
+        final_resp = store_daemon_pb2.ImportArtifactFromPathResponse(
+            artifact_id=resp.artifact_id,
+            canonical_index_bytes=resp.canonical_index_bytes,
+            generation=resp.generation,
+        )
+        event = store_daemon_pb2.ImportArtifactFromPathStreamEvent(
+            seq=1,
+            phase=store_daemon_pb2.IMPORT_ARTIFACT_PHASE_DONE,
+            done=True,
+        )
+        event.result.CopyFrom(final_resp)
+        yield event
 
 
 class _RuntimeStub:
@@ -144,8 +157,11 @@ class _RuntimeStub:
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._artifact_cache.cache_artifact_index(entry)
 
-    def get_artifact_index_by_disk_path(self, disk_path: str):
-        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
+    def get_artifact_index_by_disk_path(
+        self, disk_path: str
+    ) -> ArtifactCacheEntry | None:
+        del disk_path
+        return None
 
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
@@ -156,6 +172,7 @@ class _RuntimeStub:
     def resolve_key_mapping_cached(
         self, *, key: str
     ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
+        del key
         return None, None
 
     @property
@@ -177,6 +194,7 @@ def _make_payload(
     gate: threading.Event | None = None,
     on_iter: Callable[[], None] | None = None,
     generation: int | None = None,
+    source: store_daemon_pb2.MaterializationSource | None = None,
 ) -> MaterializationPayload:
     descriptors: list[TensorPayloadDescriptor] = []
     index: dict[str, list[object]] = {}
@@ -219,7 +237,7 @@ def _make_payload(
         disk_path=None,
         view_index_bytes=None,
         view_data_hash=None,
-        source=None,
+        source=source,
         device_uuid=None,
         generation=generation,
     )
@@ -233,7 +251,9 @@ def test_get_selective_tensors():
 
     def fake_materialize(**kwargs):
         captured["called"] = True
-        return _make_payload({"foo": torch.ones(1), "bar": torch.zeros(1)}, replica_uuid="p1")
+        return _make_payload(
+            {"foo": torch.ones(1), "bar": torch.zeros(1)}, replica_uuid="p1"
+        )
 
     pipeline.set_materialize_fn(fake_materialize)
     result = pipeline.get(artifact_id="aid", tensor_names=["bar"])
@@ -263,9 +283,7 @@ def test_get_into_async_cancel_releases(monkeypatch):
 
     pipeline.set_materialize_fn(fake_materialize)
     target = {"a": torch.empty(1), "b": torch.empty(1)}
-    fut = pipeline.get_into_async(
-        target, artifact_id="aid", tensor_names=["a", "b"]
-    )
+    fut = pipeline.get_into_async(target, artifact_id="aid", tensor_names=["a", "b"])
 
     cancelled = fut.cancel()
     gate.set()
@@ -323,14 +341,34 @@ def test_disk_fallback_verify_flag_passed():
         return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions(disk_path="/tmp/artifact", prefer_disk=True, verify_checksums=False)
+    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
     pipeline.get(artifact_id="aid", fallback=fallback)
     runtime.close()
 
     assert captured["verify_checksums"] is False
 
 
-def test_disk_path_hint_prefers_disk_without_fallback():
+def test_disk_fallback_allows_local_replica_source():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+
+    def fake_materialize(**_kwargs):
+        return _make_payload(
+            {"a": torch.ones(1)},
+            replica_uuid="local",
+            source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA,
+        )
+
+    pipeline.set_materialize_fn(fake_materialize)
+    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
+    result = pipeline.get(artifact_id="aid", fallback=fallback)
+    runtime.close()
+
+    assert torch.equal(result["a"], torch.ones(1))
+
+
+def test_prefer_disk_sets_source_policy():
     runtime = _RuntimeStub()
     views = ViewOrchestrator(runtime)
     pipeline = MaterializationPipeline(runtime, views)
@@ -338,69 +376,29 @@ def test_disk_path_hint_prefers_disk_without_fallback():
 
     def fake_materialize(**kwargs):
         captured["preference"] = kwargs.get("preference")
-        captured["disk_path_hint"] = kwargs.get("disk_path_hint")
+        source_policy = kwargs.get("source_policy")
+        captured["allow_disk"] = (
+            bool(source_policy.allow_disk) if source_policy is not None else None
+        )
         captured["artifact_id"] = kwargs.get("artifact_id")
         return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
 
     pipeline.set_materialize_fn(fake_materialize)
     materialized, _ = pipeline.materialize_subset(
-        artifact_id=None,
+        artifact_id="aid",
         key=None,
         device=0,
-        fallback=None,
+        fallback=FallbackOptions(prefer="disk"),
         tensor_names=None,
-        disk_path_hint="/tmp/artifact",
     )
     runtime.close()
 
-    assert captured["disk_path_hint"] == "/tmp/artifact"
     assert (
         captured["preference"]
         == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     )
-    assert runtime.client.resolve_calls == [("/tmp/artifact", True)]
+    assert captured["allow_disk"] is True
     assert materialized.replica_uuid == "disk"
-
-
-def test_disk_path_cache_reuses_index_without_resolve():
-    runtime = _RuntimeStub()
-    views = ViewOrchestrator(runtime)
-    pipeline = MaterializationPipeline(runtime, views)
-    payload = _make_payload({"a": torch.ones(1)}, generation=7)
-    canonical_bytes = payload.canonical_index_bytes
-    cache_entry = ArtifactCacheEntry(
-        artifact_id="aid",
-        canonical_index_bytes=canonical_bytes,
-        parsed_index=canonical_index_from_bytes(canonical_bytes),
-        generation=7,
-        disk_path="/tmp/artifact",
-        expires_at=time.monotonic() + 5.0,
-    )
-    runtime.cache_artifact_index(cache_entry)
-    captured: dict[str, object] = {}
-
-    def fake_materialize(**kwargs):
-        captured["artifact_id"] = kwargs.get("artifact_id")
-        captured["canonical_index_hint"] = kwargs.get("canonical_index_hint")
-        captured["generation_hint"] = kwargs.get("generation_hint")
-        return payload
-
-    pipeline.set_materialize_fn(fake_materialize)
-    materialized, _ = pipeline.materialize_subset(
-        artifact_id=None,
-        key=None,
-        device=0,
-        fallback=None,
-        tensor_names=None,
-        disk_path_hint="/tmp/artifact",
-    )
-    runtime.close()
-
-    assert captured["artifact_id"] == "aid"
-    assert captured["canonical_index_hint"] == canonical_bytes
-    assert captured["generation_hint"] == 7
-    assert runtime.client.resolve_calls == []
-    assert materialized.generation == 7
 
 
 def test_materialize_subset_preserves_generation():

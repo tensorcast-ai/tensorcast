@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -207,6 +207,10 @@ class Replica {
     return view_plan_;
   }
 
+  [[nodiscard]] const std::optional<std::string>& canonical_index_json() const {
+    return canonical_index_json_;
+  }
+
  private:
   // Immutable identifier for multi-device binding.
   const loading::ReplicaKey key_{};
@@ -219,7 +223,10 @@ class Replica {
       gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
       common::memory::MemoryLocation source_type,
       std::optional<loader::ViewPlan> view_plan,
-      loading::TransformPlacement transform_placement);
+      std::optional<std::string> canonical_index_json,
+      std::optional<std::string> source_index_json,
+      loading::TransformPlacement transform_placement,
+      StoreEngineOptions::ByteMappingConfig byte_mapping_config);
 
   // Helper to determine the optimal source location for loading `target_location`
   absl::StatusOr<common::memory::MemoryLocation> find_best_source_for_target(
@@ -236,7 +243,10 @@ class Replica {
 
   // Optional view execution plan when this replica represents a variant byte space.
   const std::optional<loader::ViewPlan> view_plan_;
+  const std::optional<std::string> canonical_index_json_;
+  const std::optional<std::string> source_index_json_;
   const loading::TransformPlacement transform_placement_;
+  const StoreEngineOptions::ByteMappingConfig byte_mapping_config_;
 
   // Producer-side completion signals for in-flight load/copy operations.
   std::shared_ptr<common::ReadySignal<absl::Status>> cpu_ready_signal_ ABSL_GUARDED_BY(mutex_);

@@ -28,7 +28,7 @@ class StatusController {
     WorkerIdentityStore& identity;
     std::chrono::steady_clock::time_point start_time;
     std::string local_handle_socket_path;
-    bool cpu_shared_memory_enabled{false};
+    bool cpu_shared_memory_enabled{true};
   };
 
   explicit StatusController(Dep d) : d_(std::move(d)) {}

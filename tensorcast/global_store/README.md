@@ -91,8 +91,8 @@ Global Store now treats replicas as ByteSpace-scoped:
 
 - Replicas are keyed by `(artifact_id, view_id)` via `MemoryInfo.byte_space` so
   canonical and view pieces route independently.
-- Variant metadata persists canonical coverage ranges and `view_data_hash` so
-  daemons can assemble and seal from pieces (`ListVariants` returns ranges).
+- View metadata persists canonical coverage ranges and `view_data_hash` so
+  daemons can assemble and seal from pieces (`ListViews` returns ranges).
 - `artifact_bindings` records `assembly_id → mi2_id` after sealing so reads can
   resolve to the sealed identity while preserving view routing semantics.
 - Assembly CGIDs that provide `tensor_index_data` (or an `ArtifactDescriptor`
@@ -158,9 +158,13 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
   [replicas marked unavailable]
 ```
 
-Workers must provide a stable `daemon_id` (from daemon config). Registration treats `daemon_id` as the
+Workers must provide a stable `daemon_id` (auto-generated and persisted when omitted, or explicitly configured). Registration treats `daemon_id` as the
 primary identity for upserts so a daemon can restart or change advertised address/port without losing its logical
 identity. `worker_id` remains an assigned row identifier; `ListActiveWorkers` returns both `worker_id` and `daemon_id`.
+
+When a new daemon registration arrives for an endpoint (`node_address:grpc_port`) that is still occupied by an older row,
+Global Store performs endpoint takeover: the previous endpoint owner is reclaimed and the new registration becomes authoritative
+without waiting for heartbeat timeout cleanup. This avoids restart races after unclean daemon exits.
 
 Inactive workers remain in the registry with `inactive_at` set so routing can filter them while avoiding delete/update conflicts.
 
@@ -188,6 +192,21 @@ Engine instances (user processes) register with the Global Store and send period
 Instances are keyed by a stable `instance_id` and associated with a `daemon_id` (and
 optionally a `worker_id`) to bridge engine processes with the node’s store daemon.
 
+### Capability Directory (Discovery)
+
+The worker/instance registries also act as a low-frequency **capability directory**:
+
+- Each worker/instance persists a bounded `capability_flags` bitset (see `global_store.proto`) advertising control-plane
+  capabilities (queue broker, retention handles, capability-token envelope, execution signals, node agent).
+- Writes are **update-on-change**: heartbeats update `capability_flags` only when the field is present and the value
+  changes. Omitting the field leaves the stored flags untouched; sending an explicit `0` clears capabilities.
+- `ListActiveWorkers` / `ListActiveInstances` accept `required_capability_flags` for server-side filtering; responses
+  always include the active `capability_flags`.
+- Clients should cache directory results with bounded staleness; this is **advisory discovery**, not a hot path.
+
+**Metrics:** `tc_capability_directory_entries{scope="worker|instance", capability="..."}` tracks active capability
+counts by scope and capability.
+
 ## Service Responsibilities
 
 ### WorkerService
@@ -214,16 +233,23 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
 **Purpose:** Coordinate artifact transfers with load balancing.
 
 **Key behaviors:**
-- Finds available replica with capacity below `max_concurrency`
-- Atomically claims the replica (increment counter) and creates transport record
+- Enqueues requests into a pending queue and dispatches globally
+- Applies group-aware ordering (fairness floor, completion bias, starvation aging)
+- Applies source balancing at assignment time (replica load, worker load, assignment recency, diffusion bonus)
+- Atomically claims replica capacity and creates transport lease records
+- Requires explicit request-level idempotency (`request_id`) and replays duplicate requests safely
 - Supports blocking wait with timeout for high-contention scenarios
-- Emits a timeout diagnostics snapshot (availability, capacity, worker heartbeat/accepting state, sample replicas)
+- Provides swap-safety helpers: `MarkReplicaUnavailable` flips `is_available=false` for a replica, and `WaitReplicaDrain`
+  waits until `current_requests==0` without mutating transport state; the drain wait honors the requested timeout and
+  RPC deadline by capping sleep intervals to the remaining time budget
 - Cleans up stale transports as safety net for crashed clients
+- Separates lease closure from requester outcome: completion always releases counters, while group progress uses
+  explicit `SUCCESS` outcomes only
 
-**Load balancing strategy:**
-1. Prefer GPU replicas over RAM over DISK
-2. Among same tier, prefer lower load ratio (`current_requests / max_concurrency`)
-3. Among equal load, prefer least-recently-assigned (reduces hot-spot probability)
+**Dispatch strategy (unified path):**
+1. Queue and rank pending requests with fairness floor + completion bias + starvation aging.
+2. Select replica with source-balance scoring and memory-tier preference (GPU > RAM > DISK).
+3. Finalize assignment transactionally with idempotent request replay protection.
 
 ### RecoveryService
 
@@ -234,8 +260,8 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
 - Persists `state_version` and `state_checksum` per worker (non-null defaults); heartbeats use cached checksum to avoid full-table scans
-  - Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
-  - Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
+  - Tracks per-worker reconcile cursor (`generation`, `request_seq`) and daemon incarnation (`daemon_id`) to reject stale requests and trigger explicit rebase
+  - Applies reconcile changes transactionally and only bumps `state_version` + checksum on full success (`NOOP` keeps version, refreshes checksum if needed)
 
 ### InstanceService
 
@@ -281,14 +307,19 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
 
 ### ViewStateService
 
-**Purpose:** Manage variant metadata and leaf digests for integrity verification.
+**Purpose:** Manage view metadata, TreeHash leaves, and overlap proof digests (v2).
 
 **Key behaviors:**
-- Persists variant view specifications (transformed views of canonical artifacts)
+- Persists view specifications (transformed views of canonical artifacts) and canonical coverage ranges for pieces.
+- Exposes `CheckProofCommitmentsMatch` to compare assembly-scoped and MI2-scoped proof commitments for specified
+  tensors (used by post-seal view reuse policies).
 - Stores Merkle leaf digests keyed by **HashSpaceRef**:
   - canonical hash-space is anchored by `index_multihash`
   - view hash-space is anchored by `view_id`
 - Supports partial verification by querying specific leaf indices
+  - When requested leaf digests are missing, `GetArtifactInfoById` returns `STATUS_NOT_FOUND` and populates
+    `partial_leaf_coverage` (units: leaf indices). `partial_coverage` is reserved for missing *byte* coverage ranges
+    (units: bytes) and must not be used for leaf indices.
 
 ## Data Model
 
@@ -311,8 +342,17 @@ The canonical schema lives in `/schema.sql`. Key tables:
 | `key_mappings` | Human-friendly key → artifact_id lookup | Cold |
 | `memory_tier_snapshots` | UMA telemetry time-series | Warm |
 | `memory_tier_leases` | Preemptible memory lease lifecycle | Warm |
-| `variants` | View metadata for transformed artifacts | Cold |
+| `views` | View metadata for transformed artifacts | Cold |
+| `view_coverage_ranges` | Canonical coverage ranges for views (pieces) | Cold |
 | `leaves` | Merkle leaf digests for integrity verification | Cold |
+| `layout_specs` | Immutable, content-addressed layout declarations (v2) | Cold |
+| `assembly_layout_bindings` | Versioned `assembly_id → layout_id` pointer (v2) | Warm |
+| `artifact_layout_attachments` | Immutable `mi2_id → layout_id` attachments (v2) | Cold |
+| `assembly_runtime_policies` | Mutable per-assembly operational knobs (v2) | Warm |
+| `operations` | Unified operation status + coordinator leases (v2) | Warm |
+| `assembly_proof_commitments` | Assembly-scoped proof commitments (v2) | Warm |
+| `tensor_proof_commitments` | MI2-scoped proof commitments (v2) | Cold |
+| `piece_proof_digests` | Per-piece proof digests (v2) | Warm |
 
 **Why separate `replica_counters` from `artifact_replicas`?**
 
@@ -410,9 +450,27 @@ worker_policy:
   memory_tiers:
     snapshot_retention: "600s"
     snapshot_max_rows: 200
+  key_mapping:
+    alias_cache_ttl: "1s"
+  transport_scheduler:
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+    source_balance_weights:
+      replica_load_weight: 1.0
+      worker_load_weight: 1.0
+      recent_assignment_penalty_weight: 1.0
+      diffusion_bonus_weight: 1.0
+    group_dispatch:
+      fairness_floor_ratio: 0.25
+      completion_bias_weight: 1.0
+      starvation_aging_threshold: "5s"
+      queue_scan_limit: 128
+      dispatch_batch_limit: 16
 ```
 
 `server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `database.db_file` is null/empty, the CLI leaves it unset and the Global Store uses in-memory DuckDB. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
+`worker_policy.key_mapping.alias_cache_ttl` controls the `ResolveKeyMapping` cache TTL returned for alias-style mappings; keep it short to reduce polling pressure.
+Transport request handling always uses queue-based group dispatch; `worker_policy.transport_scheduler.mode` is retained only for config compatibility and should be set to `GROUP_DISPATCH`.
+`UpsertKeyMapping`/`SwapKeyMapping` require descriptor readiness: target `artifact_id` must already resolve to canonical index bytes (`GetArtifactIndexById` path). If artifact row or index bytes are missing, RPC returns `FAILED_PRECONDITION`.
 
 ## Extending the Global Store
 
@@ -442,11 +500,16 @@ Use `GlobalStoreServicer.reset_state()` for integration test isolation. It trunc
 ## Running
 
 ```bash
-# With config file
+# With explicit config file
 uv run -m tensorcast.global_store --config config/global_store.yaml
+
+# Or rely on config discovery:
+#   1) $TENSORCAST_GLOBAL_STORE_CONFIG
+#   2) examples/config/global_store_config.yaml (repo or packaged wheel)
+uv run -m tensorcast.global_store
 
 # Programmatically (for tests)
 servicer = GlobalStoreServicer(db_file=None)  # in-memory
 server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+register_global_store_servicers(server, servicer)
 ```

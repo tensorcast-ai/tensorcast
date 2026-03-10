@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <string>
 #include <utility>
@@ -60,6 +60,7 @@ void ReadRequest::set_result(absl::Status status) {
   if (callback) {
     callback();
   }
+  notify_completion(status);
 }
 
 void ReadRequest::set_on_result(std::function<void()> callback) {
@@ -115,6 +116,32 @@ std::future<read_result_t> ReadRequest::get_read_result_future(std::string error
           .status = absl::InternalError(error_message),
       });
   return f;
+}
+
+void ReadRequest::notify_bytes_progress(uint64_t bytes_delta) {
+  if (bytes_delta == 0) {
+    return;
+  }
+  const uint64_t done = completed_bytes_.fetch_add(bytes_delta, std::memory_order_relaxed) + bytes_delta;
+  std::function<void(uint64_t, uint64_t)> callback;
+  {
+    absl::MutexLock lk(&progress_mu_);
+    callback = progress_callback_;
+  }
+  if (callback) {
+    callback(done, local_tensor_ ? local_tensor_->get_bytes() : 0);
+  }
+}
+
+void ReadRequest::notify_completion(const absl::Status& status) {
+  std::function<void(const absl::Status&)> callback;
+  {
+    absl::MutexLock lk(&progress_mu_);
+    callback = completion_callback_;
+  }
+  if (callback) {
+    callback(status);
+  }
 }
 
 WriteRequest::WriteRequest(tensor_t local_tensor, std::string tensor_key, uint64_t offset, uint64_t bytes)

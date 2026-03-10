@@ -16,6 +16,18 @@ subdirectories map 1:1 to runtime responsibilities:
 - `dataplane/` — Loader runtime, sources/sinks, registry implementations, and
   streaming infrastructure that execute the actual materialization.
 
+Dataplane note: `SeekableSource::total_bytes()` is treated as authoritative
+logical length by validators and read paths. Sources that lazily open underlying
+files must ensure size is initialized on first `total_bytes()` call, and mux
+sources must not truncate the exposed length when one backend is a partial
+cache.
+
+Safetensors note: safetensors header offsets are treated as a disk **source
+layout** only. Canonical identity/layout is always derived by coalescing sorted
+tensor names (8-byte alignment). Disk materialization may therefore apply a
+canonical→source ByteRangeMap and use source-ordered window scheduling to keep
+I/O sequential while filling canonical ByteSpace.
+
 The refactor tracks design 0027 (Materialization Control/Data-plane
 Unification). Each subdirectory exposes a Bazel package so layering can be
 enforced (`contracts` ← `control` ← `planning` ← `dataplane`). The legacy

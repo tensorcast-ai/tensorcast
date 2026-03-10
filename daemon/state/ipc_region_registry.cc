@@ -41,9 +41,6 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_
   if (params.size_bytes == 0) {
     return absl::InvalidArgumentError("size_bytes must be > 0");
   }
-  if (params.ttl_ms == 0) {
-    return absl::InvalidArgumentError("ttl_ms must be > 0");
-  }
   if (params.handle_bytes.empty()) {
     return absl::InvalidArgumentError("cuda_ipc_handle must not be empty");
   }
@@ -58,14 +55,20 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_
   rec.desc.device_id = params.device_id;
   rec.desc.owner_pid = params.owner_pid;
   rec.desc.size_bytes = params.size_bytes;
-  const uint32_t ttl_ms = clamp_ttl_ms(params.ttl_ms, opts_.max_ttl);
-  if (ttl_ms == 0) {
-    return absl::InvalidArgumentError("effective ttl_ms underflowed");
+  if (params.ttl_ms == 0) {
+    // TTL disabled: no time-based expiry.
+    rec.desc.ttl_ms = 0;
+    rec.desc.expires_at = absl::InfiniteFuture();
+  } else {
+    const uint32_t ttl_ms = clamp_ttl_ms(params.ttl_ms, opts_.max_ttl);
+    if (ttl_ms == 0) {
+      return absl::InvalidArgumentError("effective ttl_ms underflowed");
+    }
+    rec.desc.ttl_ms = ttl_ms;
+    rec.desc.expires_at = absl::Now() + absl::Milliseconds(ttl_ms);
   }
-  rec.desc.ttl_ms = ttl_ms;
   rec.desc.session_id = params.session_id;
   rec.desc.region_name = params.region_name;
-  rec.desc.expires_at = absl::Now() + absl::Milliseconds(ttl_ms);
   rec.desc.poisoned = false;
   rec.handle_bytes = params.handle_bytes;
   rec.refcount = 0;
@@ -107,12 +110,17 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::describe(
 }
 
 bool IpcRegionRegistry::refresh_ttl(const std::string& region_id, uint32_t ttl_ms) {
-  if (ttl_ms == 0) {
-    return false;
-  }
   absl::MutexLock lock(&mu_);
   auto it = regions_.find(region_id);
   if (it == regions_.end()) {
+    return false;
+  }
+  if (it->second.desc.ttl_ms == 0) {
+    // TTL disabled for this region: keep infinite expiry regardless of keepalive bumps.
+    it->second.desc.expires_at = absl::InfiniteFuture();
+    return true;
+  }
+  if (ttl_ms == 0) {
     return false;
   }
   const uint32_t effective = clamp_ttl_ms(ttl_ms, opts_.max_ttl);
@@ -130,7 +138,11 @@ std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::sweep_expire
   for (auto it = regions_.begin(); it != regions_.end();) {
     if (it->second.desc.expires_at <= now) {
       if (it->second.refcount > 0) {
-        it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+        if (it->second.desc.ttl_ms == 0) {
+          it->second.desc.expires_at = absl::InfiniteFuture();
+        } else {
+          it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+        }
         ++it;
         continue;
       }
@@ -143,6 +155,25 @@ std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::sweep_expire
     }
   }
   return expired;
+}
+
+std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::handle_pid_exit(int owner_pid) {
+  std::vector<RegionDescriptor> removed;
+  if (owner_pid <= 0) {
+    return removed;
+  }
+  absl::MutexLock lock(&mu_);
+  for (auto it = regions_.begin(); it != regions_.end();) {
+    if (it->second.desc.owner_pid == owner_pid) {
+      removed.push_back(it->second.desc);
+      auto to_erase = it;
+      ++it;
+      regions_.erase(to_erase);
+    } else {
+      ++it;
+    }
+  }
+  return removed;
 }
 
 absl::StatusOr<std::string> IpcRegionRegistry::get_handle_bytes(const std::string& region_id) const {
@@ -169,7 +200,11 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::acquire(
     return absl::PermissionDeniedError("owner_pid mismatch");
   }
   ++it->second.refcount;
-  it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+  if (it->second.desc.ttl_ms == 0) {
+    it->second.desc.expires_at = absl::InfiniteFuture();
+  } else {
+    it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+  }
   it->second.desc.poisoned = it->second.poisoned;
   return it->second.desc;
 }
@@ -185,7 +220,11 @@ absl::Status IpcRegionRegistry::release(const std::string& region_id) {
   }
   --it->second.refcount;
   if (it->second.refcount == 0) {
-    it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+    if (it->second.desc.ttl_ms == 0) {
+      it->second.desc.expires_at = absl::InfiniteFuture();
+    } else {
+      it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+    }
   }
   return absl::OkStatus();
 }

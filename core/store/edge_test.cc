@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // StoreEngine edge case tests (E-series)
 // Test error conditions, invalid inputs, and boundary cases.
@@ -23,12 +23,13 @@ using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::components::CommunicationManager;
+using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::MaterializeHints;
 using tensorcast::store::loading::ReplicaKey;
 
 // E1: Invalid device ordinal
 TEST_CASE("E1: Invalid device ordinal", "[store_engine][edge][e1]") {
-  const std::string artifact_id = "edge_model_e1";
+  const std::string artifact_id = "cgid:edge_model_e1";
   const size_t artifact_size = 10 * 1024 * 1024; // 10MB
 
   TempArtifactFixture fixture("edge_e1");
@@ -38,22 +39,27 @@ TEST_CASE("E1: Invalid device ordinal", "[store_engine][edge][e1]") {
 
   // Test negative ordinal
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
     auto neg_handle = store->materialize_replica(
         DeviceKey{.type = tensorcast::DeviceType::GPU, .ordinal = -1, .uuid = ""},
         StoreEngine::MaterializeMode::AUTO,
-        hints);
+        hints,
+        disk_source);
     REQUIRE(!neg_handle.ok());
     REQUIRE(neg_handle.status().code() == absl::StatusCode::kInvalidArgument);
   }
 
   // Test very large ordinal
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
     auto large_handle = store->materialize_replica(
-        DeviceKey{tensorcast::DeviceType::GPU, 999, ""}, StoreEngine::MaterializeMode::AUTO, hints);
+        DeviceKey{tensorcast::DeviceType::GPU, 999, ""}, StoreEngine::MaterializeMode::AUTO, hints, disk_source);
     REQUIRE(!large_handle.ok());
     REQUIRE(large_handle.status().code() == absl::StatusCode::kInvalidArgument);
   }
@@ -75,8 +81,12 @@ TEST_CASE("E2: Non-existent replica", "[store_engine][edge][e2]") {
 
   // Try to load non-existent replica
   {
-    MaterializeHints hints{.disk_path = "non_existent_artifact"};
-    auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    const std::string missing_artifact_id = "cgid:non_existent_artifact";
+    MaterializeHints hints;
+    hints.artifact_id = missing_artifact_id;
+    DiskSource disk_source{.path = missing_artifact_id, .expected_size = std::nullopt};
+    auto handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(!handle.ok());
   }
 
@@ -105,7 +115,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
   // Create multiple artifacts
   std::vector<std::string> artifact_ids;
   for (int i = 0; i < 5; ++i) {
-    auto artifact_id = generate_artifact_id("exhaust_model_e3", i);
+    auto artifact_id = "cgid:" + generate_artifact_id("exhaust_model_e3", i);
     artifact_ids.push_back(artifact_id);
     fixture.create_model(artifact_id, artifact_size);
   }
@@ -116,8 +126,11 @@ TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
   size_t idx = 0;
   absl::Status first_status = absl::InternalError("uninitialized");
   {
-    MaterializeHints hints{.disk_path = artifact_ids[idx]};
-    auto h_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    MaterializeHints hints;
+    hints.artifact_id = artifact_ids[idx];
+    DiskSource disk_source{.path = artifact_ids[idx], .expected_size = std::nullopt};
+    auto h_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     if (h_or.ok()) {
       first_status = h_or.value().wait_ready(std::chrono::milliseconds(10000));
     }
@@ -131,8 +144,11 @@ TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
   // Load remaining artifacts
   int additional_successes = 0;
   for (idx = 1; idx < artifact_ids.size(); ++idx) {
-    MaterializeHints hints{.disk_path = artifact_ids[idx]};
-    auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    MaterializeHints hints;
+    hints.artifact_id = artifact_ids[idx];
+    DiskSource disk_source{.path = artifact_ids[idx], .expected_size = std::nullopt};
+    auto handle_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
       auto wait_status = handle.wait_ready(std::chrono::milliseconds(10000));
@@ -155,7 +171,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
 TEST_CASE("E4: Concurrent clear_mem() during materialize_replica()", "[store_engine][edge][e4]") {
   skip_if_no_cuda("E4");
 
-  const std::string artifact_id = "edge_model_e4";
+  const std::string artifact_id = "cgid:edge_model_e4";
   const size_t artifact_size = 50 * 1024 * 1024; // 50MB
 
   TempArtifactFixture fixture("edge_e4");
@@ -169,9 +185,12 @@ TEST_CASE("E4: Concurrent clear_mem() during materialize_replica()", "[store_eng
 
   // Thread 1: Start materialize_replica operation
   std::thread materialize_thread([&]() {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto handle_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     materialize_started.store(true);
 
     if (handle_or.ok()) {
@@ -208,7 +227,7 @@ TEST_CASE("E4: Concurrent clear_mem() during materialize_replica()", "[store_eng
 TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]") {
   skip_if_no_cuda("E5");
 
-  const std::string artifact_id = "edge_model_e5";
+  const std::string artifact_id = "cgid:edge_model_e5";
   const size_t artifact_size = 20 * 1024 * 1024; // 20MB
 
   TempArtifactFixture fixture("edge_e5");
@@ -233,9 +252,12 @@ TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]")
 
   // Load replica
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(handle.ok());
     REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
@@ -267,7 +289,7 @@ TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]")
 TEST_CASE("E6: Materialize with invalid hints", "[store_engine][edge][e6]") {
   skip_if_no_cuda("E6");
 
-  const std::string artifact_id = "edge_model_e6";
+  const std::string artifact_id = "cgid:edge_model_e6";
   const size_t artifact_size = 15 * 1024 * 1024; // 15MB
 
   TempArtifactFixture fixture("edge_e6");
@@ -276,12 +298,17 @@ TEST_CASE("E6: Materialize with invalid hints", "[store_engine][edge][e6]") {
   auto store = make_test_store(fixture.root());
 
   // Test with various invalid hints
-  MaterializeHints hints{.disk_path = disk_path.string()};
+  MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+  DiskSource disk_source{.path = disk_path, .expected_size = std::nullopt};
 
-  auto handle1 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
-  auto handle2 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle1 =
+      store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
+  auto handle2 =
+      store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
 
-  auto handle3 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle3 =
+      store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
 
   // At least one should succeed with defaults
   REQUIRE((handle1.ok() || handle2.ok() || handle3.ok()));
@@ -291,7 +318,7 @@ TEST_CASE("E6: Materialize with invalid hints", "[store_engine][edge][e6]") {
 TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][e7]") {
   skip_if_no_cuda("E7");
 
-  const std::string artifact_id = "edge_model_e7";
+  const std::string artifact_id = "cgid:edge_model_e7";
   const size_t artifact_size = 25 * 1024 * 1024; // 25MB
 
   TempArtifactFixture fixture("edge_e7");
@@ -301,9 +328,12 @@ TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][
 
   // Prime SPB allocation and record baseline availability after initialization
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto handle_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     if (handle_or.ok()) {
       auto st = handle_or.value().wait_ready(std::chrono::milliseconds(30000));
       (void)st; // Ignore result; the goal is to trigger SPB allocation
@@ -319,9 +349,12 @@ TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][
 
   for (int i = 0; i < num_cycles; ++i) {
     // materialize
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto handle_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     if (!handle_or.ok()) {
       continue;
     }
@@ -355,7 +388,7 @@ TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][
 
 // E8: Empty replica directory
 TEST_CASE("E8: Empty replica directory", "[store_engine][edge][e8]") {
-  const std::string artifact_id = "empty_artifact_e8";
+  const std::string artifact_id = "cgid:empty_artifact_e8";
 
   TempArtifactFixture fixture("edge_e8");
 
@@ -367,16 +400,19 @@ TEST_CASE("E8: Empty replica directory", "[store_engine][edge][e8]") {
 
   // Try to load empty replica
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(!handle.ok());
   }
 }
 
 // E9: Corrupted replica file
 TEST_CASE("E9: Corrupted replica file", "[store_engine][edge][e9]") {
-  const std::string artifact_id = "corrupt_model_e9";
+  const std::string artifact_id = "cgid:corrupt_model_e9";
 
   TempArtifactFixture fixture("edge_e9");
 
@@ -394,9 +430,12 @@ TEST_CASE("E9: Corrupted replica file", "[store_engine][edge][e9]") {
 
   // Try to load corrupted replica
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     // Implementation may not perform data verification yet; accept either outcome
     if (handle.ok()) {
       auto wait_status = handle.value().wait_ready(std::chrono::milliseconds(5000));
@@ -409,7 +448,7 @@ TEST_CASE("E9: Corrupted replica file", "[store_engine][edge][e9]") {
 TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
   skip_if_no_cuda("E10");
 
-  const std::string artifact_id = "edge_model_e10";
+  const std::string artifact_id = "cgid:edge_model_e10";
   const size_t artifact_size = 30 * 1024 * 1024; // 30MB
 
   TempArtifactFixture fixture("edge_e10");
@@ -419,7 +458,8 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // COPY_ONLY without existing source
   {
-    MaterializeHints hints{};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
 
     auto copy_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE(!copy_handle.ok()); // Should fail - no source to copy from
@@ -427,16 +467,20 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // LOAD_ONLY should work
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto load_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto load_handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(load_handle.ok());
     REQUIRE(load_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
 
   // Now COPY_ONLY should work
   {
-    MaterializeHints hints{};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
 
     auto copy_handle2 = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     if (tensorcast::testing::is_cuda_available() && copy_handle2.ok()) {
@@ -447,9 +491,12 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // LOAD_ONLY on already loaded device
   {
-    MaterializeHints hints{.disk_path = artifact_id};
+    MaterializeHints hints;
+    hints.artifact_id = artifact_id;
+    DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
 
-    auto reload_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto reload_handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     if (!reload_handle.ok()) {
       LOG(ERROR) << "Failed to reload replica: " << reload_handle.status().message();
     }
@@ -461,7 +508,7 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 TEST_CASE("E11: wait_for_state tolerates immediate release", "[store_engine][edge][e11]") {
   skip_if_no_cuda("E11");
 
-  const std::string artifact_id = "edge_model_e11";
+  const std::string artifact_id = "cgid:edge_model_e11";
   const size_t artifact_size = 20 * 1024 * 1024; // 20MB
 
   TempArtifactFixture fixture("edge_e11");
@@ -485,8 +532,11 @@ TEST_CASE("E11: wait_for_state tolerates immediate release", "[store_engine][edg
     };
 
     std::thread loader([&]() {
-      MaterializeHints hints{.disk_path = artifact_id};
-      auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      MaterializeHints hints;
+      hints.artifact_id = artifact_id;
+      DiskSource disk_source{.path = artifact_id, .expected_size = std::nullopt};
+      auto handle_or =
+          store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
       if (!handle_or.ok()) {
         record_failure(handle_or.status().ToString());
         loader_finished.store(true, std::memory_order_release);

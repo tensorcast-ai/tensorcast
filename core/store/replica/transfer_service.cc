@@ -11,6 +11,7 @@
 
 #include "absl/log/log.h"
 #include "absl/log/vlog_is_on.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -136,6 +137,30 @@ absl::Status synchronize_gpu_after_transfer(int device_id, absl::string_view con
   return absl::OkStatus();
 }
 
+std::string make_pinned_wait_context(
+    absl::string_view op,
+    std::string_view artifact_id,
+    std::optional<uint64_t> session_id,
+    int device_id,
+    size_t chunks,
+    size_t slice_bytes) {
+  std::string context = absl::StrCat(
+      "op=",
+      op,
+      " artifact_id=",
+      artifact_id,
+      " device_id=",
+      device_id,
+      " chunks=",
+      chunks,
+      " slice_bytes=",
+      slice_bytes);
+  if (session_id.has_value()) {
+    absl::StrAppend(&context, " session_id=", *session_id);
+  }
+  return context;
+}
+
 } // namespace
 
 TransferService::TransferService(
@@ -176,7 +201,15 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
   const size_t slice_bytes = get_pool_chunk_size();
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
-  auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
+  auto init_status = session_spb->initialize(
+      cfg_.pinned_memory_timeout,
+      make_pinned_wait_context(
+          "copy_cpu_to_gpu_streaming",
+          replica_key_.artifact_id,
+          std::nullopt,
+          static_cast<int>(device_id),
+          std::max<size_t>(1, cfg_.streaming_buffer_chunks),
+          slice_bytes));
   if (!init_status.ok()) {
     return init_status;
   }
@@ -368,7 +401,15 @@ absl::Status TransferService::load_from_source(
   }
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
-  auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
+  auto init_status = session_spb->initialize(
+      cfg_.pinned_memory_timeout,
+      make_pinned_wait_context(
+          "load_from_source",
+          replica_key_.artifact_id,
+          std::nullopt,
+          device_id,
+          std::max<size_t>(1, cfg_.streaming_buffer_chunks),
+          slice_bytes));
   if (!init_status.ok()) {
     return init_status;
   }
@@ -466,7 +507,15 @@ absl::Status TransferService::execute(
   }
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
-  auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
+  auto init_status = session_spb->initialize(
+      cfg_.pinned_memory_timeout,
+      make_pinned_wait_context(
+          "execute",
+          replica_key_.artifact_id,
+          plan.session_id,
+          device_id,
+          std::max<size_t>(1, cfg_.streaming_buffer_chunks),
+          slice_bytes));
   if (!init_status.ok()) {
     return init_status;
   }

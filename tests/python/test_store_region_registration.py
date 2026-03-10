@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import sys
 import types
@@ -8,7 +8,10 @@ import pytest
 # Provide a stub for tensorcast.cuda before importing Store to avoid hard dependency
 sys.modules.setdefault(
     "tensorcast.cuda",
-    types.SimpleNamespace(get_cuda_memory_handle=lambda device_id, base_ptr: b"fake-handle"),
+    types.SimpleNamespace(
+        get_cuda_memory_handle=lambda device_id, base_ptr: b"fake-handle",
+        get_cuda_memory_handle_with_offset=lambda device_id, base_ptr: (b"fake-handle", 0),
+    ),
 )
 
 from tensorcast.api.store import Store, StoreOptions
@@ -37,12 +40,16 @@ def store(monkeypatch) -> Store:
 
     # Fake CUDA handle exporter (redundant with sys.modules stub but keeps isolation per test)
     monkeypatch.setattr("tensorcast.api.store.get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
+    monkeypatch.setattr(
+        "tensorcast.api.store.get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
 
     # Fake daemon client with register/unregister methods
     def _register_vram_region(*, device_id: int, size_bytes: int, ttl_ms: int, cuda_ipc_handle: bytes, region_name: str | None = None):
         assert device_id >= 0
         assert size_bytes > 0
-        assert ttl_ms > 0
+        assert ttl_ms >= 0
         assert cuda_ipc_handle == b"fake-handle"
         return VramRegionHandle(region_id="region:test123", ttl_ms=ttl_ms)
 
@@ -77,3 +84,16 @@ def test_register_and_unregister_vram_region_updates_cache(store: Store):
     assert ok is True
     dev_regions2 = region_cache.get_regions_for_device(device_id)
     assert all(r.region_id != "region:test123" for r in dev_regions2)
+
+
+def test_register_vram_region_ttl_0_is_allowed(store: Store):
+    device_id = 0
+    base_ptr = 0x1000
+    size_bytes = 4096
+    ttl_ms = 0
+
+    handle = store.register_vram_region(
+        device_id=device_id, base_ptr=base_ptr, size_bytes=size_bytes, ttl_ms=ttl_ms
+    )
+    assert handle.region_id == "region:test123"
+    assert handle.ttl_ms == 0

@@ -3,6 +3,7 @@
 """Service for instance registry operations."""
 
 import time
+from contextlib import suppress
 
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.exceptions import ValidationError
@@ -45,11 +46,17 @@ class InstanceService:
             existing.engine = instance.engine
             existing.signals_endpoint = instance.signals_endpoint
             existing.labels = instance.labels
+            existing.capability_flags = instance.capability_flags
             return self.instance_repository.update(existing)
 
         return self.instance_repository.create(instance)
 
-    def heartbeat(self, instance_id: str, worker_id: str | None = None) -> bool:
+    def heartbeat(
+        self,
+        instance_id: str,
+        worker_id: str | None = None,
+        capability_flags: int | None = None,
+    ) -> bool:
         if not instance_id:
             raise ValidationError("instance_id is required")
         resolved_worker_id = worker_id
@@ -61,9 +68,15 @@ class InstanceService:
                 worker = self.worker_repository.find_by_daemon_id(inst.daemon_id)
                 if worker:
                     resolved_worker_id = worker.worker_id
-        return self.instance_repository.heartbeat(
+        ok = self.instance_repository.heartbeat(
             instance_id, worker_id=resolved_worker_id
         )
+        if ok and capability_flags is not None:
+            with suppress(Exception):
+                self.instance_repository.update_capability_flags(
+                    instance_id, int(capability_flags)
+                )
+        return ok
 
     def unregister_instance(self, instance_id: str) -> bool:
         if not instance_id:

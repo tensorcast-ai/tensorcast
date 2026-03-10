@@ -38,7 +38,7 @@ def get_daemon_address() -> str:
         if _global_daemon_address is None:
             raise RuntimeError(
                 "TensorCast runtime is not initialized. "
-                "Call tensorcast.startup.init(mode='connect'|'create') first."
+                "Call tensorcast.startup.init(mode='connect'|'create'|'auto') first."
             )
         return _global_daemon_address
 
@@ -633,7 +633,11 @@ class GetArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     prefer: str = "auto"  # "auto" | "local" | "p2p" | "disk"
+    export_policy: str = "never"  # "never" | "auto" | "force"
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
+    # When >0 and the initial retrieval fails, the daemon can wait for a managed
+    # shared-disk location to become ready before retrying disk-only.
+    wait_for_shared_disk_ms: int = 0
     wait_for_completion: bool = True
     enable_verification: bool = True
     region_backed_mode: RegionBackedMode = RegionBackedMode.AUTO
@@ -650,10 +654,30 @@ class GetArtifactOptions(BaseModel):
             )
         return normalized
 
+    @field_validator("export_policy", mode="before")
+    @classmethod
+    def _normalize_export_policy(cls, value: object) -> str:
+        normalized = "never" if value is None else str(value).strip().lower()
+        if normalized not in {"never", "auto", "force"}:
+            raise ValueError(
+                "GetArtifactOptions.export_policy must be one of: never, auto, force"
+            )
+        return normalized
+
     @field_validator("region_backed_mode", mode="before")
     @classmethod
     def _normalize_region_backed_mode(cls, value: object) -> RegionBackedMode:
         return RegionBackedMode.parse(value)
+
+    @field_validator("wait_for_shared_disk_ms", mode="before")
+    @classmethod
+    def _normalize_wait_for_shared_disk_ms(cls, value: object) -> int:
+        if value is None or value == "":
+            return 0
+        ms = int(cast(SupportsInt, value))
+        if ms < 0:
+            raise ValueError("GetArtifactOptions.wait_for_shared_disk_ms must be >= 0")
+        return ms
 
 
 __all__ = [

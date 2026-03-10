@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypedDict
 
 import torch
 from opentelemetry.trace import Status, StatusCode
 
-from tensorcast._c_ext import compute_view_index_bytes
+from tensorcast._c_ext import (
+    compute_view_index_bytes,
+    get_cuda_memory_handle,
+    get_cuda_memory_handle_with_offset,
+)
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._config import GetArtifactOptions, RegionBackedMode
@@ -31,26 +35,39 @@ from tensorcast.api.store.common import (
     canonical_index_to_bytes,
     validate_targets,
 )
+from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import (
     compute_retry_delay,
     map_materialization_error,
+    raise_mapped_materialization_error,
     remaining_budget,
+    retry_reason_bucket,
     should_retry,
 )
 from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
+    CanonicalIndexEntry,
     FallbackOptions,
     RetryPolicy,
     SpanAttributeValue,
 )
-from tensorcast.api.store.view_composer import compute_view_id, compute_view_subset_hash
+from tensorcast.api.store.view_composer import compute_view_id
 from tensorcast.api.store.views import (
     ResolvedViewInputs,
     TransformPlacement,
     ViewOrchestrator,
 )
+from tensorcast.common.selection_contract import (
+    build_artifact_selection,
+    compute_selected_index_bytes,
+)
+from tensorcast.common.selection_identity import (
+    compute_logical_layout_hash,
+    compute_view_subset_hash,
+)
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
@@ -98,6 +115,155 @@ def _build_source_policy(
     return policy
 
 
+def _selection_debug_fields(
+    *,
+    view: common_pb2.ViewSpec | None,
+    tensor_names: Sequence[str] | None,
+    canonical_index_hint: bytes | None,
+    view_index_hint: bytes | None,
+) -> dict[str, object]:
+    view_ops_count = 0
+    view_tensor_count = 0
+    if view is not None and view.tensors:
+        view_tensor_count = len(view.tensors)
+        view_ops_count = sum(len(ops.ops) for ops in view.tensors.values())
+
+    ordered_names = tuple(str(name) for name in (tensor_names or ()))
+    debug: dict[str, object] = {
+        "view_tensor_count": int(view_tensor_count),
+        "view_ops_count": int(view_ops_count),
+        "tensor_names_count": int(len(ordered_names)),
+        "tensor_names_sample": list(ordered_names[:5]),
+        "canonical_index_hint_len": int(len(canonical_index_hint or b"")),
+        "view_index_hint_len": int(len(view_index_hint or b"")),
+    }
+
+    resolved_view_index_hint = bytes(view_index_hint or b"")
+    if resolved_view_index_hint:
+        with contextlib.suppress(Exception):
+            debug["view_index_hint_hash"] = compute_logical_layout_hash(
+                index_bytes=resolved_view_index_hint,
+                needs_view_index=True,
+            ).hex()
+
+    resolved_canonical_index_hint = bytes(canonical_index_hint or b"")
+    has_selection = bool(ordered_names or (view is not None and view.tensors))
+    if not resolved_canonical_index_hint or not has_selection:
+        return debug
+
+    with contextlib.suppress(Exception):
+        recomputed_view_index = compute_selected_index_bytes(
+            canonical_index_bytes=resolved_canonical_index_hint,
+            view_spec=view if view is not None and view.tensors else None,
+            tensor_names=ordered_names if ordered_names else None,
+        )
+        debug["recomputed_view_index_len"] = int(len(recomputed_view_index))
+        debug["recomputed_view_index_hash"] = compute_logical_layout_hash(
+            index_bytes=recomputed_view_index,
+            needs_view_index=True,
+        ).hex()
+        if resolved_view_index_hint:
+            debug["view_index_hint_matches_recomputed"] = bool(
+                resolved_view_index_hint == recomputed_view_index
+            )
+
+    return debug
+
+
+def _register_target_regions(
+    runtime: StoreRuntimeContext,
+    *,
+    target: Mapping[str, torch.Tensor],
+    device_id: int,
+) -> tuple[str, ...]:
+    ttl_ms = 0
+    client = runtime.ensure_client()
+    bases = collect_storage_bases(target)
+    region_ids: list[str] = []
+    try:
+        for base_ptr, nbytes in sorted(bases.items()):
+            base_ptr_value = int(base_ptr)
+            size_value = int(nbytes)
+            base_offset = 0
+            try:
+                handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
+                    int(device_id), base_ptr_value
+                )
+            except Exception:  # noqa: BLE001
+                handle_bytes = get_cuda_memory_handle(int(device_id), base_ptr_value)
+                base_offset = 0
+            if base_offset:
+                base_ptr_value -= int(base_offset)
+                size_value += int(base_offset)
+            handle = client.register_vram_region(
+                device_id=int(device_id),
+                size_bytes=int(size_value),
+                ttl_ms=int(ttl_ms),
+                cuda_ipc_handle=handle_bytes,
+                region_name=None,
+            )
+            region_cache.register_region(
+                region_id=handle.region_id,
+                device_id=int(device_id),
+                base_ptr=int(base_ptr_value),
+                size_bytes=int(size_value),
+                ttl_ms=int(ttl_ms),
+            )
+            region_ids.append(handle.region_id)
+    except Exception as exc:  # noqa: BLE001
+        for region_id in region_ids:
+            with contextlib.suppress(Exception):
+                client.unregister_vram_region(region_id)
+            with contextlib.suppress(Exception):
+                region_cache.unregister_region(region_id)
+        raise ArtifactError(
+            "Target tensors are not eligible for region-backed operations",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        ) from exc
+    return tuple(region_ids)
+
+
+def _build_region_layout_selection(
+    *,
+    artifact_id: str,
+    canonical_index_bytes: bytes,
+    region_layout: _RegionBackedLayout,
+    view_spec: common_pb2.ViewSpec | None,
+) -> common_pb2.ArtifactSelection:
+    subset_hash = bytes(region_layout.view_subset_hash or b"")
+    selection_names: tuple[str, ...] = (
+        tuple(region_layout.selection_names) if subset_hash else ()
+    )
+    view_spec_for_selection = (
+        view_spec if view_spec is not None and view_spec.tensors else None
+    )
+
+    layout_index_bytes: bytes | None = None
+    if region_layout.layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW:
+        if region_layout.view_index_bytes:
+            layout_index_bytes = bytes(region_layout.view_index_bytes)
+        else:
+            layout_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=view_spec_for_selection,
+                tensor_names=selection_names,
+            )
+
+    return build_artifact_selection(
+        artifact_id=artifact_id,
+        canonical_index_bytes=canonical_index_bytes,
+        layout_index_bytes=layout_index_bytes,
+        view_spec=view_spec_for_selection,
+        tensor_names=selection_names,
+        view_subset_hash=subset_hash if subset_hash else None,
+        view_id=str(region_layout.view_id or ""),
+        allow_view_id_without_spec=bool(
+            region_layout.view_id and view_spec_for_selection is None
+        ),
+    )
+
+
 class FallbackResolver:
     """Disk/P2P fallback utilities shared by materialization flows."""
 
@@ -105,42 +271,12 @@ class FallbackResolver:
         self._runtime = runtime
 
     def ensure_supported(self, fallback: FallbackOptions | None) -> None:
-        if fallback and fallback.disk_path and fallback.disk_path.strip() == "":
-            raise ArtifactError(
-                "Fallback disk_path must not be empty",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
         if fallback and fallback.prefer not in {"auto", "local", "p2p", "disk"}:
             raise ArtifactError(
                 f"Unknown fallback preference '{fallback.prefer}'",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-
-    def resolve_disk_path(
-        self,
-        *,
-        fallback: FallbackOptions,
-        client,
-        key: str | None,
-        artifact_id: str | None,
-    ) -> tuple[str | None, str | None, Exception | None]:
-        disk_path = fallback.disk_path
-        resolved_artifact_id = artifact_id
-        if disk_path:
-            return disk_path, resolved_artifact_id, None
-        if key is None:
-            return None, resolved_artifact_id, None
-        try:
-            resolved_id, mapped_path = self._runtime.resolve_key_mapping_cached(key=key)
-        except Exception as exc:  # noqa: BLE001
-            return None, resolved_artifact_id, exc
-        if mapped_path:
-            if not resolved_artifact_id:
-                resolved_artifact_id = resolved_id or resolved_artifact_id
-            return mapped_path, resolved_artifact_id, None
-        return None, resolved_artifact_id, None
 
     def record_event(
         self,
@@ -230,8 +366,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         tensor_names: Sequence[str] | None,
         canonical_index_hint: bytes | None = None,
-        disk_path_hint: str | None = None,
-        view_spec: store_daemon_pb2.ViewSpec | None = None,
+        view_spec: common_pb2.ViewSpec | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
@@ -248,7 +383,6 @@ class MaterializationPipeline:
             cancel_event=None,
             options_override=options,
             canonical_index_hint=canonical_index_hint,
-            disk_path_hint=disk_path_hint,
             tensor_names=tensor_names,
             view=view_spec,
             view_data_hash=view_data_hash,
@@ -300,7 +434,6 @@ class MaterializationPipeline:
             view_id=resolved.view_id,
             placement=placement_enum,
             canonical_index_hint=resolved.canonical_index_bytes,
-            disk_path_hint=resolved.disk_path_hint,
             allow_cpu=True,
             ctx=ctx,
         )
@@ -389,7 +522,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
-        view_spec: store_daemon_pb2.ViewSpec | None = None,
+        view_spec: common_pb2.ViewSpec | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
@@ -476,7 +609,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
-        view_spec: store_daemon_pb2.ViewSpec | None = None,
+        view_spec: common_pb2.ViewSpec | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
@@ -658,7 +791,6 @@ class MaterializationPipeline:
             view_id=resolved.view_id,
             placement=placement_enum,
             canonical_index_hint=resolved.canonical_index_bytes,
-            disk_path_hint=resolved.disk_path_hint,
         )
         try:
             layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
@@ -682,8 +814,6 @@ class MaterializationPipeline:
         artifact_id: str | None,
         key: str | None,
         fallback: FallbackOptions | None,
-        *,
-        disk_path_hint: str | None = None,
     ) -> tuple[str | None, str | None]:
         if artifact_id and key:
             raise ArtifactError(
@@ -692,14 +822,6 @@ class MaterializationPipeline:
                 retryable=False,
             )
         if not artifact_id and not key:
-            disk_path: str | None = None
-            if fallback:
-                if isinstance(fallback.disk_path, str):
-                    disk_path = fallback.disk_path.strip()
-                else:
-                    disk_path = fallback.disk_path
-            if disk_path or disk_path_hint:
-                return None, None
             raise ArtifactError(
                 "Either artifact_id or key is required",
                 status_code="INVALID_ARGUMENT",
@@ -714,21 +836,10 @@ class MaterializationPipeline:
         *,
         allow_cpu: bool = False,
     ) -> int:
-        def _has_disk_fallback() -> bool:
-            if not fallback:
-                return False
-            disk = fallback.disk_path
-            if isinstance(disk, str):
-                return disk.strip() != ""
-            return disk is not None
-
         if selector is None:
             if not torch.cuda.is_available():
                 if allow_cpu:
                     return -1
-                if _has_disk_fallback():
-                    # Legacy fallback: treat CPU as cuda:0 for disk-based retrieval paths.
-                    return 0
                 raise ArtifactError(
                     "CUDA device required for retrieval",
                     status_code="FAILED_PRECONDITION",
@@ -739,8 +850,6 @@ class MaterializationPipeline:
             if selector.type != "cuda":
                 if selector.type == "cpu" and allow_cpu:
                     return -1
-                if selector.type == "cpu" and _has_disk_fallback():
-                    return 0
                 raise ArtifactError(
                     f"Unsupported device selector {selector}",
                     status_code="INVALID_ARGUMENT",
@@ -752,8 +861,6 @@ class MaterializationPipeline:
             if device.type != "cuda":
                 if device.type == "cpu" and allow_cpu:
                     return -1
-                if device.type == "cpu" and _has_disk_fallback():
-                    return 0
                 raise ArtifactError(
                     f"Unsupported device selector {selector}",
                     status_code="INVALID_ARGUMENT",
@@ -876,7 +983,7 @@ class MaterializationPipeline:
         target: Mapping[str, torch.Tensor],
         device_id: int,
         tensor_names: Sequence[str] | None,
-        view_spec: store_daemon_pb2.ViewSpec | None,
+        view_spec: common_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
         selection_order: Sequence[str] | None = None,
@@ -910,8 +1017,25 @@ class MaterializationPipeline:
                 retryable=False,
             )
 
+        full_selection = target_names == canonical_names
+
+        selection_names: tuple[str, ...] = ()
         if selection_order is not None:
             selection_names = tuple(str(name) for name in selection_order)
+        elif tensor_names is not None:
+            selection_names = tuple(str(name) for name in tensor_names)
+        elif not full_selection:
+            selection_names = tuple(
+                entry.name
+                for entry in canonical_index.entries
+                if entry.name in target_names
+            )
+
+        if (
+            selection_order is not None
+            or tensor_names is not None
+            or not full_selection
+        ):
             if not selection_names:
                 raise ArtifactError(
                     "selection_order must not be empty when provided",
@@ -930,9 +1054,6 @@ class MaterializationPipeline:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-        else:
-            selection_names = tuple(sorted(target_names))
-        full_selection = target_names == canonical_names
 
         normalized_ops: dict[str, list[dict[str, int | str]]] = {}
         if view_spec is not None and view_spec.tensors:
@@ -971,7 +1092,7 @@ class MaterializationPipeline:
             resolved_view_id = view_id
 
         needs_view_index = (
-            bool(normalized_ops) or not full_selection or selection_order is not None
+            bool(normalized_ops) or not full_selection or bool(selection_names)
         )
         view_index_bytes: bytes | None = None
         if needs_view_index:
@@ -979,7 +1100,7 @@ class MaterializationPipeline:
                 view_index_bytes = view_index_hint
             else:
                 subset_payload = None
-                if selection_order is not None or not full_selection:
+                if selection_names:
                     subset_payload = list(selection_names)
                 view_payload = compute_view_index_bytes(
                     canonical_index_bytes, normalized_ops, subset_payload
@@ -1073,9 +1194,9 @@ class MaterializationPipeline:
                 == store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
             ):
                 elem_bytes = int(tensor.element_size())
-                if entry.segment_offset != entry.storage_offset * elem_bytes:
+                if entry.segment_offset % elem_bytes != 0:
                     raise ArtifactError(
-                        "Canonical layout is not COALESCED; region-backed get_into requires coalesced offsets",
+                        "Canonical layout segment_offset must be element-size aligned",
                         status_code="INVALID_ARGUMENT",
                         retryable=False,
                     )
@@ -1205,11 +1326,13 @@ class MaterializationPipeline:
             )
         layout.offsets.extend(offsets)
 
-        digest = hashlib.sha256()
-        digest.update(index_bytes)
-        digest.update(b"|view" if needs_view_index else b"|canonical")
-        layout.logical_layout_hash = digest.digest()
-        view_subset_hash = compute_view_subset_hash(selection_names)
+        layout.logical_layout_hash = compute_logical_layout_hash(
+            index_bytes=index_bytes,
+            needs_view_index=needs_view_index,
+        )
+        view_subset_hash = (
+            b"" if full_selection else compute_view_subset_hash(selection_names)
+        )
         return _RegionBackedLayout(
             layout=layout,
             region_ids=tuple(region_ids),
@@ -1218,6 +1341,247 @@ class MaterializationPipeline:
             view_id=resolved_view_id,
             selection_names=selection_names,
             view_subset_hash=view_subset_hash,
+        )
+
+    def _build_mapped_region_backed_layout(
+        self,
+        *,
+        target: Mapping[str, torch.Tensor],
+        device_id: int,
+        selection_order: Sequence[str] | None = None,
+        mapped_view_id: str | None = None,
+        selection_index_bytes: bytes | None = None,
+    ) -> _RegionBackedLayout:
+        if not target:
+            raise ArtifactError(
+                "Target tensors are empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        target_names = {str(name) for name in target}
+        if selection_order is not None:
+            selection_names = tuple(str(name) for name in selection_order)
+            if not selection_names:
+                raise ArtifactError(
+                    "selection_order must not be empty when provided",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if len(set(selection_names)) != len(selection_names):
+                raise ArtifactError(
+                    "selection_order must not contain duplicates",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if set(selection_names) != target_names:
+                raise ArtifactError(
+                    "selection_order must match target tensor names",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+        else:
+            selection_names = tuple(sorted(target_names))
+
+        @dataclass
+        class _StorageGroup:
+            base_ptr: int
+            nbytes: int
+            max_used: int
+            name: str
+
+        def _storage_nbytes(tensor: torch.Tensor) -> int:
+            if hasattr(tensor, "untyped_storage"):
+                return int(tensor.untyped_storage().nbytes())
+            return int(tensor.storage().nbytes())
+
+        storage_groups: dict[int, _StorageGroup] = {}
+        for name in selection_names:
+            tensor = target.get(name)
+            if tensor is None:
+                raise ArtifactError(
+                    f"Target tensor '{name}' missing",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not isinstance(tensor, torch.Tensor):
+                raise ArtifactError(
+                    f"Target tensor '{name}' must be a torch.Tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_cuda:
+                raise ArtifactError(
+                    f"Target tensor '{name}' must be CUDA",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if (tensor.device.index or 0) != device_id:
+                raise ArtifactError(
+                    f"Target tensor '{name}' on cuda:{tensor.device.index or 0}, expected cuda:{device_id}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_contiguous():
+                raise ArtifactError(
+                    f"Target tensor '{name}' is not contiguous",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if int(tensor.storage_offset()) != 0:
+                raise ArtifactError(
+                    f"Target tensor '{name}' must have storage_offset=0",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            tensor_bytes = int(tensor.numel()) * int(tensor.element_size())
+            if tensor_bytes <= 0:
+                raise ArtifactError(
+                    f"Target tensor '{name}' has empty storage",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            base_ptr = int(tensor.data_ptr())
+            group = storage_groups.get(base_ptr)
+            if group is not None:
+                raise ArtifactError(
+                    "Mapped binding does not support shared storages",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            storage_groups[base_ptr] = _StorageGroup(
+                base_ptr=base_ptr,
+                nbytes=_storage_nbytes(tensor),
+                max_used=tensor_bytes,
+                name=name,
+            )
+
+        storage_list = sorted(storage_groups.values(), key=lambda group: group.base_ptr)
+        if not storage_list:
+            raise ArtifactError(
+                "Target storages are empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
+        storage_specs: list[tuple[_StorageGroup, int]] = []
+        for group in storage_list:
+            length = int(group.max_used)
+            if length <= 0:
+                raise ArtifactError(
+                    "Target storage must be non-empty",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if length > group.nbytes:
+                raise ArtifactError(
+                    "Target storage exceeds backing allocation",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            storage_specs.append((group, length))
+
+        resolved_mapped_view_id = str(mapped_view_id or "").strip()
+        needs_view_index = bool(resolved_mapped_view_id)
+
+        layout = store_daemon_pb2.TargetLayout(
+            layout_kind=store_daemon_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
+            index_kind=(
+                store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
+                if needs_view_index
+                else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
+            ),
+            tensor_spec_kind=store_daemon_pb2.TargetLayout.TENSOR_SPEC_KIND_OFFSETS,
+        )
+
+        region_ids: list[str] = []
+        storage_id_by_ptr: dict[int, str] = {}
+        for group, length in storage_specs:
+            region = region_cache.find_region_for(device_id, group.base_ptr, length)
+            if region is None:
+                raise ArtifactError(
+                    "No registered region covers the target tensors",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            region_base_offset = int(group.base_ptr) - int(region.base_ptr)
+            storage_id = f"storage:{device_id}:{group.base_ptr:x}:{length}"
+            layout.storages.add(
+                storage_id=storage_id,
+                device_id=int(device_id),
+                storage_length=int(length),
+                vram_region_id=region.region_id,
+                mapping_base_offset=int(region_base_offset),
+            )
+            storage_id_by_ptr[group.base_ptr] = storage_id
+            region_ids.append(region.region_id)
+
+        offsets: list[store_daemon_pb2.TargetTensorOffset] = []
+        for name in selection_names:
+            tensor = target[name]
+            storage_id = storage_id_by_ptr[int(tensor.data_ptr())]
+            tensor_bytes = int(tensor.numel()) * int(tensor.element_size())
+            offsets.append(
+                store_daemon_pb2.TargetTensorOffset(
+                    name=name,
+                    storage_id=storage_id,
+                    storage_offset=0,
+                    logical_length=tensor_bytes,
+                )
+            )
+        layout.offsets.extend(offsets)
+
+        storage_base_offsets: dict[str, int] = {}
+        cursor = 0
+        for storage in layout.storages:
+            storage_base_offsets[storage.storage_id] = cursor
+            cursor += int(storage.storage_length)
+        logical_total_size = cursor
+
+        index_entries: list[CanonicalIndexEntry] = []
+        for name in sorted(selection_names):
+            tensor = target[name]
+            storage_id = storage_id_by_ptr[int(tensor.data_ptr())]
+            logical_offset = storage_base_offsets[storage_id]
+            tensor_bytes = int(tensor.numel()) * int(tensor.element_size())
+            index_entries.append(
+                CanonicalIndexEntry(
+                    name=name,
+                    dtype=tensor.dtype,
+                    shape=tuple(int(v) for v in tensor.shape),
+                    stride=tuple(int(v) for v in tensor.stride()),
+                    storage_offset=int(tensor.storage_offset()),
+                    segment_offset=logical_offset,
+                    size_bytes=tensor_bytes,
+                )
+            )
+        index = CanonicalIndex(
+            entries=tuple(index_entries),
+            total_size_bytes=logical_total_size,
+            avbs_hash="",
+        )
+        index_bytes = canonical_index_to_bytes(index)
+        resolved_selection_index_bytes = (
+            bytes(selection_index_bytes)
+            if selection_index_bytes is not None
+            else index_bytes
+        )
+        layout.logical_layout_hash = compute_logical_layout_hash(
+            index_bytes=index_bytes,
+            needs_view_index=needs_view_index,
+        )
+        if resolved_mapped_view_id:
+            layout.view_id = resolved_mapped_view_id
+
+        return _RegionBackedLayout(
+            layout=layout,
+            region_ids=tuple(region_ids),
+            logical_total_size=logical_total_size,
+            view_index_bytes=(
+                resolved_selection_index_bytes if needs_view_index else None
+            ),
+            view_id=resolved_mapped_view_id or None,
+            selection_names=selection_names,
+            view_subset_hash=None,
         )
 
     def _materialize_into_target(
@@ -1229,7 +1593,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         options: GetArtifactOptions,
         tensor_names: Sequence[str] | None,
-        view: store_daemon_pb2.ViewSpec | None,
+        view: common_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
@@ -1255,25 +1619,12 @@ class MaterializationPipeline:
                 canonical_index_bytes=canonical_bytes,
                 parsed_index=canonical_index,
                 generation=None,
-                disk_path=None,
                 expires_at=time.monotonic(),
             )
             self._runtime.cache_artifact_index(cache_entry)
 
-        region_layout = self._build_region_backed_layout(
-            canonical_index=canonical_index,
-            canonical_index_bytes=canonical_bytes,
-            target=target,
-            device_id=device_id,
-            tensor_names=tensor_names,
-            view_spec=view,
-            view_id=view_id,
-            view_index_hint=view_index_hint,
-        )
-
         effective_prefer = fallback.prefer if fallback is not None else "auto"
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        disk_path: str | None = None
         if fallback is not None:
             if fallback.prefer == "p2p":
                 preference = (
@@ -1283,17 +1634,13 @@ class MaterializationPipeline:
                 preference = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
-            disk_path = fallback.disk_path
-        if (
-            disk_path
-            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        ):
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
 
         allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
         if effective_prefer == "local":
             allow_p2p = False
-        allow_disk = effective_prefer != "local" or bool(disk_path)
+        allow_disk = True if fallback is None else bool(fallback.allow_disk)
+        if effective_prefer == "local":
+            allow_disk = False
         source_policy = _build_source_policy(
             preference=preference,
             allow_p2p=allow_p2p,
@@ -1301,47 +1648,95 @@ class MaterializationPipeline:
         )
 
         client = self._runtime.ensure_client()
-        if mark_started is not None:
-            mark_started()
-        try:
-            response = client.materialize_into_target_v2(
-                artifact_id=artifact_id,
-                target_layout=region_layout.layout,
-                device_uuid=device_uuid_for(device_id),
-                preference=preference,
-                source_policy=source_policy,
-                disk_path=disk_path,
-                tensor_names=region_layout.selection_names,
-                view=view,
-                view_id=view_id if view is None else None,
-                view_subset_hash=region_layout.view_subset_hash,
-                placement=placement,
-            )
-        except Exception as exc:  # noqa: BLE001
-            error = map_materialization_error(exc)
-            if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
+        started = False
+        attempt = 0
+        while attempt < 2:
+            try:
+                region_layout = self._build_region_backed_layout(
+                    canonical_index=canonical_index,
+                    canonical_index_bytes=canonical_bytes,
+                    target=target,
+                    device_id=device_id,
+                    tensor_names=tensor_names,
+                    view_spec=view,
+                    view_id=view_id,
+                    view_index_hint=view_index_hint,
+                )
+            except ArtifactError as exc:
+                message = str(exc)
+                if (
+                    attempt == 0
+                    and exc.status_code == "FAILED_PRECONDITION"
+                    and "No registered region covers the target tensors" in message
+                ):
+                    _register_target_regions(
+                        self._runtime, target=target, device_id=device_id
+                    )
+                    attempt += 1
+                    continue
+                raise
+
+            if mark_started is not None and not started:
+                mark_started()
+                started = True
+            try:
+                selection = _build_region_layout_selection(
+                    artifact_id=artifact_id,
+                    canonical_index_bytes=canonical_bytes,
+                    region_layout=region_layout,
+                    view_spec=view,
+                )
+                response = client.materialize_into_target_v2(
+                    selection=selection,
+                    target_layout=region_layout.layout,
+                    device_uuid=device_uuid_for(device_id),
+                    preference=preference,
+                    source_policy=source_policy,
+                    placement=placement,
+                )
+            except Exception as exc:  # noqa: BLE001
+                error = map_materialization_error(exc)
+                if attempt == 0 and error.status_code in {
+                    "DATA_LOSS",
+                    "FAILED_PRECONDITION",
+                    "NOT_FOUND",
+                }:
+                    for region_id in region_layout.region_ids:
+                        region_cache.unregister_region(region_id)
+                    _register_target_regions(
+                        self._runtime, target=target, device_id=device_id
+                    )
+                    attempt += 1
+                    continue
+                if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
+                    for region_id in region_layout.region_ids:
+                        region_cache.unregister_region(region_id)
+                raise ArtifactError(
+                    str(error),
+                    status_code=error.status_code,
+                    retryable=False,
+                ) from exc
+            if (
+                response.status
+                != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+            ):
                 for region_id in region_layout.region_ids:
                     region_cache.unregister_region(region_id)
-            raise ArtifactError(
-                str(error),
-                status_code=error.status_code,
-                retryable=False,
-            ) from exc
-        if (
-            response.status
-            != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
-            for region_id in region_layout.region_ids:
-                region_cache.unregister_region(region_id)
-            raise ArtifactError(
-                "MaterializeIntoTarget returned non-success status",
-                status_code="DATA_LOSS",
-                retryable=False,
+                raise ArtifactError(
+                    "MaterializeIntoTarget returned non-success status",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_verification_skipped(
+                self._runtime.daemon_endpoint
             )
-        store_metrics.record_region_backed_verification_skipped(
-            self._runtime.daemon_endpoint
+            return None
+
+        raise ArtifactError(
+            "MaterializeIntoTarget retry failed to produce a response",
+            status_code="DATA_LOSS",
+            retryable=False,
         )
-        return None
 
     def _maybe_region_backed_into(
         self,
@@ -1353,7 +1748,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         options: GetArtifactOptions,
         tensor_names: Sequence[str] | None,
-        view: store_daemon_pb2.ViewSpec | None,
+        view: common_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
         span=None,
@@ -1425,11 +1820,10 @@ class MaterializationPipeline:
         timeout_s: float | None,
         lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
-        disk_path_hint: str | None = None,
         tensor_names: Sequence[str] | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
@@ -1450,7 +1844,6 @@ class MaterializationPipeline:
             view_id=view_id,
             placement=placement,
             canonical_index_hint=canonical_index_hint,
-            disk_path_hint=disk_path_hint,
             tensor_names=tensor_names,
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
@@ -1470,19 +1863,16 @@ class MaterializationPipeline:
         timeout_s: float | None,
         lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
-        disk_path_hint: str | None = None,
         tensor_names: Sequence[str] | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
     ) -> MaterializationPayload:
         client = self._runtime.ensure_client()
-        disk_error: Exception | None = None
-        disk_path: str | None = disk_path_hint
         resolved_artifact_id = artifact_id
         canonical_hint: bytes | None = canonical_index_hint
         generation_hint: int | None = None
@@ -1502,125 +1892,29 @@ class MaterializationPipeline:
         allow_p2p = True if fallback_opts is None else bool(fallback_opts.allow_p2p)
         if effective_prefer == "local":
             allow_p2p = False
-        requested_disk = (
-            effective_prefer == "disk"
-            or bool(fallback_opts and fallback_opts.disk_path)
-            or bool(disk_path)
-        )
-        # Local-only preference disables P2P but should not force a disk fallback.
-        disk_required = requested_disk or (
-            not allow_p2p and effective_prefer != "local"
-        )
+        requested_disk = effective_prefer == "disk"
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         if effective_prefer == "p2p":
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
         elif effective_prefer == "disk":
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-        if (
-            disk_path
-            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        ):
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-        if disk_path and fallback_opts is None:
-            allow_p2p = False
-
-        if disk_path and canonical_hint is None:
-            cached_entry = self._runtime.get_artifact_index_by_disk_path(disk_path)
+        if resolved_artifact_id is None and key:
+            with contextlib.suppress(Exception):
+                resolved_mapping = self._runtime.resolve_key_mapping_cached(key=key)
+                if isinstance(resolved_mapping, tuple):
+                    resolved_artifact_id = resolved_mapping[0]
+                else:
+                    resolved_artifact_id = resolved_mapping
+        if resolved_artifact_id and canonical_hint is None:
+            cached_entry = self._runtime.get_artifact_index_cached(resolved_artifact_id)
             if cached_entry is not None:
                 canonical_hint = cached_entry.canonical_index_bytes
                 generation_hint = cached_entry.generation
-                if cached_entry.artifact_id:
-                    resolved_artifact_id = cached_entry.artifact_id
 
-        if fallback_opts and (requested_disk or not allow_p2p):
-            resolved_path, resolved_artifact_id, disk_error = (
-                self._fallback.resolve_disk_path(
-                    fallback=fallback_opts,
-                    client=client,
-                    key=key,
-                    artifact_id=artifact_id,
-                )
-            )
-            if resolved_path:
-                disk_path = resolved_path
-            if disk_path:
-                requested_disk = True
-                disk_required = True
-                if (
-                    effective_prefer == "disk"
-                    or preference
-                    == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                ):
-                    preference = (
-                        store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                    )
-                self._fallback.record_event(
-                    mode="disk",
-                    artifact_id=resolved_artifact_id,
-                    key=key,
-                    detail={
-                        "disk_path": disk_path,
-                        "verify": bool(fallback_opts.verify_checksums),
-                    },
-                )
-                if span is not None:
-                    span.add_event(
-                        "store.materialize.disk_fallback",
-                        {
-                            "tc.artifact.id": resolved_artifact_id or "",
-                            "tc.store.disk_path_present": True,
-                            "tc.store.verify_checksums": True,
-                        },
-                    )
-                resolved_artifact_id = resolved_artifact_id or artifact_id
-            if disk_required and not disk_path:
-                if disk_error is not None:
-                    raise ArtifactError(
-                        f"Disk fallback lookup failed: {disk_error}",
-                        status_code="UNAVAILABLE",
-                        retryable=True,
-                    ) from disk_error
-                raise ArtifactError(
-                    "Disk fallback required but disk_path unavailable",
-                    status_code="NOT_FOUND",
-                    retryable=False,
-                )
-        if requested_disk and disk_path and canonical_hint is None:
-            try:
-                disk_meta = client.resolve_artifact_from_disk_v2(
-                    disk_path=disk_path,
-                    verify_checksums=verify_checksums,
-                )
-                canonical_hint = bytes(disk_meta.canonical_index_bytes)
-                if disk_meta.artifact_id:
-                    resolved_artifact_id = disk_meta.artifact_id
-                if getattr(disk_meta, "generation", 0):
-                    generation_hint = int(disk_meta.generation)
-                if canonical_hint and resolved_artifact_id:
-                    parsed_index = canonical_index_from_bytes(canonical_hint)
-                    cache_entry = ArtifactCacheEntry(
-                        artifact_id=resolved_artifact_id,
-                        canonical_index_bytes=canonical_hint,
-                        parsed_index=parsed_index,
-                        generation=generation_hint,
-                        disk_path=disk_path,
-                        expires_at=time.monotonic(),
-                    )
-                    self._runtime.cache_artifact_index(cache_entry)
-            except Exception as exc:  # noqa: BLE001
-                if not allow_p2p:
-                    raise map_materialization_error(exc) from exc
-                logger.info(
-                    "store.materialize.disk.resolve_failed",
-                    extra={
-                        "tc.store.daemon": self._runtime.daemon_endpoint,
-                        "tc.store.disk_path": disk_path,
-                    },
-                    exc_info=exc,
-                )
-
-        allow_disk = effective_prefer != "local" or requested_disk
+        allow_disk = True if fallback_opts is None else bool(fallback_opts.allow_disk)
+        if effective_prefer == "local":
+            allow_disk = False
         source_policy = _build_source_policy(
             preference=preference,
             allow_p2p=allow_p2p,
@@ -1631,20 +1925,18 @@ class MaterializationPipeline:
         view_subset_hash = (
             compute_view_subset_hash(tensor_names) if tensor_names else None
         )
-        index_hint = view_index_hint or canonical_hint
         result = self._materialize_fn(
             client=client,
             daemon_address=self._runtime.daemon_endpoint,
             server_config=self._runtime.capabilities.server_config,
             device_id=device_id,
             artifact_id=request_artifact_id,
-            key=None if requested_disk and disk_path else key,
+            key=key,
             options=options,
             view=view,
             view_id=view_id,
             placement=placement,
-            canonical_index_hint=index_hint,
-            disk_path_hint=disk_path,
+            canonical_index_hint=canonical_hint,
             preference=preference,
             source_policy=source_policy,
             tensor_names=tensor_names,
@@ -1666,10 +1958,6 @@ class MaterializationPipeline:
             if not allow_disk:
                 disallowed_sources.add(
                     store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
-                )
-            if requested_disk:
-                disallowed_sources.add(
-                    store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA
                 )
             if disallowed_sources and result.source in disallowed_sources:
                 source_label = _source_label(result.source) or "non-disk"
@@ -1696,7 +1984,6 @@ class MaterializationPipeline:
             self._runtime.cache_key_mapping(
                 key,
                 artifact_id=resolved_id,
-                disk_path=result.disk_path,
             )
         if span is not None:
             span.add_event(
@@ -1800,11 +2087,10 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         options_override: GetArtifactOptions | None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
-        disk_path_hint: str | None = None,
         tensor_names: Sequence[str] | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
@@ -1813,12 +2099,24 @@ class MaterializationPipeline:
         ctx: CallContext | None = None,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
     ) -> tuple[MaterializationPayload, int]:
+        wait_for_shared_disk_ms = (
+            int(options_override.wait_for_shared_disk_ms)
+            if options_override is not None
+            else 0
+        )
+        options_override_no_wait = options_override
+        if wait_for_shared_disk_ms > 0 and options_override is not None:
+            options_override_no_wait = options_override.model_copy(
+                update={"wait_for_shared_disk_ms": 0}
+            )
+        wait_attempted = False
+
         policy = self._runtime.retry_policies.get(
             method, self._runtime.retry_policies.get("get")
         )
         attempt = 1
         start_time = time.monotonic()
-        if ctx is not None and ctx.deadline_ms is not None and policy is not None:
+        if ctx is not None and ctx.deadline_ms is not None:
             ctx_budget_s = float(ctx.deadline_ms) / 1000.0
             if ctx_budget_s <= 0:
                 raise ArtifactError(
@@ -1826,18 +2124,50 @@ class MaterializationPipeline:
                     status_code="DEADLINE_EXCEEDED",
                     retryable=False,
                 )
-            if policy.deadline_seconds <= 0:
-                effective_deadline = ctx_budget_s
-            else:
-                effective_deadline = min(policy.deadline_seconds, ctx_budget_s)
-            if effective_deadline != policy.deadline_seconds:
+            if policy is None:
                 policy = RetryPolicy(
-                    deadline_seconds=effective_deadline,
+                    deadline_seconds=ctx_budget_s,
+                    max_attempts=1,
+                    base_backoff_seconds=0.0,
+                    backoff_multiplier=1.0,
+                    jitter=0.0,
+                )
+            elif ctx_budget_s != policy.deadline_seconds:
+                policy = RetryPolicy(
+                    deadline_seconds=ctx_budget_s,
                     max_attempts=policy.max_attempts,
                     base_backoff_seconds=policy.base_backoff_seconds,
                     backoff_multiplier=policy.backoff_multiplier,
                     jitter=policy.jitter,
                 )
+        retry_reason_buckets: dict[str, int] = {}
+
+        def record_retry_reason(error: ArtifactError) -> None:
+            bucket = retry_reason_bucket(error)
+            retry_reason_buckets[bucket] = retry_reason_buckets.get(bucket, 0) + 1
+
+        def attach_retry_metadata(
+            payload: MaterializationPayload,
+            *,
+            attempts: int,
+            exit_reason: str,
+        ) -> MaterializationPayload:
+            elapsed = time.monotonic() - start_time
+            deadline: float | None = None
+            remaining: float | None = None
+            if policy is not None and policy.deadline_seconds > 0:
+                deadline = float(policy.deadline_seconds)
+                remaining = max(0.0, deadline - elapsed)
+            return replace(
+                payload,
+                retry_attempts=max(1, int(attempts)),
+                retry_reason_buckets=dict(retry_reason_buckets),
+                budget_deadline_sec=deadline,
+                budget_elapsed_sec=float(elapsed),
+                budget_remaining_sec=remaining,
+                budget_exit_reason=exit_reason,
+            )
+
         span_name = "Store/GetInto" if method == "get_into" else "Store/Get"
         attributes: dict[str, SpanAttributeValue] = {
             "tc.store.daemon": self._runtime.daemon_endpoint,
@@ -1911,13 +2241,12 @@ class MaterializationPipeline:
                         device=device,
                         fallback=fallback,
                         cancel_event=cancel_event,
-                        options_override=options_override,
+                        options_override=options_override_no_wait,
                         span=span,
                         view=view,
                         view_id=view_id,
                         placement=placement,
                         canonical_index_hint=canonical_index_hint,
-                        disk_path_hint=disk_path_hint,
                         tensor_names=tensor_names,
                         view_data_hash=view_data_hash,
                         view_index_hint=view_index_hint,
@@ -1938,8 +2267,17 @@ class MaterializationPipeline:
                         span.set_attribute("tc.tensor.bytes", int(bytes_value))
                     if selection_label:
                         span.set_attribute("tc.tensor.selection", selection_label)
+                    materialized = attach_retry_metadata(
+                        materialized,
+                        attempts=attempt,
+                        exit_reason="success",
+                    )
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
+                    span.set_attribute(
+                        "tc.store.retry.reason_buckets", str(retry_reason_buckets)
+                    )
+                    span.set_attribute("tc.store.budget.exit_reason", "success")
                     span.set_attribute("tc.device.id", int(device_id))
                     span.set_attribute("tc.artifact.id", materialized.artifact_id)
                     span.set_attribute(
@@ -1948,61 +2286,10 @@ class MaterializationPipeline:
                     span.set_attribute("tc.store.source", source_label or "")
                     span.set_status(Status(StatusCode.OK))
                     return materialized, device_id
-                except ArtifactError as error:
-                    span.record_exception(error)
-                    if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
-                        self._runtime.invalidate_artifact(
-                            artifact_id, key=key, reason="materialize_error"
-                        )
-                    should_retry_op = should_retry(
-                        error=error,
-                        attempt=attempt,
-                        policy=policy,
-                        start_time=start_time,
-                        cancel_event=cancel_event,
-                    )
-                    if not should_retry_op:
-                        record_outcome(error.status_code)
-                        span.set_status(Status(StatusCode.ERROR, error.status_code))
-                        raise
-                    assert policy is not None
-                    delay = compute_retry_delay(policy, attempt)
-                    remaining = remaining_budget(policy, start_time)
-                    if remaining is not None and remaining <= 0:
-                        record_outcome(error.status_code)
-                        span.set_status(Status(StatusCode.ERROR, error.status_code))
-                        raise
-                    if remaining is not None:
-                        delay = min(delay, max(0.0, remaining))
-                    store_metrics.increment_retry(
-                        method,
-                        self._runtime.daemon_endpoint,
-                        error.status_code,
-                        source=source_label,
-                        selection=selection_label,
-                    )
-                    span.add_event(
-                        "store.retry",
-                        {
-                            "tc.store.retry_attempt": attempt + 1,
-                            "tc.store.status": error.status_code,
-                        },
-                    )
-                    if delay > 0:
-                        logger.info(
-                            "store.get_retry",
-                            extra={
-                                "tc.store.daemon": self._runtime.daemon_endpoint,
-                                "tc.store.method": method,
-                                "tc.store.attempt": attempt + 1,
-                                "tc.store.delay_sec": delay,
-                                "tc.store.status_code": error.status_code,
-                            },
-                        )
-                        time.sleep(delay)
-                    attempt += 1
                 except Exception as exc:  # noqa: BLE001
+                    exc_is_artifact_error = isinstance(exc, ArtifactError)
                     error = map_materialization_error(exc)
+                    record_retry_reason(error)
                     span.record_exception(error)
                     if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
                         self._runtime.invalidate_artifact(
@@ -2016,15 +2303,138 @@ class MaterializationPipeline:
                         cancel_event=cancel_event,
                     )
                     if not should_retry_op:
+                        if (
+                            wait_for_shared_disk_ms > 0
+                            and not wait_attempted
+                            and error.status_code == "NOT_FOUND"
+                        ):
+                            wait_attempted = True
+                            span.add_event(
+                                "store.wait_for_shared_disk",
+                                {
+                                    "tc.store.wait_for_shared_disk_ms": wait_for_shared_disk_ms
+                                },
+                            )
+
+                            wait_timeout_s: float | None = None
+                            if ctx is not None and ctx.deadline_ms is not None:
+                                ctx_remaining_s = (float(ctx.deadline_ms) / 1000.0) - (
+                                    time.monotonic() - start_time
+                                )
+                                if ctx_remaining_s <= 0:
+                                    raise ArtifactError(
+                                        "CallContext deadline exceeded",
+                                        status_code="DEADLINE_EXCEEDED",
+                                        retryable=False,
+                                    ) from None
+                                wait_timeout_s = ctx_remaining_s
+                            else:
+                                required_s = (
+                                    float(wait_for_shared_disk_ms) / 1000.0
+                                ) + 5.0
+                                if required_s > 60.0:
+                                    wait_timeout_s = required_s
+
+                            try:
+                                materialized, device_id = self._attempt_get(
+                                    artifact_id=artifact_id,
+                                    key=key,
+                                    device=device,
+                                    fallback=fallback,
+                                    cancel_event=cancel_event,
+                                    options_override=options_override,
+                                    span=span,
+                                    view=view,
+                                    view_id=view_id,
+                                    placement=placement,
+                                    canonical_index_hint=canonical_index_hint,
+                                    tensor_names=tensor_names,
+                                    view_data_hash=view_data_hash,
+                                    view_index_hint=view_index_hint,
+                                    replica_uuid=replica_uuid,
+                                    allow_cpu=allow_cpu,
+                                    lease_mode=lease_mode,
+                                    ctx=ctx,
+                                    timeout_s=wait_timeout_s,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                error = map_materialization_error(exc)
+                                record_retry_reason(error)
+                            else:
+                                summary = self._summarize_materialized(
+                                    materialized, tensor_names
+                                )
+                                selection_label = summary["selection"]
+                                source_label = _source_label(materialized.source)
+                                count_value = summary["count"]
+                                bytes_value = summary["bytes"]
+                                if count_value is not None:
+                                    span.set_attribute(
+                                        "tc.tensor.count", int(count_value)
+                                    )
+                                if bytes_value is not None:
+                                    span.set_attribute(
+                                        "tc.tensor.bytes", int(bytes_value)
+                                    )
+                                if selection_label:
+                                    span.set_attribute(
+                                        "tc.tensor.selection", selection_label
+                                    )
+                                materialized = attach_retry_metadata(
+                                    materialized,
+                                    attempts=attempt + 1,
+                                    exit_reason="wait_for_shared_disk",
+                                )
+                                record_outcome("OK")
+                                span.set_attribute("tc.store.retry.count", attempt + 1)
+                                span.set_attribute(
+                                    "tc.store.retry.reason_buckets",
+                                    str(retry_reason_buckets),
+                                )
+                                span.set_attribute(
+                                    "tc.store.budget.exit_reason",
+                                    "wait_for_shared_disk",
+                                )
+                                span.set_attribute("tc.device.id", int(device_id))
+                                span.set_attribute(
+                                    "tc.artifact.id", materialized.artifact_id
+                                )
+                                span.set_attribute(
+                                    "tc.store.fallback.used_disk",
+                                    bool(materialized.disk_path),
+                                )
+                                span.set_attribute(
+                                    "tc.store.source", source_label or ""
+                                )
+                                span.set_status(Status(StatusCode.OK))
+                                return materialized, device_id
+
                         record_outcome(error.status_code)
+                        span.set_attribute(
+                            "tc.store.retry.reason_buckets", str(retry_reason_buckets)
+                        )
+                        span.set_attribute(
+                            "tc.store.budget.exit_reason",
+                            "non_retryable_or_max_attempts",
+                        )
                         span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        if exc_is_artifact_error:
+                            raise
                         raise error from None
                     assert policy is not None
                     delay = compute_retry_delay(policy, attempt)
                     remaining = remaining_budget(policy, start_time)
                     if remaining is not None and remaining <= 0:
                         record_outcome(error.status_code)
+                        span.set_attribute(
+                            "tc.store.retry.reason_buckets", str(retry_reason_buckets)
+                        )
+                        span.set_attribute(
+                            "tc.store.budget.exit_reason", "retry_deadline_exhausted"
+                        )
                         span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        if exc_is_artifact_error:
+                            raise
                         raise error from None
                     if remaining is not None:
                         delay = min(delay, max(0.0, remaining))
@@ -2069,11 +2479,10 @@ class MaterializationPipeline:
         timeout_s: float | None,
         lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
-        disk_path_hint: str | None = None,
         tensor_names: Sequence[str] | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
@@ -2082,7 +2491,7 @@ class MaterializationPipeline:
     ) -> tuple[MaterializationPayload, int]:
         resolved_fallback = fallback or self._runtime.opts.fallback
         artifact_id, key = self._resolve_identifiers(
-            artifact_id, key, resolved_fallback, disk_path_hint=disk_path_hint
+            artifact_id, key, resolved_fallback
         )
         self._fallback.ensure_supported(resolved_fallback)
         device_id = self._resolve_device_selector(
@@ -2102,7 +2511,6 @@ class MaterializationPipeline:
                 view_id=view_id,
                 placement=placement,
                 canonical_index_hint=canonical_index_hint,
-                disk_path_hint=disk_path_hint,
                 tensor_names=tensor_names,
                 view_data_hash=view_data_hash,
                 view_index_hint=view_index_hint,
@@ -2112,7 +2520,24 @@ class MaterializationPipeline:
                 lease_mode=lease_mode,
             )
         except Exception as exc:  # noqa: BLE001
-            raise map_materialization_error(exc) from exc
+            if "selection.logical_layout_hash does not match resolved selection" in str(
+                exc
+            ):
+                logger.error(
+                    "store.materialize.selection_layout_mismatch",
+                    extra={
+                        "tc.store.daemon": self._runtime.daemon_endpoint,
+                        "tc.artifact.id": artifact_id or "",
+                        "tc.store.key": key or "",
+                        "tc.store.selection_debug": _selection_debug_fields(
+                            view=view,
+                            tensor_names=tensor_names,
+                            canonical_index_hint=canonical_index_hint,
+                            view_index_hint=view_index_hint,
+                        ),
+                    },
+                )
+            raise_mapped_materialization_error(exc)
         return materialized, device_id
 
     def _release_materialized(

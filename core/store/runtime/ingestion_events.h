@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -24,6 +24,7 @@ struct IngestionStartedEvent {
   IngestionSource source{IngestionSource::kDisk};
   loading::ReplicaTarget target;
   loading::MaterializeMode materialize_mode{loading::MaterializeMode::AUTO};
+  loading::ExportPolicy export_policy{loading::ExportPolicy::kNever};
   bool publish_to_global_store{true};
   std::string publish_context_id;
   std::optional<std::string> view_id;
@@ -33,6 +34,7 @@ struct IngestionResultEvent {
   std::string request_id;
   IngestionSource source{IngestionSource::kDisk};
   loading::MaterializeMode materialize_mode{loading::MaterializeMode::AUTO};
+  loading::ExportPolicy export_policy{loading::ExportPolicy::kNever};
   std::string artifact_id;
   DeviceKey target_device;
   common::memory::MemoryLocation target_location{common::memory::MemoryLocation::CPU};

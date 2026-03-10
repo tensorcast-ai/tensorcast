@@ -70,6 +70,30 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "selection_identity_lib",
+    srcs = ["selection_identity.cc"],
+    hdrs = ["selection_identity.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":artifact_hash_lib",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "selection_identity_test",
+    size = "small",
+    srcs = ["selection_identity_test.cc"],
+    deps = [
+        ":selection_identity_lib",
+        "@abseil-cpp//absl/strings",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Memory management - CUDA memory utilities
 sc_cc_library(
     name = "cuda_memory_lib",
@@ -435,6 +459,20 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "capability_token_lib",
+    srcs = ["capability_token.cc"],
+    hdrs = ["capability_token.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto/tensorcast/common/v1:common_cc",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@boringssl//:crypto",
+        "@protobuf",
+    ],
+)
+
+sc_cc_library(
     name = "system_capabilities_lib",
     srcs = ["system_capabilities.cc"],
     hdrs = ["system_capabilities.h"],
@@ -467,6 +505,17 @@ cc_test(
     deps = [
         ":daemon_config_io_lib",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "capability_token_test",
+    size = "small",
+    srcs = ["capability_token_test.cc"],
+    deps = [
+        ":capability_token_lib",
+        "@abseil-cpp//absl/time",
         "@catch2//:catch2_main",
     ],
 )

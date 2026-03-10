@@ -44,6 +44,7 @@ void SessionLifecycleManager::sweep_once() {
     sweep_pid_liveness();
   }
   expire_due(absl::Now());
+  retry_pending_gpu_unloads_();
 }
 
 void SessionLifecycleManager::set_eviction_notify(std::function<void(const ReplicaSubject&)> fn) {
@@ -80,7 +81,12 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
     r.guards.push_back(g.id);
     pid_index_[pid].insert(g.id);
     mon = monitor_;
-    // Finalizer: drop ref for this pid+subject, then attempt immediate reclaim if eligible
+    for (auto& f : extra_finalizers) {
+      r.finalizers.emplace_back(std::move(f));
+    }
+    // Finalizer: drop ref for this pid+subject, then attempt immediate reclaim if eligible.
+    // Keep this as the last finalizer so resource-specific cleanup (e.g. GPU export
+    // deregistration) in extra_finalizers runs before unload is attempted.
     r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
       refs_.drop_ref(subj, pid);
       // Attempt immediate reclaim if no active uses or pins remain and a daemon-owned GPU replica exists.
@@ -89,9 +95,6 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
       }
       return absl::OkStatus();
     });
-    for (auto& f : extra_finalizers) {
-      r.finalizers.emplace_back(std::move(f));
-    }
     created_id = r.id;
     by_id_[r.id] = std::move(r);
     inc_use_(subj);
@@ -141,7 +144,12 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
     notify_when = push_deadline_(g2.id, g2.deadline, g2.generation);
 
     mon = monitor_;
-    // Finalizer: drop RefTracker and attempt immediate reclaim
+    for (auto& f : extra_finalizers) {
+      r.finalizers.emplace_back(std::move(f));
+    }
+    // Finalizer: drop RefTracker and attempt immediate reclaim.
+    // Keep this as the last finalizer so resource-specific cleanup (e.g. GPU export
+    // deregistration) in extra_finalizers runs before unload is attempted.
     r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
       refs_.drop_ref(subj, pid);
       if (subj.device.type == DeviceType::GPU) {
@@ -149,9 +157,6 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
       }
       return absl::OkStatus();
     });
-    for (auto& f : extra_finalizers) {
-      r.finalizers.emplace_back(std::move(f));
-    }
     created_id = r.id;
     by_id_[r.id] = std::move(r);
     inc_use_(subj);
@@ -201,6 +206,40 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
     created_id = r.id;
     by_id_[r.id] = std::move(r);
     inc_pin_(subj);
+  }
+  notify_schedule_if_earlier_(notify_when);
+  return created_id;
+}
+
+absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create_retention_lease(
+    absl::Duration ttl,
+    std::vector<std::function<absl::Status()>> finalizers) {
+  if (ttl <= absl::ZeroDuration()) {
+    return absl::InvalidArgumentError("ttl must be > 0");
+  }
+  LeaseId created_id = 0;
+  std::optional<absl::Time> notify_when;
+  {
+    absl::MutexLock lock(&mu_);
+    LeaseRec r;
+    r.id = next_id_++;
+    r.kind = LeaseKind::kRetention;
+    r.subj = ReplicaSubject{};
+    r.pid = -1;
+    GuardRec g;
+    g.id = next_guard_id_++;
+    g.kind = GuardKind::kDeadline;
+    g.lease = r.id;
+    g.generation = 1;
+    g.deadline = absl::Now() + ttl;
+    guard_by_id_.emplace(g.id, g);
+    r.guards.push_back(g.id);
+    notify_when = push_deadline_(g.id, g.deadline, g.generation);
+    for (auto& f : finalizers) {
+      r.finalizers.emplace_back(std::move(f));
+    }
+    created_id = r.id;
+    by_id_[r.id] = std::move(r);
   }
   notify_schedule_if_earlier_(notify_when);
   return created_id;
@@ -340,6 +379,10 @@ absl::Status SessionLifecycleManager::renew_placement(LeaseId id, absl::Duration
   return absl::OkStatus();
 }
 
+absl::Status SessionLifecycleManager::renew_retention(LeaseId id, absl::Duration ttl) {
+  return renew_placement(id, ttl);
+}
+
 void SessionLifecycleManager::release_lease(LeaseId id) {
   retire_lease_(id, /*reason=*/"manual_release");
 }
@@ -458,6 +501,9 @@ void SessionLifecycleManager::handle_pid_exit(pid_t pid) {
     auto it = pid_index_.find(pid);
     if (it != pid_index_.end())
       guards = it->second;
+    // Drop any external watches for this PID. The PidMonitor will also remove
+    // the watch internally once it detects exit, but we keep bookkeeping clean.
+    external_pid_watches_.erase(pid);
     for (GuardId gid : guards) {
       auto git = guard_by_id_.find(gid);
       if (git != guard_by_id_.end()) {
@@ -498,6 +544,47 @@ void SessionLifecycleManager::attach_pid_monitor(PidMonitor* mon) {
   monitor_ = mon;
 }
 
+void SessionLifecycleManager::watch_pid(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  PidMonitor* mon = nullptr;
+  {
+    absl::MutexLock lock(&mu_);
+    ++external_pid_watches_[pid];
+    mon = monitor_;
+  }
+  if (mon != nullptr) {
+    mon->watch(pid);
+  }
+}
+
+void SessionLifecycleManager::unwatch_pid(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  PidMonitor* mon = nullptr;
+  bool should_unwatch = false;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = external_pid_watches_.find(pid);
+    if (it == external_pid_watches_.end()) {
+      return;
+    }
+    if (it->second > 1) {
+      --it->second;
+      return;
+    }
+    external_pid_watches_.erase(it);
+    // Only unwatch when no lease PID guards remain for this pid.
+    should_unwatch = (pid_index_.find(pid) == pid_index_.end());
+    mon = monitor_;
+  }
+  if (should_unwatch && mon != nullptr) {
+    mon->unwatch(pid);
+  }
+}
+
 size_t SessionLifecycleManager::use_count_for(const store::loading::ReplicaKey& key) const {
   if (key.device.type != DeviceType::GPU) {
     return 0;
@@ -519,6 +606,7 @@ size_t SessionLifecycleManager::placement_pin_count_for(const store::loading::Re
 void SessionLifecycleManager::inc_use_(const ReplicaSubject& s) {
   auto& c = counters_[s];
   ++c.use_count;
+  pending_gpu_unloads_.erase(s);
 }
 
 void SessionLifecycleManager::dec_use_(const ReplicaSubject& s) {
@@ -530,6 +618,26 @@ void SessionLifecycleManager::dec_use_(const ReplicaSubject& s) {
 void SessionLifecycleManager::inc_pin_(const ReplicaSubject& s) {
   auto& c = counters_[s];
   ++c.placement_pins;
+  pending_gpu_unloads_.erase(s);
+}
+
+void SessionLifecycleManager::retry_pending_gpu_unloads_() {
+  std::vector<ReplicaSubject> pending;
+  {
+    absl::MutexLock lock(&mu_);
+    if (pending_gpu_unloads_.empty()) {
+      return;
+    }
+    pending.reserve(pending_gpu_unloads_.size());
+    for (const auto& subj : pending_gpu_unloads_) {
+      pending.push_back(subj);
+    }
+  }
+
+  VLOG(1) << "SessionLifecycle: retrying pending GPU unloads count=" << pending.size();
+  for (const auto& subj : pending) {
+    maybe_unload_daemon_replica_(subj);
+  }
 }
 
 void SessionLifecycleManager::dec_pin_(const ReplicaSubject& s) {
@@ -621,15 +729,19 @@ void SessionLifecycleManager::retire_lease_(LeaseId id, const char* /*reason*/) 
     // Move finalizers out; call them after unlock
     finalizers = std::move(it->second.finalizers);
     // Update counters once
-    if (it->second.kind == LeaseKind::kUse)
+    if (it->second.kind == LeaseKind::kUse) {
       dec_use_(it->second.subj);
-    if (it->second.kind == LeaseKind::kPlacement)
+    }
+    if (it->second.kind == LeaseKind::kPlacement) {
       dec_pin_(it->second.subj);
-    // If this was the last protection for the subject, capture subject for eviction notify
-    if (subj_opt.has_value()) {
-      auto cit = counters_.find(*subj_opt);
-      if (cit != counters_.end() && cit->second.use_count == 0 && cit->second.placement_pins == 0) {
-        subj_to_notify = *subj_opt;
+    }
+    if (it->second.kind == LeaseKind::kUse || it->second.kind == LeaseKind::kPlacement) {
+      // If this was the last protection for the subject, capture subject for eviction notify
+      if (subj_opt.has_value()) {
+        auto cit = counters_.find(*subj_opt);
+        if (cit != counters_.end() && cit->second.use_count == 0 && cit->second.placement_pins == 0) {
+          subj_to_notify = *subj_opt;
+        }
       }
     }
     // Cleanup guard indices
@@ -641,7 +753,10 @@ void SessionLifecycleManager::retire_lease_(LeaseId id, const char* /*reason*/) 
           if (pit != pid_index_.end()) {
             pit->second.erase(gid);
             if (pit->second.empty()) {
-              pids_to_unwatch.push_back(git->second.pid);
+              // Only unwatch if no external liveness watches remain.
+              if (!external_pid_watches_.contains(git->second.pid)) {
+                pids_to_unwatch.push_back(git->second.pid);
+              }
               pid_index_.erase(pit);
             }
           }
@@ -696,23 +811,46 @@ void SessionLifecycleManager::maybe_unload_daemon_replica_(const ReplicaSubject&
       uses = it->second.use_count;
       pins = it->second.placement_pins;
     }
+    if (uses != 0 || pins != 0) {
+      pending_gpu_unloads_.erase(subj);
+      return;
+    }
   }
-  if (uses != 0 || pins != 0)
-    return;
   // Check residency; only unload if GPU memory is present.
   auto state = engine_->get_replica_state(subj, DeviceType::GPU);
   if (state <= store::replica::MemoryState::UNALLOCATED) {
+    absl::MutexLock lock(&mu_);
+    pending_gpu_unloads_.erase(subj);
     return; // not allocated/loaded on GPU
   }
-  int rc = engine_->unload_replica(subj);
-  if (rc != 0) {
-    LOG(WARNING) << "maybe_unload_daemon_replica: unload_replica rc=" << rc << " key=" << subj;
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
-      ctr->Add(1.0);
-    } catch (...) {
-    }
+
+  LOG(INFO) << "SessionLifecycle: attempting daemon replica unload key=" << subj << " uses=" << uses << " pins=" << pins
+            << " gpu_state=" << store::replica::state_to_string(state);
+  const absl::Status unload_status = engine_->unload_replica_status(subj);
+  if (unload_status.ok() || absl::IsNotFound(unload_status)) {
+    absl::MutexLock lock(&mu_);
+    pending_gpu_unloads_.erase(subj);
+    return;
+  }
+
+  bool inserted_pending_retry = false;
+  {
+    absl::MutexLock lock(&mu_);
+    inserted_pending_retry = pending_gpu_unloads_.insert(subj).second;
+  }
+  notify_schedule_if_earlier_(absl::Now() + absl::Seconds(1));
+
+  if (inserted_pending_retry) {
+    LOG(WARNING) << "SessionLifecycle: unload failed; queued retry for key=" << subj << " status=" << unload_status;
+  } else {
+    VLOG(1) << "SessionLifecycle: unload retry still failing for key=" << subj << " status=" << unload_status;
+  }
+
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+    ctr->Add(1.0);
+  } catch (...) {
   }
 }
 

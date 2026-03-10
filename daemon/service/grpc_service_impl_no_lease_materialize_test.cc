@@ -5,13 +5,20 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <unordered_map>
+#include <vector>
 
 #include <unistd.h>
 
+#include "absl/status/status.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/global_store_client_stub.h"
+#include "core/store/testing/recording_global_store_client.h"
 #include "core/testing/common.h"
 #include "grpcpp/server_context.h"
+#include "nlohmann/json.hpp"
 
 namespace {
 
@@ -35,21 +42,92 @@ tensorcast::store::StoreEngineOptions make_opts() {
   return opts;
 }
 
+std::string read_artifact_id(const std::filesystem::path& artifact_dir) {
+  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
+  std::ifstream in(descriptor_path);
+  nlohmann::json j;
+  in >> j;
+  return j.at("artifact_id").get<std::string>();
+}
+
+class NoLeaseKeyMappingGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
+ public:
+  bool connected{true};
+  std::string cluster_id{"cluster-test"};
+  std::unordered_map<std::string, std::string> key_to_artifact;
+  std::vector<tensorcast::store::components::ArtifactDiskLocation> disk_locations;
+  int list_locations_calls{0};
+
+  bool is_connected() const override {
+    return connected;
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    if (cluster_id.empty()) {
+      return absl::NotFoundError("cluster_id unavailable");
+    }
+    return cluster_id;
+  }
+
+  absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping(std::string_view key) override {
+    auto it = key_to_artifact.find(std::string(key));
+    if (it == key_to_artifact.end()) {
+      return absl::NotFoundError("key not found");
+    }
+    tensorcast::store::components::KeyMapping mapping;
+    mapping.artifact_id = it->second;
+    return mapping;
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) override {
+    ++list_locations_calls;
+    std::vector<tensorcast::store::components::ArtifactDiskLocation> out;
+    out.reserve(disk_locations.size());
+    for (const auto& entry : disk_locations) {
+      if (entry.artifact_id != artifact_id) {
+        continue;
+      }
+      if (!include_deleted && entry.is_deleted) {
+        continue;
+      }
+      out.push_back(entry);
+    }
+    if (out.empty()) {
+      return absl::NotFoundError("disk_locations_not_found");
+    }
+    return out;
+  }
+};
+
 } // namespace
 
 TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon][materialize][no_lease]") {
-  const auto artifact_dir = test_tmpdir() / "artifact";
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  const auto storage_root = test_tmpdir();
+  const auto artifact_rel = std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact";
+  const auto artifact_dir = storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
   const auto data_path = artifact_dir / "tensor.data_0";
   REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_artifact_id(artifact_dir);
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = artifact_id;
+  loc.cluster_id = gs_client->cluster_id;
+  loc.relative_path = artifact_rel.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  gs_client->disk_locations.push_back(std::move(loc));
 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
   tensorcast::daemon::DaemonOptions daemon_opts;
-  daemon_opts.storage_path = test_tmpdir();
+  daemon_opts.storage_path = storage_root;
   std::filesystem::create_directories(daemon_opts.storage_path);
-  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
@@ -60,7 +138,7 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
   // NO_LEASE forbids wait_for_completion (no handle export).
   {
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
-    req.set_disk_path(artifact_dir.string());
+    req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
     req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);
@@ -77,7 +155,7 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
   // NO_LEASE with wait_for_completion=false returns a ticket but no mem_handle.
   {
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
-    req.set_disk_path(artifact_dir.string());
+    req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
     req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(false);
@@ -95,4 +173,126 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
   }
 
   REQUIRE_FALSE(harness->kernel().lifecycle_manager().has_pid_guard_for_test(pid));
+}
+
+TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize][no_lease]") {
+  auto gs_client = std::make_shared<NoLeaseKeyMappingGlobalStoreClient>();
+  const auto storage_root = test_tmpdir() / "by_key";
+  const auto artifact_rel = std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact";
+  const auto artifact_dir = storage_root / artifact_rel;
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data_0";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_artifact_id(artifact_dir);
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = artifact_id;
+  loc.cluster_id = gs_client->cluster_id;
+  loc.relative_path = artifact_rel.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  gs_client->disk_locations.push_back(std::move(loc));
+  gs_client->key_to_artifact.emplace("key-no-lease", artifact_id);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  {
+    tensorcast::daemon::v2::MaterializeReplicaRequest req;
+    req.mutable_selection()->set_artifact_id(artifact_id);
+    req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.set_wait_for_completion(true);
+    req.set_replica_uuid("op-by-key-no-lease");
+    req.set_pid(0);
+    req.set_lease_mode(tensorcast::daemon::v2::LeaseMode::LEASE_MODE_NO_LEASE);
+
+    grpc::ServerContext ctx;
+    tensorcast::daemon::v2::MaterializeReplicaResponse resp;
+    const auto st = svc.MaterializeReplica(&ctx, &req, &resp);
+    REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  }
+
+  {
+    tensorcast::daemon::v2::MaterializeReplicaRequest req;
+    req.mutable_selection()->set_artifact_id(artifact_id);
+    req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.set_wait_for_completion(false);
+    req.set_replica_uuid("op-by-key-no-lease");
+    req.set_pid(0);
+    req.set_lease_mode(tensorcast::daemon::v2::LeaseMode::LEASE_MODE_NO_LEASE);
+
+    grpc::ServerContext ctx;
+    tensorcast::daemon::v2::MaterializeReplicaResponse resp;
+    const auto st = svc.MaterializeReplica(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    REQUIRE_FALSE(resp.has_mem_handle());
+    REQUIRE(resp.has_ticket());
+    REQUIRE(resp.ticket().replica_uuid() == "op-by-key-no-lease");
+  }
+}
+
+TEST_CASE("MaterializeReplica short-circuits local cache before disk resolution", "[daemon][materialize]") {
+  auto gs_client = std::make_shared<NoLeaseKeyMappingGlobalStoreClient>();
+  const auto storage_root = test_tmpdir() / "by_key_local_short_circuit";
+  const auto artifact_rel = std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact";
+  const auto artifact_dir = storage_root / artifact_rel;
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data_0";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_artifact_id(artifact_dir);
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = artifact_id;
+  loc.cluster_id = gs_client->cluster_id;
+  loc.relative_path = artifact_rel.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  gs_client->disk_locations.push_back(std::move(loc));
+  gs_client->key_to_artifact.emplace("key-local-short", artifact_id);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::MaterializeReplicaRequest req;
+  req.mutable_selection()->set_artifact_id(artifact_id);
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
+  req.set_wait_for_completion(true);
+  req.set_pid(static_cast<int>(::getpid()));
+  req.set_replica_uuid("op-local-short-1");
+
+  grpc::ServerContext ctx1;
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp1;
+  const auto st1 = svc.MaterializeReplica(&ctx1, &req, &resp1);
+  REQUIRE(st1.ok());
+  REQUIRE(gs_client->list_locations_calls > 0);
+  const int disk_calls_after_first = gs_client->list_locations_calls;
+
+  req.set_replica_uuid("op-local-short-2");
+  grpc::ServerContext ctx2;
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp2;
+  const auto st2 = svc.MaterializeReplica(&ctx2, &req, &resp2);
+  REQUIRE(st2.ok());
+  REQUIRE(gs_client->list_locations_calls >= disk_calls_after_first);
+  REQUIRE(resp2.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
 }

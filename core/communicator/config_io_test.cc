@@ -44,7 +44,7 @@ transport:
   // Numeric defaults applied
   REQUIRE(cfg.transport().tcp_conn_count() == 4);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
-  REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(cfg.transport().so_reuseport() == false);
   REQUIRE(cfg.topology_discovery().lldp().file_path() == "/host-config/lldp-info.txt");
   REQUIRE(
       cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == true);
@@ -65,7 +65,7 @@ TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
   // Defaults
   REQUIRE(cfg.stager().buffers_per_flow() == 4);
   REQUIRE(cfg.transport().tcp_tos() == 0);
-  REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(cfg.transport().so_reuseport() == false);
   REQUIRE(
       cfg.topology_discovery().nvlink().source() ==
       tensorcast::communicator::v1::NvlinkDiscoveryConfig::SOURCE_DISABLED);
@@ -89,7 +89,7 @@ communicator:
   REQUIRE(cfg.stager().buffers_per_flow() == 3);
   REQUIRE(cfg.transport().tcp_conn_count() == 2);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
-  REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(cfg.transport().so_reuseport() == false);
 }
 
 TEST_CASE("config_io topology discovery explicit values", "[communicator][config]") {

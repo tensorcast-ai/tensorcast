@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ def _make_entry(artifact_id: str, generation: int | None = None) -> ArtifactCach
         canonical_index_bytes=b'{"x":[0,4,[1],[1],"float32",0]}',
         parsed_index=index,
         generation=generation,
-        disk_path=None,
         expires_at=time.monotonic(),
     )
 

@@ -2,8 +2,17 @@
 
 #include "daemon/testing/daemon_service_harness.h"
 
+#include <unistd.h>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <utility>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 
 namespace tensorcast::daemon {
 namespace {
@@ -21,6 +30,28 @@ absl::StatusOr<std::filesystem::path> normalize_storage_root(const std::filesyst
   return canonical;
 }
 
+absl::StatusOr<std::string> auto_local_handle_socket_path() {
+  static std::atomic<uint64_t> sequence{0};
+  const uint64_t suffix = sequence.fetch_add(1, std::memory_order_relaxed);
+  const auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::error_code ec;
+  const std::filesystem::path socket_root =
+      std::filesystem::temp_directory_path() / absl::StrCat("tensorcast_lh_", ::getuid());
+  std::filesystem::create_directories(socket_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("create local handle socket root failed: ", socket_root.string()));
+  }
+  std::filesystem::permissions(
+      socket_root, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("set local handle socket root permissions failed: ", socket_root.string()));
+  }
+  const std::string socket_name = absl::StrCat("tc_lh_", ::getpid(), "_", now_ns, "_", suffix, ".sock");
+  return (socket_root / socket_name).string();
+}
+
 } // namespace
 
 DaemonServiceHarness::DaemonServiceHarness(
@@ -30,6 +61,10 @@ DaemonServiceHarness::DaemonServiceHarness(
     std::unique_ptr<RegistrationController> registration_controller,
     std::unique_ptr<TransportController> transport_controller,
     std::unique_ptr<StatusController> status_controller,
+    std::unique_ptr<KeyMappingController> key_mapping_controller,
+    std::unique_ptr<PersistenceRpcController> persistence_rpc_controller,
+    std::unique_ptr<ReplicaSessionController> replica_session_controller,
+    std::unique_ptr<LeaseController> lease_controller,
     std::unique_ptr<StoreDaemonServiceImpl> service,
     std::unique_ptr<LocalHandleServer> local_handle_server)
     : async_runtime_(std::move(async_runtime)),
@@ -38,12 +73,19 @@ DaemonServiceHarness::DaemonServiceHarness(
       registration_controller_(std::move(registration_controller)),
       transport_controller_(std::move(transport_controller)),
       status_controller_(std::move(status_controller)),
+      key_mapping_controller_(std::move(key_mapping_controller)),
+      persistence_rpc_controller_(std::move(persistence_rpc_controller)),
+      replica_session_controller_(std::move(replica_session_controller)),
+      lease_controller_(std::move(lease_controller)),
       service_(std::move(service)),
       local_handle_server_(std::move(local_handle_server)) {}
 
 DaemonServiceHarness::~DaemonServiceHarness() {
   const auto deadline = absl::Now() + absl::Seconds(5);
-  stop(deadline);
+  const auto st = stop(deadline);
+  if (!st.ok()) {
+    LOG(WARNING) << "DaemonServiceHarness stop failed: " << st;
+  }
 }
 
 absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::create(
@@ -57,15 +99,19 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   if (!async_runtime) {
     async_runtime = std::make_shared<common::AsyncRuntime>();
   }
-  if (options.cpu_shared_memory_enabled && options.local_handle_socket_path.empty()) {
-    return absl::InvalidArgumentError(
-        "cpu_shared_memory_enabled requires lifecycle.handle_leases.local_handle_socket_path to be set");
-  }
   if (options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.handle_lease_ttl;
     if (ttl_ms.count() < 0) {
       return absl::InvalidArgumentError("handle_lease_ttl must be >= 0ms");
     }
+  }
+  if (options.cpu_shared_memory_enabled && options.local_handle_socket_path.empty()) {
+    auto socket_path_or = auto_local_handle_socket_path();
+    if (!socket_path_or.ok()) {
+      return socket_path_or.status();
+    }
+    options.local_handle_socket_path = *socket_path_or;
+    LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path=" << options.local_handle_socket_path;
   }
   auto storage_root_or = normalize_storage_root(options.storage_path);
   if (!storage_root_or.ok()) {
@@ -74,18 +120,29 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   options.storage_path = std::move(*storage_root_or);
 
   auto kernel = std::make_unique<DaemonKernel>(engine, async_runtime, options);
+  if (global_store_client) {
+    if (kernel->persistence_manager()) {
+      kernel->persistence_manager()->set_global_store_client(global_store_client.get());
+    }
+    kernel->lip_manager().set_global_store_client(global_store_client);
+  }
 
   MaterializationController::Dep mdep{
       .engine = kernel->engine(),
       .refs = kernel->ref_tracker(),
       .sessions = kernel->sessions_service(),
       .lip = kernel->lip_bridge(),
+      .lip_manager = kernel->lip_manager(),
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
+      .disk_imports = kernel->source_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
+      .async_runtime = *async_runtime,
+      .identity = kernel->worker_identity_store(),
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
       .handle_leases = kernel->handle_leases(),
+      .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
       .storage_path = options.storage_path,
   };
@@ -96,8 +153,10 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .reg = kernel->registration_manager(),
       .lip = kernel->lip_manager(),
       .refs = kernel->ref_tracker(),
+      .identity = &kernel->worker_identity_store(),
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
+      .handle_leases = kernel->handle_leases(),
       .regions = kernel->region_registry(),
   };
   auto registration_controller = std::make_unique<RegistrationController>(rdep);
@@ -117,6 +176,35 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
+  KeyMappingController::Dep kmdep{
+      .engine = kernel->engine(),
+      .shutdown_signal = kernel->shutdown_signal(),
+  };
+  auto key_mapping_controller = std::make_unique<KeyMappingController>(kmdep);
+
+  PersistenceRpcController::Dep prdep{
+      .persistence_manager = kernel->persistence_manager(),
+      .shutdown_signal = kernel->shutdown_signal(),
+  };
+  auto persistence_rpc_controller = std::make_unique<PersistenceRpcController>(prdep);
+
+  ReplicaSessionController::Dep rsdep{
+      .sessions = kernel->sessions_service(),
+      .lifecycle = kernel->lifecycle_manager(),
+  };
+  auto replica_session_controller = std::make_unique<ReplicaSessionController>(rsdep);
+
+  LeaseController::Dep ldep{
+      .engine = kernel->engine(),
+      .lifecycle = kernel->lifecycle_manager(),
+      .placement_lease_tokens = kernel->placement_lease_tokens(),
+      .capability_tokens = kernel->capability_tokens(),
+      .retention_registry = kernel->retention_registry(),
+      .daemon_id = options.daemon_id,
+      .shutdown_signal = kernel->shutdown_signal(),
+  };
+  auto lease_controller = std::make_unique<LeaseController>(std::move(ldep));
+
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = kernel->engine(),
       .materialization_controller = *materialization_controller,
@@ -125,11 +213,14 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .status_controller = *status_controller,
       .region_registry = kernel->region_registry(),
       .lip_manager = kernel->lip_manager(),
-      .persistence_manager = kernel->persistence_manager(),
-      .sessions_service = kernel->sessions_service(),
+      .global_store_client = global_store_client,
       .lifecycle_manager = kernel->lifecycle_manager(),
-      .placement_lease_tokens = kernel->placement_lease_tokens(),
+      .key_mapping_controller = *key_mapping_controller,
+      .persistence_rpc_controller = *persistence_rpc_controller,
+      .replica_session_controller = *replica_session_controller,
+      .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
+      .source_registry = &kernel->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = options.allow_high_card_attrs,
@@ -158,6 +249,10 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       std::move(registration_controller),
       std::move(transport_controller),
       std::move(status_controller),
+      std::move(key_mapping_controller),
+      std::move(persistence_rpc_controller),
+      std::move(replica_session_controller),
+      std::move(lease_controller),
       std::move(service),
       std::move(local_handle_server)));
 }

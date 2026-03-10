@@ -25,7 +25,7 @@ class ServerConfig(BaseModel):
     mem_pool_size: int
     artifact_chunk_bytes: int = 0
     local_handle_socket_path: str = ""
-    cpu_shared_memory_enabled: bool = False
+    cpu_shared_memory_enabled: bool = True
 
 
 # ----------------------------- Handshake models ----------------------------
@@ -52,6 +52,9 @@ class StableDramHandshake(BaseModel):
 
     kind: Literal["dram_stable"] = "dram_stable"
     staging_cuda_ipc_handle: bytes = b""
+    publish_cpu_memfd_size_bytes: int = 0
+    publish_cpu_memfd_offset_bytes: int = 0
+    publish_cpu_memfd_lease_token: bytes = b""
 
 
 Handshake = Union[

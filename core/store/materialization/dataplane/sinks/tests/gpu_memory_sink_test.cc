@@ -438,6 +438,38 @@ TEST_CASE("GpuMemorySink error handling", "[gpu_memory_sink]") {
     status = sink.write(data.data(), 1);
     REQUIRE(!status.ok());
   }
+
+  SECTION("Stale CUDA error does not poison subsequent async completion checks") {
+    GPUMemoryFixture fixture(4096);
+
+    if (!fixture.is_cuda_available()) {
+      SKIP("CUDA not available");
+    }
+
+    int device_count = 0;
+    auto status = tensorcast::cuda::get_device_count(&device_count);
+    REQUIRE(status.ok());
+    REQUIRE(device_count > 0);
+
+    // Inject a stale thread-local CUDA error and do not clear it here.
+    status = tensorcast::cuda::set_device(device_count + 1);
+    REQUIRE(!status.ok());
+
+    GpuMemorySink::Options options{
+        .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
+        .total_size = 1024,
+        .chunk_size = 128 * 1024 * 1024,
+        .device_id = 0,
+    };
+    GpuMemorySink sink(options);
+
+    fixture.fill_host_buffer('I');
+    status = sink.write(fixture.host_ptr(), 1024);
+    REQUIRE(status.ok());
+    status = sink.close();
+    REQUIRE(status.ok());
+    REQUIRE(fixture.verify_gpu_content(1024, 'I'));
+  }
 }
 
 TEST_CASE("GpuMemorySink validation", "[gpu_memory_sink]") {

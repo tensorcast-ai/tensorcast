@@ -65,12 +65,19 @@ class ReplicaRuntime {
   int wait_replica_ready(const loading::ReplicaKey& key) const;
   absl::Status unload_replica_status(const loading::ReplicaKey& key) const;
   int unload_replica(const loading::ReplicaKey& key) const;
+  absl::Status retire_replica_status(const loading::ReplicaKey& key);
   replica::MemoryState get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const;
   absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key) const;
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key) const;
 
   void set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state);
   ReplicaPublishState get_replica_publish_state(const loading::ReplicaKey& key) const;
+  ReplicaTransportState get_transport_state(const loading::ReplicaKey& key) const;
+  void update_transport_state(const loading::ReplicaKey& key, const ReplicaTransportState& state);
+  void clear_transport_state(const loading::ReplicaKey& key);
+  void set_replica_global_id(const loading::ReplicaKey& key, std::string replica_id);
+  std::optional<std::string> get_replica_global_id(const loading::ReplicaKey& key) const;
+  void clear_replica_global_id(const loading::ReplicaKey& key);
 
   absl::StatusOr<ExportRegistration> enable_remote_replica_access(
       const loading::ReplicaKey& key,
@@ -122,6 +129,18 @@ class ReplicaRuntime {
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location,
       bool enabled) const;
+  absl::Status disable_remote_access_for_replica(
+      const loading::ReplicaKey& key,
+      const std::shared_ptr<replica::Replica>& replica,
+      common::memory::MemoryLocation location) const;
+  void teardown_replica_memory(
+      const loading::ReplicaKey& key,
+      const std::shared_ptr<replica::Replica>& replica,
+      bool release_cpu,
+      bool release_gpu,
+      bool* released_any,
+      std::vector<absl::Status>* errors) const;
+  void clear_replica_runtime_state(const loading::ReplicaKey& key);
   size_t get_replica_size_or_zero(const loading::ReplicaKey& key) const;
 
   gsl::not_null<RuntimeContext*> context_;
@@ -130,6 +149,12 @@ class ReplicaRuntime {
   mutable absl::Mutex publish_state_mu_;
   absl::flat_hash_map<loading::ReplicaKey, ReplicaPublishState, loading::ReplicaKeyHash> publish_states_
       ABSL_GUARDED_BY(publish_state_mu_);
+  mutable absl::Mutex transport_state_mu_;
+  absl::flat_hash_map<loading::ReplicaKey, ReplicaTransportState, loading::ReplicaKeyHash> transport_states_
+      ABSL_GUARDED_BY(transport_state_mu_);
+  mutable absl::Mutex replica_id_mu_;
+  absl::flat_hash_map<loading::ReplicaKey, std::string, loading::ReplicaKeyHash> replica_ids_
+      ABSL_GUARDED_BY(replica_id_mu_);
 };
 
 } // namespace tensorcast::store::runtime

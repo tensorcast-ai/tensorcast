@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_MTCP_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_MTCP_TRANSPORT_H_
@@ -130,6 +130,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
     uint32_t window_seq = 0;
     bool final_window = false;
     uint64_t total_bytes = 0;
+    uint64_t stage_unit_bytes = 0;
     std::vector<StageSendSegment> segments;
     std::shared_ptr<std::atomic<int>> pending_segments;
     std::function<void()> on_window_complete;
@@ -148,6 +149,9 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   void send_loop();
   void staged_send_loop();
   void process_stage_window(const std::shared_ptr<StageSendWindow>& window);
+  void track_async_task(std::shared_future<chunk_result_t> future, std::function<void(const chunk_result_t&)> on_ready);
+  void fail_pending_async_tasks(misc::result_t status);
+  [[nodiscard]] bool has_outstanding_async_tasks() const;
   void prune_async_tasks();
   void recv_loop();
   misc::result_t init_socket_fd(int sock_fd);
@@ -192,8 +196,13 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   gsl::not_null<std::shared_ptr<engine::MemoryStager>> memory_stager_;
 
   // Track outstanding async tasks for proper cleanup
+  struct TrackedAsyncTask {
+    std::shared_future<chunk_result_t> future;
+    std::function<void(const chunk_result_t&)> on_ready;
+  };
+
   mutable std::mutex async_tasks_mutex_;
-  std::vector<std::shared_future<chunk_result_t>> outstanding_async_tasks_;
+  std::vector<TrackedAsyncTask> outstanding_async_tasks_;
 
   misc::Queue<std::shared_ptr<StageSendWindow>> staged_queue_;
   // Socket tuning (typed-config): IP_TOS value; 0 to leave unchanged

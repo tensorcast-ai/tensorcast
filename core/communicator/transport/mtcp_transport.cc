@@ -276,7 +276,7 @@ MTcpTransport::MTcpTransport(
       buffers_per_flow_limit_(buffers_per_flow_limit),
       memory_stager_(std::move(memory_stager)) {
   ABSL_CHECK(conn_count > 1) << "illegal conn count"; // mtcp only process
-  ABSL_CHECK(conn_count <= base::kMaxTcpConns) << "illegal conn count"; // mtcp only support 32 at max
+  ABSL_CHECK(conn_count <= base::kMaxTcpConns) << "illegal conn count";
   bzero(sock_fds_, base::kMaxTcpConns * sizeof(int));
   bzero(&server_addr_, sizeof(struct sockaddr_in));
   bzero(client_addrs_, sizeof(struct sockaddr_in) * base::kMaxTcpConns);
@@ -368,6 +368,7 @@ MTcpTransport::~MTcpTransport() {
     tasks_[i].reset();
   }
 
+  fail_pending_async_tasks(misc::TRANSPORT_FAILED);
   prune_async_tasks();
   release_receive_resources();
 
@@ -436,7 +437,7 @@ misc::result_t MTcpTransport::recv(const read_request_t& msg) {
   }
 
   VLOG(1) << "[MTcpTransport::recv] Queueing read request: key=" << msg->get_key()
-          << " bytes=" << msg->get_local_tensor()->get_bytes();
+          << " bytes=" << msg->get_local_tensor()->get_bytes() << " stage_hint=" << msg->mtcp_stage_unit_hint_bytes();
   recv_queue_.push(msg, true, -1);
   return misc::SUCCESS;
 }
@@ -897,6 +898,8 @@ void MTcpTransport::send_loop() {
 }
 
 void MTcpTransport::staged_send_loop() {
+  constexpr int kIdlePopTimeoutMs = 100;
+  constexpr int kPendingTaskPopTimeoutMs = 1;
   while (!stop_.load()) {
     if (!ready_.load()) {
       if (stop_.load()) {
@@ -906,7 +909,9 @@ void MTcpTransport::staged_send_loop() {
       continue;
     }
 
-    auto window_ptr = staged_queue_.pop(true, 100);
+    prune_async_tasks();
+    const int pop_timeout_ms = has_outstanding_async_tasks() ? kPendingTaskPopTimeoutMs : kIdlePopTimeoutMs;
+    auto window_ptr = staged_queue_.pop(true, pop_timeout_ms);
     if (stop_.load()) {
       break;
     }
@@ -962,7 +967,8 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     return;
   }
 
-  size_t stage_unit = gpu_memory_stager_->get_chunk_size();
+  size_t stage_unit = window->stage_unit_bytes > 0 ? static_cast<size_t>(window->stage_unit_bytes)
+                                                   : gpu_memory_stager_->get_chunk_size();
   if (stage_unit == 0) {
     stage_unit = memory_pool_->slice_bytes();
   }
@@ -999,7 +1005,7 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
 
     VLOG(1) << "[MTCP send] enqueue window=" << window->window_seq << " segment=" << seg.metadata.segment_idx
             << " offset=" << seg.metadata.offset << " bytes=" << seg.bytes << " lane=" << task_index
-            << " lanes_to_use=" << lanes_to_use << " conn_count=" << conn_count_;
+            << " lanes_to_use=" << lanes_to_use << " conn_count=" << conn_count_ << " stage_unit_bytes=" << stage_unit;
 
     if (task_index >= conn_count_ || tasks_[task_index] == nullptr) {
       LOG(WARNING) << "[MTcpTransport::process_stage_window] task unavailable idx=" << task_index
@@ -1013,19 +1019,14 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
 
     auto chunk = std::make_shared<MTcpTransportChunk>(reinterpret_cast<uint8_t*>(seg.data), seg.bytes);
     tasks_[task_index]->push_send(chunk);
-    auto chunk_future = chunk->get_future();
+    auto chunk_future = chunk->get_future().share();
     auto callback = seg.on_complete;
     auto metadata = seg.metadata;
     auto request_key = window->request_key;
     auto window_ptr = window;
-    auto release_future = std::async(
-        std::launch::async,
-        [chunk_future = std::move(chunk_future),
-         callback = std::move(callback),
-         metadata,
-         request_key,
-         window_ptr]() mutable {
-          auto result = chunk_future.get();
+    track_async_task(
+        std::move(chunk_future),
+        [callback = std::move(callback), metadata, request_key, window_ptr](const chunk_result_t& result) mutable {
           VLOG(1) << "[MTCP send] complete window=" << window_ptr->window_seq << " segment=" << metadata.segment_idx
                   << " offset=" << metadata.offset << " status=" << (result.status == misc::SUCCESS ? "ok" : "err");
           if (callback) {
@@ -1037,32 +1038,82 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
               window_ptr->on_window_complete();
             }
           }
-          LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << metadata.window_seq
-                    << " segment=" << metadata.segment_idx << " bytes=" << metadata.bytes
-                    << " status=" << (result.status == misc::SUCCESS ? "ok" : "error");
-          return result;
+          if (result.status != misc::SUCCESS) {
+            LOG(WARNING) << "[staging_credit] request=" << request_key
+                         << " transport=mtcp window=" << metadata.window_seq << " segment=" << metadata.segment_idx
+                         << " bytes=" << metadata.bytes << " status=error";
+          } else {
+            VLOG(2) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << metadata.window_seq
+                    << " segment=" << metadata.segment_idx << " bytes=" << metadata.bytes << " status=ok";
+          }
         });
-    {
-      std::lock_guard<std::mutex> lk(async_tasks_mutex_);
-      outstanding_async_tasks_.push_back(release_future.share());
-    }
   }
 }
 
-void MTcpTransport::prune_async_tasks() {
+void MTcpTransport::track_async_task(
+    std::shared_future<chunk_result_t> future,
+    std::function<void(const chunk_result_t&)> on_ready) {
   std::lock_guard<std::mutex> lk(async_tasks_mutex_);
-  auto it = outstanding_async_tasks_.begin();
-  while (it != outstanding_async_tasks_.end()) {
-    if (!it->valid()) {
-      it = outstanding_async_tasks_.erase(it);
-      continue;
+  outstanding_async_tasks_.push_back(
+      TrackedAsyncTask{
+          .future = std::move(future),
+          .on_ready = std::move(on_ready),
+      });
+}
+
+void MTcpTransport::fail_pending_async_tasks(misc::result_t status) {
+  std::vector<std::function<void(const chunk_result_t&)>> callbacks;
+  {
+    std::lock_guard<std::mutex> lk(async_tasks_mutex_);
+    callbacks.reserve(outstanding_async_tasks_.size());
+    for (auto& task : outstanding_async_tasks_) {
+      if (task.on_ready) {
+        callbacks.push_back(std::move(task.on_ready));
+      }
     }
-    if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-      (void)it->get();
-      it = outstanding_async_tasks_.erase(it);
-      continue;
+    outstanding_async_tasks_.clear();
+  }
+
+  const chunk_result_t forced_result{
+      .status = status,
+      .cost = 0,
+  };
+  for (auto& callback : callbacks) {
+    callback(forced_result);
+  }
+}
+
+bool MTcpTransport::has_outstanding_async_tasks() const {
+  std::lock_guard<std::mutex> lk(async_tasks_mutex_);
+  return !outstanding_async_tasks_.empty();
+}
+
+void MTcpTransport::prune_async_tasks() {
+  std::vector<std::pair<std::function<void(const chunk_result_t&)>, chunk_result_t>> completed;
+  {
+    std::lock_guard<std::mutex> lk(async_tasks_mutex_);
+    auto it = outstanding_async_tasks_.begin();
+    while (it != outstanding_async_tasks_.end()) {
+      if (!it->future.valid()) {
+        it = outstanding_async_tasks_.erase(it);
+        continue;
+      }
+      if (it->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto result = it->future.get();
+        if (it->on_ready) {
+          completed.emplace_back(std::move(it->on_ready), result);
+        }
+        it = outstanding_async_tasks_.erase(it);
+        continue;
+      }
+      ++it;
     }
-    ++it;
+  }
+
+  for (auto& [callback, result] : completed) {
+    if (callback) {
+      callback(result);
+    }
   }
 }
 
@@ -1085,21 +1136,40 @@ void MTcpTransport::recv_loop() {
     // Debug trace for recv_loop – starting a ReadRequest
     VLOG(2) << "[MTcpTransport::recv_loop] Start processing ReadRequest key=" << msg->get_key()
             << " bytes=" << msg->get_local_tensor()->get_bytes() << " conn_count=" << conn_count_;
+    const auto request_start = std::chrono::steady_clock::now();
 
     auto tensor = msg->get_local_tensor();
     auto bytes = tensor->get_bytes();
+    const uint64_t request_base_offset = msg->remote_offset_;
 
-    size_t stager_chunk_bytes = gpu_memory_stager_->get_chunk_size();
-    ABSL_CHECK_GT(stager_chunk_bytes, 0) << "MTcpTransport::recv_loop: stager_chunk_bytes must be > 0";
+    uint64_t stage_unit = msg->mtcp_stage_unit_hint_bytes();
+    if (stage_unit == 0) {
+      stage_unit = gpu_memory_stager_->get_chunk_size();
+    }
+    if (stage_unit == 0) {
+      stage_unit = memory_pool_->slice_bytes();
+    }
+    ABSL_CHECK_GT(stage_unit, 0) << "MTcpTransport::recv_loop: stage_unit must be > 0";
     const int lanes_to_use =
-        compute_active_lanes_internal(bytes, stager_chunk_bytes, conn_count_, buffers_per_flow_limit_);
+        compute_active_lanes_internal(bytes, static_cast<size_t>(stage_unit), conn_count_, buffers_per_flow_limit_);
+
+    VLOG(2) << "[mtcp_lane] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
+            << " lanes_to_use=" << lanes_to_use << " buffers_per_flow_limit=" << buffers_per_flow_limit_
+            << " stage_unit_bytes=" << stage_unit << " request_base_offset=" << request_base_offset;
 
     VLOG(1) << "[MTcpTransport::recv_loop] key=" << msg->get_key() << " bytes=" << bytes
             << " conn_count=" << conn_count_ << " lanes_to_use=" << lanes_to_use
-            << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stager_chunk_bytes=" << stager_chunk_bytes;
+            << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stage_unit_bytes=" << stage_unit
+            << " request_base_offset=" << request_base_offset;
 
-    auto chunk_size = (bytes + lanes_to_use - 1) / lanes_to_use;
-    std::vector<future_chunk_result_t> results;
+    const uint64_t network_segment_bytes = stage_unit;
+
+    struct PendingChunkResult {
+      future_chunk_result_t future;
+      uint64_t bytes = 0;
+    };
+
+    std::vector<PendingChunkResult> results;
 
     // Check if tensor is on GPU and needs staging
     if (tensor->get_mem_type() == base::COMMUNICATE_ENGINE_DEV_GPU) {
@@ -1111,9 +1181,9 @@ void MTcpTransport::recv_loop() {
       // Determine pool chunk size once for this tensor receive
       size_t pool_chunk_size = memory_pool_->slice_bytes();
       ABSL_CHECK_GT(pool_chunk_size, 0) << "MTcpTransport::recv_loop: pool_chunk_size must be > 0";
-      if (chunk_size > pool_chunk_size) {
-        VLOG(1) << "chunk_size (" << chunk_size << ") larger than pool_chunk_size (" << pool_chunk_size
-                << ") – enabling sub-chunked receive";
+      if (network_segment_bytes > pool_chunk_size) {
+        VLOG(1) << "network_segment_bytes (" << network_segment_bytes << ") larger than pool_chunk_size ("
+                << pool_chunk_size << ") – enabling sub-chunked receive";
       }
 
       // Use StreamingPinnedBuffer for efficient memory management
@@ -1132,30 +1202,28 @@ void MTcpTransport::recv_loop() {
         LOG(WARNING) << "[MTcpTransport::recv_loop] reset_for_new_production failed: " << reset_status;
       }
 
-      // Process chunks with streaming buffer (supports sub-chunking)
+      // Process stage-unit aligned network segments with streaming buffer (supports sub-chunking).
       bool processing_failed = false;
-      const uint64_t stage_unit = stager_chunk_bytes;
-
-      for (uint64_t offset = 0; offset < bytes && !processing_failed;) {
-        uint64_t real_chunk_size = chunk_size;
-        if (offset + real_chunk_size > bytes) {
-          real_chunk_size = bytes - offset;
+      for (uint64_t segment_offset = 0; segment_offset < bytes && !processing_failed;
+           segment_offset += network_segment_bytes) {
+        const uint64_t segment_size = std::min<uint64_t>(network_segment_bytes, bytes - segment_offset);
+        int lane = compute_gpu_lane_for_subchunk_internal(
+            request_base_offset + segment_offset, /*sub_offset_in_chunk=*/0, stage_unit, lanes_to_use);
+        if (lanes_to_use > 0 && lane >= lanes_to_use) {
+          lane %= lanes_to_use;
+        }
+        if (lane >= conn_count_ || tasks_[lane] == nullptr) {
+          LOG(ERROR) << "[MTcpTransport::recv_loop] Invalid lane index " << lane << " (lanes_to_use=" << lanes_to_use
+                     << ") for " << msg->get_key();
+          processing_failed = true;
+          break;
         }
 
-        // The current "network chunk" may itself be larger than a single pinned buffer.
-        // We therefore stream it as a sequence of sub-chunks each no larger than
-        // pool_chunk_size bytes.
-
-        uint64_t remain_in_chunk = real_chunk_size;
-        uint64_t sub_offset_in_chunk = 0;
-
-        while (remain_in_chunk > 0 && !processing_failed) {
-          uint64_t sub_chunk_size = std::min<uint64_t>(remain_in_chunk, pool_chunk_size);
-
-          int lane = compute_gpu_lane_for_subchunk_internal(offset, sub_offset_in_chunk, stage_unit, lanes_to_use);
-          if (lanes_to_use > 0 && lane >= lanes_to_use) {
-            lane %= lanes_to_use;
-          }
+        // A single network segment can still be larger than one pinned slot.
+        uint64_t remain_in_segment = segment_size;
+        uint64_t sub_offset_in_segment = 0;
+        while (remain_in_segment > 0 && !processing_failed) {
+          uint64_t sub_chunk_size = std::min<uint64_t>(remain_in_segment, pool_chunk_size);
 
           auto slot_guard = std::make_shared<common::memory::StreamingChunkGuard>(gpu_recv_buffer_);
           auto staged_ptr_or = slot_guard->acquire();
@@ -1169,21 +1237,15 @@ void MTcpTransport::recv_loop() {
           const int slot_id = slot_guard->slot_id();
 
           VLOG(2) << "[MTcpTransport::recv_loop] Got buffer slot #" << slot_id << " for sub-chunk ("
-                  << sub_offset_in_chunk << "/" << real_chunk_size << ") of lane #" << lane;
+                  << sub_offset_in_segment << "/" << segment_size << ") of lane #" << lane;
 
           // Create chunk for receiving into staged buffer
           auto chunk = std::make_shared<MTcpTransportChunk>(reinterpret_cast<uint8_t*>(staged_ptr), sub_chunk_size);
-          if (lane >= conn_count_ || tasks_[lane] == nullptr) {
-            LOG(ERROR) << "[MTcpTransport::recv_loop] Invalid lane index " << lane << " (lanes_to_use=" << lanes_to_use
-                       << ") for " << msg->get_key();
-            processing_failed = true;
-            break;
-          }
           tasks_[lane]->push_recv(chunk);
 
           // Create a future that will copy to GPU and return buffer after recv completes
           auto chunk_future = chunk->get_future();
-          auto gpu_global_offset = offset + sub_offset_in_chunk;
+          auto gpu_global_offset = segment_offset + sub_offset_in_segment;
           auto* gpu_ptr = tensor->get_addr<uint8_t>() + gpu_global_offset;
           auto recv_buffer = gpu_recv_buffer_.get(); // keep shared ownership for async copy
           const size_t chunk_index = pool_chunk_size > 0 ? static_cast<size_t>(gpu_global_offset / pool_chunk_size) : 0;
@@ -1279,41 +1341,44 @@ void MTcpTransport::recv_loop() {
                 return result;
               });
 
-          results.push_back(std::move(copy_future));
+          results.push_back(
+              PendingChunkResult{
+                  .future = std::move(copy_future),
+                  .bytes = sub_chunk_size,
+              });
 
-          remain_in_chunk -= sub_chunk_size;
-          sub_offset_in_chunk += sub_chunk_size;
+          remain_in_segment -= sub_chunk_size;
+          sub_offset_in_segment += sub_chunk_size;
         }
-
-        if (processing_failed) {
-          break;
-        }
-
-        offset += real_chunk_size;
       }
     } else {
       // Regular CPU tensor path
-      for (uint64_t offset = 0; offset < bytes; offset += chunk_size) {
-        auto real_chunk_size = chunk_size;
-        if (offset + real_chunk_size > bytes) {
-          real_chunk_size = bytes - offset;
-        }
-        auto chunk = std::make_shared<MTcpTransportChunk>(offset + tensor->get_addr<uint8_t>(), real_chunk_size);
-        int lane = 0;
-        if (lanes_to_use > 0) {
-          const uint64_t chunk_index = chunk_size > 0 ? offset / chunk_size : 0;
-          lane = static_cast<int>(chunk_index % static_cast<uint64_t>(lanes_to_use));
+      for (uint64_t segment_offset = 0; segment_offset < bytes; segment_offset += network_segment_bytes) {
+        const uint64_t segment_size = std::min<uint64_t>(network_segment_bytes, bytes - segment_offset);
+        int lane = compute_gpu_lane_for_subchunk_internal(
+            request_base_offset + segment_offset, /*sub_offset_in_chunk=*/0, stage_unit, lanes_to_use);
+        if (lanes_to_use > 0 && lane >= lanes_to_use) {
+          lane %= lanes_to_use;
         }
         if (lane >= conn_count_ || tasks_[lane] == nullptr) {
           LOG(ERROR) << "[MTcpTransport::recv_loop] Invalid CPU lane index " << lane
                      << " (lanes_to_use=" << lanes_to_use << ") for " << msg->get_key();
           auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
           fail_chunk->set_result(misc::TRANSPORT_FAILED);
-          results.push_back(fail_chunk->get_future());
+          results.push_back(
+              PendingChunkResult{
+                  .future = fail_chunk->get_future(),
+                  .bytes = 0,
+              });
           break;
         }
+        auto chunk = std::make_shared<MTcpTransportChunk>(segment_offset + tensor->get_addr<uint8_t>(), segment_size);
         tasks_[lane]->push_recv(chunk);
-        results.push_back(chunk->get_future());
+        results.push_back(
+            PendingChunkResult{
+                .future = chunk->get_future(),
+                .bytes = segment_size,
+            });
       }
     }
 
@@ -1322,10 +1387,12 @@ void MTcpTransport::recv_loop() {
             << msg->get_key();
     for (size_t i = 0; i < results.size(); ++i) {
       VLOG(2) << "[MTcpTransport::recv_loop] Awaiting sub-chunk future index=" << i;
-      auto chunk_result = results[i].get();
+      auto chunk_result = results[i].future.get();
       if (chunk_result.status != misc::SUCCESS) {
         LOG(ERROR) << "[MTcpTransport::recv_loop] Chunk " << i << " failed for " << msg->get_key();
         result = misc::FAILED;
+      } else if (results[i].bytes > 0) {
+        msg->mark_completion_and_is_done(results[i].bytes);
       }
       VLOG(2) << "[MTcpTransport::recv_loop] Completed sub-chunk future index=" << i;
     }
@@ -1334,6 +1401,27 @@ void MTcpTransport::recv_loop() {
       msg->set_result(absl::OkStatus());
     } else {
       msg->set_result(absl::InternalError("failed to read chunk"));
+    }
+
+    const auto request_elapsed = std::chrono::steady_clock::now() - request_start;
+    const auto request_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(request_elapsed).count();
+    const double request_elapsed_sec = static_cast<double>(request_elapsed_us) / 1'000'000.0;
+    const double request_gibps = request_elapsed_sec > 0.0
+        ? (static_cast<double>(bytes) / request_elapsed_sec / static_cast<double>(1ULL << 30))
+        : 0.0;
+    const double request_elapsed_ms = request_elapsed_sec * 1000.0;
+    if (request_elapsed_ms >= 100.0) {
+      LOG(WARNING) << "[mtcp_read_req] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
+                   << " lanes_to_use=" << lanes_to_use << " chunks=" << results.size()
+                   << " elapsed_ms=" << request_elapsed_ms << " gibps=" << request_gibps;
+    } else if (request_elapsed_ms >= 25.0) {
+      LOG(INFO) << "[mtcp_read_req] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
+                << " lanes_to_use=" << lanes_to_use << " chunks=" << results.size()
+                << " elapsed_ms=" << request_elapsed_ms << " gibps=" << request_gibps;
+    } else {
+      VLOG(1) << "[mtcp_read_req] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
+              << " lanes_to_use=" << lanes_to_use << " chunks=" << results.size()
+              << " elapsed_ms=" << request_elapsed_ms << " gibps=" << request_gibps;
     }
 
     // Debug trace for recv_loop – finished a ReadRequest with result
@@ -1351,6 +1439,47 @@ misc::result_t MTcpTransport::init_socket_fd(int sock_fd) {
   if (ret != 0) {
     PLOG(WARNING) << "failed to setup tcp no-delay";
   }
+
+#ifdef TCP_QUICKACK
+  opt = 1;
+  ret = setsockopt(sock_fd, IPPROTO_TCP, TCP_QUICKACK, reinterpret_cast<char*>(&opt), sizeof(int));
+  if (ret != 0) {
+    PLOG(WARNING) << "failed to setup tcp quickack";
+  }
+#endif
+
+  // Size socket buffers from staging chunk characteristics to reduce sender backpressure.
+  const size_t stage_chunk = std::max<size_t>(gpu_memory_stager_->get_chunk_size(), memory_pool_->slice_bytes());
+  const size_t desired_bytes_unclamped = stage_chunk * static_cast<size_t>(std::max(2, buffers_per_flow_limit_));
+  const size_t desired_bytes = std::clamp<size_t>(desired_bytes_unclamped, 1ULL * 1024 * 1024, 64ULL * 1024 * 1024);
+  const int desired_sock_buffer =
+      static_cast<int>(std::min<size_t>(desired_bytes, static_cast<size_t>(std::numeric_limits<int>::max())));
+
+  ret = setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &desired_sock_buffer, sizeof(desired_sock_buffer));
+  if (ret != 0) {
+    PLOG(WARNING) << "failed to setup socket send buffer";
+  }
+  ret = setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &desired_sock_buffer, sizeof(desired_sock_buffer));
+  if (ret != 0) {
+    PLOG(WARNING) << "failed to setup socket recv buffer";
+  }
+
+  int actual_send_buffer = 0;
+  int actual_recv_buffer = 0;
+  socklen_t option_len = sizeof(int);
+  ret = getsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &actual_send_buffer, &option_len);
+  if (ret != 0) {
+    PLOG(WARNING) << "failed to read socket send buffer";
+  }
+  option_len = sizeof(int);
+  ret = getsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &actual_recv_buffer, &option_len);
+  if (ret != 0) {
+    PLOG(WARNING) << "failed to read socket recv buffer";
+  }
+  LOG(INFO) << "[mtcp_sockbuf] fd=" << sock_fd << " requested=" << desired_sock_buffer
+            << " actual_send=" << actual_send_buffer << " actual_recv=" << actual_recv_buffer
+            << " stage_chunk=" << stage_chunk << " buffers_per_flow_limit=" << buffers_per_flow_limit_;
+
   opt = 1;
   ret = setsockopt(sock_fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(int));
   if (ret != 0) {

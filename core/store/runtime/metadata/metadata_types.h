@@ -2,21 +2,16 @@
 
 #pragma once
 
-#include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
-#include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/components/communication_manager.h"
@@ -24,18 +19,17 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/replica/replica_promotion_manager.h"
+#include "core/store/store_engine_options.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
-
-namespace tensorcast::store::components {
-class StableDramCacheManager;
-} // namespace tensorcast::store::components
 
 namespace tensorcast::store::runtime::metadata {
 
@@ -89,6 +83,13 @@ struct RegistrationBeginResult {
   uint64_t size_bytes{0};
 };
 
+struct RegistrationCpuMemfdInfo {
+  loading::ReplicaKey replica_key;
+  int fd{-1};
+  uint64_t size_bytes{0};
+  uint64_t offset_bytes{0};
+};
+
 struct RegistrationCommitResult {
   std::string registration_id;
   std::string artifact_id;
@@ -96,6 +97,7 @@ struct RegistrationCommitResult {
   DeviceKey device;
   uint64_t size_bytes{0};
   bool existed{false};
+  bool stable_cache_admitted{false};
   std::string index_multihash;
   std::string data_multihash;
   std::string schema_version;
@@ -118,6 +120,9 @@ struct RegistrationResources {
   std::shared_ptr<common::AsyncRuntime> async_runtime;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget;
   std::optional<MemoryTierConfig> memory_tier_config;
+  StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
+  ::tensorcast::store::runtime::ReplicaPromotionManager* promotion_manager{nullptr};
+  bool cpu_shared_memory_enabled{true};
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;
@@ -143,7 +148,7 @@ class RegistrationPublisher {
  public:
   virtual ~RegistrationPublisher() = default;
   virtual absl::Status publish_registration(const RegistrationPublication& publication) = 0;
-  virtual absl::Status update_variant_view(const components::VariantViewUpdate& update) = 0;
+  virtual absl::Status update_view_state(const components::ViewStateUpdate& update) = 0;
 };
 
 } // namespace tensorcast::store::runtime::metadata

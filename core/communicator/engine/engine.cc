@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <format>
+#include <limits>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -29,6 +31,7 @@
 #include "core/communicator/engine/host_pinned_cpu_stager.h"
 #include "core/communicator/engine/host_pinned_gpu_stager.h"
 #include "core/communicator/engine/message.h"
+#include "core/communicator/engine/mtcp_transfer_completion_tracker.h"
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/engine/staging_flow_controller.h"
 #include "core/communicator/misc/utils.h"
@@ -60,10 +63,12 @@ struct RdmaReadSession {
   ProtoReadRequest request;
   std::string tensor_key;
   std::string request_key;
+  std::string transfer_id;
   std::shared_ptr<PartitionTensor> tensor;
   std::shared_ptr<MemoryStager> stager;
   net_dev_t dev;
   tcp_transport_t control_transport;
+  std::shared_ptr<void> read_guard;
   std::unique_ptr<StagingWindow> window;
   bool zero_copy = false;
 };
@@ -78,6 +83,34 @@ struct Communicator::GpuChannelLease {
   }
 
   Communicator* owner;
+};
+
+struct Communicator::TensorReadLease {
+  TensorReadLease(Communicator* owner, std::string key) : owner(owner), tensor_key(std::move(key)) {}
+
+  ~TensorReadLease() {
+    if (owner != nullptr) {
+      owner->release_tensor_read_lease(tensor_key);
+    }
+  }
+
+  Communicator* owner;
+  std::string tensor_key;
+};
+
+struct Communicator::TransferProgressState {
+  std::string transfer_id;
+  std::string request_key;
+  std::string peer;
+  std::string side;
+  std::string transport;
+  uint64_t total_bytes = 0;
+  absl::Time start_time = absl::Now();
+  std::atomic<uint64_t> bytes_completed{0};
+  std::atomic<uint64_t> last_logged_bytes{0};
+  std::atomic<int64_t> next_log_ms{0};
+  std::atomic<int64_t> last_log_ms{0};
+  std::atomic<bool> finished{false};
 };
 
 namespace {
@@ -412,6 +445,39 @@ void record_direct_fallback_metric(DirectFallbackReason reason) {
   g_rdma_direct_fallback_total->Add(1.0, attr_view, opentelemetry::context::Context{});
 }
 
+constexpr uint64_t kTransferProgressMinBytes = 64ULL * 1024 * 1024;
+constexpr int64_t kTransferProgressLogIntervalMs = 1000;
+constexpr int kTransferProgressBarWidth = 18;
+constexpr double kBytesPerGiB = static_cast<double>(1ULL << 30);
+constexpr absl::Duration kUnregisterTensorDrainTimeout = absl::Minutes(10);
+constexpr absl::Duration kUnregisterTensorDrainPollInterval = absl::Seconds(1);
+constexpr absl::Duration kUnregisterTensorDrainLogInterval = absl::Seconds(5);
+
+std::string truncate_token(std::string_view token, size_t max_chars) {
+  if (token.size() <= max_chars) {
+    return std::string(token);
+  }
+  if (max_chars <= 3) {
+    return std::string(token.substr(0, max_chars));
+  }
+  return std::string(token.substr(0, max_chars - 3)) + "...";
+}
+
+std::string build_progress_bar(uint64_t done, uint64_t total) {
+  if (total == 0) {
+    return std::string(kTransferProgressBarWidth, '#');
+  }
+  const double ratio = std::clamp(static_cast<double>(done) / static_cast<double>(total), 0.0, 1.0);
+  const int filled = static_cast<int>(ratio * static_cast<double>(kTransferProgressBarWidth));
+  std::string bar(static_cast<size_t>(filled), '#');
+  bar.append(static_cast<size_t>(kTransferProgressBarWidth - filled), '-');
+  return bar;
+}
+
+double bytes_to_gib(uint64_t bytes) {
+  return static_cast<double>(bytes) / kBytesPerGiB;
+}
+
 RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
   RdmaDriveResult result;
   while (true) {
@@ -569,6 +635,308 @@ void log_handshake_transition(
 }
 
 } // namespace
+
+absl::StatusOr<std::shared_ptr<void>> Communicator::acquire_tensor_read_lease(const std::string& tensor_key) {
+  if (tensor_key.empty()) {
+    return absl::InvalidArgumentError("tensor key is empty");
+  }
+  absl::MutexLock lock(&tensor_read_mu_);
+  auto& state_ptr = tensor_read_states_[tensor_key];
+  if (state_ptr == nullptr) {
+    state_ptr = std::make_unique<TensorReadState>();
+  }
+  if (state_ptr->retiring) {
+    return absl::UnavailableError(std::format("tensor {} is retiring", tensor_key));
+  }
+  state_ptr->inflight += 1;
+  auto lease = std::make_shared<TensorReadLease>(this, tensor_key);
+  return std::static_pointer_cast<void>(lease);
+}
+
+void Communicator::release_tensor_read_lease(const std::string& tensor_key) {
+  absl::MutexLock lock(&tensor_read_mu_);
+  auto it = tensor_read_states_.find(tensor_key);
+  if (it == tensor_read_states_.end() || it->second == nullptr) {
+    LOG(WARNING) << "[Communicator] Tensor read lease release on unknown key=" << tensor_key;
+    return;
+  }
+  auto& state = *(it->second);
+  if (state.inflight <= 0) {
+    LOG(WARNING) << "[Communicator] Tensor read lease underflow key=" << tensor_key;
+    state.inflight = 0;
+  } else {
+    state.inflight -= 1;
+  }
+  if (state.inflight == 0) {
+    state.drained_cv.SignalAll();
+    if (!state.retiring) {
+      tensor_read_states_.erase(it);
+    }
+  }
+}
+
+absl::Status Communicator::wait_for_tensor_reads_to_drain(const std::string& tensor_key, absl::Duration timeout) {
+  const absl::Time start = absl::Now();
+  const absl::Time deadline = start + timeout;
+
+  absl::MutexLock lock(&tensor_read_mu_);
+  auto& state_ptr = tensor_read_states_[tensor_key];
+  if (state_ptr == nullptr) {
+    state_ptr = std::make_unique<TensorReadState>();
+  }
+  state_ptr->retiring = true;
+
+  absl::Time last_log = absl::InfinitePast();
+  while (state_ptr->inflight > 0) {
+    const absl::Time now = absl::Now();
+    if (now >= deadline) {
+      return absl::DeadlineExceededError(
+          std::format(
+              "tensor {} still has {} in-flight source reads after {} ms",
+              tensor_key,
+              state_ptr->inflight,
+              absl::ToInt64Milliseconds(timeout)));
+    }
+    if (last_log == absl::InfinitePast() || now - last_log >= kUnregisterTensorDrainLogInterval) {
+      LOG(INFO) << "[unregister_tensor] waiting for in-flight source reads key=" << tensor_key
+                << " inflight=" << state_ptr->inflight << " elapsed_ms=" << absl::ToInt64Milliseconds(now - start)
+                << " timeout_ms=" << absl::ToInt64Milliseconds(timeout);
+      last_log = now;
+    }
+    const absl::Time wake_deadline = std::min(deadline, now + kUnregisterTensorDrainPollInterval);
+    (void)state_ptr->drained_cv.WaitWithDeadline(&tensor_read_mu_, wake_deadline);
+  }
+
+  return absl::OkStatus();
+}
+
+std::shared_ptr<Communicator::TransferProgressState> Communicator::create_transfer_progress_state(
+    std::string transfer_id,
+    std::string request_key,
+    std::string peer,
+    std::string side,
+    std::string transport,
+    uint64_t total_bytes) {
+  if (total_bytes < kTransferProgressMinBytes) {
+    return nullptr;
+  }
+
+  auto state = std::make_shared<TransferProgressState>();
+  state->transfer_id = std::move(transfer_id);
+  state->request_key = std::move(request_key);
+  state->peer = std::move(peer);
+  state->side = std::move(side);
+  state->transport = std::move(transport);
+  state->total_bytes = total_bytes;
+  state->start_time = absl::Now();
+  const int64_t now_ms = absl::ToUnixMillis(state->start_time);
+  state->next_log_ms.store(now_ms + kTransferProgressLogIntervalMs, std::memory_order_relaxed);
+  state->last_log_ms.store(now_ms, std::memory_order_relaxed);
+
+  LOG(INFO) << std::format(
+      "[xfer_progress] side={} transport={} state=start peer={} request={} total_gib={:.3f}",
+      state->side,
+      state->transport,
+      truncate_token(state->peer, 64),
+      truncate_token(state->request_key, 80),
+      bytes_to_gib(state->total_bytes));
+
+  return state;
+}
+
+uint64_t Communicator::add_transfer_progress_bytes(
+    const std::shared_ptr<TransferProgressState>& state,
+    uint64_t bytes) {
+  if (!state || bytes == 0 || state->finished.load(std::memory_order_relaxed)) {
+    return state ? std::min<uint64_t>(state->bytes_completed.load(std::memory_order_relaxed), state->total_bytes) : 0;
+  }
+
+  const uint64_t done_raw = state->bytes_completed.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+  const uint64_t done = std::min<uint64_t>(done_raw, state->total_bytes);
+  if (done >= state->total_bytes) {
+    return done;
+  }
+
+  const absl::Time now = absl::Now();
+  const int64_t now_ms = absl::ToUnixMillis(now);
+  int64_t next_log_ms = state->next_log_ms.load(std::memory_order_relaxed);
+  bool should_log = false;
+  while (now_ms >= next_log_ms) {
+    if (state->next_log_ms.compare_exchange_weak(
+            next_log_ms, now_ms + kTransferProgressLogIntervalMs, std::memory_order_relaxed)) {
+      should_log = true;
+      break;
+    }
+  }
+  if (!should_log) {
+    return done;
+  }
+
+  const uint64_t prev_bytes = state->last_logged_bytes.exchange(done, std::memory_order_relaxed);
+  const int64_t prev_ms = state->last_log_ms.exchange(now_ms, std::memory_order_relaxed);
+  const double elapsed_sec = std::max(1e-6, absl::ToDoubleSeconds(now - state->start_time));
+  const double avg_gibps = bytes_to_gib(done) / elapsed_sec;
+  double inst_gibps = avg_gibps;
+  if (prev_ms > 0 && now_ms > prev_ms && done >= prev_bytes) {
+    const double delta_sec = static_cast<double>(now_ms - prev_ms) / 1000.0;
+    if (delta_sec > 0.0) {
+      inst_gibps = bytes_to_gib(done - prev_bytes) / delta_sec;
+    }
+  }
+
+  const double progress_percent =
+      state->total_bytes > 0 ? static_cast<double>(done) * 100.0 / static_cast<double>(state->total_bytes) : 100.0;
+  LOG(INFO) << std::format(
+      "[xfer_progress] side={} transport={} state=progress peer={} request={} bar=[{}] {:5.1f}% "
+      "done_gib={:.3f}/{:.3f} rate_inst_gibps={:.3f} rate_avg_gibps={:.3f}",
+      state->side,
+      state->transport,
+      truncate_token(state->peer, 64),
+      truncate_token(state->request_key, 80),
+      build_progress_bar(done, state->total_bytes),
+      progress_percent,
+      bytes_to_gib(done),
+      bytes_to_gib(state->total_bytes),
+      inst_gibps,
+      avg_gibps);
+  return done;
+}
+
+void Communicator::finish_transfer_progress(
+    const std::shared_ptr<TransferProgressState>& state,
+    const absl::Status& status) {
+  if (!state) {
+    return;
+  }
+  if (state->finished.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  const absl::Time now = absl::Now();
+  const int64_t now_ms = absl::ToUnixMillis(now);
+  const uint64_t done = std::min<uint64_t>(state->bytes_completed.load(std::memory_order_relaxed), state->total_bytes);
+  const uint64_t prev_bytes = state->last_logged_bytes.exchange(done, std::memory_order_relaxed);
+  const int64_t prev_ms = state->last_log_ms.exchange(now_ms, std::memory_order_relaxed);
+  const double elapsed_sec = std::max(1e-6, absl::ToDoubleSeconds(now - state->start_time));
+  const double avg_gibps = bytes_to_gib(done) / elapsed_sec;
+  double inst_gibps = avg_gibps;
+  if (prev_ms > 0 && now_ms > prev_ms && done >= prev_bytes) {
+    const double delta_sec = static_cast<double>(now_ms - prev_ms) / 1000.0;
+    if (delta_sec > 0.0) {
+      inst_gibps = bytes_to_gib(done - prev_bytes) / delta_sec;
+    }
+  }
+  const double progress_percent =
+      state->total_bytes > 0 ? static_cast<double>(done) * 100.0 / static_cast<double>(state->total_bytes) : 100.0;
+  const std::string phase = status.ok() ? "done" : "failed";
+  const std::string status_text = status.ok() ? std::string() : truncate_token(status.message(), 120);
+  const std::string line = std::format(
+      "[xfer_progress] side={} transport={} state={} peer={} request={} bar=[{}] {:5.1f}% "
+      "done_gib={:.3f}/{:.3f} rate_inst_gibps={:.3f} rate_avg_gibps={:.3f}{}",
+      state->side,
+      state->transport,
+      phase,
+      truncate_token(state->peer, 64),
+      truncate_token(state->request_key, 80),
+      build_progress_bar(done, state->total_bytes),
+      progress_percent,
+      bytes_to_gib(done),
+      bytes_to_gib(state->total_bytes),
+      inst_gibps,
+      avg_gibps,
+      status.ok() ? "" : std::format(" error={}", status_text));
+
+  if (status.ok()) {
+    LOG(INFO) << line;
+  } else {
+    LOG(WARNING) << line;
+  }
+}
+
+std::string Communicator::make_transfer_id(std::string_view request_key, std::string_view peer) {
+  std::string id;
+  id.reserve(request_key.size() + peer.size() + 1);
+  id.append(request_key);
+  id.push_back('@');
+  id.append(peer);
+  return id;
+}
+
+std::shared_ptr<Communicator::TransferProgressState> Communicator::register_source_transfer_progress(
+    std::string request_key,
+    std::string peer,
+    std::string transport,
+    uint64_t total_bytes,
+    std::shared_ptr<void> read_guard) {
+  const std::string transfer_id = make_transfer_id(request_key, peer);
+  auto state = create_transfer_progress_state(
+      transfer_id, std::move(request_key), std::move(peer), "source", std::move(transport), total_bytes);
+  if (!state) {
+    if (read_guard) {
+      absl::MutexLock lock(&source_transfer_progress_mu_);
+      source_transfer_read_guards_[transfer_id] = std::move(read_guard);
+    }
+    return nullptr;
+  }
+
+  std::shared_ptr<TransferProgressState> replaced;
+  std::shared_ptr<void> replaced_guard;
+  {
+    absl::MutexLock lock(&source_transfer_progress_mu_);
+    if (read_guard) {
+      auto guard_it = source_transfer_read_guards_.find(transfer_id);
+      if (guard_it != source_transfer_read_guards_.end()) {
+        replaced_guard = std::move(guard_it->second);
+        source_transfer_read_guards_.erase(guard_it);
+      }
+      source_transfer_read_guards_[transfer_id] = std::move(read_guard);
+    }
+    auto it = source_transfer_progress_.find(transfer_id);
+    if (it != source_transfer_progress_.end()) {
+      replaced = it->second;
+      it->second = state;
+    } else {
+      source_transfer_progress_.emplace(transfer_id, state);
+    }
+  }
+  if (replaced) {
+    finish_transfer_progress(replaced, absl::AbortedError("replaced by newer source transfer"));
+  }
+  replaced_guard.reset();
+  return state;
+}
+
+std::shared_ptr<Communicator::TransferProgressState> Communicator::lookup_source_transfer_progress(
+    const std::string& transfer_id) const {
+  absl::MutexLock lock(&source_transfer_progress_mu_);
+  auto it = source_transfer_progress_.find(transfer_id);
+  if (it == source_transfer_progress_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+void Communicator::finish_source_transfer_progress(const std::string& transfer_id, const absl::Status& status) {
+  std::shared_ptr<TransferProgressState> state;
+  std::shared_ptr<void> read_guard;
+  {
+    absl::MutexLock lock(&source_transfer_progress_mu_);
+    auto guard_it = source_transfer_read_guards_.find(transfer_id);
+    if (guard_it != source_transfer_read_guards_.end()) {
+      read_guard = std::move(guard_it->second);
+      source_transfer_read_guards_.erase(guard_it);
+    }
+    auto it = source_transfer_progress_.find(transfer_id);
+    if (it != source_transfer_progress_.end()) {
+      state = it->second;
+      source_transfer_progress_.erase(it);
+    }
+  }
+  if (state) {
+    finish_transfer_progress(state, status);
+  }
+  read_guard.reset();
+}
 
 Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
     : Communicator(
@@ -951,6 +1319,9 @@ void Communicator::fail_mtcp_read_task(const MtcpReadTask& task, absl::Status st
   }
 
   const std::string tensor_key(reinterpret_cast<const char*>(task.request.tensor_key));
+  const std::string request_key = transport::get_request_key(tensor_key, task.request.offset);
+  const std::string peer = task.control_transport ? task.control_transport->get_remote_url() : std::string();
+  this->finish_source_transfer_progress(make_transfer_id(request_key, peer), status);
 
   if (task.control_transport) {
     auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
@@ -999,7 +1370,14 @@ void Communicator::release_gpu_channel_slot() {
 }
 
 void Communicator::process_mtcp_read_task(MtcpReadTask task) {
+  const std::string tensor_key_for_progress(reinterpret_cast<const char*>(task.request.tensor_key));
+  const std::string request_key_for_progress = transport::get_request_key(tensor_key_for_progress, task.request.offset);
+  const std::string peer_for_progress =
+      task.control_transport ? task.control_transport->get_remote_url() : std::string();
+  const std::string transfer_id = make_transfer_id(request_key_for_progress, peer_for_progress);
+
   if (!task.channel || !task.tensor) {
+    finish_source_transfer_progress(transfer_id, absl::FailedPreconditionError("invalid MTCP staging task"));
     if (task.channel) {
       task.channel->mtcp_request_finished();
     }
@@ -1013,49 +1391,58 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       channel->mtcp_request_finished();
     }
   };
-  bool release_handed_off = false;
+
+  auto transfer_tracker = std::make_shared<MtcpTransferCompletionTracker>(
+      [this, release_cb = release_once, transfer_id](const absl::Status& status) {
+        release_cb();
+        finish_source_transfer_progress(transfer_id, status);
+      });
 
   auto flow_state = task.channel->flow_state();
   if (!flow_state) {
-    release_once();
-    release_handed_off = true;
-    fail_mtcp_read_task(task, absl::InternalError("channel missing flow state"));
+    const absl::Status status = absl::InternalError("channel missing flow state");
+    transfer_tracker->fail_fast(status);
+    fail_mtcp_read_task(task, status);
     return;
   }
 
   auto transport = task.channel->get_mtcp();
   if (transport == nullptr) {
-    release_once();
-    release_handed_off = true;
-    fail_mtcp_read_task(task, absl::InternalError("missing MTCP transport"));
+    const absl::Status status = absl::InternalError("missing MTCP transport");
+    transfer_tracker->fail_fast(status);
+    fail_mtcp_read_task(task, status);
     return;
   }
 
   const ProtoReadRequest& request = task.request;
-  const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
+  const std::string tensor_key = tensor_key_for_progress;
   const uint64_t total_bytes = request.bytes;
   const uint64_t start_offset = request.offset;
-  const std::string request_key = transport::get_request_key(tensor_key, start_offset);
+  const std::string request_key = request_key_for_progress;
 
-  const bool needs_gpu_staging =
-      task.tensor->needs_staging() || task.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
-  std::shared_ptr<MemoryStager> stager;
-  if (needs_gpu_staging) {
-    stager = get_gpu_mem_stager_for_id(task.tensor->get_device_id());
-    if (!stager) {
-      stager = gpu_memory_stager_;
+  std::shared_ptr<MemoryStager> stager = task.stager;
+  if (!stager) {
+    const bool needs_gpu_staging =
+        task.tensor->needs_staging() || task.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
+    if (needs_gpu_staging) {
+      stager = get_gpu_mem_stager_for_id(task.tensor->get_device_id());
+      if (!stager) {
+        stager = gpu_memory_stager_;
+      }
+    } else {
+      stager = memory_stager_;
     }
-  } else {
-    stager = memory_stager_;
   }
   if (!stager) {
-    release_once();
-    release_handed_off = true;
-    fail_mtcp_read_task(task, absl::FailedPreconditionError("no staging backend available for MTCP tensor"));
+    const absl::Status status = absl::FailedPreconditionError("no staging backend available for MTCP tensor");
+    transfer_tracker->fail_fast(status);
+    fail_mtcp_read_task(task, status);
     return;
   }
 
-  const uint64_t chunk_size = stager->get_chunk_size() > 0 ? stager->get_chunk_size() : total_bytes;
+  const uint64_t chunk_size = task.stage_chunk_bytes > 0
+      ? task.stage_chunk_bytes
+      : (stager->get_chunk_size() > 0 ? stager->get_chunk_size() : total_bytes);
 
   auto stage_fn = [&](uint64_t offset, uint32_t bytes, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
     // Do not block inside stage(); bounded waiting and retry is handled by the
@@ -1090,6 +1477,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
   absl::Duration backoff = absl::Milliseconds(1);
   constexpr absl::Duration kMaxBackoff = absl::Milliseconds(50);
   absl::Time last_warning = absl::InfinitePast();
+  bool final_window_enqueued = false;
 
   while (true) {
     auto window_or = window.stage_next();
@@ -1109,9 +1497,9 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
 
         if (now >= retry_deadline) {
           LOG(ERROR) << "MTCP staging credit wait exceeded deadline for request=" << request_key;
-          release_once();
-          release_handed_off = true;
-          fail_mtcp_read_task(task, absl::ResourceExhaustedError("MTCP staging credit wait timed out"));
+          const absl::Status status = absl::ResourceExhaustedError("MTCP staging credit wait timed out");
+          transfer_tracker->fail_fast(status);
+          fail_mtcp_read_task(task, status);
           return;
         }
 
@@ -1121,8 +1509,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       }
 
       LOG(ERROR) << "Failed to stage MTCP window: " << window_or.status();
-      release_once();
-      release_handed_off = true;
+      transfer_tracker->fail_fast(window_or.status());
       fail_mtcp_read_task(task, window_or.status());
       return;
     }
@@ -1135,18 +1522,14 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
     send_window.window_seq = staged_window.window_seq;
     send_window.final_window = !staged_window.more_segments;
     send_window.total_bytes = total_bytes;
+    send_window.stage_unit_bytes = chunk_size;
     send_window.segments.reserve(staged_window.segments.size());
 
-    if (send_window.final_window) {
-      send_window.pending_segments = std::make_shared<std::atomic<int>>(0);
-      auto release_cb = release_once;
-      send_window.on_window_complete = [release_cb]() { release_cb(); };
-      release_handed_off = true;
-    }
+    transfer_tracker->add_pending_segments(static_cast<int>(staged_window.segments.size()));
 
-    LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
-              << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
-              << " outstanding=" << flow_state->ledger.outstanding_credit();
+    VLOG(1) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
+            << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
+            << " outstanding=" << flow_state->ledger.outstanding_credit();
 
     for (auto& segment : staged_window.segments) {
       StageLease lease = std::move(segment.lease);
@@ -1170,37 +1553,53 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       send_segment.bytes = metadata.bytes;
       send_segment.metadata = metadata;
 
-      send_segment.on_complete =
-          [flow_state_ref = flow_state, key, metadata, lease = std::move(lease)](misc::result_t status) mutable {
-            if (flow_state_ref) {
-              auto lease_or = flow_state_ref->registry.take(key);
-              if (lease_or.ok()) {
-                lease_or->release();
-              } else {
-                VLOG(1) << "[MTCP] StageLease missing during release: key=" << key.request_key
-                        << " window=" << key.window_seq << " segment=" << key.segment_idx;
-              }
-            }
-            lease.release();
-            if (status != misc::SUCCESS) {
-              LOG(WARNING) << "[MTCP] StageLease send failure request=" << metadata.request_key
-                           << " window=" << metadata.window_seq << " segment=" << metadata.segment_idx
-                           << " status=" << status;
-            }
-          };
+      send_segment.on_complete = [this,
+                                  flow_state_ref = flow_state,
+                                  key,
+                                  metadata,
+                                  transfer_id,
+                                  tracker = transfer_tracker,
+                                  lease = std::move(lease)](misc::result_t status) mutable {
+        if (flow_state_ref) {
+          auto lease_or = flow_state_ref->registry.take(key);
+          if (lease_or.ok()) {
+            lease_or->release();
+          } else {
+            VLOG(1) << "[MTCP] StageLease missing during release: key=" << key.request_key
+                    << " window=" << key.window_seq << " segment=" << key.segment_idx;
+          }
+        }
+        lease.release();
+
+        const bool ok = (status == misc::SUCCESS);
+        if (ok) {
+          auto progress = lookup_source_transfer_progress(transfer_id);
+          if (progress) {
+            add_transfer_progress_bytes(progress, metadata.bytes);
+          }
+        } else {
+          LOG(WARNING) << "[MTCP] StageLease send failure request=" << metadata.request_key
+                       << " window=" << metadata.window_seq << " segment=" << metadata.segment_idx
+                       << " status=" << status;
+        }
+
+        tracker->mark_segment_finished(ok);
+      };
 
       send_window.segments.push_back(std::move(send_segment));
     }
 
-    if (send_window.pending_segments) {
-      send_window.pending_segments->store(static_cast<int>(send_window.segments.size()), std::memory_order_relaxed);
-    }
-
+    const bool is_final_window = send_window.final_window;
     transport->enqueue_stage_window(std::move(send_window));
+
+    if (is_final_window) {
+      final_window_enqueued = true;
+      transfer_tracker->mark_final_window_enqueued();
+    }
   }
 
-  if (!release_handed_off) {
-    release_once();
+  if (!final_window_enqueued) {
+    transfer_tracker->mark_final_window_enqueued();
   }
 }
 
@@ -1396,6 +1795,11 @@ future_read_result_t Communicator::read_tensor(
 
   auto local_tensor = store_.get_tensor(key);
 
+  const bool existing_tensor_conflicts = local_tensor != nullptr &&
+      (local_tensor->get_uint64_addr() != addr || local_tensor->get_bytes() != bytes ||
+       local_tensor->get_mem_type() != dev_type ||
+       (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id));
+
   const bool needs_new_tensor = local_tensor == nullptr || local_tensor->get_uint64_addr() != addr ||
       local_tensor->get_bytes() != bytes || local_tensor->get_mem_type() != dev_type ||
       (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id);
@@ -1406,7 +1810,11 @@ future_read_result_t Communicator::read_tensor(
     if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
       local_tensor->set_device_id(dev_id);
     }
-    store_.register_tensor(local_tensor);
+    // Preserve an existing source-side key mapping when this read uses the same
+    // key but a different destination buffer in-process (self-read path).
+    if (!existing_tensor_conflicts) {
+      store_.register_tensor(local_tensor);
+    }
   }
 
   if (enable_rdma_ && net_dev != nullptr) {
@@ -1422,6 +1830,20 @@ future_read_result_t Communicator::read_tensor(
 
   auto req = std::make_shared<transport::ReadRequest>(
       key, dst_ip, dst_port, local_tensor, remote_offset, net_dev != nullptr ? net_dev->get_rail_id() : -1);
+  const std::string peer = std::format("{}:{}", dst_ip, dst_port);
+  auto target_progress = create_transfer_progress_state(
+      make_transfer_id(req->get_key(), peer), req->get_key(), peer, "target", enable_rdma_ ? "rdma" : "mtcp", bytes);
+  if (target_progress) {
+    auto last_done = std::make_shared<std::atomic<uint64_t>>(0);
+    req->set_progress_callbacks(
+        [state = target_progress, last_done](uint64_t done, uint64_t /*total*/) {
+          const uint64_t prev = last_done->exchange(done, std::memory_order_relaxed);
+          if (done > prev) {
+            add_transfer_progress_bytes(state, done - prev);
+          }
+        },
+        [state = std::move(target_progress)](const absl::Status& status) { finish_transfer_progress(state, status); });
+  }
   LOG(INFO) << "[read_tensor] Creating request: key=" << key << " dst=" << dst_ip << ":" << dst_port
             << " req_key=" << req->get_key() << " req_rail=" << req->get_rail_id();
   request_queue_.push(req);
@@ -1486,6 +1908,16 @@ absl::Status Communicator::register_tensor_ex(
   }
 
   store_.register_tensor(tensor);
+  {
+    absl::MutexLock lock(&tensor_read_mu_);
+    auto it = tensor_read_states_.find(tensor_key);
+    if (it != tensor_read_states_.end() && it->second != nullptr) {
+      it->second->retiring = false;
+      if (it->second->inflight == 0) {
+        tensor_read_states_.erase(it);
+      }
+    }
+  }
   return absl::OkStatus();
 }
 
@@ -1493,7 +1925,8 @@ absl::Status Communicator::handle_rdma_read_request(
     const channel_t& channel,
     const tcp_transport_t& control_transport,
     ProtoReadRequest& request,
-    const std::shared_ptr<PartitionTensor>& tensor) {
+    const std::shared_ptr<PartitionTensor>& tensor,
+    std::shared_ptr<void> read_guard) {
   if (!enable_rdma_) {
     return absl::FailedPreconditionError("RDMA transport disabled");
   }
@@ -1564,6 +1997,9 @@ absl::Status Communicator::handle_rdma_read_request(
   const uint64_t start_offset = request.offset;
   const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
   const std::string request_key = transport::get_request_key(tensor_key, start_offset);
+  const std::string peer = control_transport ? control_transport->get_remote_url() : std::string();
+  const std::string transfer_id = make_transfer_id(request_key, peer);
+  (void)register_source_transfer_progress(request_key, peer, "rdma", total_bytes, std::move(read_guard));
   FlowCreditLedger* ledger_ptr = &flow_state->ledger;
   MrCache* mr_cache_ptr = meta_mr_cache_.get();
 
@@ -1594,6 +2030,7 @@ absl::Status Communicator::handle_rdma_read_request(
   }
 
   if (!use_direct && !stager) {
+    finish_source_transfer_progress(transfer_id, absl::FailedPreconditionError("no staging backend available"));
     return absl::FailedPreconditionError("no staging backend available for tensor");
   }
   if (direct_requested && !use_direct && fallback_reason != DirectFallbackReason::kNone) {
@@ -1623,6 +2060,7 @@ absl::Status Communicator::handle_rdma_read_request(
   session->stager = stager;
   session->dev = dev;
   session->control_transport = control_transport;
+  session->transfer_id = transfer_id;
   session->zero_copy = use_direct;
   session->window = std::make_unique<StagingWindow>(
       flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
@@ -1631,6 +2069,7 @@ absl::Status Communicator::handle_rdma_read_request(
 
   auto status = resume_rdma_reads(channel);
   if (!status.ok()) {
+    finish_source_transfer_progress(transfer_id, status);
     return status;
   }
 
@@ -1677,6 +2116,9 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
       }
 
       flow_state->rdma_pending_reads.pop_front();
+      if (!session->transfer_id.empty()) {
+        this->finish_source_transfer_progress(session->transfer_id, result.status);
+      }
       if (first_error.ok()) {
         first_error = result.status;
       }
@@ -1703,13 +2145,15 @@ absl::Status Communicator::handle_mtcp_read_request(
     const channel_t& channel,
     const tcp_transport_t& control_transport,
     const ProtoReadRequest& request,
-    const std::shared_ptr<PartitionTensor>& tensor) {
+    const std::shared_ptr<PartitionTensor>& tensor,
+    std::shared_ptr<void> read_guard) {
   const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
   MtcpReadTask task;
   task.channel = channel;
   task.control_transport = control_transport;
   task.request = request;
   task.tensor = tensor;
+  task.read_guard = std::move(read_guard);
 
   auto flow_state = channel->flow_state();
   if (!flow_state) {
@@ -1747,6 +2191,26 @@ absl::Status Communicator::handle_mtcp_read_request(
   }
   transport->set_tcp_tos(config_.transport().tcp_tos());
 
+  const bool needs_gpu_staging =
+      task.tensor->needs_staging() || task.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
+  std::shared_ptr<MemoryStager> stager;
+  if (needs_gpu_staging) {
+    stager = get_gpu_mem_stager_for_id(task.tensor->get_device_id());
+    if (!stager) {
+      stager = gpu_memory_stager_;
+    }
+  } else {
+    stager = memory_stager_;
+  }
+  if (!stager) {
+    auto status = absl::FailedPreconditionError("no staging backend available for MTCP tensor");
+    fail_mtcp_read_task(task, status);
+    return status;
+  }
+  const uint64_t stage_chunk_bytes = stager->get_chunk_size() > 0 ? stager->get_chunk_size() : request.bytes;
+  task.stager = stager;
+  task.stage_chunk_bytes = stage_chunk_bytes;
+
   channel->mtcp_request_started();
   bool request_handed_off = false;
   absl::Cleanup mtcp_request_guard = [&]() {
@@ -1765,7 +2229,9 @@ absl::Status Communicator::handle_mtcp_read_request(
   misc::STRCPY(hdr->nic_name, "");
   hdr->num_segments = 1;
   hdr->window_seq = 0;
-  hdr->credit_granted = 0;
+  const uint64_t stage_chunk_hint = task.stage_chunk_bytes > 0 ? task.stage_chunk_bytes : request.bytes;
+  hdr->credit_granted = static_cast<uint32_t>(
+      std::min<uint64_t>(stage_chunk_hint, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
   hdr->request_offset = request.offset;
   hdr->more_segments = 0;
   absl::Status shutdown_status = absl::CancelledError("communicator shutting down");
@@ -1790,8 +2256,14 @@ absl::Status Communicator::handle_mtcp_read_request(
     return shutdown_status;
   }
 
+  const std::string request_key = communicator::transport::get_request_key(tensor_key, request.offset);
+  const std::string peer = control_transport ? control_transport->get_remote_url() : std::string();
+  const std::string transfer_id = make_transfer_id(request_key, peer);
+  (void)register_source_transfer_progress(request_key, peer, "mtcp", request.bytes, std::move(task.read_guard));
+
   if (mtcp_staging_queue_.push(task) != misc::SUCCESS) {
     auto status = absl::InternalError("failed to enqueue MTCP staging task");
+    finish_source_transfer_progress(transfer_id, status);
     fail_mtcp_read_task(task, status);
     return status;
   }
@@ -1801,12 +2273,29 @@ absl::Status Communicator::handle_mtcp_read_request(
 }
 
 absl::Status Communicator::unregister_tensor(const std::string& tensor_key) {
-  // Make unregister idempotent: return OK if the key does not exist.
+  const absl::Status drain_status = wait_for_tensor_reads_to_drain(tensor_key, kUnregisterTensorDrainTimeout);
+  if (!drain_status.ok()) {
+    LOG(ERROR) << "[unregister_tensor] timed out draining in-flight source reads for key=" << tensor_key
+               << " status=" << drain_status;
+    return drain_status;
+  }
+
   if (store_.get_tensor(tensor_key) == nullptr) {
     VLOG(1) << "[unregister_tensor] key not found, treating as idempotent OK: " << tensor_key;
-    return absl::OkStatus();
+  } else {
+    store_.unregister_tensor(tensor_key);
   }
-  store_.unregister_tensor(tensor_key);
+
+  {
+    absl::MutexLock lock(&tensor_read_mu_);
+    auto it = tensor_read_states_.find(tensor_key);
+    if (it != tensor_read_states_.end() && it->second != nullptr) {
+      it->second->retiring = false;
+      if (it->second->inflight == 0) {
+        tensor_read_states_.erase(it);
+      }
+    }
+  }
   return absl::OkStatus();
 }
 
@@ -2099,15 +2588,29 @@ misc::result_t Communicator::on_receive_request(
         payload->reason = TENSORCAST_READ_FAILED_OVERFLOW;
         COMM_CHECK(t->send(rsp));
       } else {
+        auto read_guard_or = acquire_tensor_read_lease(tensor_key);
+        if (!read_guard_or.ok()) {
+          auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+          auto* payload = rsp->get_payload<ProtoReadFailed>();
+          memcpy(payload->tensor_key, req->tensor_key, 512);
+          payload->offset = req->offset;
+          payload->reason = TENSORCAST_READ_FAILED_NO_TENSOR;
+          COMM_CHECK(t->send(rsp));
+          LOG(WARNING) << "Read request rejected for retiring tensor key=" << tensor_key
+                       << " peer=" << t->get_remote_url() << " status=" << read_guard_or.status();
+          break;
+        }
+
+        std::shared_ptr<void> read_guard = std::move(*read_guard_or);
         // Build response depending on transport type
         if (enable_rdma_ && req->transport_type == ENGINE_TRANSPORT_RDMA) {
-          auto status = handle_rdma_read_request(channel, t, *req, tensor);
+          auto status = handle_rdma_read_request(channel, t, *req, tensor, std::move(read_guard));
           if (!status.ok()) {
             LOG(WARNING) << "RDMA read request failed: " << status;
             return misc::FAILED;
           }
         } else {
-          auto status = handle_mtcp_read_request(channel, t, *req, tensor);
+          auto status = handle_mtcp_read_request(channel, t, *req, tensor, std::move(read_guard));
           if (!status.ok()) {
             LOG(WARNING) << "MTCP read request failed: " << status;
             return misc::FAILED;
@@ -2119,6 +2622,7 @@ misc::result_t Communicator::on_receive_request(
     case ENGINE_OP_RDMA_READ_DONE_EX: {
       auto* hdr = msg->get_payload<ProtoRdmaReadDoneExHeader>();
       const std::string tensor_key = reinterpret_cast<char*>(hdr->tensor_key);
+      const std::string peer = t ? t->get_remote_url() : std::string();
       auto flow_state = channel->flow_state();
       if (!flow_state) {
         LOG(WARNING) << "RDMA_READ_DONE_EX without channel flow state";
@@ -2137,6 +2641,15 @@ misc::result_t Communicator::on_receive_request(
           LOG(WARNING) << "RDMA_READ_DONE_EX for unknown lease: key=" << key.request_key
                        << " window=" << hdr->window_seq << " segment=" << i;
           continue;
+        }
+        const uint64_t bytes = lease_or->bytes();
+        const std::string transfer_id = make_transfer_id(key.request_key, peer);
+        auto progress = lookup_source_transfer_progress(transfer_id);
+        if (progress && bytes > 0) {
+          const uint64_t done = add_transfer_progress_bytes(progress, bytes);
+          if (done >= progress->total_bytes) {
+            finish_source_transfer_progress(transfer_id, absl::OkStatus());
+          }
         }
         lease_or->release();
       }
@@ -2353,9 +2866,11 @@ misc::result_t Communicator::on_receive_response(
       std::string tensor_key = reinterpret_cast<char*>(hdr->tensor_key);
       std::string peer_dev_name = reinterpret_cast<char*>(hdr->nic_name);
 
+      auto* seg0 = reinterpret_cast<ProtoReadResponseExSeg*>(
+          reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
       LOG(INFO) << "[on_receive_response] READ_RESPONSE_EX: key=" << tensor_key << " segs=" << hdr->num_segments
-                << " transport=" << (hdr->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
-
+                << " transport=" << (hdr->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA")
+                << " offset=" << seg0->offset << " bytes=" << seg0->bytes << " stage_hint=" << hdr->credit_granted;
       auto req_key = transport::get_request_key(tensor_key, hdr->request_offset);
       auto read_request = pending_requests_.get(req_key);
       if (read_request == nullptr) {
@@ -2637,6 +3152,9 @@ misc::result_t Communicator::on_receive_response(
           channel->set_transport(transport);
         }
         transport->set_tcp_tos(config_.transport().tcp_tos());
+        if (hdr->credit_granted > 0) {
+          read_request->set_mtcp_stage_unit_hint_bytes(static_cast<uint64_t>(hdr->credit_granted));
+        }
         CHECK_WARN(transport->recv(read_request), "failed to recv via mtcp");
         // Remove pending entry now; completion is tracked in request future
         pending_requests_.del(req_key);
@@ -2982,6 +3500,9 @@ void Communicator::do_channel_gc_loop() {
                        << " window=" << metadata.window_seq << " segment=" << metadata.segment_idx
                        << " bytes=" << metadata.bytes;
           lease_or->release();
+          finish_source_transfer_progress(
+              make_transfer_id(metadata.request_key, entry.first),
+              absl::DeadlineExceededError("source staged lease reaped before ACK"));
           resumed = true;
         }
         if (resumed) {

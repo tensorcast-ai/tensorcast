@@ -37,7 +37,11 @@ RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
       device_manager_(std::make_unique<components::DeviceManager>()),
       replica_registry_(std::make_unique<components::ReplicaRegistry>()),
       metrics_collector_(std::make_unique<components::MetricsCollector>()),
-      view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})),
+      view_hash_computer_(
+          std::make_shared<ViewHashComputer>(ViewHashConfig{
+              .default_leaf_chunk_bytes = artifact_chunk_bytes_,
+              .byte_mapping = options_.byte_mapping,
+          })),
       events_(std::make_unique<RuntimeContextEvents>()),
       ingestion_event_hub_(std::make_unique<ingestion::IngestionEventHub>(events_.get())) {
   if (options_.async_runtime) {
@@ -45,7 +49,10 @@ RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
     owns_async_runtime_ = false;
   } else {
     const size_t cpu_threads = static_cast<size_t>(std::max<int>(1, options_.num_thread));
-    const size_t blocking_threads = static_cast<size_t>(std::max<int>(2, options_.num_thread));
+    // Keep a small headroom for blocking fan-out (e.g., pump producers) even when
+    // num_thread is small; avoids starvation when a caller blocks waiting on
+    // work scheduled to blocking_executor().
+    const size_t blocking_threads = static_cast<size_t>(std::max<int>(4, options_.num_thread));
     async_runtime_ = std::make_shared<common::AsyncRuntime>(common::AsyncRuntime::Options{
         .cpu_threads = cpu_threads,
         .blocking_threads = blocking_threads,

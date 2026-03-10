@@ -11,11 +11,12 @@ from tensorcast.api.store.common import canonical_index_from_bytes
 
 
 def _canonical_index_bytes() -> bytes:
-    return b'{"w":[0,4,[1],[1],"float32",0]}'
+    return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
 
 
 class _StoreStub:
     closed = False
+    _runtime = None
 
 
 def test_plan_to_spec_is_deterministic() -> None:
@@ -57,7 +58,7 @@ def test_plan_view_selection_hash_populated() -> None:
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
     )
-    view = base.view(names=["w"])
+    view = base.subset(["w"])
     ctx = CallContext(request_id="req-2")
     plan = Plan(ctx)
     worker = Worker(
@@ -68,6 +69,6 @@ def test_plan_view_selection_hash_populated() -> None:
     plan.on_worker(worker).prefetch(view, device=0)
     spec = plan.to_spec()
     selection = spec.steps[0].action.prefetch.selection
-    assert selection.view_id
+    assert selection.view_id == ""
     assert selection.view_subset_hash
     assert list(selection.tensor_names) == ["w"]

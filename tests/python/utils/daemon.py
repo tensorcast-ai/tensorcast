@@ -21,6 +21,23 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2 as _pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2_grpc as _pb2_grpc
 
 
+def _detect_visible_gpu_count(*, fake_cuda: bool) -> int:
+    if fake_cuda:
+        return 1
+    with contextlib.suppress(Exception):
+        import torch
+
+        count = int(torch.cuda.device_count())
+        if count > 0:
+            return count
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible and visible not in {"-1", "none", "None"}:
+        parsed = [token.strip() for token in visible.split(",") if token.strip()]
+        if parsed:
+            return len(parsed)
+    return 1
+
+
 def _resolve_daemon_binary(repo_root: Path) -> Path:
     override = os.environ.get("TENSORCAST_DAEMON_BIN")
     if override:
@@ -63,16 +80,20 @@ def start_daemon_binary(
     config_mode: Literal["yaml", "inline_json"] = "yaml",
     enable_same_process_ipc_fallback: bool = True,
     *,
-    cpu_shared_memory_enabled: bool = False,
+    cpu_shared_memory_enabled: bool = True,
     local_handle_socket_path: str | None = None,
     stable_bytes: int | None = None,
     handle_lease_ttl: str = "10m",
     daemon_id: str | None = None,
+    global_store_addr: str | None = None,
+    p2p_host: str = "0.0.0.0",
+    p2p_port: int = 9090,
 ) -> subprocess.Popen:
     """Start the C++ daemon with a unified minimal config for tests.
 
     - Ensures libtorch libs are on LD_LIBRARY_PATH
     - Sets debug.cuda.enable_same_process_ipc_fallback according to flag
+    - Optionally wires Global Store endpoints when global_store_addr is set
     - Waits for readiness by issuing GetServerConfig
     """
     repo_root = Path(__file__).resolve().parents[3]
@@ -82,15 +103,19 @@ def start_daemon_binary(
     storage_path.mkdir(parents=True, exist_ok=True)
     env = build_daemon_process_env(os.environ)
     fake_cuda = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
+    gpu_count = _detect_visible_gpu_count(fake_cuda=fake_cuda)
     if not daemon_id:
         daemon_id = f"test-daemon-{os.getpid()}-{port}-{int(time.time() * 1000)}"
 
-    engine_pool_bytes = 268435456 if fake_cuda else 67108864
+    engine_slice_bytes = 8388608
+    streaming_buffer_chunks = 4
+    required_engine_pool = engine_slice_bytes * streaming_buffer_chunks * gpu_count
+    engine_pool_bytes = max(268435456 if fake_cuda else 67108864, required_engine_pool)
     comm_gpu_pool_bytes = 268435456 if fake_cuda else 67108864
     cfg: dict[str, object] = {
         "server": {
             "listen": {"host": host, "port": port},
-            "p2p_listen": {"host": host, "port": 9090},
+            "p2p_listen": {"host": p2p_host, "port": int(p2p_port)},
             "storage_path": str(storage_path),
             "num_threads": 2,
             "grpc": {"tcp_nodelay": True, "so_reuseport": False},
@@ -98,14 +123,14 @@ def start_daemon_binary(
         "daemon_id": daemon_id,
         "engine": {
             "artifact_chunk_bytes": 8388608,
-            "streaming_buffer_chunks": 4,
+            "streaming_buffer_chunks": streaming_buffer_chunks,
         },
         "pinned_memory": {
             "allocation_timeout": "30s",
             "classes": [
                 {
                     "name": "engine",
-                    "slice_bytes": 8388608,
+                    "slice_bytes": engine_slice_bytes,
                     "pool_bytes": engine_pool_bytes,
                 },
                 {
@@ -142,8 +167,9 @@ def start_daemon_binary(
     }
     if cpu_shared_memory_enabled:
         if not local_handle_socket_path:
-            raise ValueError(
-                "local_handle_socket_path is required when cpu_shared_memory_enabled is True"
+            local_handle_socket_path = str(
+                Path(tempfile.gettempdir())
+                / f"tc_lh_{os.getpid()}_{port}_{int(time.time() * 1000)}.sock"
             )
         if stable_bytes is None:
             stable_bytes = 64 * 1024 * 1024
@@ -158,6 +184,20 @@ def start_daemon_binary(
                 "ttl": str(handle_lease_ttl),
             }
         }
+
+    if global_store_addr:
+        gs_host, gs_port_s = global_store_addr.split(":", 1)
+        cfg["high_availability"] = {
+            "enabled": True,
+            "global_store_endpoints": [
+                {"host": gs_host, "port": int(gs_port_s)},
+            ],
+            "heartbeat_interval": "30s",
+            "periodic_sync_interval": "30s",
+            "max_retries": 3,
+            "registration_retry_delay": "500ms",
+        }
+        cfg["capability_directory"] = {"enabled": True}
 
     cfg_suffix = ".yaml" if config_mode == "yaml" else ".json"
     with tempfile.NamedTemporaryFile(

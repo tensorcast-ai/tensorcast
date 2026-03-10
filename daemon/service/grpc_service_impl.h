@@ -3,19 +3,22 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/key_mapping_controller.h"
+#include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
+#include "daemon/service/controllers/persistence_rpc_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/persistence_manager.h"
-#include "daemon/state/placement_lease_tokens.h"
 #include "daemon/state/session_lifecycle.h"
-#include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -38,11 +41,14 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     StatusController& status_controller;
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
-    PersistenceManager* persistence_manager{nullptr};
-    SessionsService& sessions_service;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager& lifecycle_manager;
-    PlacementLeaseTokens& placement_lease_tokens;
+    KeyMappingController& key_mapping_controller;
+    PersistenceRpcController& persistence_rpc_controller;
+    ReplicaSessionController& replica_session_controller;
+    LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
+    ArtifactSourceRegistry* source_registry{nullptr};
   };
 
   StoreDaemonServiceImpl(Deps deps, Options opts);
@@ -55,6 +61,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   grpc::Status MaterializeIntoTarget(
       grpc::ServerContext* ctx,
       const v2::MaterializeIntoTargetRequest* req,
+      v2::MaterializeIntoTargetResponse* resp) override;
+
+  grpc::Status MaterializeIntoMappedTarget(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeIntoMappedTargetRequest* req,
       v2::MaterializeIntoTargetResponse* resp) override;
 
   grpc::Status ConfirmReplica(
@@ -99,6 +110,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::DeregisterArtifactRequest* req,
       v2::DeregisterArtifactResponse* resp) override;
 
+  grpc::Status PublishTargetReplica(
+      grpc::ServerContext* ctx,
+      const v2::PublishTargetReplicaRequest* req,
+      v2::PublishTargetReplicaResponse* resp) override;
+
+  grpc::Status RetirePublishedReplica(
+      grpc::ServerContext* ctx,
+      const v2::RetirePublishedReplicaRequest* req,
+      v2::RetirePublishedReplicaResponse* resp) override;
+
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
       const v2::UnlockTransportChunksRequest* req,
@@ -137,15 +158,15 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::RevokeRegisteredArtifactRequest* req,
       v2::RevokeRegisteredArtifactResponse* resp) override;
 
-  grpc::Status MaterializeByKey(
+  grpc::Status ImportArtifactFromPath(
       grpc::ServerContext* ctx,
-      const v2::MaterializeByKeyRequest* req,
-      v2::MaterializeByKeyResponse* resp) override;
+      const v2::ImportArtifactFromPathRequest* req,
+      v2::ImportArtifactFromPathResponse* resp) override;
 
-  grpc::Status ResolveArtifactFromDisk(
+  grpc::Status ImportArtifactFromPathStream(
       grpc::ServerContext* ctx,
-      const v2::ResolveArtifactFromDiskRequest* req,
-      v2::ResolveArtifactFromDiskResponse* resp) override;
+      const v2::ImportArtifactFromPathRequest* req,
+      grpc::ServerWriter<v2::ImportArtifactFromPathStreamEvent>* writer) override;
 
   grpc::Status QueryReplicaStatus(
       grpc::ServerContext* ctx,
@@ -177,6 +198,21 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::ReleasePlacementLeaseRequest* req,
       v2::ReleasePlacementLeaseResponse* resp) override;
 
+  grpc::Status AcquireRetentionHandle(
+      grpc::ServerContext* ctx,
+      const v2::AcquireRetentionHandleRequest* req,
+      v2::AcquireRetentionHandleResponse* resp) override;
+
+  grpc::Status RenewRetentionHandle(
+      grpc::ServerContext* ctx,
+      const v2::RenewRetentionHandleRequest* req,
+      v2::RenewRetentionHandleResponse* resp) override;
+
+  grpc::Status ReleaseRetentionHandle(
+      grpc::ServerContext* ctx,
+      const v2::ReleaseRetentionHandleRequest* req,
+      v2::ReleaseRetentionHandleResponse* resp) override;
+
   grpc::Status PublishReplicaKey(
       grpc::ServerContext* ctx,
       const v2::PublishReplicaKeyRequest* req,
@@ -186,6 +222,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::ResolveKeyMappingRequest* req,
       v2::ResolveKeyMappingResponse* resp) override;
+  grpc::Status SwapKeyMapping(
+      grpc::ServerContext* ctx,
+      const v2::SwapKeyMappingRequest* req,
+      v2::SwapKeyMappingResponse* resp) override;
 
   grpc::Status GetArtifactIndexById(
       grpc::ServerContext* ctx,
@@ -196,6 +236,21 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::SealAssemblyRequest* req,
       v2::SealAssemblyResponse* resp) override;
+
+  grpc::Status StartSealAssembly(
+      grpc::ServerContext* ctx,
+      const v2::StartSealAssemblyRequest* req,
+      v2::StartSealAssemblyResponse* resp) override;
+
+  grpc::Status GetOperation(
+      grpc::ServerContext* ctx,
+      const tensorcast::operation::v1::GetOperationRequest* req,
+      tensorcast::operation::v1::GetOperationResponse* resp) override;
+
+  grpc::Status WaitOperation(
+      grpc::ServerContext* ctx,
+      const v2::WaitOperationRequest* req,
+      v2::WaitOperationResponse* resp) override;
 
   grpc::Status StartPersistence(
       grpc::ServerContext* ctx,
@@ -230,11 +285,14 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   StatusController* status_controller_;
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
-  PersistenceManager* persistence_manager_;
-  SessionsService* sessions_service_;
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
   SessionLifecycleManager* lifecycle_manager_;
-  PlacementLeaseTokens* placement_lease_tokens_;
+  KeyMappingController* key_mapping_controller_;
+  PersistenceRpcController* persistence_rpc_controller_;
+  ReplicaSessionController* replica_session_controller_;
+  LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
+  ArtifactSourceRegistry* source_registry_{nullptr};
   Options opts_;
 };
 

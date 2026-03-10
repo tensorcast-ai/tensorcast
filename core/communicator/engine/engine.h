@@ -4,11 +4,14 @@
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 
 #include <atomic>
+#include <memory>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -192,13 +195,15 @@ class Communicator {
       const channel_t& channel,
       const transport::tcp_transport_t& control_transport,
       ProtoReadRequest& request,
-      const std::shared_ptr<transport::PartitionTensor>& tensor);
+      const std::shared_ptr<transport::PartitionTensor>& tensor,
+      std::shared_ptr<void> read_guard);
   absl::Status handle_mtcp_read_request(
       const channel_t& channel,
       const transport::tcp_transport_t& control_transport,
       const ProtoReadRequest& request,
-      const std::shared_ptr<transport::PartitionTensor>& tensor);
-  static absl::Status resume_rdma_reads(const channel_t& channel);
+      const std::shared_ptr<transport::PartitionTensor>& tensor,
+      std::shared_ptr<void> read_guard);
+  absl::Status resume_rdma_reads(const channel_t& channel);
   void schedule_handshake_retry(
       const channel_t& channel,
       const std::string& local_dev_name,
@@ -215,16 +220,51 @@ class Communicator {
       const std::string& local_dev_name,
       const std::string& peer_dev_name);
 
+  struct TransferProgressState;
+  static std::shared_ptr<TransferProgressState> create_transfer_progress_state(
+      std::string transfer_id,
+      std::string request_key,
+      std::string peer,
+      std::string side,
+      std::string transport,
+      uint64_t total_bytes);
+  static uint64_t add_transfer_progress_bytes(const std::shared_ptr<TransferProgressState>& state, uint64_t bytes);
+  static void finish_transfer_progress(const std::shared_ptr<TransferProgressState>& state, const absl::Status& status);
+  static std::string make_transfer_id(std::string_view request_key, std::string_view peer);
+  std::shared_ptr<TransferProgressState> register_source_transfer_progress(
+      std::string request_key,
+      std::string peer,
+      std::string transport,
+      uint64_t total_bytes,
+      std::shared_ptr<void> read_guard = nullptr);
+  std::shared_ptr<TransferProgressState> lookup_source_transfer_progress(const std::string& transfer_id) const;
+  void finish_source_transfer_progress(const std::string& transfer_id, const absl::Status& status);
+
+  struct TensorReadLease;
+
+  struct TensorReadState {
+    int inflight = 0;
+    bool retiring = false;
+    absl::CondVar drained_cv;
+  };
+
+  absl::StatusOr<std::shared_ptr<void>> acquire_tensor_read_lease(const std::string& tensor_key);
+  void release_tensor_read_lease(const std::string& tensor_key);
+  absl::Status wait_for_tensor_reads_to_drain(const std::string& tensor_key, absl::Duration timeout);
+
   struct MtcpReadTask {
     channel_t channel;
     transport::tcp_transport_t control_transport;
     ProtoReadRequest request;
     std::shared_ptr<transport::PartitionTensor> tensor;
+    std::shared_ptr<MemoryStager> stager;
+    std::shared_ptr<void> read_guard;
+    uint64_t stage_chunk_bytes = 0;
   };
 
   void mtcp_staging_loop();
   void process_mtcp_read_task(MtcpReadTask task);
-  static void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
+  void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
 
   struct GpuChannelLease;
   absl::StatusOr<std::shared_ptr<void>> acquire_gpu_channel_slot();
@@ -289,6 +329,15 @@ class Communicator {
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;
+  mutable absl::Mutex source_transfer_progress_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<TransferProgressState>> source_transfer_progress_
+      ABSL_GUARDED_BY(source_transfer_progress_mu_);
+  absl::flat_hash_map<std::string, std::shared_ptr<void>> source_transfer_read_guards_
+      ABSL_GUARDED_BY(source_transfer_progress_mu_);
+
+  mutable absl::Mutex tensor_read_mu_;
+  absl::flat_hash_map<std::string, std::unique_ptr<TensorReadState>> tensor_read_states_
+      ABSL_GUARDED_BY(tensor_read_mu_);
 
   // --- Simple NUMA mapping (Phase 3) ---
   // Mapping from NIC name -> CPU MemoryStager (pool per NUMA node)

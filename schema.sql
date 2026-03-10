@@ -15,6 +15,13 @@
 
 -- ===================== Global Store =====================
 
+-- Cluster info (singleton row)
+CREATE TABLE IF NOT EXISTS cluster_info (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    cluster_id TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Workers table
 CREATE TABLE IF NOT EXISTS workers (
     worker_id TEXT PRIMARY KEY,
@@ -25,27 +32,41 @@ CREATE TABLE IF NOT EXISTS workers (
     grpc_port INTEGER NOT NULL,
     p2p_port INTEGER NOT NULL,
     mem_pool_total_size BIGINT NOT NULL,
-    mem_pool_available_size BIGINT NOT NULL,
-    accepting_new_requests BOOLEAN NOT NULL DEFAULT TRUE,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE,
-    state_version BIGINT NOT NULL DEFAULT 1,
-    state_checksum TEXT NOT NULL DEFAULT '',
-    state_sync_epoch BIGINT NOT NULL DEFAULT 0,
-    state_sync_request_id BIGINT NOT NULL DEFAULT 0,
 
     -- Prevent duplicate registration for the same address:port
     UNIQUE(node_address, grpc_port)
 );
 
+CREATE TABLE IF NOT EXISTS worker_liveness (
+    worker_id TEXT PRIMARY KEY,
+    last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    mem_pool_available_size BIGINT NOT NULL,
+    accepting_new_requests BOOLEAN NOT NULL DEFAULT TRUE,
+    capability_flags BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS worker_reconcile_state (
+    worker_id TEXT PRIMARY KEY,
+    generation BIGINT NOT NULL DEFAULT 1,
+    request_seq BIGINT NOT NULL DEFAULT 0,
+    state_version BIGINT NOT NULL DEFAULT 1,
+    state_checksum TEXT NOT NULL DEFAULT '',
+    last_reconcile_result TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Performance indexes
-CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat);
-CREATE INDEX IF NOT EXISTS idx_workers_accepting_requests ON workers (accepting_new_requests, last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_node_id ON workers (node_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_daemon_id_unique ON workers (daemon_id);
 CREATE INDEX IF NOT EXISTS idx_workers_registered_at ON workers (registered_at);
 CREATE INDEX IF NOT EXISTS idx_workers_inactive_at ON workers (inactive_at);
+CREATE INDEX IF NOT EXISTS idx_worker_liveness_last_heartbeat ON worker_liveness (last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_worker_liveness_accepting ON worker_liveness (accepting_new_requests, last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_worker_reconcile_state_generation_seq
+    ON worker_reconcile_state (worker_id, generation, request_seq);
 
 -- Engine instance registry (node-local engine processes)
 CREATE TABLE IF NOT EXISTS instances (
@@ -55,6 +76,7 @@ CREATE TABLE IF NOT EXISTS instances (
     engine TEXT NOT NULL,
     signals_endpoint TEXT,
     labels_json TEXT NOT NULL DEFAULT '{}',
+    capability_flags BIGINT NOT NULL DEFAULT 0,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE
@@ -162,6 +184,8 @@ CREATE TABLE IF NOT EXISTS artifact_replicas (
     is_available BOOLEAN DEFAULT TRUE,
     remote_memory_keys TEXT[] NULL,
     buffer_sizes BIGINT[] NULL,
+    export_state TEXT NOT NULL DEFAULT 'PRESENCE_ONLY',
+    export_generation BIGINT NOT NULL DEFAULT 0,
     verification_json TEXT NULL,
     -- relationship to workers
     worker_id TEXT,
@@ -210,15 +234,41 @@ CREATE TABLE IF NOT EXISTS artifact_indices (
 CREATE INDEX IF NOT EXISTS idx_artifact_indices_created_at ON artifact_indices(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_indices_size ON artifact_indices(size_bytes);
 
+-- Control-plane idempotency records (RegisterReplica / UnregisterWorker)
+CREATE TABLE IF NOT EXISTS control_plane_idempotency (
+    client_request_id TEXT PRIMARY KEY,
+    operation_kind TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    response_status TEXT NOT NULL,
+    response_proto BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_plane_idempotency_created_at
+    ON control_plane_idempotency(created_at);
+
 -- In-flight artifact transports
 CREATE TABLE IF NOT EXISTS artifact_transports (
     transport_id UUID PRIMARY KEY,
     replica_id UUID NOT NULL,
     artifact_id TEXT NOT NULL,
+    requested_view_id TEXT NULL,
     disk_path TEXT NULL,
     source_node_id VARCHAR NOT NULL,
     source_address VARCHAR NOT NULL,
     source_port INTEGER NOT NULL,
+    replica_memory_size_bytes BIGINT NULL,
+    request_id TEXT NULL,
+    request_fingerprint TEXT NULL,
+    requester_worker_id TEXT NULL,
+    group_id TEXT NULL,
+    group_kind TEXT NULL,
+    group_total_parts INTEGER NULL,
+    group_part_id TEXT NULL,
+    group_priority INTEGER NULL,
+    group_epoch BIGINT NULL,
+    completion_outcome TEXT NULL,
+    completion_detail TEXT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
     status VARCHAR NOT NULL DEFAULT 'in_progress'
@@ -229,6 +279,41 @@ CREATE INDEX IF NOT EXISTS idx_artifact_transports_source_node_id ON artifact_tr
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_status ON artifact_transports(status);
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_created_at ON artifact_transports(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_completed_at ON artifact_transports(completed_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_transports_request_id_unique ON artifact_transports(request_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_transports_group_status ON artifact_transports(group_kind, group_id, group_epoch, status);
+CREATE INDEX IF NOT EXISTS idx_artifact_transports_requester_status ON artifact_transports(requester_worker_id, status);
+
+-- Pending request queue for group-aware transport scheduling.
+CREATE TABLE IF NOT EXISTS pending_transport_requests (
+    request_id TEXT PRIMARY KEY,
+    request_fingerprint TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    requested_view_id TEXT NULL,
+    source_node_id TEXT NOT NULL,
+    source_address TEXT NOT NULL,
+    source_port INTEGER NOT NULL,
+    requester_worker_id TEXT NULL,
+    group_id TEXT NULL,
+    group_kind TEXT NULL,
+    group_total_parts INTEGER NULL,
+    group_part_id TEXT NULL,
+    group_priority INTEGER NULL,
+    group_epoch BIGINT NULL,
+    state TEXT CHECK (state IN ('enqueued', 'dispatched', 'cancelled', 'expired')) NOT NULL DEFAULT 'enqueued',
+    deadline_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    dispatched_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_transport_state_deadline
+    ON pending_transport_requests(state, deadline_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_transport_group_state
+    ON pending_transport_requests(group_kind, group_id, group_epoch, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_transport_requester_state
+    ON pending_transport_requests(requester_worker_id, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_transport_artifact_view_state
+    ON pending_transport_requests(artifact_id, requested_view_id, state);
 
 -- Virtual Address Space (VS) chunk directory
 CREATE TABLE IF NOT EXISTS chunk_directory (
@@ -310,16 +395,33 @@ CREATE TABLE IF NOT EXISTS key_mappings (
     artifact_id TEXT NOT NULL,
     replica_uuid TEXT NULL,
     daemon_address TEXT NULL,
-    disk_path TEXT NULL,
     ttl_seconds BIGINT NULL,
+    generation BIGINT NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'IMMUTABLE',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);
 
--- Variant views anchored to canonical artifacts
-CREATE TABLE IF NOT EXISTS variants (
+-- Disk locations (durable shared-disk persistence locations)
+CREATE TABLE IF NOT EXISTS artifact_disk_locations (
+    artifact_id TEXT NOT NULL,
+    cluster_id TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    kind TEXT CHECK (kind IN ('MANAGED','IMPORTED')) NOT NULL DEFAULT 'MANAGED',
+    -- Soft delete marker for managed disk GC. Deleted entries are ignored for disk fallback.
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    deleted_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id, cluster_id, relative_path)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_disk_locations_artifact ON artifact_disk_locations(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_disk_locations_cluster ON artifact_disk_locations(cluster_id);
+
+-- View metadata anchored to artifacts (canonical or assemblies)
+CREATE TABLE IF NOT EXISTS views (
     artifact_id TEXT NOT NULL,
     view_id TEXT NOT NULL,
     view_spec_json TEXT NOT NULL,
@@ -332,12 +434,12 @@ CREATE TABLE IF NOT EXISTS variants (
     PRIMARY KEY (artifact_id, view_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_variants_artifact ON variants(artifact_id);
-CREATE INDEX IF NOT EXISTS idx_variants_verified_at ON variants(artifact_id, verified_at);
-CREATE INDEX IF NOT EXISTS idx_variants_view_id ON variants(view_id);
+CREATE INDEX IF NOT EXISTS idx_views_artifact ON views(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_views_verified_at ON views(artifact_id, verified_at);
+CREATE INDEX IF NOT EXISTS idx_views_view_id ON views(view_id);
 
--- Canonical coverage ranges per variant view (piece coverage manifest)
-CREATE TABLE IF NOT EXISTS variant_coverage_ranges (
+-- Canonical coverage ranges per view (piece coverage manifest)
+CREATE TABLE IF NOT EXISTS view_coverage_ranges (
     artifact_id TEXT NOT NULL,
     view_id TEXT NOT NULL,
     range_offset BIGINT NOT NULL,
@@ -345,8 +447,102 @@ CREATE TABLE IF NOT EXISTS variant_coverage_ranges (
     PRIMARY KEY (artifact_id, view_id, range_offset, range_length)
 );
 
-CREATE INDEX IF NOT EXISTS idx_variant_coverage_artifact ON variant_coverage_ranges(artifact_id);
-CREATE INDEX IF NOT EXISTS idx_variant_coverage_view ON variant_coverage_ranges(artifact_id, view_id);
+CREATE INDEX IF NOT EXISTS idx_view_coverage_artifact ON view_coverage_ranges(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_view_coverage_view ON view_coverage_ranges(artifact_id, view_id);
+
+-- Immutable, content-addressed layout specs (v2)
+CREATE TABLE IF NOT EXISTS layout_specs (
+    layout_id TEXT PRIMARY KEY,            -- "mh:..." over deterministic proto
+    index_multihash TEXT NOT NULL,
+    layout_proto BLOB NOT NULL,
+    layout_json TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_layout_specs_index_mh ON layout_specs(index_multihash);
+
+-- Unsealed assembly -> layout binding (mutable pointer, versioned)
+CREATE TABLE IF NOT EXISTS assembly_layout_bindings (
+    assembly_id TEXT PRIMARY KEY,
+    layout_id TEXT NOT NULL,
+    binding_version BIGINT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_layout_bindings_layout ON assembly_layout_bindings(layout_id);
+
+-- Sealed artifact -> layout attachments (immutable, idempotent)
+CREATE TABLE IF NOT EXISTS artifact_layout_attachments (
+    mi2_id TEXT NOT NULL,
+    layout_id TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (mi2_id, layout_id)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_layout_attachments_mi2 ON artifact_layout_attachments(mi2_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_layout_attachments_layout ON artifact_layout_attachments(layout_id);
+
+-- Per-assembly operational runtime policy (mutable; not content-addressed)
+CREATE TABLE IF NOT EXISTS assembly_runtime_policies (
+    assembly_id TEXT PRIMARY KEY,
+    policy_version BIGINT NOT NULL,
+    policy_json TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Unified operations for long-tail workflows (v2)
+CREATE TABLE IF NOT EXISTS operations (
+    operation_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    target_artifact_id TEXT NOT NULL,
+    state TEXT CHECK (state IN ('pending','running','success','failed','cancelled','degraded')) NOT NULL,
+    status_proto BLOB NOT NULL,
+    snapshot_proto BLOB NULL,
+    lease_owner TEXT NULL,
+    lease_token TEXT NULL,
+    lease_generation BIGINT NOT NULL DEFAULT 0,
+    lease_expires_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_operations_target ON operations(kind, target_artifact_id);
+CREATE INDEX IF NOT EXISTS idx_operations_state ON operations(state);
+
+-- Unsealed proof commitments (assembly-scoped; replicated overlaps)
+CREATE TABLE IF NOT EXISTS assembly_proof_commitments (
+    assembly_id TEXT NOT NULL,
+    tensor_name TEXT NOT NULL,
+    proof_schema_version TEXT NOT NULL,
+    proof_chunk_idx BIGINT NOT NULL,
+    digest BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (assembly_id, tensor_name, proof_schema_version, proof_chunk_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_proof_commitments_tensor ON assembly_proof_commitments(assembly_id, tensor_name);
+
+-- Sealed proof commitments (MI2-scoped; long-lived truth)
+CREATE TABLE IF NOT EXISTS tensor_proof_commitments (
+    mi2_id TEXT NOT NULL,
+    tensor_name TEXT NOT NULL,
+    proof_schema_version TEXT NOT NULL,
+    proof_chunk_idx BIGINT NOT NULL,
+    digest BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (mi2_id, tensor_name, proof_schema_version, proof_chunk_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_tensor_proof_commitments_tensor ON tensor_proof_commitments(mi2_id, tensor_name);
+
+-- Per-piece proof digests (audit/debug + conflict attribution)
+CREATE TABLE IF NOT EXISTS piece_proof_digests (
+    assembly_id TEXT NOT NULL,
+    view_id TEXT NOT NULL,
+    tensor_name TEXT NOT NULL,
+    proof_schema_version TEXT NOT NULL,
+    proof_chunk_idx BIGINT NOT NULL,
+    digest BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (assembly_id, view_id, tensor_name, proof_schema_version, proof_chunk_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_piece_proof_digests_tensor ON piece_proof_digests(assembly_id, view_id, tensor_name);
 
 -- Assembly → sealed bindings (cgid -> mi2)
 CREATE TABLE IF NOT EXISTS artifact_bindings (
@@ -357,7 +553,7 @@ CREATE TABLE IF NOT EXISTS artifact_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_bindings_to ON artifact_bindings(to_artifact_id);
 
--- Leaf digests anchored to canonical or variant ByteSpaces
+-- Leaf digests anchored to canonical or view ByteSpaces
 CREATE TABLE IF NOT EXISTS leaves (
     artifact_id TEXT NOT NULL,
     space_kind CHAR(1) NOT NULL,

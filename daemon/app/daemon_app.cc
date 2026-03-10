@@ -5,7 +5,11 @@
 #include <filesystem>
 #include <utility>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "daemon/ha/worker_lifecycle_ports.h"
@@ -26,6 +30,86 @@ absl::StatusOr<std::filesystem::path> normalize_storage_root(const std::filesyst
   return canonical;
 }
 
+absl::Status fsync_directory(const std::filesystem::path& dir_path) {
+  int dir_fd = ::open(dir_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open directory failed: ", dir_path.string()));
+  }
+  if (::fsync(dir_fd) != 0) {
+    const int err = errno;
+    ::close(dir_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync directory failed: ", dir_path.string()));
+  }
+  if (::close(dir_fd) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close directory failed: ", dir_path.string()));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ensure_import_root_ready(const std::filesystem::path& import_root) {
+  std::error_code ec;
+  std::filesystem::create_directories(import_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("create import root failed: ", import_root.string()));
+  }
+  std::filesystem::permissions(
+      import_root, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("set import root permissions failed: ", import_root.string()));
+  }
+
+  const auto probe_tmp = import_root / ".import_root_probe.tmp";
+  const auto probe_path = import_root / ".import_root_probe";
+  constexpr std::string_view kProbePayload = "tensorcast-import-root-probe";
+  int probe_fd = ::open(probe_tmp.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+  if (probe_fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open probe file failed: ", probe_tmp.string()));
+  }
+  if (::write(probe_fd, kProbePayload.data(), kProbePayload.size()) < 0) {
+    const int err = errno;
+    ::close(probe_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("write probe file failed: ", probe_tmp.string()));
+  }
+  if (::fsync(probe_fd) != 0) {
+    const int err = errno;
+    ::close(probe_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync probe file failed: ", probe_tmp.string()));
+  }
+  if (::close(probe_fd) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close probe file failed: ", probe_tmp.string()));
+  }
+  if (::rename(probe_tmp.c_str(), probe_path.c_str()) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("rename probe file failed: ", probe_path.string()));
+  }
+  auto dir_sync_status = fsync_directory(import_root);
+  if (!dir_sync_status.ok()) {
+    return dir_sync_status;
+  }
+  std::filesystem::remove(probe_path, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("remove probe file failed: ", probe_path.string()));
+  }
+  dir_sync_status = fsync_directory(import_root);
+  if (!dir_sync_status.ok()) {
+    return dir_sync_status;
+  }
+
+  const auto db_path = import_root / "artifact_source_registry.db";
+  int db_fd = ::open(db_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (db_fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open registry db file failed: ", db_path.string()));
+  }
+  if (::fsync(db_fd) != 0) {
+    const int err = errno;
+    ::close(db_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync registry db file failed: ", db_path.string()));
+  }
+  if (::close(db_fd) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close registry db file failed: ", db_path.string()));
+  }
+  return fsync_directory(import_root);
+}
+
 } // namespace
 
 DaemonApp::DaemonApp(Options options) : options_(std::move(options)) {}
@@ -40,10 +124,6 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (options.grpc.listen_addr.empty()) {
     return absl::InvalidArgumentError("DaemonApp requires listen_addr");
   }
-  if (options.daemon_options.cpu_shared_memory_enabled && options.daemon_options.local_handle_socket_path.empty()) {
-    return absl::InvalidArgumentError(
-        "cpu_shared_memory_enabled requires lifecycle.handle_leases.local_handle_socket_path to be set");
-  }
   if (options.daemon_options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.daemon_options.handle_lease_ttl;
     if (ttl_ms.count() < 0) {
@@ -55,6 +135,25 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
     return storage_root_or.status();
   }
   options.daemon_options.storage_path = std::move(*storage_root_or);
+  if (options.daemon_options.import_root.empty()) {
+    options.daemon_options.import_root = options.daemon_options.storage_path / ".tensorcast_import";
+  }
+  auto import_root_or = normalize_storage_root(options.daemon_options.import_root);
+  if (!import_root_or.ok()) {
+    return import_root_or.status();
+  }
+  options.daemon_options.import_root = std::move(*import_root_or);
+  auto import_root_status = ensure_import_root_ready(options.daemon_options.import_root);
+  if (!import_root_status.ok()) {
+    return absl::FailedPreconditionError(absl::StrCat("IMPORT_ROOT_UNAVAILABLE: ", import_root_status.message()));
+  }
+  if (options.daemon_options.cpu_shared_memory_enabled && options.daemon_options.local_handle_socket_path.empty()) {
+    options.daemon_options.local_handle_socket_path =
+        (options.daemon_options.import_root / "local_handle.sock").string();
+    LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path="
+              << options.daemon_options.local_handle_socket_path;
+  }
+  LOG(INFO) << "Import metadata root initialized at " << options.daemon_options.import_root.string();
 
   auto app = std::unique_ptr<DaemonApp>(new DaemonApp(std::move(options)));
   app->kernel_ =
@@ -63,21 +162,31 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (app->options_.global_store_client && app->kernel_->persistence_manager()) {
     app->kernel_->persistence_manager()->set_global_store_client(app->options_.global_store_client.get());
   }
+  if (app->options_.global_store_client) {
+    app->kernel_->lip_manager().set_global_store_client(app->options_.global_store_client);
+  }
 
   MaterializationController::Dep mdep{
       .engine = app->kernel_->engine(),
       .refs = app->kernel_->ref_tracker(),
       .sessions = app->kernel_->sessions_service(),
       .lip = app->kernel_->lip_bridge(),
+      .lip_manager = app->kernel_->lip_manager(),
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
+      .disk_imports = app->kernel_->source_registry(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .async_runtime = app->kernel_->async_runtime(),
+      .identity = app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
+      .max_concurrency = app->options_.daemon_options.max_concurrency,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .handle_leases = app->kernel_->handle_leases(),
+      .capability_tokens = app->kernel_->capability_tokens(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
       .external_target_verification_enabled = app->options_.daemon_options.external_target_verification_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
+      .post_seal_policy = app->options_.daemon_options.post_seal_policy,
   };
   app->materialization_controller_ = std::make_unique<MaterializationController>(mdep);
 
@@ -86,9 +195,12 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .reg = app->kernel_->registration_manager(),
       .lip = app->kernel_->lip_manager(),
       .refs = app->kernel_->ref_tracker(),
+      .identity = &app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
+      .handle_leases = app->kernel_->handle_leases(),
       .regions = app->kernel_->region_registry(),
+      .max_concurrency = app->options_.daemon_options.max_concurrency,
   };
   app->registration_controller_ = std::make_unique<RegistrationController>(rdep);
 
@@ -109,6 +221,35 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
+  KeyMappingController::Dep kmdep{
+      .engine = app->kernel_->engine(),
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->key_mapping_controller_ = std::make_unique<KeyMappingController>(kmdep);
+
+  PersistenceRpcController::Dep prdep{
+      .persistence_manager = app->kernel_->persistence_manager(),
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->persistence_rpc_controller_ = std::make_unique<PersistenceRpcController>(prdep);
+
+  ReplicaSessionController::Dep rsdep{
+      .sessions = app->kernel_->sessions_service(),
+      .lifecycle = app->kernel_->lifecycle_manager(),
+  };
+  app->replica_session_controller_ = std::make_unique<ReplicaSessionController>(rsdep);
+
+  LeaseController::Dep ldep{
+      .engine = app->kernel_->engine(),
+      .lifecycle = app->kernel_->lifecycle_manager(),
+      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
+      .capability_tokens = app->kernel_->capability_tokens(),
+      .retention_registry = app->kernel_->retention_registry(),
+      .daemon_id = app->options_.daemon_options.daemon_id,
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->lease_controller_ = std::make_unique<LeaseController>(std::move(ldep));
+
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = app->kernel_->engine(),
       .materialization_controller = *app->materialization_controller_,
@@ -117,11 +258,14 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .status_controller = *app->status_controller_,
       .region_registry = app->kernel_->region_registry(),
       .lip_manager = app->kernel_->lip_manager(),
-      .persistence_manager = app->kernel_->persistence_manager(),
-      .sessions_service = app->kernel_->sessions_service(),
+      .global_store_client = app->options_.global_store_client,
       .lifecycle_manager = app->kernel_->lifecycle_manager(),
-      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
+      .key_mapping_controller = *app->key_mapping_controller_,
+      .persistence_rpc_controller = *app->persistence_rpc_controller_,
+      .replica_session_controller = *app->replica_session_controller_,
+      .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .source_registry = &app->kernel_->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = app->options_.daemon_options.allow_high_card_attrs,
@@ -229,6 +373,12 @@ absl::Status DaemonApp::build_grpc_server_() {
 
   if (options_.grpc.max_concurrent_streams > 0) {
     builder.AddChannelArgument("grpc.max_concurrent_streams", options_.grpc.max_concurrent_streams);
+  }
+  if (options_.grpc.max_send_message_length > 0) {
+    builder.AddChannelArgument("grpc.max_send_message_length", options_.grpc.max_send_message_length);
+  }
+  if (options_.grpc.max_receive_message_length > 0) {
+    builder.AddChannelArgument("grpc.max_receive_message_length", options_.grpc.max_receive_message_length);
   }
   if (options_.grpc.keepalive_time_ms.has_value()) {
     builder.AddChannelArgument("grpc.keepalive_time_ms", *options_.grpc.keepalive_time_ms);

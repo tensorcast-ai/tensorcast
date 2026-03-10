@@ -3,12 +3,17 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <optional>
+#include <thread>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "catch2/catch_test_macros.hpp"
+#include "core/common/memory/host_memory.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
@@ -16,6 +21,7 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/memory_tier_budget.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 #include "core/store/runtime/context/runtime_context.h"
@@ -29,7 +35,9 @@
 
 using tensorcast::DeviceType;
 using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::set_host_memory_available_override_for_testing;
 using tensorcast::store::DeviceKey;
+using tensorcast::store::MemoryTierBudget;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::loading::InlineBufferSource;
 using tensorcast::store::loading::ReplicaKey;
@@ -42,6 +50,7 @@ using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::metadata::ArtifactRegistration;
 using tensorcast::store::runtime::metadata::MetadataGateway;
 using tensorcast::store::runtime::metadata::RegistrationBackend;
+using tensorcast::store::runtime::metadata::RegistrationPlan;
 using tensorcast::store::runtime::metadata::RegistrationPublication;
 using tensorcast::store::runtime::metadata::RegistrationPublisher;
 using tensorcast::store::runtime::metadata::RegistrationResources;
@@ -55,13 +64,13 @@ class RecordingPublisher final : public RegistrationPublisher {
     return absl::OkStatus();
   }
 
-  absl::Status update_variant_view(const tensorcast::store::components::VariantViewUpdate&) override {
-    ++variant_updates;
+  absl::Status update_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
+    ++view_updates;
     return absl::OkStatus();
   }
 
   std::vector<RegistrationPublication> publications;
-  int variant_updates{0};
+  int view_updates{0};
 };
 
 struct RegistrationBackendHarness {
@@ -176,6 +185,29 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
   int register_calls{0};
   std::vector<std::string> registered_artifacts;
 
+  void set_register_blocking(bool enabled) {
+    absl::MutexLock lock(&register_mu_);
+    block_register_ = enabled;
+    register_started_ = false;
+    allow_register_continue_ = !enabled;
+    if (!enabled) {
+      register_cv_.SignalAll();
+    }
+  }
+
+  void wait_for_register_started() {
+    absl::MutexLock lock(&register_mu_);
+    while (!register_started_) {
+      register_cv_.Wait(&register_mu_);
+    }
+  }
+
+  void unblock_register() {
+    absl::MutexLock lock(&register_mu_);
+    allow_register_continue_ = true;
+    register_cv_.SignalAll();
+  }
+
   absl::Status initialize() override {
     return absl::OkStatus();
   }
@@ -189,7 +221,8 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       uint64_t,
       bool,
       std::string_view,
-      std::string_view) override {
+      std::string_view,
+      uint64_t) override {
     return absl::UnimplementedError("register_worker not used in tests");
   }
 
@@ -203,7 +236,8 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       int64_t,
       tensorcast::global_store::v1::ConnectionStatus,
       const tensorcast::store::components::RpcOptions&,
-      std::string_view) override {
+      std::string_view,
+      uint64_t) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not used in tests");
   }
 
@@ -219,6 +253,16 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       uint64_t,
       uint32_t,
       std::optional<std::string_view>) override {
+    {
+      absl::MutexLock lock(&register_mu_);
+      if (block_register_) {
+        register_started_ = true;
+        register_cv_.SignalAll();
+        while (!allow_register_continue_) {
+          register_cv_.Wait(&register_mu_);
+        }
+      }
+    }
     registered_artifacts.emplace_back(artifact_id);
     ++register_calls;
     if (!next_register_status.ok()) {
@@ -227,7 +271,7 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::StrCat("rep-", register_calls);
   }
 
-  absl::Status record_variant_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
+  absl::Status record_view_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
       override {
     return absl::OkStatus();
   }
@@ -267,12 +311,86 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::OkStatus();
   }
 
-  absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate&) override {
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>) override {
+    return true;
+  }
+
+  absl::StatusOr<tensorcast::store::components::ReplicaDrainStatus> wait_replica_drain(
+      std::string_view,
+      uint32_t,
+      std::optional<std::string_view>) override {
+    tensorcast::store::components::ReplicaDrainStatus out;
+    out.drained = true;
+    out.current_requests = 0;
+    return out;
+  }
+
+  absl::Status update_artifact_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::vector<tensorcast::store::components::VariantInfo>> list_variants(std::string_view) override {
-    return absl::UnimplementedError("list_variants not used in tests");
+  absl::StatusOr<std::vector<tensorcast::store::components::ViewInfo>> list_views(std::string_view) override {
+    return absl::UnimplementedError("list_views not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_layout_binding not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
+    return absl::UnimplementedError("get_layout_spec not used in tests");
+  }
+
+  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
+    return absl::UnimplementedError("attach_layout_to_artifact not used in tests");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
+    return absl::UnimplementedError("list_artifact_layouts not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const tensorcast::global_store::v1::WriteTensorProofCommitmentsRequest&) override {
+    return absl::UnimplementedError("write_tensor_proof_commitments not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
+    return absl::UnimplementedError("check_proof_commitments_match not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_runtime_policy not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
+    return absl::UnimplementedError("acquire_operation_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
+    return absl::UnimplementedError("keepalive_operation_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
+      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
+    return absl::UnimplementedError("release_operation_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
+      const tensorcast::operation::v1::GetOperationRequest&) override {
+    return absl::UnimplementedError("get_operation not used in tests");
+  }
+
+  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
+    return absl::UnimplementedError("update_operation not used in tests");
   }
 
   absl::StatusOr<tensorcast::store::components::ArtifactBinding> get_artifact_binding(std::string_view) override {
@@ -290,7 +408,10 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       std::string_view,
       uint32_t,
       const DeviceKey&,
-      uint32_t) override {
+      uint32_t,
+      const std::optional<tensorcast::store::components::TransportSchedulingGroupHint>&,
+      std::string_view,
+      std::string_view) override {
     return absl::UnimplementedError("request_replica_transport not used in tests");
   }
 
@@ -301,11 +422,17 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       std::string_view,
       uint32_t,
       const DeviceKey&,
-      uint32_t) override {
+      uint32_t,
+      const std::optional<tensorcast::store::components::TransportSchedulingGroupHint>&,
+      std::string_view,
+      std::string_view) override {
     return absl::UnimplementedError("request_view_transport not used in tests");
   }
 
-  absl::Status complete_replica_transport(std::string_view) override {
+  absl::Status complete_replica_transport(
+      std::string_view,
+      tensorcast::store::components::TransportCompletionOutcome,
+      std::string_view) override {
     return absl::OkStatus();
   }
 
@@ -321,20 +448,14 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("query_chunk_locations not used in tests");
   }
 
-  absl::StatusOr<tensorcast::store::components::StateSyncResult> synchronize_worker_state(
-      const tensorcast::global_store::v1::WorkerLocalState&,
+  absl::StatusOr<tensorcast::store::components::StateSyncResult> reconcile_worker_state(
+      std::string_view,
+      std::string_view,
+      const std::vector<tensorcast::common::v1::ReplicaInfo>&,
       bool,
       const tensorcast::store::components::StateSyncToken&,
       const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("synchronize_worker_state not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::FullStateSyncResult> request_full_state_sync(
-      std::string_view,
-      uint64_t,
-      const tensorcast::store::components::StateSyncToken&,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("request_full_state_sync not used in tests");
+    return absl::UnimplementedError("reconcile_worker_state not used in tests");
   }
 
   bool is_connected() const override {
@@ -361,8 +482,35 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("get_view_metadata not used in tests");
   }
 
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
+  absl::Status upsert_key_mapping(std::string_view, std::string_view, absl::Duration) override {
     return absl::UnimplementedError("upsert_key_mapping not used in tests");
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    return absl::UnimplementedError("get_cluster_id not used in tests");
+  }
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view,
+      std::string_view,
+      std::string_view,
+      tensorcast::global_store::v1::DiskLocationKind,
+      bool) override {
+    return absl::UnimplementedError("upsert_artifact_disk_location not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view,
+      bool) override {
+    return absl::UnimplementedError("list_artifact_disk_locations not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<uint64_t>) override {
+    return absl::UnimplementedError("swap_key_mapping not used in tests");
   }
 
   absl::Status revoke_key_mapping(std::string_view) override {
@@ -382,6 +530,13 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
   }
 
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
+
+ private:
+  mutable absl::Mutex register_mu_;
+  bool block_register_ ABSL_GUARDED_BY(register_mu_){false};
+  bool register_started_ ABSL_GUARDED_BY(register_mu_){false};
+  bool allow_register_continue_ ABSL_GUARDED_BY(register_mu_){false};
+  absl::CondVar register_cv_;
 };
 
 struct MetadataGatewayHarness {
@@ -393,6 +548,7 @@ struct MetadataGatewayHarness {
     MetadataGateway::Config cfg{
         .runtime_context = &context,
         .replica_runtime = &replica_runtime,
+        .promotion_manager = nullptr,
         .artifact_chunk_bytes = options.artifact_chunk_bytes,
         .pinned_memory_timeout = options.pinned_memory_timeout,
         .replica_factory = {},
@@ -447,6 +603,325 @@ TEST_CASE("RegistrationBackend commits publish to MetadataGateway", "[registrati
   CHECK(publication.device.ordinal == reg.device_id);
 }
 
+TEST_CASE(
+    "RegistrationBackend stable begin guard rejects when host memory is too low without reusable stable capacity",
+    "[registration_backend][memory_guard]") {
+  RegistrationBackendHarness harness;
+  set_host_memory_available_override_for_testing(16ULL * 1024ULL * 1024ULL * 1024ULL);
+  auto reset_override = absl::MakeCleanup([] { set_host_memory_available_override_for_testing(std::nullopt); });
+
+  auto backend = harness.make_backend();
+  auto reg = MakeRegistration(/*total_bytes=*/64ULL * 1024ULL * 1024ULL * 1024ULL);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.schema_version = "invalid-schema";
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE_FALSE(begin_or.ok());
+  CHECK(begin_or.status().code() == absl::StatusCode::kResourceExhausted);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable begin guard accounts for reusable stable capacity before checking host headroom",
+    "[registration_backend][memory_guard]") {
+  RegistrationBackendHarness harness;
+  auto budget = std::make_shared<MemoryTierBudget>(
+      /*stable_total_bytes=*/256ULL * 1024ULL * 1024ULL * 1024ULL,
+      /*preemptible_total_bytes=*/0);
+  REQUIRE(budget->try_acquire_stable(64ULL * 1024ULL * 1024ULL * 1024ULL).ok());
+  harness.resources.memory_tier_budget = budget;
+
+  set_host_memory_available_override_for_testing(16ULL * 1024ULL * 1024ULL * 1024ULL);
+  auto reset_override = absl::MakeCleanup([] { set_host_memory_available_override_for_testing(std::nullopt); });
+
+  auto backend = harness.make_backend();
+  auto reg = MakeRegistration(/*total_bytes=*/64ULL * 1024ULL * 1024ULL * 1024ULL);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.schema_version = "invalid-schema";
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE_FALSE(begin_or.ok());
+  CHECK(begin_or.status().code() == absl::StatusCode::kInvalidArgument);
+}
+
+TEST_CASE("RegistrationBackend commit cleans pending mem_reg alias from ReplicaRegistry", "[registration_backend]") {
+  SKIP_IF_NO_CUDA();
+
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/32);
+  reg.client_artifact_id = "cgid:registration-backend-alias-cleanup";
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+  CHECK(harness.replica_registry->size() == 1);
+  CHECK(harness.replica_registry->find_by_artifact(reg.artifact_id).size() == 1);
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  CHECK(harness.replica_registry->size() == 1);
+  CHECK(harness.replica_registry->find_by_artifact(reg.artifact_id).empty());
+  CHECK(harness.replica_registry->find_by_artifact(commit_or->artifact_id).size() == 1);
+}
+
+TEST_CASE("RegistrationBackend abort cleans pending mem_reg alias from ReplicaRegistry", "[registration_backend]") {
+  SKIP_IF_NO_CUDA();
+
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/32);
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+  CHECK(harness.replica_registry->size() == 1);
+
+  auto abort_status = backend.abort(begin_or->registration_id);
+  REQUIRE(abort_status.ok());
+  CHECK(harness.replica_registry->size() == 0);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram stage_on_gpu=false supports streamed CPU ingestion",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  auto gpu_ptr_or = backend.get_registration_gpu_ptr(begin_or->registration_id);
+  REQUIRE_FALSE(gpu_ptr_or.ok());
+
+  std::array<std::byte, 16> payload{};
+  for (size_t index = 0; index < payload.size(); ++index) {
+    payload[index] = static_cast<std::byte>(index + 1);
+  }
+  auto ingest_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  CHECK(commit_or->device.type == DeviceType::CPU);
+  CHECK(commit_or->size_bytes == reg.total_size_bytes);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram stage_on_gpu=false supports cpu_memfd written-range ingestion",
+    "[registration_backend][stable_dram][cpu_memfd]") {
+  RegistrationBackendHarness harness;
+  harness.resources.cpu_shared_memory_enabled = true;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  auto memfd_or = backend.get_registration_cpu_memfd_info(begin_or->registration_id);
+  REQUIRE(memfd_or.ok());
+  CHECK(memfd_or->fd >= 0);
+  CHECK(memfd_or->size_bytes >= reg.total_size_bytes);
+
+  auto tail_status = backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/8, /*length=*/8);
+  REQUIRE(tail_status.ok());
+
+  auto head_status = backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/0, /*length=*/8);
+  REQUIRE(head_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  CHECK(commit_or->device.type == DeviceType::CPU);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram written-range ingestion rejects overlap",
+    "[registration_backend][stable_dram][cpu_memfd]") {
+  RegistrationBackendHarness harness;
+  harness.resources.cpu_shared_memory_enabled = true;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  auto first_status = backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/0, /*length=*/8);
+  REQUIRE(first_status.ok());
+
+  auto overlap_status =
+      backend.ingest_registration_written_range(begin_or->registration_id, /*offset=*/4, /*length=*/8);
+  REQUIRE_FALSE(overlap_status.ok());
+  CHECK(overlap_status.code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion propagates cpu_shared_memory_enabled to replicas",
+    "[registration_backend][stable_dram][cpu_memfd]") {
+  RegistrationBackendHarness harness;
+  harness.resources.cpu_shared_memory_enabled = true;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::byte, 16> payload{};
+  auto ingest_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  auto keys = harness.replica_registry->find_by_artifact(commit_or->artifact_id);
+  REQUIRE(keys.size() == 1);
+  auto replica_or = harness.replica_registry->find(keys.front());
+  REQUIRE(replica_or.ok());
+
+  const auto& allocation_key = replica_or.value()->replica_key();
+  CHECK_FALSE(allocation_key.artifact_id.empty());
+  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  REQUIRE(uma != nullptr);
+  auto region_or = uma->get_cpu_memfd_region(allocation_key);
+  REQUIRE(region_or.ok());
+  CHECK(region_or->fd >= 0);
+  CHECK(region_or->size_bytes >= reg.total_size_bytes);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion accepts out-of-order chunks and enforces full coverage",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::byte, 8> chunk{};
+  auto tail_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/8, absl::MakeConstSpan(chunk));
+  REQUIRE(tail_status.ok());
+
+  auto premature_commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE_FALSE(premature_commit_or.ok());
+  CHECK(premature_commit_or.status().code() == absl::StatusCode::kFailedPrecondition);
+
+  auto head_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(chunk));
+  REQUIRE(head_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion rejects overlapping chunks",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::byte, 8> chunk{};
+  auto first_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(chunk));
+  REQUIRE(first_status.ok());
+
+  auto overlap_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/4, absl::MakeConstSpan(chunk));
+  REQUIRE_FALSE(overlap_status.ok());
+  CHECK(overlap_status.code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion supports concurrent non-overlapping chunks",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  constexpr uint64_t kChunkBytes = 4096;
+  constexpr uint64_t kChunkCount = 4;
+  auto reg = MakeRegistration(/*total_bytes=*/kChunkBytes * kChunkCount);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::array<std::byte, kChunkBytes>, kChunkCount> chunks{};
+  for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
+    for (size_t byte_index = 0; byte_index < chunks[chunk_index].size(); ++byte_index) {
+      chunks[chunk_index][byte_index] = static_cast<std::byte>(chunk_index + 1);
+    }
+  }
+  const std::array<uint64_t, kChunkCount> offsets = {kChunkBytes * 2, 0, kChunkBytes * 3, kChunkBytes};
+
+  std::array<absl::Status, kChunkCount> ingest_status;
+  std::vector<std::thread> workers;
+  workers.reserve(kChunkCount);
+  for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
+    workers.emplace_back([&, chunk_index]() {
+      ingest_status[chunk_index] = backend.ingest_registration_chunk(
+          begin_or->registration_id, offsets[chunk_index], absl::MakeConstSpan(chunks[chunk_index]));
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  for (const auto& status : ingest_status) {
+    REQUIRE(status.ok());
+  }
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  auto keys = harness.replica_registry->find_by_artifact(commit_or->artifact_id);
+  REQUIRE(keys.size() == 1);
+  auto replica_or = harness.replica_registry->find(keys.front());
+  REQUIRE(replica_or.ok());
+  const auto cpu_ptrs = replica_or.value()->get_memory_manager().get_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  REQUIRE(cpu_ptrs[0] != nullptr);
+
+  const auto* bytes = static_cast<const std::byte*>(cpu_ptrs[0]);
+  for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
+    const uint64_t chunk_offset = offsets[chunk_index];
+    for (size_t byte_index = 0; byte_index < chunks[chunk_index].size(); ++byte_index) {
+      const auto actual = bytes[static_cast<size_t>(chunk_offset) + byte_index];
+      const auto expected = chunks[chunk_index][byte_index];
+      REQUIRE(actual == expected);
+    }
+  }
+}
+
 TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][runtime]") {
   SKIP_IF_NO_CUDA();
 
@@ -480,6 +955,84 @@ TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][r
   auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-2");
   CHECK(second_status.ok());
   CHECK(harness.client->register_calls == 2);
+}
+
+TEST_CASE("MetadataGateway suppresses concurrent publish context duplicates", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_inflight");
+
+  harness.client->set_register_blocking(true);
+
+  absl::Status first_status = absl::UnknownError("not-run");
+  std::thread first([&]() { first_status = harness.gateway->register_replica(replica_key, {}, "ctx-inflight"); });
+
+  harness.client->wait_for_register_started();
+  auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-inflight");
+  CHECK(second_status.ok());
+
+  harness.client->unblock_register();
+  first.join();
+  CHECK(first_status.ok());
+  CHECK(harness.client->register_calls == 1);
+}
+
+TEST_CASE("MetadataGateway retries publish context after client reconnection", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_retry_client");
+
+  harness.client->connected = false;
+  auto first_status = harness.gateway->register_replica(replica_key, {}, "ctx-retry-client");
+  CHECK_FALSE(first_status.ok());
+  CHECK(first_status.code() == absl::StatusCode::kFailedPrecondition);
+  CHECK(harness.client->register_calls == 0);
+
+  harness.client->connected = true;
+  auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-retry-client");
+  CHECK(second_status.ok());
+  CHECK(harness.client->register_calls == 1);
+}
+
+TEST_CASE("MetadataGateway retries publish context after replica size lookup failure", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  auto missing_replica_key = MakeReplicaKey("artifact_ctx_retry_size", cpu_device);
+
+  auto first_status = harness.gateway->register_replica(missing_replica_key, {}, "ctx-retry-size");
+  CHECK_FALSE(first_status.ok());
+  CHECK(first_status.code() == absl::StatusCode::kNotFound);
+  CHECK(harness.client->register_calls == 0);
+
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_retry_size");
+  auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-retry-size");
+  CHECK(second_status.ok());
+  CHECK(harness.client->register_calls == 1);
+}
+
+TEST_CASE(
+    "MetadataGateway retries publish context after canonical artifact validation failure",
+    "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_retry_canonical");
+
+  auto first_status = harness.gateway->register_replica(replica_key, "artifact-non-canonical", "ctx-retry-canonical");
+  CHECK_FALSE(first_status.ok());
+  CHECK(first_status.code() == absl::StatusCode::kInvalidArgument);
+  CHECK(harness.client->register_calls == 0);
+
+  auto second_status =
+      harness.gateway->register_replica(replica_key, "mi2:artifact_ctx_retry_canonical", "ctx-retry-canonical");
+  CHECK(second_status.ok());
+  CHECK(harness.client->register_calls == 1);
+  CHECK_FALSE(harness.client->registered_artifacts.empty());
+  CHECK(harness.client->registered_artifacts.back() == "mi2:artifact_ctx_retry_canonical");
 }
 
 TEST_CASE("MetadataGateway keeps publish pending on registration failure", "[metadata_gateway][runtime]") {

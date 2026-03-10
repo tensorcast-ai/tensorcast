@@ -18,6 +18,86 @@ from tensorcast.proto.config.v1 import (
 # GlobalStoreConfig now leverages Pydantic for validation / immutability
 
 
+class DigestWriteLimitsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    max_leaf_writes_per_request: int = 16_384
+    max_proof_digests_per_request: int = 16_384
+    max_total_digests_per_request: int = 32_768
+    max_digest_bytes_per_request: int = 2 * 1024 * 1024
+
+
+class OperationLeasePolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    default_ttl_ms: int = 30_000
+    max_ttl_ms: int = 300_000
+
+
+class OperationWriteLimitsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    min_status_update_interval_ms: int = 1_000
+
+
+class RetentionPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    operations_ttl_ms: int = 86_400_000  # 24h
+    assembly_proof_commitments_ttl_ms: int = 86_400_000  # 24h
+    piece_proof_digests_ttl_ms: int = 86_400_000  # 24h
+
+
+class GlobalStoreLimitsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    digest_writes: DigestWriteLimitsConfig = DigestWriteLimitsConfig()
+    operation_leases: OperationLeasePolicyConfig = OperationLeasePolicyConfig()
+    retention: RetentionPolicyConfig = RetentionPolicyConfig()
+    operation_writes: OperationWriteLimitsConfig = OperationWriteLimitsConfig()
+
+
+class WorkerControlReducerConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    shard_count: int = 1
+    queue_capacity: int = 2048
+    coalesce_window_ms: int = 50
+
+
+class KeyMappingPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    alias_cache_ttl_ms: int = 1000
+
+
+class SourceBalanceWeightsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    replica_load_weight: float = 1.0
+    worker_load_weight: float = 1.0
+    recent_assignment_penalty_weight: float = 1.0
+    diffusion_bonus_weight: float = 1.0
+
+
+class GroupDispatchPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fairness_floor_ratio: float = 0.25
+    completion_bias_weight: float = 1.0
+    starvation_aging_threshold_ms: int = 5_000
+    queue_scan_limit: int = 128
+    dispatch_batch_limit: int = 16
+
+
+class TransportSchedulerPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: str = "LEGACY"
+    source_balance_weights: SourceBalanceWeightsConfig = SourceBalanceWeightsConfig()
+    group_dispatch: GroupDispatchPolicyConfig = GroupDispatchPolicyConfig()
+
+
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
 
@@ -38,6 +118,11 @@ class GlobalStoreConfig(BaseModel):
     memory_tier_snapshot_retention_ms: int = 600000  # 10 minutes
     memory_tier_snapshot_max_rows: int = 200
     memory_tier_publish_interval_ms: int = 5000  # Daemon publish hint
+    worker_control_reducer: WorkerControlReducerConfig = WorkerControlReducerConfig()
+    key_mapping_policy: KeyMappingPolicyConfig = KeyMappingPolicyConfig()
+    transport_scheduler: TransportSchedulerPolicyConfig = (
+        TransportSchedulerPolicyConfig()
+    )
 
     # Server settings
     listen_host: str = "127.0.0.1"
@@ -56,6 +141,7 @@ class GlobalStoreConfig(BaseModel):
     metrics_port: int = 8000
     # Cluster identity (opaque token used to prevent split-brain)
     cluster_token: Optional[str] = None
+    limits: GlobalStoreLimitsConfig = GlobalStoreLimitsConfig()
 
     @property
     def port(self) -> int:
@@ -118,6 +204,10 @@ class GlobalStoreConfig(BaseModel):
             else 8000
         )
 
+        worker_policy_section = (
+            data.get("worker_policy", {}) if isinstance(data, dict) else {}
+        )
+
         # Worker policy durations are in seconds+nanos
         def _dur_ms(dur) -> int:
             # google.protobuf.Duration parsed from JSON strings "Xs" yields
@@ -147,6 +237,9 @@ class GlobalStoreConfig(BaseModel):
         snapshot_retention_ms = 600_000
         snapshot_max_rows = 200
         publish_interval_ms = 5000
+        reducer_cfg = WorkerControlReducerConfig()
+        key_mapping_policy = KeyMappingPolicyConfig()
+        scheduler_policy = TransportSchedulerPolicyConfig()
         if pb.worker_policy.HasField("memory_tiers"):
             mt = pb.worker_policy.memory_tiers
             snapshot_retention_ms = (
@@ -160,6 +253,178 @@ class GlobalStoreConfig(BaseModel):
                 if mt.HasField("publish_interval")
                 else publish_interval_ms
             )
+        if pb.worker_policy.HasField("control_reducer"):
+            reducer_pb = pb.worker_policy.control_reducer
+            reducer_cfg = WorkerControlReducerConfig(
+                shard_count=max(1, int(reducer_pb.shard_count or 0))
+                if int(reducer_pb.shard_count or 0) > 0
+                else reducer_cfg.shard_count,
+                queue_capacity=max(1, int(reducer_pb.queue_capacity or 0))
+                if int(reducer_pb.queue_capacity or 0) > 0
+                else reducer_cfg.queue_capacity,
+                coalesce_window_ms=max(
+                    0,
+                    _dur_ms(reducer_pb.coalesce_window)
+                    if reducer_pb.HasField("coalesce_window")
+                    else reducer_cfg.coalesce_window_ms,
+                ),
+            )
+        if pb.worker_policy.HasField("key_mapping"):
+            key_mapping_pb = pb.worker_policy.key_mapping
+            alias_cache_ttl_ms = (
+                _dur_ms(key_mapping_pb.alias_cache_ttl)
+                if key_mapping_pb.HasField("alias_cache_ttl")
+                else key_mapping_policy.alias_cache_ttl_ms
+            )
+            key_mapping_policy = KeyMappingPolicyConfig(
+                alias_cache_ttl_ms=max(0, alias_cache_ttl_ms),
+            )
+        if pb.worker_policy.HasField("transport_scheduler"):
+            scheduler_pb = pb.worker_policy.transport_scheduler
+            scheduler_section = (
+                worker_policy_section.get("transport_scheduler", {})
+                if isinstance(worker_policy_section, dict)
+                else {}
+            )
+            if (
+                scheduler_pb.mode
+                == gsc_pb2.TransportSchedulerMode.TRANSPORT_SCHEDULER_MODE_SOURCE_BALANCE
+            ):
+                scheduler_mode = "SOURCE_BALANCE"
+            elif (
+                scheduler_pb.mode
+                == gsc_pb2.TransportSchedulerMode.TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+            ):
+                scheduler_mode = "GROUP_DISPATCH"
+            else:
+                scheduler_mode = "LEGACY"
+
+            source_weights = scheduler_policy.source_balance_weights
+            if scheduler_pb.HasField("source_balance_weights"):
+                source_pb = scheduler_pb.source_balance_weights
+                source_section = (
+                    scheduler_section.get("source_balance_weights", {})
+                    if isinstance(scheduler_section, dict)
+                    else {}
+                )
+                source_weights = SourceBalanceWeightsConfig(
+                    replica_load_weight=float(source_pb.replica_load_weight)
+                    if "replica_load_weight" in source_section
+                    else source_weights.replica_load_weight,
+                    worker_load_weight=float(source_pb.worker_load_weight)
+                    if "worker_load_weight" in source_section
+                    else source_weights.worker_load_weight,
+                    recent_assignment_penalty_weight=float(
+                        source_pb.recent_assignment_penalty_weight
+                    )
+                    if "recent_assignment_penalty_weight" in source_section
+                    else source_weights.recent_assignment_penalty_weight,
+                    diffusion_bonus_weight=float(source_pb.diffusion_bonus_weight)
+                    if "diffusion_bonus_weight" in source_section
+                    else source_weights.diffusion_bonus_weight,
+                )
+
+            group_dispatch = scheduler_policy.group_dispatch
+            if scheduler_pb.HasField("group_dispatch"):
+                dispatch_pb = scheduler_pb.group_dispatch
+                dispatch_section = (
+                    scheduler_section.get("group_dispatch", {})
+                    if isinstance(scheduler_section, dict)
+                    else {}
+                )
+                group_dispatch = GroupDispatchPolicyConfig(
+                    fairness_floor_ratio=float(dispatch_pb.fairness_floor_ratio)
+                    if "fairness_floor_ratio" in dispatch_section
+                    else group_dispatch.fairness_floor_ratio,
+                    completion_bias_weight=float(dispatch_pb.completion_bias_weight)
+                    if "completion_bias_weight" in dispatch_section
+                    else group_dispatch.completion_bias_weight,
+                    starvation_aging_threshold_ms=(
+                        _dur_ms(dispatch_pb.starvation_aging_threshold)
+                        if "starvation_aging_threshold" in dispatch_section
+                        else group_dispatch.starvation_aging_threshold_ms
+                    ),
+                    queue_scan_limit=max(
+                        1,
+                        int(dispatch_pb.queue_scan_limit)
+                        if "queue_scan_limit" in dispatch_section
+                        else group_dispatch.queue_scan_limit,
+                    ),
+                    dispatch_batch_limit=max(
+                        1,
+                        int(dispatch_pb.dispatch_batch_limit)
+                        if "dispatch_batch_limit" in dispatch_section
+                        else group_dispatch.dispatch_batch_limit,
+                    ),
+                )
+            scheduler_policy = TransportSchedulerPolicyConfig(
+                mode=scheduler_mode,
+                source_balance_weights=source_weights,
+                group_dispatch=group_dispatch,
+            )
+
+        # Limits
+        limits = GlobalStoreLimitsConfig()
+        if pb.HasField("limits"):
+            pb_limits = pb.limits
+            digest_writes = limits.digest_writes
+            if pb_limits.HasField("digest_writes"):
+                dw = pb_limits.digest_writes
+                digest_writes = DigestWriteLimitsConfig(
+                    max_leaf_writes_per_request=int(dw.max_leaf_writes_per_request)
+                    or digest_writes.max_leaf_writes_per_request,
+                    max_proof_digests_per_request=int(dw.max_proof_digests_per_request)
+                    or digest_writes.max_proof_digests_per_request,
+                    max_total_digests_per_request=int(dw.max_total_digests_per_request)
+                    or digest_writes.max_total_digests_per_request,
+                    max_digest_bytes_per_request=int(dw.max_digest_bytes_per_request)
+                    or digest_writes.max_digest_bytes_per_request,
+                )
+
+            op_leases = limits.operation_leases
+            if pb_limits.HasField("operation_leases"):
+                ol = pb_limits.operation_leases
+                op_leases = OperationLeasePolicyConfig(
+                    default_ttl_ms=_dur_ms(ol.default_ttl)
+                    if ol.HasField("default_ttl")
+                    else op_leases.default_ttl_ms,
+                    max_ttl_ms=_dur_ms(ol.max_ttl)
+                    if ol.HasField("max_ttl")
+                    else op_leases.max_ttl_ms,
+                )
+
+            op_writes = limits.operation_writes
+            if pb_limits.HasField("operation_writes"):
+                ow = pb_limits.operation_writes
+                op_writes = OperationWriteLimitsConfig(
+                    min_status_update_interval_ms=_dur_ms(ow.min_status_update_interval)
+                    if ow.HasField("min_status_update_interval")
+                    else op_writes.min_status_update_interval_ms,
+                )
+
+            retention = limits.retention
+            if pb_limits.HasField("retention"):
+                rp = pb_limits.retention
+                retention = RetentionPolicyConfig(
+                    operations_ttl_ms=_dur_ms(rp.operations_ttl)
+                    if rp.HasField("operations_ttl")
+                    else retention.operations_ttl_ms,
+                    assembly_proof_commitments_ttl_ms=_dur_ms(
+                        rp.assembly_proof_commitments_ttl
+                    )
+                    if rp.HasField("assembly_proof_commitments_ttl")
+                    else retention.assembly_proof_commitments_ttl_ms,
+                    piece_proof_digests_ttl_ms=_dur_ms(rp.piece_proof_digests_ttl)
+                    if rp.HasField("piece_proof_digests_ttl")
+                    else retention.piece_proof_digests_ttl_ms,
+                )
+
+            limits = GlobalStoreLimitsConfig(
+                digest_writes=digest_writes,
+                operation_leases=op_leases,
+                retention=retention,
+                operation_writes=op_writes,
+            )
 
         return cls(
             db_file=db_file,
@@ -169,6 +434,9 @@ class GlobalStoreConfig(BaseModel):
             memory_tier_snapshot_retention_ms=max(0, snapshot_retention_ms),
             memory_tier_snapshot_max_rows=max(0, snapshot_max_rows),
             memory_tier_publish_interval_ms=max(0, publish_interval_ms),
+            worker_control_reducer=reducer_cfg,
+            key_mapping_policy=key_mapping_policy,
+            transport_scheduler=scheduler_policy,
             listen_host=listen_host or "127.0.0.1",
             listen_port=listen_port if listen_port >= 0 else 0,
             advertise_host=advertise_host,
@@ -181,6 +449,7 @@ class GlobalStoreConfig(BaseModel):
             cluster_token=(pb.meta.cluster_token or None)
             if pb.HasField("meta")
             else None,
+            limits=limits,
         )
 
     @staticmethod

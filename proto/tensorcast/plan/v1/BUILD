@@ -6,7 +6,10 @@ proto_library(
     srcs = ["plan.proto"],
     strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
-    deps = ["//proto/tensorcast/daemon/v2:daemon_proto_lib"],
+    deps = [
+        "//proto/tensorcast/common/v1:common_proto",
+        "//proto/tensorcast/daemon/v2:daemon_proto_lib",
+    ],
 )
 
 buf_lint_test(

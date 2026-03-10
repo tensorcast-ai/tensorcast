@@ -15,8 +15,14 @@ High-level overview of the system architecture, core components, and design prin
 ### [API Design](./api/README.md)
 Public SDK surface and internal API flows (registration, materialization, policy, persistence, region-backed).
 
-### Key-based Loading
-Recommended client API is key-based: clients call the daemon’s `MaterializeByKey` and reconstruct tensors using canonical indices fetched from Global Store (`GetArtifactIndexById`). The daemon resolves the key, orchestrates P2P transfers, and performs disk fallback when needed. See:
+### [Artifact Views and Retrieval](./artifact-views-and-retrieval.md)
+Canonical view semantics, planning, and retrieval/materialization pipeline.
+
+### [View Replicas and Assembly](./view-replicas-and-assembly.md)
+Dense piece replicas, assembly lifecycle, and sealing semantics.
+
+### Selection-first Loading
+Recommended client API is selection-first: clients build an `ArtifactSelection`, optionally resolve keys via `ResolveKeyMapping`, then materialize via `MaterializeReplica`/`MaterializeIntoTarget`. The daemon orchestrates P2P transfers and performs disk fallback on the artifact-id path. See:
 - [P2P Transfer Strategies](./p2p-transfer-strategies.md)
 - [Internals: Artifact Loading Workflow](../internals/model-loading.md)
 

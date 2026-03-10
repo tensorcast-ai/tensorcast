@@ -30,11 +30,55 @@ message MemoryTierPolicy {
   google.protobuf.Duration publish_interval = 3;
 }
 
+message KeyMappingPolicy {
+  // Cache TTL returned for alias-style key mappings. Keep this short to reduce
+  // polling pressure while preserving near-real-time updates. 0 disables alias
+  // caching.
+  google.protobuf.Duration alias_cache_ttl = 1;
+}
+
+enum TransportSchedulerMode {
+  TRANSPORT_SCHEDULER_MODE_UNSPECIFIED = 0;
+  TRANSPORT_SCHEDULER_MODE_LEGACY = 1;
+  TRANSPORT_SCHEDULER_MODE_SOURCE_BALANCE = 2;
+  TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH = 3;
+}
+
+message SourceBalanceScoreWeights {
+  double replica_load_weight = 1;
+  double worker_load_weight = 2;
+  double recent_assignment_penalty_weight = 3;
+  double diffusion_bonus_weight = 4;
+}
+
+message GroupDispatchPolicy {
+  double fairness_floor_ratio = 1;
+  double completion_bias_weight = 2;
+  google.protobuf.Duration starvation_aging_threshold = 3;
+  uint32 queue_scan_limit = 4;
+  uint32 dispatch_batch_limit = 5;
+}
+
+message TransportSchedulerPolicy {
+  TransportSchedulerMode mode = 1;
+  SourceBalanceScoreWeights source_balance_weights = 2;
+  GroupDispatchPolicy group_dispatch = 3;
+}
+
 message WorkerPolicy {
   google.protobuf.Duration heartbeat_timeout = 1;
   google.protobuf.Duration cleanup_interval = 2;
   google.protobuf.Duration default_heartbeat_interval = 3;
   MemoryTierPolicy memory_tiers = 4;
+  WorkerControlReducerPolicy control_reducer = 5;
+  KeyMappingPolicy key_mapping = 6;
+  TransportSchedulerPolicy transport_scheduler = 7;
+}
+
+message WorkerControlReducerPolicy {
+  uint32 shard_count = 1;
+  uint32 queue_capacity = 2;
+  google.protobuf.Duration coalesce_window = 3;
 }
 
 message GlobalStoreConfig {
@@ -44,5 +88,47 @@ message GlobalStoreConfig {
   GlobalServer server = 2;
   WorkerPolicy worker_policy = 3;
   tensorcast.config.v1.Observability observability = 5;
+  GlobalStoreLimits limits = 6;
   tensorcast.config.v1.ConfigMeta meta = 100; // Optional metadata
+}
+
+message DigestWriteLimits {
+  // Hard bound on leaf digests per request.
+  uint32 max_leaf_writes_per_request = 1;
+  // Hard bound on proof digests per request.
+  uint32 max_proof_digests_per_request = 2;
+  // Hard bound on total digest entries per request (leaf + proof).
+  uint32 max_total_digests_per_request = 3;
+  // Hard bound on total digest payload bytes per request (sum of digest bytes).
+  uint64 max_digest_bytes_per_request = 4;
+}
+
+message OperationLeasePolicy {
+  // Default lease TTL when callers omit a TTL.
+  google.protobuf.Duration default_ttl = 1;
+  // Maximum lease TTL accepted by the server.
+  google.protobuf.Duration max_ttl = 2;
+}
+
+message OperationWriteLimits {
+  // Throttle persisted status/snapshot updates for long-tail operations.
+  // The server always accepts terminal transitions, but may skip frequent
+  // in-place RUNNING updates to bound write amplification.
+  google.protobuf.Duration min_status_update_interval = 1;
+}
+
+message RetentionPolicy {
+  // Retain terminal operations and snapshots for this duration before GC.
+  google.protobuf.Duration operations_ttl = 1;
+  // Retain assembly-scoped proof commitments before GC (post-seal cleanup).
+  google.protobuf.Duration assembly_proof_commitments_ttl = 2;
+  // Retain per-piece proof digests (audit) before GC.
+  google.protobuf.Duration piece_proof_digests_ttl = 3;
+}
+
+message GlobalStoreLimits {
+  DigestWriteLimits digest_writes = 1;
+  OperationLeasePolicy operation_leases = 2;
+  RetentionPolicy retention = 3;
+  OperationWriteLimits operation_writes = 4;
 }

@@ -19,9 +19,12 @@ from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
-def _build_payload(tensors: dict[str, torch.Tensor]) -> tuple[bytes, MaterializationPayload]:
+def _build_payload(
+    tensors: dict[str, torch.Tensor],
+) -> tuple[bytes, MaterializationPayload]:
     descriptors: list[TensorPayloadDescriptor] = []
     index: dict[str, list[object]] = {}
     offset = 0
@@ -74,21 +77,38 @@ class _ClientStub:
         self.get_index_calls += 1
         return self.canonical_index_bytes
 
-    def resolve_artifact_from_disk_v2(
-        self, *, disk_path: str, verify_checksums: bool = True
-    ):
-        self.resolve_calls.append((disk_path, bool(verify_checksums)))
+    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+        self.resolve_calls.append((path, bool(verify_checksums)))
         generation = self.disk_generation if self.disk_generation is not None else 0
 
         class _Resp:
             pass
 
         resp = _Resp()
-        resp.artifact_id = self.disk_artifact_id or f"disk:{disk_path}"
-        resp.disk_path = disk_path
+        resp.artifact_id = self.disk_artifact_id or "mi2:idx:data"
         resp.canonical_index_bytes = self.canonical_index_bytes
         resp.generation = generation
         return resp
+
+    def import_artifact_from_path_stream_v2(
+        self, *, path: str, verify_checksums: bool = True
+    ):
+        resp = self.import_artifact_from_path_v2(
+            path=path,
+            verify_checksums=verify_checksums,
+        )
+        final_resp = store_daemon_pb2.ImportArtifactFromPathResponse(
+            artifact_id=resp.artifact_id,
+            canonical_index_bytes=resp.canonical_index_bytes,
+            generation=resp.generation,
+        )
+        event = store_daemon_pb2.ImportArtifactFromPathStreamEvent(
+            seq=1,
+            phase=store_daemon_pb2.IMPORT_ARTIFACT_PHASE_DONE,
+            done=True,
+        )
+        event.result.CopyFrom(final_resp)
+        yield event
 
     def unload_replica(self, replica_uuid: str, *, disk_path: str = "") -> bool:
         self.unloaded.append((replica_uuid, disk_path))
@@ -104,7 +124,7 @@ class _RuntimeStub:
         self._artifact_cache = ArtifactCache(
             daemon_endpoint="daemon", ttl_seconds=10, max_entries=8
         )
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, str | None] = {}
         self._client = client
 
     def ensure_client(self) -> _ClientStub:
@@ -116,21 +136,18 @@ class _RuntimeStub:
     def get_artifact_index_cached(self, artifact_id: str):
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
-    def get_artifact_index_by_disk_path(self, disk_path: str):
-        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
-
-    def invalidate_artifact(self, artifact_id: str | None, *, key=None, reason=None) -> None:
+    def invalidate_artifact(
+        self, artifact_id: str | None, *, key=None, reason=None
+    ) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
 
-    def resolve_key_mapping_cached(
-        self, *, key: str
-    ) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key, (None, None))
+    def resolve_key_mapping_cached(self, *, key: str) -> str | None:
+        return self._key_cache.get(key)
 
     def cache_key_mapping(
-        self, key: str, *, artifact_id: str | None, disk_path: str | None, ttl_override=None
+        self, key: str, *, artifact_id: str | None, ttl_override=None
     ) -> None:
-        self._key_cache[key] = (artifact_id, disk_path)
+        self._key_cache[key] = artifact_id
 
 
 class _PipelineStub:
@@ -152,9 +169,13 @@ class _PipelineStub:
             state[desc.name] = tensor
         return state
 
-    def _release_materialized(self, payload: MaterializationPayload, client: _ClientStub) -> None:
+    def _release_materialized(
+        self, payload: MaterializationPayload, client: _ClientStub
+    ) -> None:
         self.released.append(payload.replica_uuid)
-        client.unload_replica(payload.replica_uuid, disk_path=getattr(payload, "disk_path", "") or "")
+        client.unload_replica(
+            payload.replica_uuid, disk_path=getattr(payload, "disk_path", "") or ""
+        )
 
     def get_into(
         self,
@@ -217,12 +238,49 @@ def test_tensor_subset_materialization_and_release():
         generation=1,
     )
 
-    result = artifact.tensor_dict(device="cpu", names=["bar"])
+    result = artifact.subset(["bar"]).tensor_dict(device="cpu")
 
     assert set(result.keys()) == {"bar"}
     assert pipeline.calls and pipeline.calls[0]["tensor_names"] == ("bar",)
     assert runtime._client.unloaded == []
     assert pipeline.released == []
+
+
+def test_tensor_dict_with_diagnostics_reports_source_and_bytes():
+    canonical_bytes, payload = _build_payload(
+        {"foo": torch.ones(4, dtype=torch.float32), "bar": torch.zeros(2)}
+    )
+    payload = replace(
+        payload,
+        source=store_daemon_pb2.MATERIALIZATION_SOURCE_P2P,
+        ticket_replica_uuid="ticket-1",
+        ticket_status=store_daemon_pb2.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
+    )
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+
+    result = artifact.tensor_dict_with_diagnostics(device="cpu")
+
+    assert set(result.tensors) == {"foo", "bar"}
+    diagnostics = result.diagnostics
+    assert diagnostics.source == "p2p"
+    assert diagnostics.source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_P2P)
+    assert diagnostics.tensor_count == 2
+    assert diagnostics.total_bytes == sum(
+        int(desc.byte_length) for desc in payload.descriptors
+    )
+    assert diagnostics.replica_uuid == "replica-1"
+    assert diagnostics.ticket_replica_uuid == "ticket-1"
+    assert diagnostics.ticket_status == "allocated"
+    assert diagnostics.materialize_sec >= 0.0
+    assert diagnostics.tensor_bind_sec >= 0.0
+    assert diagnostics.total_sec >= diagnostics.materialize_sec
 
 
 def test_tensor_into_materializes_subset_only():
@@ -335,15 +393,13 @@ def test_to_dict_round_trip_preserves_metadata():
 def test_with_fallback_handles_multiple_identifiers():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
-    runtime.cache_key_mapping("mapped", artifact_id="aid", disk_path=None)
+    runtime.cache_key_mapping("mapped", artifact_id="aid")
     pipeline = _PipelineStub(payload)
     store = _StoreStub(runtime, pipeline)
     artifact = Artifact(store_ref=_store_ref(store), key="mapped")
 
     assert artifact.artifact_id == "aid"
-    clone = artifact.with_fallback(
-        FallbackOptions(disk_path="/tmp/fallback", prefer_disk=True, allow_p2p=False)
-    )
+    clone = artifact.with_fallback(FallbackOptions(prefer="disk", allow_p2p=False))
 
     assert clone.artifact_id == "aid"
     assert clone.key == "mapped"
@@ -358,7 +414,6 @@ def test_describe_uses_cached_generation_without_fetch():
         canonical_index_bytes=canonical_bytes,
         parsed_index=canonical_index_from_bytes(canonical_bytes),
         generation=42,
-        disk_path=None,
         expires_at=time.monotonic() + 1.0,
     )
     runtime.cache_artifact_index(cache_entry)
@@ -375,7 +430,7 @@ def test_describe_uses_cached_generation_without_fetch():
 def test_from_dict_accepts_key_and_artifact_id():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
-    runtime.cache_key_mapping("mapped", artifact_id="aid", disk_path=None)
+    runtime.cache_key_mapping("mapped", artifact_id="aid")
     pipeline = _PipelineStub(payload)
     store = _StoreStub(runtime, pipeline)
     artifact = Artifact(store_ref=_store_ref(store), key="mapped")
@@ -392,86 +447,40 @@ def test_from_dict_accepts_key_and_artifact_id():
 def test_from_disk_resolves_once_and_caches_generation():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     client = _ClientStub(
-        canonical_bytes, disk_generation=11, disk_artifact_id="disk-aid"
+        canonical_bytes, disk_generation=11, disk_artifact_id="mi2:idx:data"
     )
     runtime = _RuntimeStub(client)
-    pipeline = _PipelineStub(payload)
-    store = _StoreStub(runtime, pipeline)
-    artifact = Artifact(
-        store_ref=_store_ref(store),
-        disk_path="/tmp/artifact",
-        fallback=FallbackOptions.for_disk("/tmp/artifact"),
-    )
+    store = Store("daemon", runtime=runtime)
 
+    artifact = store.from_disk("/tmp/artifact")
     desc = artifact.describe()
     repeat = artifact.describe()
 
-    assert desc.artifact_id == "disk-aid"
+    assert desc.artifact_id == "mi2:idx:data"
     assert desc.generation == 11
     assert repeat.generation == 11
     assert client.resolve_calls == [("/tmp/artifact", True)]
     assert client.get_index_calls == 0
-    cached = runtime.get_artifact_index_cached("disk-aid")
+    cached = runtime.get_artifact_index_cached("mi2:idx:data")
     assert cached is not None
     assert cached.canonical_index_bytes == canonical_bytes
     assert cached.generation == 11
-    assert cached.disk_path == "/tmp/artifact"
 
 
-def test_from_disk_uses_cached_entry_for_disk_path():
-    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
-    client = _ClientStub(canonical_bytes, disk_generation=5, disk_artifact_id="disk-aid")
+def test_from_disk_progress_mode_uses_stream_resolution():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=5,
+        disk_artifact_id="mi2:idx:data",
+    )
     runtime = _RuntimeStub(client)
-    cache_entry = ArtifactCacheEntry(
-        artifact_id="disk-aid",
-        canonical_index_bytes=canonical_bytes,
-        parsed_index=canonical_index_from_bytes(canonical_bytes),
-        generation=5,
-        disk_path="/tmp/artifact",
-        expires_at=time.monotonic() + 5.0,
-    )
-    runtime.cache_artifact_index(cache_entry)
-    pipeline = _PipelineStub(payload)
-    store = _StoreStub(runtime, pipeline)
-    artifact = Artifact(
-        store_ref=_store_ref(store),
-        disk_path="/tmp/artifact",
-        fallback=FallbackOptions.for_disk("/tmp/artifact"),
-    )
+    store = Store("daemon", runtime=runtime)
 
-    desc = artifact.describe()
+    artifact = store.from_disk("/tmp/artifact", show_progress=True)
 
-    assert desc.artifact_id == "disk-aid"
-    assert desc.generation == 5
-    assert client.resolve_calls == []
-    assert client.get_index_calls == 0
-
-
-def test_disk_cache_mismatch_invalidates_and_refetches():
-    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
-    client = _ClientStub(canonical_bytes)
-    runtime = _RuntimeStub(client)
-    stale_entry = ArtifactCacheEntry(
-        artifact_id="aid",
-        canonical_index_bytes=canonical_bytes,
-        parsed_index=canonical_index_from_bytes(canonical_bytes),
-        generation=1,
-        disk_path="/other/path",
-        expires_at=time.monotonic() + 5.0,
-    )
-    runtime.cache_artifact_index(stale_entry)
-    pipeline = _PipelineStub(payload)
-    store = _StoreStub(runtime, pipeline)
-    artifact = Artifact(
-        store_ref=_store_ref(store), artifact_id="aid", disk_path="/real/path"
-    )
-
-    _ = artifact.tensor_names
-
-    assert client.get_index_calls == 1
-    refreshed = runtime.get_artifact_index_cached("aid")
-    assert refreshed is not None
-    assert refreshed.disk_path == "/real/path"
+    assert artifact.artifact_id == "mi2:idx:data"
+    assert client.resolve_calls == [("/tmp/artifact", True)]
 
 
 def test_ensure_metadata_sets_under_lock(monkeypatch):

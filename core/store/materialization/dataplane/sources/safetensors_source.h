@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -23,8 +23,10 @@ class SafetensorsSource : public SeekableSource {
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
-  uint64_t total_size() const {
-    return data_size_;
+  [[nodiscard]] uint64_t total_bytes() const override;
+
+  [[nodiscard]] uint64_t total_size() const {
+    return total_bytes();
   }
 
  private:

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -37,18 +38,17 @@ class WorkerLifecycleManager {
     int chunk_sync_interval_ms{10000}; // 0 to disable
     int heartbeat_rpc_timeout_ms{0};
     int state_sync_rpc_timeout_ms{0};
-    int full_sync_rpc_timeout_ms{0};
     std::optional<int32_t> heartbeat_rpc_max_retries;
     std::optional<int32_t> state_sync_rpc_max_retries;
-    std::optional<int32_t> full_sync_rpc_max_retries;
-    // When true, an empty local inventory is treated as authoritative and will
-    // drive removals via force_full_sync during synchronization.
-    bool force_full_sync_on_empty_inventory{false};
     // Optional cluster identity guard; if set, daemon will refuse to register
     // with a Global Store reporting a different token.
     std::string cluster_token;
     // Optional shared Global Store client to reuse across the daemon.
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    // Capability directory bitset for Global Store registration/heartbeats.
+    uint64_t capability_flags{0};
+    // Per-replica max transport concurrency reported to GS during state sync.
+    uint32_t max_concurrency{4};
   };
 
   WorkerLifecycleManager(
@@ -112,6 +112,8 @@ class WorkerLifecycleManager {
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
   void enqueue_retire_keys(std::vector<store::loading::ReplicaKey> keys, std::string_view context);
   void process_retire_queue();
+  void schedule_demotion_task(const store::loading::ReplicaKey& key, std::string_view context);
+  bool wait_for_state_sync_success(uint64_t baseline, std::chrono::milliseconds timeout);
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
   bool wait_for_stop(std::chrono::milliseconds interval);
@@ -119,8 +121,9 @@ class WorkerLifecycleManager {
   void queue_obsolete_replicas(std::vector<std::string> obsolete);
   void perform_state_sync(uint64_t epoch);
   void retire_thread(std::thread* thread);
+  absl::Status unregister_worker_single_flight(std::string_view worker_id, bool is_graceful_shutdown);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
-  store::components::StateSyncToken next_state_sync_token(uint64_t epoch);
+  store::components::StateSyncToken next_state_sync_token();
   void mark_state_sync_progress();
   std::optional<std::chrono::milliseconds> state_sync_stall_budget() const;
 
@@ -128,6 +131,9 @@ class WorkerLifecycleManager {
   const WorkerLifecyclePorts ports_;
   const Options opts_;
   const std::string daemon_id_;
+  // Serialize control-plane RPCs that update the same worker row in Global Store
+  // (heartbeat/reconcile/register) to avoid write-write conflicts.
+  mutable std::mutex worker_control_plane_rpc_mu_;
 
   static gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> make_global_store_client(
       const Options& opts);
@@ -147,6 +153,8 @@ class WorkerLifecycleManager {
   // explicit shutdown path and destructor). When true, subsequent calls to
   // stop() are no-ops.
   std::atomic<bool> stop_called_{false};
+  // Ensure worker unregister is sent at most once for this lifecycle manager.
+  std::atomic<bool> unregister_worker_submitted_{false};
   std::mutex stop_mu_;
   std::condition_variable stop_cv_;
   std::thread hb_thread_;
@@ -155,6 +163,12 @@ class WorkerLifecycleManager {
   std::thread monitor_thread_;
   std::mutex retired_threads_mu_;
   std::vector<std::thread> retired_threads_;
+
+  // Cache last reported per-replica chunk states to avoid full periodic
+  // re-publication when nothing changed.
+  std::mutex chunk_sync_state_mu_;
+  absl::flat_hash_map<store::loading::ReplicaKey, std::vector<int32_t>, store::loading::ReplicaKeyHash>
+      chunk_sync_last_states_;
 
   // Lightweight metrics/counters for observability
   std::atomic<uint64_t> hb_success_{0};
@@ -173,9 +187,16 @@ class WorkerLifecycleManager {
   std::atomic<bool> state_sync_inflight_{false};
   std::atomic<bool> sync_alive_{false};
   std::atomic<uint64_t> hb_epoch_{0};
+  std::atomic<uint64_t> reconcile_generation_{1};
   std::atomic<uint64_t> state_sync_epoch_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
   std::atomic<uint64_t> state_sync_request_id_{0};
+  std::atomic<uint64_t> state_sync_enqueue_suppressed_{0};
+  std::atomic<uint32_t> state_sync_consecutive_failures_{0};
+  std::atomic<int64_t> state_sync_next_retry_ns_{0};
+  std::atomic<bool> state_sync_outage_mode_active_{false};
+  std::atomic<int64_t> state_sync_outage_enter_ns_{0};
+  std::atomic<int64_t> last_reconnect_latency_ms_{0};
   std::atomic<int64_t> state_sync_last_progress_ns_{0};
   std::atomic<bool> state_sync_restart_pending_{false};
   std::mutex state_sync_mu_;
@@ -187,11 +208,18 @@ class WorkerLifecycleManager {
   struct RetireEntry {
     size_t attempts{0};
     int64_t last_log_ts_s{0};
+    bool demotion_started{false};
+    bool demotion_complete{false};
   };
 
   std::mutex retire_mu_;
   absl::flat_hash_map<store::loading::ReplicaKey, RetireEntry, store::loading::ReplicaKeyHash> retire_queue_;
+  std::mutex pending_missing_mu_;
+  absl::flat_hash_map<store::loading::ReplicaKey, uint32_t, store::loading::ReplicaKeyHash>
+      pending_missing_reconcile_counts_;
   std::atomic<bool> retire_pending_{false};
+  std::mutex sync_success_mu_;
+  std::condition_variable sync_success_cv_;
   std::unique_ptr<store::runtime::RuntimeContextEvents::Subscription> runtime_event_subscription_;
   bool memory_tier_enabled_{false};
 
@@ -235,6 +263,18 @@ class WorkerLifecycleManager {
 
   bool sync_alive() const {
     return sync_alive_.load();
+  }
+
+  uint64_t state_sync_enqueue_suppressed() const {
+    return state_sync_enqueue_suppressed_.load();
+  }
+
+  bool state_sync_outage_mode_active() const {
+    return state_sync_outage_mode_active_.load();
+  }
+
+  int64_t last_reconnect_latency_ms() const {
+    return last_reconnect_latency_ms_.load();
   }
 };
 

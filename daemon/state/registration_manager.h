@@ -35,6 +35,7 @@ class RegistrationManager {
     bool lease_in_place{false};
     bool stage_on_gpu{true};
     bool release_gpu_on_commit{true};
+    std::string stable_dram_publish_lease_token;
     std::string index_key_hex;
     std::string index_data;
     tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
@@ -42,6 +43,7 @@ class RegistrationManager {
     bool view_registration{false};
     store::StoreEngine::ViewPlacement view_placement{store::StoreEngine::ViewPlacement::kUnspecified};
     std::string view_id;
+    std::string view_spec_json;
     store::StoreEngine::ViewRegistrationKind view_registration_kind{
         store::StoreEngine::ViewRegistrationKind::kUnspecified};
     uint64_t view_canonical_size_bytes{0};

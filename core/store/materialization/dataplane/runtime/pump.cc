@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/runtime/pump.h"
 
@@ -199,9 +199,12 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
     inflight.clear();
   };
   absl::Cleanup flush_guard = [&]() { flush_inflight(); };
-  while (!state.should_stop.load(std::memory_order_acquire) || draining) {
+  while (true) {
     if (state.drain_requested.load(std::memory_order_acquire)) {
       draining = true;
+    }
+    if (state.should_stop.load(std::memory_order_acquire) && !draining) {
+      break;
     }
     auto chunk_result = pool.get_ready_chunk();
     if (!chunk_result.ok()) {
@@ -328,6 +331,16 @@ void run_range_producer(
     absl::Span<const std::pair<uint64_t, size_t>> ranges,
     std::atomic<size_t>& range_index,
     PumpState& state) {
+  const auto fail_producer = [&](absl::Status status) {
+    absl::MutexLock lock(&state.status_mutex);
+    if (state.producer_status.ok()) {
+      state.producer_status = std::move(status);
+    }
+    state.should_stop.store(true, std::memory_order_release);
+    state.drain_requested.store(true, std::memory_order_release);
+    pool.shutdown();
+  };
+
   while (!state.should_stop.load(std::memory_order_acquire)) {
     size_t idx = range_index.fetch_add(1, std::memory_order_acq_rel);
     if (idx >= ranges.size()) {
@@ -341,12 +354,7 @@ void run_range_producer(
     while (remaining > 0 && !state.should_stop.load(std::memory_order_acquire)) {
       auto slot_result = pool.get_free_chunk();
       if (!slot_result.ok()) {
-        absl::MutexLock lock(&state.status_mutex);
-        if (state.producer_status.ok()) {
-          state.producer_status = slot_result.status();
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        fail_producer(slot_result.status());
         break;
       }
 
@@ -363,49 +371,27 @@ void run_range_producer(
       // Get buffer pointer from pool using interface method
       void* buffer = pool.get_chunk_data_ptr(slot_id);
       if (!buffer) {
-        absl::MutexLock lock(&state.status_mutex);
-        if (state.producer_status.ok()) {
-          state.producer_status = absl::InternalError("Failed to get chunk buffer pointer");
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        fail_producer(absl::InternalError("Failed to get chunk buffer pointer"));
         break;
       }
 
       auto read_result = src.read_at(current_offset, buffer, to_read);
       if (!read_result.ok()) {
-        absl::MutexLock lock(&state.status_mutex);
-        if (state.producer_status.ok()) {
-          state.producer_status = read_result.status();
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        fail_producer(read_result.status());
         break;
       }
 
       size_t bytes_read = *read_result;
       if (bytes_read == 0) {
         LOG(WARNING) << "Unexpected EOF at offset " << current_offset;
-        // Treat as error to propagate failure instead of silently succeeding
-        {
-          absl::MutexLock lock(&state.status_mutex);
-          if (state.producer_status.ok()) {
-            state.producer_status = absl::OutOfRangeError("Unexpected EOF while reading source");
-          }
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        // Treat as error to propagate failure instead of silently succeeding.
+        fail_producer(absl::OutOfRangeError("Unexpected EOF while reading source"));
         break;
       }
 
       // Validate that Source respects requested read size limits
       if (bytes_read > to_read) {
-        absl::MutexLock lock(&state.status_mutex);
-        if (state.producer_status.ok()) {
-          state.producer_status = absl::InvalidArgumentError("Source returned more bytes than requested");
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        fail_producer(absl::InvalidArgumentError("Source returned more bytes than requested"));
         break;
       }
 
@@ -413,12 +399,7 @@ void run_range_producer(
 
       // Check for overflow - use max value as error indicator
       if (chunk_id == std::numeric_limits<uint64_t>::max()) {
-        absl::MutexLock lock(&state.status_mutex);
-        if (state.producer_status.ok()) {
-          state.producer_status = absl::ResourceExhaustedError("Chunk ID overflow");
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        fail_producer(absl::ResourceExhaustedError("Chunk ID overflow"));
         break;
       }
 
@@ -431,12 +412,7 @@ void run_range_producer(
       auto status = pool.mark_chunk_ready(slot_id, chunk_id, bytes_read);
       if (!status.ok()) {
         record_copy_failure("cpu");
-        absl::MutexLock lock(&state.status_mutex);
-        if (state.producer_status.ok()) {
-          state.producer_status = status;
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
+        fail_producer(status);
         break;
       }
 
@@ -471,7 +447,7 @@ absl::Status pump_ranges(
   // Capability-driven direct-write path: if destination implements
   // DirectWriteCapable and source supports direct writes (e.g., RDMA),
   // plan windowed grants and stream directly into destination VA ranges.
-  if (src.supports_direct_write()) {
+  if (src.supports_direct_write_at()) {
     if (auto* cap = dynamic_cast<DirectWriteCapable*>(&dst)) {
       const size_t window_bytes = pool.chunk_size();
       if (!g_meter) {
@@ -521,7 +497,7 @@ absl::Status pump_ranges(
             range_staged_fallback = true;
           } else {
             auto t0 = absl::Now();
-            auto got = src.read_into(off, step, *grant_or);
+            auto got = src.read_into_at(off, off, step, *grant_or);
             if (!got.ok()) {
               // retry once on recoverable errors
               auto code = got.status().code();
@@ -533,7 +509,7 @@ absl::Status pump_ranges(
                 static const std::map<std::string, opentelemetry::common::AttributeValue> kEmptyAttrs;
                 g_direct_win_retry_total->Add(
                     1.0, opentelemetry::common::KeyValueIterableView(kEmptyAttrs), opentelemetry::context::Context{});
-                got = src.read_into(off, step, *grant_or);
+                got = src.read_into_at(off, off, step, *grant_or);
               }
               if (!got.ok()) {
                 // mark failure and fallback sticky for remaining of this range
@@ -543,7 +519,7 @@ absl::Status pump_ranges(
                 range_staged_fallback = true;
               } else {
                 if (*got != step)
-                  return absl::OutOfRangeError("Short direct write (window)");
+                  return absl::DataLossError("Short direct write (window)");
                 // metrics for successful window
                 std::map<std::string, opentelemetry::common::AttributeValue> attrs;
                 attrs.emplace("mode", opentelemetry::common::AttributeValue("direct"));
@@ -558,7 +534,7 @@ absl::Status pump_ranges(
               }
             } else {
               if (*got != step)
-                return absl::OutOfRangeError("Short direct write (window)");
+                return absl::DataLossError("Short direct write (window)");
               std::map<std::string, opentelemetry::common::AttributeValue> attrs;
               attrs.emplace("mode", opentelemetry::common::AttributeValue("direct"));
               g_bytes_total->Add(
@@ -628,6 +604,24 @@ absl::Status pump_ranges(
   run_consumer(dst, pool, state);
 
   producers_done->Wait();
+
+  // Producer-side failures can race with consumer shutdown: late ready chunks
+  // may be enqueued after the consumer observed end-of-stream. Drain any
+  // remaining ready slots so StreamingPinnedBuffer::release can reclaim all
+  // pinned slices deterministically.
+  if (state.should_stop.load(std::memory_order_acquire) || state.drain_requested.load(std::memory_order_acquire)) {
+    while (true) {
+      auto chunk_result = pool.get_ready_chunk();
+      if (!chunk_result.ok()) {
+        if (absl::IsOutOfRange(chunk_result.status()) || absl::IsUnavailable(chunk_result.status())) {
+          break;
+        }
+        LOG(WARNING) << "pump_ranges cleanup drain failed to fetch ready chunk: " << chunk_result.status();
+        break;
+      }
+      pool.return_chunk(chunk_result->slot_id);
+    }
+  }
 
   // Close the sink
   // Attempt to close if dst also implements Sink

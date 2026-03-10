@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -16,6 +17,7 @@
 #include <openssl/sha.h>
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -539,8 +541,21 @@ absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(i
 
 class NvrtcSha256KernelCache {
  public:
-  absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> get_or_compile(int major, int minor) {
-    const int key = major * 10 + minor;
+  struct CacheKey {
+    CUcontext context = nullptr;
+    int device_id = -1;
+    int major = 0;
+    int minor = 0;
+
+    bool operator==(const CacheKey& other) const = default;
+
+    template <typename H>
+    friend H AbslHashValue(H h, const CacheKey& key) {
+      return H::combine(std::move(h), reinterpret_cast<uintptr_t>(key.context), key.device_id, key.major, key.minor);
+    }
+  };
+
+  absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> get_or_compile(const CacheKey& key) {
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = cache_.find(key);
@@ -549,7 +564,7 @@ class NvrtcSha256KernelCache {
       }
     }
 
-    auto compiled_or = compile_nvrtc_sha256_kernel(major, minor);
+    auto compiled_or = compile_nvrtc_sha256_kernel(key.major, key.minor);
     if (!compiled_or.ok()) {
       return compiled_or.status();
     }
@@ -566,14 +581,36 @@ class NvrtcSha256KernelCache {
     return compiled;
   }
 
+  void invalidate(const CacheKey& key) {
+    std::lock_guard<std::mutex> lock(mu_);
+    cache_.erase(key);
+  }
+
  private:
   std::mutex mu_;
-  absl::flat_hash_map<int, std::shared_ptr<NvrtcSha256Kernel>> cache_;
+  absl::flat_hash_map<CacheKey, std::shared_ptr<NvrtcSha256Kernel>> cache_;
 };
 
 NvrtcSha256KernelCache& get_nvrtc_kernel_cache() {
   static auto* cache = new NvrtcSha256KernelCache();
   return *cache;
+}
+
+absl::StatusOr<CUcontext> current_cuda_context() {
+  auto init_status = ensure_cuda_driver_initialized();
+  if (!init_status.ok()) {
+    return init_status;
+  }
+  const cuda::DriverApi& driver = cuda::DriverApi::get();
+  CUcontext context = nullptr;
+  auto ctx_status = cu_result_to_status(driver.cuCtxGetCurrent(&context), "cuCtxGetCurrent");
+  if (!ctx_status.ok()) {
+    return ctx_status;
+  }
+  if (context == nullptr) {
+    return absl::FailedPreconditionError("CUDA context is null after set_device");
+  }
+  return context;
 }
 
 absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
@@ -594,11 +631,22 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
     return prop_status;
   }
 
-  auto kernel_or = get_nvrtc_kernel_cache().get_or_compile(props.major, props.minor);
+  auto context_or = current_cuda_context();
+  if (!context_or.ok()) {
+    return context_or.status();
+  }
+  NvrtcSha256KernelCache::CacheKey cache_key{
+      .context = *context_or,
+      .device_id = device_id,
+      .major = props.major,
+      .minor = props.minor,
+  };
+
+  auto kernel_or = get_nvrtc_kernel_cache().get_or_compile(cache_key);
   if (!kernel_or.ok()) {
     return kernel_or.status();
   }
-  const auto& kernel = kernel_or.value();
+  auto kernel = kernel_or.value();
   const auto sm_count = static_cast<unsigned int>(props.multiProcessorCount);
 
   auto ensure_driver_status = ensure_cuda_driver_initialized();
@@ -658,10 +706,20 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
 
   CUstream launch_stream = stream_created ? reinterpret_cast<CUstream>(stream) : nullptr;
 
-  auto launch_status = cu_result_to_status(
-      driver.cuLaunchKernel(
-          kernel->function, launch_blocks, 1, 1, kThreadsPerBlock, 1, 1, 0, launch_stream, params, nullptr),
-      "cuLaunchKernel(tensorcast_sha256_leaf_kernel)");
+  auto launch_result = driver.cuLaunchKernel(
+      kernel->function, launch_blocks, 1, 1, kThreadsPerBlock, 1, 1, 0, launch_stream, params, nullptr);
+  if (launch_result == CUDA_ERROR_INVALID_HANDLE || launch_result == CUDA_ERROR_INVALID_CONTEXT) {
+    LOG(WARNING) << "NVRTC kernel launch returned invalid handle/context; refreshing cache for device=" << device_id;
+    get_nvrtc_kernel_cache().invalidate(cache_key);
+    auto refreshed_or = get_nvrtc_kernel_cache().get_or_compile(cache_key);
+    if (!refreshed_or.ok()) {
+      return refreshed_or.status();
+    }
+    kernel = refreshed_or.value();
+    launch_result = driver.cuLaunchKernel(
+        kernel->function, launch_blocks, 1, 1, kThreadsPerBlock, 1, 1, 0, launch_stream, params, nullptr);
+  }
+  auto launch_status = cu_result_to_status(launch_result, "cuLaunchKernel(tensorcast_sha256_leaf_kernel)");
   if (!launch_status.ok()) {
     return launch_status;
   }

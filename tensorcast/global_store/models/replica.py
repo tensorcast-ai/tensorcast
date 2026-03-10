@@ -34,6 +34,14 @@ class ByteSpaceKind(Enum):
     VIEW = "VIEW"
 
 
+class ExportState(Enum):
+    """Export state for transport eligibility."""
+
+    PRESENCE_ONLY = "PRESENCE_ONLY"
+    EXPORTABLE = "EXPORTABLE"
+    DRAINING = "DRAINING"
+
+
 @dataclass(frozen=True)
 class ByteSpaceRef:
     """Byte space identifier for routing and replica identity."""
@@ -82,6 +90,8 @@ class Replica:
     buffer_sizes: List[int] = field(default_factory=list)
     # Optional verification metadata in JSON form (e.g., KEY_POINTS/SEGMENT_HASHES)
     verification_json: str | None = None
+    export_state: ExportState = ExportState.PRESENCE_ONLY
+    export_generation: int = 0
 
     # Worker association
     worker_id: str | None = None

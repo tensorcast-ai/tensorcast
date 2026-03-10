@@ -1,15 +1,21 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-"""Tests for concurrency and thread-safety in Global Store."""
-
-import pytest
+import concurrent.futures
 import threading
 import time
-import concurrent.futures
-from uuid import uuid4
 
-from tensorcast.global_store.models import Replica, Worker, MemoryType
-from .conftest import create_test_replicas, create_test_workers
+import pytest
+
+from tensorcast.global_store.exceptions.base import (
+    TimeoutError as GlobalStoreTimeoutError,
+)
+from tensorcast.global_store.models import (
+    ExportState,
+    MemoryType,
+    Replica,
+    TransportCompletionOutcome,
+    Worker,
+)
 
 
 class TestConcurrency:
@@ -18,11 +24,8 @@ class TestConcurrency:
     def test_concurrent_worker_registrations(self, services):
         """Test multiple workers registering simultaneously."""
         num_workers = 20
-        workers = []
-
-        # Create unique workers
-        for i in range(num_workers):
-            workers.append(Worker(
+        workers = [
+            Worker(
                 worker_id=f"concurrent_worker_{i}",
                 daemon_id=f"daemon_concurrent_{i}",
                 node_id=f"node_concurrent_{i}",
@@ -31,7 +34,9 @@ class TestConcurrency:
                 p2p_port=41000 + i,
                 mem_pool_total_size=10240 * (i + 1),
                 mem_pool_available_size=8192 * (i + 1),
-            ))
+            )
+            for i in range(num_workers)
+        ]
 
         # Register workers concurrently
         results = []
@@ -61,11 +66,8 @@ class TestConcurrency:
         """Test multiple replicas registering for the same artifact simultaneously."""
         artifact_id = "concurrent_test_artifact"
         num_replicas = 20
-        replicas = []
-
-        # Create unique replicas for the same artifact
-        for i in range(num_replicas):
-            replicas.append(Replica(
+        replicas = [
+            Replica(
                 artifact_id=artifact_id,
                 node_id=f"node_replica_{i}",
                 node_address=f"192.168.{100 + i // 255}.{i % 255 + 1}",
@@ -75,7 +77,9 @@ class TestConcurrency:
                 device_id=i if i % 3 == 0 else 0,  # GPU only for GPU type
                 worker_id=f"worker_replica_{i}",
                 max_concurrency=5,
-            ))
+            )
+            for i in range(num_replicas)
+        ]
 
         # Register replicas concurrently
         results = []
@@ -130,6 +134,9 @@ class TestConcurrency:
                 memory_size=1024,
                 memory_type=MemoryType.GPU,
                 device_id=i,
+                remote_memory_keys=[f"rk{i}"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
                 worker_id=worker_ids[i],
                 max_concurrency=2,  # Low concurrency to test queueing
                 is_available=True,
@@ -158,12 +165,13 @@ class TestConcurrency:
                     source_node_id=f"source_{request_id}",
                     source_address="192.168.201.1",
                     source_port=36000 + request_id,
-                    wait_timeout_ms=2000  # 2 second timeout
+                    wait_timeout_ms=2000,  # 2 second timeout
+                    request_id=f"concurrency-request-{request_id}",
                 )
                 return (replica, transport_id)
-            except Exception as e:
-                if "timeout" in str(e).lower():
-                    return "timeout"
+            except GlobalStoreTimeoutError:
+                return "timeout"
+            except Exception:
                 raise
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
@@ -192,8 +200,11 @@ class TestConcurrency:
         assert len(results) > 0  # At least some should succeed
 
         # Complete some transports to free up capacity
-        for replica, transport_id in results[:5]:
-            services["transport"].complete_transport(transport_id)
+        for _replica, transport_id in results[:5]:
+            services["transport"].complete_transport(
+                transport_id,
+                outcome=TransportCompletionOutcome.SUCCESS,
+            )
 
     def test_concurrent_heartbeats(self, services, repositories):
         """Test concurrent heartbeat updates from multiple workers."""
@@ -287,6 +298,9 @@ class TestConcurrency:
             memory_size=1024,
             memory_type=MemoryType.GPU,
             device_id=0,
+            remote_memory_keys=["rk0"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
             worker_id=worker_id,
             max_concurrency=max_concurrency,
             is_available=True,
@@ -311,7 +325,8 @@ class TestConcurrency:
                     source_node_id=f"source_{i}",
                     source_address="192.168.221.1",
                     source_port=40000 + i,
-                    wait_timeout_ms=500  # Short timeout
+                    wait_timeout_ms=500,  # Short timeout
+                    request_id=f"limit-request-{i}",
                 )
                 return ("success", transport_id)
             except Exception as e:
@@ -332,8 +347,11 @@ class TestConcurrency:
         assert len(transport_ids) == max_concurrency
         assert len(failed_requests) == num_requests - max_concurrency
 
-        # All failures should be timeouts
-        assert all("timeout" in err.lower() for err in failed_requests)
+        # All failures should be timeout-style terminal outcomes in queued dispatch
+        assert all(
+            "timeout" in err.lower() or "expired" in err.lower()
+            for err in failed_requests
+        )
 
     def test_concurrent_model_updates(self, services):
         """Test concurrent updates to the same artifact from different nodes."""
@@ -441,6 +459,9 @@ class TestRaceConditions:
             memory_size=1024,
             memory_type=MemoryType.GPU,
             device_id=0,
+            remote_memory_keys=["rk0"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
             worker_id=worker_id,
             max_concurrency=1,
             is_available=True,
@@ -459,7 +480,8 @@ class TestRaceConditions:
             source_node_id="source_1",
             source_address="192.168.241.1",
             source_port=43000,
-            wait_timeout_ms=1000
+            wait_timeout_ms=1000,
+            request_id="race-initial-1",
         )
 
         # Race condition: complete transport while others are waiting
@@ -469,7 +491,10 @@ class TestRaceConditions:
 
         def complete_transport():
             time.sleep(0.1)  # Small delay
-            services["transport"].complete_transport(transport_id)
+            services["transport"].complete_transport(
+                transport_id,
+                outcome=TransportCompletionOutcome.SUCCESS,
+            )
             completed.set()
 
         def request_new_transport():
@@ -480,7 +505,8 @@ class TestRaceConditions:
                     source_node_id="source_2",
                     source_address="192.168.241.2",
                     source_port=43001,
-                    wait_timeout_ms=2000
+                    wait_timeout_ms=2000,
+                    request_id="race-new-1",
                 )
                 new_transport_id = new_id
             except Exception as e:
@@ -541,9 +567,7 @@ class TestRaceConditions:
             while keep_running.is_set():
                 try:
                     for i in range(5):
-                        replicas = services["artifact"].list_replicas(
-                            artifact_id=f"unregister_artifact_{i}"
-                        )
+                        services["artifact"].list_replicas(artifact_id=f"unregister_artifact_{i}")
                         time.sleep(0.01)
                 except Exception as e:
                     errors.append(str(e))

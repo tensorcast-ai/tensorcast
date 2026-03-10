@@ -1,14 +1,20 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
 import logging
+import queue
+import threading
+from collections.abc import Sequence
 from contextlib import contextmanager
+from datetime import datetime
 from time import monotonic
 from typing import Callable, Iterator
 
 import grpc
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 """Prometheus metrics for the Global Store service.
 
@@ -59,6 +65,76 @@ GRPC_SERVER_HANDLING_LATENCY_SECONDS = Histogram(
         float("inf"),
     ),
 )
+
+GRPC_SERVER_INFLIGHT_GAUGE = Gauge(
+    "tc_grpc_server_inflight_requests",
+    "Current number of in-flight gRPC requests on the Global Store.",
+)
+
+GRPC_SERVER_INFLIGHT_PEAK_GAUGE = Gauge(
+    "tc_grpc_server_inflight_peak_requests",
+    "Peak in-flight gRPC requests observed within the latest telemetry window.",
+)
+
+CONTROL_PLANE_EXECUTOR_MAX_THREADS = Gauge(
+    "tc_control_plane_executor_max_threads",
+    "Configured max workers for the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_LIVE_THREADS = Gauge(
+    "tc_control_plane_executor_live_threads",
+    "Current number of live threads in the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_BUSY_THREADS = Gauge(
+    "tc_control_plane_executor_busy_threads",
+    "Estimated busy threads in the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_IDLE_THREADS = Gauge(
+    "tc_control_plane_executor_idle_threads",
+    "Estimated idle thread capacity in the Global Store control-plane executor.",
+)
+
+CONTROL_PLANE_EXECUTOR_QUEUE_DEPTH = Gauge(
+    "tc_control_plane_executor_queue_depth",
+    "Current work-queue depth in the Global Store control-plane executor.",
+)
+
+
+class _InFlightTracker:
+    """Track current and peak in-flight requests between telemetry snapshots."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current = 0
+        self._peak = 0
+
+    def increment(self) -> int:
+        with self._lock:
+            self._current += 1
+            if self._current > self._peak:
+                self._peak = self._current
+            return self._current
+
+    def decrement(self) -> int:
+        with self._lock:
+            if self._current > 0:
+                self._current -= 1
+            if self._peak < self._current:
+                self._peak = self._current
+            return self._current
+
+    def snapshot(self) -> tuple[int, int]:
+        with self._lock:
+            current = max(0, int(self._current))
+            peak = max(current, int(self._peak))
+            # Keep current as the next baseline and reset window peak.
+            self._peak = current
+            return current, peak
+
+
+_INFLIGHT_TRACKER = _InFlightTracker()
 
 ACTIVE_WORKERS_GAUGE = Gauge(
     "tc_active_workers",
@@ -132,6 +208,91 @@ ACTIVE_TRANSPORTS_GAUGE = Gauge(
     "Current number of in-flight (not yet completed) artifact transports.",
 )
 
+TRANSPORT_FILTER_COUNTER = Counter(
+    "tc_transport_filter_total",
+    "Total number of replicas filtered during transport selection.",
+    labelnames=("artifact_id", "reason"),
+)
+
+TRANSPORT_NO_EXPORTABLE_COUNTER = Counter(
+    "tc_transport_no_exportable_total",
+    "Total number of transport requests rejected due to no exportable sources.",
+    labelnames=("artifact_id",),
+)
+
+TRANSPORT_SOURCE_TOP1_SHARE_GAUGE = Gauge(
+    "tc_transport_source_top1_share",
+    "Top-1 source assignment share per artifact transport scheduling window.",
+    labelnames=("artifact_id",),
+)
+
+TRANSPORT_SOURCE_HHI_GAUGE = Gauge(
+    "tc_transport_source_hhi",
+    "Herfindahl-Hirschman index over source assignment shares per artifact.",
+    labelnames=("artifact_id",),
+)
+
+TRANSPORT_DIFFUSION_FIRST_HIT_SECONDS = Histogram(
+    "tc_transport_diffusion_first_hit_seconds",
+    "Latency from source availability to first assignment for diffusion tracking.",
+    labelnames=("artifact_id",),
+    buckets=(
+        0.01,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        30.0,
+        60.0,
+        float("inf"),
+    ),
+)
+
+TRANSPORT_DISPATCH_EVENT_COUNTER = Counter(
+    "tc_transport_dispatch_events_total",
+    "Internal dispatcher lifecycle events for queue-driven transport scheduling.",
+    labelnames=("event",),
+)
+
+_TRANSPORT_ASSIGNMENT_LOCK = threading.Lock()
+_TRANSPORT_SOURCE_ASSIGNMENTS: dict[str, dict[str, int]] = {}
+_TRANSPORT_SOURCE_FIRST_ASSIGNMENT: set[tuple[str, str]] = set()
+
+# Capability directory -------------------------------------------------------
+
+CAPABILITY_DIRECTORY_GAUGE = Gauge(
+    "tc_capability_directory_entries",
+    "Active capability directory entries by scope and capability.",
+    labelnames=("scope", "capability"),
+)
+
+
+def _normalize_capability_name(raw: str) -> str:
+    for prefix in (
+        "WORKER_CAPABILITY_FLAG_",
+        "INSTANCE_CAPABILITY_FLAG_",
+    ):
+        if raw.startswith(prefix):
+            return raw[len(prefix) :].lower()
+    return raw.lower()
+
+
+_WORKER_CAPABILITIES: list[tuple[int, str]] = [
+    (value, _normalize_capability_name(name))
+    for name, value in global_store_pb2.WorkerCapabilityFlag.items()
+    if value != 0
+]
+
+_INSTANCE_CAPABILITIES: list[tuple[int, str]] = [
+    (value, _normalize_capability_name(name))
+    for name, value in global_store_pb2.InstanceCapabilityFlag.items()
+    if value != 0
+]
+
 # View registration ----------------------------------------------------------
 
 VIEW_REGISTRATION_COUNTER = Counter(
@@ -144,6 +305,38 @@ VIEW_PARTIAL_BACKLOG_GAUGE = Gauge(
     "tc_view_partial_backlog_bytes",
     "Canonical byte backlog for partial view registrations.",
     labelnames=("artifact_id", "view_id"),
+)
+
+# Digest grids (leaves + overlap proofs) -------------------------------------
+
+DIGEST_ENTRIES_WRITTEN_COUNTER = Counter(
+    "tc_digest_entries_written_total",
+    "Total number of digest entries newly written (inserted) by the Global Store.",
+    labelnames=(
+        "grid",
+    ),  # grid=leaves|assembly_proof_commitments|piece_proof_digests|tensor_proof_commitments
+)
+
+DIGEST_CONFLICT_COUNTER = Counter(
+    "tc_digest_conflicts_total",
+    "Total number of digest conflicts (mismatched writes) rejected by the Global Store.",
+    labelnames=("grid",),
+)
+
+DIGEST_REQUEST_REJECTED_COUNTER = Counter(
+    "tc_digest_requests_rejected_total",
+    "Total number of digest write requests rejected by the Global Store.",
+    labelnames=("reason",),  # reason=too_large|conflict|invalid
+)
+
+# Retention / GC -------------------------------------------------------------
+
+GC_ROWS_DELETED_COUNTER = Counter(
+    "tc_gc_rows_deleted_total",
+    "Total number of rows deleted by Global Store retention policies.",
+    labelnames=(
+        "table",
+    ),  # table=operations|assembly_proof_commitments|piece_proof_digests
 )
 
 # Recovery / state-sync ------------------------------------------------------
@@ -169,6 +362,92 @@ STATE_SYNC_DURATION_SECONDS = Histogram(
         10,
         float("inf"),
     ),
+)
+
+WORKER_CONTROL_REDUCER_QUEUE_DEPTH = Gauge(
+    "tc_worker_control_reducer_queue_depth",
+    "Current queue depth per worker control reducer shard.",
+    labelnames=("shard",),
+)
+
+WORKER_CONTROL_REDUCER_QUEUE_LATENCY_SECONDS = Histogram(
+    "tc_worker_control_reducer_queue_latency_seconds",
+    "Queue wait latency for worker control reducer intents.",
+    buckets=(
+        0.0005,
+        0.001,
+        0.0025,
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2,
+        5,
+        float("inf"),
+    ),
+)
+
+WORKER_CONTROL_REDUCER_INTENT_COUNTER = Counter(
+    "tc_worker_control_reducer_intents_total",
+    "Total worker control reducer intents by shard/kind/result.",
+    labelnames=("shard", "kind", "result"),
+)
+
+WORKER_HEARTBEAT_BUFFER_PENDING_GAUGE = Gauge(
+    "tc_worker_heartbeat_buffer_pending",
+    "Current number of workers with pending heartbeat updates in the buffer.",
+)
+
+WORKER_HEARTBEAT_FLUSH_BATCH_SIZE = Histogram(
+    "tc_worker_heartbeat_flush_batch_size",
+    "Batch size for buffered heartbeat flush operations.",
+    buckets=(
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        float("inf"),
+    ),
+)
+
+WORKER_HEARTBEAT_FLUSH_UPDATES_COUNTER = Counter(
+    "tc_worker_heartbeat_flush_updates_total",
+    "Total buffered heartbeat updates handled by flush path.",
+    labelnames=("result",),  # result=batched|fallback|dropped
+)
+
+RECONCILE_RESULT_COUNTER = Counter(
+    "tc_reconcile_result_total",
+    "Total number of reconcile results emitted by Global Store.",
+    labelnames=("result_kind",),
+)
+
+RECONCILE_RETRY_LATER_COUNTER = Counter(
+    "tc_reconcile_retry_later_total",
+    "Total number of reconcile RETRY_LATER responses by reason.",
+    labelnames=("reason",),
+)
+
+CONTROL_PLANE_CONFLICT_COUNTER = Counter(
+    "tc_control_plane_conflicts_total",
+    "Total number of control-plane write conflicts observed by Global Store.",
+    labelnames=("scope",),
+)
+
+IDEMPOTENCY_REPLAY_COUNTER = Counter(
+    "tc_control_plane_idempotency_replay_total",
+    "Total number of control-plane idempotency replay outcomes.",
+    labelnames=("operation_kind", "result"),  # result=hit|payload_conflict
 )
 
 # Memory tier telemetry ------------------------------------------------------
@@ -218,6 +497,27 @@ def set_total_replicas(count: int) -> None:
     """Set the total replicas gauge to *count*."""
 
     ARTIFACT_REPLICAS_GAUGE.set(count)
+
+
+def set_capability_counts(*, scope: str, entries: Sequence[object]) -> None:
+    """Set capability directory gauges for the given entries."""
+
+    if scope == "worker":
+        capabilities = _WORKER_CAPABILITIES
+    elif scope == "instance":
+        capabilities = _INSTANCE_CAPABILITIES
+    else:
+        return
+
+    counts = {name: 0 for _, name in capabilities}
+    for entry in entries:
+        flags = int(getattr(entry, "capability_flags", 0))
+        for bit, name in capabilities:
+            if flags & (1 << int(bit)):
+                counts[name] += 1
+
+    for name, count in counts.items():
+        CAPABILITY_DIRECTORY_GAUGE.labels(scope=scope, capability=name).set(count)
 
 
 def observe_memory_tier_snapshot(
@@ -299,6 +599,30 @@ def set_view_partial_backlog(
     )
 
 
+def inc_digest_entries_written(*, grid: str, count: int) -> None:
+    if count <= 0:
+        return
+    DIGEST_ENTRIES_WRITTEN_COUNTER.labels(grid=grid).inc(count)
+
+
+def inc_digest_conflict(*, grid: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    DIGEST_CONFLICT_COUNTER.labels(grid=grid).inc(count)
+
+
+def inc_digest_request_rejected(*, reason: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    DIGEST_REQUEST_REJECTED_COUNTER.labels(reason=reason).inc(count)
+
+
+def inc_gc_rows_deleted(*, table: str, count: int) -> None:
+    if count <= 0:
+        return
+    GC_ROWS_DELETED_COUNTER.labels(table=table).inc(count)
+
+
 # ---------------------------------------------------------------------------
 # Transport helpers
 # ---------------------------------------------------------------------------
@@ -326,6 +650,68 @@ def dec_active_transports() -> None:
         ACTIVE_TRANSPORTS_GAUGE.dec()
 
 
+def inc_transport_filter(artifact_id: str, reason: str) -> None:
+    """Increment transport filter counter with *reason*."""
+
+    TRANSPORT_FILTER_COUNTER.labels(artifact_id=artifact_id, reason=reason).inc()
+
+
+def inc_transport_no_exportable(artifact_id: str) -> None:
+    """Increment no-exportable transport counter."""
+
+    TRANSPORT_NO_EXPORTABLE_COUNTER.labels(artifact_id=artifact_id).inc()
+
+
+def inc_transport_dispatch_event(event: str, count: int = 1) -> None:
+    """Increment bounded dispatcher event counters."""
+    if count <= 0:
+        return
+    TRANSPORT_DISPATCH_EVENT_COUNTER.labels(event=event).inc(count)
+
+
+def record_transport_source_assignment(
+    *,
+    artifact_id: str,
+    replica_id: str,
+    source_created_at: datetime | None,
+) -> None:
+    """Track source assignment distribution and diffusion first-hit latency."""
+    if not artifact_id or not replica_id:
+        return
+
+    is_first_assignment_for_source = False
+    top1_share = 0.0
+    hhi = 0.0
+    with _TRANSPORT_ASSIGNMENT_LOCK:
+        artifact_counts = _TRANSPORT_SOURCE_ASSIGNMENTS.setdefault(artifact_id, {})
+        artifact_counts[replica_id] = int(artifact_counts.get(replica_id, 0)) + 1
+        total = sum(int(v) for v in artifact_counts.values())
+        if total > 0:
+            shares = [float(count) / float(total) for count in artifact_counts.values()]
+            top1_share = max(shares)
+            hhi = sum(share * share for share in shares)
+
+        source_key = (artifact_id, replica_id)
+        if source_key not in _TRANSPORT_SOURCE_FIRST_ASSIGNMENT:
+            _TRANSPORT_SOURCE_FIRST_ASSIGNMENT.add(source_key)
+            is_first_assignment_for_source = True
+
+    TRANSPORT_SOURCE_TOP1_SHARE_GAUGE.labels(artifact_id=artifact_id).set(top1_share)
+    TRANSPORT_SOURCE_HHI_GAUGE.labels(artifact_id=artifact_id).set(hhi)
+
+    if not is_first_assignment_for_source or source_created_at is None:
+        return
+    now = (
+        datetime.now(tz=source_created_at.tzinfo)
+        if source_created_at.tzinfo is not None
+        else datetime.now()
+    )
+    latency_seconds = max(0.0, float((now - source_created_at).total_seconds()))
+    TRANSPORT_DIFFUSION_FIRST_HIT_SECONDS.labels(artifact_id=artifact_id).observe(
+        latency_seconds
+    )
+
+
 # ---------------------------------------------------------------------------
 # Recovery helpers
 # ---------------------------------------------------------------------------
@@ -337,6 +723,177 @@ def observe_state_sync(duration_seconds: float, success: bool) -> None:
     result_label = "success" if success else "error"
     STATE_SYNC_COUNTER.labels(result=result_label).inc()
     STATE_SYNC_DURATION_SECONDS.observe(duration_seconds)
+
+
+def set_worker_control_reducer_queue_depth(*, shard: int, depth: int) -> None:
+    WORKER_CONTROL_REDUCER_QUEUE_DEPTH.labels(shard=str(int(shard))).set(max(0, depth))
+
+
+def observe_worker_control_reducer_queue_latency(*, wait_seconds: float) -> None:
+    WORKER_CONTROL_REDUCER_QUEUE_LATENCY_SECONDS.observe(max(0.0, wait_seconds))
+
+
+def inc_worker_control_reducer_intent(
+    *, shard: int, kind: str, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    WORKER_CONTROL_REDUCER_INTENT_COUNTER.labels(
+        shard=str(int(shard)),
+        kind=kind,
+        result=result,
+    ).inc(count)
+
+
+def set_worker_heartbeat_buffer_pending(*, pending_workers: int) -> None:
+    WORKER_HEARTBEAT_BUFFER_PENDING_GAUGE.set(max(0, int(pending_workers)))
+
+
+def observe_worker_heartbeat_flush_batch_size(*, batch_size: int) -> None:
+    if batch_size <= 0:
+        return
+    WORKER_HEARTBEAT_FLUSH_BATCH_SIZE.observe(int(batch_size))
+
+
+def inc_worker_heartbeat_flush_updates(*, result: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    WORKER_HEARTBEAT_FLUSH_UPDATES_COUNTER.labels(result=result).inc(count)
+
+
+def inc_reconcile_result(*, result_kind: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    RECONCILE_RESULT_COUNTER.labels(result_kind=result_kind).inc(count)
+
+
+def inc_reconcile_retry_later(*, reason: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    RECONCILE_RETRY_LATER_COUNTER.labels(reason=reason).inc(count)
+
+
+def inc_control_plane_conflict(*, scope: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    CONTROL_PLANE_CONFLICT_COUNTER.labels(scope=scope).inc(count)
+
+
+def inc_idempotency_replay_hit(*, operation_kind: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    IDEMPOTENCY_REPLAY_COUNTER.labels(operation_kind=operation_kind, result="hit").inc(
+        count
+    )
+
+
+def inc_idempotency_replay_conflict(*, operation_kind: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    IDEMPOTENCY_REPLAY_COUNTER.labels(
+        operation_kind=operation_kind, result="payload_conflict"
+    ).inc(count)
+
+
+# ---------------------------------------------------------------------------
+# Control-plane executor observability
+# ---------------------------------------------------------------------------
+
+
+def _safe_queue_size(work_queue: object) -> int:
+    if work_queue is None:
+        return 0
+    try:
+        if isinstance(work_queue, queue.Queue):
+            return max(0, int(work_queue.qsize()))
+        qsize_fn = getattr(work_queue, "qsize", None)
+        if callable(qsize_fn):
+            return max(0, int(qsize_fn()))
+    except NotImplementedError:
+        return 0
+    except Exception:  # noqa: BLE001
+        return 0
+    return 0
+
+
+class ThreadPoolTelemetryReporter:
+    """Background sampler for ThreadPoolExecutor occupancy metrics."""
+
+    def __init__(
+        self,
+        *,
+        executor: object,
+        poll_interval_s: float = 1.0,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._executor = executor
+        self._poll_interval_s = max(0.1, float(poll_interval_s))
+        self._logger = logger or logging.getLogger(__name__)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="gs-control-plane-metrics",
+            daemon=True,
+        )
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        self._started = False
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._sample_once()
+            except Exception:  # noqa: BLE001
+                self._logger.debug(
+                    "control plane executor metrics sampling failed", exc_info=True
+                )
+            self._stop_event.wait(self._poll_interval_s)
+
+    def _sample_once(self) -> None:
+        max_workers = int(max(0, int(getattr(self._executor, "_max_workers", 0))))
+        threads = getattr(self._executor, "_threads", None)
+        live_threads = len(threads) if threads is not None else 0
+        queue_depth = _safe_queue_size(getattr(self._executor, "_work_queue", None))
+        inflight_current, inflight_peak = _INFLIGHT_TRACKER.snapshot()
+        GRPC_SERVER_INFLIGHT_GAUGE.set(inflight_current)
+        GRPC_SERVER_INFLIGHT_PEAK_GAUGE.set(inflight_peak)
+        busy_threads = min(
+            max_workers if max_workers > 0 else live_threads,
+            inflight_peak,
+        )
+        idle_threads = max(0, max_workers - busy_threads) if max_workers > 0 else 0
+
+        CONTROL_PLANE_EXECUTOR_MAX_THREADS.set(max_workers)
+        CONTROL_PLANE_EXECUTOR_LIVE_THREADS.set(max(0, int(live_threads)))
+        CONTROL_PLANE_EXECUTOR_QUEUE_DEPTH.set(queue_depth)
+        CONTROL_PLANE_EXECUTOR_BUSY_THREADS.set(max(0, int(busy_threads)))
+        CONTROL_PLANE_EXECUTOR_IDLE_THREADS.set(max(0, int(idle_threads)))
+
+
+def start_thread_pool_telemetry(
+    *,
+    executor: object,
+    poll_interval_s: float = 1.0,
+    logger: logging.Logger | None = None,
+) -> ThreadPoolTelemetryReporter:
+    reporter = ThreadPoolTelemetryReporter(
+        executor=executor,
+        poll_interval_s=poll_interval_s,
+        logger=logger,
+    )
+    reporter.start()
+    return reporter
 
 
 # ---------------------------------------------------------------------------
@@ -386,11 +943,28 @@ class PrometheusInterceptor(grpc.ServerInterceptor):
         """Wrap a unary-unary RPC handler to collect metrics."""
 
         def wrapper(request, context):
-            with _record_rpc_metrics(method):
+            start_time = monotonic()
+            response = None
+            code_name = grpc.StatusCode.OK.name
+            inflight_after_inc = _INFLIGHT_TRACKER.increment()
+            GRPC_SERVER_INFLIGHT_GAUGE.set(inflight_after_inc)
+            try:
                 response = inner(request, context)
                 code = context.code() or grpc.StatusCode.OK
-                GRPC_SERVER_HANDLED_COUNTER.labels(method=method, code=code.name).inc()
+                code_name = code.name
                 return response
+            except Exception:  # noqa: BLE001
+                code = context.code() or grpc.StatusCode.UNKNOWN
+                code_name = code.name
+                raise
+            finally:
+                duration = monotonic() - start_time
+                GRPC_SERVER_HANDLING_LATENCY_SECONDS.labels(method=method).observe(
+                    duration
+                )
+                GRPC_SERVER_HANDLED_COUNTER.labels(method=method, code=code_name).inc()
+                inflight_after_dec = _INFLIGHT_TRACKER.decrement()
+                GRPC_SERVER_INFLIGHT_GAUGE.set(inflight_after_dec)
 
         return wrapper
 
@@ -421,7 +995,8 @@ def start_metrics_http_server(port: int, addr: str = "") -> int:
 
     try:
         server = start_http_server(port, addr=addr)
-        actual_port = getattr(server, "server_port", None) or port
+        httpd = server[0] if isinstance(server, tuple) and server else server
+        actual_port = getattr(httpd, "server_port", None) or port
         return int(actual_port)
     except OSError as exc:
         logging.getLogger(__name__).warning(

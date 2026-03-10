@@ -306,17 +306,24 @@ net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const
   }
   if (dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
     if (rail_id == -1) {
-      int index = std::hash<std::string>{}(key) % devs_.size();
+      if (devs_.empty()) {
+        VLOG(1) << "No active RDMA device available for CPU key=" << key;
+        return nullptr;
+      }
+      size_t index = std::hash<std::string>{}(key) % devs_.size();
       LOG(INFO) << "get_best_dev: dev_type=" << dev_type << " dev_id=" << dev_id << " rail input=" << rail_id
                 << " key=" << key << " index=" << index << " dev=" << devs_[index]->get_name()
                 << " dev rail_id=" << devs_[index]->get_rail_id();
       return devs_[index];
-    } else {
-      return get_dev_by_rail(rail_id);
     }
-  } else {
-    return get_best_dev(dev_id);
+    auto rail_it = rail_devs_.find(rail_id);
+    if (rail_it == rail_devs_.end()) {
+      VLOG(1) << "No RDMA device mapped for rail_id=" << rail_id << " key=" << key;
+      return nullptr;
+    }
+    return rail_it->second;
   }
+  return get_best_dev(dev_id);
 }
 
 net_dev_t RdmaContext::get_best_dev(int gpu_id) {
@@ -325,12 +332,12 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
                  << " max_supported=" << static_cast<int>(std::size(dev_vector_)) - 1;
     return nullptr;
   }
-  if (devs_.empty()) {
-    LOG(WARNING) << "No RDMA net devices available when selecting best device for gpu_id=" << gpu_id;
-    return nullptr;
-  }
   if (dev_vector_[gpu_id] != nullptr) {
     return dev_vector_[gpu_id];
+  }
+  if (devs_.empty()) {
+    VLOG(1) << "No active RDMA devices discovered";
+    return nullptr;
   }
 
   char pci_path[512] = {0};
@@ -433,7 +440,7 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
     return dev_vector_[gpu_id];
   }
 
-  max_prefix_idx = dev_idx_list[gpu_id % dev_idx_list.size()];
+  max_prefix_idx = dev_idx_list[static_cast<size_t>(gpu_id) % dev_idx_list.size()];
   dev_vector_[gpu_id] = devs_[max_prefix_idx];
   return dev_vector_[gpu_id];
 }

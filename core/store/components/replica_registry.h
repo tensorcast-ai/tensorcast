@@ -1,9 +1,10 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,7 +96,16 @@ class ReplicaRegistry {
    */
   std::vector<loading::ReplicaKey> get_lru_instances() const ABSL_LOCKS_EXCLUDED(mutex_);
 
+  /**
+   * @brief Erase the exact replica instance for `key`.
+   *        Returns std::nullopt when the key is not present.
+   */
+  std::optional<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>> erase(const loading::ReplicaKey& key)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
  private:
+  void rebuild_indices_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   mutable absl::Mutex mutex_;
 
   // ────────────────────────────────────────────────────────────────────────

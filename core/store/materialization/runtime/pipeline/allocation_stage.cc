@@ -2,10 +2,12 @@
 
 #include "core/store/materialization/runtime/pipeline/allocation_stage.h"
 
+#include <string_view>
 #include <utility>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/time/time.h"
 #include "core/store/components/eviction_service.h"
 #include "core/store/replica/memory_state.h"
@@ -13,6 +15,29 @@
 namespace tensorcast::store::materialization::runtime::pipeline {
 
 namespace {
+
+bool status_indicates_gpu_memory_pressure(const absl::Status& status) {
+  if (status.ok()) {
+    return false;
+  }
+  if (absl::IsResourceExhausted(status)) {
+    return true;
+  }
+  const std::string_view message = status.message();
+  return absl::StrContains(message, "Resource exhausted") || absl::StrContains(message, "resource exhausted") ||
+      absl::StrContains(message, "out of memory") || absl::StrContains(message, "Out of memory") ||
+      absl::StrContains(message, "cudaErrorMemoryAllocation") || absl::StrContains(message, "cudaErrorOutOfMemory");
+}
+
+bool should_retry_gpu_load_after_wait_failure(const absl::Status& wait_status) {
+  if (wait_status.ok()) {
+    return false;
+  }
+  if (absl::IsDeadlineExceeded(wait_status)) {
+    return false;
+  }
+  return status_indicates_gpu_memory_pressure(wait_status);
+}
 
 absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ctx) {
   replica::ReplicaConfig config{
@@ -30,12 +55,21 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
   config.max_buffer_bytes = ctx.hints.max_buffer_bytes;
   if (ctx.options != nullptr) {
     config.streaming_buffer_chunks = std::max<size_t>(1, ctx.options->streaming_buffer_chunks);
+    config.byte_mapping_config = ctx.options->byte_mapping;
+  }
+  if (ctx.source_type == SourceType::kDisk) {
+    config.canonical_index_json = ctx.verification.canonical_index_json;
+    config.source_index_json = ctx.disk.source_index_json;
   }
   config.view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::nullopt;
   config.view_plan = ctx.resolved_view_plan;
   config.transform_placement = ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer;
   if (ctx.resolved_view_plan.has_value()) {
     config.expected_artifact_size = ctx.resolved_view_plan->view_size_bytes;
+  } else if (
+      ctx.source_type == SourceType::kDisk && ctx.disk.source_index_json.has_value() &&
+      ctx.verification.logical_total_size > 0) {
+    config.expected_artifact_size = ctx.verification.logical_total_size;
   } else if (ctx.source_type == SourceType::kDisk && ctx.disk.source.expected_size.has_value()) {
     config.expected_artifact_size = ctx.disk.source.expected_size;
   }
@@ -67,13 +101,14 @@ absl::Status retry_gpu_load_with_eviction(
 
   if (!evict_status.ok()) {
     LOG(WARNING) << "GPU eviction did not free enough memory: " << evict_status;
-    return absl::ResourceExhaustedError("GPU eviction failed");
+    return evict_status;
   }
 
   {
     absl::Status release_status = replica->release_memory(common::memory::MemoryLocation::GPU);
     if (!release_status.ok()) {
       LOG(WARNING) << "release_memory(GPU) failed during retry after eviction: " << release_status;
+      return release_status;
     }
   }
 
@@ -99,6 +134,42 @@ absl::Status retry_gpu_load_with_eviction(
   return absl::OkStatus();
 }
 
+absl::Status retry_if_stale_ready_signal(
+    IngestionContext& ctx,
+    common::memory::MemoryLocation target_location,
+    std::optional<int> gpu_device,
+    folly::SemiFuture<absl::Status>* load_sf) {
+  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+  if (!ctx.load_signal || !ctx.load_signal->is_ready()) {
+    return absl::OkStatus();
+  }
+
+  const absl::Status ready_status = std::move(ctx.load_signal->subscribe()).get();
+  if (ready_status.ok()) {
+    return absl::OkStatus();
+  }
+  if (!absl::IsFailedPrecondition(ready_status) && !absl::IsNotFound(ready_status)) {
+    return ready_status;
+  }
+
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::GPU);
+    const auto cpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::CPU);
+    if (gpu_state == replica::MemoryState::ALLOCATED && cpu_state != replica::MemoryState::LOADED) {
+      LOG(WARNING) << "Detected stale GPU ready signal with no loaded CPU source; forcing GPU reload";
+    }
+  }
+
+  absl::Status release_status = ctx.replica->release_memory(target_location);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    return release_status;
+  }
+
+  *load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, std::move(gpu_device));
+  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+  return absl::OkStatus();
+}
+
 } // namespace
 
 absl::Status AllocationStage::allocate(IngestionContext& ctx) {
@@ -116,7 +187,10 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
   auto target_location = ctx.target_location;
   std::optional<int> gpu_device = ctx.target_is_gpu ? std::optional<int>(ctx.target_device_id) : std::nullopt;
   auto load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
-  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+  auto stale_retry_status = retry_if_stale_ready_signal(ctx, target_location, gpu_device, &load_sf);
+  if (!stale_retry_status.ok()) {
+    return stale_retry_status;
+  }
 
   if (ctx.source_type == SourceType::kP2P) {
     absl::Status status = std::move(load_sf).get();
@@ -126,8 +200,12 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
         auto evict_status = ctx.replica_runtime->try_evict_memory_for_replica(ctx.p2p.source.size_bytes);
         if (evict_status.ok()) {
           load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
-          ctx.load_signal = ctx.replica->ready_signal_for(target_location);
-          status = std::move(load_sf).get();
+          stale_retry_status = retry_if_stale_ready_signal(ctx, target_location, gpu_device, &load_sf);
+          if (!stale_retry_status.ok()) {
+            status = stale_retry_status;
+          } else {
+            status = std::move(load_sf).get();
+          }
         }
       }
       if (!status.ok()) {
@@ -142,7 +220,7 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
       : absl::InfiniteDuration();
   auto wait_status =
       ctx.replica->get_memory_manager().wait_for_state(target_location, replica::MemoryState::LOADED, wait_duration);
-  if (!wait_status.ok() && ctx.target_is_gpu) {
+  if (!wait_status.ok() && ctx.target_is_gpu && should_retry_gpu_load_after_wait_failure(wait_status)) {
     auto retry_status = retry_gpu_load_with_eviction(ctx, ctx.replica, gpu_device);
     if (!retry_status.ok()) {
       return retry_status;

@@ -12,6 +12,7 @@ import click
 from tensorcast import runtime
 from tensorcast.cli_utils import ServiceError, global_store_manager, service_manager
 from tensorcast.cli_utils.health import ping_global_store
+from tensorcast.cli_utils.network import resolve_connect_host
 from tensorcast.cli_utils.paths import (
     current_global_session_path,
     global_session_paths,
@@ -578,6 +579,24 @@ def global_status(gs_session: str | None, as_json: bool):
     sid, payload = _global_status_payload(gs_session)
     address = payload.get("address")
     health = ping_global_store(address, timeout=1.0) if address else None
+    if not health:
+        state_obj = payload.get("state", {})
+        gs_obj = (
+            state_obj.get("global_store", state_obj)
+            if isinstance(state_obj, dict)
+            else {}
+        )
+        if isinstance(gs_obj, dict):
+            listen_host = gs_obj.get("listen_host")
+            listen_port = gs_obj.get("listen_port")
+            if listen_host and listen_port:
+                fallback_address = (
+                    f"{resolve_connect_host(str(listen_host))}:{int(listen_port)}"
+                )
+                if fallback_address != address:
+                    health = ping_global_store(fallback_address, timeout=1.0)
+                    if health:
+                        address = fallback_address
     output = {
         "session_id": sid,
         "address": address,

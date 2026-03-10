@@ -27,8 +27,13 @@ from tensorcast.api._errors import DaemonUnavailable, IndexParseError
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
 from tensorcast.api.context import CallContext
+from tensorcast.common.selection_contract import (
+    build_artifact_selection,
+    compute_selected_index_bytes,
+)
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import ServerConfig
 
@@ -66,6 +71,12 @@ class MaterializationPayload:
     ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
     ticket_created_at_ts: float | None = None
     ticket_expires_at_ts: float | None = None
+    retry_attempts: int = 1
+    retry_reason_buckets: Mapping[str, int] | None = None
+    budget_deadline_sec: float | None = None
+    budget_elapsed_sec: float | None = None
+    budget_remaining_sec: float | None = None
+    budget_exit_reason: str | None = None
 
 
 _LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
@@ -160,6 +171,51 @@ def _tensor_payload_from_proto(
     )
 
 
+def _export_policy_to_proto(value: str | None) -> store_daemon_pb2.ExportPolicy:
+    normalized = "never" if value is None else str(value).strip().lower()
+    if normalized == "force":
+        return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_FORCE
+    if normalized == "auto":
+        return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_AUTO
+    return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_NEVER
+
+
+def _build_artifact_selection(
+    *,
+    artifact_id: str,
+    view: common_pb2.ViewSpec | None,
+    view_id: str | None,
+    tensor_names: Sequence[str] | None,
+    view_subset_hash: bytes | None,
+    canonical_index_hint: bytes | None,
+    view_index_hint: bytes | None,
+) -> common_pb2.ArtifactSelection:
+    ordered_names: tuple[str, ...] = tuple(str(name) for name in (tensor_names or ()))
+    has_subset = bool(ordered_names)
+    has_transform = bool(view is not None and view.tensors)
+    resolved_view_index_hint = bytes(view_index_hint or b"")
+
+    if (has_transform or has_subset) and not resolved_view_index_hint:
+        canonical_bytes = bytes(canonical_index_hint or b"")
+        if canonical_bytes:
+            resolved_view_index_hint = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_bytes,
+                view_spec=view if has_transform else None,
+                tensor_names=ordered_names if has_subset else None,
+            )
+
+    return build_artifact_selection(
+        artifact_id=artifact_id,
+        canonical_index_bytes=bytes(canonical_index_hint or b""),
+        layout_index_bytes=resolved_view_index_hint,
+        view_spec=view,
+        tensor_names=ordered_names,
+        view_subset_hash=view_subset_hash,
+        view_id=view_id,
+        allow_view_id_without_spec=bool(view_id and not has_transform),
+    )
+
+
 def materialize_artifact_v2(
     *,
     client: DaemonCtl,
@@ -169,11 +225,10 @@ def materialize_artifact_v2(
     artifact_id: str | None,
     key: str | None,
     options: GetArtifactOptions | None = None,
-    view: store_daemon_pb2.ViewSpec | None = None,
+    view: common_pb2.ViewSpec | None = None,
     view_id: str | None = None,
     placement: store_daemon_pb2.TransformPlacement | None = None,
     canonical_index_hint: bytes | None = None,
-    disk_path_hint: str | None = None,
     preference: store_daemon_pb2.SourcePreference | None = None,
     source_policy: store_daemon_pb2.SourcePolicy | None = None,
     tensor_names: Sequence[str] | None = None,
@@ -188,8 +243,8 @@ def materialize_artifact_v2(
 ) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
-    if artifact_id is None and key is None and not disk_path_hint:
-        raise ValueError("Either artifact_id, key, or disk_path_hint is required")
+    if artifact_id is None and key is None:
+        raise ValueError("Either artifact_id or key is required")
     if view is not None and view_id is not None:
         raise ValueError("Specify at most one of view or view_id")
 
@@ -226,7 +281,7 @@ def materialize_artifact_v2(
     )
 
     replica_uuid_value = replica_uuid or new_uuid()
-    disk_path: str | None = disk_path_hint
+    disk_path: str | None = None
     view_index_bytes: bytes | None = None
     materialized_source: store_daemon_pb2.MaterializationSource | None = None
 
@@ -263,103 +318,63 @@ def materialize_artifact_v2(
             )
         else:
             preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        response: (
-            store_daemon_pb2.MaterializeReplicaResponse
-            | store_daemon_pb2.MaterializeByKeyResponse
+        export_policy = _export_policy_to_proto(opts.export_policy)
+        resolved_artifact_id = artifact_id
+        if resolved_artifact_id is None:
+            if key is None:
+                raise ValueError(
+                    "artifact_id or key is required for materialize_artifact_v2"
+                )
+            mapping = client.resolve_key_mapping(key)
+            if not mapping.artifact_id:
+                raise DaemonUnavailable(
+                    f"ResolveKeyMapping returned empty artifact_id for key '{key}'"
+                )
+            resolved_artifact_id = mapping.artifact_id
+
+        resolved_canonical_index_hint = canonical_index_hint
+        if resolved_canonical_index_hint is None:
+            resolved_canonical_index_hint = client.get_artifact_index_by_id(
+                resolved_artifact_id
+            )
+
+        selection = _build_artifact_selection(
+            artifact_id=resolved_artifact_id,
+            view=view,
+            view_id=view_id,
+            tensor_names=tensor_names,
+            view_subset_hash=view_subset_hash,
+            canonical_index_hint=resolved_canonical_index_hint,
+            view_index_hint=view_index_hint,
         )
-        if artifact_id is not None:
-            request_device_uuid = (
-                ""
-                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-                else device_uuid_for(dev_id)
+
+        request_device_uuid = (
+            ""
+            if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+            else device_uuid_for(dev_id)
+        )
+        response = client.materialize_by_artifact_id_v2(
+            selection=selection,
+            replica_uuid=replica_uuid_value,
+            device_uuid=request_device_uuid,
+            pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+            wait_for_completion=opts.wait_for_completion,
+            wait_for_shared_disk_ms=opts.wait_for_shared_disk_ms,
+            placement=placement,
+            return_response=True,
+            preference=preference_value,
+            source_policy=source_policy,
+            export_policy=export_policy,
+            target_device_type=target_device_type,
+            lease_mode=lease_mode,
+            timeout_s=effective_timeout_s,
+        )
+        if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
+            raise DaemonUnavailable(
+                "Daemon returned unexpected response type for materialization v2"
             )
-            response = client.materialize_by_artifact_id_v2(
-                artifact_id=artifact_id,
-                replica_uuid=replica_uuid_value,
-                device_uuid=request_device_uuid,
-                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                wait_for_completion=opts.wait_for_completion,
-                view=view,
-                view_id=view_id,
-                placement=placement,
-                return_response=True,
-                disk_path=disk_path_hint,
-                preference=preference_value,
-                source_policy=source_policy,
-                tensor_names=tensor_names,
-                verify_checksums=verify_checksums,
-                view_subset_hash=view_subset_hash,
-                target_device_type=target_device_type,
-                lease_mode=lease_mode,
-                timeout_s=effective_timeout_s,
-            )
-            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
-                raise DaemonUnavailable(
-                    "Daemon returned unexpected response type for materialization v2"
-                )
-            disk_path = response.disk_path or disk_path
-            materialized_source = response.source
-        elif key is not None:
-            response = client.materialize_by_key_v2(
-                key=key or "",
-                replica_uuid=replica_uuid_value,
-                device_id=0
-                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-                else int(dev_id),
-                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                wait_for_completion=opts.wait_for_completion,
-                return_response=True,
-                preference=preference_value,
-                source_policy=source_policy,
-                tensor_names=tensor_names,
-                view_subset_hash=view_subset_hash,
-                target_device_type=target_device_type,
-                lease_mode=lease_mode,
-                timeout_s=effective_timeout_s,
-            )
-            if not isinstance(response, store_daemon_pb2.MaterializeByKeyResponse):
-                raise DaemonUnavailable(
-                    "Daemon returned unexpected response type for key materialization v2"
-                )
-            disk_path = response.used_disk_path or disk_path
-            materialized_source = response.source
-        elif disk_path_hint:
-            # Disk-only materialization: no artifact_id or key, just a disk path.
-            # The daemon loads directly from disk via DiskFallbackHint.
-            response = client.materialize_by_artifact_id_v2(
-                artifact_id="",
-                replica_uuid=replica_uuid_value,
-                device_uuid=(
-                    ""
-                    if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-                    else device_uuid_for(dev_id)
-                ),
-                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                wait_for_completion=opts.wait_for_completion,
-                view=view,
-                view_id=view_id,
-                placement=placement,
-                return_response=True,
-                disk_path=disk_path_hint,
-                preference=store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK,
-                source_policy=source_policy,
-                tensor_names=tensor_names,
-                verify_checksums=verify_checksums,
-                view_subset_hash=view_subset_hash,
-                target_device_type=target_device_type,
-                lease_mode=lease_mode,
-                timeout_s=effective_timeout_s,
-            )
-            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
-                raise DaemonUnavailable(
-                    "Daemon returned unexpected response type for disk materialization v2"
-                )
-            disk_path = response.disk_path or disk_path
-            materialized_source = response.source
-        else:
-            raise ValueError(
-                "artifact_id, key, or disk_path_hint is required for materialize_artifact_v2"
-            )
+        disk_path = response.disk_path or disk_path
+        materialized_source = response.source
 
     ticket_replica_uuid: str | None = None
     ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
@@ -387,7 +402,7 @@ def materialize_artifact_v2(
         server_config.local_handle_socket_path if server_config is not None else ""
     )
     cpu_shared_memory_enabled = bool(
-        server_config.cpu_shared_memory_enabled if server_config is not None else False
+        server_config.cpu_shared_memory_enabled if server_config is not None else True
     )
 
     cuda_ipc_handle = b""
@@ -449,17 +464,16 @@ def materialize_artifact_v2(
     if generation_value is None and generation_hint is not None:
         generation_value = generation_hint
     if canonical_index_bytes:
-        resolved_artifact_id = response.artifact_id or artifact_id or key or ""
+        resolved_artifact_id = response.artifact_id or resolved_artifact_id
     else:
-        fallback_hint = canonical_index_hint or view_index_hint
+        fallback_hint = resolved_canonical_index_hint
         if fallback_hint is not None:
             canonical_index_bytes = fallback_hint
-            resolved_artifact_id = artifact_id or key or ""
             if generation_value is None and generation_hint is not None:
                 generation_value = generation_hint
         else:
             raise IndexParseError(
-                f"Failed to fetch canonical index for artifact_id={artifact_id or key or ''}"
+                f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}"
             )
 
     if hasattr(response, "view_index_bytes") and response.view_index_bytes:

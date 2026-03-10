@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 import weakref
 from typing import Any
 
 import tensorcast as tc
-
 from tensorcast.api._materialize import MaterializationPayload
 from tensorcast.api.store.artifact import Artifact
+from tensorcast.common.selection_identity import (
+    compute_selection_hash,
+)
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _Client:
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        del artifact_id
+        return b"{}"
+
     def query_replica_status(self, ticket: store_daemon_pb2.ReplicaTicket):
         resp = store_daemon_pb2.QueryReplicaStatusResponse()
         resp.ticket.replica_uuid = ticket.replica_uuid
@@ -44,9 +49,16 @@ class _Runtime:
     def __init__(self) -> None:
         self._client = _Client()
         self.cached: list[Any] = []
+        self.invalidated: list[tuple[str, str]] = []
 
     def ensure_client(self) -> _Client:
         return self._client
+
+    def get_artifact_index_cached(self, artifact_id: str):  # noqa: ANN001, ARG002
+        return None
+
+    def invalidate_artifact(self, artifact_id: str, *, reason: str) -> None:
+        self.invalidated.append((str(artifact_id), str(reason)))
 
     def cache_artifact_index(self, entry: object) -> None:
         self.cached.append(entry)
@@ -85,9 +97,13 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
     op = artifact.prefetch(device="cuda:0", ctx=ctx)
 
     daemon_id = store._runtime.daemon_id
-    selection_hash = hashlib.sha256("aid|".encode("utf-8")).hexdigest()
+    selection_hash = compute_selection_hash(
+        view_id="",
+        view_subset_hash=None,
+    ).hex()
     action_fingerprint = (
-        f"prefetch|daemon={daemon_id}|selection={selection_hash}|device=0|lease=NO_LEASE|v1"
+        f"prefetch|daemon={daemon_id}|selection={selection_hash}"
+        f"|device=0|lease=NO_LEASE|v1"
     )
     ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
     expected = str(uuid.uuid5(ns, f"{ctx.idempotency_key}|{action_fingerprint}"))

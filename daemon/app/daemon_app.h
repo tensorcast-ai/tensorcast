@@ -31,6 +31,8 @@ class DaemonApp {
     std::string listen_addr;
     std::shared_ptr<grpc::ServerCredentials> credentials;
     int max_concurrent_streams{0};
+    int max_send_message_length{64 * 1024 * 1024};
+    int max_receive_message_length{64 * 1024 * 1024};
     std::optional<int> keepalive_time_ms;
     std::optional<int> keepalive_timeout_ms;
     std::optional<int> max_connection_idle_ms;
@@ -73,6 +75,10 @@ class DaemonApp {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<KeyMappingController> key_mapping_controller_;
+  std::unique_ptr<PersistenceRpcController> persistence_rpc_controller_;
+  std::unique_ptr<ReplicaSessionController> replica_session_controller_;
+  std::unique_ptr<LeaseController> lease_controller_;
   std::unique_ptr<StoreDaemonServiceImpl> service_;
   std::unique_ptr<LocalHandleServer> local_handle_server_;
   std::unique_ptr<WorkerLifecycleManager> worker_lifecycle_manager_;

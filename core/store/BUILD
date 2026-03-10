@@ -89,8 +89,12 @@ sc_header_only_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":communication_manager",
+        ":global_store_client",
         "//core/common:async_runtime_lib",
         "//core/common:const_granularity_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:pinned_memory_authority_lib",
     ],
 )
 
@@ -346,6 +350,7 @@ sc_cc_library(
         "//core/common:trace_macros_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store/materialization/common:view_hash_utils",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/contracts:materialization_request",
         "//core/store/materialization/control:replica_registration_helper",
@@ -354,7 +359,6 @@ sc_cc_library(
         "//core/store/materialization/dataplane:index_reader",
         "//core/store/materialization/dataplane:loader",
         "//core/store/materialization/dataplane:p2p_loader",
-        "//core/store/materialization/dataplane:segment_plan_source",
         "//core/store/materialization/dataplane:source_hash",
         "//core/store/materialization/dataplane:verification_utils",
         "//core/store/materialization/dataplane:view_ingest_executor",
@@ -367,6 +371,7 @@ sc_cc_library(
         "//core/store/runtime:runtime_env",
         "//core/store/runtime/ingestion:ingestion_runtime",
         "//core/store/runtime/metadata:metadata_gateway",
+        "//core/store/runtime/replica:replica_promotion_manager",
         "//core/store/runtime/replica:replica_runtime",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",

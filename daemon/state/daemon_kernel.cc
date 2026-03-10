@@ -38,6 +38,9 @@ DaemonKernel::DaemonKernel(
         if (this->lifecycle_mgr_) {
           this->lifecycle_mgr_->handle_pid_exit(pid);
         }
+        if (this->region_registry_) {
+          (void)this->region_registry_->handle_pid_exit(static_cast<int>(pid));
+        }
       },
       std::chrono::duration_cast<std::chrono::milliseconds>(options_.proc_check_interval));
   lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
@@ -62,13 +65,36 @@ DaemonKernel::DaemonKernel(
 
   placement_lease_tokens_ = std::make_unique<PlacementLeaseTokens>(PlacementLeaseTokens::Options{});
 
+  if (options_.capability_tokens.active.version != 0 && !options_.capability_tokens.active.secret.empty()) {
+    capability_tokens_ = std::make_unique<common::CapabilityTokenManager>(options_.capability_tokens);
+  }
+
+  if (options_.retention_handles.enabled) {
+    RetentionRegistry::Options retention_opts;
+    retention_opts.enabled = options_.retention_handles.enabled;
+    retention_opts.default_ttl =
+        absl::Milliseconds(static_cast<int64_t>(options_.retention_handles.default_ttl.count()));
+    retention_opts.max_ttl = absl::Milliseconds(static_cast<int64_t>(options_.retention_handles.max_ttl.count()));
+    retention_registry_ = std::make_unique<RetentionRegistry>(
+        retention_opts,
+        make_store_engine_retention_backend(*engine_),
+        *lifecycle_mgr_,
+        capability_tokens_.get(),
+        options_.daemon_id);
+  }
+
   persistence_mgr_ = std::make_unique<PersistenceManager>(
       scheduler_.get(),
       lip_mgr_.get(),
       engine_.get(),
+      async_runtime_,
       engine_->get_artifact_chunk_bytes(),
       std::chrono::milliseconds(500),
       options_.persistence_log_path);
+  if (persistence_mgr_) {
+    persistence_mgr_->set_storage_path(options_.storage_path);
+    persistence_mgr_->set_max_concurrency(options_.max_concurrency);
+  }
   engine_->set_stable_cache_spill_evictable([this](const auto& key, const auto& policy) {
     if (!persistence_mgr_) {
       return false;

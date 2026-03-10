@@ -80,7 +80,8 @@ class BatchContext:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        tensors = artifact.tensor_dict(device=self._device, names=self._names or None)
+        selected_artifact = artifact.subset(self._names) if self._names else artifact
+        tensors = selected_artifact.tensor_dict(device=self._device)
         with self._lock:
             self._materialized = tensors
 
@@ -243,11 +244,11 @@ class MaterializationBatcher:
             return
         names = [fetch.tensor_name for fetch in fetches]
         device = fetches[0].device
+        selected_artifact = artifact.subset(names) if names else artifact
         try:
             tensors = await asyncio.to_thread(
-                artifact.tensor_dict,
+                selected_artifact.tensor_dict,
                 device=device,
-                names=names,
             )
         except Exception as exc:  # noqa: BLE001
             for fetch in fetches:

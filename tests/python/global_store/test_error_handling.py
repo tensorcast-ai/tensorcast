@@ -7,7 +7,13 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
-from tensorcast.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.models import (
+    ExportState,
+    MemoryType,
+    Replica,
+    TransportCompletionOutcome,
+    Worker,
+)
 from tensorcast.global_store.exceptions import (
     NotFoundError,
     ValidationError,
@@ -66,12 +72,29 @@ class TestErrorHandling:
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
-                wait_timeout_ms=100
+                wait_timeout_ms=100,
+                request_id="error-no-replicas-1",
             )
         assert "No replicas registered" in str(exc_info.value)
 
     def test_transport_request_all_replicas_at_capacity(self, services, repositories):
         """Test requesting transport when all replicas are at capacity."""
+        workers = []
+        for i in range(3):
+            workers.append(
+                services["worker"].register_worker(
+                    Worker(
+                        daemon_id=f"daemon_capacity_{i}",
+                        node_id=f"node{i}",
+                        node_address=f"192.168.1.{i+1}",
+                        grpc_port=55051 + i,
+                        p2p_port=55061 + i,
+                        mem_pool_total_size=1024,
+                        mem_pool_available_size=1024,
+                    )
+                )
+            )
+
         # Create replicas with max_concurrency=1
         replicas = []
         for i in range(3):
@@ -83,7 +106,10 @@ class TestErrorHandling:
                 memory_size=1024,
                 memory_type=MemoryType.GPU,
                 device_id=i,
-                worker_id=f"worker{i}",
+                remote_memory_keys=[f"rk{i}"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=workers[i].worker_id,
                 max_concurrency=1,
                 current_requests=1,  # Already at capacity
             )
@@ -97,16 +123,21 @@ class TestErrorHandling:
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
-                wait_timeout_ms=100  # Short timeout for test
+                wait_timeout_ms=100,  # Short timeout for test
+                request_id="error-all-capacity-1",
             )
-        assert "No available replica" in str(exc_info.value) and "timeout" in str(exc_info.value)
+        assert (
+            "No available replica" in str(exc_info.value)
+            or "expired before dispatch" in str(exc_info.value)
+        )
 
     def test_complete_transport_invalid_id(self, services):
         """Test completing transport with invalid ID."""
         from uuid import uuid4
         with pytest.raises(NotFoundError) as exc_info:
             services["transport"].complete_transport(
-                transport_id=uuid4()
+                transport_id=uuid4(),
+                outcome=TransportCompletionOutcome.SUCCESS,
             )
         # The error message includes the transport ID
         assert "Transport" in str(exc_info.value) and "not found" in str(exc_info.value)
@@ -339,6 +370,18 @@ class TestEdgeCases:
 
     def test_zero_timeout_transport_request(self, services, repositories):
         """Test transport request with zero timeout."""
+        worker = services["worker"].register_worker(
+            Worker(
+                daemon_id="daemon_zero_timeout_worker",
+                node_id="zero_timeout_node",
+                node_address="192.168.60.1",
+                grpc_port=56051,
+                p2p_port=56052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+
         # Create a replica with unique identifiers
         replica = Replica(
             artifact_id="zero_timeout_artifact",
@@ -348,7 +391,10 @@ class TestEdgeCases:
             memory_size=1024,
             memory_type=MemoryType.GPU,
             device_id=0,
-            worker_id="zero_timeout_worker",
+            remote_memory_keys=["rk0"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            worker_id=worker.worker_id,
         )
         repositories["replica"].create(replica)
 
@@ -359,7 +405,8 @@ class TestEdgeCases:
                 source_node_id="zero_timeout_source",
                 source_address="192.168.60.2",  # Different from replica address
                 source_port=8181,
-                wait_timeout_ms=0
+                wait_timeout_ms=0,
+                request_id="error-zero-timeout-1",
             )
             assert transport_id
             assert selected_replica.artifact_id == "zero_timeout_artifact"

@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <utility>
 
@@ -14,7 +14,11 @@ transport::tensor_t PartitionTensorStore::get_tensor(std::string tensor_key) {
 }
 
 void PartitionTensorStore::register_tensor(const transport::tensor_t& t) {
-  tensors_.put(t->get_key(), t);
+  const std::string key = t->get_key();
+  // Registration keys are reused across promotion cycles; replace stale entries
+  // so byte-size/address metadata always reflects the newest export.
+  (void)tensors_.erase_if_present(key);
+  tensors_.put(key, t);
 }
 
 void PartitionTensorStore::unregister_tensor(std::string tensor_key) {

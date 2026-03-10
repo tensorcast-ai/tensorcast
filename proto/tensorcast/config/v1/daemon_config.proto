@@ -13,6 +13,14 @@ enum VerificationTimeoutStatus {
   VERIFICATION_TIMEOUT_STATUS_DEADLINE = 2;
 }
 
+enum PromotionPolicy {
+  PROMOTION_POLICY_UNSPECIFIED = 0;
+  PROMOTION_POLICY_NEVER = 1;
+  PROMOTION_POLICY_ON_MATERIALIZE = 2;
+  PROMOTION_POLICY_ON_HOTNESS = 3;
+  PROMOTION_POLICY_ON_POLICY = 4;
+}
+
 // Explicit daemon server config to avoid ambiguity with other servers.
 message DaemonServer {
   // Legacy fields replaced by listen/p2p_listen for structure.
@@ -68,6 +76,8 @@ message Lifecycle {
 message HighAvailability {
   bool enabled = 1;
   reserved 2; // global_store_address (host:port string)
+  reserved 11, 13, 14;
+  reserved "force_full_sync_on_empty_inventory", "full_sync_rpc_timeout", "full_sync_rpc_max_retries";
   // One or more control-plane endpoints for the Global Store.
   repeated tensorcast.config.v1.SocketAddress global_store_endpoints = 10;
   google.protobuf.Duration heartbeat_interval = 3;
@@ -80,12 +90,6 @@ message HighAvailability {
   // State sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
   google.protobuf.Duration state_sync_rpc_timeout = 9;
   optional int32 state_sync_rpc_max_retries = 12;
-  // Full-state sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
-  google.protobuf.Duration full_sync_rpc_timeout = 13;
-  optional int32 full_sync_rpc_max_retries = 14;
-  // When true, an empty local inventory is treated as authoritative and will
-  // remove replicas during sync (intended for drain/retire workflows).
-  bool force_full_sync_on_empty_inventory = 11;
 }
 
 message Engine {
@@ -122,6 +126,31 @@ message Engine {
   reserved 6, 7;
   reserved "p2p_fallback_disk_dir", "disk_path_whitelist";
   MemoryTiers memory_tiers = 10;
+
+  message ByteMapping {
+    optional bool enable_strided_execution = 1;
+    optional bool enable_direct_write_at = 2;
+    uint32 program_cache_entries = 3;
+    uint32 strided_run_min_ranges = 4;
+    uint64 strided_min_row_len_bytes = 5;
+    uint32 strided_max_amplification = 6;
+    uint64 strided_block_target_bytes = 7;
+    uint64 strided_block_max_bytes = 8;
+    optional bool disk_source_ordered_read = 9;
+    uint64 disk_source_merge_max_gap_bytes = 10;
+    uint32 disk_source_merge_max_amplification = 11;
+    uint32 disk_source_prefetch_depth = 12;
+  }
+  ByteMapping byte_mapping = 13;
+}
+
+message Promotion {
+  PromotionPolicy policy = 1;
+  bool require_verified = 2;
+  google.protobuf.Duration demotion_drain_timeout = 3;
+  // Max concurrent transport requests allowed per registered memory replica in
+  // Global Store. Set to 1 to force per-replica P2P serialization.
+  uint32 max_concurrency = 4;
 }
 
 message PinnedMemory {
@@ -149,6 +178,7 @@ message DaemonConfig {
   tensorcast.communicator.v1.CommunicatorConfig communicator = 4;
   Engine engine = 5;
   tensorcast.config.v1.Observability observability = 6;
+  Promotion promotion = 25;
   // Stable identity for this daemon instance used by the control plane.
   // Must not be derived from network address and should remain stable across restarts.
   string daemon_id = 10;
@@ -162,9 +192,43 @@ message DaemonConfig {
   }
   Compatibility compatibility = 7;
 
+  message CapabilityTokens {
+    message Key {
+      uint32 version = 1;
+      bytes secret = 2;
+    }
+    Key active = 1;
+    repeated Key previous = 2;
+  }
+  CapabilityTokens capability_tokens = 22;
+
+  message RetentionHandles {
+    bool enabled = 1;
+    google.protobuf.Duration default_ttl = 2;
+    google.protobuf.Duration max_ttl = 3;
+  }
+  RetentionHandles retention_handles = 23;
+
+  message CapabilityDirectory {
+    bool enabled = 1;
+  }
+  CapabilityDirectory capability_directory = 24;
+
   reserved 8;
   reserved "checkpoint";
   PinnedMemory pinned_memory = 20;
+
+  message PostSealPolicy {
+    // When true, migrate selected assembly views under the sealed mi2_id.
+    bool migrate_views = 1;
+    // When true, only migrate views that require transforms (e.g., transpose).
+    bool migrate_transpose_only = 2;
+    // When true, allow safe reuse of CGID-scoped view replicas after sealing.
+    bool reuse_views_if_safe = 3;
+    // When true, retire CGID-scoped piece replicas after sealing.
+    bool retire_pieces = 4;
+  }
+  PostSealPolicy post_seal = 21;
 
   message Debug {
     message Cuda {

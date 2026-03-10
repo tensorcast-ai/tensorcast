@@ -11,6 +11,8 @@ import weakref
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from tensorcast._c_ext import compute_view_id as compute_view_id_cpp
+from tensorcast._c_ext import compute_view_index_bytes
 from tensorcast.api._view_ops import (
     NarrowOp,
     TensorViewOp,
@@ -18,12 +20,17 @@ from tensorcast.api._view_ops import (
     ViewSpecBuildResult,
     build_view_spec,
 )
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
     CanonicalIndexEntry,
 )
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.common.selection_identity import compute_view_subset_hash  # noqa: F401
+from tensorcast.proto.common.v1 import common_pb2
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,21 +40,7 @@ class ViewMetadataCache:
     view_data_hash: str
     tensor_names: tuple[str, ...]
     nbytes: int
-    canonical_index: CanonicalIndex
-
-
-def _serialize_index(index: CanonicalIndex) -> bytes:
-    entries: dict[str, list[object]] = {}
-    for entry in index.entries:
-        entries[entry.name] = [
-            int(entry.segment_offset),
-            int(entry.size_bytes),
-            list(entry.shape),
-            list(entry.stride),
-            str(entry.dtype),
-            int(entry.storage_offset),
-        ]
-    return json.dumps(entries, separators=(",", ":")).encode("utf-8")
+    selected_index: CanonicalIndex
 
 
 def _multibase_multihash_sha256(digest: bytes) -> str:
@@ -63,23 +56,39 @@ def compute_index_multihash(index_bytes: bytes) -> str:
 
 
 def compute_view_id(
-    view_spec: store_daemon_pb2.ViewSpec,
+    view_spec: common_pb2.ViewSpec,
     canonical_index_bytes: bytes,
 ) -> str:
     if view_spec is None or not view_spec.tensors:
         raise ValueError("view_spec must be non-empty for view_id computation")
-    spec_bytes = view_spec.SerializeToString(deterministic=True)
-    index_mh = compute_index_multihash(canonical_index_bytes)
-    digest = hashlib.sha256(spec_bytes + index_mh.encode("utf-8")).digest()
-    return _multibase_multihash_sha256(digest)
-
-
-def compute_view_subset_hash(tensor_names: Sequence[str]) -> bytes:
-    names = sorted({str(name) for name in tensor_names})
-    payload = json.dumps(names, separators=(",", ":"), ensure_ascii=True).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(payload).digest()
+    normalized_ops: dict[str, list[dict[str, int | str]]] = {}
+    for name, ops in view_spec.tensors.items():
+        op_list: list[dict[str, int | str]] = []
+        for op in ops.ops:
+            if op.HasField("narrow"):
+                op_list.append(
+                    {
+                        "type": "narrow",
+                        "dim": int(op.narrow.dim),
+                        "start": int(op.narrow.start),
+                        "length": int(op.narrow.length),
+                    }
+                )
+            elif op.HasField("transpose"):
+                op_list.append(
+                    {
+                        "type": "transpose",
+                        "dim0": int(op.transpose.dim0),
+                        "dim1": int(op.transpose.dim1),
+                    }
+                )
+            else:
+                raise ValueError("view_spec contains op with unset kind")
+        if op_list:
+            normalized_ops[str(name)] = op_list
+    if not normalized_ops:
+        raise ValueError("view_spec must contain at least one operation")
+    return str(compute_view_id_cpp(canonical_index_bytes, normalized_ops))
 
 
 def _compose_narrow(
@@ -253,6 +262,7 @@ class ViewSpecComposer:
         self,
         *,
         canonical_index: CanonicalIndex,
+        identity_index_bytes: bytes | None = None,
         parent_spec: ViewSpecBuildResult | None,
         child_spec: ViewSpecBuildResult | None,
         parent_depth: int,
@@ -295,11 +305,25 @@ class ViewSpecComposer:
 
         view_cache: ViewMetadataCache | None = None
         if view_index is not None and tensor_names is not None:
-            view_index_bytes = _serialize_index(view_index)
+            canonical_bytes = (
+                bytes(identity_index_bytes)
+                if identity_index_bytes is not None
+                else canonical_index_to_bytes(canonical_index)
+            )
+            normalized_ops = (
+                composed_spec.to_normalized_dict() if composed_spec is not None else {}
+            )
+            subset_payload = list(tensor_names) if tensor_names else None
+            view_payload = compute_view_index_bytes(
+                canonical_bytes,
+                normalized_ops,
+                subset_payload,
+            )
+            view_index_bytes = bytes(view_payload["view_index_bytes"])
+            resolved_selected_index = canonical_index_from_bytes(view_index_bytes)
             view_hash = self.hash_view_spec(composed_spec, subset=tensor_names)
             view_id: str | None = None
             if composed_spec is not None and not composed_spec.is_identity:
-                canonical_bytes = _serialize_index(canonical_index)
                 view_proto = composed_spec.proto
                 if view_proto is None:
                     raise ArtifactError(
@@ -309,12 +333,12 @@ class ViewSpecComposer:
                     )
                 view_id = compute_view_id(view_proto, canonical_bytes)
             view_cache = ViewMetadataCache(
-                view_id=view_id or view_hash,
+                view_id=view_id or "",
                 view_index_bytes=view_index_bytes,
                 view_data_hash=view_hash,
                 tensor_names=tensor_names,
-                nbytes=sum(entry.size_bytes for entry in view_index.entries),
-                canonical_index=view_index,
+                nbytes=int(resolved_selected_index.total_size_bytes),
+                selected_index=resolved_selected_index,
             )
 
         return composed_spec, view_cache, depth

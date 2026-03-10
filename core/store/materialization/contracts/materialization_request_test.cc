@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/contracts/materialization_request.h"
 
@@ -35,7 +35,6 @@ TEST_CASE("MaterializationRequest validates canonical artifact id for LOAD modes
   auto device_manager = make_device_manager();
   MaterializeHints hints;
   hints.artifact_id.clear();
-  hints.disk_path.clear();
 
   auto result = MaterializationRequest::Create(make_cpu_key(), MaterializeMode::LOAD_ONLY, hints, device_manager);
   REQUIRE_FALSE(result.ok());
@@ -46,7 +45,6 @@ TEST_CASE("MaterializationRequest rejects COPY_ONLY without canonical identifier
   auto device_manager = make_device_manager();
   MaterializeHints hints;
   hints.artifact_id.clear();
-  hints.disk_path.clear();
 
   auto result = MaterializationRequest::Create(make_gpu_key(0), MaterializeMode::COPY_ONLY, hints, device_manager);
   REQUIRE_FALSE(result.ok());
@@ -56,7 +54,7 @@ TEST_CASE("MaterializationRequest rejects COPY_ONLY without canonical identifier
 TEST_CASE("MaterializationRequest rejects invalid GPU ordinals", "[materialization_request]") {
   auto device_manager = make_device_manager();
   MaterializeHints hints;
-  hints.artifact_id = "artifact-A";
+  hints.artifact_id = "cgid:artifact-A";
 
   auto result = MaterializationRequest::Create(make_gpu_key(0), MaterializeMode::AUTO, hints, device_manager);
   REQUIRE_FALSE(result.ok());
@@ -66,14 +64,13 @@ TEST_CASE("MaterializationRequest rejects invalid GPU ordinals", "[materializati
 TEST_CASE("MaterializationRequest captures canonical ids and replica key", "[materialization_request]") {
   auto device_manager = make_device_manager();
   MaterializeHints hints;
-  hints.artifact_id = "artifact-A";
-  hints.disk_path = "/tmp/artifact-A";
+  hints.artifact_id = "cgid:artifact-A";
 
   auto result = MaterializationRequest::Create(make_cpu_key(), MaterializeMode::LOAD_ONLY, hints, device_manager);
   REQUIRE(result.ok());
   const auto& request = result.value();
-  REQUIRE(request.replica_key().artifact_id == "artifact-A");
-  REQUIRE(request.canonical_artifact_id() == "artifact-A");
+  REQUIRE(request.replica_key().artifact_id == "cgid:artifact-A");
+  REQUIRE(request.canonical_artifact_id() == "cgid:artifact-A");
   REQUIRE(request.requested_view_id() == std::nullopt);
   REQUIRE(request.target_device().type == DeviceType::CPU);
 }

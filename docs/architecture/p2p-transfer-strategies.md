@@ -8,6 +8,10 @@ sidebar_position: 5
 
 This document explains how P2P transfers work in Global Store mode. It is code-derived and focuses on control flow, data flow, memory and VRAM movement, and the thread model that drives transfers.
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/view-replicas-and-assembly.md`
+
 ## Scope and terminology
 
 - P2P transfer happens between Store Daemons; Global Store only coordinates.
@@ -90,13 +94,13 @@ Notes:
 ### Materialization control flow
 
 - `MaterializationService` tries in-order: reuse existing replica, local CPU to GPU copy, then P2P in AUTO mode (`core/store/runtime/ingestion/materialization_service.cc`).
-- `MaterializeOrchestrator::run` requests a transport, rejects stale local routes, builds a `P2PSource`, and falls back to disk when `hints.disk_path` is present (`core/store/materialization/control/materialize_orchestrator.cc`).
-- The orchestrator always calls `complete_replica_transport` on success or failure; disk fallback does not require Global Store.
+- `MaterializeOrchestrator::run` requests a transport, rejects stale local routes, builds a `P2PSource`, and falls back to disk when the daemon resolves a disk source binding (managed shared-disk or local import) (`core/store/materialization/control/materialize_orchestrator.cc`).
+- The orchestrator always calls `complete_replica_transport` on success or failure; once a disk source is resolved, disk fallback does not require additional Global Store calls.
 
 ### Entry points used by the daemon
 
-- `MaterializeByKey` resolves `key -> artifact_id` via `StoreEngine::resolve_key_mapping` and then calls `materialize_replica` with `MaterializeMode::AUTO` (`daemon/service/controllers/materialization_controller.cc`).
-- `MaterializeReplica` and `materialize_replica_v2` also end in `materialize_replica` with AUTO or LOAD_ONLY depending on preference and inputs.
+- `ResolveKeyMapping` remains the control-path lookup for `key -> artifact_id` when callers start from keys.
+- `MaterializeReplica` consumes `ArtifactSelection` and calls `materialize_replica` with AUTO or LOAD_ONLY depending on preference and inputs.
 
 ### Ingestion pipeline stages
 
@@ -191,24 +195,24 @@ Notes:
 
 ## Failure handling and fallbacks
 
-- `MaterializeOrchestrator` always calls `complete_replica_transport`. On P2P failure, it falls back to disk if `hints.disk_path` is set.
+- `MaterializeOrchestrator` always calls `complete_replica_transport`. On P2P failure, it falls back to disk when a daemon-resolved disk source is available.
 - `P2PLoader` fallback is per-read: `MuxSeekableSource` completes remaining bytes from disk on short reads or remote errors.
 - RDMA handshake failures surface as transport errors; no automatic MTCP fallback is performed.
 - MTCP staging waits for credit up to `staging_wait_timeout` and fails with `ResourceExhausted` when the deadline is exceeded.
 - `do_channel_gc_loop` reaps stale `StageLease` entries when ACKs are missing (`ack_ttl_ms`).
 
-## Variant-aware routing and verification
+## View-aware routing and verification
 
 - `request_view_transport` is invoked when `view_id` is present. The client falls back to canonical routing when the server is view-unaware.
 - `MetadataStage` fetches the canonical index from Global Store when a view needs planning.
 - `VerificationStage` validates P2P transfers using `verification_json` (key-point verification) and computes optional view hashes.
 
-## Variant View Registration Telemetry
+## View Registration Telemetry
 
 - View registrations are handled by `RegistrationController` and `RegistrationBackend`, which build a bidirectional view plan and stream view writes into the target replica (`core/store/runtime/metadata/registration_backend.cc`).
-- On commit, the backend computes view hash and optional leaf digests (when a segment plan is available) and publishes a `VariantViewUpdate` via `RegistrationPublisher::update_variant_view`.
+- On commit, the backend computes view hash and optional leaf digests (when a canonical `ByteRangeMap` is available) and publishes a `ViewStateUpdate` via `RegistrationPublisher::update_view_state`.
 - `GlobalStoreRegistrationPublisher` calls `GlobalStoreClient::update_artifact_view_state` to persist view metadata; failures are logged and treated as best-effort when the server does not support the RPC.
-- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_variant_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
+- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_view_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
 
 ## Observability
 

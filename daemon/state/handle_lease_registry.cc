@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -140,6 +141,36 @@ absl::StatusOr<std::vector<uint32_t>> copy_chunks(absl::Span<const uint32_t> chu
     out.push_back(c);
   }
   return out;
+}
+
+absl::StatusOr<std::vector<uint32_t>> build_export_chunks_for_replica(
+    store::StoreEngine* engine,
+    const store::loading::ReplicaKey& key) {
+  if (engine == nullptr) {
+    return absl::FailedPreconditionError("engine is unavailable");
+  }
+  auto size_or = engine->get_replica_size(key);
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+  const uint64_t size_bytes = *size_or;
+  const uint64_t chunk_bytes = static_cast<uint64_t>(engine->get_artifact_chunk_bytes());
+  if (chunk_bytes == 0) {
+    return absl::FailedPreconditionError("artifact_chunk_bytes is zero");
+  }
+  const uint64_t num_chunks = (size_bytes + chunk_bytes - 1) / chunk_bytes;
+  if (num_chunks == 0) {
+    return absl::InvalidArgumentError("replica size is zero");
+  }
+  if (num_chunks > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    return absl::InvalidArgumentError("replica has too many chunks");
+  }
+  std::vector<uint32_t> chunks;
+  chunks.reserve(static_cast<size_t>(num_chunks));
+  for (uint32_t i = 0; i < static_cast<uint32_t>(num_chunks); ++i) {
+    chunks.push_back(i);
+  }
+  return chunks;
 }
 
 } // namespace
@@ -423,6 +454,131 @@ void HandleLeaseRegistry::release_cpu_export_state_(
   }
 }
 
+absl::StatusOr<std::shared_ptr<HandleLeaseRegistry::GpuExportState>> HandleLeaseRegistry::acquire_gpu_export_state_(
+    const store::loading::ReplicaKey& key) {
+  if (engine_ == nullptr) {
+    return absl::FailedPreconditionError("engine is unavailable");
+  }
+
+  std::shared_ptr<GpuExportState> state;
+  bool init_needed = false;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = gpu_exports_.find(key);
+    if (it != gpu_exports_.end()) {
+      state = it->second;
+      state->refcount++;
+    } else {
+      if (gpu_exports_.size() >= opts_.capacity) {
+        return absl::ResourceExhaustedError("GPU export registry capacity exceeded");
+      }
+      state = std::make_shared<GpuExportState>();
+      state->ready = false;
+      state->status = absl::OkStatus();
+      state->refcount = 1;
+      gpu_exports_.emplace(key, state);
+      init_needed = true;
+    }
+  }
+
+  if (!init_needed) {
+    absl::Status st = absl::OkStatus();
+    {
+      absl::MutexLock lock(&mu_);
+      while (!state->ready) {
+        state->cv.Wait(&mu_);
+      }
+      if (state->status.ok()) {
+        return state;
+      }
+      st = state->status;
+    }
+    release_gpu_export_state_(key, state);
+    return st;
+  }
+
+  absl::Status init_status = absl::OkStatus();
+  std::vector<uint32_t> chunks;
+  if (init_status.ok()) {
+    auto chunks_or = build_export_chunks_for_replica(engine_, key);
+    if (!chunks_or.ok()) {
+      init_status = chunks_or.status();
+    } else {
+      chunks = std::move(*chunks_or);
+    }
+  }
+  if (init_status.ok()) {
+    auto export_or = engine_->set_replica_exported(key, common::memory::MemoryLocation::GPU, chunks, /*on=*/true);
+    if (!export_or.ok()) {
+      init_status = export_or.status();
+    }
+  }
+
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = gpu_exports_.find(key);
+    if (it == gpu_exports_.end() || it->second.get() != state.get()) {
+      if (init_status.ok()) {
+        auto st = engine_->set_replica_exported(key, common::memory::MemoryLocation::GPU, chunks, /*on=*/false);
+        LOG_IF(WARNING, !st.ok()) << "set_replica_exported(off) failed after state disappearance: " << st.status();
+      }
+      return absl::AbortedError("GPU export state disappeared during initialization");
+    }
+    state->status = init_status;
+    if (init_status.ok()) {
+      state->chunks = std::move(chunks);
+    }
+    state->ready = true;
+    state->cv.SignalAll();
+  }
+
+  if (!init_status.ok()) {
+    release_gpu_export_state_(key, state);
+    return init_status;
+  }
+
+  return state;
+}
+
+void HandleLeaseRegistry::release_gpu_export_state_(
+    const store::loading::ReplicaKey& key,
+    const std::shared_ptr<GpuExportState>& state) {
+  if (!state) {
+    return;
+  }
+
+  std::vector<uint32_t> chunks;
+  bool do_cleanup = false;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = gpu_exports_.find(key);
+    if (it == gpu_exports_.end()) {
+      return;
+    }
+    if (it->second.get() != state.get()) {
+      return;
+    }
+    if (state->refcount == 0) {
+      return;
+    }
+    state->refcount--;
+    if (state->refcount != 0) {
+      return;
+    }
+    chunks = state->chunks;
+    gpu_exports_.erase(it);
+    do_cleanup = true;
+  }
+
+  if (!do_cleanup || engine_ == nullptr || chunks.empty()) {
+    return;
+  }
+  auto st = engine_->set_replica_exported(key, common::memory::MemoryLocation::GPU, chunks, /*on=*/false);
+  if (!st.ok() && st.status().code() != absl::StatusCode::kNotFound) {
+    LOG(WARNING) << "set_replica_exported(off) failed for GPU export: " << st.status();
+  }
+}
+
 absl::StatusOr<std::string> HandleLeaseRegistry::mint_cuda_ipc_lease(const store::loading::ReplicaKey& key, pid_t pid) {
   if (pid <= 0) {
     return absl::InvalidArgumentError("pid must be > 0");
@@ -431,33 +587,55 @@ absl::StatusOr<std::string> HandleLeaseRegistry::mint_cuda_ipc_lease(const store
     return absl::FailedPreconditionError("lifecycle manager is unavailable");
   }
 
+  auto gpu_state_or = acquire_gpu_export_state_(key);
+  if (!gpu_state_or.ok()) {
+    return gpu_state_or.status();
+  }
+  auto gpu_state = *gpu_state_or;
+
   const absl::Duration ttl = opts_.ttl;
   const bool ttl_enabled = ttl > absl::ZeroDuration();
   std::string token;
+  absl::Status mint_status = absl::OkStatus();
   {
     absl::MutexLock lock(&mu_);
     if (leases_.size() >= opts_.capacity) {
-      return absl::ResourceExhaustedError("handle lease registry capacity exceeded");
+      mint_status = absl::ResourceExhaustedError("handle lease registry capacity exceeded");
+    } else {
+      mint_status = maybe_rate_limit_mint_locked(absl::Now());
     }
-    auto rl = maybe_rate_limit_mint_locked(absl::Now());
-    if (!rl.ok()) {
-      return rl;
+    if (mint_status.ok()) {
+      token = mint_token_locked();
+      leases_[token] = LeaseRecord{
+          .kind = HandleKind::kCudaIpc,
+          .key = key,
+          .lease_id = 0,
+          .cpu_export_state = {},
+          .gpu_export_state = gpu_state};
     }
-    token = mint_token_locked();
-    leases_[token] = LeaseRecord{.kind = HandleKind::kCudaIpc, .key = key, .lease_id = 0, .cpu_export_state = {}};
+  }
+  if (!mint_status.ok()) {
+    release_gpu_export_state_(key, gpu_state);
+    return mint_status;
   }
 
-  auto cleanup = [this, token]() -> absl::Status {
-    absl::MutexLock lock(&mu_);
-    leases_.erase(token);
+  auto cleanup = [this, token, key, gpu_state]() -> absl::Status {
+    {
+      absl::MutexLock lock(&mu_);
+      leases_.erase(token);
+    }
+    release_gpu_export_state_(key, gpu_state);
     return absl::OkStatus();
   };
 
   auto id_or = ttl_enabled ? lifecycle_->create_ttl_use_lease(key, pid, ttl, {std::move(cleanup)})
                            : lifecycle_->create_use_lease(key, pid, {std::move(cleanup)});
   if (!id_or.ok()) {
-    absl::MutexLock lock(&mu_);
-    leases_.erase(token);
+    {
+      absl::MutexLock lock(&mu_);
+      leases_.erase(token);
+    }
+    release_gpu_export_state_(key, gpu_state);
     return id_or.status();
   }
 
@@ -467,6 +645,7 @@ absl::StatusOr<std::string> HandleLeaseRegistry::mint_cuda_ipc_lease(const store
     if (it == leases_.end()) {
       // Lease retired before registration; do not hand out a dangling token.
       lifecycle_->release_lease(*id_or);
+      release_gpu_export_state_(key, gpu_state);
       return absl::AbortedError("lease retired before token registration");
     }
     it->second.lease_id = *id_or;

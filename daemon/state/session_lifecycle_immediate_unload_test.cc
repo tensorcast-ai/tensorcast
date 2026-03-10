@@ -3,9 +3,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <vector>
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/common/memory/memory_location.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/lip_manager.h"
@@ -15,6 +17,7 @@
 #include "daemon/state/session_lifecycle.h"
 
 using tensorcast::DeviceType;
+using tensorcast::common::memory::MemoryLocation;
 using tensorcast::daemon::LipManager;
 using tensorcast::daemon::RefTracker;
 using tensorcast::daemon::RegistrationManager;
@@ -55,6 +58,9 @@ TEST_CASE("Immediate unload on last UseLease with no pins", "[daemon][lifecycle]
   ReplicaKey key{.artifact_id = committed.artifact_id, .device = DeviceRegistry::instance().gpu_key(0), .replica = 0};
   auto state_before = engine_ptr->get_replica_state(key, DeviceType::GPU);
   REQUIRE(state_before > MemoryState::UNALLOCATED);
+  auto clear_export =
+      engine_ptr->set_replica_exported(key, MemoryLocation::GPU, std::vector<uint32_t>{0}, /*on=*/false);
+  REQUIRE(clear_export.ok());
 
   // Build lifecycle manager wired to engine for immediate reclaim
   ReplicaSessionManager sessions(std::chrono::seconds(60));
@@ -72,6 +78,65 @@ TEST_CASE("Immediate unload on last UseLease with no pins", "[daemon][lifecycle]
   REQUIRE(mgr.release_use_lease(key, pid).ok());
 
   // Assert: engine no longer reports GPU residency (unloaded)
+  auto state_after = engine_ptr->get_replica_state(key, DeviceType::GPU);
+  REQUIRE(state_after <= MemoryState::UNALLOCATED);
+}
+
+TEST_CASE("UseLease extra finalizers run before immediate GPU unload", "[daemon][lifecycle][unload][export_order]") {
+  StoreEngineOptions opts;
+  opts.storage_path = std::filesystem::temp_directory_path().string();
+  opts.memory_pool_size = 16ULL * 1024 * 1024; // 16MB
+  opts.tx_slice_bytes = 1ULL << 20; // 1MB
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+
+  StoreEngine::ArtifactRegistration reg;
+  reg.artifact_id = "test:finalizer_order_unload";
+  reg.tensor_index_data = std::string("{\"tensors\":[{\"name\":\"x\",\"offset\":0,\"length\":8}]}\n");
+  reg.schema_version = "v3";
+  reg.encoding = "json";
+  reg.device_id = 0;
+  reg.total_size_bytes = 8;
+
+  auto begin_or = engine_ptr->begin_register_artifact(reg);
+  REQUIRE(begin_or.ok());
+  auto commit_or = engine_ptr->commit_registered_artifact(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  const auto& committed = *commit_or;
+
+  ReplicaKey key{.artifact_id = committed.artifact_id, .device = DeviceRegistry::instance().gpu_key(0), .replica = 0};
+  REQUIRE(engine_ptr->get_replica_state(key, DeviceType::GPU) > MemoryState::UNALLOCATED);
+
+  const std::vector<uint32_t> exported_chunks{0};
+  auto export_on = engine_ptr->set_replica_exported(key, MemoryLocation::GPU, exported_chunks, /*on=*/true);
+  REQUIRE(export_on.ok());
+
+  ReplicaSessionManager sessions(std::chrono::seconds(60));
+  RefTracker refs;
+  LipManager lip(engine_ptr, nullptr);
+  RegistrationManager regmgr;
+  SessionLifecycleManager mgr(sessions, refs, lip, *engine_ptr);
+
+  bool cleanup_ran = false;
+  auto lid_or = mgr.create_use_lease(
+      key,
+      /*pid=*/24680,
+      {
+          [&cleanup_ran, &engine_ptr, key, &exported_chunks]() -> absl::Status {
+            cleanup_ran = true;
+            auto export_off = engine_ptr->set_replica_exported(key, MemoryLocation::GPU, exported_chunks, /*on=*/false);
+            if (!export_off.ok()) {
+              return export_off.status();
+            }
+            return absl::OkStatus();
+          },
+      });
+  REQUIRE(lid_or.ok());
+
+  mgr.release_lease(*lid_or);
+  REQUIRE(cleanup_ran);
+
   auto state_after = engine_ptr->get_replica_state(key, DeviceType::GPU);
   REQUIRE(state_after <= MemoryState::UNALLOCATED);
 }

@@ -3,12 +3,14 @@
 #include "daemon/testing/daemon_service_harness.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,8 +24,10 @@
 
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/recording_global_store_client.h"
 #include "core/testing/common.h"
 #include "grpcpp/server_context.h"
+#include "nlohmann/json.hpp"
 
 namespace {
 
@@ -60,6 +64,25 @@ tensorcast::store::StoreEngineOptions make_engine_opts(const std::filesystem::pa
   tiers.stable_bytes = stable_bytes;
   opts.memory_tier_config = tiers;
   return opts;
+}
+
+std::string read_artifact_id(const std::filesystem::path& artifact_dir) {
+  std::ifstream descriptor_in(artifact_dir / "artifact_descriptor.json");
+  nlohmann::json descriptor_json;
+  descriptor_in >> descriptor_json;
+  return descriptor_json.value("artifact_id", "");
+}
+
+void register_disk_location(
+    tensorcast::store::testing::RecordingGlobalStoreClient& client,
+    std::string_view artifact_id,
+    const std::filesystem::path& relative_path) {
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = std::string(artifact_id);
+  loc.cluster_id = client.cluster_id;
+  loc.relative_path = relative_path.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  client.disk_locations.push_back(std::move(loc));
 }
 
 bool write_all(int fd, const void* buf, size_t n) {
@@ -180,25 +203,33 @@ TEST_CASE("CPU memfd end-to-end materialization and LocalHandle FD exchange", "[
   const auto root = test_tmpdir();
   std::filesystem::create_directories(root);
 
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+
   // Prepare a minimal disk artifact with deterministic content.
-  const auto artifact_dir = root / "artifact";
+  const auto artifact_rel = std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact";
+  const auto artifact_dir = root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
   const auto data_path = artifact_dir / "tensor.data_0";
   REQUIRE(tensorcast::testing::create_dummy_file(data_path, 2 * kChunkBytes, 'A'));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_artifact_id(artifact_dir);
+  REQUIRE_FALSE(artifact_id.empty());
+  register_disk_location(*gs_client, artifact_id, artifact_rel);
 
   const auto socket_dir = make_socket_dir();
   const std::string socket_path = (socket_dir / "local_handle.sock").string();
 
   auto engine =
       std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root, /*stable_bytes=*/64 * kChunkBytes));
+  engine->set_global_store_client_for_testing(gs_client);
   tensorcast::daemon::DaemonOptions daemon_opts;
   daemon_opts.storage_path = root;
   daemon_opts.cpu_shared_memory_enabled = true;
   daemon_opts.local_handle_socket_path = socket_path;
   daemon_opts.handle_lease_ttl = std::chrono::milliseconds(5000);
-  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
@@ -208,7 +239,7 @@ TEST_CASE("CPU memfd end-to-end materialization and LocalHandle FD exchange", "[
   const std::string replica_uuid2 = "cpu_memfd_e2e_replica_2";
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_disk_path(artifact_dir.string());
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
   req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   req.set_wait_for_completion(true);
@@ -330,4 +361,197 @@ TEST_CASE("CPU memfd end-to-end materialization and LocalHandle FD exchange", "[
   auto fd_after2 = local_handle_get_cpu_memfd_fd(socket_path, lease_token2);
   REQUIRE(fd_after2.code != 0);
   REQUIRE(fd_after2.fd < 0);
+}
+
+TEST_CASE(
+    "Stable DRAM registration advertises CPU memfd publish handle and accepts range-only feed",
+    "[daemon][cpu_memfd][registration]") {
+  const auto root = test_tmpdir();
+  std::filesystem::create_directories(root);
+
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  const auto socket_dir = make_socket_dir();
+  const std::string socket_path = (socket_dir / "local_handle_registration.sock").string();
+
+  auto engine =
+      std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root, /*stable_bytes=*/64 * kChunkBytes));
+  engine->set_global_store_client_for_testing(gs_client);
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = root;
+  daemon_opts.cpu_shared_memory_enabled = true;
+  daemon_opts.local_handle_socket_path = socket_path;
+  daemon_opts.handle_lease_ttl = std::chrono::milliseconds(5000);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest begin_req;
+  begin_req.set_device_id(0);
+  begin_req.set_total_size(16);
+  begin_req.set_owner_pid(getpid());
+  begin_req.mutable_stable_dram()->set_stage_on_gpu(false);
+  begin_req.mutable_stable_dram()->set_release_gpu_on_commit(false);
+  auto* idx = begin_req.mutable_tensor_index_data();
+  idx->set_data("{}");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+
+  grpc::ServerContext begin_ctx;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse begin_resp;
+  auto st = svc.BeginRegisterArtifact(&begin_ctx, &begin_req, &begin_resp);
+  REQUIRE(st.ok());
+  REQUIRE(begin_resp.has_stable_dram());
+  REQUIRE(begin_resp.stable_dram().publish_cpu_memfd().size_bytes() >= 16);
+  REQUIRE_FALSE(begin_resp.stable_dram().publish_cpu_memfd_lease_token().empty());
+  REQUIRE(begin_resp.stable_dram().staging_cuda_ipc_handle().empty());
+
+  const std::string lease_token = begin_resp.stable_dram().publish_cpu_memfd_lease_token();
+  auto fd_resp = local_handle_get_cpu_memfd_fd(socket_path, lease_token);
+  REQUIRE(fd_resp.code == 0);
+  REQUIRE(fd_resp.fd >= 0);
+
+  const uint64_t size_bytes = begin_resp.stable_dram().publish_cpu_memfd().size_bytes();
+  const uint64_t offset_bytes = begin_resp.stable_dram().publish_cpu_memfd().offset_bytes();
+  void* mapped = ::mmap(
+      nullptr,
+      static_cast<size_t>(size_bytes),
+      PROT_READ | PROT_WRITE,
+      MAP_SHARED,
+      fd_resp.fd,
+      static_cast<off_t>(offset_bytes));
+  REQUIRE(mapped != MAP_FAILED);
+
+  std::array<uint8_t, 16> payload{};
+  for (size_t i = 0; i < payload.size(); ++i) {
+    payload[i] = static_cast<uint8_t>(i + 1);
+  }
+  std::memcpy(mapped, payload.data(), payload.size());
+  REQUIRE(::munmap(mapped, static_cast<size_t>(size_bytes)) == 0);
+  ::close(fd_resp.fd);
+
+  tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest feed_req;
+  feed_req.set_registration_id(begin_resp.registration_id());
+  auto* progress = feed_req.mutable_stable_dram_write_progress();
+  auto* range = progress->add_ranges();
+  range->set_canonical_offset(0);
+  range->set_length(payload.size());
+  progress->set_upload_complete(true);
+  st = svc.feed_register_artifact_stream_vector({feed_req});
+  REQUIRE(st.ok());
+
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest commit_req;
+  commit_req.set_registration_id(begin_resp.registration_id());
+  grpc::ServerContext commit_ctx;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse commit_resp;
+  st = svc.CommitRegisteredArtifact(&commit_ctx, &commit_req, &commit_resp);
+  INFO("commit error_code=" << static_cast<int>(st.error_code()) << " message=" << st.error_message());
+  REQUIRE(st.ok());
+  REQUIRE(commit_resp.has_artifact_descriptor());
+
+  auto fd_after_commit = local_handle_get_cpu_memfd_fd(socket_path, lease_token);
+  REQUIRE(fd_after_commit.code != 0);
+  REQUIRE(fd_after_commit.fd < 0);
+}
+
+TEST_CASE(
+    "Stable DRAM pinned commit uses one stable admission when budget equals payload",
+    "[daemon][cpu_memfd][registration][stable_budget]") {
+  const auto root = test_tmpdir();
+  std::filesystem::create_directories(root);
+
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  const auto socket_dir = make_socket_dir();
+  const std::string socket_path = (socket_dir / "local_handle_registration_exact_budget.sock").string();
+
+  constexpr uint64_t kPayloadBytes = 16;
+  auto engine =
+      std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root, /*stable_bytes=*/kPayloadBytes));
+  engine->set_global_store_client_for_testing(gs_client);
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = root;
+  daemon_opts.cpu_shared_memory_enabled = true;
+  daemon_opts.local_handle_socket_path = socket_path;
+  daemon_opts.handle_lease_ttl = std::chrono::milliseconds(5000);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest begin_req;
+  begin_req.set_device_id(0);
+  begin_req.set_total_size(kPayloadBytes);
+  begin_req.set_owner_pid(getpid());
+  begin_req.mutable_stable_dram()->set_stage_on_gpu(false);
+  begin_req.mutable_stable_dram()->set_release_gpu_on_commit(false);
+  begin_req.mutable_policy()->set_profile(tensorcast::daemon::v2::POLICY_PROFILE_PINNED);
+  auto* idx = begin_req.mutable_tensor_index_data();
+  idx->set_data("{}");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+
+  grpc::ServerContext begin_ctx;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse begin_resp;
+  auto st = svc.BeginRegisterArtifact(&begin_ctx, &begin_req, &begin_resp);
+  REQUIRE(st.ok());
+  REQUIRE(begin_resp.has_stable_dram());
+  REQUIRE(begin_resp.stable_dram().publish_cpu_memfd().size_bytes() >= kPayloadBytes);
+  REQUIRE_FALSE(begin_resp.stable_dram().publish_cpu_memfd_lease_token().empty());
+
+  const std::string lease_token = begin_resp.stable_dram().publish_cpu_memfd_lease_token();
+  auto fd_resp = local_handle_get_cpu_memfd_fd(socket_path, lease_token);
+  REQUIRE(fd_resp.code == 0);
+  REQUIRE(fd_resp.fd >= 0);
+
+  const uint64_t size_bytes = begin_resp.stable_dram().publish_cpu_memfd().size_bytes();
+  const uint64_t offset_bytes = begin_resp.stable_dram().publish_cpu_memfd().offset_bytes();
+  void* mapped = ::mmap(
+      nullptr,
+      static_cast<size_t>(size_bytes),
+      PROT_READ | PROT_WRITE,
+      MAP_SHARED,
+      fd_resp.fd,
+      static_cast<off_t>(offset_bytes));
+  REQUIRE(mapped != MAP_FAILED);
+
+  std::array<uint8_t, kPayloadBytes> payload{};
+  for (size_t i = 0; i < payload.size(); ++i) {
+    payload[i] = static_cast<uint8_t>(i + 1);
+  }
+  std::memcpy(mapped, payload.data(), payload.size());
+  REQUIRE(::munmap(mapped, static_cast<size_t>(size_bytes)) == 0);
+  ::close(fd_resp.fd);
+
+  tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest feed_req;
+  feed_req.set_registration_id(begin_resp.registration_id());
+  auto* progress = feed_req.mutable_stable_dram_write_progress();
+  auto* range = progress->add_ranges();
+  range->set_canonical_offset(0);
+  range->set_length(payload.size());
+  progress->set_upload_complete(true);
+  st = svc.feed_register_artifact_stream_vector({feed_req});
+  REQUIRE(st.ok());
+
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest commit_req;
+  commit_req.set_registration_id(begin_resp.registration_id());
+  grpc::ServerContext commit_ctx;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse commit_resp;
+  st = svc.CommitRegisteredArtifact(&commit_ctx, &commit_req, &commit_resp);
+  INFO("commit error_code=" << static_cast<int>(st.error_code()) << " message=" << st.error_message());
+  REQUIRE(st.ok());
+  REQUIRE(commit_resp.has_artifact_descriptor());
+  REQUIRE(commit_resp.has_local_stable_tier());
+  REQUIRE(commit_resp.local_stable_tier().status() == tensorcast::daemon::v2::LOCAL_STABLE_TIER_STATUS_READY);
+
+  auto budget_snapshot = engine->get_memory_tier_snapshot();
+  REQUIRE(budget_snapshot.has_value());
+  REQUIRE(budget_snapshot->stable_used_bytes == kPayloadBytes);
+
+  auto fd_after_commit = local_handle_get_cpu_memfd_fd(socket_path, lease_token);
+  REQUIRE(fd_after_commit.code != 0);
+  REQUIRE(fd_after_commit.fd < 0);
 }

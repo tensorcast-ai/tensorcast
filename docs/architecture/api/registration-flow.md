@@ -13,6 +13,7 @@ Related docs:
 - Public surface and caller contracts: [API Design](./api-design.md)
 - Policy and what happens after commit: [Policy & Persistence](./policy-persistence.md)
 - Region registration and teardown: [Region-Backed](./region-backed.md)
+- View semantics and piece assembly: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 - Failure modes and retry guidance: [Error, Retry, Observability](./error-retry-observability.md)
 
 ## What is “registration”?

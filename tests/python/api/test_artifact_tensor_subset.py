@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -69,6 +69,6 @@ def test_invalid_tensor_name_raises_before_materialization():
     )
 
     with pytest.raises(ArtifactError) as excinfo:
-        artifact.tensor_dict(device=0, names=["missing"])
+        artifact.subset(["missing"]).tensor_dict(device=0)
 
     assert excinfo.value.status_code == "INVALID_ARGUMENT"

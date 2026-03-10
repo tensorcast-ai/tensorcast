@@ -39,6 +39,7 @@
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/sources/file_partition_source.h"
+#include "core/store/materialization/dataplane/view/view_identity.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 
 namespace py = pybind11;
@@ -304,12 +305,13 @@ py::dict tensor_transform_plan_to_dict(const TensorTransformPlan& plan) {
   return out;
 }
 
-py::dict selection_range_to_dict(const tensorcast::store::loader::SelectionPlan::Range& range) {
+py::dict selection_segment_to_dict(const tensorcast::store::loader::ByteRangeSegment& segment) {
   py::dict out;
-  out["kind"] = range.kind == tensorcast::store::loader::SelectionPlan::Range::Kind::kData ? "data" : "pad";
-  out["src_offset"] = py::int_(range.src_offset);
-  out["dst_offset"] = py::int_(range.dst_offset);
-  out["length"] = py::int_(range.length);
+  out["kind"] = segment.kind == tensorcast::store::loader::ByteRangeSegment::Kind::kData ? "data" : "pad";
+  out["src_offset"] = py::int_(segment.src_offset);
+  out["dst_offset"] = py::int_(segment.dst_offset);
+  out["length"] = py::int_(segment.length);
+  out["source_index"] = py::int_(segment.source_index);
   return out;
 }
 
@@ -329,12 +331,12 @@ py::dict compute_view_registration_plan_wrapper(py::bytes canonical_index_bytes,
   forward["is_identity"] = plan.forward.is_identity;
   forward["view_size_bytes"] = py::int_(plan.forward.view_size_bytes);
   forward["view_index_json"] = py::bytes(plan.forward.view_index_json);
-  forward["selection_total_bytes"] = py::int_(plan.forward.selection.total_bytes);
+  forward["selection_total_bytes"] = py::int_(plan.forward.selection.map.total_bytes);
   forward["selection_is_contiguous"] = plan.forward.selection.is_contiguous;
   forward["selection_is_segment_aligned"] = plan.forward.selection.is_segment_aligned;
   py::list selection_ranges;
-  for (const auto& range : plan.forward.selection.ranges) {
-    selection_ranges.append(selection_range_to_dict(range));
+  for (const auto& segment : plan.forward.selection.map.segments) {
+    selection_ranges.append(selection_segment_to_dict(segment));
   }
   forward["selection_ranges"] = selection_ranges;
   result["forward"] = forward;
@@ -390,6 +392,16 @@ py::dict compute_view_index_bytes_wrapper(
   result["view_size_bytes"] = py::int_(plan.view_size_bytes);
   result["is_identity"] = plan.is_identity;
   return result;
+}
+
+std::string compute_view_id_wrapper(py::bytes canonical_index_bytes, const py::dict& spec_dict) {
+  const std::string canonical_index_json = canonical_index_bytes.cast<std::string>();
+  ViewSpec spec = build_view_spec_from_py(spec_dict);
+  auto view_id_or = tensorcast::store::loader::compute_view_id_from_spec(spec, canonical_index_json);
+  if (!view_id_or.ok()) {
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, view_id_or.status().ToString());
+  }
+  return *view_id_or;
 }
 
 } // namespace
@@ -986,6 +998,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("normalized_ops"),
           py::arg("subset_names") = py::none(),
           "Compute packed view index bytes using the core ViewPlanner")
+      .def(
+          "compute_view_id",
+          &compute_view_id_wrapper,
+          py::arg("canonical_index_bytes"),
+          py::arg("normalized_ops"),
+          "Compute deterministic view_id using core semantic canonicalization")
       .def(
           "restore_tensors",
           &tensorcast::checkpoint::restore_tensors,

@@ -13,6 +13,7 @@ Related docs:
 - Public surface: [API Design](./api-design.md#region-apis)
 - LIP registration internals: [Registration Flow](./registration-flow.md#lease-in-place-path)
 - Region-backed `get_into` (different mechanism, same motivation): [Materialization Flow](./materialization-flow.md#region-backed-get_into-materializeintotarget-v2)
+- View semantics and identity: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 - Failure semantics: [Error, Retry, Observability](./error-retry-observability.md)
 
 ## What is a “VRAM region”?
@@ -164,6 +165,8 @@ reuse. The client then unregisters the region from its cache.
 2. Drain active exports if `wait_for_drain=true`.
 3. Revoke the commit lease if the owner matches.
 4. Best-effort unregister from Global Store.
+5. By default, also tombstone and delete any managed shared-disk copies for the artifact
+   (set `keep_shared_disk_copy=true` to retain shared-disk persistence).
 
 The SDK exposes this as `Store.deregister_artifact(...)` and returns a
 `DeregisterArtifactOutcome` containing drain status and released region ids.
@@ -181,6 +184,7 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 | `owner_pid` | Optional PID check. | When present, mismatches fail with `PERMISSION_DENIED`. |
 | `device_id` | Disambiguate when replicas span devices. | Avoid revoking the wrong resident replica. |
 | `release_regions` | Release region references after deregistration. | Prevent ref leaks on long-running daemons. |
+| `keep_shared_disk_copy` | Preserve managed shared-disk copies for this artifact. | Default is `false` (purge shared disk on deregister). |
 
 ## TTL Extension And Transport Hold
 
@@ -192,6 +196,7 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 - Owner mismatch returns `PERMISSION_DENIED`.
 - Expired regions behave as missing and return `NOT_FOUND`.
 - Drain timeouts return `DEADLINE_EXCEEDED` and leave the artifact quiesced.
+- The drain timeout bounds both Global Store drain waits and local export drain; total wait does not exceed the requested budget.
 
 ## Code Map
 

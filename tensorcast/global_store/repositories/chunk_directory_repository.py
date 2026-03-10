@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for chunk directory operations."""
 
@@ -14,6 +14,8 @@ logger = init_logger(__name__)
 
 class ChunkDirectoryRepository(BaseRepository):
     """Repository for managing chunk directory entries."""
+
+    _UPSERT_BATCH_SIZE = 256
 
     def batch_update_chunk_states(
         self,
@@ -39,40 +41,75 @@ class ChunkDirectoryRepository(BaseRepository):
         updates_applied = 0
 
         try:
-            # Use ON CONFLICT DO UPDATE to perform atomic upsert on composite PK
-            for update in updates:
-                cursor.execute(
+            try:
+                # Use set-based upserts to reduce lock hold time and RPC tail latency.
+                for start in range(0, len(updates), self._UPSERT_BATCH_SIZE):
+                    batch = updates[start : start + self._UPSERT_BATCH_SIZE]
+                    placeholders = ", ".join(["(?, ?, ?, ?, ?, ?)"] * len(batch))
+                    sql = f"""
+                        INSERT INTO chunk_directory (
+                            artifact_id,
+                            chunk_idx,
+                            node_id,
+                            device_uuid,
+                            replica,
+                            chunk_state,
+                            last_update_time,
+                            node_load_ratio
+                        )
+                        SELECT
+                            staged.artifact_id,
+                            staged.chunk_idx,
+                            staged.node_id,
+                            staged.device_uuid,
+                            staged.replica,
+                            staged.chunk_state,
+                            now(),
+                            0.0
+                        FROM (VALUES {placeholders})
+                            AS staged(
+                                artifact_id,
+                                chunk_idx,
+                                node_id,
+                                device_uuid,
+                                replica,
+                                chunk_state
+                            )
+                        ON CONFLICT (artifact_id, device_uuid, replica, chunk_idx, node_id)
+                        DO UPDATE SET
+                            chunk_state = EXCLUDED.chunk_state,
+                            last_update_time = now(),
+                            node_load_ratio = EXCLUDED.node_load_ratio
                     """
-                    INSERT INTO chunk_directory (
-                        artifact_id, chunk_idx, node_id, device_uuid, replica,
-                        chunk_state, last_update_time, node_load_ratio
-                    ) VALUES (?, ?, ?, ?, ?, ?, now(), 0.0)
-                    ON CONFLICT (artifact_id, device_uuid, replica, chunk_idx, node_id)
-                    DO UPDATE SET
-                        chunk_state = EXCLUDED.chunk_state,
-                        last_update_time = now(),
-                        node_load_ratio = EXCLUDED.node_load_ratio
-                    """,
-                    (
-                        update.artifact_id,
-                        update.chunk_idx,
-                        node_id,
-                        update.device_uuid,
-                        update.replica,
-                        update.state,
-                    ),
+                    params: list[int | str] = []
+                    for update in batch:
+                        params.extend(
+                            [
+                                update.artifact_id,
+                                int(update.chunk_idx),
+                                node_id,
+                                update.device_uuid,
+                                int(update.replica),
+                                int(update.state),
+                            ]
+                        )
+                    cursor.execute(
+                        sql,
+                        params,
+                    )
+                    updates_applied += len(batch)
+
+                logger.info(
+                    f"Applied {updates_applied} chunk state updates from worker {worker_id}"
                 )
-                updates_applied += 1
 
-            logger.info(
-                f"Applied {updates_applied} chunk state updates from worker {worker_id}"
-            )
+            except Exception as e:
+                logger.exception(f"Error updating chunk states: {e}")
+                raise
 
-        except Exception as e:
-            logger.exception(f"Error updating chunk states: {e}")
-            raise
-
-        return updates_applied
+            return updates_applied
+        finally:
+            cursor.close()
 
     def query_chunk_locations(
         self, artifact_id: str, chunk_indices: Optional[List[int]] = None
@@ -92,42 +129,44 @@ class ChunkDirectoryRepository(BaseRepository):
             return []
 
         cursor = self.get_cursor()
-
         try:
-            if chunk_indices:
-                # Query specific chunks
-                placeholders = ",".join("?" for _ in chunk_indices)
-                query = f"""
-                    SELECT DISTINCT
-                        cd.chunk_idx, w.node_id, w.node_address, w.p2p_port,
-                        cd.chunk_state, cd.node_load_ratio, cd.device_uuid, cd.replica
-                    FROM chunk_directory cd
-                    JOIN workers w ON cd.node_id = w.node_id
-                    WHERE cd.artifact_id = ?
-                      AND cd.chunk_idx IN ({placeholders})
-                      AND cd.chunk_state != 4  -- Exclude EVICTED chunks
-                    ORDER BY cd.chunk_idx, cd.chunk_state, cd.node_load_ratio
-                """
-                params = [artifact_id] + chunk_indices
-            else:
-                # Query all chunks for the artifact
-                query = """
-                    SELECT DISTINCT
-                        cd.chunk_idx, w.node_id, w.node_address, w.p2p_port,
-                        cd.chunk_state, cd.node_load_ratio, cd.device_uuid, cd.replica
-                    FROM chunk_directory cd
-                    JOIN workers w ON cd.node_id = w.node_id
-                    WHERE cd.artifact_id = ?
-                      AND cd.chunk_state != 4  -- Exclude EVICTED chunks
-                    ORDER BY cd.chunk_idx, cd.chunk_state, cd.node_load_ratio
-                """
-                params = [artifact_id]
+            try:
+                if chunk_indices:
+                    # Query specific chunks
+                    placeholders = ",".join("?" for _ in chunk_indices)
+                    query = f"""
+                        SELECT DISTINCT
+                            cd.chunk_idx, w.node_id, w.node_address, w.p2p_port,
+                            cd.chunk_state, cd.node_load_ratio, cd.device_uuid, cd.replica
+                        FROM chunk_directory cd
+                        JOIN workers w ON cd.node_id = w.node_id
+                        WHERE cd.artifact_id = ?
+                          AND cd.chunk_idx IN ({placeholders})
+                          AND cd.chunk_state != 4  -- Exclude EVICTED chunks
+                        ORDER BY cd.chunk_idx, cd.chunk_state, cd.node_load_ratio
+                    """
+                    params = [artifact_id] + chunk_indices
+                else:
+                    # Query all chunks for the artifact
+                    query = """
+                        SELECT DISTINCT
+                            cd.chunk_idx, w.node_id, w.node_address, w.p2p_port,
+                            cd.chunk_state, cd.node_load_ratio, cd.device_uuid, cd.replica
+                        FROM chunk_directory cd
+                        JOIN workers w ON cd.node_id = w.node_id
+                        WHERE cd.artifact_id = ?
+                          AND cd.chunk_state != 4  -- Exclude EVICTED chunks
+                        ORDER BY cd.chunk_idx, cd.chunk_state, cd.node_load_ratio
+                    """
+                    params = [artifact_id]
 
-            return cursor.execute(query, params).fetchall()
+                return cursor.execute(query, params).fetchall()
 
-        except Exception as e:
-            logger.exception(f"Error querying chunk locations: {e}")
-            raise
+            except Exception as e:
+                logger.exception(f"Error querying chunk locations: {e}")
+                raise
+        finally:
+            cursor.close()
 
     def cleanup_stale_chunks(self, stale_threshold_seconds: int = 3600) -> int:
         """
@@ -181,33 +220,36 @@ class ChunkDirectoryRepository(BaseRepository):
         cursor = self.get_cursor()
 
         try:
-            # Get chunk count by state
-            state_counts = cursor.execute(
-                """
-                SELECT chunk_state, COUNT(DISTINCT chunk_idx) as count
-                FROM chunk_directory
-                WHERE artifact_id = ?
-                GROUP BY chunk_state
-                """,
-                (artifact_id,),
-            ).fetchall()
+            try:
+                # Get chunk count by state
+                state_counts = cursor.execute(
+                    """
+                    SELECT chunk_state, COUNT(DISTINCT chunk_idx) as count
+                    FROM chunk_directory
+                    WHERE artifact_id = ?
+                    GROUP BY chunk_state
+                    """,
+                    (artifact_id,),
+                ).fetchall()
 
-            # Get chunk count by node
-            node_counts = cursor.execute(
-                """
-                SELECT node_id, COUNT(DISTINCT chunk_idx) as count
-                FROM chunk_directory
-                WHERE artifact_id = ?
-                GROUP BY node_id
-                """,
-                (artifact_id,),
-            ).fetchall()
+                # Get chunk count by node
+                node_counts = cursor.execute(
+                    """
+                    SELECT node_id, COUNT(DISTINCT chunk_idx) as count
+                    FROM chunk_directory
+                    WHERE artifact_id = ?
+                    GROUP BY node_id
+                    """,
+                    (artifact_id,),
+                ).fetchall()
 
-            return {
-                "state_distribution": dict(state_counts),
-                "node_distribution": dict(node_counts),
-            }
+                return {
+                    "state_distribution": dict(state_counts),
+                    "node_distribution": dict(node_counts),
+                }
 
-        except Exception as e:
-            logger.exception(f"Error getting chunk distribution: {e}")
-            raise
+            except Exception as e:
+                logger.exception(f"Error getting chunk distribution: {e}")
+                raise
+        finally:
+            cursor.close()
