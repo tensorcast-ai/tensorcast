@@ -173,6 +173,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "store": ("tensorcast.api.store", "store"),
     "unregister_vram_region": ("tensorcast.api.store", "unregister_vram_region"),
     "init": ("tensorcast.startup", "init"),
+    "PortConfig": ("tensorcast.startup", "PortConfig"),
     "is_initialized": ("tensorcast.startup", "is_initialized"),
     "shutdown": ("tensorcast.startup", "shutdown"),
 }
@@ -249,7 +250,12 @@ if TYPE_CHECKING:
         store,
         unregister_vram_region,
     )
-    from tensorcast.startup import init, is_initialized, shutdown  # noqa: F401
+    from tensorcast.startup import (  # noqa: F401
+        PortConfig,
+        init,
+        is_initialized,
+        shutdown,
+    )
 
 
 __all__ = [

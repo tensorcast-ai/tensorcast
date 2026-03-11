@@ -57,7 +57,6 @@ class WorkerTask:
     verify_checksums: bool
     show_progress: bool
     name_limit: int | None
-    prefer: str
     export_policy: str
     device_mode: str
     force_device: str | None
@@ -221,7 +220,6 @@ def _run_worker(task: WorkerTask) -> dict[str, Any]:
 
         artifact_tp = artifact.subset(names).view(slices=slices)
         options = tc.GetArtifactOptions(
-            prefer=task.prefer,
             export_policy=task.export_policy,
         )
         materialization: dict[str, dict[str, Any]] = {}
@@ -381,11 +379,6 @@ def _parse_args() -> argparse.Namespace:
         help="Show one aggregate progress bar in parent process (completed ranks / total)",
     )
     parser.add_argument(
-        "--prefer",
-        default="p2p",
-        help="GetArtifactOptions.prefer",
-    )
-    parser.add_argument(
         "--export-policy",
         default="force",
         help="GetArtifactOptions.export_policy",
@@ -458,7 +451,6 @@ def main() -> int:
             verify_checksums=bool(args.verify_checksums),
             show_progress=bool(args.show_progress),
             name_limit=args.name_limit,
-            prefer=str(args.prefer),
             export_policy=str(args.export_policy),
             device_mode=str(args.device_mode),
             force_device=(

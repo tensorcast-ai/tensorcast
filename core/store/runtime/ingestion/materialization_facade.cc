@@ -1091,9 +1091,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
 
   const uint64_t source_size = selected_source_size;
 
-  const int concurrency = request.hints().pipeline_concurrency > 0
-      ? static_cast<int>(request.hints().pipeline_concurrency)
-      : std::max(1, config_.num_threads);
+  const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, request.hints());
   const loading::TransformPlacement transform_placement =
       request.hints().variant ? request.hints().variant->placement : loading::TransformPlacement::kServer;
 
@@ -1569,8 +1567,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     };
     loader::TargetLayoutGpuSink sink(std::move(sink_opts));
 
-    const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
-                                                           : std::max(1, config_.num_threads);
+    const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, hints);
     if (source_ordered) {
       const uint64_t max_window_bytes = std::min<uint64_t>(hints.max_buffer_bytes, 64ULL * 1024 * 1024);
       const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
@@ -1990,8 +1987,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     };
     loader::TargetLayoutGpuSink sink(std::move(sink_opts));
 
-    const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
-                                                           : std::max(1, config_.num_threads);
+    const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, hints);
     if (source_ordered) {
       const uint64_t max_window_bytes = std::min<uint64_t>(hints.max_buffer_bytes, 64ULL * 1024 * 1024);
       const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
@@ -2120,6 +2116,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (!view_transport_or.ok() &&
             (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
              absl::IsDeadlineExceeded(view_transport_or.status()))) {
+          if (has_disk_source && allow_disk && !prefer_p2p) {
+            LOG(INFO) << "request_view_transport unavailable for artifact_id=" << hints.artifact_id
+                      << " view_id=" << *requested_view_id << " within probe_timeout_ms=" << view_probe_timeout_ms
+                      << "; bypassing canonical transport route and falling back to disk";
+            return absl::AbortedError(
+                absl::StrCat(
+                    "view transport unavailable for artifact_id=", hints.artifact_id, "; disk fallback available"));
+          }
           LOG(INFO) << "request_view_transport unavailable for artifact_id=" << hints.artifact_id
                     << " view_id=" << *requested_view_id << " within probe_timeout_ms=" << view_probe_timeout_ms
                     << "; retrying canonical transport route with wait_timeout_ms=" << wait_timeout_ms;
@@ -3102,9 +3106,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   key.replica = 0;
   const loading::TransformPlacement transform_placement =
       request.hints().variant ? request.hints().variant->placement : loading::TransformPlacement::kServer;
-  const int concurrency = request.hints().pipeline_concurrency > 0
-      ? static_cast<int>(request.hints().pipeline_concurrency)
-      : std::max(1, config_.num_threads);
+  const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, request.hints());
 
   auto existing_or = replica_registry.find(key);
   if (existing_or.ok()) {

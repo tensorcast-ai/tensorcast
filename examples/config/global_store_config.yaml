@@ -52,8 +52,9 @@ server:
       key_file: ""
       # Optional client CA bundle for mTLS; empty disables client cert checks.
       client_ca_file: ""
-  # Prometheus metrics HTTP port; 0 lets the service choose an available port.
-  metrics_port: 18000
+  # Prometheus metrics HTTP port; use a less common fixed port to reduce
+  # collisions with other local services. Set 0 to auto-pick a free port.
+  metrics_port: 18008
 
 # Worker lifecycle and cleanup policy.
 worker_policy:

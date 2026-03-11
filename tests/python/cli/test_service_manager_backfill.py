@@ -10,7 +10,6 @@ from tensorcast.cli_utils import service_manager
 from tensorcast.cli_utils.paths import runtime_state_path, session_paths
 from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
 from tensorcast.proto.config.v1 import daemon_config_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _FakeProc:
@@ -137,6 +136,7 @@ def test_start_service_applies_config_overrides(monkeypatch, tmp_path):
         register_current=False,
         publish_meta=True,
         to_console=False,
+        p2p_listen_port=64001,
         config_overrides=[
             "engine.memory_tiers.enable_preemptible=true",
             "engine.memory_tiers.stable_bytes=4GB",
@@ -151,3 +151,65 @@ def test_start_service_applies_config_overrides(monkeypatch, tmp_path):
     assert tiers.enable_preemptible is True
     assert tiers.stable_bytes == 4 * 1024**3
     assert tiers.preemptible_low_watermark_ratio == 0.3
+    assert effective_cfg.server.p2p_listen.port == 64001
+
+
+def test_start_service_passes_launcher_envs_to_daemon_process(monkeypatch, tmp_path):
+    monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
+
+    cfg = daemon_config_pb2.DaemonConfig()
+    cfg.server.listen.host = "127.0.0.1"
+    cfg.server.listen.port = 0
+    cfg.server.p2p_listen.host = "127.0.0.1"
+    cfg.server.p2p_listen.port = 0
+    cfg.envs["NCCL_DEBUG"] = "INFO"
+    cfg.envs["LD_LIBRARY_PATH"] = "/data/cuda/compat"
+    cfg.envs["TENSORCAST_INSTANCE"] = "user-value"
+    cfg_path = tmp_path / "daemon.yaml"
+    dump_daemon_config(cfg, cfg_path)
+
+    port_seq = [65000, 65001]
+    monkeypatch.setattr(service_manager, "pick_free_tcp_port", lambda: port_seq.pop(0))
+
+    captured_build_env: dict[str, object] = {}
+    proc_envs: list[dict[str, str]] = []
+
+    def _fake_build_env(base_env, extra_env):  # noqa: ANN001
+        captured_build_env["base_env"] = dict(base_env)
+        captured_build_env["extra_env"] = dict(extra_env)
+        env = dict(extra_env)
+        env["LD_LIBRARY_PATH"] = "/merged/lib"
+        env["TENSORCAST_INSTANCE"] = "ignored"
+        return env
+
+    def _fake_popen(args, **kwargs):  # noqa: ANN001
+        proc_envs.append(dict(kwargs["env"]))
+        return _FakeProc(5000)
+
+    monkeypatch.setattr(service_manager, "build_daemon_process_env", _fake_build_env)
+    monkeypatch.setattr(service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true"))
+    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(service_manager, "ensure_process_started", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        service_manager, "wait_daemon_ready", lambda host, _port, **_kwargs: host
+    )
+    monkeypatch.setattr(service_manager, "start_log_threads", lambda *args, **kwargs: [])
+    monkeypatch.setattr(service_manager, "get_daemon_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service_manager, "preexec_fate_sharing", lambda: None)
+
+    inst = service_manager.start_service(
+        config_path=cfg_path,
+        register_current=False,
+        publish_meta=True,
+        to_console=False,
+    )
+
+    assert captured_build_env["extra_env"] == {
+        "LD_LIBRARY_PATH": "/data/cuda/compat",
+        "NCCL_DEBUG": "INFO",
+        "TENSORCAST_INSTANCE": "user-value",
+    }
+    assert len(proc_envs) == 1
+    assert proc_envs[0]["LD_LIBRARY_PATH"] == "/merged/lib"
+    assert proc_envs[0]["NCCL_DEBUG"] == "INFO"
+    assert proc_envs[0]["TENSORCAST_INSTANCE"] == inst.id

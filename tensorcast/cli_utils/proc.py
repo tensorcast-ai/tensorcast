@@ -133,6 +133,12 @@ def _dedupe_library_paths(candidates: Iterable[Path]) -> list[Path]:
     return deduped
 
 
+def _split_env_path_entries(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [entry for entry in value.split(":") if entry]
+
+
 def build_daemon_process_env(
     base_env: Mapping[str, str] | None = None,
     extra_env: Mapping[str, str] | None = None,
@@ -140,16 +146,21 @@ def build_daemon_process_env(
     """Prepare an environment mapping for launching the C++ daemon."""
 
     env = dict(base_env or os.environ)
+    configured_ld_library_path: str | None = None
     if extra_env:
-        env.update(extra_env)
+        configured_ld_library_path = extra_env.get("LD_LIBRARY_PATH")
+        for key, value in extra_env.items():
+            if key == "LD_LIBRARY_PATH":
+                continue
+            env[key] = value
 
     ld_paths = _discover_daemon_library_paths()
-    if ld_paths:
-        existing = env.get("LD_LIBRARY_PATH", "")
-        existing_entries = [entry for entry in existing.split(":") if entry]
-        discovered_entries = [str(p) for p in ld_paths if str(p)]
-        # Keep caller-provided LD_LIBRARY_PATH entries first for expected precedence.
-        ld_entries = existing_entries + discovered_entries
+    ld_entries = (
+        _split_env_path_entries(configured_ld_library_path)
+        + _split_env_path_entries(env.get("LD_LIBRARY_PATH"))
+        + [str(p) for p in ld_paths if str(p)]
+    )
+    if ld_entries or "LD_LIBRARY_PATH" in env or configured_ld_library_path is not None:
         deduped_entries: list[str] = []
         seen: set[str] = set()
         for entry in ld_entries:

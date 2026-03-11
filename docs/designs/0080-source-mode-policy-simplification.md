@@ -4,7 +4,7 @@ title: Unified Source-Mode Retrieval Policy
 areas: ["sdk", "daemon", "core", "proto", "docs", "tests"]
 status: draft
 created: 2026-02-15
-last_updated: 2026-02-15
+last_updated: 2026-03-11
 related_code:
   - tensorcast/api/store/types.py
   - tensorcast/api/_config.py
@@ -36,7 +36,7 @@ links:
 
 Unify source-selection policy into one user-facing concept and one transport contract.
 
-Current behavior splits source policy across multiple fields (`FallbackOptions.prefer`, `allow_p2p`, `allow_disk`, `GetArtifactOptions.prefer`, request `preference`, request `source_policy`), which creates semantic drift and user confusion.
+Current behavior splits source policy across multiple fields (`FallbackOptions.prefer`, `allow_p2p`, `allow_disk`, request `preference`, request `source_policy`), which creates semantic drift and user confusion.
 
 This design introduces one normative policy model:
 
@@ -50,8 +50,8 @@ This design introduces one normative policy model:
 The current policy model has three fundamental inconsistencies:
 
 1. API duplication in SDK:
-   - source intent appears in both `FallbackOptions` and `GetArtifactOptions`.
-   - primary retrieval paths are driven by `fallback`, while `GetArtifactOptions.prefer` is not the authoritative control in those paths.
+   - source intent still appears across multiple legacy knobs in `FallbackOptions`.
+   - primary retrieval paths are driven by `fallback`, which leaves the public API with legacy source-selection overlap and weak semantics.
 
 2. Transport duplication in daemon RPC:
    - requests carry both legacy `preference` and `source_policy.preference`.
@@ -70,7 +70,7 @@ This design is grounded in current implementation behavior:
 
 - SDK policy resolution is effectively `FallbackOptions`-driven in materialization paths:
   - `tensorcast/api/store/materialization.py` computes `preference` and `allow_*` from `fallback`.
-  - `GetArtifactOptions.prefer` exists in model validation but is not the main source-selection driver in these paths.
+  - `GetArtifactOptions` is execution-only; source selection is not driven from it.
 - Daemon request encoding keeps dual channels:
   - `preference` field plus `source_policy.preference`.
   - `tensorcast/daemon_ctl.py` contains merge precedence logic on the client side.
@@ -161,7 +161,7 @@ Why no public `p2p_only` mode:
 Target-state API:
 
 - Source policy appears only in `FallbackOptions` (or successor alias type) as `source_mode`.
-- `GetArtifactOptions.prefer` is removed.
+- `GetArtifactOptions` carries no source-selection field.
 - `FallbackOptions.prefer`, `allow_p2p`, `allow_disk`, and `prefer_disk` are removed from public contract after migration.
 
 Surface shape:
@@ -345,7 +345,7 @@ Migration is explicit and bounded.
 
 ## Stage 3 (hard cut)
 
-- Remove `GetArtifactOptions.prefer`.
+- Keep `GetArtifactOptions` free of source-selection fields.
 - Remove `FallbackOptions.prefer`, `allow_p2p`, `allow_disk`, `prefer_disk`.
 - Remove RPC legacy `preference` and old `SourcePolicy` fields.
 - Remove temporary `p2p_first_compat` and `p2p_only_compat` adapters.

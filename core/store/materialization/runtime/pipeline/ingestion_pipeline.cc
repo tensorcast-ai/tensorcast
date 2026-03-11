@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <utility>
@@ -105,7 +106,7 @@ absl::Status initialize_context(
   ctx.hints = hints;
   ctx.storage_path = config.storage_path;
   ctx.artifact_chunk_bytes = config.artifact_chunk_bytes;
-  ctx.num_threads = config.num_threads;
+  ctx.num_threads = loading::resolve_materialization_concurrency(config.num_threads, hints);
   ctx.pinned_memory_timeout = config.pinned_memory_timeout;
   ctx.options = config.engine_options;
   ctx.replica_runtime = config.replica_runtime;

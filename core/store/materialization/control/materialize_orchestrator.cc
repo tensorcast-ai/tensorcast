@@ -397,6 +397,13 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
            absl::IsDeadlineExceeded(view_transport_or.status()))) {
         view_transport_status = view_transport_or.status();
+        if (has_disk_source && allow_disk && preference != loading::SourcePreference::kPreferP2P) {
+          LOG(INFO) << "request_view_transport unavailable for artifact_id=" << artifact_id << " view_id=" << *view_id
+                    << " within probe_timeout_ms=" << view_probe_timeout_ms
+                    << "; bypassing canonical transport route and falling back to disk";
+          return absl::AbortedError(
+              absl::StrCat("view transport unavailable for artifact_id=", artifact_id, "; disk fallback available"));
+        }
         LOG(INFO) << "request_view_transport unavailable for artifact_id=" << artifact_id << " view_id=" << *view_id
                   << " within probe_timeout_ms=" << view_probe_timeout_ms
                   << "; retrying canonical transport route with wait_timeout_ms=" << wait_timeout_ms;

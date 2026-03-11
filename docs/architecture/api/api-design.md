@@ -74,8 +74,10 @@ TensorCast exposes a process-wide store session and module-level helpers.
 - `tensorcast.init(...)`: establishes a runtime (connect to an existing daemon
   or launch services). In `mode="auto"`, concurrent callers under the same
   runtime root coordinate so one process launches and the rest connect to the
-  same daemon. In `mode="create"`, you can also start (or reuse) a local
-  Global Store by setting `global_store_mode="start"`; use
+  same daemon. In `mode="create"`, you can also start a local
+  Global Store by setting `global_store_mode="start"`; this requires that no
+  healthy local Global Store is already recorded under the current runtime
+  root, otherwise startup fails. Use
   `global_store_config_path=...` (or `$TENSORCAST_GLOBAL_STORE_CONFIG`) to pick
   the Global Store YAML. Implementation: [tensorcast/startup.py](../../../tensorcast/startup.py).
 - `tensorcast.store(...)`: returns the process-wide `Store` (lazy initialization).
@@ -337,10 +339,11 @@ Materialization behavior is controlled by `FallbackOptions` and
 Disk paths are not supplied by the SDK; when disk fallback is enabled the daemon
 resolves managed disk locations via Global Store.
 
-`GetArtifactOptions` is used by the materialization pipeline; most applications
-won’t pass it directly today, but it is important for understanding behavior
-like region-backed `get_into`, pinned allocation timeouts, and “wait for
-completion”.
+`GetArtifactOptions` is execution-only. It does not control source selection;
+that remains the responsibility of `FallbackOptions`. Most applications won’t
+pass `GetArtifactOptions` directly today, but it is important for understanding
+behavior like region-backed `get_into`, pinned allocation timeouts, and “wait
+for completion”.
 
 - Type: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py) (`GetArtifactOptions`, `RegionBackedMode`)
 

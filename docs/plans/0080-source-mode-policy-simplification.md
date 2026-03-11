@@ -4,7 +4,7 @@ title: Unified Source-Mode Retrieval Policy Plan
 status: draft
 areas: ["sdk", "daemon", "core", "proto", "docs", "tests"]
 created: 2026-02-15
-last_updated: 2026-02-15
+last_updated: 2026-03-11
 related_code:
   - tensorcast/api/store/types.py
   - tensorcast/api/_config.py
@@ -42,7 +42,7 @@ Current implementation has policy split and drift:
 
 - SDK duplicates source intent:
   - `tensorcast/api/store/types.py` (`FallbackOptions.prefer` and allow flags)
-  - `tensorcast/api/_config.py` (`GetArtifactOptions.prefer`)
+  - `tensorcast/api/_config.py` (`GetArtifactOptions` execution options)
 - materialization pipeline primarily resolves policy from fallback:
   - `tensorcast/api/store/materialization.py`
 - transport duplicates source policy:
@@ -84,7 +84,7 @@ Constraints:
 
 - [ ] Phase 4: SDK Surface Simplification
   - [ ] Milestone 4.1: Introduce SDK `SourceMode` and `FallbackOptions.source_mode`.
-  - [ ] Milestone 4.2: Remove source semantics from `GetArtifactOptions`.
+  - [x] Milestone 4.2: Keep `GetArtifactOptions` execution-only and free of source-selection semantics.
   - [ ] Milestone 4.3: Remove legacy `FallbackOptions.prefer`, `allow_p2p`, `allow_disk`, `prefer_disk`.
   - [ ] Milestone 4.4: Ensure all retrieval callsites build one mode-only source policy.
 

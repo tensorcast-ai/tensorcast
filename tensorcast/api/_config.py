@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, SupportsIndex, SupportsInt, cast
 
@@ -632,7 +633,6 @@ class RegisterArtifactOptions(BaseModel):
 class GetArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    prefer: str = "auto"  # "auto" | "local" | "p2p" | "disk"
     export_policy: str = "never"  # "never" | "auto" | "force"
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     # When >0 and the initial retrieval fails, the daemon can wait for a managed
@@ -644,15 +644,15 @@ class GetArtifactOptions(BaseModel):
     # Hint for P2P transport lock TTL extension; forwarded by daemons
     transport_hold_ms: int | None = None
 
-    @field_validator("prefer", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _normalize_prefer(cls, value: object) -> str:
-        normalized = "auto" if value is None else str(value).strip().lower()
-        if normalized not in {"auto", "local", "p2p", "disk"}:
+    def _reject_removed_fields(cls, value: object) -> object:
+        if isinstance(value, Mapping) and "prefer" in value:
             raise ValueError(
-                "GetArtifactOptions.prefer must be one of: auto, local, p2p, disk"
+                "GetArtifactOptions.prefer has been removed; use "
+                "FallbackOptions(prefer=...) to control source selection"
             )
-        return normalized
+        return value
 
     @field_validator("export_policy", mode="before")
     @classmethod

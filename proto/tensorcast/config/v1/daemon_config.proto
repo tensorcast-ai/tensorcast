@@ -182,6 +182,16 @@ message DaemonConfig {
   // Stable identity for this daemon instance used by the control plane.
   // Must not be derived from network address and should remain stable across restarts.
   string daemon_id = 10;
+  // Launcher-only environment variables applied by the CLI/SDK when spawning
+  // the daemon binary. These values must be declared explicitly in config; the
+  // daemon does not read ambient process environment as part of the unified
+  // runtime configuration contract.
+  //
+  // Special case: when LD_LIBRARY_PATH is configured here, the launcher keeps
+  // inherited entries first, then appends the configured entries, then appends
+  // TensorCast/PyTorch/CUDA library directories discovered from the active
+  // Python environment.
+  map<string, string> envs = 26;
 
   message Compatibility {
     bool confirm_requires_disk_path = 1;
