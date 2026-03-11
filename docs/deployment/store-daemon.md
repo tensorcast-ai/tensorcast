@@ -41,6 +41,11 @@ packages such as ``cusparselt`` that are installed outside the ``nvidia``
 namespace) that live inside the active Python environment. This allows the
 daemon to resolve ``libstore_engine``, ``libtorch`` and CUDA components even
 when only the binary is present on disk.
+If you need extra launcher environment for the daemon binary, set `envs` in the
+daemon config. `envs.LD_LIBRARY_PATH` is merged in this order: inherited shell
+entries, then configured entries, then the auto-discovered TensorCast/PyTorch/CUDA
+directories. Other `envs.*` keys are passed through directly to the daemon
+process.
 
 By default the daemon runs in the background after `tensorcast-cli daemon start`
 returns, and logs are persisted under `~/.tensorcast/hosts/<host_id>/sessions/<id>/logs`
@@ -157,6 +162,14 @@ Pair this panel with a counter visualization for `tc_store_operation_retries_tot
 All runtime parameters are configured via the unified config. The daemon only
 accepts `--config=/path/to/file`. See `examples/config/store_daemon_config.yaml`.
 Enum fields accept friendly values and are normalized (case-insensitive): `observability.otel.exporter_protocol: grpc | http/protobuf`, `observability.logging.level: debug|info|warn|error`.
+Launcher-only daemon environment can also be declared in config via `envs`, for
+example:
+
+```yaml
+envs:
+  LD_LIBRARY_PATH: /data/cuda/compat
+  NCCL_DEBUG: INFO
+```
 
 When HA is enabled, the daemon advertises a routable address to the Global Store. If `server.advertise.host` is set but non-routable, startup fails; if it is unset, the daemon resolves it using a routable `server.listen.host`, the outbound route IP to the Global Store endpoint, and finally the default interface IP. The resolved advertise address is logged at startup.
 

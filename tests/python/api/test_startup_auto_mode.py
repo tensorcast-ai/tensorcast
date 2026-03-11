@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from tensorcast import runtime, startup
+from tensorcast.cli_utils.errors import ServiceError
 from tensorcast.cli_utils.paths import session_paths
 from tensorcast.cli_utils.process import read_json_default
 
@@ -41,6 +43,104 @@ def test_auto_mode_connects_existing_daemon(monkeypatch: pytest.MonkeyPatch) -> 
         assert ctx.client is dummy_client
     finally:
         startup.shutdown()
+
+
+def test_auto_mode_multiprocess_singleflight_shares_one_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mp_ctx = multiprocessing.get_context("fork")
+    daemon_address = "127.0.0.1:61011"
+    global_store_address = "10.0.0.1:50051"
+    start_count = mp_ctx.Value("i", 0)
+    daemon_ready = mp_ctx.Event()
+    release_workers = mp_ctx.Event()
+    results = mp_ctx.Queue()
+    start_kwargs = mp_ctx.Queue()
+
+    def _fake_status(_session_id=None):
+        if not daemon_ready.is_set():
+            return None
+        return runtime.RuntimeSession(
+            session_id="sess-multiprocess",
+            daemon_pid=4242,
+            daemon_address=daemon_address,
+            daemon_p2p_address="127.0.0.1:61012",
+            logs_dir=session_paths("sess-multiprocess").logs,
+            started_at=time.time(),
+            owner=True,
+        )
+
+    def _fake_start(**kwargs):
+        with start_count.get_lock():
+            start_count.value += 1
+        start_kwargs.put(
+            {
+                "global_store_mode": kwargs.get("global_store_mode"),
+                "global_store_address": kwargs.get("global_store_address"),
+            }
+        )
+        time.sleep(0.2)
+        daemon_ready.set()
+        return runtime.RuntimeSession(
+            session_id="sess-multiprocess",
+            daemon_pid=4242,
+            daemon_address=daemon_address,
+            daemon_p2p_address="127.0.0.1:61012",
+            logs_dir=session_paths("sess-multiprocess").logs,
+            started_at=time.time(),
+            owner=True,
+        )
+
+    monkeypatch.setattr(startup.runtime, "status", _fake_status)
+    monkeypatch.setattr(startup.runtime, "start", _fake_start)
+    monkeypatch.setattr(startup.runtime, "stop", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        startup,
+        "ping_daemon",
+        lambda addr: bool(daemon_ready.is_set() and addr == daemon_address),
+    )
+    monkeypatch.setattr(
+        "tensorcast.daemon_ctl.get_daemon_client", lambda _address: object()
+    )
+
+    def _worker() -> None:
+        try:
+            ctx = startup.init(
+                mode="auto",
+                global_store_mode="connect",
+                global_store_address=global_store_address,
+                show_daemon_logs=False,
+            )
+            results.put(
+                {
+                    "address": ctx.address,
+                    "is_owner": ctx.is_owner,
+                    "session_id": ctx.session_id,
+                }
+            )
+            release_workers.wait(timeout=5.0)
+            startup.shutdown()
+        except Exception as exc:  # noqa: BLE001
+            results.put({"error": type(exc).__name__, "message": str(exc)})
+
+    procs = [mp_ctx.Process(target=_worker) for _ in range(2)]
+    for proc in procs:
+        proc.start()
+
+    collected = [results.get(timeout=10.0) for _ in range(2)]
+    release_workers.set()
+
+    for proc in procs:
+        proc.join(timeout=10.0)
+        assert proc.exitcode == 0
+
+    assert all("error" not in item for item in collected)
+    assert start_count.value == 1
+    assert [item["address"] for item in collected] == [daemon_address, daemon_address]
+    assert sorted(item["is_owner"] for item in collected) == [False, True]
+    leader_start = start_kwargs.get(timeout=2.0)
+    assert leader_start["global_store_mode"] == "connect"
+    assert leader_start["global_store_address"] == global_store_address
 
 
 def test_auto_mode_creates_daemon_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,6 +295,84 @@ def test_auto_mode_records_failed_state_on_start_error(
     assert "start boom" in auto_state["error_message"]
 
 
+def test_auto_mode_multiprocess_connect_requires_reachable_global_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mp_ctx = multiprocessing.get_context("fork")
+    global_store_address = "10.0.0.1:50051"
+    start_count = mp_ctx.Value("i", 0)
+    results = mp_ctx.Queue()
+
+    monkeypatch.setattr(startup.runtime, "status", lambda _session_id=None: None)
+    monkeypatch.setattr(startup, "ping_daemon", lambda _address: False)
+
+    def _fake_start(**_kwargs):
+        with start_count.get_lock():
+            start_count.value += 1
+        raise ServiceError(
+            "Global Store connect mode requires a reachable address, "
+            f"got ['{global_store_address}']"
+        )
+
+    monkeypatch.setattr(startup.runtime, "start", _fake_start)
+
+    def _worker() -> None:
+        try:
+            startup.init(
+                mode="auto",
+                global_store_mode="connect",
+                global_store_address=global_store_address,
+                show_daemon_logs=False,
+            )
+            results.put({"error": "unexpected-success"})
+        except Exception as exc:  # noqa: BLE001
+            results.put({"type": type(exc).__name__, "message": str(exc)})
+
+    procs = [mp_ctx.Process(target=_worker) for _ in range(2)]
+    for proc in procs:
+        proc.start()
+
+    collected = [results.get(timeout=10.0) for _ in range(2)]
+
+    for proc in procs:
+        proc.join(timeout=10.0)
+        assert proc.exitcode == 0
+
+    assert start_count.value == 1
+    assert all(item.get("error") != "unexpected-success" for item in collected)
+    assert any(
+        "Global Store connect mode requires a reachable address"
+        in item["message"]
+        for item in collected
+    )
+    assert any("AUTO_START_FAILED" in item["message"] for item in collected)
+
+
+def test_auto_mode_start_reports_existing_local_global_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(startup.runtime, "status", lambda _session_id=None: None)
+    monkeypatch.setattr(startup, "ping_daemon", lambda _address: False)
+    monkeypatch.setattr(
+        startup.runtime,
+        "start",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ServiceError(
+                "A local Global Store is already running for session gs-existing "
+                "at 127.0.0.1:50051. Stop it before using global_store_mode='start'."
+            )
+        ),
+    )
+
+    with pytest.raises(ServiceError, match="A local Global Store is already running"):
+        startup.init(mode="auto", global_store_mode="start")
+
+    auto_state = read_json_default(startup._auto_state_path(), {})
+    assert auto_state["status"] == "FAILED"
+    assert auto_state["error_code"] == "AUTO_START_FAILED"
+    assert "A local Global Store is already running" in auto_state["error_message"]
+
+
 def test_auto_mode_recovers_from_stale_ready_owner_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -240,6 +418,7 @@ def test_auto_mode_recovers_from_stale_ready_owner_dead(
                 cluster_id=None,
                 allow_gs_fallback=False,
                 session_id=None,
+                port_config=None,
             ),
             "session_id": "sess-stale",
             "address": "127.0.0.1:50052",
@@ -305,6 +484,7 @@ def test_auto_mode_recovers_from_stale_failed_owner_dead(
                 cluster_id=None,
                 allow_gs_fallback=False,
                 session_id=None,
+                port_config=None,
             ),
             "session_id": "sess-failed",
             "address": "127.0.0.1:50052",

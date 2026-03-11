@@ -30,6 +30,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/common/config/daemon_config_io.h"
@@ -624,6 +625,14 @@ int main(int argc, char** argv) {
     return 2;
   }
   const bool fake_cuda_backend = cuda::is_fake();
+  if (!fake_cuda_backend && detected_gpu_count > 0) {
+    const absl::Status gpu_hash_prewarm = common::prewarm_gpu_hash_nvrtc_for_visible_devices();
+    if (!gpu_hash_prewarm.ok()) {
+      LOG(ERROR) << "FAILED_PRECONDITION: GPU hash NVRTC prewarm failed during startup: " << gpu_hash_prewarm;
+      return 2;
+    }
+    LOG(INFO) << "GPU hash NVRTC prewarm complete for detected_gpu_count=" << detected_gpu_count;
+  }
   const daemon::EnginePinnedConcurrencySizing engine_sizing =
       daemon::compute_engine_pinned_concurrency_sizing(streaming_buffer_chunks, detected_gpu_count, fake_cuda_backend);
   if (engine_sizing.required_slices > 0) {

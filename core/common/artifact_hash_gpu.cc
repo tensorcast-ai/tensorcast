@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -107,6 +108,25 @@ void release_device_buffer(void** ptr) {
     LOG(ERROR) << "cuda::free failed while releasing buffer: " << status;
   }
   *ptr = nullptr;
+}
+
+void restore_device_best_effort(std::optional<int> prior_device, int current_device) {
+  if (!prior_device.has_value() || *prior_device == current_device) {
+    return;
+  }
+  auto restore_status = cuda::set_device(*prior_device);
+  if (!restore_status.ok()) {
+    LOG(WARNING) << "Failed to restore CUDA device " << *prior_device
+                 << " after GPU hash NVRTC prewarm: " << restore_status;
+  }
+}
+
+std::optional<int> current_device_best_effort() {
+  int device_id = -1;
+  if (cuda::get_device(&device_id).ok()) {
+    return device_id;
+  }
+  return std::nullopt;
 }
 
 absl::StatusOr<std::vector<uint8_t>> compute_root_via_host_copy(
@@ -596,6 +616,49 @@ NvrtcSha256KernelCache& get_nvrtc_kernel_cache() {
   return *cache;
 }
 
+absl::StatusOr<CUcontext> current_cuda_context();
+
+absl::StatusOr<NvrtcSha256KernelCache::CacheKey> build_nvrtc_cache_key(int device_id) {
+  if (device_id < 0) {
+    return absl::InvalidArgumentError("device_id must be >= 0");
+  }
+
+  cudaDeviceProp props;
+  if (auto prop_status = cuda::get_device_properties(device_id, &props); !prop_status.ok()) {
+    return prop_status;
+  }
+
+  auto context_or = current_cuda_context();
+  if (!context_or.ok()) {
+    return context_or.status();
+  }
+
+  return NvrtcSha256KernelCache::CacheKey{
+      .context = *context_or,
+      .device_id = device_id,
+      .major = props.major,
+      .minor = props.minor,
+  };
+}
+
+absl::Status prewarm_gpu_hash_nvrtc_for_current_device(int device_id) {
+  auto cache_key_or = build_nvrtc_cache_key(device_id);
+  if (!cache_key_or.ok()) {
+    return cache_key_or.status();
+  }
+
+  auto kernel_or = get_nvrtc_kernel_cache().get_or_compile(*cache_key_or);
+  if (!kernel_or.ok()) {
+    return kernel_or.status();
+  }
+  return absl::OkStatus();
+}
+
+absl::Status cpu_fallback_disabled_status(const absl::Status& status) {
+  return absl::Status(
+      status.code(), absl::StrCat("GPU hashing unavailable; CPU fallback disabled: ", status.message()));
+}
+
 absl::StatusOr<CUcontext> current_cuda_context() {
   auto init_status = ensure_cuda_driver_initialized();
   if (!init_status.ok()) {
@@ -627,26 +690,20 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
   }
 
   cudaDeviceProp props;
-  if (auto prop_status = cuda::get_device_properties(device_id, &props); !prop_status.ok()) {
-    return prop_status;
+  auto cache_key_or = build_nvrtc_cache_key(device_id);
+  if (!cache_key_or.ok()) {
+    return cache_key_or.status();
   }
-
-  auto context_or = current_cuda_context();
-  if (!context_or.ok()) {
-    return context_or.status();
-  }
-  NvrtcSha256KernelCache::CacheKey cache_key{
-      .context = *context_or,
-      .device_id = device_id,
-      .major = props.major,
-      .minor = props.minor,
-  };
+  const NvrtcSha256KernelCache::CacheKey cache_key = *cache_key_or;
 
   auto kernel_or = get_nvrtc_kernel_cache().get_or_compile(cache_key);
   if (!kernel_or.ok()) {
     return kernel_or.status();
   }
   auto kernel = kernel_or.value();
+  if (auto prop_status = cuda::get_device_properties(device_id, &props); !prop_status.ok()) {
+    return prop_status;
+  }
   const auto sm_count = static_cast<unsigned int>(props.multiProcessorCount);
 
   auto ensure_driver_status = ensure_cuda_driver_initialized();
@@ -756,6 +813,65 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
 
 } // namespace
 
+absl::Status prewarm_gpu_hash_nvrtc_for_device(int device_id) {
+  if (device_id < 0) {
+    return absl::InvalidArgumentError("device_id must be >= 0");
+  }
+  if (cuda::is_fake()) {
+    return absl::OkStatus();
+  }
+
+  int device_count = 0;
+  if (auto count_status = cuda::get_device_count(&device_count); !count_status.ok()) {
+    return count_status;
+  }
+  if (device_id >= device_count) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("device_id ", device_id, " out of range for visible GPU count ", device_count));
+  }
+
+  const std::optional<int> prior_device = current_device_best_effort();
+  absl::Cleanup restore_device = absl::MakeCleanup([&]() { restore_device_best_effort(prior_device, device_id); });
+
+  if (auto set_status = cuda::set_device(device_id); !set_status.ok()) {
+    return set_status;
+  }
+  return prewarm_gpu_hash_nvrtc_for_current_device(device_id);
+}
+
+absl::Status prewarm_gpu_hash_nvrtc_for_visible_devices() {
+  if (cuda::is_fake()) {
+    return absl::OkStatus();
+  }
+
+  int device_count = 0;
+  if (auto count_status = cuda::get_device_count(&device_count); !count_status.ok()) {
+    return count_status;
+  }
+  if (device_count <= 0) {
+    return absl::OkStatus();
+  }
+
+  const std::optional<int> prior_device = current_device_best_effort();
+  int current_device = prior_device.value_or(-1);
+  absl::Cleanup restore_device = absl::MakeCleanup([&]() { restore_device_best_effort(prior_device, current_device); });
+
+  for (int device_id = 0; device_id < device_count; ++device_id) {
+    if (auto set_status = cuda::set_device(device_id); !set_status.ok()) {
+      return absl::Status(
+          set_status.code(),
+          absl::StrCat("failed to set CUDA device ", device_id, " during GPU hash prewarm: ", set_status.message()));
+    }
+    current_device = device_id;
+    if (auto prewarm_status = prewarm_gpu_hash_nvrtc_for_current_device(device_id); !prewarm_status.ok()) {
+      return absl::Status(
+          prewarm_status.code(),
+          absl::StrCat("GPU hash NVRTC prewarm failed for device ", device_id, ": ", prewarm_status.message()));
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::StatusOr<std::string> compute_data_multihash_from_gpu(
     void* gpu_ptr,
     uint64_t total_size,
@@ -794,8 +910,7 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(
   if (!cuda::is_fake()) {
     root_or = compute_root_via_nvrtc(device_base, total_size, chunk_size, device_id);
     if (!root_or.ok()) {
-      LOG(WARNING) << "NVRTC hashing unavailable; falling back to CPU hashing: " << root_or.status();
-      root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);
+      return cpu_fallback_disabled_status(root_or.status());
     }
   } else {
     root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);

@@ -84,7 +84,7 @@ All retrieval flows pass through `MaterializationPipeline` with canonical index 
 - `FallbackOptions`: `prefer` = `"auto" | "local" | "p2p" | "disk"` (default `"auto"`); `disk_path`; `allow_p2p` (default `True`); `verify_checksums` (default `True`); `replica_uuid` (prefetch reuse). Helpers: `for_disk(path, verify=True)`, `local_only()`. Accept string shortcuts at the surface (e.g., `fallback="disk:/tmp/foo"` → `for_disk`).
 - `PlanType`: user-facing strings `plan="lease" | "copy"` (default `lease`), coerced internally to `PlanType.VRAM_LEASED` / `PlanType.VRAM_COALESCED`; enum remains for power users.
 - `RegisterArtifactOptions`: public-facing fields `plan`, `lease_in_place`, `max_inflight_bytes`, `release_on_tensor_commit`; accept string `plan` and map to enum internally; keep advanced knobs optional.
-- `GetArtifactOptions`: `prefer` (mirrors `FallbackOptions`), `wait_for_completion` (default `True`), `enable_verification` (default `True`), `transport_hold_ms` (advanced).
+- `GetArtifactOptions`: execution-only options such as `wait_for_completion` (default `True`), `enable_verification` (default `True`), and `transport_hold_ms` (advanced). Source selection belongs to `FallbackOptions`.
 - Devices: accept `str | torch.device`; retrieval defaults to the current CUDA device if available (otherwise require explicit CPU with disk fallback). For `put`, CUDA inputs target their device unless `device` is provided (must match); CPU inputs are not supported yet.
 
 ## Behavioral Notes

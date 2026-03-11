@@ -38,8 +38,11 @@ managing clients manually.
   artifacts via daemon `ImportArtifactFromPath` / `ImportArtifactFromPathStream`.
   The daemon returns `artifact_id`, `canonical_index_bytes`, `generation`, and
   `import_state=READY`, and the SDK seeds `ArtifactCache` with this metadata.
-  Import is **reference-only registration**: no payload copy/link/reflink, and
-  no source-directory mutation (no descriptor/index/verification backfill).
+  Import is **reference-only registration** for payload bytes: no payload
+  copy/link/reflink. On first import, the daemon may backfill metadata sidecars
+  such as `artifact_descriptor.json` (and `tensor_index.json` for safetensors
+  directories) so later imports can reuse trusted metadata and skip full data
+  hashing.
   Stream events are the canonical progress contract (`phase`, bytes, `percent`,
   terminal `done`, machine-readable `error_code`).
   Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch

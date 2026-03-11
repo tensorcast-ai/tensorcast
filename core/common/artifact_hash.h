@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 
@@ -28,6 +29,15 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(
     uint64_t total_size,
     int device_id,
     size_t leaf_chunk_bytes = kGpuHashDefaultLeafChunkBytes);
+
+// Pre-compile/load the NVRTC GPU hashing kernel for a specific device. This is
+// a no-op under the FakeCuda backend.
+absl::Status prewarm_gpu_hash_nvrtc_for_device(int device_id);
+
+// Pre-compile/load the NVRTC GPU hashing kernel for every visible device. This
+// is intended for daemon startup fail-fast checks and is a no-op under the
+// FakeCuda backend or when no GPUs are visible.
+absl::Status prewarm_gpu_hash_nvrtc_for_visible_devices();
 
 // Lightweight public wrappers to reuse hashing primitives across modules
 // without duplicating implementations. These mirror the internal helpers

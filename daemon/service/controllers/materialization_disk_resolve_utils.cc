@@ -4,9 +4,11 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #include <sys/stat.h>
 
@@ -21,6 +23,7 @@
 
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
+#include "core/store/materialization/dataplane/verification/verification_utils.h"
 
 namespace tensorcast::daemon::materialization_disk_resolve {
 
@@ -183,6 +186,42 @@ absl::Status descriptor_consistency_check(
   return absl::OkStatus();
 }
 
+absl::StatusOr<std::optional<std::pair<std::string, std::string>>> try_trust_existing_descriptor(
+    const DescriptorMetadata& descriptor,
+    const store::loader::IndexInfo& index,
+    bool verify_checksums,
+    std::string_view index_multihash) {
+  if (!descriptor.found) {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
+  if (!descriptor.index_multihash.has_value() || descriptor.index_multihash->empty() ||
+      !descriptor.data_multihash.has_value() || descriptor.data_multihash->empty() ||
+      !descriptor.artifact_id.has_value() || descriptor.artifact_id->empty()) {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
+
+  if (verify_checksums) {
+    auto st = validate_descriptor_against_index(descriptor, index, /*verify_checksums=*/true);
+    if (!st.ok()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("SOURCE_FORMAT_INVALID: descriptor/index mismatch: ", st.message()));
+    }
+  }
+
+  if (*descriptor.index_multihash != index_multihash) {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
+
+  const std::string expected_artifact_id =
+      absl::StrCat("mi2:", *descriptor.index_multihash, ":", *descriptor.data_multihash);
+  if (*descriptor.artifact_id != expected_artifact_id) {
+    return std::optional<std::pair<std::string, std::string>>{};
+  }
+
+  return std::optional<std::pair<std::string, std::string>>(
+      std::make_pair(*descriptor.artifact_id, *descriptor.data_multihash));
+}
+
 } // namespace
 
 void record_disk_path_denied() {
@@ -282,25 +321,54 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
     index_multihash = *index_mh_or;
   }
 
-  emit_progress(ImportArtifactPhase::kHashData);
-  auto data_mh_or = store::loader::compute_data_multihash_from_disk_dir(
-      normalized_path.string(), [&](std::uint64_t processed_bytes, std::uint64_t total_bytes) {
-        emit_progress(ImportArtifactPhase::kHashData, processed_bytes, total_bytes);
-      });
-  if (!data_mh_or.ok()) {
-    record_disk_import_outcome("data_hash_failed");
-    emit_error(data_mh_or.status());
-    return data_mh_or.status();
-  }
-  const std::string data_multihash = *data_mh_or;
-  const std::string artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
+  std::string artifact_id;
+  std::string data_multihash;
+  bool descriptor_present = descriptor.found;
 
-  auto consistency =
-      descriptor_consistency_check(descriptor, index, verify_checksums, index_multihash, data_multihash, artifact_id);
-  if (!consistency.ok()) {
+  auto trusted_descriptor_or = try_trust_existing_descriptor(descriptor, index, verify_checksums, index_multihash);
+  if (!trusted_descriptor_or.ok()) {
     record_disk_import_outcome("descriptor_mismatch");
-    emit_error(consistency);
-    return consistency;
+    emit_error(trusted_descriptor_or.status());
+    return trusted_descriptor_or.status();
+  }
+
+  if (trusted_descriptor_or->has_value()) {
+    artifact_id = trusted_descriptor_or->value().first;
+    data_multihash = trusted_descriptor_or->value().second;
+  } else {
+    emit_progress(ImportArtifactPhase::kHashData);
+    auto data_mh_or = store::loader::compute_data_multihash_from_disk_dir(
+        normalized_path.string(), [&](std::uint64_t processed_bytes, std::uint64_t total_bytes) {
+          emit_progress(ImportArtifactPhase::kHashData, processed_bytes, total_bytes);
+        });
+    if (!data_mh_or.ok()) {
+      record_disk_import_outcome("data_hash_failed");
+      emit_error(data_mh_or.status());
+      return data_mh_or.status();
+    }
+    data_multihash = *data_mh_or;
+    artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
+
+    auto consistency =
+        descriptor_consistency_check(descriptor, index, verify_checksums, index_multihash, data_multihash, artifact_id);
+    if (!consistency.ok()) {
+      record_disk_import_outcome("descriptor_mismatch");
+      emit_error(consistency);
+      return consistency;
+    }
+
+    uint64_t total_size = index.total_size_bytes;
+    if (total_size == 0 && index.source_total_size_bytes > 0) {
+      total_size = index.source_total_size_bytes;
+    }
+    auto write_status = store::loader::verification::write_descriptor_if_absent(
+        normalized_path, index_multihash, data_multihash, total_size, "json");
+    if (!write_status.ok()) {
+      LOG(WARNING) << "Failed to backfill artifact_descriptor.json for import path '" << normalized_path.string()
+                   << "': " << write_status;
+    } else {
+      descriptor_present = true;
+    }
   }
 
   emit_progress(ImportArtifactPhase::kWriteRegistry);
@@ -312,7 +380,7 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
   result.index_multihash = std::move(index_multihash);
   result.data_multihash = data_multihash;
   result.generation = compute_generation_from_index(index.canonical_index_json);
-  result.descriptor_present = descriptor.found;
+  result.descriptor_present = descriptor_present;
   result.file_fingerprints = std::move(scan_or->fingerprints);
 
   record_disk_import_outcome("ok");

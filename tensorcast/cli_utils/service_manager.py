@@ -115,6 +115,7 @@ def start_service(
     global_store: dict[str, Any] | None = None,
     listen_host: str | None = None,
     listen_port: int | None = None,
+    p2p_listen_port: int | None = None,
     config_overrides: tuple[str, ...] | list[str] | None = None,
     ha_endpoints: list[str] | None = None,
     ha_enabled: bool | None = None,
@@ -146,6 +147,11 @@ def start_service(
         if listen_port < 0 or listen_port > 65535:
             raise ServiceError("listen_port must be between 0 and 65535")
         cfg.server.listen.port = listen_port
+        cfg_modified = True
+    if p2p_listen_port is not None:
+        if p2p_listen_port < 0 or p2p_listen_port > 65535:
+            raise ServiceError("p2p_listen_port must be between 0 and 65535")
+        cfg.server.p2p_listen.port = p2p_listen_port
         cfg_modified = True
 
     # Restrict to loopback if requested (SDK private launch)
@@ -232,7 +238,9 @@ def start_service(
     so = open_log_binary(so_path) if persist_logs else None
     se = open_log_binary(se_path) if persist_logs else None
 
-    env = build_daemon_process_env({**os.environ, "TENSORCAST_INSTANCE": inst.id})
+    launcher_env = dict(cfg.envs) if cfg.envs else None
+    env = build_daemon_process_env(os.environ, launcher_env)
+    env["TENSORCAST_INSTANCE"] = inst.id
 
     try:
         preexec_fn = preexec_fate_sharing if fate_share else preexec_detached

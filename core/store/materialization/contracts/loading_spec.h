@@ -2,9 +2,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -135,6 +137,16 @@ struct MaterializeHints {
 
   std::optional<VariantIdentity> variant;
 };
+
+inline int resolve_materialization_concurrency(int daemon_num_threads, const MaterializeHints& hints) {
+  const int bounded_daemon_threads = std::max(1, daemon_num_threads);
+  if (hints.pipeline_concurrency == 0) {
+    return bounded_daemon_threads;
+  }
+  const uint32_t bounded_hint =
+      std::min<uint32_t>(hints.pipeline_concurrency, static_cast<uint32_t>(std::numeric_limits<int>::max()));
+  return std::max(1, std::min(bounded_daemon_threads, static_cast<int>(bounded_hint)));
+}
 
 struct ReplicaLoadSpec {
   std::string identifier;

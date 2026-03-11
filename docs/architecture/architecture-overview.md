@@ -88,9 +88,11 @@ graph TD
   surfaces `FAILED_PRECONDITION` if used after `Store.close()`.
 - **Disk-backed Handles**: `tensorcast.from_disk(path)` routes through the
   daemon import RPCs (`ImportArtifactFromPath` /
-  `ImportArtifactFromPathStream`). Import is reference-only registration (no
-  source writes), returns `artifact_id` + canonical index bytes + generation,
-  and seeds the SDK cache for reuse across materialization, views, and unloads.
+  `ImportArtifactFromPathStream`). Import is reference-only registration for
+  payload bytes, may backfill metadata sidecars such as
+  `artifact_descriptor.json` / safetensors `tensor_index.json` on first import,
+  returns `artifact_id` + canonical index bytes + generation, and seeds the SDK
+  cache for reuse across materialization, views, and unloads.
 - **Metadata Cache**: A process-wide `ArtifactCache` stores canonical indices
   (default TTL 600s, max 1000 entries) to avoid repeated daemon lookups.
   Tunables: `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS`,

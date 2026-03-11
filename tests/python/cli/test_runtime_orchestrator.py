@@ -10,13 +10,14 @@ import pytest
 
 from tensorcast import runtime
 from tensorcast.cli_utils.errors import ServiceError
+from tensorcast.cli_utils.health import GlobalStoreHealth
+from tensorcast.cli_utils.paths import runtime_state_path, session_paths
 from tensorcast.cli_utils.process import (
     instance_fingerprint,
     update_runtime_daemon,
-    write_session_state,
     write_runtime_state,
+    write_session_state,
 )
-from tensorcast.cli_utils.paths import runtime_state_path, session_paths
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +32,8 @@ def _stub_daemon_start(monkeypatch, gs_state: dict[str, Any]):
         inst = session_paths(kwargs.get("session_id"))
         started["ha_endpoints"] = kwargs.get("ha_endpoints")
         started["global_store"] = kwargs.get("global_store")
+        started["listen_port"] = kwargs.get("listen_port")
+        started["p2p_listen_port"] = kwargs.get("p2p_listen_port")
         update_runtime_daemon(
             path=runtime_state_path(),
             session_id=inst.id,
@@ -136,6 +139,8 @@ def test_runtime_start_injects_global_store(monkeypatch):
     def _fake_start_global_store(**kwargs):
         captured["cluster_token"] = kwargs.get("cluster_token")
         captured["config_path"] = kwargs.get("config_path")
+        captured["listen_port"] = kwargs.get("listen_port")
+        captured["metrics_port"] = kwargs.get("metrics_port")
         return SimpleNamespace(
             id="gs-123",
             pid=1111,
@@ -163,14 +168,123 @@ def test_runtime_start_injects_global_store(monkeypatch):
     started = _stub_daemon_start(monkeypatch, gs_state)
 
     gs_cfg = Path("cfg/gs.yaml")
-    session = runtime.start(global_store_mode="start", global_store_config=gs_cfg)
+    session = runtime.start(
+        global_store_mode="start",
+        global_store_config=gs_cfg,
+        listen_port=50052,
+        p2p_listen_port=65091,
+        global_store_listen_port=50061,
+        global_store_metrics_port=18008,
+    )
 
     assert session.global_store_address == "127.0.0.1:50051"
     assert started["ha_endpoints"] == ["127.0.0.1:50051"]
+    assert started["listen_port"] == 50052
+    assert started["p2p_listen_port"] == 65091
     assert captured["cluster_token"] is None
     assert captured["config_path"] == gs_cfg
+    assert captured["listen_port"] == 50061
+    assert captured["metrics_port"] == 18008
     assert session.global_store_session == "gs-123"
     assert session.global_store_mode == "start"
+
+
+def test_runtime_start_rejects_existing_local_global_store(monkeypatch):
+    write_runtime_state(
+        runtime_state_path(),
+        {
+            "global_store": {
+                "session_id": "gs-existing",
+                "address": "127.0.0.1:50051",
+                "cluster_token": "tok-1",
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        runtime,
+        "ping_global_store",
+        lambda *_args, **_kwargs: GlobalStoreHealth(
+            address="127.0.0.1:50051",
+            listen_host="127.0.0.1",
+            listen_port=50051,
+            advertise_host=None,
+            advertise_port=None,
+            metrics_port=18008,
+            cluster_token="tok-1",
+            version="test",
+            db_file=None,
+        ),
+    )
+    monkeypatch.setattr(
+        runtime.global_store_manager,
+        "start_global_store",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("start_global_store should not be called")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime.service_manager,
+        "start_service",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("start_service should not be called")
+        ),
+    )
+
+    with pytest.raises(
+        ServiceError, match="A local Global Store is already running"
+    ):
+        runtime.start(global_store_mode="start")
+
+
+def test_runtime_start_replaces_stale_global_store_token(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    write_runtime_state(
+        runtime_state_path(),
+        {
+            "global_store": {
+                "address": "127.0.0.1:50051",
+                "session_id": "gs-stale",
+                "cluster_token": "tok-old",
+            }
+        },
+    )
+
+    def _fake_start_global_store(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            id="gs-new",
+            pid=1111,
+            address="127.0.0.1:50052",
+            listen_host="127.0.0.1",
+            listen_port=50052,
+            metrics_port=8000,
+            logs_dir=None,
+            cluster_token="tok-new",
+            db_file=None,
+            owner=True,
+        )
+
+    monkeypatch.setattr(runtime, "ping_global_store", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime.global_store_manager, "start_global_store", _fake_start_global_store
+    )
+
+    gs_state = {
+        "mode": "start",
+        "address": "127.0.0.1:50052",
+        "session": "gs-new",
+        "owner": True,
+        "cluster_token": "tok-new",
+    }
+    _stub_daemon_start(monkeypatch, gs_state)
+
+    session = runtime.start(global_store_mode="start")
+
+    assert captured["cluster_token"] is None
+    assert session.global_store_address == "127.0.0.1:50052"
+    assert session.cluster_token == "tok-new"
 
 
 def test_runtime_stop_cascades_global_store(monkeypatch):
@@ -265,6 +379,8 @@ def test_runtime_rejects_mismatched_cluster_token(monkeypatch):
             mode="connect",
             address=None,
             config_path=None,
+            listen_port=None,
+            metrics_port=None,
             allow_gs_fallback=False,
             cluster_id=None,
         )

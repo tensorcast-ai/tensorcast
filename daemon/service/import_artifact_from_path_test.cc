@@ -74,6 +74,14 @@ void create_safetensors_file(
   }
 }
 
+nlohmann::json read_json_file(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  REQUIRE(in.is_open());
+  nlohmann::json payload;
+  in >> payload;
+  return payload;
+}
+
 tensorcast::store::StoreEngineOptions make_engine_opts(const std::filesystem::path& storage_root) {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
@@ -199,7 +207,9 @@ TEST_CASE("ImportArtifactFromPath returns ready response and records local sourc
   REQUIRE_FALSE(binding->file_fingerprints.empty());
 }
 
-TEST_CASE("ImportArtifactFromPath does not mutate source directories", "[daemon][disk][import][readonly]") {
+TEST_CASE(
+    "ImportArtifactFromPath backfills descriptor metadata for safetensors sources",
+    "[daemon][disk][import][descriptor]") {
   const auto storage_root = make_clean_dir("import_readonly_storage");
   const auto artifact_dir = storage_root / "artifact_safetensors";
   std::filesystem::create_directories(artifact_dir);
@@ -217,9 +227,14 @@ TEST_CASE("ImportArtifactFromPath does not mutate source directories", "[daemon]
   REQUIRE(status.ok());
   REQUIRE(resp.import_state() == tensorcast::daemon::v2::IMPORT_ARTIFACT_STATE_READY);
   REQUIRE_FALSE(resp.artifact_id().empty());
-  REQUIRE_FALSE(std::filesystem::exists(artifact_dir / "artifact_descriptor.json"));
-  REQUIRE_FALSE(std::filesystem::exists(artifact_dir / "tensor_index.json"));
+  REQUIRE(std::filesystem::exists(artifact_dir / "artifact_descriptor.json"));
+  REQUIRE(std::filesystem::exists(artifact_dir / "tensor_index.json"));
   REQUIRE_FALSE(std::filesystem::exists(artifact_dir / "tensor_index.cbor"));
+
+  const auto descriptor = read_json_file(artifact_dir / "artifact_descriptor.json");
+  REQUIRE(descriptor["artifact_id"].get<std::string>() == resp.artifact_id());
+  REQUIRE(descriptor["schema_version"].get<std::string>() == "v3");
+  REQUIRE_FALSE(descriptor["data_multihash"].get<std::string>().empty());
 }
 
 TEST_CASE(
@@ -304,6 +319,60 @@ TEST_CASE(
   REQUIRE_FALSE(terminal.error());
   REQUIRE(terminal.has_result());
   REQUIRE(terminal.result().import_state() == tensorcast::daemon::v2::IMPORT_ARTIFACT_STATE_READY);
+}
+
+TEST_CASE(
+    "ImportArtifactFromPathStream reuses artifact_descriptor and skips hash phase on later imports",
+    "[daemon][disk][import][stream][descriptor]") {
+  const auto storage_root = make_clean_dir("import_stream_descriptor_storage");
+  const auto artifact_dir = storage_root / "artifact_stream_descriptor";
+  std::filesystem::create_directories(artifact_dir);
+  create_safetensors_file(artifact_dir / "part0.safetensors", "weights", /*size_bytes=*/32);
+
+  {
+    HarnessFixture fix(storage_root);
+
+    ImportArtifactFromPathRequest req;
+    req.set_path(artifact_dir.string());
+    req.set_verify_checksums(false);
+    grpc::ServerContext ctx;
+    ImportArtifactFromPathResponse resp;
+    const auto status = fix.service().ImportArtifactFromPath(&ctx, &req, &resp);
+
+    REQUIRE(status.ok());
+    REQUIRE(std::filesystem::exists(artifact_dir / "artifact_descriptor.json"));
+  }
+
+  GrpcStreamFixture fix(storage_root);
+
+  ImportArtifactFromPathRequest req;
+  req.set_path(artifact_dir.string());
+  req.set_verify_checksums(false);
+
+  grpc::ClientContext client_ctx;
+  auto reader = fix.stub->ImportArtifactFromPathStream(&client_ctx, req);
+  REQUIRE(reader != nullptr);
+
+  std::vector<ImportArtifactFromPathStreamEvent> events;
+  ImportArtifactFromPathStreamEvent event;
+  while (reader->Read(&event)) {
+    events.push_back(event);
+  }
+  const auto status = reader->Finish();
+
+  REQUIRE(status.ok());
+  REQUIRE_FALSE(events.empty());
+
+  bool saw_hash_phase = false;
+  for (const auto& item : events) {
+    if (item.phase() == tensorcast::daemon::v2::IMPORT_ARTIFACT_PHASE_HASH_DATA) {
+      saw_hash_phase = true;
+      break;
+    }
+  }
+  REQUIRE_FALSE(saw_hash_phase);
+  REQUIRE(events.back().done());
+  REQUIRE(events.back().has_result());
 }
 
 TEST_CASE(

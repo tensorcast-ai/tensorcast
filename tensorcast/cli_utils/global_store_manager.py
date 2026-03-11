@@ -18,8 +18,8 @@ import psutil
 
 from tensorcast.cli_utils.config import (
     dump_global_store_config,
-    load_or_create_cluster_token,
     select_free_port,
+    write_cluster_token,
 )
 from tensorcast.cli_utils.errors import ServiceError
 from tensorcast.cli_utils.filesys import open_log_binary
@@ -36,7 +36,6 @@ from tensorcast.cli_utils.paths import (
     global_session_paths,
     global_store_lock_path,
     runtime_lock_path,
-    runtime_root,
     runtime_state_path,
     set_current_global_session_id,
 )
@@ -218,15 +217,6 @@ def _locked(inst: GlobalSession):
         yield
 
 
-def _load_runtime_global_state() -> dict[str, Any] | None:
-    try:
-        state = read_runtime_state(runtime_state_path())
-    except Exception:
-        return None
-    gs_state = state.get("global_store") if isinstance(state, dict) else None
-    return gs_state if isinstance(gs_state, dict) else None
-
-
 def _resolve_config(
     *,
     inst: GlobalSession,
@@ -335,16 +325,12 @@ def start_global_store(
 
     provided_cluster_token = cluster_token
     runtime_state_file = runtime_state_path()
-    gs_state_hint = _load_runtime_global_state()
-    hinted_token = cluster_token or (
-        gs_state_hint.get("cluster_token") if isinstance(gs_state_hint, dict) else None
-    )
-    cluster_token = load_or_create_cluster_token(hinted_token)
     existing_gid: str | None = None
     existing_addr: str | None = None
-    state_token: str | None = None
     inst: GlobalSession | None = None
     gs_state: dict[str, Any] | None = None
+    reused_instance: GlobalStoreInstance | None = None
+    reused_cluster_token: str | None = None
 
     with file_lock(runtime_lock_path()), file_lock(global_store_lock_path()):
         runtime_state = read_runtime_state(runtime_state_file)
@@ -357,17 +343,6 @@ def start_global_store(
             gs_state.get("session_id") if isinstance(gs_state, dict) else None
         )
         existing_addr = gs_state.get("address") if isinstance(gs_state, dict) else None
-        state_token = (
-            gs_state.get("cluster_token") if isinstance(gs_state, dict) else None
-        )
-        if state_token:
-            if provided_cluster_token and state_token != provided_cluster_token:
-                token_path = runtime_root() / "cluster_token"
-                raise ServiceError(
-                    "Global Store cluster token mismatch; clear "
-                    f"{token_path} if you intend to replace the existing cluster."
-                )
-            cluster_token = state_token
         if session_id and existing_gid and existing_addr and session_id != existing_gid:
             raise ServiceError(
                 f"Global Store already running under session {existing_gid}"
@@ -390,17 +365,16 @@ def start_global_store(
                         health = ping_global_store(fallback_addr, timeout=1.0)
             if health:
                 if (
-                    cluster_token
+                    provided_cluster_token
                     and health.cluster_token
-                    and health.cluster_token != cluster_token
+                    and health.cluster_token != provided_cluster_token
                 ):
-                    token_path = runtime_root() / "cluster_token"
                     raise ServiceError(
                         "Global Store is running with a different cluster token; "
-                        f"clear {token_path} to reset."
+                        "expected the explicitly requested token."
                     )
                 set_current_global_session_id(inst.id)
-                return _build_instance_from_health(
+                reused_instance = _build_instance_from_health(
                     inst=inst,
                     gs_state=gs_state,
                     health=health,
@@ -408,24 +382,35 @@ def start_global_store(
                     if isinstance(gs_state, dict)
                     else False,
                 )
-            if _has_live_recorded_global_store(inst):
-                raise ServiceError(
-                    "Global Store process appears to be running but is not healthy via "
-                    "recorded endpoints. Refusing to start a second instance on the "
-                    "same session. Run 'tensorcast-cli global stop --force' and retry."
-                )
+                reused_cluster_token = reused_instance.cluster_token
+            else:
+                if _has_live_recorded_global_store(inst):
+                    raise ServiceError(
+                        "Global Store process appears to be running but is not healthy via "
+                        "recorded endpoints. Refusing to start a second instance on the "
+                        "same session. Run 'tensorcast-cli global stop --force' and retry."
+                    )
 
-            prune_process_records(
-                pids_path=inst.pids_json,
-                predicate=(lambda entry: True),
-                lock_path=None,
-            )
-            with contextlib.suppress(FileNotFoundError):
-                inst.state_json.unlink()
-            clear_runtime_global_store(runtime_state_file, preserve_cluster_token=True)
+                prune_process_records(
+                    pids_path=inst.pids_json,
+                    predicate=(lambda entry: True),
+                    lock_path=None,
+                )
+                with contextlib.suppress(FileNotFoundError):
+                    inst.state_json.unlink()
+                clear_runtime_global_store(
+                    runtime_state_file, preserve_cluster_token=False
+                )
 
     # Prepare effective config and launch (outside locks)
     assert inst is not None
+    if reused_instance is not None:
+        if reused_cluster_token:
+            with contextlib.suppress(Exception):
+                write_cluster_token(reused_cluster_token)
+        return reused_instance
+
+    cluster_token = write_cluster_token(provided_cluster_token)
     started_at = time.time()
     pb_cfg, effective_cfg_path = _resolve_config(
         inst=inst,
@@ -440,9 +425,12 @@ def start_global_store(
     se_path = inst.logs / "global_store.err"
     so = open_log_binary(so_path)
     se = open_log_binary(se_path)
+    # Launch Global Store with the current interpreter so the serving process is
+    # the direct child protected by PR_SET_PDEATHSIG. Wrapping with `uv run`
+    # leaves an extra process layer that can orphan the actual server when the
+    # parent dies abruptly (for example via SIGKILL).
     args = [
-        "uv",
-        "run",
+        sys.executable,
         "-m",
         "tensorcast.global_store",
         "--config",
@@ -520,7 +508,7 @@ def start_global_store(
         raise ServiceError("Global Store exited during startup." + hint)
 
     if health and health.cluster_token:
-        cluster_token = health.cluster_token
+        cluster_token = write_cluster_token(health.cluster_token)
 
     listen_host_eff = (
         health.listen_host if health else pb_cfg.server.listen.host or "0.0.0.0"
@@ -588,10 +576,6 @@ def start_global_store(
             fingerprint=fingerprint,
         )
         set_current_global_session_id(inst.id)
-
-    if cluster_token:
-        with contextlib.suppress(Exception):
-            load_or_create_cluster_token(cluster_token)
 
     instance = GlobalStoreInstance(
         id=inst.id,

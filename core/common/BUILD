@@ -94,6 +94,18 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "artifact_hash_test",
+    size = "small",
+    srcs = ["artifact_hash_test.cc"],
+    deps = [
+        ":artifact_hash_lib",
+        "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Memory management - CUDA memory utilities
 sc_cc_library(
     name = "cuda_memory_lib",

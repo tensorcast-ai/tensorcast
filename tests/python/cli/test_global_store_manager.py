@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import io
 import json
-from pathlib import Path
+import sys
+from itertools import count
 
 from tensorcast.cli_utils.global_store_manager import (
     start_global_store,
@@ -17,7 +18,7 @@ from tensorcast.cli_utils.paths import global_session_paths, runtime_state_path
 class _FakeProc:
     def __init__(self, pid: int):
         self.pid = pid
-        self.args = ["uv", "run", "-m", "tensorcast.global_store", "--config", "cfg"]
+        self.args = [sys.executable, "-m", "tensorcast.global_store", "--config", "cfg"]
         self.stdout = io.BytesIO(b"")
         self.stderr = io.BytesIO(b"")
 
@@ -77,6 +78,7 @@ def test_start_global_store_records_state(monkeypatch, tmp_path):
     )
     assert instance.address == "127.0.0.1:50051"
     assert len(proc_calls) == 1
+    assert proc_calls[0].args[:3] == [sys.executable, "-m", "tensorcast.global_store"]
 
     state = json.loads(runtime_state_path().read_text(encoding="utf-8"))
     gs_state = state.get("global_store", {})
@@ -103,3 +105,59 @@ def test_start_global_store_records_state(monkeypatch, tmp_path):
     stop_global_store(session_id=instance.id, quiet=True, force=True)
     stopped_state = json.loads(runtime_state_path().read_text(encoding="utf-8"))
     assert stopped_state.get("global_store", {}).get("cluster_token") == "cluster-token"
+
+
+def test_start_global_store_rotates_cluster_token_on_fresh_restart(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
+    proc_ids = count(3000)
+    health_tokens = iter(("cluster-a", "cluster-b"))
+
+    def _fake_popen(args, **kwargs):
+        return _FakeProc(next(proc_ids))
+
+    def _fake_wait_for_global_store(*_args, **_kwargs):
+        token = next(health_tokens)
+        return GlobalStoreHealth(
+            address="127.0.0.1:50051",
+            listen_host="127.0.0.1",
+            listen_port=50051,
+            advertise_host="127.0.0.1",
+            advertise_port=50051,
+            metrics_port=8000,
+            cluster_token=token,
+            version="v1",
+            db_file=str(tmp_path / f"{token}.duckdb"),
+        )
+
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.subprocess.Popen", _fake_popen
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.ensure_process_started",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.wait_for_global_store",
+        _fake_wait_for_global_store,
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.start_log_threads",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.ping_global_store",
+        lambda *args, **kwargs: None,
+    )
+
+    first = start_global_store(to_console=False)
+    assert first.cluster_token == "cluster-a"
+
+    stop_global_store(session_id=first.id, quiet=True, force=True)
+
+    second = start_global_store(to_console=False)
+    assert second.cluster_token == "cluster-b"
+
+    state = json.loads(runtime_state_path().read_text(encoding="utf-8"))
+    assert state["global_store"]["cluster_token"] == "cluster-b"

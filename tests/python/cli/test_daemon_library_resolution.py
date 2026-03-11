@@ -134,7 +134,7 @@ def _load_shared_objects_in_subprocess(
     return [str(item) for item in decoded]
 
 
-def test_build_daemon_process_env_keeps_user_ld_library_path_prefix(
+def test_build_daemon_process_env_keeps_configured_ld_library_path_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user_prefix = "/data/cuda/compat:/usr/local/lib"
@@ -147,16 +147,50 @@ def test_build_daemon_process_env_keeps_user_ld_library_path_prefix(
         ),
     )
 
-    env = build_daemon_process_env({"LD_LIBRARY_PATH": user_prefix})
+    env = build_daemon_process_env(
+        {"LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"},
+        {"LD_LIBRARY_PATH": user_prefix},
+    )
     ld_library_path = env.get("LD_LIBRARY_PATH")
     assert ld_library_path is not None
 
     entries = [entry for entry in ld_library_path.split(":") if entry]
     assert entries[0] == "/data/cuda/compat"
     assert entries[1] == "/usr/local/lib"
+    assert entries[2] == "/usr/local/nvidia/lib64"
     assert "/tensorcast/lib" in entries
     assert "/torch/lib" in entries
     assert entries.count("/data/cuda/compat") == 1
+
+
+def test_build_daemon_process_env_merges_configured_launcher_envs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._discover_daemon_library_paths",
+        lambda: (
+            Path("/tensorcast/lib"),
+            Path("/torch/lib"),
+        ),
+    )
+
+    env = build_daemon_process_env(
+        {"LD_LIBRARY_PATH": "/base/lib:/shared/lib", "PATH": "/usr/bin"},
+        {
+            "LD_LIBRARY_PATH": "/config/lib:/shared/lib",
+            "NCCL_DEBUG": "INFO",
+        },
+    )
+
+    assert env["NCCL_DEBUG"] == "INFO"
+    assert env["PATH"] == "/usr/bin"
+    assert env["LD_LIBRARY_PATH"].split(":") == [
+        "/config/lib",
+        "/shared/lib",
+        "/base/lib",
+        "/tensorcast/lib",
+        "/torch/lib",
+    ]
 
 
 @pytest.mark.integration

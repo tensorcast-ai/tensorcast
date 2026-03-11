@@ -45,7 +45,9 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 Daemon disk import is now import-only and reference-only:
 
 - `ImportArtifactFromPath` + `ImportArtifactFromPathStream` are the only SDK-facing disk import contracts.
-- Import performs registration only: no source mutation and no copy/link/reflink fallback.
+- Import performs registration only for payload bytes: no copy/link/reflink fallback. On first import, the daemon may
+  persist metadata sidecars such as `artifact_descriptor.json` (and safetensors `tensor_index.json`) so later imports
+  can reuse trusted multihashes without re-hashing the full artifact.
 - Progress is stream-native with fixed phases and machine-readable `error_code`.
 - Retrieval/materialization identity is `artifact_id`; clients do not supply disk paths for retrieval.
 
@@ -130,6 +132,7 @@ Contract highlights:
 - TTL for every ephemeral map; all TTL updates and cleanup run under BackgroundScheduler.
 - Consistent deadlines: user timeouts are clamped to RPC deadlines.
 - Memory tiers: `engine.memory_tiers` drives stable/preemptible behavior; startup fails if configured `stable_bytes` exceed `(cgroup|MemTotal) - sum(pinned_memory.classes[].pool_bytes)`. Startup also performs a fail-fast available-memory admission check *before allocating pinned pools*: it requires `pinned_total + stable_bytes + headroom`, where `headroom = min(10% * (pinned_total + stable_bytes), 10GiB)` and availability is derived from cgroup v2 headroom when `memory.max` is set (treating `inactive_file` as reclaimable) or `/proc/meminfo` `MemAvailable` otherwise. For GPU ingest concurrency, startup also validates that `pinned_memory.classes[name=engine]` can cover at least one streaming session per detected GPU (`required_slices = engine.streaming_buffer_chunks * gpu_count`) and fails fast if undersized. Preemptible markings are skipped entirely when `enable_preemptible` is false. When HA is enabled, the daemon publishes `MemoryTierStatus` heartbeats via `MemoryTierService` using the UMA-backed `MemoryTierBudget` and replays `MemoryTierLease` state on startup/heartbeats (ListOutstandingLeases → UMA stable lease bind/release → ACK carrying artifact_id + chunk_ids + ledger_version for audit).
+- In real CUDA mode with visible GPUs, startup also prewarms the NVRTC GPU-hash kernel on every device and fails fast if compilation or module load fails. GPU full-digest hashing no longer falls back to CPU in real CUDA mode.
 - Observability is best-effort and never changes control flow; high-cardinality fields are gated. Background HA counters (heartbeat/sync) tolerate missing meters so registration and sync continue even when telemetry providers are unavailable.
 - HA lifecycle loops are decoupled: the heartbeat thread only samples state and queues sync work, state sync runs in a separate loop (including memory tier maintenance), and the monitor only requests cancel when state sync exceeds its RPC-timeout budget, restarting after the thread exits to avoid overlapping syncs; per-RPC timeouts tune that budget.
 - Idempotent unload and lock cleanup; expired tokens are unlocked automatically.
