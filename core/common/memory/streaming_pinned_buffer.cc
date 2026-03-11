@@ -2,6 +2,8 @@
 
 #include "core/common/memory/streaming_pinned_buffer.h"
 
+#include <algorithm>
+
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
@@ -261,6 +263,12 @@ absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
     LOG(INFO) << "StreamingPinnedBuffer wait resolved after " << absl::FormatDuration(absl::Now() - wait_start)
               << ": slot=" << slot_id << " now available";
   }
+  if (wait_started) {
+    VLOG(2) << "streaming_buffer.get_free_chunk.wait_resolved slot=" << slot_id << " wait_us="
+            << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - wait_start)))
+            << " free_queue_size=" << free_queue_.size() << " ready_queue_size=" << ready_queue_.size()
+            << " chunks_produced=" << chunks_produced_ << " chunks_consumed=" << chunks_consumed_;
+  }
 
   return slot_id;
 }
@@ -358,6 +366,10 @@ absl::Status StreamingPinnedBuffer::mark_chunk_ready(int slot_id, size_t global_
   set_slot_state_unsafe(slot_id, SlotState::kReady);
   chunks_produced_++;
   ready_cv_.Signal();
+  VLOG(2) << "streaming_buffer.mark_chunk_ready slot=" << slot_id << " chunk_id=" << global_chunk_id
+          << " bytes=" << bytes_in_chunk << " ready_queue_size=" << ready_queue_.size()
+          << " free_queue_size=" << free_queue_.size() << " chunks_produced=" << chunks_produced_
+          << " chunks_consumed=" << chunks_consumed_;
   return absl::OkStatus();
 }
 
@@ -369,7 +381,13 @@ absl::StatusOr<StreamingPinnedBuffer::ReadyChunk> StreamingPinnedBuffer::get_rea
   }
 
   // Wait for a ready chunk or production complete
+  absl::Time wait_start;
+  bool wait_started = false;
   while (ready_queue_.empty() && !production_complete_) {
+    if (!wait_started) {
+      wait_started = true;
+      wait_start = absl::Now();
+    }
     ready_cv_.Wait(&mutex_);
   }
 
@@ -392,6 +410,13 @@ absl::StatusOr<StreamingPinnedBuffer::ReadyChunk> StreamingPinnedBuffer::get_rea
   }
   set_slot_state_unsafe(chunk.slot_id, SlotState::kConsumerOwned);
   slot_chunk_ids_[chunk.slot_id] = chunk.global_chunk_id;
+  if (wait_started) {
+    VLOG(2) << "streaming_buffer.get_ready_chunk.wait_resolved slot=" << chunk.slot_id
+            << " chunk_id=" << chunk.global_chunk_id << " wait_us="
+            << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - wait_start)))
+            << " ready_queue_size=" << ready_queue_.size() << " chunks_produced=" << chunks_produced_
+            << " chunks_consumed=" << chunks_consumed_;
+  }
   return chunk;
 }
 
@@ -420,6 +445,9 @@ absl::Status StreamingPinnedBuffer::return_chunk(int slot_id) {
   free_queue_.push(slot_id);
   chunks_consumed_++;
   free_cv_.Signal();
+  VLOG(2) << "streaming_buffer.return_chunk slot=" << slot_id << " free_queue_size=" << free_queue_.size()
+          << " ready_queue_size=" << ready_queue_.size() << " chunks_produced=" << chunks_produced_
+          << " chunks_consumed=" << chunks_consumed_;
   return absl::OkStatus();
 }
 
@@ -435,7 +463,9 @@ void StreamingPinnedBuffer::signal_production_complete() {
   production_complete_ = true;
   ready_cv_.SignalAll();
   free_cv_.SignalAll();
-  VLOG(1) << "Production complete. Total chunks produced: " << chunks_produced_;
+  VLOG(1) << "Production complete. Total chunks produced: " << chunks_produced_
+          << " chunks_consumed=" << chunks_consumed_ << " free_queue_size=" << free_queue_.size()
+          << " ready_queue_size=" << ready_queue_.size();
 }
 
 bool StreamingPinnedBuffer::is_consumption_complete() const {

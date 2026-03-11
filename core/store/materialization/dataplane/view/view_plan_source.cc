@@ -48,6 +48,10 @@ absl::StatusOr<size_t> ViewPlanSource::read_at(uint64_t offset, void* dst, size_
   return mapped_source_->read_at(offset, dst, bytes);
 }
 
+const uint8_t* ViewPlanSource::cpu_base_ptr() const {
+  return base_->cpu_base_ptr();
+}
+
 bool ViewPlanSource::supports_direct_write_at() const {
   return mapped_source_->supports_direct_write_at();
 }
@@ -89,6 +93,10 @@ std::unique_ptr<SeekableSource> make_view_plan_source(
 
     absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
       return adapter_.read_at(offset, dst, bytes);
+    }
+
+    [[nodiscard]] const uint8_t* cpu_base_ptr() const override {
+      return base_->cpu_base_ptr();
     }
 
     [[nodiscard]] bool supports_direct_write_at() const override {

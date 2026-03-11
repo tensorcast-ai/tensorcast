@@ -41,6 +41,7 @@ class ViewPlanSource final : public SeekableSource {
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
+  [[nodiscard]] const uint8_t* cpu_base_ptr() const override;
   [[nodiscard]] bool supports_direct_write_at() const override;
   absl::StatusOr<size_t> read_into_at(
       uint64_t src_offset,
