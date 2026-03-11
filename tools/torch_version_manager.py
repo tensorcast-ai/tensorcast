@@ -139,8 +139,10 @@ def validate_torch_versions(raise_on_error: bool = True) -> Tuple[bool, Dict[str
 
     versions.update(_get_pyproject_torch_versions())
 
-    unique_versions = set(versions.values())
-    is_consistent = len(unique_versions) <= 1
+    # Check for consistency using base versions (ignore local tags like +cu128 or +cpu)
+    base_versions = {k: v.split("+")[0] for k, v in versions.items()}
+    unique_base_versions = set(base_versions.values())
+    is_consistent = len(unique_base_versions) <= 1
 
     if not is_consistent:
         msg_lines = ["Torch version mismatch detected:"] + [f"  {k}: {v}" for k, v in sorted(versions.items())]
