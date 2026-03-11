@@ -186,6 +186,28 @@ loading::ReplicaHandle build_local_replica_handle(
   handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
   handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
   handle.source = loading::MaterializationSource::kLocalReplica;
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
+    handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+    auto ipc_or = replica->get_memory_manager().get_ipc_handle();
+    if (ipc_or.ok()) {
+      handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
+    }
+    return handle;
+  }
+
+  auto uma = replica->get_memory_manager().memory_authority();
+  if (uma != nullptr) {
+    const loading::ReplicaKey& allocation_key = replica->replica_key();
+    auto region_or = uma->get_cpu_memfd_region(allocation_key);
+    if (region_or.ok()) {
+      handle.cpu_memfd_region = loading::CpuMemfdRegion{
+          .fd = region_or->fd,
+          .size_bytes = region_or->size_bytes,
+          .offset_bytes = region_or->offset_bytes,
+      };
+    }
+  }
   return handle;
 }
 
@@ -368,6 +390,10 @@ class LocalReplicaSource final : public loader::SeekableSource {
       size_t bytes,
       const DirectWriteGrant& grant) override {
     return source_->read_into_at(src_offset, dest_va_offset, bytes, grant);
+  }
+
+  [[nodiscard]] const uint8_t* cpu_base_ptr() const override {
+    return source_->cpu_base_ptr();
   }
 
  private:
@@ -983,15 +1009,6 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
 
   auto build_local_view_handle = [&](const std::shared_ptr<replica::Replica>& replica_instance) {
     loading::ReplicaHandle handle = build_local_replica_handle(key, replica_instance, request.target_location());
-    if (request.target_is_gpu()) {
-      const auto gpu_ptrs = replica_instance->get_data_pointer(common::memory::MemoryLocation::GPU);
-      handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
-      auto ipc_or = replica_instance->get_memory_manager().get_ipc_handle();
-      if (ipc_or.ok()) {
-        handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
-      }
-    }
-
     const auto& replica_view_plan = replica_instance->view_plan();
     const loader::ViewPlan* effective_plan = nullptr;
     if (replica_view_plan.has_value() && !replica_view_plan->is_identity) {
@@ -1480,11 +1497,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
       auto init_spb_status = session_spb->initialize(
           timeout,
-          make_materialize_into_target_pinned_wait_context(
-              hints,
-              target_device.ordinal,
-              num_chunks,
-              slice_bytes));
+          make_materialize_into_target_pinned_wait_context(hints, target_device.ordinal, num_chunks, slice_bytes));
       if (!init_spb_status.ok()) {
         return init_spb_status;
       }
@@ -2839,20 +2852,8 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
     return emplace_status;
   }
 
-  loading::ReplicaHandle handle;
-  handle.replica_key = key;
-  handle.ready_signal = replica->ready_signal_for(request.target_location());
-  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
-  handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
+  loading::ReplicaHandle handle = build_local_replica_handle(key, replica, request.target_location());
   handle.source = loading::MaterializationSource::kP2P;
-  if (request.target_is_gpu()) {
-    const auto gpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
-    handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
-    auto ipc_or = replica->get_memory_manager().get_ipc_handle();
-    if (ipc_or.ok()) {
-      handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
-    }
-  }
   const auto& view_plan = replica->view_plan();
   if (view_plan.has_value() && !view_plan->is_identity) {
     handle.view_index_json = view_plan->view_index_json;
