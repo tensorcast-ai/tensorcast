@@ -12,6 +12,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
@@ -68,7 +69,11 @@ absl::Status process_disk_canonical_index(IngestionContext& ctx) {
   const auto& disk = ctx.disk;
 
   if (!verification.canonical_index_json.has_value()) {
-    auto index_info_or = loader::read_from_artifact_dir(disk.artifact_path, ctx.target_device_id);
+    auto artifact_ctx_or = loader::get_disk_artifact_context(disk.artifact_path);
+    if (!artifact_ctx_or.ok()) {
+      return artifact_ctx_or.status();
+    }
+    auto index_info_or = (*artifact_ctx_or)->get_index_info(ctx.target_device_id);
     if (index_info_or.ok()) {
       const loader::IndexInfo& info = *index_info_or;
       verification.canonical_index_json = info.canonical_index_json;

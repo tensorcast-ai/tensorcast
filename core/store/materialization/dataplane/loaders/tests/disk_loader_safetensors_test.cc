@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
@@ -21,6 +21,7 @@ namespace {
 
 std::filesystem::path make_tmp_dir(const std::string& prefix) {
   auto base = std::filesystem::temp_directory_path() / prefix;
+  std::filesystem::remove_all(base);
   std::filesystem::create_directories(base);
   return base;
 }
@@ -57,23 +58,25 @@ TEST_CASE("DiskLoader detects single .safetensors", "[safetensors]") {
   auto f = dir / "weights.safetensors";
   create_st_file(f, "{\"t\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}", payload);
 
-  DiskLoader dl(DiskSource{.path = dir, .expected_size = std::nullopt});
-  auto st = dl.initialize();
-  REQUIRE(st.ok());
+  {
+    DiskLoader dl(DiskSource{.path = dir, .expected_size = std::nullopt});
+    auto st = dl.initialize();
+    REQUIRE(st.ok());
 
-  auto size_or = dl.get_artifact_size();
-  REQUIRE(size_or.ok());
-  REQUIRE(*size_or == 64);
+    auto size_or = dl.get_artifact_size();
+    REQUIRE(size_or.ok());
+    REQUIRE(*size_or == 64);
 
-  auto src_or = dl.open_source();
-  REQUIRE(src_or.ok());
-  std::unique_ptr<SeekableSource> src = std::move(*src_or);
-  // Ensure DiskLoader selected the single-file Safetensors source
-  auto* st_src = dynamic_cast<tensorcast::store::loader::SafetensorsSource*>(src.get());
-  REQUIRE(st_src != nullptr);
-
-  std::filesystem::remove(f);
-  std::filesystem::remove(dir);
+    auto src_or = dl.open_source();
+    REQUIRE(src_or.ok());
+    std::unique_ptr<SeekableSource> src = std::move(*src_or);
+    // Ensure DiskLoader selected the single-file Safetensors source
+    auto* st_src = dynamic_cast<tensorcast::store::loader::SafetensorsSource*>(src.get());
+    REQUIRE(st_src != nullptr);
+    REQUIRE(src->cpu_base_ptr() != nullptr);
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
 }
 
 TEST_CASE("DiskLoader detects multiple .safetensors", "[safetensors]") {
@@ -91,20 +94,20 @@ TEST_CASE("DiskLoader detects multiple .safetensors", "[safetensors]") {
   create_st_file(f1, "{\"a\":{\"dtype\":\"U8\",\"shape\":[16],\"data_offsets\":[0,16]}}", a);
   create_st_file(f2, "{\"b\":{\"dtype\":\"U8\",\"shape\":[32],\"data_offsets\":[0,32]}}", b);
 
-  DiskLoader dl(DiskSource{.path = dir, .expected_size = std::nullopt});
-  REQUIRE(dl.initialize().ok());
-  auto size_or = dl.get_artifact_size();
-  REQUIRE(size_or.ok());
-  REQUIRE(*size_or == 48);
+  {
+    DiskLoader dl(DiskSource{.path = dir, .expected_size = std::nullopt});
+    REQUIRE(dl.initialize().ok());
+    auto size_or = dl.get_artifact_size();
+    REQUIRE(size_or.ok());
+    REQUIRE(*size_or == 48);
 
-  auto src_or = dl.open_source();
-  REQUIRE(src_or.ok());
-  std::unique_ptr<SeekableSource> src = std::move(*src_or);
-  // Ensure DiskLoader selected the multi-file Safetensors source
-  auto* ms_src = dynamic_cast<tensorcast::store::loader::MultiSafetensorsSource*>(src.get());
-  REQUIRE(ms_src != nullptr);
-
-  std::filesystem::remove(f1);
-  std::filesystem::remove(f2);
-  std::filesystem::remove(dir);
+    auto src_or = dl.open_source();
+    REQUIRE(src_or.ok());
+    std::unique_ptr<SeekableSource> src = std::move(*src_or);
+    // Ensure DiskLoader selected the multi-file Safetensors source
+    auto* ms_src = dynamic_cast<tensorcast::store::loader::MultiSafetensorsSource*>(src.get());
+    REQUIRE(ms_src != nullptr);
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
 }

@@ -106,6 +106,20 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "disk_artifact_context",
+    srcs = ["metadata/disk_artifact_context.cc"],
+    hdrs = ["metadata/disk_artifact_context.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":index_reader",
+        ":safetensors_util",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
     name = "index_reader",
     srcs = ["metadata/index_reader.cc"],
     hdrs = ["metadata/index_reader.h"],
@@ -125,6 +139,7 @@ sc_cc_library(
     hdrs = ["sources/safetensors_source.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":disk_artifact_context",
         ":safetensors_util",
         ":source",
         "@abseil-cpp//absl/strings",
@@ -137,6 +152,7 @@ sc_cc_library(
     hdrs = ["sources/multi_safetensors_source.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":disk_artifact_context",
         ":safetensors_util",
         ":source",
         "@abseil-cpp//absl/strings",
@@ -418,6 +434,7 @@ sc_cc_library(
     hdrs = ["loaders/disk_loader.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":disk_artifact_context",
         ":file_partition_source",
         ":loader",
         ":multi_safetensors_source",
@@ -604,6 +621,16 @@ cc_test(
     srcs = ["sources/tests/source_window_scheduler_test.cc"],
     deps = [
         ":source_window_scheduler",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_artifact_context_test",
+    srcs = ["metadata/tests/disk_artifact_context_test.cc"],
+    deps = [
+        ":disk_artifact_context",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

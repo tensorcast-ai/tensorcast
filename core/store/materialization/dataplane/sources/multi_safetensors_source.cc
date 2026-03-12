@@ -42,10 +42,13 @@ absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes
 MultiSafetensorsSource::MultiSafetensorsSource(std::vector<std::filesystem::path> file_paths)
     : file_paths_(std::move(file_paths)) {}
 
+MultiSafetensorsSource::MultiSafetensorsSource(std::vector<SharedSafetensorsSegment> shared_segments)
+    : shared_segments_(std::move(shared_segments)) {}
+
 MultiSafetensorsSource::~MultiSafetensorsSource() {
   absl::MutexLock lock(&init_mutex_);
   for (auto& s : segments_) {
-    if (s.fd >= 0) {
+    if (s.owns_fd && s.fd >= 0) {
       ::close(s.fd);
       s.fd = -1;
     }
@@ -64,6 +67,25 @@ uint64_t MultiSafetensorsSource::total_bytes() const {
 absl::Status MultiSafetensorsSource::OpenFiles() {
   absl::MutexLock lock(&init_mutex_);
   if (initialized_) {
+    return absl::OkStatus();
+  }
+  if (!shared_segments_.empty()) {
+    segments_.clear();
+    segments_.reserve(shared_segments_.size());
+    total_size_ = 0;
+    for (const auto& shared : shared_segments_) {
+      segments_.push_back(
+          Segment{
+              .fd = shared.file ? shared.file->fd() : -1,
+              .owns_fd = false,
+              .shared_file = shared.file,
+              .data_start = shared.data_start,
+              .data_size = shared.data_size,
+              .base_offset = shared.base_offset,
+          });
+      total_size_ = std::max<uint64_t>(total_size_, shared.base_offset + shared.data_size);
+    }
+    initialized_ = true;
     return absl::OkStatus();
   }
   if (file_paths_.empty()) {
@@ -152,6 +174,15 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
     uint64_t within = off - s.base_offset;
     auto seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);
+    if (s.shared_file) {
+      const uint8_t* base = s.shared_file->mapped_base();
+      if (base != nullptr) {
+        std::memcpy(ptr + total, base + s.data_start + within, want);
+        total += want;
+        off += want;
+        continue;
+      }
+    }
     auto got = pread_fully(s.fd, s.data_start + within, ptr + total, want);
     if (!got.ok()) {
       return got.status();
@@ -192,6 +223,15 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
     uint64_t within = off - s.base_offset;
     auto seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);
+    if (s.shared_file) {
+      const uint8_t* base = s.shared_file->mapped_base();
+      if (base != nullptr) {
+        std::memcpy(ptr + total, base + s.data_start + within, want);
+        total += want;
+        off += want;
+        continue;
+      }
+    }
     auto got = pread_fully(s.fd, s.data_start + within, ptr + total, want);
     if (!got.ok()) {
       return got.status();

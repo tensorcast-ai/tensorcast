@@ -4,12 +4,14 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 
 namespace tensorcast::store::loader {
 
@@ -18,12 +20,14 @@ namespace tensorcast::store::loader {
 class SafetensorsSource : public SeekableSource {
  public:
   explicit SafetensorsSource(std::filesystem::path file_path);
+  explicit SafetensorsSource(SharedSafetensorsSegment segment);
   ~SafetensorsSource() override;
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
   [[nodiscard]] uint64_t total_bytes() const override;
+  [[nodiscard]] const uint8_t* cpu_base_ptr() const override;
 
   [[nodiscard]] uint64_t total_size() const {
     return total_bytes();
@@ -32,8 +36,10 @@ class SafetensorsSource : public SeekableSource {
  private:
   absl::Status OpenFile();
   absl::Status ParseHeaderLocked();
+  [[nodiscard]] int active_fd() const;
 
   std::filesystem::path file_path_;
+  std::optional<SharedSafetensorsSegment> shared_segment_;
   int fd_ = -1;
   uint64_t data_start_ = 0;
   uint64_t data_size_ = 0;

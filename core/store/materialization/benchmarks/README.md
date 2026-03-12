@@ -50,6 +50,7 @@ fallocate -l 8G /tmp/tensorcast_disk_bench.bin
 - `disk_baseline`：把单个大文件按顺序 disk→GPU 读取。
 - `disk_fragmentation`：按固定 stride 读取大量小段（模拟碎片化/随机访问）。
 - `gpu_peer_baseline`：测一次 GPU0→GPU1 的 `cudaMemcpyPeerAsync`。
+- `h2d_nccl_broadcast_baseline`：先把数据做一次 `host(pinned) -> root GPU`，再用 NCCL `broadcast` 分发到 `tp_world_size` 张 GPU。
 - `safetensors_hot_host_baseline`：**显式预热 OS page cache**（先顺序读取全部 payload 一次），再测 disk(buffered)→pinned host 吞吐。
 - `safetensors_hot_disk_baseline`：**显式预热 OS page cache** 后，再测 disk(buffered)→pinned host→GPU 的端到端吞吐（含 H2D）。
 - `safetensors_dram_mirror_host_baseline`：显式申请一块大 DRAM 缓冲，把 payload 拷入 DRAM（不计入测量），再测 **DRAM(userspace)→pinned host bounce buffer** 的吞吐；用于和 `safetensors_hot_host_baseline`（page cache→userspace）互相印证。

@@ -3,6 +3,7 @@
 #include "core/store/replica/replica.h"
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -58,6 +59,65 @@ std::optional<uint64_t> compute_total_size_from_index(std::string_view index_jso
   } catch (const std::exception&) {
     return std::nullopt;
   }
+}
+
+StoreEngineOptions::ByteMappingConfig maybe_relax_mmap_strided_thresholds(
+    StoreEngineOptions::ByteMappingConfig config,
+    const loader::SeekableSource& source,
+    common::memory::MemoryLocation source_type,
+    const std::string& artifact_identifier) {
+  if (source_type != common::memory::MemoryLocation::DISK) {
+    return config;
+  }
+  if (source.cpu_base_ptr() == nullptr) {
+    return config;
+  }
+  constexpr uint32_t kMmapStridedMinRanges = 8;
+  constexpr uint64_t kMmapStridedMinRowLenBytes = 512;
+  bool changed = false;
+  if (config.strided_run_min_ranges <= kMmapStridedMinRanges) {
+  } else {
+    config.strided_run_min_ranges = kMmapStridedMinRanges;
+    changed = true;
+  }
+  if (config.strided_min_row_len_bytes > kMmapStridedMinRowLenBytes) {
+    config.strided_min_row_len_bytes = kMmapStridedMinRowLenBytes;
+    changed = true;
+  }
+  if (changed) {
+    VLOG(1) << "Replica(" << artifact_identifier << "): relaxing strided thresholds for mmap-capable disk source"
+            << " min_ranges=" << config.strided_run_min_ranges
+            << " min_row_len_bytes=" << config.strided_min_row_len_bytes;
+  }
+  return config;
+}
+
+loader::ByteRangeMappedSource::Options make_mmap_aware_map_options(
+    std::string path,
+    const loader::SeekableSource& source,
+    common::memory::MemoryLocation source_type,
+    const std::string& artifact_identifier,
+    bool enable_direct_write_at) {
+  loader::ByteRangeMappedSource::Options options{
+      .path = std::move(path),
+      .enable_direct_write_at = enable_direct_write_at,
+  };
+  if (source_type != common::memory::MemoryLocation::DISK || source.cpu_base_ptr() == nullptr) {
+    return options;
+  }
+  constexpr uint64_t kMmapDirectGatherMinRowLenBytes = 512;
+  constexpr size_t kMmapDirectGatherMinTotalBytes = 256ULL * 1024;
+  constexpr uint64_t kMmapDirectGatherMaxRowsTouched = std::numeric_limits<uint64_t>::max() / 2;
+  options.prefer_direct_gather_for_mmap_strided = true;
+  options.direct_gather_min_row_len_bytes = kMmapDirectGatherMinRowLenBytes;
+  options.direct_gather_min_total_bytes = kMmapDirectGatherMinTotalBytes;
+  options.direct_gather_max_rows_touched = kMmapDirectGatherMaxRowsTouched;
+  VLOG(1) << "Replica(" << artifact_identifier << "): relaxing direct_gather thresholds for mmap-capable disk source"
+          << " prefer_direct_gather=" << (options.prefer_direct_gather_for_mmap_strided ? 1 : 0)
+          << " min_row_len_bytes=" << options.direct_gather_min_row_len_bytes
+          << " min_total_bytes=" << options.direct_gather_min_total_bytes
+          << " max_rows_touched=" << options.direct_gather_max_rows_touched;
+  return options;
 }
 
 } // namespace
@@ -381,6 +441,8 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
       return ready_signal->subscribe();
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
+    const StoreEngineOptions::ByteMappingConfig effective_byte_mapping_config =
+        maybe_relax_mmap_strided_thresholds(byte_mapping_config_, *source_ptr, source_location, key_.artifact_id);
     bool composed_view = false;
     if (canonical_index_json_.has_value() && source_index_json_.has_value()) {
       auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
@@ -404,7 +466,7 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
         effective_map = std::move(*composed_or);
         composed_view = true;
       }
-      loader::ByteRangeCompiler compiler(byte_mapping_config_, "replica_disk_canonicalize");
+      loader::ByteRangeCompiler compiler(effective_byte_mapping_config, "replica_disk_canonicalize");
       auto program_or = compiler.Compile(effective_map);
       if (!program_or.ok()) {
         ready_signal->set_value(program_or.status());
@@ -412,10 +474,12 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
       }
       std::vector<std::shared_ptr<loader::SeekableSource>> sources;
       sources.emplace_back(std::move(source_ptr));
-      loader::ByteRangeMappedSource::Options map_opts{
-          .path = "replica_disk_canonicalize",
-          .enable_direct_write_at = byte_mapping_config_.enable_direct_write_at,
-      };
+      loader::ByteRangeMappedSource::Options map_opts = make_mmap_aware_map_options(
+          "replica_disk_canonicalize",
+          *source_ptr,
+          source_location,
+          key_.artifact_id,
+          effective_byte_mapping_config.enable_direct_write_at);
       auto mapped_or =
           loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
       if (!mapped_or.ok()) {
@@ -426,7 +490,8 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     }
     if (view_plan_.has_value() && !view_plan_->is_identity) {
       if (!composed_view) {
-        source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, byte_mapping_config_);
+        source_ptr =
+            loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, effective_byte_mapping_config);
       }
     }
     std::function<absl::Status()> post_load_fn;
