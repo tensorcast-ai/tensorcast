@@ -66,7 +66,14 @@ class ByteRangeMappedSource final : public SeekableSource {
       const ByteRangeRun& run,
       uint64_t run_offset,
       uint8_t* dst,
-      size_t bytes);
+      size_t bytes,
+      uint64_t* pack_us_total,
+      size_t* pack_bytes_total,
+      uint64_t* cache_lookup_us_total,
+      uint64_t* block_prepare_us_total,
+      uint64_t* block_load_us_total,
+      uint64_t* row_copy_us_total,
+      size_t* row_copy_bytes_total);
   absl::Status zero_fill_to_grant(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant);
 
   struct Stats {
