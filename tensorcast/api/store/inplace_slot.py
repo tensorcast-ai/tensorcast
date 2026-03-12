@@ -37,7 +37,6 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
     from tensorcast.api.store.artifact import Artifact
-    from tensorcast.api.store.deferred_loader import DeferredCommitResult
     from tensorcast.api.store.materialization import (
         MaterializationPipeline,
         _RegionBackedLayout,
@@ -145,7 +144,6 @@ class InplaceSlot:
         region_layout: "_RegionBackedLayout",
         view_spec: common_pb2.ViewSpec | None,
         fallback: FallbackOptions | None,
-        commit_result: "DeferredCommitResult",
         artifact_id: str,
         canonical_index_bytes: bytes,
         target_write_token: bytes | None,
@@ -200,7 +198,6 @@ class InplaceSlot:
             view_id=self._view_id,
             view_subset_hash=self._view_subset_hash,
         )
-        self._commit_result = commit_result
         self._published_lease_id: str | None = None
         self._published_replica_id: str | None = None
         self._dirty = False
@@ -247,10 +244,6 @@ class InplaceSlot:
     @property
     def device(self) -> torch.device:
         return self._device
-
-    @property
-    def commit_result(self) -> "DeferredCommitResult":
-        return self._commit_result
 
     @property
     def published_lease_id(self) -> str | None:
@@ -896,17 +889,6 @@ class InplaceSlot:
         self._fallback = fallback
         self._target_write_token = (
             bytes(target_write_token) if target_write_token else None
-        )
-        storage_ids = tuple(
-            storage.storage_id for storage in region_layout.layout.storages
-        )
-        self._commit_result = type(self._commit_result)(
-            tensor_names=self._selection_names,
-            view_id=region_layout.view_id,
-            view_subset_hash=region_layout.view_subset_hash,
-            storage_ids=storage_ids,
-            logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=None,
         )
 
 

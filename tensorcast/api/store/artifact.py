@@ -33,7 +33,6 @@ from tensorcast.api.operation import (
 from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.mapped_binding import (
     CopyPlan,
@@ -822,22 +821,6 @@ class Artifact:
     def view_builder(self) -> ViewBuilder:
         return ViewBuilder(artifact_ref=weakref.ref(self), composer=ViewSpecComposer())
 
-    def deferred_loader(
-        self,
-        *,
-        device: torch.device | str,
-        packing: str = "append",
-        capacity_bytes: int | None = None,
-    ) -> DeferredLoader:
-        """Return a deferred loader for vLLM-style placeholder binding."""
-        self._require_components()
-        return DeferredLoader(
-            artifact=self,
-            device=device,
-            packing=packing,
-            capacity_bytes=capacity_bytes,
-        )
-
     def bind(
         self,
         device: torch.device | str,
@@ -847,7 +830,7 @@ class Artifact:
         publish: bool = False,
         ctx: CallContext | None = None,
     ) -> Binding:
-        """Allocate placeholders, fill from this artifact, and return a Binding."""
+        """Allocate target tensors, fill from this artifact, and return a Binding."""
         self._require_components()
         base_index = self._effective_index()
         if not base_index.entries:
@@ -856,15 +839,42 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        with self.deferred_loader(
-            device=device,
+        device_obj = torch.device(device)
+        if device_obj.type != "cuda":
+            raise ArtifactError(
+                "bind() requires a CUDA device",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if capacity_bytes is not None:
+            requested_capacity = int(capacity_bytes)
+            if requested_capacity <= 0:
+                raise ArtifactError(
+                    "capacity_bytes must be positive",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            required_capacity = int(base_index.total_size_bytes)
+            if requested_capacity < required_capacity:
+                raise ArtifactError(
+                    "capacity_bytes is smaller than the selected artifact layout",
+                    status_code="RESOURCE_EXHAUSTED",
+                    retryable=False,
+                )
+        target_tensors: dict[str, torch.Tensor] = {}
+        for entry in base_index.entries:
+            target_tensors[entry.name] = torch.empty_strided(
+                size=tuple(int(v) for v in entry.shape),
+                stride=tuple(int(v) for v in entry.stride),
+                dtype=entry.dtype,
+                device=device_obj,
+            )
+        return self.bind_into(
+            target_tensors,
             packing=packing,
-            capacity_bytes=capacity_bytes,
-        ) as loader:
-            for entry in base_index.entries:
-                loader.tensor(entry.name)
-            slot = loader.commit()
-        return Binding(slot, publish=publish, ctx=ctx)
+            publish=publish,
+            ctx=ctx,
+        )
 
     def bind_into(
         self,
@@ -1120,17 +1130,6 @@ class Artifact:
             )
             raise
 
-        storage_ids = tuple(
-            storage.storage_id for storage in region_layout.layout.storages
-        )
-        commit_result = DeferredCommitResult(
-            tensor_names=region_layout.selection_names,
-            view_id=region_layout.view_id,
-            view_subset_hash=region_layout.view_subset_hash,
-            storage_ids=storage_ids,
-            logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=None,
-        )
         slot = InplaceSlot(
             store=store,
             runtime=runtime,
@@ -1142,7 +1141,6 @@ class Artifact:
             region_layout=region_layout,
             view_spec=view_spec_proto,
             fallback=self._fallback,
-            commit_result=commit_result,
             artifact_id=self._ensure_identified(),
             canonical_index_bytes=canonical_index_bytes,
             target_write_token=getattr(response, "target_write_token", None),
@@ -1411,17 +1409,6 @@ class Artifact:
             )
             raise
 
-        storage_ids = tuple(
-            storage.storage_id for storage in region_layout.layout.storages
-        )
-        commit_result = DeferredCommitResult(
-            tensor_names=region_layout.selection_names,
-            view_id=region_layout.view_id,
-            view_subset_hash=region_layout.view_subset_hash,
-            storage_ids=storage_ids,
-            logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=None,
-        )
         slot = InplaceSlot(
             store=store,
             runtime=runtime,
@@ -1433,7 +1420,6 @@ class Artifact:
             region_layout=region_layout,
             view_spec=view_spec_proto,
             fallback=self._fallback,
-            commit_result=commit_result,
             artifact_id=self._ensure_identified(),
             canonical_index_bytes=canonical_index_bytes,
             target_write_token=getattr(response, "target_write_token", None),

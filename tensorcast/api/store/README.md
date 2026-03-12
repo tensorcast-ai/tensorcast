@@ -79,37 +79,19 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
-## Deferred Slice Materialization (vLLM)
-
-- `artifact.deferred_loader(device=..., packing="byte_space"|"append"|"plan", capacity_bytes=...)`
-  returns a `DeferredLoader` that issues no I/O until `commit()`.
-- `loader.tensor(name, slice=...)` returns a CUDA placeholder backed by a
-  client-owned arena; contents are undefined until `commit()` completes.
-- `packing="byte_space"` places tensors at their logical offsets in the selected
-  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
-  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
-  local-only in Phase 1.
-- `packing="append"` preserves call order; `packing="plan"` requires `plan(...)`
-  first to precompute a deterministic layout before calling `tensor(...)`. Both
-  modes are local-only layouts (not publishable).
-- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena and
-  returns an `InplaceSlot`. Use `slot.publish_replica()` to publish a routable
-  replica or `slot.swap(..., publish=True)` to retire → overwrite → publish.
-  `slot.swap(ref)` reuses the slot selection (including any `artifact.view(...)`
-  slices) so callers do not need to restate view parameters on every swap.
-- `capacity_bytes` bounds the arena size (defaults to the base canonical/view
-  total size); exceeding it raises `RESOURCE_EXHAUSTED`.
-- For most users, prefer the `Binding` API (`artifact.bind(...)` /
-  `artifact.bind_into(...)`) which hides the deferred-loader/slot mechanics.
-
 ## Binding (Preferred Inplace Updates)
 
+Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-contract.md`.
+
 - `artifact.bind(device=..., packing=\"byte_space\", publish=False)` allocates a
-  client-owned CUDA layout, fills it from the artifact, and returns a `Binding`
-  ready for swaps without extra ceremony.
+  client-owned CUDA target layout, fills it from the artifact, and returns a
+  `Binding` ready for swaps without extra ceremony.
 - `artifact.bind_into({name: tensor, ...}, packing=\"byte_space\", publish=False)`
   adopts **user-owned** CUDA tensors (already allocated in the current process),
   fills them once, and returns a `Binding`.
+- `artifact.subset(...).view(...).bind(...)` captures a rank-local selection once;
+  later `binding.swap("model:v2")` reapplies that same selection to the new
+  artifact version instead of materializing the whole model.
 - `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
   executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.

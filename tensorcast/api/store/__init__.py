@@ -56,9 +56,7 @@ from tensorcast.api.store.batch_context import (
 from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
-from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.mapped_binding import (
     CopyPlan,
     CopyPlanEntry,
@@ -1285,9 +1283,6 @@ __all__ = [
     "CanonicalIndexEntry",
     "CopyPlan",
     "CopyPlanEntry",
-    "DeferredCommitResult",
-    "DeferredLoader",
-    "InplaceSlot",
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",

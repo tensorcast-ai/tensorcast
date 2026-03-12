@@ -33,8 +33,7 @@ related_code:
   - core/common/selection_identity.cc
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
-  - docs/designs/0061-slot-based-inplace-binding-and-swap.md
-  - docs/designs/0063-binding-first-inplace-updates.md
+  - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/architecture/artifact-views-and-retrieval.md
   - docs/architecture/api/materialization-flow.md
 links:
@@ -42,7 +41,6 @@ links:
   predecessors:
     - ./0039-artifact-first-sdk.md
     - ./0055-programmable-framework.md
-    - ./0061-slot-based-inplace-binding-and-swap.md
 ---
 
 # Summary
@@ -411,8 +409,7 @@ Hard gates for merge:
 
 - `docs/designs/0039-artifact-first-sdk.md`
 - `docs/designs/0055-programmable-framework.md`
-- `docs/designs/0061-slot-based-inplace-binding-and-swap.md`
-- `docs/designs/0063-binding-first-inplace-updates.md`
+- `docs/designs/0084-binding-unified-model-and-contract.md`
 - `docs/architecture/artifact-views-and-retrieval.md`
 - `docs/architecture/api/materialization-flow.md`
 - `docs/architecture/api/region-backed.md`
