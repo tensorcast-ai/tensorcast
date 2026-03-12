@@ -644,6 +644,10 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
 
   // Engine-backed materialization
   store::loading::MaterializeHints hints;
+  const bool prefer_direct_disk_for_local_import = local_import.has_value() && disk_source.has_value() &&
+      effective_policy.allow_disk &&
+      effective_policy.preference != v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P &&
+      (view_spec.has_value() || resolved_view_id.has_value() || !selection_names.empty());
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
@@ -652,9 +656,17 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.transport_wait_timeout = request_budget;
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
+  hints.source_preference = prefer_direct_disk_for_local_import
+      ? to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK)
+      : to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = prefer_direct_disk_for_local_import ? false : effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
+  if (prefer_direct_disk_for_local_import) {
+    LOG(INFO) << "Using disk-first materialization for local import artifact_id=" << resolved_artifact_id
+              << " (view_requested="
+              << ((view_spec.has_value() || resolved_view_id.has_value() || !selection_names.empty()) ? 1 : 0)
+              << ", selection_tensors=" << selection_names.size() << ")";
+  }
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }

@@ -12,6 +12,7 @@ Related docs:
 - `docs/architecture/artifact-views-and-retrieval.md`
 - `docs/architecture/api/materialization-flow.md`
 - `docs/internals/byte-range-mapping-and-execution.md`
+- `docs/designs/0084-binding-unified-model-and-contract.md`
 
 ## System Components
 
@@ -100,25 +101,27 @@ without allocating VRAM.
 See [tensor_dict_into dataflow](tensor_dict_into_dataflow.md) for the detailed
 sequence and constraints.
 
-## Deferred Slice Materialization
+## Binding-Based Inplace Materialization
 
-Deferred loaders expose vLLM-friendly placeholder binding while still using the
+The canonical binding contract lives in
+`docs/designs/0084-binding-unified-model-and-contract.md`. This section summarizes
+where binding sits in the loading pipeline.
+
+Binding exposes the inplace-update path directly while still using the
 region-backed data plane:
 
-- `Artifact.deferred_loader(...)` allocates a client-owned CUDA arena, registers
-  the arena as a VRAM region, and returns CUDA tensors immediately.
-- `DeferredLoader.tensor(...)` returns placeholder views into the arena; no I/O
-  occurs until `commit()`.
-- `commit()` issues a single `MaterializeIntoTarget` RPC and returns an
-  `InplaceSlot` that keeps tensor storage pointers stable across swaps.
-- `packing="byte_space"` places tensors at their logical offsets in the selected
-  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
-  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
-  local-only.
-- `packing="append"` / `packing="plan"` build local packed layouts (ordered
-  call/plan order) and are not publishable in Phase 1. Use
-  `slot.publish_replica()` or `slot.swap(..., publish=True)` to publish a
-  routable memory replica once the slot is filled.
+- `Artifact.bind(...)` allocates client-owned CUDA target tensors, registers
+  them as VRAM regions, performs one `MaterializeIntoTarget` RPC, and returns a
+  `Binding`.
+- `Artifact.bind_into(...)` adopts user-owned CUDA tensors and performs the same
+  single-RPC fill.
+- `Artifact.subset(...).view(...).bind(...)` captures a rank-local source
+  selection once; later `binding.swap("model:v2")` reuses that same selection
+  against the new full artifact version.
+- `bind_into(..., mapping=copy_plan)` captures a copy plan for mapped binding;
+  later `binding.swap(...)` reuses the same plan without Python copy loops.
+- `binding.publish_replica()` or `binding.swap(..., publish=True)` publishes the
+  current bound layout once the local overwrite succeeds.
 
 ### Lease-In-Place Fast Path & Use Leases
 

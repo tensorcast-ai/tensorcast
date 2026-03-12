@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib
 import json
 import time
 import types
@@ -14,16 +15,18 @@ import torch
 import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api.store import ArtifactError, Store
-from tensorcast.api.store import deferred_loader as deferred_loader_mod
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import VramRegionHandle
 
+artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
+inplace_slot_mod = importlib.import_module("tensorcast.api.store.inplace_slot")
+
 
 def _skip_if_no_cuda() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("CUDA not available - inplace slot tests require CUDA tensors")
+        pytest.skip("CUDA not available - binding tests require CUDA tensors")
 
 
 def _make_index_bytes() -> bytes:
@@ -54,6 +57,7 @@ class FakeSlotClient:
         self.unregister_calls: list[str] = []
         self.publish_failures = 0
         self._token_counter = 0
+        self._region_counter = 0
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         return self._index_bytes
@@ -67,6 +71,7 @@ class FakeSlotClient:
         cuda_ipc_handle: bytes,
         region_name: str | None = None,
     ) -> VramRegionHandle:
+        self._region_counter += 1
         self.register_calls.append(
             {
                 "device_id": device_id,
@@ -76,7 +81,10 @@ class FakeSlotClient:
                 "region_name": region_name,
             }
         )
-        return VramRegionHandle(region_id="region:slot", ttl_ms=ttl_ms)
+        return VramRegionHandle(
+            region_id=f"region:slot:{self._region_counter}",
+            ttl_ms=ttl_ms,
+        )
 
     def unregister_vram_region(
         self, region_id: str, *, force: bool | None = None
@@ -155,7 +163,7 @@ def _cache_index(runtime: FakeRuntime, artifact_id: str, index_bytes: bytes) -> 
     runtime.cache_artifact_index(entry)
 
 
-def test_inplace_slot_swap_preserves_data_ptr(
+def test_binding_swap_preserves_data_ptr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _skip_if_no_cuda()
@@ -173,26 +181,22 @@ def test_inplace_slot_swap_preserves_data_ptr(
         "get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),
     )
-    monkeypatch.setattr(
-        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
-    )
+    monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(inplace_slot_mod, "device_uuid_for", lambda device_id: "gpu-0")
 
     artifact1 = store.artifact(artifact_id="artifact-1")
     artifact2 = store.artifact(artifact_id="artifact-2")
 
-    with artifact1.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-        tensor_alpha = loader.tensor("alpha")
-        tensor_beta = loader.tensor("beta")
-        ptrs = {"alpha": tensor_alpha.data_ptr(), "beta": tensor_beta.data_ptr()}
-        slot = loader.commit()
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
+    ptrs = {name: tensor.data_ptr() for name, tensor in binding.tensors.items()}
 
-    slot.swap(artifact2, publish=False)
+    binding.swap(artifact2, publish=False)
 
-    assert slot.tensors["alpha"].data_ptr() == ptrs["alpha"]
-    assert slot.tensors["beta"].data_ptr() == ptrs["beta"]
+    assert binding.tensors["alpha"].data_ptr() == ptrs["alpha"]
+    assert binding.tensors["beta"].data_ptr() == ptrs["beta"]
 
 
-def test_inplace_slot_swap_reuses_slot_view_spec(
+def test_binding_swap_reuses_view_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _skip_if_no_cuda()
@@ -205,9 +209,8 @@ def test_inplace_slot_swap_reuses_slot_view_spec(
     monkeypatch.setattr(
         store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
     )
-    monkeypatch.setattr(
-        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
-    )
+    monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(inplace_slot_mod, "device_uuid_for", lambda device_id: "gpu-0")
 
     artifact1 = store.artifact(artifact_id="mi2:artifact-1")
     artifact2 = store.artifact(artifact_id="mi2:artifact-2")
@@ -215,21 +218,17 @@ def test_inplace_slot_swap_reuses_slot_view_spec(
     slices = {"alpha": (slice(0, 2),)}
     artifact_view = artifact1.view(slices=slices)
 
-    with artifact_view.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-        ptrs = {}
-        for name in ("alpha", "beta"):
-            tensor = loader.tensor(name)
-            ptrs[name] = tensor.data_ptr()
-        slot = loader.commit()
+    binding = artifact_view.bind(device="cuda:0", packing="byte_space")
+    ptrs = {name: tensor.data_ptr() for name, tensor in binding.tensors.items()}
 
-    slot.swap(artifact2, publish=False)
+    binding.swap(artifact2, publish=False)
 
-    assert slot.artifact_id == "mi2:artifact-2"
-    assert slot.tensors["alpha"].data_ptr() == ptrs["alpha"]
-    assert slot.tensors["beta"].data_ptr() == ptrs["beta"]
+    assert binding.artifact_id == "mi2:artifact-2"
+    assert binding.tensors["alpha"].data_ptr() == ptrs["alpha"]
+    assert binding.tensors["beta"].data_ptr() == ptrs["beta"]
 
 
-def test_publish_failure_keeps_slot_clean_and_retry(
+def test_publish_failure_keeps_binding_clean_and_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _skip_if_no_cuda()
@@ -243,26 +242,22 @@ def test_publish_failure_keeps_slot_clean_and_retry(
     monkeypatch.setattr(
         store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
     )
-    monkeypatch.setattr(
-        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
-    )
+    monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(inplace_slot_mod, "device_uuid_for", lambda device_id: "gpu-0")
 
     artifact1 = store.artifact(artifact_id="artifact-1")
     artifact2 = store.artifact(artifact_id="artifact-2")
 
-    with artifact1.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-        _ = loader.tensor("alpha")
-        _ = loader.tensor("beta")
-        slot = loader.commit()
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
 
     with pytest.raises(ArtifactError):
-        slot.swap(artifact2, publish=True)
+        binding.swap(artifact2, publish=True)
 
-    assert slot.dirty is False
-    assert slot.published_lease_id is None
+    assert binding._slot.dirty is False
+    assert binding._slot.published_lease_id is None
 
-    slot.publish_replica()
-    assert slot.published_lease_id == "lease-1"
+    binding.publish_replica()
+    assert binding._slot.published_lease_id == "lease-1"
     assert len(client.publish_calls) == 2
 
 

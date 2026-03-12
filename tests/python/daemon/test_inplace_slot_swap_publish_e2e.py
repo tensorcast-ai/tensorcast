@@ -1,6 +1,6 @@
 #  Copyright (c) 2026, TensorCast Team.
 
-"""End-to-end swap+publish coverage for slot-based materialization."""
+"""End-to-end swap+publish coverage for binding-based materialization."""
 
 from __future__ import annotations
 
@@ -306,6 +306,8 @@ def test_inplace_slot_swap_publish_e2e(
 
     proc_log = storage_dir / "daemon_proc.log"
     env = build_daemon_process_env(os.environ)
+    binding = None
+    store = None
     with proc_log.open("a") as log_fd:
         proc = subprocess.Popen(
             [str(bin_path), f"--config={cfg_path}"],
@@ -331,42 +333,37 @@ def test_inplace_slot_swap_publish_e2e(
             artifact_a = store.artifact(artifact_id=artifact_a_id, fallback=fallback_a)
             artifact_b = store.artifact(artifact_id=artifact_b_id, fallback=fallback_b)
 
-            with artifact_a.deferred_loader(
-                device="cuda:0", packing="byte_space"
-            ) as loader:
-                _ = loader.tensor("alpha")
-                _ = loader.tensor("beta")
-                slot = loader.commit()
+            binding = artifact_a.bind(device="cuda:0", packing="byte_space")
 
             torch.cuda.synchronize()
             torch.testing.assert_close(
-                slot.tensors["alpha"].cpu(),
+                binding.tensors["alpha"].cpu(),
                 torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32),
             )
             torch.testing.assert_close(
-                slot.tensors["beta"].cpu(),
+                binding.tensors["beta"].cpu(),
                 torch.tensor([5.0, 6.0, 7.0, 8.0], dtype=torch.float32),
             )
 
-            slot.publish_replica()
-            old_replica_id = slot.published_replica_id
+            binding.publish_replica()
+            old_replica_id = binding._slot.published_replica_id
             assert old_replica_id is not None
             _wait_replica_state(
                 servicer, old_replica_id, expected_available=True, timeout_s=15.0
             )
 
-            slot.swap(artifact_b, publish=True)
+            binding.swap(artifact_b, publish=True)
             torch.cuda.synchronize()
-            new_replica_id = slot.published_replica_id
+            new_replica_id = binding._slot.published_replica_id
             assert new_replica_id is not None
             assert new_replica_id != old_replica_id
 
             torch.testing.assert_close(
-                slot.tensors["alpha"].cpu(),
+                binding.tensors["alpha"].cpu(),
                 torch.tensor([9.0, 10.0, 11.0, 12.0], dtype=torch.float32),
             )
             torch.testing.assert_close(
-                slot.tensors["beta"].cpu(),
+                binding.tensors["beta"].cpu(),
                 torch.tensor([13.0, 14.0, 15.0, 16.0], dtype=torch.float32),
             )
 
@@ -376,9 +373,11 @@ def test_inplace_slot_swap_publish_e2e(
             _wait_replica_retired(servicer, old_replica_id, timeout_s=15.0)
         finally:
             with contextlib.suppress(Exception):
-                slot.close()
+                if binding is not None:
+                    binding.close()
             with contextlib.suppress(Exception):
-                store.close()
+                if store is not None:
+                    store.close()
             proc.terminate()
             try:
                 proc.wait(timeout=5)

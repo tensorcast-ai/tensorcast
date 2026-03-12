@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib
 import json
 import time
 import types
@@ -15,12 +16,14 @@ import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api import context as tc_context
 from tensorcast.api.store import ArtifactError, Store
-from tensorcast.api.store import deferred_loader as deferred_loader_mod
 from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import VramRegionHandle
+
+artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
+inplace_slot_mod = importlib.import_module("tensorcast.api.store.inplace_slot")
 
 
 def _skip_if_no_cuda() -> None:
@@ -57,6 +60,7 @@ class FakeBindingClient:
         self.swap_key_calls: list[dict[str, Any]] = []
         self.keepalive_calls: list[tuple[str, int, int]] = []
         self._token_counter = 0
+        self._region_counter = 0
         self._key_state: dict[str, tuple[str, int]] = {}
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
@@ -71,6 +75,7 @@ class FakeBindingClient:
         cuda_ipc_handle: bytes,
         region_name: str | None = None,
     ) -> VramRegionHandle:
+        self._region_counter += 1
         self.register_calls.append(
             {
                 "device_id": device_id,
@@ -80,9 +85,14 @@ class FakeBindingClient:
                 "region_name": region_name,
             }
         )
-        return VramRegionHandle(region_id="region:binding", ttl_ms=ttl_ms)
+        return VramRegionHandle(
+            region_id=f"region:binding:{self._region_counter}",
+            ttl_ms=ttl_ms,
+        )
 
-    def unregister_vram_region(self, region_id: str, *, force: bool | None = None) -> bool:
+    def unregister_vram_region(
+        self, region_id: str, *, force: bool | None = None
+    ) -> bool:
         self.unregister_calls.append(region_id)
         return True
 
@@ -103,7 +113,9 @@ class FakeBindingClient:
         self.retire_calls.append(kwargs)
         return types.SimpleNamespace(drained=True, removed=True)
 
-    def keep_alive_registered_artifact(self, registration_id: str, ttl_ms: int, epoch: int) -> bool:
+    def keep_alive_registered_artifact(
+        self, registration_id: str, ttl_ms: int, epoch: int
+    ) -> bool:
         self.keepalive_calls.append((registration_id, ttl_ms, epoch))
         return True
 
@@ -129,14 +141,22 @@ class FakeBindingClient:
         )
         current_id, generation = self._key_state.get(key, ("", 0))
         if expected_artifact_id and expected_artifact_id != current_id:
-            return types.SimpleNamespace(ok=False, artifact_id=current_id, generation=generation)
+            return types.SimpleNamespace(
+                ok=False, artifact_id=current_id, generation=generation
+            )
         if expected_generation is not None and expected_generation != generation:
-            return types.SimpleNamespace(ok=False, artifact_id=current_id, generation=generation)
+            return types.SimpleNamespace(
+                ok=False, artifact_id=current_id, generation=generation
+            )
         if current_id == new_artifact_id:
-            return types.SimpleNamespace(ok=True, artifact_id=current_id, generation=generation)
+            return types.SimpleNamespace(
+                ok=True, artifact_id=current_id, generation=generation
+            )
         generation += 1
         self._key_state[key] = (new_artifact_id, generation)
-        return types.SimpleNamespace(ok=True, artifact_id=new_artifact_id, generation=generation)
+        return types.SimpleNamespace(
+            ok=True, artifact_id=new_artifact_id, generation=generation
+        )
 
 
 class FakeRuntime:
@@ -185,7 +205,9 @@ def _cache_index(runtime: FakeRuntime, artifact_id: str, index_bytes: bytes) -> 
     runtime.cache_artifact_index(entry)
 
 
-def _setup_store(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeRuntime, FakeBindingClient]:
+def _setup_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Store, FakeRuntime, FakeBindingClient]:
     _skip_if_no_cuda()
     index_bytes = _make_index_bytes()
     client = FakeBindingClient(index_bytes)
@@ -193,13 +215,16 @@ def _setup_store(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeRuntime, F
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),
     )
-    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(inplace_slot_mod, "device_uuid_for", lambda device_id: "gpu-0")
     return store, runtime, client
 
 

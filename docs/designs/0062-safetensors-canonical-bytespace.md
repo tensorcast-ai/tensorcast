@@ -20,7 +20,7 @@ related_code:
   - proto/tensorcast/config/v1/daemon_config.proto
   - tensorcast/api/store/materialization.py
 created: 2026-02-02
-last_updated: 2026-02-03
+last_updated: 2026-03-12
 ---
 
 # Summary
@@ -49,7 +49,7 @@ Safetensors disk loading currently derives the canonical index directly from pay
 - **Canonical ByteSpace** (identity + target layout) with
 - **Source ByteSpace** (payload order on disk).
 
-Region-backed paths and `DeferredLoader(packing="byte_space")` require a coalesced canonical layout with:
+Region-backed paths and binding APIs that use `packing="byte_space"` require a coalesced canonical layout with:
 - deterministic packing (identity does not depend on the on-disk payload order), and
 - element-size aligned tensor starts (so tensors can be bound into a shared arena without misalignment).
 
@@ -59,7 +59,7 @@ offsets equal to disk offsets, canonical-ordered reads also devolve into random 
 
 Scope:
 - Disk-based safetensors loading in the daemon and SDK paths.
-- Region-backed materialization and `DeferredLoader` usage.
+- Region-backed materialization and `Artifact.bind(...)` / `bind_into(...)` usage.
 - View planning and subset selection for safetensors when source offsets differ from canonical.
 
 Out of scope:
@@ -267,7 +267,7 @@ Compatibility:
 - No backward-compatibility requirements (project pre-launch).
 
 Acceptance criteria:
-- `DeferredLoader(packing="byte_space")` succeeds for safetensors disk artifacts.
+- `Artifact.bind(..., packing="byte_space")` succeeds for safetensors disk artifacts.
 - `MaterializeIntoTarget` passes canonical coalesced layout validation for safetensors.
 - Source-ordered executor reduces `tc_byte_range_base_read_calls_total` and increases effective sequential read size for safetensors.
 - View materialization yields identical tensor values compared to existing safetensors loading.

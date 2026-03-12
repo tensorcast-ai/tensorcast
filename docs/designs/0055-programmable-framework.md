@@ -322,7 +322,8 @@ introducing cross-talk between unrelated callers that happen to touch the same `
    - Optional: kept resident by `pin_device_residency(...)` (placement pin).
 
 2. **Caller-owned buffer (engine arena / cache buffers)**
-   - Filled by `Artifact.tensor_dict_into(...)` / `deferred_loader.commit(...)`.
+   - Filled by `Artifact.tensor_dict_into(...)` / `Artifact.bind_into(...)`
+     (or `Artifact.bind(...)` when the SDK allocates the client-owned target).
    - Uses region-backed `MaterializeIntoTarget` when enabled.
    - Does **not** create daemon-owned VRAM replica.
 
@@ -787,13 +788,11 @@ class Artifact:
         """
 ```
 
-For advanced usage, deferred loader remains the recommended path.
+For advanced usage, binding remains the recommended path.
 
 ```python
-with art.deferred_loader(device="cuda:0") as loader:
-    q = loader.tensor("layers.0.attn.q_proj.weight")
-    ...
-    loader.commit()
+binding = art.subset(["layers.0.attn.q_proj.weight"]).bind(device="cuda:0")
+q = binding.tensors["layers.0.attn.q_proj.weight"]
 ```
 
 #### Persistence (publish durability; existing)
@@ -1198,7 +1197,7 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
 |---|---|---|
 | `Artifact.prefetch()` | `Artifact.prefetch() -> Operation[PrefetchedReplica]` | Phase-0 is sync/blocking: use `op.result(...)` / `op.wait(...)`. |
 | warm pool | `prefetch + pin_device_residency` | Daemon-owned cache warm (shared). |
-| execute-while-load | `Artifact.view(...).tensor_dict_into(...)` / `DeferredLoader` | Caller-owned buffers; remote requires Engine Adapter. |
+| execute-while-load | `Artifact.view(...).tensor_dict_into(...)` / `Artifact.bind(...)` | Caller-owned buffers; remote requires Engine Adapter. |
 | persistence status polling | `Operation[PersistenceOutcome]` | Phase-0 wraps polling; Phase-1 adds `WaitPersistenceStatus`. |
 | weights broadcast | `Plan` over workers calling prefetch/pin | Source selection remains Global Store-owned. |
 | Cache delta transfer (paged KV) | `Artifact.view(...)` (slice/subset) + `tensor_dict_into(...)` | Requires domain-specific tensor naming/layout conventions. |
@@ -1585,7 +1584,7 @@ except tensorcast.PlanFailedError as exc:
 
 ## Compatibility & Migration
 
-- Existing artifact retrieval calls (`tensor_dict`, `tensor_dict_into`, `DeferredLoader`) continue to work.
+- Existing artifact retrieval calls (`tensor_dict`, `tensor_dict_into`, `bind`, `bind_into`) continue to work.
 - This design intentionally introduces **meaningful breaking changes** where needed to make programmability correct:
   - `Artifact.prefetch(...)` returns `Operation[PrefetchedReplica]` (instead of a `(handle, ticket)` tuple).
   - `Artifact.prefetch(...)` defaults to `NO_LEASE` so it does not create PID-bound UseLeases.

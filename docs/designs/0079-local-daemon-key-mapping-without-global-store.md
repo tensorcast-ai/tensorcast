@@ -24,7 +24,6 @@ links:
   predecessors:
     - ./0004-unified-runtime-config.md
     - ./0039-artifact-first-sdk.md
-    - ./0063-binding-first-inplace-updates.md
     - ./0078-selection-first-artifact-retrieval.md
 ---
 
@@ -274,7 +273,7 @@ Acceptance criteria:
 
 - `docs/guides/sdk-startup-user-guide.md`
 - `docs/architecture/api/api-design.md`
-- `docs/designs/0063-binding-first-inplace-updates.md`
+- `docs/designs/0084-binding-unified-model-and-contract.md`
 - `schema.sql`
 - `tensorcast/global_store/repositories/key_mapping_repository.py`
 - `tensorcast/global_store/rpc/key_mapping_rpc_handler.py`
