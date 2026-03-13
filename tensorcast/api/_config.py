@@ -634,6 +634,7 @@ class GetArtifactOptions(BaseModel):
 
     prefer: str = "auto"  # "auto" | "local" | "p2p" | "disk"
     export_policy: str = "never"  # "never" | "auto" | "force"
+    need_view_data_hash: bool = True
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     # When >0 and the initial retrieval fails, the daemon can wait for a managed
     # shared-disk location to become ready before retrying disk-only.

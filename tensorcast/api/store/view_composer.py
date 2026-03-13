@@ -37,7 +37,7 @@ from tensorcast.proto.common.v1 import common_pb2
 class ViewMetadataCache:
     view_id: str
     view_index_bytes: bytes
-    view_data_hash: str
+    view_data_hash: str | None
     tensor_names: tuple[str, ...]
     nbytes: int
     selected_index: CanonicalIndex
@@ -321,7 +321,6 @@ class ViewSpecComposer:
             )
             view_index_bytes = bytes(view_payload["view_index_bytes"])
             resolved_selected_index = canonical_index_from_bytes(view_index_bytes)
-            view_hash = self.hash_view_spec(composed_spec, subset=tensor_names)
             view_id: str | None = None
             if composed_spec is not None and not composed_spec.is_identity:
                 view_proto = composed_spec.proto
@@ -335,7 +334,7 @@ class ViewSpecComposer:
             view_cache = ViewMetadataCache(
                 view_id=view_id or "",
                 view_index_bytes=view_index_bytes,
-                view_data_hash=view_hash,
+                view_data_hash=None,
                 tensor_names=tensor_names,
                 nbytes=int(resolved_selected_index.total_size_bytes),
                 selected_index=resolved_selected_index,

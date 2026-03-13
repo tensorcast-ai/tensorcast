@@ -401,6 +401,9 @@ message MaterializeReplicaRequest {
   // location in the local cluster before retrying disk-only.
   uint32 wait_for_shared_disk_ms = 16;
   ExportPolicy export_policy = 17;
+  // When false, the daemon skips computing the realized-view data hash and
+  // leaves response.view_data_hash unset. Unset preserves legacy behavior.
+  optional bool need_view_data_hash = 18;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
