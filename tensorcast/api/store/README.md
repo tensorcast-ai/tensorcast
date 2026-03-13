@@ -84,8 +84,11 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
 Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-contract.md`.
 
 - `artifact.bind(device=..., packing=\"byte_space\", publish=False)` allocates a
-  client-owned CUDA target layout, fills it from the artifact, and returns a
-  `Binding` ready for swaps without extra ceremony.
+  daemon-owned CUDA target layout, maps shared tensor views into the client
+  process, and returns a `Binding` ready for pointer-stable swaps.
+- `artifact.bind(device=..., mapping=copy_plan, packing=\"byte_space\")` keeps
+  the same owner semantics while inferring the destination tensor layout from
+  the mapped copy plan.
 - `artifact.bind_into({name: tensor, ...}, packing=\"byte_space\", publish=False)`
   adopts **user-owned** CUDA tensors (already allocated in the current process),
   fills them once, and returns a `Binding`.
@@ -93,7 +96,7 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
   later `binding.swap("model:v2")` reapplies that same selection to the new
   artifact version instead of materializing the whole model.
 - `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
-  executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
+  executes the same traced copy plan (`CopyPlanEntry`/`Range`) against
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you

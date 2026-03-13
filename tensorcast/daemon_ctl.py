@@ -978,6 +978,178 @@ class DaemonCtl:
             )
         return response
 
+    def create_owned_binding(
+        self,
+        *,
+        source_selection: common_pb2.ArtifactSelection,
+        target_layout: store_daemon_pb2.TargetLayout,
+        target_index_bytes: bytes,
+        device_uuid: str,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
+        copy_plan: store_daemon_pb2.CopyPlan | None = None,
+        dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
+        pid: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.CreateOwnedBindingResponse:
+        if not isinstance(source_selection, common_pb2.ArtifactSelection):
+            raise ValueError("source_selection is required")
+        if not source_selection.artifact_id:
+            raise ValueError("source_selection.artifact_id is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        if not target_index_bytes:
+            raise ValueError("target_index_bytes is required")
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/CreateOwnedBinding") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.CreateOwnedBindingRequest(
+                source_selection=source_selection,
+                target_layout=target_layout,
+                target_index_bytes=bytes(target_index_bytes),
+                device_uuid=device_uuid,
+                pid=pid_value,
+                preference=preference_value,
+            )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
+            if placement is not None:
+                request.placement = placement
+            if copy_plan is not None:
+                request.copy_plan.CopyFrom(copy_plan)
+            if dst_specs is not None:
+                for spec in dst_specs:
+                    request.dst_tensors.add().CopyFrom(spec)
+            if operation_id:
+                request.operation_id = str(operation_id)
+            try:
+                response: store_daemon_pb2.CreateOwnedBindingResponse = (
+                    self._unary_call(
+                        self.stub_v2.CreateOwnedBinding,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CreateOwnedBinding RPC failed")
+                ) from e
+        return response
+
+    def refill_owned_binding(
+        self,
+        *,
+        binding_id: str,
+        artifact_id: str,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.RefillOwnedBindingResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        with self._client_span("Client/RefillOwnedBinding") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.RefillOwnedBindingRequest(
+                binding_id=str(binding_id),
+                artifact_id=str(artifact_id),
+                preference=preference_value,
+            )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
+            if placement is not None:
+                request.placement = placement
+            if operation_id:
+                request.operation_id = str(operation_id)
+            try:
+                response: store_daemon_pb2.RefillOwnedBindingResponse = (
+                    self._unary_call(
+                        self.stub_v2.RefillOwnedBinding,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="RefillOwnedBinding RPC failed")
+                ) from e
+        return response
+
+    def close_owned_binding(
+        self,
+        *,
+        binding_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.CloseOwnedBindingResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        with self._client_span("Client/CloseOwnedBinding") as span:
+            request = store_daemon_pb2.CloseOwnedBindingRequest(
+                binding_id=str(binding_id)
+            )
+            try:
+                response: store_daemon_pb2.CloseOwnedBindingResponse = self._unary_call(
+                    self.stub_v2.CloseOwnedBinding,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CloseOwnedBinding RPC failed")
+                ) from e
+        return response
+
     def query_replica_status(
         self, ticket: store_daemon_pb2.ReplicaTicket
     ) -> store_daemon_pb2.QueryReplicaStatusResponse:

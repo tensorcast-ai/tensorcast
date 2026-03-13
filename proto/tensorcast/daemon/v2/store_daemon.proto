@@ -10,6 +10,9 @@ service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
+  rpc RefillOwnedBinding(RefillOwnedBindingRequest) returns (RefillOwnedBindingResponse) {}
+  rpc CloseOwnedBinding(CloseOwnedBindingRequest) returns (CloseOwnedBindingResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
   rpc UnloadReplica(UnloadReplicaRequest) returns (UnloadReplicaResponse) {}
 
@@ -900,6 +903,55 @@ message RouteAuthorityStageResponse {
   BatchItemStatus status = 1;
   string message = 2;
   OwnerStageReply owner_stage_reply = 3;
+}
+
+message CreateOwnedBindingRequest {
+  tensorcast.common.v1.ArtifactSelection source_selection = 1;
+  TargetLayout target_layout = 2;
+  bytes target_index_bytes = 3;
+  int32 pid = 4;
+  string device_uuid = 5;
+  SourcePreference preference = 6;
+  SourcePolicy source_policy = 7;
+  optional string operation_id = 8;
+  TransformPlacement placement = 9;
+  CopyPlan copy_plan = 10;
+  repeated MappedTensorSpec dst_tensors = 11;
+}
+
+message CreateOwnedBindingResponse {
+  string binding_id = 1;
+  string artifact_id = 2;
+  MemCopyHandle mem_handle = 3;
+  bytes target_index_bytes = 4;
+  repeated TensorPayloadDescriptor payloads = 5;
+  bytes target_publication_token = 6;
+  tensorcast.common.v1.ArtifactSelection resolved_selection = 7;
+  MaterializationSource source = 8;
+}
+
+message RefillOwnedBindingRequest {
+  string binding_id = 1;
+  string artifact_id = 2;
+  SourcePreference preference = 3;
+  SourcePolicy source_policy = 4;
+  optional string operation_id = 5;
+  TransformPlacement placement = 6;
+}
+
+message RefillOwnedBindingResponse {
+  string artifact_id = 1;
+  MaterializationSource source = 2;
+  bytes target_publication_token = 3;
+  tensorcast.common.v1.ArtifactSelection resolved_selection = 4;
+}
+
+message CloseOwnedBindingRequest {
+  string binding_id = 1;
+}
+
+message CloseOwnedBindingResponse {
+  bool closed = 1;
 }
 
 message ConfirmReplicaRequest {

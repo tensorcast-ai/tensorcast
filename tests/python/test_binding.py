@@ -19,11 +19,15 @@ from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import VramRegionHandle
 
 artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
 inplace_slot_mod = importlib.import_module("tensorcast.api.store.inplace_slot")
+owned_binding_slot_mod = importlib.import_module(
+    "tensorcast.api.store.owned_binding_slot"
+)
 
 
 def _skip_if_no_cuda() -> None:
@@ -53,6 +57,9 @@ class FakeBindingClient:
     def __init__(self, index_bytes: bytes) -> None:
         self._index_bytes = index_bytes
         self.materialize_calls: list[dict[str, Any]] = []
+        self.create_calls: list[dict[str, Any]] = []
+        self.refill_calls: list[dict[str, Any]] = []
+        self.close_calls: list[str] = []
         self.publish_calls: list[dict[str, Any]] = []
         self.retire_calls: list[dict[str, Any]] = []
         self.register_calls: list[dict[str, Any]] = []
@@ -62,6 +69,8 @@ class FakeBindingClient:
         self._token_counter = 0
         self._region_counter = 0
         self._key_state: dict[str, tuple[str, int]] = {}
+        self._binding_counter = 0
+        self._binding_selections: dict[str, common_pb2.ArtifactSelection] = {}
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         return self._index_bytes
@@ -108,6 +117,49 @@ class FakeBindingClient:
     def publish_target_replica(self, **kwargs: Any) -> Any:
         self.publish_calls.append(kwargs)
         return types.SimpleNamespace(lease_id="lease-1", replica_id="replica-1")
+
+    def create_owned_binding(self, **kwargs: Any) -> Any:
+        self.create_calls.append(kwargs)
+        self._token_counter += 1
+        self._binding_counter += 1
+        binding_id = f"binding-{self._binding_counter}"
+        selection = common_pb2.ArtifactSelection()
+        selection.CopyFrom(kwargs["source_selection"])
+        if kwargs.get("copy_plan") is not None and kwargs["copy_plan"].entries:
+            selection.ClearField("view_spec")
+            selection.ClearField("tensor_names")
+            selection.ClearField("view_subset_hash")
+            selection.view_id = str(kwargs["target_layout"].view_id)
+            selection.logical_layout_hash = bytes(
+                kwargs["target_layout"].logical_layout_hash
+            )
+            selection.selection_hash = b"mapped-selection"
+        self._binding_selections[binding_id] = selection
+        return types.SimpleNamespace(
+            binding_id=binding_id,
+            artifact_id=str(selection.artifact_id),
+            target_index_bytes=bytes(kwargs["target_index_bytes"]),
+            resolved_selection=selection,
+            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+        )
+
+    def refill_owned_binding(self, **kwargs: Any) -> Any:
+        self.refill_calls.append(kwargs)
+        self._token_counter += 1
+        binding_id = str(kwargs["binding_id"])
+        selection = common_pb2.ArtifactSelection()
+        selection.CopyFrom(self._binding_selections[binding_id])
+        selection.artifact_id = str(kwargs["artifact_id"])
+        self._binding_selections[binding_id] = selection
+        return types.SimpleNamespace(
+            artifact_id=str(selection.artifact_id),
+            resolved_selection=selection,
+            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+        )
+
+    def close_owned_binding(self, *, binding_id: str, **_kwargs: Any) -> Any:
+        self.close_calls.append(str(binding_id))
+        return types.SimpleNamespace(closed=True)
 
     def retire_published_replica(self, **kwargs: Any) -> Any:
         self.retire_calls.append(kwargs)
@@ -225,6 +277,24 @@ def _setup_store(
     )
     monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
     monkeypatch.setattr(inplace_slot_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(
+        artifact_mod,
+        "restore_owned_binding_tensors",
+        lambda *, response, runtime, device_id: {
+            entry.name: torch.empty_strided(
+                size=tuple(int(v) for v in entry.shape),
+                stride=tuple(int(v) for v in entry.stride),
+                dtype=entry.dtype,
+                device=torch.device("cuda", int(device_id)),
+            )
+            for entry in canonical_index_from_bytes(
+                bytes(response.target_index_bytes)
+            ).entries
+        },
+    )
+    monkeypatch.setattr(
+        owned_binding_slot_mod, "device_uuid_for", lambda device_id: "gpu-0"
+    )
     return store, runtime, client
 
 
@@ -356,3 +426,19 @@ def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:
     assert "tot=16" in operation_id
     assert "part=rx1:r0" in operation_id
     assert "rid=case-a1:v2:rx1:r0" in operation_id
+
+
+def test_bind_does_not_delegate_to_bind_into(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    monkeypatch.setattr(
+        artifact_mod.Artifact,
+        "bind_into",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bind_into called")
+        ),
+    )
+
+    binding = artifact.bind(device="cuda:0")
+
+    assert binding.artifact_id == "artifact-1"

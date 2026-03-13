@@ -19,6 +19,7 @@
 #include "daemon/service/payload_transport_broker.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/background_scheduler.h"
+#include "daemon/state/binding_registry.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
@@ -110,6 +111,10 @@ class DaemonKernel {
 
   [[nodiscard]] ArtifactSourceRegistry& source_registry() {
     return source_registry_;
+  }
+
+  [[nodiscard]] BindingRegistry& binding_registry() const {
+    return *binding_registry_;
   }
 
   [[nodiscard]] RegistrationManager& registration_manager() const {
@@ -223,6 +228,7 @@ class DaemonKernel {
   std::unique_ptr<LipBridge> lip_bridge_;
   std::unique_ptr<PersistenceManager> persistence_mgr_;
   ArtifactSourceRegistry source_registry_;
+  std::unique_ptr<BindingRegistry> binding_registry_;
 
   DeviceResolver devices_;
   ShutdownSignal shutdown_signal_;

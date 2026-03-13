@@ -17,11 +17,13 @@
 #include "daemon/service/controllers/assembly_operation_service.h"
 #include "daemon/service/controllers/disk_artifact_service.h"
 #include "daemon/service/controllers/external_target_access_service.h"
+#include "daemon/service/controllers/owned_binding_service.h"
 #include "daemon/service/controllers/replica_lifecycle_service.h"
 #include "daemon/service/controllers/replica_materialization_service.h"
 #include "daemon/service/controllers/target_materialization_service.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/artifact_source_registry.h"
+#include "daemon/state/binding_registry.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
@@ -49,6 +51,7 @@ class MaterializationController {
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
     ArtifactSourceRegistry& disk_imports;
+    BindingRegistry& binding_registry;
     ShutdownSignal& shutdown_signal;
     common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
@@ -81,6 +84,21 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::MaterializeIntoMappedTargetRequest& req,
       v2::MaterializeIntoTargetResponse& resp);
+
+  grpc::Status create_owned_binding(
+      RpcContext& rctx,
+      const v2::CreateOwnedBindingRequest& req,
+      v2::CreateOwnedBindingResponse& resp);
+
+  grpc::Status refill_owned_binding(
+      RpcContext& rctx,
+      const v2::RefillOwnedBindingRequest& req,
+      v2::RefillOwnedBindingResponse& resp);
+
+  grpc::Status close_owned_binding(
+      RpcContext& rctx,
+      const v2::CloseOwnedBindingRequest& req,
+      v2::CloseOwnedBindingResponse& resp);
 
   grpc::Status publish_target_replica(
       RpcContext& rctx,
@@ -151,6 +169,7 @@ class MaterializationController {
   ReplicaMaterializationService replica_materialization_service_;
   ReplicaLifecycleService replica_lifecycle_service_;
   TargetMaterializationService target_materialization_service_;
+  OwnedBindingService owner_binding_service_;
 };
 
 } // namespace tensorcast::daemon

@@ -80,6 +80,9 @@ class TargetMaterializationService {
       const RoutedAuthorityRequest& routed_request,
       absl::Time now);
 
+  [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> remember_target_publication(
+      TargetPublicationRegistry::Record record);
+
   [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> insert_target_publication_for_testing(
       TargetPublicationRegistry::Record record);
 
