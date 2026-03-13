@@ -7,16 +7,24 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <queue>
+#include <string_view>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
+#include "absl/time/time.h"
 
+#include <nccl.h>
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/memory_location.h"
@@ -25,10 +33,13 @@
 #include "core/cuda/cuda_api.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
+#include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
+#include "core/store/replica/collective_disk_loader.h"
 #include "core/store/replica/memory_export_registry.h"
 #include "core/store/replica/transfer_service.h"
 #include "core/store/replica/types/direct_write_grant.h"
 #include "gsl/pointers"
+#include "nlohmann/json.hpp"
 
 namespace tensorcast::store::replica {
 
@@ -1344,7 +1355,8 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
     MemoryLocation target_location,
     int concurrency,
     std::optional<absl::Span<const uint32_t>> chunk_indices,
-    std::function<absl::Status()> post_load_fn) {
+    std::function<absl::Status()> post_load_fn,
+    std::optional<CollectiveDiskLoadInput> collective_disk_load) {
   // Phase 1: capture state under lock and ensure allocation + LOADING
   bool need_allocate = false;
   {
@@ -1395,6 +1407,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
            concurrency,
            chunk_indices,
            post_load_fn = std::move(post_load_fn),
+           collective_disk_load = std::move(collective_disk_load),
            local_device_id](auto&&) mutable -> absl::Status {
             std::optional<GpuTransferGateLease> lease;
             if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
@@ -1451,15 +1464,46 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                         << "): plan ranges device=" << device_id << " target=" << static_cast<int>(target_location)
                         << " ranges=" << range_str;
             }
-            absl::Status exec_status = self->transfer_service_->execute(
-                plan,
-                target_location,
-                *source,
-                concurrency,
-                self->async_runtime_->blocking_executor(),
-                gpu_ptr,
-                gpu_allocation,
-                device_id);
+            absl::Status exec_status;
+            if (collective_disk_load.has_value()) {
+              auto collective_result = try_collective_disk_load(
+                  CollectiveDiskLoadRequest{
+                      .replica_key = self->replica_key_,
+                      .group = collective_disk_load->group,
+                      .disk_context = collective_disk_load->disk_context,
+                      .source_index_json = collective_disk_load->source_index_json,
+                      .view_index_json = collective_disk_load->view_index_json,
+                      .variant_identity = collective_disk_load->variant_identity,
+                      .gpu_ptr = gpu_ptr,
+                      .device_id = device_id,
+                      .gpu_allocation = gpu_allocation,
+                  },
+                  self->pinned_pool_,
+                  self->pinned_memory_timeout_);
+              if (collective_result.handled) {
+                exec_status = collective_result.status;
+              } else {
+                exec_status = self->transfer_service_->execute(
+                    plan,
+                    target_location,
+                    *source,
+                    concurrency,
+                    self->async_runtime_->blocking_executor(),
+                    gpu_ptr,
+                    gpu_allocation,
+                    device_id);
+              }
+            } else {
+              exec_status = self->transfer_service_->execute(
+                  plan,
+                  target_location,
+                  *source,
+                  concurrency,
+                  self->async_runtime_->blocking_executor(),
+                  gpu_ptr,
+                  gpu_allocation,
+                  device_id);
+            }
             if (!exec_status.ok()) {
               // Abort session on failure (idempotent)
               auto _ = self->memory_coordinator_->abort(plan.session_id);

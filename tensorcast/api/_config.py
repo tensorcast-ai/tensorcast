@@ -605,7 +605,9 @@ class RegisterArtifactOptions(BaseModel):
     # Stable DRAM options
     stage_on_gpu: bool = True
     release_gpu_on_commit: bool = True
-    # CPU path removed
+    # When stage_on_gpu=false, require the daemon to return a CPU memfd publish
+    # handshake and fail fast instead of silently falling back to cpu_stream.
+    require_cpu_memfd_publish: bool = True
     key: str | None = None
     disk_path: str | None = None
 

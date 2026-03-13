@@ -373,15 +373,21 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
 
   emit_progress(ImportArtifactPhase::kWriteRegistry);
 
+  auto final_scan_or = scan_source(normalized_path);
+  if (!final_scan_or.ok()) {
+    return final_scan_or.status();
+  }
+
   ImportArtifactFromPathResult result;
   result.normalized_path = normalized_path;
   result.artifact_id = artifact_id;
   result.canonical_index_json = index.canonical_index_json;
+  result.source_index_json = index.source_index_json;
   result.index_multihash = std::move(index_multihash);
   result.data_multihash = data_multihash;
   result.generation = compute_generation_from_index(index.canonical_index_json);
   result.descriptor_present = descriptor_present;
-  result.file_fingerprints = std::move(scan_or->fingerprints);
+  result.file_fingerprints = std::move(final_scan_or->fingerprints);
 
   record_disk_import_outcome("ok");
   emit_progress(ImportArtifactPhase::kDone, scan_or->total_bytes, scan_or->total_bytes, /*done=*/true);

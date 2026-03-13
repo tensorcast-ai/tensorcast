@@ -34,6 +34,8 @@ class ArtifactSourceRegistry {
   struct Entry {
     SourceKind source_kind{SourceKind::kLocalImport};
     std::string canonical_source_path;
+    std::string canonical_index_json;
+    std::optional<std::string> source_index_json;
     std::optional<std::string> source_disk_path;
     bool descriptor_present{false};
     std::optional<std::string> index_multihash;

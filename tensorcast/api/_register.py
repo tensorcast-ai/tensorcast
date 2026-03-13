@@ -1036,6 +1036,7 @@ class _StableDramUploader:
         handle: RegisteredArtifact,
         handshake: Handshake,
         cancel_event: threading.Event | None = None,
+        require_cpu_memfd_publish: bool = False,
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, StableDramHandshake):
             raise TensorCastError("Unexpected handshake type for dram_stable plan")
@@ -1214,6 +1215,12 @@ class _StableDramUploader:
             return artifact
 
         if force_cpu_stream or not handshake.staging_cuda_ipc_handle:
+            if require_cpu_memfd_publish:
+                raise TensorCastError(
+                    "stable_dram cpu memfd publish is required but the daemon "
+                    "did not return a publish_cpu_memfd handshake; disable "
+                    "require_cpu_memfd_publish to allow cpu_stream fallback"
+                )
             ctl = handle.client
             total_streamed_bytes = 0
             stream_start = time.monotonic()
@@ -1733,14 +1740,20 @@ def _register_artifact_core(
             try:
                 # Upload per plan
                 if isinstance(registrar, (_CoalescedUploader, _StableDramUploader)):
-                    state_dict: dict[str, torch.Tensor] | None = registrar.upload(
-                        artifact=artifact,
-                        ctx=ctx,
-                        layout=layout,
-                        handle=handle,
-                        handshake=hs,
-                        cancel_event=cancel_event,
-                    )
+                    upload_kwargs = {
+                        "artifact": artifact,
+                        "ctx": ctx,
+                        "layout": layout,
+                        "handle": handle,
+                        "handshake": hs,
+                        "cancel_event": cancel_event,
+                    }
+                    if isinstance(registrar, _StableDramUploader):
+                        upload_kwargs["require_cpu_memfd_publish"] = bool(
+                            options.require_cpu_memfd_publish
+                            and not options.stage_on_gpu
+                        )
+                    state_dict = registrar.upload(**upload_kwargs)
                     if cancel_event and cancel_event.is_set():
                         raise CancelledError
                     commit_res = handle.commit(timeout_s=60.0)

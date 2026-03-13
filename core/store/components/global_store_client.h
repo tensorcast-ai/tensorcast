@@ -599,6 +599,10 @@ class IGlobalStoreClient {
     return resolve_key_mapping(key);
   }
 
+  virtual absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) = 0;
+
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
   virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
@@ -969,6 +973,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const MemoryTierLeaseAckPayload& ack) override;
   absl::StatusOr<std::vector<MemoryTierLeaseDescriptor>> list_memory_tier_leases(std::string_view node_id) override;
   absl::StatusOr<MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) override;
+
+  absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) override;
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
   absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) override;

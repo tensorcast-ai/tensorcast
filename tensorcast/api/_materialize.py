@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import contextlib
 import fcntl
+import hashlib
 import os
 import socket
 import struct
@@ -180,6 +181,32 @@ def _export_policy_to_proto(value: str | None) -> store_daemon_pb2.ExportPolicy:
     return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_NEVER
 
 
+def _encode_collective_replica_uuid(
+    replica_uuid: str,
+    ctx: CallContext | None,
+) -> str:
+    if ctx is None or not ctx.tags:
+        return replica_uuid
+    tags = ctx.tags
+    enabled = bool(tags.get("tc.collective.enable", False))
+    if not enabled:
+        return replica_uuid
+    group_id = tags.get("tc.collective.group_id")
+    world_size = tags.get("tc.collective.world_size")
+    rank = tags.get("tc.collective.rank")
+    if not isinstance(group_id, str) or not group_id:
+        return replica_uuid
+    try:
+        world_size_value = int(world_size)
+        rank_value = int(rank)
+    except Exception:  # noqa: BLE001
+        return replica_uuid
+    if world_size_value <= 1 or rank_value < 0 or rank_value >= world_size_value:
+        return replica_uuid
+    group_hash = hashlib.blake2b(group_id.encode("utf-8"), digest_size=8).hexdigest()
+    return f"tcg1:{group_hash}:{world_size_value}:{rank_value}:{replica_uuid}"
+
+
 def _build_artifact_selection(
     *,
     artifact_id: str,
@@ -280,7 +307,9 @@ def materialize_artifact_v2(
         }
     )
 
-    replica_uuid_value = replica_uuid or new_uuid()
+    replica_uuid_value = _encode_collective_replica_uuid(
+        replica_uuid or new_uuid(), ctx
+    )
     disk_path: str | None = None
     view_index_bytes: bytes | None = None
     materialized_source: store_daemon_pb2.MaterializationSource | None = None
