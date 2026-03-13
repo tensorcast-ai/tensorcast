@@ -89,6 +89,18 @@ def _normalize_exit_code(return_code: int) -> int:
     return return_code
 
 
+def _global_store_launch_env() -> dict[str, str]:
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[2]
+    if (repo_root / "tensorcast" / "__init__.py").exists():
+        existing = env.get("PYTHONPATH", "")
+        parts = [str(repo_root)]
+        if existing:
+            parts.append(existing)
+        env["PYTHONPATH"] = os.pathsep.join(parts)
+    return env
+
+
 def _extract_config_path(cmd: Any) -> str | None:
     if not isinstance(cmd, list):
         return None
@@ -441,12 +453,14 @@ def start_global_store(
         use_pipes = blocking or fate_share
         stdout_target = subprocess.PIPE if use_pipes else so
         stderr_target = subprocess.PIPE if use_pipes else se
+        launch_env = _global_store_launch_env()
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
             stdout=stdout_target,
             stderr=stderr_target,
             cwd=inst.session,
+            env=launch_env,
             preexec_fn=preexec_fn,
             close_fds=True,
         )
