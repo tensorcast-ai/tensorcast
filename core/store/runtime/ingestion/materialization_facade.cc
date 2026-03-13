@@ -404,6 +404,71 @@ class LocalReplicaSource final : public loader::SeekableSource {
   std::shared_ptr<loader::SeekableSource> source_;
 };
 
+class SharedSeekableSource final : public loader::SeekableSource {
+ public:
+  explicit SharedSeekableSource(std::shared_ptr<loader::SeekableSource> source) : source_(std::move(source)) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return source_->total_bytes();
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    return source_->read(dst, max_bytes);
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    return source_->read_at(offset, dst, bytes);
+  }
+
+  [[nodiscard]] const uint8_t* cpu_base_ptr() const override {
+    return source_->cpu_base_ptr();
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return source_->supports_direct_write_at();
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const DirectWriteGrant& grant) override {
+    return source_->read_into_at(src_offset, dest_va_offset, bytes, grant);
+  }
+
+ private:
+  std::shared_ptr<loader::SeekableSource> source_;
+};
+
+class SharedSourceLoader final : public IArtifactLoader {
+ public:
+  explicit SharedSourceLoader(std::shared_ptr<loader::SeekableSource> source) : source_(std::move(source)) {}
+
+  absl::Status initialize() override {
+    if (!source_) {
+      return absl::FailedPreconditionError("shared source is unavailable");
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<uint64_t> get_artifact_size() override {
+    if (!source_) {
+      return absl::FailedPreconditionError("shared source is unavailable");
+    }
+    return source_->total_bytes();
+  }
+
+  absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override {
+    if (!source_) {
+      return absl::FailedPreconditionError("shared source is unavailable");
+    }
+    return std::make_unique<SharedSeekableSource>(source_);
+  }
+
+ private:
+  std::shared_ptr<loader::SeekableSource> source_;
+};
+
 absl::StatusOr<uint64_t> compute_logical_total_size(std::string_view canonical_index_json) {
   if (canonical_index_json.empty()) {
     return absl::InvalidArgumentError("canonical index JSON must not be empty");
@@ -874,6 +939,77 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_piece_source(
     return absl::NotFoundError(absl::StrCat("local replica missing for view_id=", view_id));
   }
   return LocalReplicaSource::Create(std::move(*replica_or), location, device_id, view_size_bytes);
+}
+
+absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_canonical_source(
+    components::ReplicaRegistry& registry,
+    std::string_view artifact_id,
+    const DeviceKey& target_device,
+    uint64_t source_size) {
+  if (artifact_id.empty()) {
+    return absl::InvalidArgumentError("local canonical source requires artifact_id");
+  }
+  if (source_size == 0) {
+    return absl::InvalidArgumentError("local canonical source requires non-zero source_size");
+  }
+
+  const auto candidates = registry.find_by_artifact(artifact_id);
+  std::shared_ptr<replica::Replica> selected_replica;
+  common::memory::MemoryLocation selected_location = common::memory::MemoryLocation::NONE;
+  int selected_device_id = -1;
+  int selected_score = -1;
+
+  for (const auto& candidate : candidates) {
+    if (candidate.view_id.has_value()) {
+      continue;
+    }
+
+    auto replica_or = registry.find(candidate);
+    if (!replica_or.ok()) {
+      continue;
+    }
+    const auto& replica = *replica_or;
+    auto candidate_size_or = replica->get_artifact_size();
+    if (!candidate_size_or.ok() || source_size > *candidate_size_or) {
+      continue;
+    }
+
+    if (candidate.device.type == DeviceType::GPU &&
+        replica->get_memory_state(common::memory::MemoryLocation::GPU) == replica::MemoryState::LOADED) {
+      const auto gpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
+      if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
+        int score = 1;
+        if (candidate.device.ordinal == target_device.ordinal) {
+          score = 3;
+        }
+        if (score > selected_score) {
+          selected_replica = replica;
+          selected_location = common::memory::MemoryLocation::GPU;
+          selected_device_id = candidate.device.ordinal;
+          selected_score = score;
+        }
+      }
+    }
+
+    if (candidate.device.type == DeviceType::CPU &&
+        replica->get_memory_state(common::memory::MemoryLocation::CPU) == replica::MemoryState::LOADED) {
+      const auto cpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::CPU);
+      if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
+        constexpr int kCpuScore = 2;
+        if (kCpuScore > selected_score) {
+          selected_replica = replica;
+          selected_location = common::memory::MemoryLocation::CPU;
+          selected_device_id = -1;
+          selected_score = kCpuScore;
+        }
+      }
+    }
+  }
+
+  if (selected_replica == nullptr || selected_location == common::memory::MemoryLocation::NONE) {
+    return absl::NotFoundError(absl::StrCat("local canonical replica missing for artifact_id=", artifact_id));
+  }
+  return LocalReplicaSource::Create(std::move(selected_replica), selected_location, selected_device_id, source_size);
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_from_local_canonical(
@@ -1529,6 +1665,16 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return loading::MaterializeIntoTargetResult{.source = source_kind};
   };
 
+  auto local_source_or = make_local_canonical_source(
+      config_.replica_runtime->registry(), hints.artifact_id, target_device, canonical_total_size);
+  if (local_source_or.ok()) {
+    return run_source(
+        std::make_unique<SharedSourceLoader>(*local_source_or), loading::MaterializationSource::kLocalReplica);
+  }
+  if (!absl::IsNotFound(local_source_or.status())) {
+    return local_source_or.status();
+  }
+
   auto gs_client = config_.runtime_context->global_store_client();
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool gs_connected = gs_client && gs_client->is_connected();
@@ -1935,6 +2081,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
     return loading::MaterializeIntoTargetResult{.source = source_kind};
   };
+
+  auto local_source_or = make_local_canonical_source(
+      config_.replica_runtime->registry(), hints.artifact_id, target_device, canonical_total_size);
+  if (local_source_or.ok()) {
+    return run_source(
+        std::make_unique<SharedSourceLoader>(*local_source_or),
+        loading::MaterializationSource::kLocalReplica,
+        MappedSourceByteSpace::kCanonical);
+  }
+  if (!absl::IsNotFound(local_source_or.status())) {
+    return local_source_or.status();
+  }
 
   auto gs_client = config_.runtime_context->global_store_client();
   auto comm_manager = config_.runtime_context->communication_manager();

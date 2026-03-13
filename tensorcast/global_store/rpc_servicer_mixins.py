@@ -175,6 +175,13 @@ class ArtifactCatalogRpcServicerMixin:
             request, context
         )
 
+    def UpsertArtifactMetadata(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.artifact_index_rpc_handler.upsert_artifact_metadata(
+            request, context
+        )
+
     def GetArtifactIndex(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.artifact_index_rpc_handler.get_artifact_index(request, context)
 

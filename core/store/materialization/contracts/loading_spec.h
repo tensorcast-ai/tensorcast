@@ -108,6 +108,12 @@ struct TransportSchedulingGroupHint {
   uint64_t epoch{0};
 };
 
+struct CollectiveLoadGroupHint {
+  std::string group_id;
+  uint32_t world_size{0};
+  uint32_t rank{0};
+};
+
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
@@ -122,6 +128,8 @@ struct MaterializeHints {
   std::string transport_request_id;
   // Optional scheduler group hint for fairness/completion-aware dispatch.
   std::optional<TransportSchedulingGroupHint> transport_scheduling_group;
+  // Optional same-host multi-rank hint for shared-window disk loading.
+  std::optional<CollectiveLoadGroupHint> collective_load_group;
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
   bool prefer_pageable_cpu{false};

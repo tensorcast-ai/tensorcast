@@ -125,6 +125,25 @@ std::vector<std::filesystem::path> collect_safetensors(const std::filesystem::pa
   return files;
 }
 
+void maybe_attach_safetensors_source_index(const std::filesystem::path& artifact_path, IndexInfo* info) {
+  if (info == nullptr || info->source_index_json.has_value()) {
+    return;
+  }
+  auto files = collect_safetensors(artifact_path);
+  if (files.empty()) {
+    return;
+  }
+  auto source_bytes_or = loader::BuildSourceIndexFromSafetensors(files);
+  if (!source_bytes_or.ok()) {
+    LOG(WARNING) << "Failed to build safetensors source index for '" << artifact_path.string()
+                 << "': " << source_bytes_or.status();
+    return;
+  }
+  info->source_total_size_bytes = compute_total_size_bytes(*source_bytes_or);
+  info->source_index_json = std::move(*source_bytes_or);
+  info->is_safetensors = true;
+}
+
 } // namespace
 
 absl::StatusOr<IndexInfo> canonicalize_from_raw_json(std::string raw_json, int target_device_id) {
@@ -195,7 +214,13 @@ absl::StatusOr<IndexInfo> read_from_artifact_dir(const std::filesystem::path& ar
     if (!raw_or.ok()) {
       return raw_or.status();
     }
-    return canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+    auto info_or = canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+    if (!info_or.ok()) {
+      return info_or.status();
+    }
+    auto info = std::move(*info_or);
+    maybe_attach_safetensors_source_index(artifact_path, &info);
+    return info;
   }
 
   const bool has_cbor = std::filesystem::exists(index_cbor_path, index_ec);
@@ -208,7 +233,13 @@ absl::StatusOr<IndexInfo> read_from_artifact_dir(const std::filesystem::path& ar
     if (!raw_or.ok()) {
       return raw_or.status();
     }
-    return canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+    auto info_or = canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+    if (!info_or.ok()) {
+      return info_or.status();
+    }
+    auto info = std::move(*info_or);
+    maybe_attach_safetensors_source_index(artifact_path, &info);
+    return info;
   }
 
   auto files = collect_safetensors(artifact_path);

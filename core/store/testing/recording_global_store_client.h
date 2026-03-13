@@ -59,6 +59,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool fail_register_replica{false};
   bool fail_acknowledge_lease{false};
   bool fail_disk_location_upsert{false};
+  absl::Status upsert_artifact_metadata_status{absl::OkStatus()};
   absl::Status unregister_replica_status{absl::OkStatus()};
   absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
   bool drain_success{true};
@@ -70,6 +71,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::optional<std::string> canonical_index_json;
   std::string cluster_id{"cluster-test"};
   std::vector<components::ArtifactDiskLocation> disk_locations;
+  std::vector<common::v1::ArtifactDescriptor> upserted_artifact_metadata_descriptors;
+  std::vector<std::string> upserted_artifact_metadata_indices;
 
   struct TransportReplicaInfo {
     std::string artifact_id;
@@ -430,6 +433,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view) override {
     return absl::UnimplementedError("resolve_key_mapping not supported in test stub");
+  }
+
+  absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) override {
+    upserted_artifact_metadata_descriptors.push_back(descriptor);
+    upserted_artifact_metadata_indices.emplace_back(canonical_index_data);
+    return upsert_artifact_metadata_status;
   }
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {

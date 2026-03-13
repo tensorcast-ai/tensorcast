@@ -28,6 +28,7 @@
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
@@ -45,6 +46,14 @@ namespace tensorcast::store::replica {
  */
 class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadController> {
  public:
+  struct CollectiveDiskLoadInput {
+    loading::CollectiveLoadGroupHint group;
+    std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+    std::string source_index_json;
+    std::string view_index_json;
+    std::optional<loading::VariantIdentity> variant_identity;
+  };
+
   /**
    * @brief Constructs a ReplicaLoadController.
    * @param artifact_identifier A unique name for the replica, used for logging.
@@ -195,7 +204,8 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
       common::memory::MemoryLocation target_location,
       int concurrency,
       std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt,
-      std::function<absl::Status()> post_load_fn = {}) ABSL_LOCKS_EXCLUDED(mutex_);
+      std::function<absl::Status()> post_load_fn = {},
+      std::optional<CollectiveDiskLoadInput> collective_disk_load = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Waits for the memory at the specified location to reach the LOADED state.

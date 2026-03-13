@@ -57,6 +57,9 @@ service ArtifactCatalogService {
   rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
   rpc UpsertArtifactBinding(UpsertArtifactBindingRequest) returns (UpsertArtifactBindingResponse) {}
 
+  // Upsert canonical artifact metadata without registering a replica or disk location.
+  rpc UpsertArtifactMetadata(UpsertArtifactMetadataRequest) returns (UpsertArtifactMetadataResponse) {}
+
   // Get artifact tensor index data by key
   rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
   // Get canonical tensor index by content-addressed artifact_id
@@ -657,6 +660,15 @@ message UpsertArtifactBindingResponse {
   Status status = 1;
   ArtifactBinding binding = 2;
   bool created = 3;
+}
+
+message UpsertArtifactMetadataRequest {
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 1;
+  bytes canonical_index_data = 2;
+}
+
+message UpsertArtifactMetadataResponse {
+  Status status = 1;
 }
 
 // Get artifact index request

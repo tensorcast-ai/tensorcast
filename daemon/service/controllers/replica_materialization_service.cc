@@ -16,6 +16,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
@@ -72,6 +73,40 @@ using selection_validation::validate_request_tensor_names;
 using store::loader::ViewSpec;
 
 using store::loading::MaterializationSource;
+
+std::optional<store::loading::CollectiveLoadGroupHint> parse_collective_group_hint(std::string_view replica_uuid) {
+  constexpr std::string_view kPrefix = "tcg1:";
+  if (!replica_uuid.starts_with(kPrefix)) {
+    return std::nullopt;
+  }
+  const std::string_view payload = replica_uuid.substr(kPrefix.size());
+  const size_t first = payload.find(':');
+  if (first == std::string_view::npos || first == 0) {
+    return std::nullopt;
+  }
+  const size_t second = payload.find(':', first + 1);
+  if (second == std::string_view::npos || second == first + 1) {
+    return std::nullopt;
+  }
+  const size_t third = payload.find(':', second + 1);
+  if (third == std::string_view::npos) {
+    return std::nullopt;
+  }
+  uint32_t world_size = 0;
+  uint32_t rank = 0;
+  if (!absl::SimpleAtoi(payload.substr(first + 1, second - first - 1), &world_size) ||
+      !absl::SimpleAtoi(payload.substr(second + 1, third - second - 1), &rank)) {
+    return std::nullopt;
+  }
+  if (world_size <= 1 || rank >= world_size) {
+    return std::nullopt;
+  }
+  return store::loading::CollectiveLoadGroupHint{
+      .group_id = std::string(payload.substr(0, first)),
+      .world_size = world_size,
+      .rank = rank,
+  };
+}
 
 void record_lease_create_failed() {
   try {
@@ -396,6 +431,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     }
     auto& metadata = *disk_metadata;
     metadata.descriptor_present = metadata.descriptor_present || local_import->descriptor_present;
+    if (!metadata.source_index_json.has_value() && local_import->source_index_json.has_value()) {
+      metadata.source_index_json = *local_import->source_index_json;
+    }
     if (!metadata.index_multihash.has_value() && local_import->index_multihash.has_value()) {
       metadata.index_multihash = *local_import->index_multihash;
     }
@@ -666,6 +704,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.export_policy = to_hint_export_policy(req.export_policy());
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
+  if (auto collective_group = parse_collective_group_hint(req.replica_uuid()); collective_group.has_value()) {
+    hints.collective_load_group = std::move(*collective_group);
+  }
   if (disk_metadata.has_value()) {
     hints.disk_metadata = std::move(*disk_metadata);
   }

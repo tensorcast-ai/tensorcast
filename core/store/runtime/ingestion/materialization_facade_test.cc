@@ -1,11 +1,13 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -14,6 +16,7 @@
 #pragma clang diagnostic ignored "-Wmacro-redefined"
 #endif
 #include "catch2/catch_test_macros.hpp"
+#include "core/cuda/cuda_api.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context_events.h"
@@ -579,6 +582,93 @@ TEST_CASE("MaterializationFacade AUTO serves view from local canonical replica",
   auto view_or = harness.replica_runtime().registry().find(handle_or->replica_key);
   REQUIRE(view_or.ok());
   CHECK(view_or.value()->get_memory_state(MemoryLocation::GPU) == tensorcast::store::replica::MemoryState::LOADED);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade materialize_into_target prefers local canonical replica", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kCanonicalSize = 16;
+  const std::string artifact_id = "cgid:artifact_local_into_target";
+  constexpr std::string_view kCanonicalIndexJson = R"({"tensor":[0,16,[16],[1],"torch.uint8",0]})";
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_local_into_target";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->allow_replica_transport = true;
+  harness.runtime_context().set_global_store_client_for_testing(gs_client);
+
+  loading::InlineBufferSource source{.data = nullptr, .size_bytes = kCanonicalSize};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = source,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool = harness.runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.runtime_context().async_runtime()},
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .expected_artifact_size = kCanonicalSize,
+  };
+  auto canonical_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(canonical_or.ok());
+  auto canonical_replica = std::shared_ptr<tensorcast::store::replica::Replica>(std::move(canonical_or.value()));
+
+  CHECK_OK(canonical_replica->get_memory_manager().allocate_memory(MemoryLocation::CPU));
+  auto cpu_ptrs = canonical_replica->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    cpu_ptr[i] = i;
+  }
+  CHECK_OK(canonical_replica->mark_loaded(MemoryLocation::CPU));
+  canonical_replica->set_ready_signal(MemoryLocation::CPU, absl::OkStatus());
+
+  loading::ReplicaKey canonical_key{
+      .artifact_id = artifact_id,
+      .view_id = std::nullopt,
+      .device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  CHECK_OK(harness.replica_runtime().registry().emplace(canonical_key, gsl::not_null{canonical_replica}));
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kCanonicalSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kCanonicalSize});
+  target_layout.total_size = kCanonicalSize;
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_into_target(
+      target_device, target_layout, kCanonicalIndexJson, /*generation=*/1, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kLocalReplica);
+  CHECK(gs_client->replica_requests.empty());
+
+  std::array<uint8_t, kCanonicalSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kCanonicalSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    CHECK(host_out[i] == i);
+  }
 
   harness.shutdown();
   std::error_code cleanup_ec;

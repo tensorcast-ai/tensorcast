@@ -224,4 +224,15 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> DiskLoader::get_ver
   return absl::NotFoundError("No verification info available");
 }
 
+absl::StatusOr<std::shared_ptr<const loader::DiskArtifactContext>> DiskLoader::shared_context() const {
+  absl::MutexLock lock(&mutex_);
+  if (!initialized_) {
+    return absl::FailedPreconditionError("DiskLoader not initialized");
+  }
+  if (shared_context_ == nullptr) {
+    return absl::FailedPreconditionError("DiskLoader shared context is unavailable");
+  }
+  return shared_context_;
+}
+
 } // namespace tensorcast::store

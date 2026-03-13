@@ -61,6 +61,8 @@ class DiskLoader : public IArtifactLoader {
    */
   absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> get_verification_info() const;
 
+  [[nodiscard]] absl::StatusOr<std::shared_ptr<const loader::DiskArtifactContext>> shared_context() const;
+
   // NEW: Provide disk-backed source for pumping
   absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override ABSL_LOCKS_EXCLUDED(mutex_);
 

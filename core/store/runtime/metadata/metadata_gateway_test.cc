@@ -473,6 +473,10 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("resolve_key_mapping not used in tests");
   }
 
+  absl::Status upsert_artifact_metadata(const tensorcast::common::v1::ArtifactDescriptor&, std::string_view) override {
+    return absl::UnimplementedError("upsert_artifact_metadata not used in tests");
+  }
+
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
     return absl::UnimplementedError("get_artifact_index_by_id not used in tests");
   }

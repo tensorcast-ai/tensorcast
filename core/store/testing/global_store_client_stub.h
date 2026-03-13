@@ -189,6 +189,10 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("resolve_key_mapping not supported in GlobalStoreClientStub");
   }
 
+  absl::Status upsert_artifact_metadata(const common::v1::ArtifactDescriptor&, std::string_view) override {
+    return absl::UnimplementedError("upsert_artifact_metadata not supported in GlobalStoreClientStub");
+  }
+
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
     return absl::UnimplementedError("get_artifact_index_by_id not supported in GlobalStoreClientStub");
   }

@@ -147,10 +147,10 @@ const char* rpc_service_for_method(absl::string_view method_name) {
     return "tensorcast.global_store.v1.WorkflowOrchestrationService";
   }
   if (method_name == "GetArtifactBinding" || method_name == "UpsertArtifactBinding" ||
-      method_name == "GetArtifactIndex" || method_name == "GetArtifactIndexById" ||
-      method_name == "UpsertArtifactDiskLocation" || method_name == "ListArtifactDiskLocations" ||
-      method_name == "UpsertKeyMapping" || method_name == "SwapKeyMapping" || method_name == "ResolveKeyMapping" ||
-      method_name == "RevokeKeyMapping") {
+      method_name == "UpsertArtifactMetadata" || method_name == "GetArtifactIndex" ||
+      method_name == "GetArtifactIndexById" || method_name == "UpsertArtifactDiskLocation" ||
+      method_name == "ListArtifactDiskLocations" || method_name == "UpsertKeyMapping" ||
+      method_name == "SwapKeyMapping" || method_name == "ResolveKeyMapping" || method_name == "RevokeKeyMapping") {
     return "tensorcast.global_store.v1.ArtifactCatalogService";
   }
   if (method_name == "GetArtifactInfoById" || method_name == "UpdateArtifactViewState" ||
@@ -2719,6 +2719,37 @@ absl::StatusOr<std::vector<ArtifactDiskLocation>> GlobalStoreClient::list_artifa
     out.push_back(std::move(entry));
   }
   return out;
+}
+
+absl::Status GlobalStoreClient::upsert_artifact_metadata(
+    const common::v1::ArtifactDescriptor& descriptor,
+    std::string_view canonical_index_data) {
+  if (descriptor.artifact_id().empty()) {
+    return absl::InvalidArgumentError("upsert_artifact_metadata requires descriptor.artifact_id");
+  }
+  if (canonical_index_data.empty()) {
+    return absl::InvalidArgumentError("upsert_artifact_metadata requires canonical_index_data");
+  }
+
+  global_store::UpsertArtifactMetadataRequest request;
+  *request.mutable_descriptor_() = descriptor;
+  request.set_canonical_index_data(std::string(canonical_index_data));
+
+  global_store::UpsertArtifactMetadataResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->UpsertArtifactMetadata(ctx, req, resp);
+      },
+      "UpsertArtifactMetadata");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError("artifact metadata upsert failed");
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::string_view artifact_id) {
