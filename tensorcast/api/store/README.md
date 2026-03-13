@@ -43,6 +43,9 @@ managing clients manually.
   such as `artifact_descriptor.json` (and `tensor_index.json` for safetensors
   directories) so later imports can reuse trusted metadata and skip full data
   hashing.
+  For one-off backfill on root-owned directories, use
+  `bash tools/backfill_from_disk_import.sh`, which starts an isolated temporary
+  daemon and can auto-escalate to `sudo`.
   Stream events are the canonical progress contract (`phase`, bytes, `percent`,
   terminal `done`, machine-readable `error_code`).
   Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
