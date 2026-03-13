@@ -1091,4 +1091,8 @@ grpc::Status TargetMaterializationService::publish_target_replica(
   return target_publish_service_.publish_target_replica(rctx, req, resp);
 }
 
+TargetWriteRegistry::Record TargetMaterializationService::remember_target_write(TargetWriteRegistry::Record record) {
+  return target_publish_service_.remember_target_write(std::move(record));
+}
+
 } // namespace tensorcast::daemon

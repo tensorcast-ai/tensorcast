@@ -30,6 +30,30 @@ Status StoreDaemonServiceImpl::MaterializeIntoMappedTarget(
   return materialization_controller_->materialize_into_mapped_target(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::CreateOwnedBinding(
+    grpc::ServerContext* ctx,
+    const v2::CreateOwnedBindingRequest* req,
+    v2::CreateOwnedBindingResponse* resp) {
+  RpcContext rctx{"CreateOwnedBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->create_owned_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::RefillOwnedBinding(
+    grpc::ServerContext* ctx,
+    const v2::RefillOwnedBindingRequest* req,
+    v2::RefillOwnedBindingResponse* resp) {
+  RpcContext rctx{"RefillOwnedBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->refill_owned_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::CloseOwnedBinding(
+    grpc::ServerContext* ctx,
+    const v2::CloseOwnedBindingRequest* req,
+    v2::CloseOwnedBindingResponse* resp) {
+  RpcContext rctx{"CloseOwnedBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->close_owned_binding(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::ConfirmReplica(
     grpc::ServerContext* ctx,
     const v2::ConfirmReplicaRequest* req,

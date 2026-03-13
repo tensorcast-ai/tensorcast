@@ -41,6 +41,12 @@ DaemonKernel::DaemonKernel(
         if (this->region_registry_) {
           (void)this->region_registry_->handle_pid_exit(static_cast<int>(pid));
         }
+        if (this->handle_leases_) {
+          this->handle_leases_->handle_pid_exit(pid);
+        }
+        if (this->binding_registry_) {
+          this->binding_registry_->handle_pid_exit(static_cast<int>(pid));
+        }
       },
       std::chrono::duration_cast<std::chrono::milliseconds>(options_.proc_check_interval));
   lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
@@ -51,6 +57,7 @@ DaemonKernel::DaemonKernel(
       sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(options_.sessions_ttl.count()));
 
   lip_bridge_ = std::make_unique<LipBridge>(*lip_mgr_);
+  binding_registry_ = std::make_unique<BindingRegistry>();
 
   if (!options_.local_handle_socket_path.empty()) {
     HandleLeaseRegistry::Options hl_opts;

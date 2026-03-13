@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,14 +58,18 @@ class HandleLeaseRegistry {
       CpuMemfdDescriptor memfd,
       absl::Span<const uint32_t> exported_chunks);
 
+  [[nodiscard]] absl::StatusOr<std::string> mint_external_cuda_lease(pid_t pid, std::function<void()> cleanup);
+
   [[nodiscard]] absl::Status release(const std::string& lease_token);
+
+  void handle_pid_exit(pid_t pid);
 
   [[nodiscard]] absl::StatusOr<CpuMemfdDescriptor> get_cpu_memfd_descriptor(const std::string& lease_token) const;
 
   [[nodiscard]] size_t size() const;
 
  private:
-  enum class HandleKind : uint8_t { kCudaIpc = 0, kCpuMemfd = 1 };
+  enum class HandleKind : uint8_t { kCudaIpc = 0, kCpuMemfd = 1, kExternal = 2 };
 
   struct CpuExportState;
   struct GpuExportState;
@@ -75,6 +80,8 @@ class HandleLeaseRegistry {
     SessionLifecycleManager::LeaseId lease_id{0};
     std::shared_ptr<CpuExportState> cpu_export_state;
     std::shared_ptr<GpuExportState> gpu_export_state;
+    pid_t external_owner_pid{0};
+    std::function<void()> external_cleanup;
   };
 
   struct CpuExportState {

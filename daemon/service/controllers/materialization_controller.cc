@@ -22,6 +22,7 @@ MaterializationController::MaterializationController(Dep d)
               .engine = d.engine,
               .source_registry = d.disk_imports,
               .shutdown_signal = d.shutdown_signal,
+              .global_store_client = d.global_store_client,
               .storage_path = d.storage_path,
           }),
       replica_materialization_service_(
@@ -62,6 +63,20 @@ MaterializationController::MaterializationController(Dep d)
               .capability_tokens = d.capability_tokens,
               .external_target_verification_enabled = d.external_target_verification_enabled,
               .storage_path = d.storage_path,
+          }),
+      owner_binding_service_(
+          OwnedBindingService::Dep{
+              .engine = d.engine,
+              .devices = d.devices,
+              .disk_imports = d.disk_imports,
+              .bindings = d.binding_registry,
+              .shutdown_signal = d.shutdown_signal,
+              .identity = d.identity,
+              .global_store_client = d.global_store_client,
+              .handle_leases = d.handle_leases,
+              .capability_tokens = d.capability_tokens,
+              .target_materialization_service = &target_materialization_service_,
+              .storage_path = d.storage_path,
           }) {}
 
 TargetWriteRegistry::Record MaterializationController::insert_target_write_for_testing(
@@ -88,6 +103,27 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     const v2::MaterializeIntoMappedTargetRequest& req,
     v2::MaterializeIntoTargetResponse& resp) {
   return target_materialization_service_.materialize_into_mapped_target(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::create_owned_binding(
+    RpcContext& rctx,
+    const v2::CreateOwnedBindingRequest& req,
+    v2::CreateOwnedBindingResponse& resp) {
+  return owner_binding_service_.create_owned_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::refill_owned_binding(
+    RpcContext& rctx,
+    const v2::RefillOwnedBindingRequest& req,
+    v2::RefillOwnedBindingResponse& resp) {
+  return owner_binding_service_.refill_owned_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::close_owned_binding(
+    RpcContext& rctx,
+    const v2::CloseOwnedBindingRequest& req,
+    v2::CloseOwnedBindingResponse& resp) {
+  return owner_binding_service_.close_owned_binding(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::publish_target_replica(

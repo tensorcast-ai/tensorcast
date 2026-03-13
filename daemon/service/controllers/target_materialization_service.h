@@ -55,6 +55,8 @@ class TargetMaterializationService {
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
+  TargetWriteRegistry::Record remember_target_write(TargetWriteRegistry::Record record);
+
   TargetWriteRegistry::Record insert_target_write_for_testing(TargetWriteRegistry::Record record);
 
  private:

@@ -110,6 +110,7 @@ struct MappedFixture {
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
   tensorcast::daemon::ArtifactSourceRegistry disk_imports;
+  tensorcast::daemon::BindingRegistry binding_registry;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;
@@ -128,6 +129,7 @@ struct MappedFixture {
         scheduler(),
         sessions_svc(session_mgr, verif_tracker, &scheduler, /*lifecycle=*/nullptr, absl::Seconds(60)),
         devices(tensorcast::store::DeviceRegistry::instance()),
+        binding_registry(),
         capability_tokens(
             tensorcast::common::CapabilityTokenConfig{
                 .active = tensorcast::common::CapabilityTokenKey{.version = 1, .secret = "mapped-test-secret"}}),
@@ -142,6 +144,7 @@ struct MappedFixture {
                 .devices = devices,
                 .regions = regions,
                 .disk_imports = disk_imports,
+                .binding_registry = binding_registry,
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,

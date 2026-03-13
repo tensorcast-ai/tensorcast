@@ -11,6 +11,7 @@ import torch
 
 from tensorcast.api.context import CallContext
 from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
+from tensorcast.api.store.owned_binding_slot import OwnedBindingSlot
 from tensorcast.api.store.types import ArtifactError
 
 if TYPE_CHECKING:
@@ -171,7 +172,7 @@ class Binding:
 
     def __init__(
         self,
-        slot: InplaceSlot,
+        slot: InplaceSlot | OwnedBindingSlot,
         *,
         publish: bool = False,
         ctx: CallContext | None = None,

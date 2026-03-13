@@ -38,7 +38,7 @@ links:
 Define one canonical design for TensorCast binding.
 
 `Artifact` is the immutable value handle. `Binding` is the mutable location handle
-that owns or adopts a stable target layout in client-owned CUDA memory and can be
+that owns or adopts a stable target layout in CUDA-backed target memory and can be
 refilled in place while preserving tensor storage pointers.
 
 This document replaces the earlier split between slot-first inplace swap,
@@ -47,18 +47,24 @@ public contract and the runtime rules that make binding safe:
 
 - one user-facing inplace-update abstraction: `Binding`
 - one construction family: `Artifact.bind(...)` and `Artifact.bind_into(...)`
+- one public binding capability surface: `mapping` is valid on both constructors
+- one primitive external-target write entry point: `bind_into(...)`
+- one owner-allocating mapped bind entry point: `bind(..., mapping=...)`
+  allocates under bind semantics and uses the same mapped copy-plan model
+- one TensorCast-managed serving-buffer model for `bind(...)`: TensorCast owns the
+  VRAM and the model process maps borrowed tensor views onto it
 - one safe overwrite lifecycle: preflight -> retire/drain -> overwrite ->
   optional publish -> optional activate
 - one selection identity model: `ArtifactSelection` plus `ByteSpaceRef`
-- one mapped binding model for trace-driven rename/split/merge plans
+- one mapped-binding semantic model for trace-driven rename/split/merge plans
 
 # Problem Statement and Scope
 
 TensorCast needs a long-lived, pointer-stable target location for model weights and
-other user-owned CUDA tensors:
+other CUDA-backed tensors:
 
-1. allocate or adopt CUDA tensors once
-2. fill them from an artifact without creating daemon-owned destination VRAM
+1. allocate or adopt target CUDA storage once
+2. fill it from an artifact under explicit constructor ownership semantics
 3. later replace the bytes in place without changing `torch.Tensor` storage
    pointers
 4. optionally publish the filled target as a routable replica
@@ -103,16 +109,44 @@ The public inplace-update surface is:
 `InplaceSlot` remains the internal lifecycle and state-machine implementation. Users
 should not need to learn slot-oriented concepts.
 
-## Binding Owns The Lifecycle For External-Target Writes
+## Mapping Is A Binding Option, Not A Separate User Concept
 
-Binding is the lifecycle owner for writes into caller-owned CUDA memory:
+`mapping` is part of the `Binding` construction family, not a separate top-level
+abstraction:
 
+- `artifact.bind(device=..., mapping=None, ...)`
+- `artifact.bind_into(target_tensors=..., mapping=None, ...)`
+- `binding.swap(...)`
+
+Users should not need to reason about a distinct public `MappedBinding` type or a
+second inplace-update model. The internal mapped-binding path, copy-plan helpers,
+and mapped target RPCs remain implementation details behind `Binding`.
+
+## Binding Owns The Lifecycle For Target Writes
+
+Binding is the lifecycle owner for writes into stable target CUDA memory:
+
+- `bind(...)` is the allocation path: the binding owns the target location it creates
+- `bind_into(...)` is the adoption path: the binding attaches to caller-provided
+  target storage
 - it manages region registration and cleanup
 - it persists the captured selection and mapped copy plan
 - it handles retire-before-overwrite when a published replica exists
 - it tracks dirty state
 - it owns the optional publish lease lifecycle
 - it performs safe region self-heal when registrations expire or are poisoned
+
+## bind() Is A TensorCast-Managed Serving Buffer
+
+`bind()` is not just "allocate tensors and fill them". Its intended meaning is:
+
+- TensorCast allocates and manages the backing VRAM
+- the model process receives shared-memory or CUDA-IPC mapped tensor views
+- the model process is a borrower of those tensor views, not the memory owner
+- future `swap(...)` calls update the same backing VRAM in place through
+  TensorCast-managed control flow
+
+This is the semantic difference between `bind()` and `bind_into(...)`.
 
 # Public API Surface
 
@@ -149,6 +183,7 @@ class Artifact:
         self,
         device: torch.device | str,
         *,
+        mapping: CopyPlan | None = None,
         packing: str = "byte_space",
         capacity_bytes: int | None = None,
         publish: bool = False,
@@ -176,7 +211,8 @@ Binding supports three packing modes:
 | `"append"` | densely pack tensors in first-request order | local-only quick binding | local-only |
 | `"plan"` | densely pack tensors in caller-defined order | local-only stable reorder | local-only |
 
-Mapped binding requires `packing="byte_space"`.
+Mapped binding requires `packing="byte_space"` on both `bind(...)` and
+`bind_into(...)`.
 
 ## Naming Compliance
 
@@ -237,6 +273,13 @@ Selection capture is a core promise of binding:
 - later `binding.swap("model:v2")` applies the same contract to the new artifact
 - callers must rebind instead of restating slices or names when the layout contract
   changes
+
+For mapped binding, the same rule extends to the copy plan:
+
+- `bind(..., mapping=copy_plan)` and `bind_into(..., mapping=copy_plan)` capture
+  the plan once
+- later `binding.swap("model:v2")` accepts only the new artifact reference
+- callers do not restate `mapping`, `subset`, or `view` on swap
 
 ## Publishability Profile
 
@@ -303,14 +346,33 @@ State meanings:
 
 ## Artifact.bind(...)
 
-`Artifact.bind(...)` is allocate-and-fill sugar:
+`Artifact.bind(...)` is the allocation path for `Binding`.
+
+When `mapping is None`:
 
 1. resolve the artifact selection
-2. allocate target tensors matching the selected layout
-3. register caller-owned CUDA storage as daemon-visible VRAM regions
-4. build a region-backed `TargetLayout`
-5. issue one materialization RPC
-6. return a `Binding`
+2. allocate owned target tensors matching the selected layout
+3. materialize into that owned target location
+4. return the resulting `Binding`
+
+When `mapping is not None`:
+
+1. resolve the artifact selection
+2. validate that the mapping belongs to the allocation-inferable subset
+3. infer destination tensor specs from source selection plus mapping
+4. allocate the owned destination tensors on the requested device through the
+   bind owner path
+5. materialize through the owner-path mapped-binding pipeline
+6. return the resulting `Binding`
+
+Here, "allocate" means `bind(...)` is responsible for creating and owning the
+target location promised by the API. In the owner-path design, the daemon is the
+allocator and memory owner, and the SDK maps exported handles into tensors while
+`Binding` owns the control lifecycle.
+
+`bind(..., mapping=...)` must not silently fall back to the unmapped path,
+silently degrade into `bind_into(...)`, or silently relax layout-inference rules.
+If the mapping is not allocation-inferable under bind semantics, the call fails.
 
 ## Artifact.bind_into(...)
 
@@ -326,9 +388,13 @@ State meanings:
 `bind_into(...)` must not silently accept daemon-owned CUDA IPC imports as future
 swap targets. If the memory is not user-owned, the call fails.
 
+`bind_into(...)` remains the explicit-target primitive. Any future binding mode
+that writes into caller-provided CUDA memory must reduce to `bind_into(...)` plus
+the shared binding lifecycle rules.
+
 ## One Shared External-Target Write Policy
 
-Binding unifies all caller-owned CUDA write paths under one policy surface:
+Binding unifies all target-write paths under one policy surface:
 
 - `Artifact.bind(...)`
 - `Artifact.bind_into(...)`
@@ -336,7 +402,16 @@ Binding unifies all caller-owned CUDA write paths under one policy surface:
 - region-backed write paths that stream directly into caller memory
 
 The rules for selection validation, region retry, publish token handling, and dirty
-semantics must not fork across these paths.
+semantics must not fork across these paths. Constructor semantics stay explicit:
+`bind(...)` allocates, `bind_into(...)` adopts, and requests never silently switch
+between those modes.
+
+The internal write pipelines may differ:
+
+- `bind_into(...)` uses explicit-target region-backed materialization
+- `bind(...)` may use a daemon-owned binding registry and owner-path RPCs
+
+Public lifecycle guarantees must still match across both constructors.
 
 # Swap Flow and Safety Guarantees
 
@@ -346,6 +421,8 @@ A successful `swap(...)` guarantees:
 
 - the target tensors keep the same storage pointers
 - the new artifact resolves to the same binding layout identity
+- the stored selection envelope and stored copy plan, if any, are replayed
+  without the caller restating them
 - if an old published replica exists, it becomes non-exportable before overwrite
   begins
 - the target bytes match the new binding selection after overwrite completes
@@ -369,7 +446,7 @@ sequenceDiagram
     D->>GS: wait for transport drain
     D-->>SDK: retired and non-exportable
   end
-  SDK->>D: materialize into target
+  SDK->>D: materialize into target using stored selection and copy plan
   D->>IO: stream bytes
   D-->>SDK: success plus target_write_token
   opt publish requested
@@ -399,7 +476,7 @@ model is not being read or mutated locally while overwrite is in progress.
 ## Publish Means Routable Replica, Not New Artifact
 
 `binding.publish_replica()` and `swap(..., publish=True)` do not register a new
-artifact. They publish the already-written client-owned target as a routable memory
+artifact. They publish the already-written bound target as a routable memory
 replica for the binding's current artifact and byte-space identity.
 
 ## Publish Requires A Daemon-Minted target_write_token
@@ -428,11 +505,16 @@ not a substitute for publish and does not change artifact immutability.
 
 ## Ownership Model
 
-Binding targets are always client-owned CUDA buffers:
+Binding supports two ownership modes:
 
-- the client owns the memory
+- `bind(...)`: the binding owns the allocation path and returns daemon-owned
+  target storage mapped into SDK tensors
+- `bind_into(...)`: the caller owns the target memory and the binding adopts it
 - the daemon owns the write token, publication authority, and routing-side metadata
 - publish is a while-alive capability, not durable storage
+
+For `bind(...)`, daemon ownership remains hidden behind the `Binding` contract and
+must not change the pointer-stable swap semantics exposed to the caller.
 
 # Mapped Binding
 
@@ -448,6 +530,39 @@ the load semantics are discovered once and then reused:
 
 This is the intended path for vLLM-style traced weight loading without Python copy
 loops.
+
+## Mapping Is First-Class On Binding Construction
+
+Mapped binding is still part of the `Binding` API family:
+
+- `bind_into(..., mapping=...)` is the primitive for explicit target layouts
+- `bind(..., mapping=...)` is the allocate-first convenience for inferable target
+  layouts
+
+The user-facing concept stays `Binding`. The mapped materialization path remains an
+internal execution choice, and constructor ownership semantics stay intact.
+
+## Full Artifact Id In, Rank-Local Partial Layout Out
+
+Binding captures a replay contract at construction time:
+
+- source selection envelope:
+  subset membership/order, view identity or view spec, and selection hashes
+- destination layout identity:
+  the layout that the binding promises to preserve across swaps
+- optional mapped copy plan:
+  the source-to-destination transformation used for mapped binding
+
+Because that contract is persisted on the binding, future `swap(...)` calls only
+need a new full artifact reference such as an artifact id or key. TensorCast must:
+
+- resolve that full artifact reference
+- reapply the stored selection envelope to find the correct partial source bytes
+- reapply the stored copy plan, if present
+- refill the exact same target layout in place
+
+This is especially important for tensor-parallel serving, where each rank binds a
+partial view once and later swaps by full artifact id only.
 
 ## Copy Plan Model
 
@@ -490,6 +605,41 @@ Mapped binding v1 requires:
 - narrow-only view compatibility for mapped source views
 - transpose or permutation views rejected
 
+## Allocation-Inferable Mapping Subset For bind(...)
+
+`bind(..., mapping=...)` is intentionally stricter than
+`bind_into(..., mapping=...)`.
+
+`mapping` alone does not fully describe an arbitrary destination allocation.
+`bind(...)` therefore accepts only the subset where TensorCast can derive one
+unambiguous destination tensor layout for every `dst_name`.
+
+The allocation-inferable subset requires:
+
+- every destination tensor has one unambiguous `dtype`
+- every destination tensor has one unambiguous rank and one shared non-sliced
+  shape profile across all contributing source fragments
+- every destination tensor uses one logical slice dimension for the mapping plan
+- destination coverage is total and gap-free, so the final extent on the sliced
+  dimension is exact rather than a lower bound
+- the inferred destination layout is contiguous with `storage_offset == 0` and
+  compact stride
+- the inferred allocation uses the caller-provided `device`; no per-tensor device
+  overrides exist
+
+If any part of destination allocation remains ambiguous, `bind(..., mapping=...)`
+fails fast and instructs the caller to use `bind_into(...)` with explicit target
+tensors.
+
+Representative rejection cases:
+
+- the desired destination stride is non-contiguous or otherwise custom
+- contributing source fragments disagree on non-sliced extents or `dtype`
+- the mapping would require reshape, permutation, or an under-specified storage
+  contract
+- the plan describes only a source-to-destination correspondence but not one
+  unique allocation
+
 ## Stable Mapped View Identity
 
 Mapped binding derives a stable view identity from:
@@ -508,9 +658,16 @@ actually a different byte-space.
 Mapped binding executes through the mapped target materialization RPC rather than
 ordinary name-aligned target materialization:
 
-- `bind_into(..., mapping=...)` validates and stores the copy plan
+- `bind_into(..., mapping=...)` is the explicit-target primitive validation and
+  materialization path
+- `bind(..., mapping=...)` first infers and allocates an owned target layout, then
+  uses the bind owner-path daemon pipeline
 - target materialization executes inside the daemon pipeline
 - future `swap(...)` reuses the same stored plan and stable mapped view identity
+- explicit-target and owner-path bindings may use different internal daemon RPCs
+  or registries
+- no implicit constructor fallback or public binding subtype is introduced for
+  the mapped bind path
 
 # Runtime Contracts
 
@@ -606,6 +763,40 @@ binding = (
 binding.swap("model:v2")
 ```
 
+## Allocate Serving Layout From Mapping
+
+```python
+binding = (
+    tc.artifact("model:v1")
+    .subset(materialize_names)
+    .view(slices=src_hull)
+    .bind(device="cuda:0", mapping=copy_plan)
+)
+binding.swap("model:v2")
+```
+
+## Tensor-Parallel Serving Profile
+
+For tensor-parallel serving, the intended construction pattern is one binding per
+rank-local layout:
+
+- each rank calls `artifact.subset(...).view(...).bind(...)` or
+  `artifact.subset(...).view(...).bind(mapping=...)`
+- TensorCast owns the rank-local VRAM for each binding created via `bind(...)`
+- the model process maps rank-local tensor views from TensorCast-managed VRAM
+- later `binding.swap(full_artifact_id)` replays the captured rank-local partial
+  selection and optional mapping without restating either
+
+This profile is strong when:
+
+- the TP degree and rank-local layout stay stable across versions
+- the caller wants pointer-stable model parameters backed by TensorCast-managed
+  VRAM
+- updates should be applied in place without Python copy loops
+
+When the TP degree or rank-local layout contract changes, callers should create a
+new binding instead of swapping through the old one.
+
 ## vLLM-Style Mapped Reload
 
 ```python
@@ -636,11 +827,17 @@ None. Binding documentation consolidation does not change `schema.sql`.
 # Trade-offs and Risks
 
 - Binding is inherently non-atomic once overwrite begins.
-- Publish of client-owned VRAM relies on a cooperative client model and a daemon
-  write token instead of full publish-time re-hash.
+- Publish of bound target memory relies on a cooperative client/daemon model and
+  a daemon write token instead of full publish-time re-hash.
 - Mapped binding adds significant validation and identity complexity, but that
   complexity is preferable to re-running Python copy logic or exposing divergent
   swap semantics.
+- `bind(..., mapping=...)` intentionally rejects mappings that do not uniquely
+  determine destination allocation and never silently falls back; callers needing
+  custom layout control must use `bind_into(...)`.
+- Tensor-parallel hot reload remains a per-binding local guarantee; cross-rank
+  cutover still requires external coordination if the application needs global
+  synchronization.
 - Keeping publishability strict can make some local layouts non-routable, but it
   preserves honest routing semantics.
 
@@ -650,24 +847,46 @@ Compatibility policy:
 
 - `Binding` is the only public inplace-update abstraction.
 - `InplaceSlot` remains internal implementation detail.
-- `bind_into(..., mapping=...)` is the additive mapped binding extension.
+- `mapping` is a first-class binding capability on both `bind(...)` and
+  `bind_into(...)`.
+- `bind_into(..., mapping=...)` remains the explicit-target mapped-binding
+  primitive.
+- `bind(..., mapping=...)` is the owner-allocating mapped-binding entry point.
+- owner-path and explicit-target bindings may use different internal daemon
+  pipelines while preserving one public `Binding` contract.
+- no implicit fallback is allowed between `bind(...)`, `bind_into(...)`, mapped,
+  and unmapped binding modes.
 
 Acceptance criteria:
 
 1. `Artifact.bind(...)` and `Artifact.bind_into(...)` return pointer-stable
-   `Binding` objects backed by client-owned CUDA memory.
-2. `artifact.subset(...).view(...).bind(...).swap(...)` reuses the captured
+   `Binding` objects backed by stable CUDA target storage under their respective
+   ownership modes.
+2. For `bind(...)`, TensorCast owns and manages the backing VRAM; the model
+   process observes borrowed mapped tensor views onto that VRAM.
+3. `artifact.subset(...).view(...).bind(...).swap(...)` reuses the captured
    selection without restating it.
-3. `bind_into(..., mapping=copy_plan)` stores the mapping and reuses it on
+4. `bind_into(..., mapping=copy_plan)` stores the mapping and reuses it on
    `swap(...)`.
-4. Publishability checks reject local-only packed layouts and accept canonical,
+5. `bind(..., mapping=copy_plan)` allocates owned destination tensors only when
+   the mapping uniquely determines destination layout, then uses the bind
+   owner-path mapped-binding pipeline.
+6. `bind(..., mapping=copy_plan)` rejects ambiguous or custom-layout mappings and
+   never silently falls back to another binding mode; it directs callers to
+   `bind_into(...)`.
+7. `swap(...)` never requires the caller to restate `mapping`; the binding reuses
+   the plan captured at bind time.
+8. `swap(full_artifact_id)` replays the stored selection envelope and, if
+   present, the stored copy plan to find the correct partial source bytes inside
+   the full artifact.
+9. Publishability checks reject local-only packed layouts and accept canonical,
    stable view, and stable mapped-view identities.
-5. Swap retires any published old replica before overwrite begins.
-6. Overwrite failure marks the binding dirty; publish failure leaves bytes correct
+10. Swap retires any published old replica before overwrite begins.
+11. Overwrite failure marks the binding dirty; publish failure leaves bytes correct
    but local-only.
-7. Binding tolerates safe region self-heal by re-registering regions and retrying
+12. Binding tolerates safe region self-heal by re-registering regions and retrying
    once.
-8. Activation remains daemon-mediated and supports compare-and-set guards.
+13. Activation remains daemon-mediated and supports compare-and-set guards.
 
 # References
 

@@ -136,6 +136,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
       .disk_imports = kernel->source_registry(),
+      .binding_registry = kernel->binding_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
       .async_runtime = *async_runtime,
       .identity = kernel->worker_identity_store(),
@@ -179,6 +180,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   KeyMappingController::Dep kmdep{
       .engine = kernel->engine(),
       .shutdown_signal = kernel->shutdown_signal(),
+      .source_registry = &kernel->source_registry(),
+      .global_store_client = global_store_client,
   };
   auto key_mapping_controller = std::make_unique<KeyMappingController>(kmdep);
 

@@ -200,6 +200,7 @@ void HandleLeaseRegistry::active_leases_gauge_callback(
 
   double cuda_ipc_count = 0.0;
   double cpu_memfd_count = 0.0;
+  double external_count = 0.0;
   {
     absl::MutexLock lock(&self->mu_);
     for (const auto& [token, rec] : self->leases_) {
@@ -208,12 +209,15 @@ void HandleLeaseRegistry::active_leases_gauge_callback(
         cuda_ipc_count += 1.0;
       } else if (rec.kind == HandleKind::kCpuMemfd) {
         cpu_memfd_count += 1.0;
+      } else if (rec.kind == HandleKind::kExternal) {
+        external_count += 1.0;
       }
     }
   }
 
   obs->Observe(cuda_ipc_count, {{"kind", opentelemetry::common::AttributeValue("cuda_ipc")}});
   obs->Observe(cpu_memfd_count, {{"kind", opentelemetry::common::AttributeValue("cpu_memfd")}});
+  obs->Observe(external_count, {{"kind", opentelemetry::common::AttributeValue("external_cuda")}});
 }
 
 void HandleLeaseRegistry::cpu_exports_gauge_callback(
@@ -727,18 +731,87 @@ absl::StatusOr<std::string> HandleLeaseRegistry::mint_cpu_memfd_lease(
   return token;
 }
 
+absl::StatusOr<std::string> HandleLeaseRegistry::mint_external_cuda_lease(pid_t pid, std::function<void()> cleanup) {
+  if (pid <= 0) {
+    return absl::InvalidArgumentError("pid must be > 0");
+  }
+  if (!cleanup) {
+    return absl::InvalidArgumentError("cleanup is required");
+  }
+
+  std::string token;
+  {
+    absl::MutexLock lock(&mu_);
+    if (leases_.size() >= opts_.capacity) {
+      return absl::ResourceExhaustedError("handle lease registry capacity exceeded");
+    }
+    auto mint_status = maybe_rate_limit_mint_locked(absl::Now());
+    if (!mint_status.ok()) {
+      return mint_status;
+    }
+    token = mint_token_locked();
+    leases_[token] = LeaseRecord{
+        .kind = HandleKind::kExternal,
+        .key = {},
+        .lease_id = 0,
+        .cpu_export_state = {},
+        .gpu_export_state = {},
+        .external_owner_pid = pid,
+        .external_cleanup = std::move(cleanup),
+    };
+  }
+  return token;
+}
+
 absl::Status HandleLeaseRegistry::release(const std::string& lease_token) {
   SessionLifecycleManager::LeaseId id = 0;
+  std::function<void()> external_cleanup;
   {
     absl::MutexLock lock(&mu_);
     auto it = leases_.find(lease_token);
     if (it == leases_.end()) {
       return absl::NotFoundError("lease_token not found");
     }
-    id = it->second.lease_id;
+    if (it->second.kind == HandleKind::kExternal) {
+      external_cleanup = std::move(it->second.external_cleanup);
+      leases_.erase(it);
+    } else {
+      id = it->second.lease_id;
+    }
+  }
+  if (external_cleanup) {
+    external_cleanup();
+    return absl::OkStatus();
   }
   lifecycle_->release_lease(id);
   return absl::OkStatus();
+}
+
+void HandleLeaseRegistry::handle_pid_exit(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  std::vector<std::function<void()>> cleanups;
+  {
+    absl::MutexLock lock(&mu_);
+    for (auto it = leases_.begin(); it != leases_.end();) {
+      if (it->second.kind != HandleKind::kExternal || it->second.external_owner_pid != pid) {
+        ++it;
+        continue;
+      }
+      if (it->second.external_cleanup) {
+        cleanups.push_back(std::move(it->second.external_cleanup));
+      }
+      auto erase_it = it;
+      ++it;
+      leases_.erase(erase_it);
+    }
+  }
+  for (auto& cleanup : cleanups) {
+    if (cleanup) {
+      cleanup();
+    }
+  }
 }
 
 absl::StatusOr<HandleLeaseRegistry::CpuMemfdDescriptor> HandleLeaseRegistry::get_cpu_memfd_descriptor(

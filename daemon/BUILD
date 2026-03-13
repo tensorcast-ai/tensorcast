@@ -399,6 +399,20 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "binding_registry_lib",
+    srcs = ["state/binding_registry.cc"],
+    hdrs = ["state/binding_registry.h"],
+    deps = [
+        "//core/common:cuda_memory_lib",
+        "//core/cuda:cuda_ipc_lib",
+        "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
     name = "ipc_region_registry_lib",
     srcs = ["state/ipc_region_registry.cc"],
     hdrs = ["state/ipc_region_registry.h"],
@@ -667,6 +681,7 @@ sc_cc_library(
     deps = [
         ":artifact_source_registry_lib",
         ":background_scheduler_hdr",
+        ":binding_registry_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":handle_lease_registry_lib",
@@ -801,9 +816,11 @@ sc_cc_library(
     srcs = ["service/controllers/key_mapping_controller.cc"],
     hdrs = ["service/controllers/key_mapping_controller.h"],
     deps = [
+        ":artifact_source_registry_lib",
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/time",
@@ -843,6 +860,7 @@ sc_cc_library(
     deps = [
         ":artifact_source_registry_lib",
         ":assembly_operation_service_lib",
+        ":binding_registry_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":disk_artifact_service_lib",
@@ -850,6 +868,7 @@ sc_cc_library(
         ":ipc_region_registry_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
+        ":owned_binding_service_lib",
         ":ref_tracker_hdr",
         ":replica_lifecycle_service_lib",
         ":replica_materialization_service_lib",
@@ -865,6 +884,43 @@ sc_cc_library(
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+    ],
+)
+
+sc_cc_library(
+    name = "owned_binding_service_lib",
+    srcs = ["service/controllers/owned_binding_service.cc"],
+    hdrs = ["service/controllers/owned_binding_service.h"],
+    deps = [
+        ":artifact_source_registry_lib",
+        ":binding_registry_lib",
+        ":device_resolver_hdr",
+        ":grpc_peer_utils_lib",
+        ":handle_lease_registry_lib",
+        ":materialization_index_source_utils_lib",
+        ":materialization_layout_utils_lib",
+        ":materialization_payload_utils_lib",
+        ":materialization_policy_utils_lib",
+        ":materialization_request_common_utils_lib",
+        ":materialization_target_plan_utils_lib",
+        ":rpc_context_hdr",
+        ":shutdown_signal_hdr",
+        ":status_utils",
+        ":target_materialization_service_lib",
+        ":worker_identity_store_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/common:capability_token_lib",
+        "//core/common:selection_identity_lib",
+        "//core/store:global_store_client",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:index_reader",
+        "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/random:random",
+        "@abseil-cpp//absl/strings",
+        "@gsl",
+        "@protobuf",
     ],
 )
 
@@ -1654,6 +1710,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/store:testing_global_store_client_stub",
+        "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
@@ -1927,6 +1984,7 @@ cc_test(
         ":daemon_service_harness_lib",
         "//core/store:store_engine",
         "//core/store:store_engine_options",
+        "//core/store:testing_recording_global_store_client",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",

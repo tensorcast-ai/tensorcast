@@ -175,6 +175,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
       .disk_imports = app->kernel_->source_registry(),
+      .binding_registry = app->kernel_->binding_registry(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
       .async_runtime = app->kernel_->async_runtime(),
       .identity = app->kernel_->worker_identity_store(),
@@ -224,6 +225,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   KeyMappingController::Dep kmdep{
       .engine = app->kernel_->engine(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .source_registry = &app->kernel_->source_registry(),
+      .global_store_client = app->options_.global_store_client,
   };
   app->key_mapping_controller_ = std::make_unique<KeyMappingController>(kmdep);
 

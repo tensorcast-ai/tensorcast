@@ -68,6 +68,21 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::MaterializeIntoMappedTargetRequest* req,
       v2::MaterializeIntoTargetResponse* resp) override;
 
+  grpc::Status CreateOwnedBinding(
+      grpc::ServerContext* ctx,
+      const v2::CreateOwnedBindingRequest* req,
+      v2::CreateOwnedBindingResponse* resp) override;
+
+  grpc::Status RefillOwnedBinding(
+      grpc::ServerContext* ctx,
+      const v2::RefillOwnedBindingRequest* req,
+      v2::RefillOwnedBindingResponse* resp) override;
+
+  grpc::Status CloseOwnedBinding(
+      grpc::ServerContext* ctx,
+      const v2::CloseOwnedBindingRequest* req,
+      v2::CloseOwnedBindingResponse* resp) override;
+
   grpc::Status ConfirmReplica(
       grpc::ServerContext* ctx,
       const v2::ConfirmReplicaRequest* req,
