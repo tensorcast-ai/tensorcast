@@ -66,14 +66,22 @@ def test_start_service_backfills_ports(monkeypatch, tmp_path):
 
     fake_cfg = _Cfg()
 
-    monkeypatch.setattr(service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true"))
-    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(service_manager, "ensure_process_started", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        service_manager, "wait_daemon_ready", lambda host, _port, **_kwargs: host
+        service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true")
     )
-    monkeypatch.setattr(service_manager, "start_log_threads", lambda *args, **kwargs: [])
-    monkeypatch.setattr(service_manager, "get_daemon_config", lambda *args, **kwargs: fake_cfg)
+    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        service_manager, "ensure_process_started", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        service_manager, "wait_daemon_listening", lambda host, _port, **_kwargs: host
+    )
+    monkeypatch.setattr(
+        service_manager, "start_log_threads", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        service_manager, "get_daemon_config", lambda *args, **kwargs: fake_cfg
+    )
     monkeypatch.setattr(service_manager, "preexec_fate_sharing", lambda: None)
 
     inst = service_manager.start_service(
@@ -95,7 +103,9 @@ def test_start_service_backfills_ports(monkeypatch, tmp_path):
     assert daemon_state.get("p2p_address", "").endswith(":62001")
 
     inst_paths = session_paths(inst.id)
-    session_state = json.loads(inst_paths.session_state_json.read_text(encoding="utf-8"))
+    session_state = json.loads(
+        inst_paths.session_state_json.read_text(encoding="utf-8")
+    )
     assert session_state["daemon"]["address"].endswith(":62000")
     assert session_state["daemon"]["p2p_address"].endswith(":62001")
 
@@ -121,14 +131,22 @@ def test_start_service_applies_config_overrides(monkeypatch, tmp_path):
         proc_calls.append(proc)
         return proc
 
-    monkeypatch.setattr(service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true"))
-    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(service_manager, "ensure_process_started", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        service_manager, "wait_daemon_ready", lambda host, _port, **_kwargs: host
+        service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true")
     )
-    monkeypatch.setattr(service_manager, "start_log_threads", lambda *args, **kwargs: [])
-    monkeypatch.setattr(service_manager, "get_daemon_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        service_manager, "ensure_process_started", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        service_manager, "wait_daemon_listening", lambda host, _port, **_kwargs: host
+    )
+    monkeypatch.setattr(
+        service_manager, "start_log_threads", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        service_manager, "get_daemon_config", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(service_manager, "preexec_fate_sharing", lambda: None)
 
     inst = service_manager.start_service(
@@ -187,14 +205,22 @@ def test_start_service_passes_launcher_envs_to_daemon_process(monkeypatch, tmp_p
         return _FakeProc(5000)
 
     monkeypatch.setattr(service_manager, "build_daemon_process_env", _fake_build_env)
-    monkeypatch.setattr(service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true"))
-    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(service_manager, "ensure_process_started", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        service_manager, "wait_daemon_ready", lambda host, _port, **_kwargs: host
+        service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true")
     )
-    monkeypatch.setattr(service_manager, "start_log_threads", lambda *args, **kwargs: [])
-    monkeypatch.setattr(service_manager, "get_daemon_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        service_manager, "ensure_process_started", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        service_manager, "wait_daemon_listening", lambda host, _port, **_kwargs: host
+    )
+    monkeypatch.setattr(
+        service_manager, "start_log_threads", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        service_manager, "get_daemon_config", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(service_manager, "preexec_fate_sharing", lambda: None)
 
     inst = service_manager.start_service(

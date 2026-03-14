@@ -27,7 +27,7 @@ from tensorcast.cli_utils.logs import logs_tail as _logs_tail
 from tensorcast.cli_utils.network import (
     pick_free_tcp_port,
     resolve_connect_host,
-    wait_daemon_ready,
+    wait_daemon_listening,
 )
 from tensorcast.cli_utils.paths import (
     DaemonSession,
@@ -124,7 +124,8 @@ def start_service(
     """Start the C++ StoreDaemon.
 
     - If config listen.port is 0 or missing, pick a free TCP port and pass derived config to daemon.
-    - Startup is always blocking: this call returns only once the daemon is ready (or the process exits).
+    - Startup waits only until the daemon is listening. Data-plane RPC readiness
+      may lag while deferred startup completes.
     """
     try:
         cfg = load_daemon_config(config_path)
@@ -367,7 +368,7 @@ def start_service(
         ensure_process_started(
             proc,
             inst.logs if persist_logs else None,
-            startup_grace=1.0,
+            startup_grace=0.2,
         )
     except ServiceError:
         _cleanup_failed_start(proc, log_threads, inst, so, se)
@@ -387,7 +388,7 @@ def start_service(
             f" (fallback: {', '.join(fallback_hosts)})" if fallback_hosts else ""
         )
         click.echo(
-            f"Waiting for daemon readiness at {connect_host}:{port}{fallback_note}...",
+            f"Waiting for daemon listenability at {connect_host}:{port}{fallback_note}...",
             err=True,
         )
 
@@ -396,7 +397,7 @@ def start_service(
             last_wait_err = last_err
             click.echo(
                 (
-                    "Still waiting for daemon readiness at "
+                    "Still waiting for daemon listenability at "
                     f"{connect_host}:{port} ({elapsed_s:.1f}s elapsed)."
                 ),
                 err=True,
@@ -404,7 +405,7 @@ def start_service(
 
         progress_cb = _progress
 
-    ready_host = wait_daemon_ready(
+    listening_host = wait_daemon_listening(
         connect_host,
         port,
         timeout=None,
@@ -412,7 +413,7 @@ def start_service(
         progress=progress_cb,
         extra_hosts=fallback_hosts,
     )
-    if not ready_host:
+    if not listening_host:
         retcode = proc.poll()
         _cleanup_failed_start(proc, log_threads, inst, so, se)
         log_hint = f" See logs under {inst.logs}" if persist_logs else ""
@@ -428,8 +429,8 @@ def start_service(
             + log_hint
             + err_hint
         )
-    if ready_host != connect_host:
-        connect_host = ready_host
+    if listening_host != connect_host:
+        connect_host = listening_host
         object.__setattr__(inst, "address", f"{connect_host}:{port}")
 
     # Best-effort backfill of effective listen/p2p ports from daemon once it is serving.

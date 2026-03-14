@@ -33,7 +33,7 @@ class GlobalStoreHealth:
 
 
 def ping_daemon(address: str, timeout: float = 1.0) -> bool:
-    """Ping the daemon via GetServerConfig; returns True on success."""
+    """Ping the daemon control plane via GetServerConfig; returns True on success."""
 
     channel = grpc.insecure_channel(address)
     try:
@@ -60,7 +60,7 @@ def get_daemon_config(address: str, timeout: float = 1.0):
 def wait_for_daemon(
     address: str, *, timeout: float | None = 10.0, interval: float = 0.2
 ) -> bool:
-    """Wait for daemon readiness using GetServerConfig."""
+    """Wait for data-plane readiness using GetServerConfig.startup_phase."""
 
     wait_interval = max(0.05, interval)
     deadline = None if timeout is None else time.time() + max(timeout, 0.0)
@@ -68,10 +68,25 @@ def wait_for_daemon(
         rpc_timeout = (
             min(wait_interval, timeout) if timeout is not None else wait_interval
         )
-        if ping_daemon(address, timeout=rpc_timeout):
+        if is_daemon_rpc_ready(address, timeout=rpc_timeout):
             return True
         time.sleep(wait_interval)
     return False
+
+
+def is_daemon_rpc_ready(address: str, timeout: float = 1.0) -> bool:
+    """Return True only when startup-gated daemon RPCs are expected to be usable."""
+
+    resp = get_daemon_config(address, timeout=timeout)
+    if resp is None:
+        return False
+    phase = getattr(resp, "startup_phase", None)
+    if phase in (
+        None,
+        store_daemon_pb2.DAEMON_STARTUP_PHASE_UNSPECIFIED,
+    ):
+        return True
+    return phase == store_daemon_pb2.DAEMON_STARTUP_PHASE_READY
 
 
 def _split_host_port(address: str) -> tuple[str | None, int | None]:
@@ -190,6 +205,7 @@ __all__ = [
     "ping_global_store",
     "wait_for_global_store",
     "ping_daemon",
+    "is_daemon_rpc_ready",
     "wait_for_daemon",
     "get_daemon_config",
 ]

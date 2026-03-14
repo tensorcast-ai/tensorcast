@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from tensorcast import runtime
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
 from tensorcast.cli_utils.config import discover_daemon_config
-from tensorcast.cli_utils.health import ping_daemon
+from tensorcast.cli_utils.health import ping_daemon, wait_for_daemon
 from tensorcast.cli_utils.paths import runtime_lock_path, runtime_root, session_paths
 from tensorcast.cli_utils.process import (
     atomic_write_json,
@@ -54,11 +54,13 @@ _ctx_lock: "threading.Lock" = threading.Lock()
 _AUTO_STATE_SCHEMA_VERSION = 1
 _AUTO_STATUS_EMPTY = "EMPTY"
 _AUTO_STATUS_STARTING = "STARTING"
+_AUTO_STATUS_LISTENING = "LISTENING"
 _AUTO_STATUS_READY = "READY"
 _AUTO_STATUS_FAILED = "FAILED"
 _AUTO_STATUS_VALUES = {
     _AUTO_STATUS_EMPTY,
     _AUTO_STATUS_STARTING,
+    _AUTO_STATUS_LISTENING,
     _AUTO_STATUS_READY,
     _AUTO_STATUS_FAILED,
 }
@@ -251,6 +253,35 @@ def _clear_auto_state_if_matches(
             return
         with contextlib.suppress(FileNotFoundError):
             _auto_state_path().unlink()
+
+
+def _promote_auto_state_ready_when_rpc_ready(
+    *, session_id: str | None, address: str
+) -> None:
+    def _monitor() -> None:
+        if not wait_for_daemon(address, timeout=None):
+            return
+        with file_lock(runtime_lock_path()):
+            state = _read_auto_state_locked()
+            tracked_session = str(state.get("session_id", "") or "")
+            tracked_address = str(state.get("address", "") or "")
+            if tracked_session != (session_id or "") or tracked_address != address:
+                return
+            if (
+                str(state.get("status", _AUTO_STATUS_EMPTY)).upper()
+                != _AUTO_STATUS_LISTENING
+            ):
+                return
+            ready = dict(state)
+            ready["status"] = _AUTO_STATUS_READY
+            ready["error_code"] = ""
+            ready["error_message"] = ""
+            _write_auto_state_locked(ready)
+
+    thread = threading.Thread(
+        target=_monitor, name="tensorcast-auto-ready-promoter", daemon=True
+    )
+    thread.start()
 
 
 def _auto_wait_timeout_seconds() -> float:
@@ -610,7 +641,10 @@ def _init_auto_mode(
             state_hash = (
                 str(state_hash_raw).strip() if isinstance(state_hash_raw, str) else ""
             )
-            enforce_hash = status == _AUTO_STATUS_STARTING or (
+            enforce_hash = status in {
+                _AUTO_STATUS_STARTING,
+                _AUTO_STATUS_LISTENING,
+            } or (
                 status == _AUTO_STATUS_READY
                 and bool(existing_address)
                 and bool(state_address)
@@ -650,7 +684,7 @@ def _init_auto_mode(
                             ),
                             state=state,
                         )
-            elif status == _AUTO_STATUS_READY:
+            elif status in {_AUTO_STATUS_LISTENING, _AUTO_STATUS_READY}:
                 owner_pid = _coerce_int(state.get("owner_pid"), default=0)
                 if owner_pid > 0 and not _owner_alive(
                     owner_pid, state.get("owner_fingerprint")
@@ -659,17 +693,17 @@ def _init_auto_mode(
                     _write_auto_state_locked(_default_auto_state())
                     next_action = "reset"
                 else:
-                    ready_address = state.get("address")
-                    if isinstance(ready_address, str) and ready_address:
-                        connect_address = ready_address
+                    listening_address = state.get("address")
+                    if isinstance(listening_address, str) and listening_address:
+                        connect_address = listening_address
                         next_action = "connect"
                     elif existing_address:
                         connect_address = existing_address
                         next_action = "connect"
                     else:
                         raise _auto_error(
-                            code="AUTO_READY_INVALID",
-                            reason="ready state is missing daemon address",
+                            code="AUTO_LISTENING_INVALID",
+                            reason="listening state is missing daemon address",
                             state=state,
                         )
             elif status == _AUTO_STATUS_STARTING:
@@ -755,7 +789,12 @@ def _init_auto_mode(
                 else ""
             )
             if (
-                latest_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
+                latest_status
+                in {
+                    _AUTO_STATUS_LISTENING,
+                    _AUTO_STATUS_READY,
+                    _AUTO_STATUS_FAILED,
+                }
                 and latest_address
                 and latest_address == connect_address
                 and not latest_owner_alive
@@ -775,7 +814,12 @@ def _init_auto_mode(
                         refreshed.get("owner_pid"), default=0
                     )
                     if (
-                        refreshed_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
+                        refreshed_status
+                        in {
+                            _AUTO_STATUS_LISTENING,
+                            _AUTO_STATUS_READY,
+                            _AUTO_STATUS_FAILED,
+                        }
                         and refreshed_address == connect_address
                         and not _owner_alive(
                             refreshed_owner_pid, refreshed.get("owner_fingerprint")
@@ -825,16 +869,20 @@ def _init_auto_mode(
                     _write_auto_state_locked(failed)
                 raise
             with file_lock(runtime_lock_path()):
-                ready = dict(leader_state)
-                ready["status"] = _AUTO_STATUS_READY
-                ready["address"] = ctx.address
-                ready["session_id"] = ctx.session_id or ""
-                ready["logs_dir"] = (
+                listening = dict(leader_state)
+                listening["status"] = _AUTO_STATUS_LISTENING
+                listening["address"] = ctx.address
+                listening["session_id"] = ctx.session_id or ""
+                listening["logs_dir"] = (
                     str(session_paths(ctx.session_id).logs) if ctx.session_id else ""
                 )
-                ready["error_code"] = ""
-                ready["error_message"] = ""
-                _write_auto_state_locked(ready)
+                listening["error_code"] = ""
+                listening["error_message"] = ""
+                _write_auto_state_locked(listening)
+            _promote_auto_state_ready_when_rpc_ready(
+                session_id=ctx.session_id,
+                address=ctx.address,
+            )
             return ctx
 
         time.sleep(_AUTO_POLL_INTERVAL_SECONDS)
