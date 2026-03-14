@@ -1,18 +1,13 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-"""Network helpers: port selection, readiness probes, and address normalization."""
+"""Network helpers: port selection, listen probes, and address normalization."""
 
 from __future__ import annotations
 
-import contextlib
 import socket
 import subprocess
 import time
 from typing import Any, Callable, Iterable
-
-import grpc
-
-from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 
 
 def resolve_connect_host(listen_host: str | None) -> str:
@@ -38,7 +33,7 @@ def pick_free_tcp_port() -> int:
         return int(s.getsockname()[1])
 
 
-def wait_daemon_ready(
+def wait_daemon_listening(
     host: str,
     port: int,
     timeout: float | None = 20.0,
@@ -63,40 +58,23 @@ def wait_daemon_ready(
         seen.add(candidate)
     if proc is not None and proc.poll() is not None:
         return None
-    stubs: list[
-        tuple[str, grpc.Channel, store_daemon_pb2_grpc.StoreDaemonServiceStub]
-    ] = []
-    for candidate in candidates:
-        addr = f"{candidate}:{port}"
-        channel = grpc.insecure_channel(addr)
-        stubs.append(
-            (candidate, channel, store_daemon_pb2_grpc.StoreDaemonServiceStub(channel))
-        )
-    try:
-        while deadline is None or time.time() < deadline:
-            if proc is not None and proc.poll() is not None:
-                return None
-            for candidate, _channel, stub in stubs:
-                try:
-                    stub.GetServerConfig(
-                        store_daemon_pb2.GetServerConfigRequest(), timeout=0.8
-                    )
-                    return candidate
-                except Exception as e:  # noqa: BLE001
-                    last_err = e
-                    if proc is not None and proc.poll() is not None:
-                        return None
-            now = time.time()
-            if progress is not None and now - last_report >= max(
-                progress_interval, 0.5
-            ):
-                progress(now - start_ts, last_err)
-                last_report = now
-            time.sleep(0.2)
-    finally:
-        for _candidate, channel, _stub in stubs:
-            with contextlib.suppress(Exception):
-                channel.close()
+    while deadline is None or time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return None
+        for candidate in candidates:
+            try:
+                with socket.create_connection((candidate, port), timeout=0.2):
+                    pass
+                return candidate
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if proc is not None and proc.poll() is not None:
+                    return None
+        now = time.time()
+        if progress is not None and now - last_report >= max(progress_interval, 0.5):
+            progress(now - start_ts, last_err)
+            last_report = now
+        time.sleep(0.2)
     # For debugging purposes; caller can log if desired
     _ = last_err
     return None

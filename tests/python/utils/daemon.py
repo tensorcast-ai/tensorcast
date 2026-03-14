@@ -61,9 +61,15 @@ def _wait_ready(
         try:
             chan = grpc.insecure_channel(listen_addr)
             stub = _pb2_grpc.StoreDaemonServiceStub(chan)
-            stub.GetServerConfig(_pb2.GetServerConfigRequest(), timeout=1.0)
+            resp = stub.GetServerConfig(_pb2.GetServerConfigRequest(), timeout=1.0)
             chan.close()
-            return
+            phase = getattr(resp, "startup_phase", None)
+            if phase in (
+                None,
+                _pb2.DAEMON_STARTUP_PHASE_UNSPECIFIED,
+                _pb2.DAEMON_STARTUP_PHASE_READY,
+            ):
+                return
         except Exception:
             time.sleep(0.2)
     try:
@@ -94,7 +100,7 @@ def start_daemon_binary(
     - Ensures libtorch libs are on LD_LIBRARY_PATH
     - Sets debug.cuda.enable_same_process_ipc_fallback according to flag
     - Optionally wires Global Store endpoints when global_store_addr is set
-    - Waits for readiness by issuing GetServerConfig
+    - Waits for data-plane readiness via GetServerConfig.startup_phase
     """
     repo_root = Path(__file__).resolve().parents[3]
     bin_path = _resolve_daemon_binary(repo_root)

@@ -10,11 +10,15 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable, Mapping
 
 import pytest
 
-from tensorcast.cli_utils.proc import build_daemon_process_env
+from tensorcast.cli_utils.proc import (
+    _discover_daemon_library_paths,
+    build_daemon_process_env,
+)
 
 _REQUIRED_LIBRARIES: tuple[str, ...] = (
     "libnvrtc.so.12",
@@ -191,6 +195,42 @@ def test_build_daemon_process_env_merges_configured_launcher_envs(
         "/tensorcast/lib",
         "/torch/lib",
     ]
+
+
+def test_discover_daemon_library_paths_avoids_importing_torch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    torch_root = site_packages / "torch"
+    torch_lib = torch_root / "lib"
+    nvidia_lib = site_packages / "nvidia" / "cuda_runtime" / "lib"
+    torch_lib.mkdir(parents=True)
+    nvidia_lib.mkdir(parents=True)
+
+    real_import = __import__
+
+    def _guarded_import(name, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if name == "torch":
+            raise AssertionError("torch should not be imported during discovery")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _guarded_import)
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: (
+            SimpleNamespace(
+                origin=str(torch_root / "__init__.py"),
+                submodule_search_locations=[str(torch_root)],
+            )
+            if name == "torch"
+            else None
+        ),
+    )
+
+    paths = _discover_daemon_library_paths()
+
+    assert torch_lib.resolve() in paths
+    assert nvidia_lib.resolve() in paths
 
 
 @pytest.mark.integration

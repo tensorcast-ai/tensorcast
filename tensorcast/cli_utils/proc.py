@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.resources as ir
+import importlib.util
 import os
 import platform
 import signal
@@ -39,20 +40,27 @@ def _discover_daemon_library_paths() -> list[Path]:
     site_packages: Path | None = None
 
     try:
-        import torch
+        torch_spec = importlib.util.find_spec("torch")
     except Exception:
-        torch = None
+        torch_spec = None
 
-    if torch is not None:
-        try:
-            torch_root = Path(torch.__file__).resolve().parent
-        except Exception:
-            torch_root = None
-        if torch_root is not None:
-            torch_lib = torch_root / "lib"
-            if torch_lib.is_dir():
-                paths.append(torch_lib)
-            site_packages = torch_root.parent
+    torch_root: Path | None = None
+    if torch_spec is not None:
+        locations = getattr(torch_spec, "submodule_search_locations", None)
+        with contextlib.suppress(Exception):
+            if locations:
+                first_location = next(iter(locations), None)
+                if first_location:
+                    torch_root = Path(str(first_location)).resolve()
+        if torch_root is None and getattr(torch_spec, "origin", None):
+            with contextlib.suppress(Exception):
+                torch_root = Path(str(torch_spec.origin)).resolve().parent
+
+    if torch_root is not None:
+        torch_lib = torch_root / "lib"
+        if torch_lib.is_dir():
+            paths.append(torch_lib)
+        site_packages = torch_root.parent
 
     if site_packages is None:
         import site as _site

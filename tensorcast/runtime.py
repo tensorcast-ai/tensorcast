@@ -592,7 +592,7 @@ def start(
                 fingerprint=None,
             )
 
-    return status(inst.id) or RuntimeSession(
+    return _build_runtime_session(inst.id) or RuntimeSession(
         session_id=inst.id,
         daemon_pid=None,
         daemon_address=None,
