@@ -22,8 +22,9 @@ absl::StatusOr<std::string> compute_index_multihash(
     std::string_view index_key_hex);
 
 // Compute data multihash (multibase base32 over tree-hash sha2-256 root) for a
-// contiguous GPU buffer [gpu_ptr, size). The implementation streams device→host
-// in 4MiB leaves and reduces them as a Merkle tree.
+// contiguous GPU buffer [gpu_ptr, size). Under the real CUDA backend this
+// requires the NVRTC-based device hashing path; FakeCuda falls back to
+// streaming device→host in 4MiB leaves.
 absl::StatusOr<std::string> compute_data_multihash_from_gpu(
     void* gpu_ptr,
     uint64_t total_size,

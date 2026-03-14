@@ -1207,7 +1207,7 @@ TEST_CASE("StoreEngine materializes variant slice with distinct residency", "[st
 }
 
 TEST_CASE(
-    "StoreEngine AUTO variant falls back to disk when Global Store lacks view",
+    "StoreEngine AUTO variant falls back directly to disk when Global Store lacks view",
     "[store_engine][variant][auto][fallback]") {
   const std::string artifact_name = "auto_variant_artifact";
   fs::path temp_root = fs::temp_directory_path() / "store_engine_variant_auto";
@@ -1271,13 +1271,7 @@ TEST_CASE(
   CHECK(std::all_of(gs_stub->view_requests.begin(), gs_stub->view_requests.end(), [](const std::string& view_id) {
     return view_id == "view-weights-narrow";
   }));
-  REQUIRE_FALSE(gs_stub->replica_requests.empty());
-  CHECK(
-      std::all_of(
-          gs_stub->replica_requests.begin(), gs_stub->replica_requests.end(), [&](const std::string& artifact_id) {
-            return artifact_id == canonical_artifact_id;
-          }));
-  CHECK(gs_stub->replica_requests.size() == gs_stub->view_requests.size());
+  CHECK(gs_stub->replica_requests.empty());
   REQUIRE(gs_stub->registered_replicas.size() == 1);
   CHECK(gs_stub->registered_replicas[0] == canonical_artifact_id);
   REQUIRE(gs_stub->recorded_views.size() == 1);

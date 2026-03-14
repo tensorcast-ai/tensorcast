@@ -141,7 +141,6 @@ void maybe_attach_safetensors_source_index(const std::filesystem::path& artifact
   }
   info->source_total_size_bytes = compute_total_size_bytes(*source_bytes_or);
   info->source_index_json = std::move(*source_bytes_or);
-  info->is_safetensors = true;
 }
 
 } // namespace
