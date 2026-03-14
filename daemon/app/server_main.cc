@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
@@ -41,6 +42,7 @@
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/replica/collective_disk_loader.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/app/daemon_app.h"
@@ -188,6 +190,13 @@ uint64_t saturating_mul_u64(uint64_t lhs, uint64_t rhs) {
     return std::numeric_limits<uint64_t>::max();
   }
   return lhs * rhs;
+}
+
+uint64_t saturating_add_u64(uint64_t lhs, uint64_t rhs) {
+  if (lhs > (std::numeric_limits<uint64_t>::max() - rhs)) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return lhs + rhs;
 }
 
 std::string format_binary_bytes(uint64_t bytes) {
@@ -458,6 +467,17 @@ absl::StatusOr<std::optional<uint64_t>> read_cgroup_v2_memory_max() {
   }
 }
 
+absl::StatusOr<std::optional<uint64_t>> read_memlock_limit_bytes() {
+  struct rlimit lim{};
+  if (::getrlimit(RLIMIT_MEMLOCK, &lim) != 0) {
+    return absl::ErrnoToStatus(errno, "getrlimit(RLIMIT_MEMLOCK) failed");
+  }
+  if (lim.rlim_cur == RLIM_INFINITY) {
+    return std::optional<uint64_t>{};
+  }
+  return std::optional<uint64_t>{static_cast<uint64_t>(lim.rlim_cur)};
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -563,6 +583,7 @@ int main(int argc, char** argv) {
   if (cfg.pinned_memory().has_allocation_timeout()) {
     pm_cfg.allocation_timeout = duration_to_absl(cfg.pinned_memory().allocation_timeout());
   }
+  pm_cfg.defer_host_registration = true;
   pm_cfg.classes.reserve(static_cast<size_t>(cfg.pinned_memory().classes_size()));
   uint64_t pinned_total_bytes = 0;
   for (const auto& cls : cfg.pinned_memory().classes()) {
@@ -577,6 +598,18 @@ int main(int argc, char** argv) {
 
   const uint64_t stable_bytes =
       (cfg.engine().has_memory_tiers() ? static_cast<uint64_t>(cfg.engine().memory_tiers().stable_bytes()) : 0);
+  const uint64_t startup_required_bytes = saturating_add_u64(pinned_total_bytes, stable_bytes);
+  auto cgroup_limit_or = read_cgroup_v2_memory_max();
+  if (cgroup_limit_or.ok() && cgroup_limit_or->has_value() && startup_required_bytes > **cgroup_limit_or) {
+    LOG(ERROR) << "INVALID_ARGUMENT: cgroup memory.max too small for pinned+stable startup reservation: required="
+               << startup_required_bytes << " memory.max=" << **cgroup_limit_or;
+    return 2;
+  }
+  auto memlock_limit_or = read_memlock_limit_bytes();
+  if (memlock_limit_or.ok() && memlock_limit_or->has_value() && pinned_total_bytes > **memlock_limit_or) {
+    LOG(WARNING) << "RLIMIT_MEMLOCK may be too small for pinned pool registration: pinned_total=" << pinned_total_bytes
+                 << " memlock_limit=" << **memlock_limit_or << ". cudaHostRegister may fail during startup.";
+  }
   const absl::Status startup_mem = daemon::preflight_startup_memory(pinned_total_bytes, stable_bytes);
   if (!startup_mem.ok()) {
     LOG(ERROR) << "RESOURCE_EXHAUSTED: startup memory preflight failed: " << startup_mem;
@@ -625,14 +658,6 @@ int main(int argc, char** argv) {
     return 2;
   }
   const bool fake_cuda_backend = cuda::is_fake();
-  if (!fake_cuda_backend && detected_gpu_count > 0) {
-    const absl::Status gpu_hash_prewarm = common::prewarm_gpu_hash_nvrtc_for_visible_devices();
-    if (!gpu_hash_prewarm.ok()) {
-      LOG(ERROR) << "FAILED_PRECONDITION: GPU hash NVRTC prewarm failed during startup: " << gpu_hash_prewarm;
-      return 2;
-    }
-    LOG(INFO) << "GPU hash NVRTC prewarm complete for detected_gpu_count=" << detected_gpu_count;
-  }
   const daemon::EnginePinnedConcurrencySizing engine_sizing =
       daemon::compute_engine_pinned_concurrency_sizing(streaming_buffer_chunks, detected_gpu_count, fake_cuda_backend);
   if (engine_sizing.required_slices > 0) {
@@ -872,16 +897,6 @@ int main(int argc, char** argv) {
     if (!memfd_probe.ok()) {
       LOG(ERROR) << "INVALID_ARGUMENT: CPU shared memory enabled but memfd probe failed: " << memfd_probe;
       return 2;
-    }
-    auto limit_or = read_cgroup_v2_memory_max();
-    if (limit_or.ok() && limit_or->has_value()) {
-      const uint64_t limit = **limit_or;
-      const uint64_t required = static_cast<uint64_t>(pinned_total_bytes) + cfg.engine().memory_tiers().stable_bytes();
-      if (required > limit) {
-        LOG(ERROR) << "INVALID_ARGUMENT: cgroup memory.max too small for pinned+stable: required=" << required
-                   << " memory.max=" << limit;
-        return 2;
-      }
     }
   }
 
@@ -1172,6 +1187,40 @@ int main(int argc, char** argv) {
   app_opts.grpc = std::move(grpc_opts);
   app_opts.worker_lifecycle = lifecycle_opts;
   app_opts.global_store_client = shared_global_store_client;
+  app_opts.startup_coordinator = std::make_shared<daemon::StartupCoordinator>();
+  app_opts.deferred_startup_work = [pma, fake_cuda_backend, detected_gpu_count]() -> absl::Status {
+    const absl::Status register_status = pma->register_all_pools();
+    if (!register_status.ok()) {
+      return absl::Status(
+          register_status.code(),
+          absl::StrCat("deferred pinned pool host registration failed: ", register_status.message()));
+    }
+    LOG(INFO) << "Deferred pinned pool host registration complete";
+
+    if (!fake_cuda_backend && detected_gpu_count > 0) {
+      const absl::Status gpu_hash_prewarm = common::prewarm_gpu_hash_nvrtc_for_visible_devices();
+      if (!gpu_hash_prewarm.ok()) {
+        return absl::Status(
+            gpu_hash_prewarm.code(),
+            absl::StrCat("GPU hash NVRTC prewarm failed during deferred startup: ", gpu_hash_prewarm.message()));
+      }
+      LOG(INFO) << "GPU hash NVRTC prewarm complete for detected_gpu_count=" << detected_gpu_count;
+      if (detected_gpu_count > 1) {
+        std::vector<int> clique_devices;
+        clique_devices.reserve(static_cast<size_t>(detected_gpu_count));
+        for (int device_id = 0; device_id < detected_gpu_count; ++device_id) {
+          clique_devices.push_back(device_id);
+        }
+        const absl::Status clique_prewarm = store::replica::warm_collective_clique_cache(clique_devices);
+        if (!clique_prewarm.ok()) {
+          return absl::Status(
+              clique_prewarm.code(),
+              absl::StrCat("collective clique prewarm failed during deferred startup: ", clique_prewarm.message()));
+        }
+      }
+    }
+    return absl::OkStatus();
+  };
 
   auto app_or = daemon::DaemonApp::create(std::move(app_opts));
   if (!app_or.ok()) {

@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "core/common/memory/cuda_memory.h"
@@ -36,5 +37,7 @@ CollectiveDiskLoadResult try_collective_disk_load(
     const CollectiveDiskLoadRequest& request,
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout);
+
+absl::Status warm_collective_clique_cache(const std::vector<int>& device_ids);
 
 } // namespace tensorcast::store::replica

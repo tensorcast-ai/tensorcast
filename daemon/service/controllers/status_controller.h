@@ -5,9 +5,11 @@
 #pragma once
 
 #include <chrono>
+#include <memory>
 #include <string>
 
 #include "core/store/store_engine.h"
+#include "daemon/app/startup_coordinator.h"
 #include "daemon/service/controllers/status_assembler.h"
 #include "daemon/service/replica_listing.h"
 #include "daemon/service/rpc_context.h"
@@ -29,6 +31,7 @@ class StatusController {
     std::chrono::steady_clock::time_point start_time;
     std::string local_handle_socket_path;
     bool cpu_shared_memory_enabled{true};
+    std::shared_ptr<StartupCoordinator> startup_coordinator;
   };
 
   explicit StatusController(Dep d) : d_(std::move(d)) {}
@@ -42,6 +45,7 @@ class StatusController {
     resp.set_tx_slice_bytes(static_cast<uint64_t>(e.get_tx_slice_bytes()));
     resp.set_local_handle_socket_path(d_.local_handle_socket_path);
     resp.set_cpu_shared_memory_enabled(d_.cpu_shared_memory_enabled);
+    resp.set_startup_phase(startup_phase_proto());
     rctx.mark_success();
     return grpc::Status::OK;
   }
@@ -113,6 +117,21 @@ class StatusController {
 
  private:
   Dep d_;
+
+  v2::DaemonStartupPhase startup_phase_proto() const {
+    if (!d_.startup_coordinator) {
+      return v2::DaemonStartupPhase::DAEMON_STARTUP_PHASE_READY;
+    }
+    switch (d_.startup_coordinator->current_phase()) {
+      case StartupCoordinator::Phase::kListening:
+        return v2::DaemonStartupPhase::DAEMON_STARTUP_PHASE_LISTENING;
+      case StartupCoordinator::Phase::kReady:
+        return v2::DaemonStartupPhase::DAEMON_STARTUP_PHASE_READY;
+      case StartupCoordinator::Phase::kFailed:
+        return v2::DaemonStartupPhase::DAEMON_STARTUP_PHASE_FAILED;
+    }
+    return v2::DaemonStartupPhase::DAEMON_STARTUP_PHASE_FAILED;
+  }
 
   std::chrono::seconds uptime() const {
     return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - d_.start_time);

@@ -3,6 +3,7 @@
 #include "daemon/app/daemon_app.h"
 
 #include <filesystem>
+#include <thread>
 #include <utility>
 
 #include <fcntl.h>
@@ -124,6 +125,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (options.grpc.listen_addr.empty()) {
     return absl::InvalidArgumentError("DaemonApp requires listen_addr");
   }
+  if (!options.startup_coordinator) {
+    options.startup_coordinator = std::make_shared<StartupCoordinator>();
+  }
   if (options.daemon_options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.daemon_options.handle_lease_ttl;
     if (ttl_ms.count() < 0) {
@@ -219,6 +223,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .start_time = app->kernel_->start_time(),
       .local_handle_socket_path = app->options_.daemon_options.local_handle_socket_path,
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
+      .startup_coordinator = app->options_.startup_coordinator,
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
@@ -268,6 +273,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .replica_session_controller = *app->replica_session_controller_,
       .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .startup_coordinator = app->options_.startup_coordinator,
       .source_registry = &app->kernel_->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
@@ -318,6 +324,32 @@ absl::Status DaemonApp::start() {
     return grpc_st;
   }
 
+  if (options_.deferred_startup_work) {
+    options_.startup_coordinator->begin_startup(
+        "daemon startup still in progress: registering pinned pools and prewarming GPU caches");
+    auto deferred_work = options_.deferred_startup_work;
+    auto startup_coordinator = options_.startup_coordinator;
+    auto startup_failure_is_fatal = startup_failure_is_fatal_;
+    std::thread([deferred_work = std::move(deferred_work),
+                 startup_coordinator = std::move(startup_coordinator),
+                 startup_failure_is_fatal]() mutable {
+      const absl::Status startup_status = deferred_work();
+      if (startup_status.ok()) {
+        startup_coordinator->mark_ready();
+        LOG(INFO) << "Deferred daemon startup tasks completed";
+        return;
+      }
+      startup_coordinator->mark_failed(startup_status);
+      if (!startup_failure_is_fatal->load(std::memory_order_acquire)) {
+        LOG(WARNING) << "Deferred daemon startup failed after shutdown began: " << startup_status;
+        return;
+      }
+      LOG(FATAL) << "Deferred daemon startup failed: " << startup_status;
+    }).detach();
+  } else if (options_.startup_coordinator) {
+    options_.startup_coordinator->mark_ready();
+  }
+
   if (worker_lifecycle_manager_) {
     auto st = worker_lifecycle_manager_->start();
     if (!st.ok()) {
@@ -339,6 +371,7 @@ absl::Status DaemonApp::stop(absl::Time deadline) {
   if (!stop_called_.compare_exchange_strong(expected, true)) {
     return absl::OkStatus();
   }
+  startup_failure_is_fatal_->store(false, std::memory_order_release);
 
   kernel_->begin_shutdown();
 
