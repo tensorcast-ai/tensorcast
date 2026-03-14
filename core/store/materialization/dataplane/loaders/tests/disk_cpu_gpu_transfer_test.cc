@@ -43,19 +43,16 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   const size_t size1 = 1024 * 2;
   const size_t total_size = size0 + size1;
 
-  fs::path base = fs::temp_directory_path() / "cpu_to_gpu_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  tensorcast::testing::TestTempDir base("cpu_to_gpu_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
-  fs::path path0 = base / artifact_dir_name / p0;
-  fs::path path1 = base / artifact_dir_name / p1;
+  fs::path path0 = base.path() / artifact_dir_name / p0;
+  fs::path path1 = base.path() / artifact_dir_name / p1;
   REQUIRE(create_dummy_file(path0, size0, 'X'));
   REQUIRE(create_dummy_file(path1, size1, 'Y'));
 
   // RFC-0007 metadata for standard partitions
-  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
   // Combined original data
   auto data0 = read_file_content(path0);
@@ -76,7 +73,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
 
   // Use new DiskSource
   DiskSource disk_src;
-  disk_src.path = base / artifact_dir_name;
+  disk_src.path = base.path() / artifact_dir_name;
 
   // Use aggregate initialization for ReplicaConfig
   // Set max_buffer_bytes to match the available pool size
@@ -119,11 +116,6 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   REQUIRE(copy_status.ok());
 
   REQUIRE(host_buf == combined);
-
-  // Teardown
-  replica.reset();
-  pool.reset();
-  fs::remove_all(base);
 }
 
 TEST_CASE(
@@ -139,16 +131,13 @@ TEST_CASE(
   const size_t chunk_bytes = 1 * 1024 * 1024; // 1 MiB UMA chunking for the test fixture
   const size_t payload_size = chunk_bytes * 2; // two full chunks
 
-  fs::path base = fs::temp_directory_path() / "preemptible_off_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  tensorcast::testing::TestTempDir base("preemptible_off_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
-  fs::path shard_path = base / artifact_dir_name / shard_name;
+  fs::path shard_path = base.path() / artifact_dir_name / shard_name;
   REQUIRE(create_dummy_file(shard_path, payload_size, 'Z'));
 
-  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
   const size_t pool_total = 4 * chunk_bytes;
   const size_t pool_chunk = chunk_bytes / 4;
@@ -164,7 +153,7 @@ TEST_CASE(
   mem_tier_cfg.preemptible_low_watermark_ratio = 0.2;
 
   DiskSource disk_src;
-  disk_src.path = base / artifact_dir_name;
+  disk_src.path = base.path() / artifact_dir_name;
 
   ReplicaConfig cfg{
       .source = disk_src,
@@ -215,8 +204,4 @@ TEST_CASE(
     REQUIRE(rec.cpu != ChunkState::PREEMPTIBLE);
     REQUIRE(rec.cpu != ChunkState::EVICTED);
   }
-
-  replica.reset();
-  pool.reset();
-  fs::remove_all(base);
 }

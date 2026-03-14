@@ -527,14 +527,14 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
           ready_signal->set_value(program_or.status());
           return ready_signal->subscribe();
         }
-        std::vector<std::shared_ptr<loader::SeekableSource>> sources;
-        sources.emplace_back(std::move(source_ptr));
         loader::ByteRangeMappedSource::Options map_opts = make_mmap_aware_map_options(
             "replica_disk_canonicalize",
             *source_ptr,
             source_location,
             key_.artifact_id,
             effective_byte_mapping_config.enable_direct_write_at);
+        std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+        sources.emplace_back(std::move(source_ptr));
         auto mapped_or =
             loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
         if (!mapped_or.ok()) {
