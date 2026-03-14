@@ -3,26 +3,31 @@ slug: binding-unified-model-and-contract
 title: Binding Unified Model and Contract
 status: accepted
 created: 2026-03-12
-last_updated: 2026-03-12
+last_updated: 2026-03-14
 areas: ["sdk", "daemon", "core", "proto"]
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/inplace_slot.py
-  - tensorcast/api/store/mapped_binding.py
+  - tensorcast/api/store/owned_binding_slot.py
+  - tensorcast/api/store/owned_binding_layout.py
   - tensorcast/common/selection_contract.py
   - tensorcast/common/selection_identity.py
   - tensorcast/daemon_ctl.py
   - proto/tensorcast/common/v1/common.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
-  - daemon/service/controllers/materialization_controller.cc
+  - daemon/service/controllers/owned_binding_service.cc
   - daemon/service/controllers/target_materialization_service.cc
   - daemon/service/controllers/target_publish_service.cc
+  - daemon/state/binding_registry.h
   - daemon/state/retention_registry.cc
   - tests/python/test_binding.py
+  - tests/python/test_inplace_slot.py
   - tests/python/api/test_mapped_binding.py
 links:
   plan: ../plans/0084-binding-doc-consolidation.md
+  related:
+    - ./0085-distributed-binding-assembly-and-coordinator.md
   predecessors:
     - ./0039-artifact-first-sdk.md
     - ./0055-programmable-framework.md
@@ -35,128 +40,260 @@ links:
 
 # Summary
 
-Define one canonical design for TensorCast binding.
+Define one canonical **local binding** design for TensorCast.
 
-`Artifact` is the immutable value handle. `Binding` is the mutable location handle
-that owns or adopts a stable target layout in CUDA-backed target memory and can be
-refilled in place while preserving tensor storage pointers.
+`Binding` is the stable local weight location. `SealedBindingValue` is the
+immutable value currently sealed into that location. The critical correction in
+this revision is that a local sealed value is **not automatically a global
+artifact**.
 
-This document replaces the earlier split between slot-first inplace swap,
-binding-first API design, and mapped binding extension. It captures the current
-public contract and the runtime rules that make binding safe:
+The design therefore separates three planes:
 
-- one user-facing inplace-update abstraction: `Binding`
-- one construction family: `Artifact.bind(...)` and `Artifact.bind_into(...)`
-- one public binding capability surface: `mapping` is valid on both constructors
-- one primitive external-target write entry point: `bind_into(...)`
-- one owner-allocating mapped bind entry point: `bind(..., mapping=...)`
-  allocates under bind semantics and uses the same mapped copy-plan model
-- one TensorCast-managed serving-buffer model for `bind(...)`: TensorCast owns the
-  VRAM and the model process maps borrowed tensor views onto it
-- one safe overwrite lifecycle: preflight -> retire/drain -> overwrite ->
-  optional publish -> optional activate
-- one selection identity model: `ArtifactSelection` plus `ByteSpaceRef`
-- one mapped-binding semantic model for trace-driven rename/split/merge plans
+- **local binding plane**
+  - stable local location
+  - mutable window control
+  - pointer stability
+- **artifact plane**
+  - routable artifact ids
+  - `ArtifactSelection`
+  - publish, key activation, materialization, and retrieval
+- **assembly plane**
+  - promotion of local sealed values into globally visible artifacts
+  - specified in `0085`
 
-# Problem Statement and Scope
+This yields one coherent rule set:
 
-TensorCast needs a long-lived, pointer-stable target location for model weights and
-other CUDA-backed tensors:
+- `swap(...)` installs an existing artifact-backed value into the same stable
+  location
+- `begin_update(...)` opens a local mutable window after retire/drain
+- `seal_current(...)` closes that window and produces a new **binding-local**
+  sealed value
+- promotion of a locally sealed value into the artifact plane is an explicit
+  assembly concern from `0085`, including the single-slot case
 
-1. allocate or adopt target CUDA storage once
-2. fill it from an artifact under explicit constructor ownership semantics
-3. later replace the bytes in place without changing `torch.Tensor` storage
-   pointers
-4. optionally publish the filled target as a routable replica
-5. optionally activate a mutable key or alias after the local overwrite succeeds
+# Goals / Non-Goals
 
-This design covers:
+## Goals
 
-- the public `Binding` API
-- the identity model used by bind, swap, publish, and mapped binding
-- publishability rules
-- the runtime safety contract around retire, drain, overwrite, publish, and
-  activation
-- mapped binding for trace-driven copy plans
+- Keep one public `Binding` concept across artifact-seeded owner path,
+  artifact-seeded adopt path, layout-first creation, inference reload, and
+  training-style update flows.
+- Make binding identity depend on the bound local target layout, not on the
+  current source artifact.
+- Keep one coalesced local weight byte-space per binding.
+- Make the distinction between local sealed value identity and global artifact
+  identity explicit and enforceable.
+- Preserve pointer stability for bound tensors across successful updates.
+- Keep publish, retire, drain, and key activation daemon-mediated.
+- Reuse existing `ArtifactSelection`, byte-space, publish/retire, and lease
+  machinery without inventing a second artifact-routing contract.
+- Reserve `layout_id` for the existing Global Store `LayoutSpec` identity and
+  stop reusing that name for local binding layout identity.
+- Make update epochs explicit so delayed callbacks cannot seal the wrong mutable
+  window.
 
-This design does not redefine the global selection contract, byte-space identity
-system, lease framework, or HA retire system. Binding depends on those systems and
-profiles them for the inplace-update use case.
+## Non-Goals
 
-# Core Mental Model
+- This document does not define distributed multi-binding publish in detail.
+  That design lives in `0085`.
+- This document does not redefine global `LayoutSpec`.
+- This document does not make a local `seal_current(...)` automatically mint a
+  globally routable artifact id.
+- This document does not define a second artifact-routing or key-mapping plane.
+- This document does not require every framework to use meta-device
+  initialization; multiple planner frontends remain valid.
+- This document does not place optimizer state, gradients, activations, or
+  workspaces inside binding-managed slabs.
+- This document does not promise a non-blocking `begin_update(...)` in v1.
 
-## Artifact Is Value, Binding Is Location
+# Problem Statement
 
-- `Artifact` names immutable bytes selected from a canonical artifact or a view.
-- `Binding` owns or adopts a stable target location and can mutate what bytes live
-  at that location.
-- `swap(...)` mutates the binding contents, not the source artifact.
+The earlier binding model captured a correct local insight and then overreached
+into the global artifact plane.
 
-This separation is the key to the whole design. An unbound `Artifact` does not know
-where future overwrites should go, so `Artifact.swap(...)` is intentionally not part
-of the API.
+Correct local insight:
 
-## Binding Is The Public Surface
+- binding is a stable local location
+- training and inference both need pointer-stable replacement at that location
 
-The public inplace-update surface is:
+Incorrect extension:
+
+- every sealed local state was implicitly treated as though it already had a
+  global artifact identity
+- local binding layout identity reused the overloaded name `layout_id`, which in
+  the existing repository already means Global Store `LayoutSpec` identity
+
+That extension breaks long-term consistency:
+
+- current publish and key activation are built around artifact-backed
+  `ArtifactSelection`
+- current selection-first retrieval assumes `artifact_id` and
+  `ArtifactSelection` already exist and are authoritative
+- current assembly infrastructure already uses `layout_id` for global canonical
+  layout contracts
+
+The local binding contract therefore must stay local and explicit:
+
+- local mutation and sealing happen in the binding plane
+- artifact routing, key activation, and distributed publish happen only after an
+  explicit promotion step in the assembly plane
+
+# Design Principles
+
+## One Name, One Plane
+
+This design makes the following naming rule normative:
+
+- `layout_id` means the content-addressed global `LayoutSpec` id only
+- local binding layout identity must use a distinct name: `binding_layout_id`
+
+This is required because the repository already persists `layout_id` in
+`layout_specs`, `assembly_layout_bindings`, and post-seal attachments.
+
+## Local Seal Is Not Artifact Promotion
+
+`seal_current(...)` produces an immutable local value hosted by one binding. It
+does **not** by itself create:
+
+- a globally routable `artifact_id`
+- a key-mappable version
+- a value that can be materialized by unrelated daemons through existing
+  artifact APIs
+
+Promotion of a local sealed value into the artifact plane is a separate,
+explicit concern. `0085` defines that promotion through the existing
+assembly/layout trunk; a single-binding publish is the degenerate one-view case
+of the same model.
+
+## Artifact-Backed Values Remain First-Class
+
+The design does not regress current inference flows:
 
 - `Artifact.bind(...)`
 - `Artifact.bind_into(...)`
 - `Binding.swap(...)`
-- `Binding.publish_replica(...)`
-- `Binding.close()`
 
-`InplaceSlot` remains the internal lifecycle and state-machine implementation. Users
-should not need to learn slot-oriented concepts.
+These continue to produce a current sealed value that is already backed by an
+existing artifact and therefore already has authoritative `artifact_id` and
+`ArtifactSelection`.
 
-## Mapping Is A Binding Option, Not A Separate User Concept
+## One Local Binding, One Coalesced Weight Byte-Space
 
-`mapping` is part of the `Binding` construction family, not a separate top-level
-abstraction:
+The intended storage shape for a binding remains one coalesced local weight
+byte-space represented as a single logical slab with tensor views.
 
-- `artifact.bind(device=..., mapping=None, ...)`
-- `artifact.bind_into(target_tensors=..., mapping=None, ...)`
-- `binding.swap(...)`
+Reasons:
 
-Users should not need to reason about a distinct public `MappedBinding` type or a
-second inplace-update model. The internal mapped-binding path, copy-plan helpers,
-and mapped target RPCs remain implementation details behind `Binding`.
+- minimizes fragmentation and extra model-sized copies
+- gives one deterministic local offset space
+- matches the current owner-path design already used by `bind()`
+- works for both daemon-owned and client-owned storage
 
-## Binding Owns The Lifecycle For Target Writes
+# Core Mental Model
 
-Binding is the lifecycle owner for writes into stable target CUDA memory:
+## Plane Separation
 
-- `bind(...)` is the allocation path: the binding owns the target location it creates
-- `bind_into(...)` is the adoption path: the binding attaches to caller-provided
-  target storage
-- it manages region registration and cleanup
-- it persists the captured selection and mapped copy plan
-- it handles retire-before-overwrite when a published replica exists
-- it tracks dirty state
-- it owns the optional publish lease lifecycle
-- it performs safe region self-heal when registrations expire or are poisoned
+| Plane | Canonical identities | What it controls | What it must not control |
+| --- | --- | --- | --- |
+| Local binding plane | `binding_id`, `binding_layout_id`, `binding_value_id`, `seal_generation` | local storage, mutable windows, pointer stability, local current value | global routing, keys, model-family layout contracts |
+| Artifact plane | `artifact_id`, `ArtifactSelection`, ByteSpace | publish, key activation, materialization, retrieval | local mutable windows |
+| Assembly plane | `assembly_id`, `layout_id`, contract ids from `0085` | promotion of sealed local values into globally visible artifacts | local tensor ownership and mutable windows |
 
-## bind() Is A TensorCast-Managed Serving Buffer
+## Binding Is Location, `SealedBindingValue` Is Current Local Value
 
-`bind()` is not just "allocate tensors and fill them". Its intended meaning is:
+- `Binding` names a stable local target byte-space on one device.
+- `SealedBindingValue` names one immutable value currently sealed into that
+  location.
+- A binding may exist before any sealed value exists.
+- A binding in `Mutable` or `Dirty` has no current sealed value.
 
-- TensorCast allocates and manages the backing VRAM
-- the model process receives shared-memory or CUDA-IPC mapped tensor views
-- the model process is a borrower of those tensor views, not the memory owner
-- future `swap(...)` calls update the same backing VRAM in place through
-  TensorCast-managed control flow
+At any instant, a binding is in exactly one of these categories:
 
-This is the semantic difference between `bind()` and `bind_into(...)`.
+1. **no current sealed value**
+   - examples: newly created layout-first binding, `Mutable`, `Dirty`
+2. **one current sealed value**
+   - the value may be either:
+     - **artifact-backed**
+     - **local-only**
 
-# Public API Surface
+## Identity Layers
 
-## User-Facing Types
+The local binding plane uses four identities:
+
+- `binding_id`
+  - daemon- or process-scoped control identity for the stable local location
+- `binding_layout_id`
+  - stable identifier derived from `BindingLayout`
+- `binding_value_id`
+  - identity of one local sealed value hosted by that binding
+- `seal_generation`
+  - monotonic generation counter for the binding’s current sealed value
+
+The artifact plane remains separate:
+
+- `artifact_id`
+  - present only when the current sealed value is backed by an actual artifact
+- `selection`
+  - present only when artifact-backed routing semantics exist
+
+These identities must not be conflated:
+
+- one binding hosts many local values over time
+- two bindings may share a logically equal local layout but remain different
+  stable locations
+- one local sealed value may or may not have an artifact-backed projection
+
+## Current Value Categories
+
+`SealedBindingValue` has two categories:
+
+1. **artifact-backed sealed value**
+   - created by artifact-seeded constructors or `swap(...)`
+   - has authoritative `artifact_id` and `selection`
+   - may use existing publish and key-activation flows
+2. **local-only sealed value**
+   - created by `seal_current(...)`
+   - has no artifact id yet
+   - may contribute to assembly in `0085`
+   - must not use artifact-key publish or retrieval paths directly
+
+This distinction is the main long-term consistency boundary.
+
+# Architecture & Interfaces
+
+## Public Surface
 
 ```python
+class SealedBindingValue:
+    binding_id: str
+    binding_layout_id: str
+    binding_value_id: str
+    seal_generation: int
+    source_artifact_id: str | None
+    selection: ArtifactSelection | None
+    is_artifact_backed: bool
+    is_current: bool
+    is_published: bool
+
+    def publish_replica(self, *, ctx: CallContext | None = None) -> None: ...
+    def activate_key(
+        self,
+        key: str,
+        *,
+        expected_active_artifact_id: str | None = None,
+        expected_active_generation: int | None = None,
+        ctx: CallContext | None = None,
+    ) -> None: ...
+
+
 class Binding:
     tensors: Mapping[str, torch.Tensor]
-    artifact_id: str
-    selection: ArtifactSelection
+    binding_id: str
+    binding_layout_id: str
+    layout: BindingLayout
+    current_value: SealedBindingValue | None
+    artifact_id: str | None
+    selection: ArtifactSelection | None
 
     def swap(
         self,
@@ -166,736 +303,391 @@ class Binding:
         activate_key: str | None = None,
         expected_active_artifact_id: str | None = None,
         expected_active_generation: int | None = None,
-        wait: bool = True,
+        drain_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue: ...
+
+    def begin_update(
+        self,
+        *,
+        wait_events: Sequence[object] | None = None,
+        drain_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> BindingUpdateEpoch: ...
+
+    def seal_current(
+        self,
+        *,
+        update_epoch: BindingUpdateEpoch | str | int,
+        wait_events: Sequence[object] | None = None,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue: ...
+
+    def publish_replica(self, *, ctx: CallContext | None = None) -> SealedBindingValue: ...
+    def retire(
+        self,
+        *,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
     ) -> None: ...
-
-    def publish_replica(self, *, ctx: CallContext | None = None) -> None: ...
     def close(self) -> None: ...
-```
 
-Construction APIs:
 
-```python
+class Store:
+    def create_binding(
+        self,
+        layout: BindingLayout,
+        *,
+        ownership: str = "daemon",
+        device: torch.device | str | None = None,
+        target_tensors: Mapping[str, torch.Tensor] | None = None,
+        mapping: CopyPlan | None = None,
+        ctx: CallContext | None = None,
+    ) -> Binding: ...
+
+
 class Artifact:
-    def bind(
-        self,
-        device: torch.device | str,
-        *,
-        mapping: CopyPlan | None = None,
-        packing: str = "byte_space",
-        capacity_bytes: int | None = None,
-        publish: bool = False,
-        ctx: CallContext | None = None,
-    ) -> Binding: ...
-
-    def bind_into(
-        self,
-        target_tensors: Mapping[str, torch.Tensor],
-        *,
-        mapping: CopyPlan | None = None,
-        packing: str = "byte_space",
-        publish: bool = False,
-        ctx: CallContext | None = None,
-    ) -> Binding: ...
+    def bind(..., publish: bool = False, ctx: CallContext | None = None) -> Binding: ...
+    def bind_into(..., publish: bool = False, ctx: CallContext | None = None) -> Binding: ...
 ```
 
-## Packing Modes
+Important surface rules:
 
-Binding supports three packing modes:
+- `Binding.current_value` is the authoritative current local sealed value handle
+- `Binding.artifact_id` and `Binding.selection` are convenience mirrors over
+  `current_value` and are `None` when the current value is local-only or absent
+- `Binding.publish_replica()` is legal only when `current_value` is
+  artifact-backed
+- distributed contribution lives on `SealedBindingValue` in `0085`, not on
+  mutable `Binding`
 
-| `packing` | Meaning | Primary use | Publishability |
-| --- | --- | --- | --- |
-| `"byte_space"` | place tensors at logical offsets of the selected canonical or view byte-space | default, stable layout identity, routable publish path | publishable only when the selection is routable |
-| `"append"` | densely pack tensors in first-request order | local-only quick binding | local-only |
-| `"plan"` | densely pack tensors in caller-defined order | local-only stable reorder | local-only |
+## BindingLayout
 
-Mapped binding requires `packing="byte_space"` on both `bind(...)` and
-`bind_into(...)`.
+`BindingLayout` is the declarative description of one local binding’s target
+layout:
+
+- ordered tensor descriptors
+- alias and tied-weight relationships
+- coalesced packing offsets
+- local byte-space metadata
+
+It exposes a stable `binding_layout_id`.
+
+`binding_layout_id` must be derived deterministically from the local layout but
+must not reuse the name `layout_id`, because `layout_id` is already reserved for
+the global `LayoutSpec` identity plane.
+
+## Constructor Families
+
+### 1. Artifact-Seeded Constructors
+
+- `Artifact.bind(...)`
+- `Artifact.bind_into(...)`
+
+These create a binding and immediately fill it from an artifact. The resulting
+binding starts with an artifact-backed current value.
+
+### 2. Layout-Seeded Constructor
+
+- `Store.create_binding(...)`
+
+This creates a binding from a `BindingLayout` before the first value exists.
+
+Constructor rules:
+
+- `ownership="daemon"`
+  - TensorCast allocates the coalesced slab
+  - `device` is required
+  - `target_tensors` must be absent
+- `ownership="client"`
+  - caller supplies `target_tensors`
+  - `target_tensors` must match `BindingLayout`
+  - `device` must be absent or match the supplied tensors exactly
+  - `mapping` is optional and only meaningful for mapped or adopted layouts
+
+## `BindingUpdateEpoch`
+
+`BindingUpdateEpoch` is the token returned by `begin_update(...)` and consumed by
+`seal_current(...)`.
+
+It exists to make update windows explicit:
+
+- delayed callbacks from an older mutable window must not seal a newer state
+- overlapping pipelines must fail cleanly if they race for the same binding
+- `0085` must be able to fence stale contributions against sealed value identity
+
+The token is local control identity. It is not artifact identity.
 
 ## Naming Compliance
 
 | Symbol | Kind | Required style | Result |
 | --- | --- | --- | --- |
 | `Binding` | Python class | `PascalCase` | pass |
-| `Artifact.bind` | Python method | `snake_case` | pass |
-| `Artifact.bind_into` | Python method | `snake_case` | pass |
+| `BindingLayout` | Python class | `PascalCase` | pass |
+| `BindingUpdateEpoch` | Python class | `PascalCase` | pass |
+| `SealedBindingValue` | Python class | `PascalCase` | pass |
+| `binding_layout_id` | Python field | `snake_case` | pass |
+| `binding_value_id` | Python field | `snake_case` | pass |
+| `Store.create_binding` | Python method | `snake_case` | pass |
+| `Binding.begin_update` | Python method | `snake_case` | pass |
+| `Binding.seal_current` | Python method | `snake_case` | pass |
 | `Binding.swap` | Python method | `snake_case` | pass |
 | `Binding.publish_replica` | Python method | `snake_case` | pass |
-| `Binding.close` | Python method | `snake_case` | pass |
-| `Range` | Python dataclass | `PascalCase` | pass |
-| `CopyPlanEntry` | Python dataclass | `PascalCase` | pass |
+| `Binding.retire` | Python method | `snake_case` | pass |
+| `SealedBindingValue.publish_replica` | Python method | `snake_case` | pass |
+| `SealedBindingValue.activate_key` | Python method | `snake_case` | pass |
 
-# Selection, ByteSpace, and Publishability
+# Layout Planning and Initialization
 
-## Binding Uses ArtifactSelection As Its Identity Envelope
+## Planning Is Required
 
-Every binding is anchored in one `ArtifactSelection`.
+A single contiguous binding slab cannot be allocated correctly until the full
+local layout is known.
 
-For binding, the important fields are:
+Therefore:
 
-- `artifact_id`: immutable content identity of the source artifact
-- `view_id`: stable id for a routable non-identity view, or a stable mapped view id
-- `tensor_names`: ordered packed stream when a subset or custom order is active
-- `view_subset_hash`: order-independent membership hash over sorted unique
-  `tensor_names`
-- `logical_layout_hash`: identity of the selected logical byte-space layout
-- `selection_hash`: identity of the chosen subset/view semantics
+- a naive online storage provider is not sufficient
+- the system needs a planning pass that determines the full local tensor layout
+  before final allocation or adoption
 
-Binding captures this selection once at construction time and requires future
-swaps to resolve to the same layout and selection identity.
+## Supported Planning Frontends
 
-## ByteSpaceRef
+This design allows multiple frontends that all produce the same `BindingLayout`:
 
-Publish and retire operate against a `ByteSpaceRef`:
+- meta or dry-build frontend
+- explicit framework layout planner
+- constructor-time external weight injection frontend
 
-- canonical byte-space: `CANONICAL`
-- view byte-space: `VIEW(view_id)`
+The binding protocol must not depend on which planning frontend produced the
+layout.
 
-Binding never publishes or retires an implicit unnamed byte-space. Routing identity
-must be explicit.
+The planner output must also preserve stable canonical tensor naming, ordering,
+and local offsets. `0085` depends on that stability to compile one local sealed
+value into deterministic disjoint contribution views on the existing
+assembly/layout trunk without re-planning from live framework objects.
 
-## What The Two Hashes Mean
+# Artifact Selection, Publishability, and Promotion Boundary
 
-- `logical_layout_hash` identifies the logical byte-space layout that the binding
-  promises to preserve across swaps.
-- `selection_hash` identifies which logical selection was written into that layout.
+## Artifact Selection Is Optional
 
-Neither hash may depend on physical bindings such as region ids, VRAM pointers,
-buffer handles, or device-local export state.
+For artifact-seeded bindings:
 
-## Selection Captured Once
+- `current_value.source_artifact_id` and `current_value.selection` are present
+  immediately
 
-Selection capture is a core promise of binding:
+For layout-seeded bindings and for values returned by `seal_current(...)`:
 
-- `artifact.subset(...).view(...).bind(...)` captures the rank-local contract once
-- later `binding.swap("model:v2")` applies the same contract to the new artifact
-- callers must rebind instead of restating slices or names when the layout contract
-  changes
+- `current_value.source_artifact_id` is absent
+- `current_value.selection` is absent
 
-For mapped binding, the same rule extends to the copy plan:
+This is intentional. `ArtifactSelection` remains the canonical artifact-plane
+selection contract from `0078`; it must not be synthesized speculatively for a
+local-only value.
 
-- `bind(..., mapping=copy_plan)` and `bind_into(..., mapping=copy_plan)` capture
-  the plan once
-- later `binding.swap("model:v2")` accepts only the new artifact reference
-- callers do not restate `mapping`, `subset`, or `view` on swap
+## Existing Publish and Key Activation Rules Stay Artifact-Backed
 
-## Publishability Profile
+`publish_replica()` and `activate_key(...)` remain legal only for
+artifact-backed current values because current publish tokens, key mapping, and
+selection validation all assume an existing artifact-backed `ArtifactSelection`.
 
-Binding supports three publishability classes:
+Therefore:
 
-1. Canonical full coverage
-   - `view_id == ""`
-   - `tensor_names == []`
-   - `view_subset_hash == b""`
-   - publishable as canonical byte-space
+- `swap(...)` may publish and activate keys as today
+- `seal_current(...)` does not make the returned local value immediately
+  publishable through the artifact plane
+- single-rank training publish must use the explicit one-slot assembly path from
+  `0085`, not a binding-local shortcut that silently creates a second artifact
+  identity contract
 
-2. View full coverage
-   - stable non-empty `view_id`
-   - `tensor_names == []`
-   - `view_subset_hash == b""`
-   - publishable as `VIEW(view_id)`
+## Wait-Event Barrier
 
-3. Stable mapped view
-   - non-empty mapped `view_id`
-   - target layout identity and copy plan are stable
-   - publishable as `VIEW(mapped_view_id)`
+Both `begin_update(...)` and `seal_current(...)` may accept `wait_events`.
 
-The following remain local-only:
+This is required for correct GPU semantics:
 
-- append-packed bindings
-- plan-packed bindings
-- subset-packed or reordered bindings without a stable routable `view_id`
+- TensorCast must wait for framework-issued CUDA work to finish before
+  transitioning into or out of the mutable window
+- Python call ordering is not proof that device bytes are quiesced
 
-This keeps routing semantics honest. A local packed layout must not be published as
-if it were canonical full coverage.
+V1 rule:
 
-# Binding Lifecycle and State Machine
+- `begin_update(...)` is synchronous with respect to visibility exclusion and
+  drain completion
+- a non-blocking variant is deferred until it can return a proper
+  `Operation[BindingUpdateEpoch]`
+
+# Lifecycle and State Machine
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Bound: bind tensors
-  Bound --> FilledLocal: initial fill succeeds
-  FilledLocal --> Published: publish succeeds
-  Published --> Retiring: retire requested
-  Retiring --> FilledLocal: retire completes
-  Published --> Swapping: swap starts after retire
-  FilledLocal --> Swapping: swap starts
-  Bound --> Swapping: swap starts
-  Swapping --> FilledLocal: overwrite succeeds, publish not requested or publish fails
-  Swapping --> Published: overwrite succeeds, publish succeeds
-  Swapping --> Dirty: overwrite started and materialization fails
-  Dirty --> FilledLocal: later fill succeeds
-  Dirty --> Published: later fill and publish succeed
-  Bound --> Closed: close
-  FilledLocal --> Closed: close
-  Published --> Closed: close
+  [*] --> Allocated: create binding
+  Allocated --> ReadyArtifact: first bind or swap from artifact succeeds
+  Allocated --> ReadyLocal: first local seal succeeds
+  ReadyArtifact --> Published: publish succeeds
+  Published --> Retiring: retire or begin_update
+  Retiring --> ReadyArtifact: drain completes without mutation
+  ReadyArtifact --> Mutable: begin_update on local-only binding
+  ReadyLocal --> Mutable: begin_update
+  Retiring --> Mutable: begin_update after drain
+  Mutable --> ReadyLocal: seal_current succeeds
+  ReadyArtifact --> ReadyArtifact: swap succeeds
+  ReadyLocal --> ReadyArtifact: swap succeeds
+  ReadyArtifact --> Dirty: swap or seal path fails after bytes changed
+  ReadyLocal --> Dirty: seal path fails after bytes changed
+  Allocated --> Closed: close
+  ReadyArtifact --> Closed: close
+  ReadyLocal --> Closed: close
+  Mutable --> Closed: close
   Dirty --> Closed: close
 ```
 
 State meanings:
 
-- `Bound`: stable tensors exist, but bytes are not yet known-good
-- `FilledLocal`: bytes match the current binding selection, but the result is local-only
-- `Published`: bytes match the current selection and the binding has an active routable replica lease
-- `Dirty`: overwrite began and failed; bytes are undefined until a later successful refill
-- `Closed`: regions and best-effort published state cleanup have been released
-
-# Construction Flows
-
-## Artifact.bind(...)
-
-`Artifact.bind(...)` is the allocation path for `Binding`.
-
-When `mapping is None`:
-
-1. resolve the artifact selection
-2. allocate owned target tensors matching the selected layout
-3. materialize into that owned target location
-4. return the resulting `Binding`
-
-When `mapping is not None`:
-
-1. resolve the artifact selection
-2. validate that the mapping belongs to the allocation-inferable subset
-3. infer destination tensor specs from source selection plus mapping
-4. allocate the owned destination tensors on the requested device through the
-   bind owner path
-5. materialize through the owner-path mapped-binding pipeline
-6. return the resulting `Binding`
-
-Here, "allocate" means `bind(...)` is responsible for creating and owning the
-target location promised by the API. In the owner-path design, the daemon is the
-allocator and memory owner, and the SDK maps exported handles into tensors while
-`Binding` owns the control lifecycle.
-
-`bind(..., mapping=...)` must not silently fall back to the unmapped path,
-silently degrade into `bind_into(...)`, or silently relax layout-inference rules.
-If the mapping is not allocation-inferable under bind semantics, the call fails.
-
-## Artifact.bind_into(...)
-
-`Artifact.bind_into(...)` adopts caller-owned target tensors:
-
-1. validate the tensors are CUDA, writable, contiguous where required, and on one device
-2. require that the target memory is user-owned and exportable from the current process
-3. register one or more VRAM regions over the target storages
-4. build the region-backed target layout
-5. issue one materialization RPC
-6. return a `Binding` that can later swap in place
-
-`bind_into(...)` must not silently accept daemon-owned CUDA IPC imports as future
-swap targets. If the memory is not user-owned, the call fails.
-
-`bind_into(...)` remains the explicit-target primitive. Any future binding mode
-that writes into caller-provided CUDA memory must reduce to `bind_into(...)` plus
-the shared binding lifecycle rules.
-
-## One Shared External-Target Write Policy
-
-Binding unifies all target-write paths under one policy surface:
-
-- `Artifact.bind(...)`
-- `Artifact.bind_into(...)`
-- `Binding.swap(...)`
-- region-backed write paths that stream directly into caller memory
-
-The rules for selection validation, region retry, publish token handling, and dirty
-semantics must not fork across these paths. Constructor semantics stay explicit:
-`bind(...)` allocates, `bind_into(...)` adopts, and requests never silently switch
-between those modes.
-
-The internal write pipelines may differ:
-
-- `bind_into(...)` uses explicit-target region-backed materialization
-- `bind(...)` may use a daemon-owned binding registry and owner-path RPCs
-
-Public lifecycle guarantees must still match across both constructors.
-
-# Swap Flow and Safety Guarantees
-
-## Safe Swap Contract
-
-A successful `swap(...)` guarantees:
-
-- the target tensors keep the same storage pointers
-- the new artifact resolves to the same binding layout identity
-- the stored selection envelope and stored copy plan, if any, are replayed
-  without the caller restating them
-- if an old published replica exists, it becomes non-exportable before overwrite
-  begins
-- the target bytes match the new binding selection after overwrite completes
-- if `publish=True`, the new bytes are published after overwrite succeeds
-- if `activate_key=...`, activation happens only after the local binding reaches its
-  requested post-swap state
-
-## Swap Sequence
-
-```mermaid
-sequenceDiagram
-  participant SDK as "SDK"
-  participant D as "StoreDaemon"
-  participant GS as "Global Store"
-  participant IO as "P2P or disk"
-
-  SDK->>SDK: resolve artifact and validate layout identity
-  opt old published replica exists
-    SDK->>D: retire published replica
-    D->>GS: mark replica unavailable
-    D->>GS: wait for transport drain
-    D-->>SDK: retired and non-exportable
-  end
-  SDK->>D: materialize into target using stored selection and copy plan
-  D->>IO: stream bytes
-  D-->>SDK: success plus target_write_token
-  opt publish requested
-    SDK->>D: publish target replica using target_write_token
-    D-->>SDK: lease_id and replica_id
-  end
-  opt activate key requested
-    SDK->>D: swap key mapping with CAS guards
-    D-->>SDK: activation result
-  end
-```
-
-## Drain And Retire Rules
-
-Binding relies on the daemon and Global Store safe-retire model:
-
-- published replicas must stop accepting new transports before overwrite
-- in-flight transports must drain before overwrite
-- retire is byte-space aware
-- drain timeout must fail the swap before any overwrite begins
-
-Binding is not a local compute quiescing mechanism. Callers still must ensure the
-model is not being read or mutated locally while overwrite is in progress.
-
-# Publish, Activation, and Ownership Rules
-
-## Publish Means Routable Replica, Not New Artifact
-
-`binding.publish_replica()` and `swap(..., publish=True)` do not register a new
-artifact. They publish the already-written bound target as a routable memory
-replica for the binding's current artifact and byte-space identity.
-
-## Publish Requires A Daemon-Minted target_write_token
-
-To avoid re-hashing client VRAM on publish:
-
-- the daemon mints a `target_write_token` after a successful target materialization
-- publish must present that token back to the daemon
-- the daemon validates the token against the written selection and target ownership
-- the daemon rejects stale or incompatible tokens
-
-This preserves integrity for cooperative clients while keeping publish single-pass.
-
-## Activation Uses Daemon-Mediated Key Swap
-
-When `activate_key` is provided:
-
-- activation is a daemon-mediated key operation, never a direct SDK-to-GS call
-- activation runs after the local overwrite succeeds
-- CAS guards may use `expected_active_artifact_id` and/or
-  `expected_active_generation`
-- alias keys should resolve with server-driven `cache_ttl_seconds=0`
-
-Activation is a control-plane action layered on top of local binding success. It is
-not a substitute for publish and does not change artifact immutability.
-
-## Ownership Model
-
-Binding supports two ownership modes:
-
-- `bind(...)`: the binding owns the allocation path and returns daemon-owned
-  target storage mapped into SDK tensors
-- `bind_into(...)`: the caller owns the target memory and the binding adopts it
-- the daemon owns the write token, publication authority, and routing-side metadata
-- publish is a while-alive capability, not durable storage
-
-For `bind(...)`, daemon ownership remains hidden behind the `Binding` contract and
-must not change the pointer-stable swap semantics exposed to the caller.
-
-# Mapped Binding
-
-## Motivation
-
-Mapped binding extends ordinary name-aligned binding to trace-driven reloads where
-the load semantics are discovered once and then reused:
-
-- source and destination tensor names can differ
-- one source tensor can be split into many destinations
-- many sources can be merged into one destination
-- TP or framework-specific slicing can be encoded once and replayed on future swaps
-
-This is the intended path for vLLM-style traced weight loading without Python copy
-loops.
-
-## Mapping Is First-Class On Binding Construction
-
-Mapped binding is still part of the `Binding` API family:
-
-- `bind_into(..., mapping=...)` is the primitive for explicit target layouts
-- `bind(..., mapping=...)` is the allocate-first convenience for inferable target
-  layouts
-
-The user-facing concept stays `Binding`. The mapped materialization path remains an
-internal execution choice, and constructor ownership semantics stay intact.
-
-## Full Artifact Id In, Rank-Local Partial Layout Out
-
-Binding captures a replay contract at construction time:
-
-- source selection envelope:
-  subset membership/order, view identity or view spec, and selection hashes
-- destination layout identity:
-  the layout that the binding promises to preserve across swaps
-- optional mapped copy plan:
-  the source-to-destination transformation used for mapped binding
-
-Because that contract is persisted on the binding, future `swap(...)` calls only
-need a new full artifact reference such as an artifact id or key. TensorCast must:
-
-- resolve that full artifact reference
-- reapply the stored selection envelope to find the correct partial source bytes
-- reapply the stored copy plan, if present
-- refill the exact same target layout in place
-
-This is especially important for tensor-parallel serving, where each rank binds a
-partial view once and later swaps by full artifact id only.
-
-## Copy Plan Model
-
-Mapped binding uses a copy plan:
-
-```python
-@dataclass(frozen=True)
-class Range:
-    dim: int
-    start: int
-    end: int
-
-@dataclass(frozen=True)
-class CopyPlanEntry:
-    ckpt_name: str
-    ckpt_range: Range | None
-    dst_name: str
-    dst_range: Range | None
-```
-
-The plan is persisted on the binding and reused on `swap(...)`.
-
-## Coordinate System
-
-Copy-plan ranges are expressed in canonical artifact coordinates.
-
-If the source artifact handle carries a view, binding must translate from canonical
-coordinates into the view materialization coordinates internally. Callers should not
-rewrite the plan for each bind or swap.
-
-## Mapped Binding Constraints
-
-Mapped binding v1 requires:
-
-- `packing="byte_space"`
-- CUDA target tensors only
-- contiguous targets with `storage_offset == 0`
-- a single device for all targets
-- full destination coverage with no gaps or overlaps
-- narrow-only view compatibility for mapped source views
-- transpose or permutation views rejected
-
-## Allocation-Inferable Mapping Subset For bind(...)
-
-`bind(..., mapping=...)` is intentionally stricter than
-`bind_into(..., mapping=...)`.
-
-`mapping` alone does not fully describe an arbitrary destination allocation.
-`bind(...)` therefore accepts only the subset where TensorCast can derive one
-unambiguous destination tensor layout for every `dst_name`.
-
-The allocation-inferable subset requires:
-
-- every destination tensor has one unambiguous `dtype`
-- every destination tensor has one unambiguous rank and one shared non-sliced
-  shape profile across all contributing source fragments
-- every destination tensor uses one logical slice dimension for the mapping plan
-- destination coverage is total and gap-free, so the final extent on the sliced
-  dimension is exact rather than a lower bound
-- the inferred destination layout is contiguous with `storage_offset == 0` and
-  compact stride
-- the inferred allocation uses the caller-provided `device`; no per-tensor device
-  overrides exist
-
-If any part of destination allocation remains ambiguous, `bind(..., mapping=...)`
-fails fast and instructs the caller to use `bind_into(...)` with explicit target
-tensors.
-
-Representative rejection cases:
-
-- the desired destination stride is non-contiguous or otherwise custom
-- contributing source fragments disagree on non-sliced extents or `dtype`
-- the mapping would require reshape, permutation, or an under-specified storage
-  contract
-- the plan describes only a source-to-destination correspondence but not one
-  unique allocation
-
-## Stable Mapped View Identity
-
-Mapped binding derives a stable view identity from:
-
-- canonical index identity
-- source view identity, if any
-- copy plan contents
-- destination layout identity
-
-That derived `mapped_view_id` is the publish and routing identity for mapped
-bindings. Mapped binding must not pretend to be canonical full coverage when it is
-actually a different byte-space.
-
-## Mapped Binding Runtime Path
-
-Mapped binding executes through the mapped target materialization RPC rather than
-ordinary name-aligned target materialization:
-
-- `bind_into(..., mapping=...)` is the explicit-target primitive validation and
-  materialization path
-- `bind(..., mapping=...)` first infers and allocates an owned target layout, then
-  uses the bind owner-path daemon pipeline
-- target materialization executes inside the daemon pipeline
-- future `swap(...)` reuses the same stored plan and stable mapped view identity
-- explicit-target and owner-path bindings may use different internal daemon RPCs
-  or registries
-- no implicit constructor fallback or public binding subtype is introduced for
-  the mapped bind path
-
-# Runtime Contracts
-
-## Pointers Are Stable, Region IDs Are Not
-
-The stable contract is tensor storage identity, not region registration identity.
-
-- tensor pointers must remain stable across swap
-- region ids are renewable capabilities
-- binding may re-register regions and retry once on safe region failures
-
-## TTL Policy
-
-Binding uses two important TTL defaults:
-
-- binding-managed VRAM regions default to `ttl_ms=0`
-- published binding leases default to `ttl_ms=0`
-
-`ttl_ms=0` means lifecycle is driven by explicit retire, explicit close, and PID-exit
-cleanup rather than silent expiry during long-lived serving.
-
-If a non-zero TTL is used:
-
-- published leases require keepalive
-- region registrations require renewal or must tolerate self-heal retry
-
-## operation_id Propagation
-
-Binding operations span multiple RPCs. One logical operation should carry one
-`operation_id` across retire, materialize, publish, and activate so logs and metrics
-can be correlated end to end.
-
-# Failure Model
-
-## Dirty Semantics
-
-Binding failures are intentionally non-atomic:
-
-- if overwrite begins and materialization fails, the binding becomes `Dirty`
-- a dirty binding must not publish until a later successful refill
-- publish failure after a successful overwrite leaves bytes correct but local-only
-
-## Fail-Fast Cases
-
-Binding must fail before overwrite when:
-
-- the new artifact resolves to a different layout identity
-- selection order, subset semantics, or view identity no longer match the binding
-- mapped binding detects shape, dtype, or range incompatibilities
-- publish is requested for a non-routable selection
-- retire drain times out
-
-## Error Classes
-
-Representative errors:
-
-- `INVALID_ARGUMENT`: malformed mapping, invalid slice, duplicate names, invalid view
-- `FAILED_PRECONDITION`: non-user-owned target memory, non-publishable selection,
-  stale runtime state, region/token preconditions not satisfied
-- `DEADLINE_EXCEEDED`: retire or publish waits exceed deadline
-- `DATA_LOSS`: overwrite started and materialization failed, or daemon returned an
-  invalid target-write result
-
-# Typical Usage Patterns
-
-## Meta-Init And Future Swap
-
-```python
-binding = tc.artifact("model:v1").bind(device="cuda:0")
-for name, param in model.named_parameters():
-    param.data = binding.tensors[name]
-binding.swap("model:v2")
-```
-
-## Fill Pre-Allocated Model Buffers
-
-```python
-binding = tc.artifact("model:v1").bind_into(
-    {name: param.data for name, param in model.named_parameters()}
-)
-binding.swap("model:v2")
-```
-
-## Rank-Local Tensor-Parallel Selection
-
-```python
-binding = (
-    tc.artifact("model:v1")
-    .subset(materialize_names)
-    .view(slices=rank_slices)
-    .bind(device="cuda:0")
-)
-binding.swap("model:v2")
-```
-
-## Allocate Serving Layout From Mapping
-
-```python
-binding = (
-    tc.artifact("model:v1")
-    .subset(materialize_names)
-    .view(slices=src_hull)
-    .bind(device="cuda:0", mapping=copy_plan)
-)
-binding.swap("model:v2")
-```
-
-## Tensor-Parallel Serving Profile
-
-For tensor-parallel serving, the intended construction pattern is one binding per
-rank-local layout:
-
-- each rank calls `artifact.subset(...).view(...).bind(...)` or
-  `artifact.subset(...).view(...).bind(mapping=...)`
-- TensorCast owns the rank-local VRAM for each binding created via `bind(...)`
-- the model process maps rank-local tensor views from TensorCast-managed VRAM
-- later `binding.swap(full_artifact_id)` replays the captured rank-local partial
-  selection and optional mapping without restating either
-
-This profile is strong when:
-
-- the TP degree and rank-local layout stay stable across versions
-- the caller wants pointer-stable model parameters backed by TensorCast-managed
-  VRAM
-- updates should be applied in place without Python copy loops
-
-When the TP degree or rank-local layout contract changes, callers should create a
-new binding instead of swapping through the old one.
-
-## vLLM-Style Mapped Reload
-
-```python
-binding = (
-    tc.artifact("model:v1")
-    .subset(materialize_names)
-    .view(slices=src_hull)
-    .bind_into(dst_tensors, mapping=copy_plan)
-)
-binding.swap("model:v2")
-```
-
-# Non-Goals and Boundaries
-
-This design does not:
-
-- make local compute concurrent with overwrite safe
-- redefine artifact immutability
-- allow daemon-owned CUDA imports to become inplace binding targets
-- make every packed local layout routable
-- replace the system-wide `ArtifactSelection` contract
-- replace the system-wide lease or safe-retire framework
+- `Allocated`
+  - layout exists, but no current sealed value exists yet
+- `ReadyArtifact`
+  - one current sealed value exists and is artifact-backed, but not published
+- `ReadyLocal`
+  - one current sealed value exists, but it is local-only
+- `Published`
+  - the current sealed value is artifact-backed and routable
+- `Retiring`
+  - current published visibility is draining
+- `Mutable`
+  - framework may mutate bytes; no current sealed value exists in this state
+- `Dirty`
+  - bytes changed and there is no known-good current sealed value
+- `Closed`
+  - control lifetime ended and best-effort cleanup was requested
+
+# Safety Guarantees
+
+## Pointer Stability
+
+A successful `swap(...)` or `seal_current(...)` guarantees:
+
+- the bound tensors keep the same storage pointers
+- `binding_layout_id` is unchanged
+- `current_value` changes only after the update succeeds
+
+## One-Current-Value Rule
+
+The binding cannot expose multiple current values at once.
+
+Therefore:
+
+- entering `Mutable` invalidates the binding’s current value
+- a later successful `seal_current(...)` or `swap(...)` replaces the current
+  value atomically
+- if callers need previous versions to outlive the next mutation, they must be
+  retained or promoted elsewhere
+
+## Lifecycle Coherence With Existing Lease Model
+
+Binding control lifetime must integrate with existing daemon lifecycle rules:
+
+- retire and drain stay the visibility exclusion boundary
+- owner PID exit or explicit close must retire published visibility and cancel
+  any mutable window
+- `0085` may add contribution leases that fence `begin_update(...)`
+
+This keeps binding semantics consistent with the repository’s existing
+lease/guard/finalizer model rather than inventing a parallel cleanup system.
+
+# Error Model
+
+- `INVALID_ARGUMENT`
+  - malformed layout, incompatible constructor arguments, invalid barrier input,
+    or invalid publish/key parameters
+- `FAILED_PRECONDITION`
+  - no current sealed value exists, update epoch mismatch, publish requested for
+    a local-only value, owner mismatch, layout invariant drift, or mutation
+    requested while a contribution lease still fences the current value
+- `DEADLINE_EXCEEDED`
+  - retire or drain wait exceeds the requested budget
+- `DATA_LOSS`
+  - refill or seal failed after bytes may already have changed; binding
+    transitions to `Dirty`
+
+The dirty rule stays strict:
+
+- once bytes may have changed and the update fails, continuing to treat the old
+  value as current is unsafe until a later successful `swap(...)` or
+  `seal_current(...)`
 
 # Schema Changes
 
-None. Binding documentation consolidation does not change `schema.sql`.
+None.
 
-# Trade-offs and Risks
+This design requires SDK, daemon, and proto changes, but it does not require new
+Global Store persistent tables by itself. Promotion of local sealed values into
+the artifact plane is handled by `0085`.
 
-- Binding is inherently non-atomic once overwrite begins.
-- Publish of bound target memory relies on a cooperative client/daemon model and
-  a daemon write token instead of full publish-time re-hash.
-- Mapped binding adds significant validation and identity complexity, but that
-  complexity is preferable to re-running Python copy logic or exposing divergent
-  swap semantics.
-- `bind(..., mapping=...)` intentionally rejects mappings that do not uniquely
-  determine destination allocation and never silently falls back; callers needing
-  custom layout control must use `bind_into(...)`.
-- Tensor-parallel hot reload remains a per-binding local guarantee; cross-rank
-  cutover still requires external coordination if the application needs global
-  synchronization.
-- Keeping publishability strict can make some local layouts non-routable, but it
-  preserves honest routing semantics.
+# Alternatives and Rationale
 
-# Compatibility and Acceptance Criteria
+## Reuse `layout_id` For Local Binding Layout Identity
 
-Compatibility policy:
+Rejected.
 
-- `Binding` is the only public inplace-update abstraction.
-- `InplaceSlot` remains internal implementation detail.
-- `mapping` is a first-class binding capability on both `bind(...)` and
-  `bind_into(...)`.
-- `bind_into(..., mapping=...)` remains the explicit-target mapped-binding
-  primitive.
-- `bind(..., mapping=...)` is the owner-allocating mapped-binding entry point.
-- owner-path and explicit-target bindings may use different internal daemon
-  pipelines while preserving one public `Binding` contract.
-- no implicit fallback is allowed between `bind(...)`, `bind_into(...)`, mapped,
-  and unmapped binding modes.
+Reasons:
 
-Acceptance criteria:
+- `layout_id` already names the global content-addressed `LayoutSpec`
+- reusing the name would split one identifier across local and global planes
+- current schema and coordinator logic already depend on the global meaning
 
-1. `Artifact.bind(...)` and `Artifact.bind_into(...)` return pointer-stable
-   `Binding` objects backed by stable CUDA target storage under their respective
-   ownership modes.
-2. For `bind(...)`, TensorCast owns and manages the backing VRAM; the model
-   process observes borrowed mapped tensor views onto that VRAM.
-3. `artifact.subset(...).view(...).bind(...).swap(...)` reuses the captured
-   selection without restating it.
-4. `bind_into(..., mapping=copy_plan)` stores the mapping and reuses it on
-   `swap(...)`.
-5. `bind(..., mapping=copy_plan)` allocates owned destination tensors only when
-   the mapping uniquely determines destination layout, then uses the bind
-   owner-path mapped-binding pipeline.
-6. `bind(..., mapping=copy_plan)` rejects ambiguous or custom-layout mappings and
-   never silently falls back to another binding mode; it directs callers to
-   `bind_into(...)`.
-7. `swap(...)` never requires the caller to restate `mapping`; the binding reuses
-   the plan captured at bind time.
-8. `swap(full_artifact_id)` replays the stored selection envelope and, if
-   present, the stored copy plan to find the correct partial source bytes inside
-   the full artifact.
-9. Publishability checks reject local-only packed layouts and accept canonical,
-   stable view, and stable mapped-view identities.
-10. Swap retires any published old replica before overwrite begins.
-11. Overwrite failure marks the binding dirty; publish failure leaves bytes correct
-   but local-only.
-12. Binding tolerates safe region self-heal by re-registering regions and retrying
-   once.
-13. Activation remains daemon-mediated and supports compare-and-set guards.
+## Let `seal_current(...)` Mint A Default Artifact Id
+
+Rejected.
+
+Reasons:
+
+- current publish and retrieval paths already assume artifact-backed
+  `ArtifactSelection`
+- silently minting a local-only artifact plane would create a second routing
+  contract
+- the correct promotion boundary is assembly from `0085`
+
+## Put Distributed Contribution Directly On `Binding`
+
+Rejected.
+
+Reasons:
+
+- it conflates stable mutable location with immutable contributor identity
+- `Mutable` binding state is not a legal contribution state
+- `0085` needs to fence against sealed value identity, not only binding identity
+
+## Preserve Previous Value As Routable During `Mutable`
+
+Rejected.
+
+Reasons:
+
+- once mutation begins, the hosted bytes are no longer safe to route
+- the repository’s existing publish and retire flows already assume that source
+  visibility closes before overwrite
+
+# Compatibility & Acceptance Criteria
+
+The design is accepted when:
+
+- `Binding` remains the single stable local location abstraction
+- `binding_layout_id` replaces local misuse of `layout_id`
+- `swap(...)` still preserves existing artifact-backed inference flows
+- `seal_current(...)` produces a local sealed value without silently creating a
+  second artifact identity plane
+- `Binding.artifact_id` and `Binding.selection` are absent when the current value
+  is local-only or absent
+- publish and key activation remain daemon-mediated and valid only for
+  artifact-backed current values
+- local contiguous slab initialization is expressible without a second
+  model-sized persistent weight copy
+- distributed and single-slot promotion of local sealed values is specified in
+  `0085` without redefining the local binding contract
 
 # References
 
-- `docs/designs/0039-artifact-first-sdk.md`
-- `docs/designs/0055-programmable-framework.md`
-- `docs/designs/0062-safetensors-canonical-bytespace.md`
-- `docs/designs/0078-selection-first-artifact-retrieval.md`
-- `docs/designs/0079-local-daemon-key-mapping-without-global-store.md`
-- `docs/designs/0011-unified-session-lifecycle-leases.md`
-- `docs/designs/0048-ha-replica-visibility-and-retire.md`
-- `docs/internals/model-loading.md`
-- `tensorcast/api/store/README.md`
+- `docs/plans/0084-binding-doc-consolidation.md`
+- `docs/designs/0085-distributed-binding-assembly-and-coordinator.md`
+- `docs/plans/0085-distributed-binding-assembly-and-coordinator.md`
+- `docs/guides/steptron-vllm-binding-integration.md`
