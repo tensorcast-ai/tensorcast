@@ -872,6 +872,7 @@ class MaterializationPipeline:
     def _payload_state_dict(
         self, payload: MaterializationPayload
     ) -> dict[str, torch.Tensor]:
+        bind_timing = payload.bind_timing
         if payload.descriptors and payload.state_dict is not None:
             missing = [
                 d.name for d in payload.descriptors if d.name not in payload.state_dict
@@ -883,11 +884,35 @@ class MaterializationPipeline:
                     retryable=False,
                 )
             return {d.name: payload.state_dict[d.name] for d in payload.descriptors}
+        if payload.state_dict_loader is not None:
+            loaded = payload.state_dict_loader()
+            if payload.descriptors:
+                missing = [d.name for d in payload.descriptors if d.name not in loaded]
+                if missing:
+                    raise ArtifactError(
+                        f"Materialization payload missing tensors: {', '.join(missing)}",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                descriptor_names = tuple(d.name for d in payload.descriptors)
+                if tuple(loaded.keys()) == descriptor_names:
+                    return loaded
+                projection_start = time.perf_counter()
+                projected = {name: loaded[name] for name in descriptor_names}
+                if bind_timing is not None:
+                    bind_timing["dict_projection_sec"] = (
+                        time.perf_counter() - projection_start
+                    )
+                return projected
+            return dict(loaded)
         if payload.state_dict is not None:
             return dict(payload.state_dict)
+        dict_assembly_start = time.perf_counter()
         state: dict[str, torch.Tensor] = {}
         for desc, tensor in payload.payload_iter():
             state[desc.name] = tensor
+        if bind_timing is not None:
+            bind_timing["dict_assembly_sec"] = time.perf_counter() - dict_assembly_start
         return state
 
     def _summarize_materialized(
@@ -2034,12 +2059,26 @@ class MaterializationPipeline:
                     for name, tensor in base_payload.state_dict.items()
                     if name in requested
                 }
+            state_dict_loader = None
+            if base_payload.state_dict_loader is not None:
+                requested_name_set = set(requested_names)
+
+                def _filtered_state_dict_loader() -> dict[str, torch.Tensor]:
+                    loaded = base_payload.state_dict_loader()
+                    return {
+                        name: tensor
+                        for name, tensor in loaded.items()
+                        if name in requested_name_set
+                    }
+
+                state_dict_loader = _filtered_state_dict_loader
 
             result = MaterializationPayload(
                 artifact_id=base_payload.artifact_id,
                 canonical_index_bytes=canonical_bytes,
                 descriptors=filtered_descriptors,
                 payload_iter=_filtered_iter,
+                state_dict_loader=state_dict_loader,
                 generation=base_payload.generation,
                 state_dict=state_dict,
                 replica_uuid=base_payload.replica_uuid,
@@ -2052,6 +2091,8 @@ class MaterializationPipeline:
                 ticket_status=base_payload.ticket_status,
                 ticket_created_at_ts=base_payload.ticket_created_at_ts,
                 ticket_expires_at_ts=base_payload.ticket_expires_at_ts,
+                materialize_timing=base_payload.materialize_timing,
+                bind_timing=base_payload.bind_timing,
             )
         return result
 

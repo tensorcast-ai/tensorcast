@@ -129,6 +129,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "calculate_tensor_device_offsets",
     ),
     "CallContext": ("tensorcast.api", "CallContext"),
+    "CollectiveLoadGroup": ("tensorcast.api", "CollectiveLoadGroup"),
     "CapabilityDirectoryClient": (
         "tensorcast.capability_directory",
         "CapabilityDirectoryClient",
@@ -204,6 +205,7 @@ if TYPE_CHECKING:
         CallContext,
         CapabilityDirectoryClient,
         CapabilityDirectoryOptions,
+        CollectiveLoadGroup,
         FallbackOptions,
         GetArtifactOptions,
         Instance,
@@ -275,6 +277,7 @@ __all__ = [
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "CallContext",
+    "CollectiveLoadGroup",
     "Operation",
     "OperationError",
     "OperationStatus",

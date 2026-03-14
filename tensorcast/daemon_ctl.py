@@ -1404,7 +1404,9 @@ class DaemonCtl:
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
@@ -1424,7 +1426,9 @@ class DaemonCtl:
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
@@ -1444,7 +1448,9 @@ class DaemonCtl:
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
 
     def materialize_by_artifact_id_v2(
@@ -1462,7 +1468,9 @@ class DaemonCtl:
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> (
         store_daemon_pb2.MaterializeReplicaResponse
         | bytes
@@ -1507,6 +1515,8 @@ class DaemonCtl:
                 preference=preference_value,
                 lease_mode=lease_mode,
             )
+            if collective_load_group is not None:
+                request.collective_load_group.CopyFrom(collective_load_group)
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
@@ -1516,6 +1526,7 @@ class DaemonCtl:
             if placement is not None:
                 request.placement = placement
             try:
+                rpc_start = time.perf_counter()
                 response: store_daemon_pb2.MaterializeReplicaResponse = (
                     self._unary_call(
                         self.stub_v2.MaterializeReplica,
@@ -1525,6 +1536,8 @@ class DaemonCtl:
                         retries=1,
                     )
                 )
+                if timing_out is not None:
+                    timing_out["rpc_roundtrip_sec"] = time.perf_counter() - rpc_start
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
                 code = e.code()
@@ -1569,11 +1582,14 @@ class DaemonCtl:
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
+            confirm_start = time.perf_counter()
             success = self.confirm_replica_loaded(
                 response.disk_path or "",
                 replica_uuid,
                 target_device_type=target_device_type,
             )
+            if timing_out is not None:
+                timing_out["confirm_replica_sec"] = time.perf_counter() - confirm_start
             if not success:
                 raise RuntimeError(
                     "Failed to confirm artifact loading: "

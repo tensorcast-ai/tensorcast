@@ -33,7 +33,10 @@ from tensorcast.api.operation import (
 )
 from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
-from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.mapped_binding import (
     CopyPlan,
@@ -145,6 +148,7 @@ class MaterializationDiagnostics:
     budget_elapsed_sec: float | None
     budget_remaining_sec: float | None
     budget_exit_reason: str | None
+    breakdown: Mapping[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,18 +616,23 @@ class Artifact:
         ctx: CallContext | None = None,
     ) -> TensorDictMaterializationResult:
         artifact_id = self._ensure_identified()
+        selection_breakdown: dict[str, float] = {}
+        selection_prepare_start = time.perf_counter()
+        view_metadata = self._ensure_view_metadata_cache(
+            require_index_bytes=True,
+            timing_out=selection_breakdown,
+        )
+        selection_prepare_sec = time.perf_counter() - selection_prepare_start
         requested_names = (
-            tuple(self._view_metadata.tensor_names)
-            if self._view_metadata is not None and self._view_metadata.tensor_names
+            tuple(view_metadata.tensor_names)
+            if view_metadata is not None and view_metadata.tensor_names
             else None
         )
         _, runtime, pipeline = self._require_components()
         view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = (
-            self._view_metadata.view_data_hash if self._view_metadata else None
-        )
+        view_data_hash = view_metadata.view_data_hash or None if view_metadata else None
         view_index_hint = (
-            self._view_metadata.view_index_bytes if self._view_metadata else None
+            view_metadata.view_index_bytes or None if view_metadata else None
         )
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
         materialize_start = time.perf_counter()
@@ -652,6 +661,19 @@ class Artifact:
             else:
                 output = {name: state[name] for name in requested_names}
             return_end = time.perf_counter()
+            breakdown: dict[str, float] = {}
+            if selection_prepare_sec > 0:
+                breakdown["selection_prepare_sec"] = selection_prepare_sec
+            for name, value in selection_breakdown.items():
+                breakdown[f"selection_{name}"] = float(value)
+            payload_bind_timing = getattr(payload, "bind_timing", None) or {}
+            payload_materialize_timing = (
+                getattr(payload, "materialize_timing", None) or {}
+            )
+            for name, value in payload_materialize_timing.items():
+                breakdown[f"materialize_{name}"] = float(value)
+            for name, value in payload_bind_timing.items():
+                breakdown[f"bind_{name}"] = float(value)
             diagnostics = MaterializationDiagnostics(
                 source=_materialization_source_label(payload.source),
                 source_code=(
@@ -685,6 +707,7 @@ class Artifact:
                 budget_elapsed_sec=payload.budget_elapsed_sec,
                 budget_remaining_sec=payload.budget_remaining_sec,
                 budget_exit_reason=payload.budget_exit_reason,
+                breakdown=breakdown or None,
             )
             logger.debug(
                 "store.tensor_dict.materialized",
@@ -740,12 +763,11 @@ class Artifact:
         effective_index = self._effective_index()
         _ = self._validate_tensor_names(effective_index, None)
         _, _, pipeline = self._require_components()
+        view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
         view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = (
-            self._view_metadata.view_data_hash if self._view_metadata else None
-        )
+        view_data_hash = view_metadata.view_data_hash or None if view_metadata else None
         view_index_hint = (
-            self._view_metadata.view_index_bytes if self._view_metadata else None
+            view_metadata.view_index_bytes or None if view_metadata else None
         )
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
         pipeline.get_into(
@@ -1662,21 +1684,24 @@ class Artifact:
         canonical_index_bytes: bytes,
     ) -> common_pb2.ArtifactSelection:
         selection_names: tuple[str, ...] = ()
+        view_metadata: ViewMetadataCache | None = None
         if packing != "byte_space":
             selection_names = tuple(
                 entry.name for entry in self._effective_index().entries
             )
-        elif self._view_metadata is not None and self._view_metadata.tensor_names:
-            selection_names = tuple(self._view_metadata.tensor_names)
+        else:
+            view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
+            if view_metadata is not None and view_metadata.tensor_names:
+                selection_names = tuple(view_metadata.tensor_names)
 
         has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
         layout_index_bytes: bytes | None = None
         if (
             packing == "byte_space"
-            and self._view_metadata is not None
-            and self._view_metadata.view_index_bytes
+            and view_metadata is not None
+            and view_metadata.view_index_bytes
         ):
-            layout_index_bytes = bytes(self._view_metadata.view_index_bytes)
+            layout_index_bytes = bytes(view_metadata.view_index_bytes)
         elif has_transform or selection_names:
             layout_index_bytes = compute_selected_index_bytes(
                 canonical_index_bytes=canonical_index_bytes,
@@ -1717,8 +1742,9 @@ class Artifact:
         self._ensure_identified()
         loop = asyncio.get_running_loop()
         view_hash = None
-        if self._view_metadata is not None:
-            view_hash = self._view_metadata.view_data_hash
+        view_metadata = self._ensure_view_metadata_cache(require_view_hash=True)
+        if view_metadata is not None:
+            view_hash = view_metadata.view_data_hash or None
         elif self._view_spec is not None:
             view_hash = ViewSpecComposer.hash_view_spec(self._view_spec)
         batcher = getattr(store, "_batcher", None)
@@ -2217,13 +2243,18 @@ class Artifact:
             ) from exc
 
     def _mapped_source_view_id(self, runtime: "StoreRuntimeContext") -> str:
-        if self._view_metadata is not None and self._view_metadata.view_id:
-            return str(self._view_metadata.view_id)
+        view_metadata = self._ensure_view_metadata_cache(require_view_id=True)
+        if view_metadata is not None and view_metadata.view_id:
+            return str(view_metadata.view_id)
         return self._control_plane_view_id(runtime)
 
     def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
         artifact_id = self._ensure_identified()
         runtime = self._runtime_if_available()
+        view_metadata = self._ensure_view_metadata_cache(
+            require_index_bytes=True,
+            require_view_id=True,
+        )
 
         view_spec_proto: common_pb2.ViewSpec | None = None
         if self._view_spec is not None and not self._view_spec.is_identity:
@@ -2236,8 +2267,8 @@ class Artifact:
                 )
 
         selection_names: tuple[str, ...] = ()
-        if self._view_metadata is not None and self._view_metadata.tensor_names:
-            selection_names = tuple(self._view_metadata.tensor_names)
+        if view_metadata is not None and view_metadata.tensor_names:
+            selection_names = tuple(view_metadata.tensor_names)
 
         canonical_index_bytes = self._canonical_index_bytes
         if canonical_index_bytes is None and runtime is not None:
@@ -2254,8 +2285,8 @@ class Artifact:
         has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
         has_subset = bool(selection_names)
         layout_index_bytes: bytes | None = None
-        if self._view_metadata is not None and self._view_metadata.view_index_bytes:
-            layout_index_bytes = bytes(self._view_metadata.view_index_bytes)
+        if view_metadata is not None and view_metadata.view_index_bytes:
+            layout_index_bytes = bytes(view_metadata.view_index_bytes)
         elif has_transform or has_subset:
             layout_index_bytes = compute_selected_index_bytes(
                 canonical_index_bytes=canonical_index_bytes,
@@ -2452,9 +2483,138 @@ class Artifact:
 
     def _effective_index(self) -> CanonicalIndex:
         base_index = self._ensure_metadata()
-        if self._view_metadata is not None:
-            return self._view_metadata.selected_index
+        view_metadata = self._ensure_view_metadata_cache(require_selected_index=True)
+        if view_metadata is not None and view_metadata.selected_index is not None:
+            return view_metadata.selected_index
         return base_index
+
+    def _ensure_view_metadata_cache(
+        self,
+        *,
+        require_index_bytes: bool = False,
+        require_view_hash: bool = False,
+        require_view_id: bool = False,
+        require_selected_index: bool = False,
+        timing_out: dict[str, float] | None = None,
+    ) -> ViewMetadataCache | None:
+        cache = self._view_metadata
+        if cache is None:
+            return None
+        needs_index_bytes = require_index_bytes and not cache.view_index_bytes
+        needs_view_hash = require_view_hash and not cache.view_data_hash
+        needs_view_id = (
+            require_view_id
+            and not cache.view_id
+            and self._view_spec is not None
+            and not self._view_spec.is_identity
+        )
+        needs_selected_index = require_selected_index and cache.selected_index is None
+        if not (
+            needs_index_bytes
+            or needs_view_hash
+            or needs_view_id
+            or needs_selected_index
+        ):
+            return cache
+
+        canonical_index = self._ensure_metadata()
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None:
+            canonical_index_bytes = canonical_index_to_bytes(canonical_index)
+
+        with self._lock:
+            cache = self._view_metadata
+            if cache is None:
+                return None
+            view_index_bytes = cache.view_index_bytes
+            view_data_hash = cache.view_data_hash
+            view_id = cache.view_id
+            selected_index = cache.selected_index
+
+            if require_index_bytes and not view_index_bytes:
+                view_spec_proto = self._view_spec.proto if self._view_spec else None
+                compute_index_start = time.perf_counter()
+                view_index_bytes = compute_selected_index_bytes(
+                    canonical_index_bytes=canonical_index_bytes,
+                    view_spec=view_spec_proto,
+                    tensor_names=cache.tensor_names,
+                )
+                if timing_out is not None:
+                    timing_out["index_bytes_sec"] = (
+                        time.perf_counter() - compute_index_start
+                    )
+            if require_selected_index and selected_index is None:
+                if not view_index_bytes:
+                    view_spec_proto = self._view_spec.proto if self._view_spec else None
+                    compute_index_start = time.perf_counter()
+                    view_index_bytes = compute_selected_index_bytes(
+                        canonical_index_bytes=canonical_index_bytes,
+                        view_spec=view_spec_proto,
+                        tensor_names=cache.tensor_names,
+                    )
+                    if timing_out is not None:
+                        timing_out["index_bytes_sec"] = timing_out.get(
+                            "index_bytes_sec", 0.0
+                        ) + (time.perf_counter() - compute_index_start)
+                parse_index_start = time.perf_counter()
+                selected_index = canonical_index_from_bytes(view_index_bytes)
+                if timing_out is not None:
+                    timing_out["index_parse_sec"] = (
+                        time.perf_counter() - parse_index_start
+                    )
+            if require_view_hash and not view_data_hash:
+                hash_start = time.perf_counter()
+                view_data_hash = ViewSpecComposer.hash_view_spec(
+                    self._view_spec,
+                    subset=cache.tensor_names,
+                )
+                if timing_out is not None:
+                    timing_out["view_hash_sec"] = time.perf_counter() - hash_start
+            if (
+                require_view_id
+                and not view_id
+                and self._view_spec is not None
+                and not self._view_spec.is_identity
+            ):
+                view_proto = self._view_spec.proto
+                if view_proto is None:
+                    raise ArtifactError(
+                        "View spec proto missing while computing view_id",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                view_id_start = time.perf_counter()
+                view_id = compute_view_id(view_proto, canonical_index_bytes)
+                if timing_out is not None:
+                    timing_out["view_id_sec"] = time.perf_counter() - view_id_start
+
+            if (
+                view_index_bytes == cache.view_index_bytes
+                and view_data_hash == cache.view_data_hash
+                and view_id == cache.view_id
+                and selected_index == cache.selected_index
+            ):
+                return cache
+
+            cache = ViewMetadataCache(
+                view_id=view_id,
+                view_index_bytes=view_index_bytes,
+                view_data_hash=view_data_hash,
+                tensor_names=cache.tensor_names,
+                nbytes=(
+                    int(selected_index.total_size_bytes)
+                    if selected_index is not None
+                    else cache.nbytes
+                ),
+                selected_index=selected_index,
+            )
+            self._view_metadata = cache
+            if selected_index is not None:
+                self._tensor_metas = {
+                    entry.name: _meta_from_entry(entry)
+                    for entry in selected_index.entries
+                }
+            return cache
 
     @staticmethod
     def _normalize_view_inputs(

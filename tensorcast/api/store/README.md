@@ -48,6 +48,10 @@ managing clients manually.
   daemon and can auto-escalate to `sudo`.
   Stream events are the canonical progress contract (`phase`, bytes, `percent`,
   terminal `done`, machine-readable `error_code`).
+  Same-host collective disk loading is now an explicit per-call contract:
+  set `ctx=CallContext(collective=CollectiveLoadGroup(...))` to request it.
+  TensorCast no longer auto-enables collective mode from ambient GPU
+  environment variables, and `replica_uuid` remains a pure operation/session id.
   Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
   checks for local development.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`

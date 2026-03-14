@@ -242,8 +242,60 @@ def test_tensor_subset_materialization_and_release():
 
     assert set(result.keys()) == {"bar"}
     assert pipeline.calls and pipeline.calls[0]["tensor_names"] == ("bar",)
+    assert pipeline.calls[0]["view_index_hint"]
     assert runtime._client.unloaded == []
     assert pipeline.released == []
+
+
+def test_subset_derives_view_metadata_lazily():
+    canonical_bytes, payload = _build_payload(
+        {"foo": torch.ones(1), "bar": torch.zeros(1)}
+    )
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        generation=1,
+    )
+
+    derived = artifact.subset(["bar"])
+
+    assert derived._view_metadata is not None
+    assert derived._view_metadata.tensor_names == ("bar",)
+    assert derived._view_metadata.selected_index is None
+    assert derived._view_metadata.view_index_bytes
+    assert derived._view_metadata.view_data_hash == ""
+    assert derived._view_metadata.view_id == ""
+
+
+def test_selection_materializes_lazy_view_metadata_on_demand():
+    canonical_bytes, payload = _build_payload(
+        {"foo": torch.ones(2, 3), "bar": torch.zeros(2, 3)}
+    )
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        generation=1,
+    )
+
+    derived = artifact.view(transpose={"foo": [(0, 1)]})
+    assert derived._view_metadata is not None
+    assert derived._view_metadata.view_index_bytes
+    assert derived._view_metadata.view_id == ""
+
+    selection = derived._build_artifact_selection()
+
+    assert selection.view_id
+    assert derived._view_metadata is not None
+    assert derived._view_metadata.view_index_bytes
+    assert derived._view_metadata.view_id
 
 
 def test_tensor_dict_with_diagnostics_reports_source_and_bytes():

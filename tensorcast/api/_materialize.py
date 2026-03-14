@@ -5,11 +5,11 @@ from __future__ import annotations
 import array
 import contextlib
 import fcntl
-import hashlib
 import os
 import socket
 import struct
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -27,7 +27,7 @@ from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for, resolve_devic
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
-from tensorcast.api.context import CallContext
+from tensorcast.api.context import CallContext, CollectiveLoadGroup
 from tensorcast.common.selection_contract import (
     build_artifact_selection,
     compute_selected_index_bytes,
@@ -63,6 +63,7 @@ class MaterializationPayload:
     replica_uuid: str
     generation: int | None = None
     state_dict: dict[str, torch.Tensor] | None = None
+    state_dict_loader: Callable[[], dict[str, torch.Tensor]] | None = None
     disk_path: str | None = None
     view_index_bytes: bytes | None = None
     view_data_hash: str | None = None
@@ -78,6 +79,8 @@ class MaterializationPayload:
     budget_elapsed_sec: float | None = None
     budget_remaining_sec: float | None = None
     budget_exit_reason: str | None = None
+    materialize_timing: dict[str, float] | None = None
+    bind_timing: dict[str, float] | None = None
 
 
 _LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
@@ -181,30 +184,25 @@ def _export_policy_to_proto(value: str | None) -> store_daemon_pb2.ExportPolicy:
     return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_NEVER
 
 
-def _encode_collective_replica_uuid(
-    replica_uuid: str,
+def _resolve_collective_load_group(
     ctx: CallContext | None,
-) -> str:
-    if ctx is None or not ctx.tags:
-        return replica_uuid
-    tags = ctx.tags
-    enabled = bool(tags.get("tc.collective.enable", False))
-    if not enabled:
-        return replica_uuid
-    group_id = tags.get("tc.collective.group_id")
-    world_size = tags.get("tc.collective.world_size")
-    rank = tags.get("tc.collective.rank")
-    if not isinstance(group_id, str) or not group_id:
-        return replica_uuid
-    try:
-        world_size_value = int(world_size)
-        rank_value = int(rank)
-    except Exception:  # noqa: BLE001
-        return replica_uuid
-    if world_size_value <= 1 or rank_value < 0 or rank_value >= world_size_value:
-        return replica_uuid
-    group_hash = hashlib.blake2b(group_id.encode("utf-8"), digest_size=8).hexdigest()
-    return f"tcg1:{group_hash}:{world_size_value}:{rank_value}:{replica_uuid}"
+) -> store_daemon_pb2.CollectiveLoadGroup | None:
+    # Collective disk load must be an explicit API choice. Ambient environment
+    # state must not silently rewrite a normal materialization request.
+    if ctx is None or ctx.collective is None:
+        return None
+    collective: CollectiveLoadGroup = ctx.collective
+    if not collective.group_id:
+        return None
+    if collective.world_size <= 1:
+        return None
+    if collective.rank < 0 or collective.rank >= collective.world_size:
+        return None
+    group = store_daemon_pb2.CollectiveLoadGroup()
+    group.group_id = collective.group_id
+    group.world_size = int(collective.world_size)
+    group.rank = int(collective.rank)
+    return group
 
 
 def _build_artifact_selection(
@@ -307,12 +305,10 @@ def materialize_artifact_v2(
         }
     )
 
-    replica_uuid_value = _encode_collective_replica_uuid(
-        replica_uuid or new_uuid(), ctx
-    )
     disk_path: str | None = None
     view_index_bytes: bytes | None = None
     materialized_source: store_daemon_pb2.MaterializationSource | None = None
+    materialize_timing: dict[str, float] = {}
 
     with tracer.start_as_current_span(
         "Client/MaterializeArtifactV2", kind=SpanKind.INTERNAL
@@ -367,6 +363,7 @@ def materialize_artifact_v2(
                 resolved_artifact_id
             )
 
+        selection_start = time.perf_counter()
         selection = _build_artifact_selection(
             artifact_id=resolved_artifact_id,
             view=view,
@@ -376,12 +373,18 @@ def materialize_artifact_v2(
             canonical_index_hint=resolved_canonical_index_hint,
             view_index_hint=view_index_hint,
         )
+        materialize_timing["build_selection_sec"] = (
+            time.perf_counter() - selection_start
+        )
+        replica_uuid_value = replica_uuid or new_uuid()
+        collective_load_group = _resolve_collective_load_group(ctx)
 
         request_device_uuid = (
             ""
             if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
             else device_uuid_for(dev_id)
         )
+        rpc_start = time.perf_counter()
         response = client.materialize_by_artifact_id_v2(
             selection=selection,
             replica_uuid=replica_uuid_value,
@@ -396,14 +399,19 @@ def materialize_artifact_v2(
             export_policy=export_policy,
             target_device_type=target_device_type,
             lease_mode=lease_mode,
+            collective_load_group=collective_load_group,
             timeout_s=effective_timeout_s,
+            timing_out=materialize_timing,
         )
+        materialize_timing["materialize_call_sec"] = time.perf_counter() - rpc_start
         if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
             raise DaemonUnavailable(
                 "Daemon returned unexpected response type for materialization v2"
             )
         disk_path = response.disk_path or disk_path
         materialized_source = response.source
+
+    response_decode_start = time.perf_counter()
 
     ticket_replica_uuid: str | None = None
     ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
@@ -523,6 +531,9 @@ def materialize_artifact_v2(
         _tensor_payload_from_proto(desc, default_device_uuid=device_uuid)
         for desc in response.payloads
     ]
+    materialize_timing["decode_response_sec"] = (
+        time.perf_counter() - response_decode_start
+    )
 
     meta_state_dict = {
         desc.name: (
@@ -538,8 +549,9 @@ def materialize_artifact_v2(
     }
 
     tensors_cache: dict[str, torch.Tensor] | None = None
+    bind_timing: dict[str, float] = {}
 
-    def _iter() -> PayloadIterator:
+    def _ensure_tensors_cache() -> dict[str, torch.Tensor]:
         nonlocal tensors_cache
         if not wait_for_completion:
             raise DaemonUnavailable(
@@ -559,13 +571,16 @@ def materialize_artifact_v2(
                     raise DaemonUnavailable(
                         "lease_token present but local_handle_socket_path is missing"
                     )
+                ipc_open_start = time.perf_counter()
                 cuda_memory_ptr = get_cuda_memory_ptr(dev_id, cuda_ipc_handle)
+                bind_timing["ipc_open_sec"] = time.perf_counter() - ipc_open_start
                 tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
                     dev_id: tensor_offsets_by_name
                 }
                 memory_ptrs: Mapping[int | torch.device, int] = {
                     dev_id: cuda_memory_ptr
                 }
+                restore_start = time.perf_counter()
                 tensors_cache = restore_tensors(
                     meta_state_dict,
                     memory_ptrs,
@@ -574,6 +589,7 @@ def materialize_artifact_v2(
                     lease_token=lease_token,
                     local_handle_socket_path=local_handle_socket_path,
                 )
+                bind_timing["restore_tensors_sec"] = time.perf_counter() - restore_start
             elif handle_kind == "cpu_memfd":
                 if not cpu_shared_memory_enabled:
                     raise DaemonUnavailable("cpu_shared_memory_enabled is false")
@@ -581,10 +597,15 @@ def materialize_artifact_v2(
                     raise DaemonUnavailable("local_handle_socket_path is missing")
                 if not lease_token:
                     raise DaemonUnavailable("lease_token is missing for CPU memfd")
+                fd_request_start = time.perf_counter()
                 fd = _request_cpu_memfd_fd(
                     local_handle_socket_path=local_handle_socket_path,
                     lease_token=lease_token,
                 )
+                bind_timing["cpu_fd_request_sec"] = (
+                    time.perf_counter() - fd_request_start
+                )
+                restore_start = time.perf_counter()
                 tensors_cache = restore_tensors_from_cpu_fd_with_lease(
                     meta_state_dict,
                     fd=fd,
@@ -594,12 +615,17 @@ def materialize_artifact_v2(
                     lease_token=lease_token,
                     local_handle_socket_path=local_handle_socket_path,
                 )
+                bind_timing["restore_tensors_sec"] = time.perf_counter() - restore_start
             else:
                 raise DaemonUnavailable(
                     "Materialization payload is missing a mem_handle"
                 )
+        return tensors_cache
+
+    def _iter() -> PayloadIterator:
+        cache = _ensure_tensors_cache()
         for desc in descriptors:
-            yield desc, tensors_cache[desc.name]
+            yield desc, cache[desc.name]
 
     if opts.enable_verification:
         verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000
@@ -620,6 +646,7 @@ def materialize_artifact_v2(
         canonical_index_bytes=canonical_index_bytes,
         descriptors=tuple(descriptors),
         payload_iter=_iter,
+        state_dict_loader=_ensure_tensors_cache,
         replica_uuid=replica_uuid_value,
         disk_path=disk_path,
         view_index_bytes=view_index_bytes,
@@ -631,6 +658,8 @@ def materialize_artifact_v2(
         ticket_created_at_ts=ticket_created_at_ts,
         ticket_expires_at_ts=ticket_expires_at_ts,
         generation=generation_value,
+        materialize_timing=materialize_timing,
+        bind_timing=bind_timing,
     )
 
 
