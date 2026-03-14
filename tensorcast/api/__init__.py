@@ -20,7 +20,13 @@ from tensorcast.api._indices import (
     calculate_tensor_device_offsets,
 )
 from tensorcast.api._register import RegisteredLease, RegistrationResult
-from tensorcast.api.context import CallContext, QosClass, SpanAttributeValue, context
+from tensorcast.api.context import (
+    CallContext,
+    CollectiveLoadGroup,
+    QosClass,
+    SpanAttributeValue,
+    context,
+)
 from tensorcast.api.operation import (
     Operation,
     OperationError,
@@ -86,6 +92,7 @@ __all__ = [
     "ArtifactDescriptor",
     "Artifact",
     "CallContext",
+    "CollectiveLoadGroup",
     "Operation",
     "OperationError",
     "OperationState",

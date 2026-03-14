@@ -54,10 +54,12 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 
 ## Programmable Control-Plane Primitives
 
-- `tensorcast.context(...) -> CallContext` is a pure per-call container for deadline/idempotency/tags. Handle factories
+- `tensorcast.context(...) -> CallContext` is a pure per-call container for deadline/idempotency/execution hints. Handle factories
   remain context-free (`tensorcast.artifact(...)` / `Store.artifact(...)`).
 - Action APIs accept `*, ctx: CallContext | None = None` as a keyword-only parameter; `ctx` does not participate in
   artifact/view identity, but `ctx.idempotency_key` seeds deterministic operation ids for joinable actions.
+- Collective disk loads are explicit at the API boundary via `CallContext.collective=CollectiveLoadGroup(...)`; the SDK
+  no longer infers collective mode from ambient GPU environment variables or overloads `replica_uuid` with group hints.
 - Long-tail control-plane actions return `Operation[T]` (sync/blocking): use `status()` / `result()` / `cancel()` to
   implement wait/cancel without ad-hoc polling loops.
 - `Artifact.prefetch(...)` warms a **daemon-owned** replica and supports both GPU and CPU/DRAM placement:

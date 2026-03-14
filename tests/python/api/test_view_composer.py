@@ -3,7 +3,10 @@
 import torch
 
 from tensorcast.api._view_ops import NarrowOp, build_view_spec
-from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.api.store.view_composer import (
     ViewSpecComposer,
@@ -155,7 +158,9 @@ def test_compose_view_cache_uses_selected_index_bytes_semantics() -> None:
     )
 
     assert cache is not None
-    selected_entry = cache.selected_index.entries[0]
+    assert cache.selected_index is None
+    selected_index = canonical_index_from_bytes(cache.view_index_bytes)
+    selected_entry = selected_index.entries[0]
     assert selected_entry.name == "w"
     assert selected_entry.shape == (4, 4)
     assert selected_entry.stride == (4, 1)

@@ -11,7 +11,12 @@ from typing import Callable
 import pytest
 import torch
 
-from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
+from tensorcast.api._materialize import (
+    MaterializationPayload,
+    TensorPayloadDescriptor,
+    _resolve_collective_load_group,
+)
+from tensorcast.api.context import CallContext, CollectiveLoadGroup
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
@@ -56,6 +61,35 @@ def test_materialization_proto_alignment():
     assert hasattr(resp, "view_index_bytes")
     assert hasattr(resp, "generation")
     assert not hasattr(resp, "canonical_index_json")
+
+
+def test_resolve_collective_load_group_from_explicit_context() -> None:
+    ctx = CallContext(
+        collective=CollectiveLoadGroup(
+            group_id="explicit-group",
+            world_size=4,
+            rank=1,
+        )
+    )
+    group = _resolve_collective_load_group(ctx)
+    assert group is not None
+    assert group.group_id == "explicit-group"
+    assert group.world_size == 4
+    assert group.rank == 1
+
+
+def test_resolve_collective_load_group_rejects_invalid_context() -> None:
+    ctx = CallContext(
+        collective=CollectiveLoadGroup(group_id="bad", world_size=1, rank=0)
+    )
+    assert _resolve_collective_load_group(ctx) is None
+
+
+def test_resolve_collective_load_group_ignores_ambient_gpu_env(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    monkeypatch.setenv("LOCAL_RANK", "5")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    assert _resolve_collective_load_group(None) is None
 
 
 class _DummySpan:
