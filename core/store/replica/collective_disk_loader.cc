@@ -2,6 +2,8 @@
 
 #include "core/store/replica/collective_disk_loader.h"
 
+#include <errno.h>
+#include <unistd.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -24,8 +26,15 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
+#include "core/common/async_runtime.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/error_handling.h"
+#include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/materialization/dataplane/runtime/pump.h"
+#include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
+#include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
 #include "nlohmann/json.hpp"
 
@@ -52,6 +61,7 @@ namespace {
 
 constexpr std::chrono::milliseconds kGroupAssembleTimeout{2000};
 constexpr size_t kPreferredChunkBytes = 128ULL * 1024ULL * 1024ULL;
+constexpr size_t kWholeSourceFreeMemoryReserveBytes = 512ULL * 1024ULL * 1024ULL;
 
 absl::Status nccl_status(ncclResult_t rc, std::string_view what) {
   if (rc == ncclSuccess) {
@@ -478,6 +488,404 @@ absl::Status read_exact(loader::MultiSafetensorsSource& source, uint64_t offset,
   return absl::OkStatus();
 }
 
+absl::StatusOr<size_t> pread_fully(int fd, uint64_t offset, void* dst, size_t bytes) {
+  size_t total = 0;
+  auto* ptr = static_cast<char*>(dst);
+  while (total < bytes) {
+    const ssize_t got = ::pread(fd, ptr + total, bytes - total, static_cast<off_t>(offset + total));
+    if (got < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return absl::ErrnoToStatus(errno, "pread failed");
+    }
+    if (got == 0) {
+      break;
+    }
+    total += static_cast<size_t>(got);
+  }
+  return total;
+}
+
+uint64_t total_source_bytes(absl::Span<const loader::SharedSafetensorsSegment> segments) {
+  uint64_t total = 0;
+  for (const auto& segment : segments) {
+    total = std::max<uint64_t>(total, segment.base_offset + segment.data_size);
+  }
+  return total;
+}
+
+class PreadMultiSafetensorsSource final : public loader::SeekableSource {
+ public:
+  explicit PreadMultiSafetensorsSource(std::vector<loader::SharedSafetensorsSegment> segments)
+      : segments_(std::move(segments)), total_bytes_(total_source_bytes(segments_)) {
+    std::sort(
+        segments_.begin(), segments_.end(), [](const auto& a, const auto& b) { return a.base_offset < b.base_offset; });
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    absl::MutexLock lock(&offset_mu_);
+    auto read_or = read_at(current_offset_, dst, max_bytes);
+    if (read_or.ok()) {
+      current_offset_ += *read_or;
+    }
+    return read_or;
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_bytes_;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= total_bytes_) {
+      return static_cast<size_t>(0);
+    }
+    size_t to_read = static_cast<size_t>(std::min<uint64_t>(bytes, total_bytes_ - offset));
+    size_t total = 0;
+    auto* out = static_cast<char*>(dst);
+    uint64_t cursor = offset;
+    while (total < to_read) {
+      auto it = std::upper_bound(
+          segments_.begin(),
+          segments_.end(),
+          cursor,
+          [](uint64_t value, const loader::SharedSafetensorsSegment& segment) {
+            return value < segment.base_offset + segment.data_size;
+          });
+      if (it == segments_.end()) {
+        break;
+      }
+      const auto& segment = *it;
+      if (cursor < segment.base_offset) {
+        return absl::InternalError("pread source contains an uncovered gap");
+      }
+      if (segment.file == nullptr) {
+        return absl::FailedPreconditionError("shared safetensors segment is missing a file handle");
+      }
+      const uint64_t within = cursor - segment.base_offset;
+      const size_t available = static_cast<size_t>(segment.data_size - within);
+      const size_t step = std::min(to_read - total, available);
+      auto got_or = pread_fully(segment.file->fd(), segment.data_start + within, out + total, step);
+      if (!got_or.ok()) {
+        return got_or.status();
+      }
+      if (*got_or != step) {
+        return absl::OutOfRangeError(
+            absl::StrCat("short read in PreadMultiSafetensorsSource: got=", *got_or, " want=", step));
+      }
+      total += step;
+      cursor += step;
+    }
+    if (total != to_read) {
+      return absl::OutOfRangeError(
+          absl::StrCat("short logical read in PreadMultiSafetensorsSource: got=", total, " want=", to_read));
+    }
+    return total;
+  }
+
+ private:
+  std::vector<loader::SharedSafetensorsSegment> segments_;
+  uint64_t total_bytes_{0};
+  absl::Mutex offset_mu_;
+  uint64_t current_offset_ ABSL_GUARDED_BY(offset_mu_){0};
+};
+
+common::AsyncRuntime& whole_source_load_runtime() {
+  static common::AsyncRuntime runtime(
+      common::AsyncRuntime::Options{
+          .cpu_threads = 1,
+          .blocking_threads = 8,
+          .thread_name_prefix = "tc-whole-src",
+      });
+  return runtime;
+}
+
+std::vector<loader::Range> split_even_ranges(uint64_t total_bytes, int parts) {
+  if (total_bytes == 0) {
+    return {};
+  }
+  const int effective_parts = std::max(1, parts);
+  std::vector<loader::Range> ranges;
+  ranges.reserve(static_cast<size_t>(effective_parts));
+  const uint64_t base_chunk = total_bytes / static_cast<uint64_t>(effective_parts);
+  const uint64_t remainder = total_bytes % static_cast<uint64_t>(effective_parts);
+  uint64_t cursor = 0;
+  for (int idx = 0; idx < effective_parts; ++idx) {
+    uint64_t length = base_chunk + (static_cast<uint64_t>(idx) < remainder ? 1 : 0);
+    if (length == 0) {
+      continue;
+    }
+    ranges.emplace_back(cursor, static_cast<size_t>(length));
+    cursor += length;
+  }
+  return ranges;
+}
+
+// Whole-source preload is the required execution mode for collective disk
+// load. If this invariant cannot be satisfied, the request must fail.
+absl::StatusOr<std::unique_ptr<common::memory::GpuDeviceMemory>> load_whole_source_to_root_buffer_required(
+    const std::vector<ParsedParticipant>& participants,
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    size_t chunk_bytes) {
+  if (participants.empty()) {
+    return absl::InvalidArgumentError("participants are empty");
+  }
+  if (segments.empty()) {
+    return absl::InvalidArgumentError("safetensors segments are empty");
+  }
+  if (chunk_bytes == 0) {
+    return absl::InvalidArgumentError("chunk_bytes must be > 0");
+  }
+  if (pinned_pool == nullptr) {
+    return absl::InvalidArgumentError("pinned_pool is null");
+  }
+
+  const int root_rank = 0;
+  const int root_device_id = participants[static_cast<size_t>(root_rank)].device_id;
+  const uint64_t source_bytes = total_source_bytes(segments);
+  if (source_bytes == 0) {
+    return absl::InvalidArgumentError("collective source bytes are zero");
+  }
+
+  size_t free_bytes = 0;
+  size_t total_bytes = 0;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::get_memory_info(&free_bytes, &total_bytes, root_device_id));
+  if (source_bytes + kWholeSourceFreeMemoryReserveBytes > free_bytes) {
+    return absl::ResourceExhaustedError(
+        absl::StrCat(
+            "whole-source root buffer required but unavailable: source_bytes=",
+            source_bytes,
+            " free_bytes=",
+            free_bytes,
+            " total_bytes=",
+            total_bytes,
+            " reserve_bytes=",
+            kWholeSourceFreeMemoryReserveBytes));
+  }
+
+  auto root_source = std::make_unique<common::memory::GpuDeviceMemory>();
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device_id));
+  TC_RETURN_IF_ERROR(root_source->allocate(static_cast<size_t>(source_bytes), root_device_id));
+
+  const size_t buffer_chunk_bytes = pinned_pool->slice_bytes();
+  if (buffer_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("pinned_pool slice_bytes must be > 0");
+  }
+  const size_t capacity_slices = pinned_pool->capacity_slices();
+  const int concurrency = std::max<int>(1, std::min<int>(8, static_cast<int>(capacity_slices / 2)));
+  const size_t num_chunks =
+      std::max<size_t>(2, std::min<size_t>(capacity_slices, static_cast<size_t>(std::max(2, concurrency * 2))));
+  auto streaming_buffer =
+      std::make_shared<common::memory::StreamingPinnedBuffer>(num_chunks, buffer_chunk_bytes, pinned_pool);
+  TC_RETURN_IF_ERROR(streaming_buffer->initialize(
+      pinned_timeout,
+      absl::StrCat("collective_whole_source artifact_id=", participants.front().replica_key.artifact_id)));
+  loader::StreamingBufferAdapter buffer_pool(streaming_buffer);
+  loader::GpuMemorySink sink(
+      loader::GpuMemorySink::Options{
+          .gpu_base_ptr = gsl::not_null<void*>{root_source->get()},
+          .total_size = source_bytes,
+          .chunk_size = buffer_chunk_bytes,
+          .device_id = root_device_id,
+          .allocation = nullptr,
+          .gpu_sched_enabled = false,
+          .gpu_sched_limit_bytes = loader::DEFAULT_GPU_SCHED_LIMIT_BYTES,
+          .gpu_sched_limit_copies = loader::DEFAULT_GPU_SCHED_LIMIT_COPIES,
+      });
+  PreadMultiSafetensorsSource source(std::vector<loader::SharedSafetensorsSegment>(segments.begin(), segments.end()));
+  const auto ranges = split_even_ranges(source_bytes, concurrency);
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(
+          source, sink, buffer_pool, ranges, concurrency, whole_source_load_runtime().blocking_executor()));
+  TC_RETURN_IF_ERROR(sink.close());
+  TC_RETURN_IF_ERROR(streaming_buffer->release());
+  return root_source;
+}
+
+absl::Status execute_replicated_tensor_from_root_buffer(
+    const TensorJob& job,
+    const std::vector<ParsedParticipant>& participants,
+    NcclClique& clique,
+    const void* root_source_ptr,
+    size_t chunk_bytes,
+    int root_rank) {
+  uint64_t copied = 0;
+  while (copied < job.source.size_bytes) {
+    const size_t step =
+        static_cast<size_t>(std::min<uint64_t>(job.source.size_bytes - copied, static_cast<uint64_t>(chunk_bytes)));
+    const auto* send_ptr = static_cast<const uint8_t*>(root_source_ptr) + job.source.offset + copied;
+    TC_RETURN_IF_ERROR(clique.group_start());
+    for (size_t idx = 0; idx < participants.size(); ++idx) {
+      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + job.slices[idx].dst_offset + copied;
+      const void* rank_send_ptr = (static_cast<int>(idx) == root_rank) ? send_ptr : dst_ptr;
+      TC_RETURN_IF_ERROR(clique.broadcast_u8(static_cast<int>(idx), rank_send_ptr, dst_ptr, step, root_rank));
+    }
+    TC_RETURN_IF_ERROR(clique.group_end());
+    copied += static_cast<uint64_t>(step);
+  }
+  TC_RETURN_IF_ERROR(clique.synchronize_all());
+  return absl::OkStatus();
+}
+
+absl::Status execute_dim0_tensor_from_root_buffer(
+    const TensorJob& job,
+    const std::vector<ParsedParticipant>& participants,
+    NcclClique& clique,
+    const void* root_source_ptr,
+    size_t chunk_bytes,
+    int root_rank) {
+  uint64_t per_row_bytes = job.source.elem_size;
+  for (size_t dim = 1; dim < job.source.shape.size(); ++dim) {
+    per_row_bytes *= static_cast<uint64_t>(job.source.shape[dim]);
+  }
+  const uint64_t full_bytes = job.source.size_bytes;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
+  uint64_t copied = 0;
+  while (copied < full_bytes) {
+    const size_t step =
+        static_cast<size_t>(std::min<uint64_t>(full_bytes - copied, static_cast<uint64_t>(chunk_bytes)));
+    TC_RETURN_IF_ERROR(clique.group_start());
+    for (size_t idx = 0; idx < participants.size(); ++idx) {
+      const auto& slice = job.slices[idx];
+      const uint64_t slice_begin = static_cast<uint64_t>(slice.start) * per_row_bytes;
+      const uint64_t slice_end = slice_begin + slice.dst_size_bytes;
+      const uint64_t chunk_begin = copied;
+      const uint64_t chunk_end = copied + step;
+      const uint64_t overlap_begin = std::max<uint64_t>(slice_begin, chunk_begin);
+      const uint64_t overlap_end = std::min<uint64_t>(slice_end, chunk_end);
+      if (overlap_end <= overlap_begin) {
+        continue;
+      }
+      const size_t overlap_bytes = static_cast<size_t>(overlap_end - overlap_begin);
+      const uint64_t dst_off = slice.dst_offset + (overlap_begin - slice_begin);
+      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + dst_off;
+      const auto* src_ptr = static_cast<const uint8_t*>(root_source_ptr) + job.source.offset + overlap_begin;
+      if (static_cast<int>(idx) == root_rank) {
+        TC_RETURN_IF_ERROR(
+            tensorcast::cuda::memcpy_async(
+                dst_ptr, src_ptr, overlap_bytes, cudaMemcpyDeviceToDevice, clique.stream(root_rank)));
+      } else {
+        TC_RETURN_IF_ERROR(clique.send_u8(root_rank, src_ptr, overlap_bytes, static_cast<int>(idx)));
+        TC_RETURN_IF_ERROR(clique.recv_u8(static_cast<int>(idx), dst_ptr, overlap_bytes, root_rank));
+      }
+    }
+    TC_RETURN_IF_ERROR(clique.group_end());
+    copied += static_cast<uint64_t>(step);
+  }
+  TC_RETURN_IF_ERROR(clique.synchronize_all());
+  return absl::OkStatus();
+}
+
+absl::Status execute_dim1_tensor_from_root_buffer(
+    const TensorJob& job,
+    const std::vector<ParsedParticipant>& participants,
+    NcclClique& clique,
+    const void* root_source_ptr,
+    size_t chunk_bytes,
+    int root_rank) {
+  if (job.source.shape.size() != 2) {
+    return absl::UnimplementedError("dim1 collective tensor must be 2D");
+  }
+  const uint64_t rows = static_cast<uint64_t>(job.source.shape[0]);
+  const uint64_t cols = static_cast<uint64_t>(job.source.shape[1]);
+  const uint64_t row_bytes = cols * job.source.elem_size;
+  if (row_bytes == 0) {
+    return absl::InvalidArgumentError("dim1 collective tensor has zero row_bytes");
+  }
+
+  const uint64_t rows_per_chunk = std::max<uint64_t>(1, static_cast<uint64_t>(chunk_bytes) / row_bytes);
+  std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> pack_buffers(participants.size());
+  for (size_t idx = 0; idx < participants.size(); ++idx) {
+    if (static_cast<int>(idx) == root_rank) {
+      continue;
+    }
+    const uint64_t col_bytes = job.slices[idx].dst_size_bytes / std::max<uint64_t>(1, rows);
+    if (col_bytes == 0) {
+      continue;
+    }
+    pack_buffers[idx] = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
+    TC_RETURN_IF_ERROR(
+        pack_buffers[idx]->allocate(
+            static_cast<size_t>(rows_per_chunk * col_bytes), participants[static_cast<size_t>(root_rank)].device_id));
+  }
+
+  cudaStream_t pack_stream = nullptr;
+  cudaEvent_t pack_ready_event = nullptr;
+  cudaEvent_t pack_consumed_event = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&pack_stream, cudaStreamNonBlocking));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&pack_ready_event, cudaEventDisableTiming));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&pack_consumed_event, cudaEventDisableTiming));
+
+  for (uint64_t row = 0; row < rows; row += rows_per_chunk) {
+    const uint64_t chunk_rows = std::min<uint64_t>(rows_per_chunk, rows - row);
+    if (row > 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_wait_event(pack_stream, pack_consumed_event));
+    }
+    const auto* row_base_ptr = static_cast<const uint8_t*>(root_source_ptr) + job.source.offset + row * row_bytes;
+
+    for (size_t idx = 0; idx < participants.size(); ++idx) {
+      const auto& slice = job.slices[idx];
+      const uint64_t col_bytes = slice.dst_size_bytes / std::max<uint64_t>(1, rows);
+      const uint64_t src_col_bytes = static_cast<uint64_t>(slice.start) * job.source.elem_size;
+      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + slice.dst_offset + row * col_bytes;
+      const auto* src_ptr = row_base_ptr + src_col_bytes;
+      if (static_cast<int>(idx) == root_rank) {
+        SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+            dst_ptr,
+            static_cast<size_t>(col_bytes),
+            src_ptr,
+            static_cast<size_t>(row_bytes),
+            static_cast<size_t>(col_bytes),
+            static_cast<size_t>(chunk_rows),
+            cudaMemcpyDeviceToDevice,
+            clique.stream(root_rank)));
+        continue;
+      }
+      if (pack_buffers[idx] == nullptr) {
+        continue;
+      }
+      auto* pack_ptr = static_cast<uint8_t*>(pack_buffers[idx]->get());
+      SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+          pack_ptr,
+          static_cast<size_t>(col_bytes),
+          src_ptr,
+          static_cast<size_t>(row_bytes),
+          static_cast<size_t>(col_bytes),
+          static_cast<size_t>(chunk_rows),
+          cudaMemcpyDeviceToDevice,
+          pack_stream));
+    }
+
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(pack_ready_event, pack_stream));
+    TC_RETURN_IF_ERROR(clique.wait_stream_on_event(root_rank, pack_ready_event));
+    TC_RETURN_IF_ERROR(clique.group_start());
+    for (size_t idx = 0; idx < participants.size(); ++idx) {
+      if (static_cast<int>(idx) == root_rank || pack_buffers[idx] == nullptr) {
+        continue;
+      }
+      const auto& slice = job.slices[idx];
+      const uint64_t col_bytes = slice.dst_size_bytes / std::max<uint64_t>(1, rows);
+      const size_t send_bytes = static_cast<size_t>(chunk_rows * col_bytes);
+      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + slice.dst_offset + row * col_bytes;
+      TC_RETURN_IF_ERROR(clique.send_u8(root_rank, pack_buffers[idx]->get(), send_bytes, static_cast<int>(idx)));
+      TC_RETURN_IF_ERROR(clique.recv_u8(static_cast<int>(idx), dst_ptr, send_bytes, root_rank));
+    }
+    TC_RETURN_IF_ERROR(clique.group_end());
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(pack_consumed_event, clique.stream(root_rank)));
+  }
+
+  TC_RETURN_IF_ERROR(clique.synchronize_all());
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::event_destroy(pack_consumed_event));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::event_destroy(pack_ready_event));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(pack_stream));
+  return absl::OkStatus();
+}
+
 absl::Status execute_replicated_tensor(
     const TensorJob& job,
     const std::vector<ParsedParticipant>& participants,
@@ -523,6 +931,15 @@ absl::Status execute_dim0_tensor(
     cudaStream_t h2d_stream,
     cudaEvent_t ready_event,
     int root_rank) {
+  double read_sec = 0.0;
+  double h2d_sec = 0.0;
+  double wait_ready_sec = 0.0;
+  double issue_sec = 0.0;
+  double sync_sec = 0.0;
+  double root_d2d_sec = 0.0;
+  size_t chunk_count = 0;
+  uint64_t peer_transfer_bytes = 0;
+  const auto total_start = std::chrono::steady_clock::now();
   uint64_t per_row_bytes = job.source.elem_size;
   for (size_t dim = 1; dim < job.source.shape.size(); ++dim) {
     per_row_bytes *= static_cast<uint64_t>(job.source.shape[dim]);
@@ -530,46 +947,75 @@ absl::Status execute_dim0_tensor(
   const uint64_t full_bytes = job.source.size_bytes;
   uint64_t copied = 0;
   while (copied < full_bytes) {
+    chunk_count += 1;
     const size_t chunk_bytes =
         static_cast<size_t>(std::min<uint64_t>(full_bytes - copied, static_cast<uint64_t>(host_buffer_bytes)));
-    TC_RETURN_IF_ERROR(read_exact(source, job.source.offset + copied, host_buffer, chunk_bytes));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
-    TC_RETURN_IF_ERROR(
-        tensorcast::cuda::memcpy_async(root_stage_ptr, host_buffer, chunk_bytes, cudaMemcpyHostToDevice, h2d_stream));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(ready_event, h2d_stream));
-    TC_RETURN_IF_ERROR(clique.wait_stream_on_event(root_rank, ready_event));
-
-    TC_RETURN_IF_ERROR(clique.group_start());
-    for (size_t idx = 0; idx < participants.size(); ++idx) {
-      const auto& slice = job.slices[idx];
-      const uint64_t slice_begin = static_cast<uint64_t>(slice.start) * per_row_bytes;
-      const uint64_t slice_end = slice_begin + slice.dst_size_bytes;
-      const uint64_t chunk_begin = copied;
-      const uint64_t chunk_end = copied + chunk_bytes;
-      const uint64_t overlap_begin = std::max<uint64_t>(slice_begin, chunk_begin);
-      const uint64_t overlap_end = std::min<uint64_t>(slice_end, chunk_end);
-      if (overlap_end <= overlap_begin) {
-        continue;
-      }
-      const size_t overlap_bytes = static_cast<size_t>(overlap_end - overlap_begin);
-      const uint64_t src_off = overlap_begin - chunk_begin;
-      const uint64_t dst_off = slice.dst_offset + (overlap_begin - slice_begin);
-      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + dst_off;
-      const auto* src_ptr = static_cast<const uint8_t*>(root_stage_ptr) + src_off;
-      if (static_cast<int>(idx) == root_rank) {
-        TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[idx].device_id));
-        TC_RETURN_IF_ERROR(
-            tensorcast::cuda::memcpy_async(
-                dst_ptr, src_ptr, overlap_bytes, cudaMemcpyDeviceToDevice, clique.stream(root_rank)));
-      } else {
-        TC_RETURN_IF_ERROR(clique.send_u8(root_rank, src_ptr, overlap_bytes, static_cast<int>(idx)));
-        TC_RETURN_IF_ERROR(clique.recv_u8(static_cast<int>(idx), dst_ptr, overlap_bytes, root_rank));
-      }
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(read_exact(source, job.source.offset + copied, host_buffer, chunk_bytes));
+      read_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
     }
-    TC_RETURN_IF_ERROR(clique.group_end());
-    TC_RETURN_IF_ERROR(clique.synchronize_all());
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(root_stage_ptr, host_buffer, chunk_bytes, cudaMemcpyHostToDevice, h2d_stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(ready_event, h2d_stream));
+      h2d_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(clique.wait_stream_on_event(root_rank, ready_event));
+      wait_ready_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(clique.group_start());
+      for (size_t idx = 0; idx < participants.size(); ++idx) {
+        const auto& slice = job.slices[idx];
+        const uint64_t slice_begin = static_cast<uint64_t>(slice.start) * per_row_bytes;
+        const uint64_t slice_end = slice_begin + slice.dst_size_bytes;
+        const uint64_t chunk_begin = copied;
+        const uint64_t chunk_end = copied + chunk_bytes;
+        const uint64_t overlap_begin = std::max<uint64_t>(slice_begin, chunk_begin);
+        const uint64_t overlap_end = std::min<uint64_t>(slice_end, chunk_end);
+        if (overlap_end <= overlap_begin) {
+          continue;
+        }
+        const size_t overlap_bytes = static_cast<size_t>(overlap_end - overlap_begin);
+        const uint64_t src_off = overlap_begin - chunk_begin;
+        const uint64_t dst_off = slice.dst_offset + (overlap_begin - slice_begin);
+        auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + dst_off;
+        const auto* src_ptr = static_cast<const uint8_t*>(root_stage_ptr) + src_off;
+        if (static_cast<int>(idx) == root_rank) {
+          const auto local_copy_start = std::chrono::steady_clock::now();
+          TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[idx].device_id));
+          TC_RETURN_IF_ERROR(
+              tensorcast::cuda::memcpy_async(
+                  dst_ptr, src_ptr, overlap_bytes, cudaMemcpyDeviceToDevice, clique.stream(root_rank)));
+          root_d2d_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - local_copy_start).count();
+        } else {
+          peer_transfer_bytes += overlap_bytes;
+          TC_RETURN_IF_ERROR(clique.send_u8(root_rank, src_ptr, overlap_bytes, static_cast<int>(idx)));
+          TC_RETURN_IF_ERROR(clique.recv_u8(static_cast<int>(idx), dst_ptr, overlap_bytes, root_rank));
+        }
+      }
+      TC_RETURN_IF_ERROR(clique.group_end());
+      issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(clique.synchronize_all());
+      sync_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
     copied += static_cast<uint64_t>(chunk_bytes);
   }
+  const auto total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "collective_dim0_job name=" << job.name << " bytes=" << full_bytes << " chunks=" << chunk_count
+            << " read=" << read_sec << "s h2d=" << h2d_sec << "s wait_ready=" << wait_ready_sec
+            << "s issue=" << issue_sec << "s sync=" << sync_sec << "s root_d2d=" << root_d2d_sec
+            << "s peer_transfer_bytes=" << peer_transfer_bytes << " total=" << total_sec << "s";
   return absl::OkStatus();
 }
 
@@ -584,6 +1030,15 @@ absl::Status execute_dim1_tensor(
     cudaStream_t h2d_stream,
     cudaEvent_t ready_event,
     int root_rank) {
+  double pack_alloc_sec = 0.0;
+  double read_sec = 0.0;
+  double h2d_sec = 0.0;
+  double pack_sec = 0.0;
+  double issue_sec = 0.0;
+  double sync_sec = 0.0;
+  size_t chunk_count = 0;
+  uint64_t peer_transfer_bytes = 0;
+  const auto total_start = std::chrono::steady_clock::now();
   if (job.source.shape.size() != 2) {
     return absl::UnimplementedError("dim1 collective tensor must be 2D");
   }
@@ -605,9 +1060,11 @@ absl::Status execute_dim1_tensor(
     }
     pack_buffers[idx] = std::make_unique<common::memory::GpuDeviceMemory>();
     TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
+    const auto alloc_start = std::chrono::steady_clock::now();
     TC_RETURN_IF_ERROR(
         pack_buffers[idx]->allocate(
             static_cast<size_t>(rows_per_chunk * col_bytes), participants[static_cast<size_t>(root_rank)].device_id));
+    pack_alloc_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - alloc_start).count();
   }
 
   cudaStream_t pack_stream = nullptr;
@@ -615,26 +1072,49 @@ absl::Status execute_dim1_tensor(
   TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&pack_stream, cudaStreamNonBlocking));
 
   for (uint64_t row = 0; row < rows; row += rows_per_chunk) {
+    chunk_count += 1;
     const uint64_t chunk_rows = std::min<uint64_t>(rows_per_chunk, rows - row);
     const uint64_t chunk_bytes = chunk_rows * row_bytes;
-    TC_RETURN_IF_ERROR(
-        read_exact(source, job.source.offset + row * row_bytes, host_buffer, static_cast<size_t>(chunk_bytes)));
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(
+          read_exact(source, job.source.offset + row * row_bytes, host_buffer, static_cast<size_t>(chunk_bytes)));
+      read_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
     TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
-    TC_RETURN_IF_ERROR(
-        tensorcast::cuda::memcpy_async(
-            root_stage_ptr, host_buffer, static_cast<size_t>(chunk_bytes), cudaMemcpyHostToDevice, h2d_stream));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(ready_event, h2d_stream));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_wait_event(pack_stream, ready_event));
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(
+              root_stage_ptr, host_buffer, static_cast<size_t>(chunk_bytes), cudaMemcpyHostToDevice, h2d_stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(ready_event, h2d_stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_wait_event(pack_stream, ready_event));
+      h2d_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
 
-    for (size_t idx = 0; idx < participants.size(); ++idx) {
-      const auto& slice = job.slices[idx];
-      const uint64_t col_bytes = slice.dst_size_bytes / std::max<uint64_t>(1, rows);
-      const uint64_t src_col_bytes = static_cast<uint64_t>(slice.start) * job.source.elem_size;
-      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + slice.dst_offset + row * col_bytes;
-      const auto* src_ptr = static_cast<const uint8_t*>(root_stage_ptr) + src_col_bytes;
-      if (static_cast<int>(idx) == root_rank) {
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      for (size_t idx = 0; idx < participants.size(); ++idx) {
+        const auto& slice = job.slices[idx];
+        const uint64_t col_bytes = slice.dst_size_bytes / std::max<uint64_t>(1, rows);
+        const uint64_t src_col_bytes = static_cast<uint64_t>(slice.start) * job.source.elem_size;
+        auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + slice.dst_offset + row * col_bytes;
+        const auto* src_ptr = static_cast<const uint8_t*>(root_stage_ptr) + src_col_bytes;
+        if (static_cast<int>(idx) == root_rank) {
+          SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+              dst_ptr,
+              static_cast<size_t>(col_bytes),
+              src_ptr,
+              static_cast<size_t>(row_bytes),
+              static_cast<size_t>(col_bytes),
+              static_cast<size_t>(chunk_rows),
+              cudaMemcpyDeviceToDevice,
+              pack_stream));
+          continue;
+        }
+        auto* pack_ptr = static_cast<uint8_t*>(pack_buffers[idx]->get());
         SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
-            dst_ptr,
+            pack_ptr,
             static_cast<size_t>(col_bytes),
             src_ptr,
             static_cast<size_t>(row_bytes),
@@ -642,40 +1122,45 @@ absl::Status execute_dim1_tensor(
             static_cast<size_t>(chunk_rows),
             cudaMemcpyDeviceToDevice,
             pack_stream));
-        continue;
       }
-      auto* pack_ptr = static_cast<uint8_t*>(pack_buffers[idx]->get());
-      SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
-          pack_ptr,
-          static_cast<size_t>(col_bytes),
-          src_ptr,
-          static_cast<size_t>(row_bytes),
-          static_cast<size_t>(col_bytes),
-          static_cast<size_t>(chunk_rows),
-          cudaMemcpyDeviceToDevice,
-          pack_stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(pack_stream));
+      pack_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
     }
-    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(pack_stream));
-    TC_RETURN_IF_ERROR(clique.group_start());
-    for (size_t idx = 0; idx < participants.size(); ++idx) {
-      if (static_cast<int>(idx) == root_rank) {
-        continue;
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(clique.group_start());
+      for (size_t idx = 0; idx < participants.size(); ++idx) {
+        if (static_cast<int>(idx) == root_rank) {
+          continue;
+        }
+        const auto& slice = job.slices[idx];
+        const uint64_t col_bytes = slice.dst_size_bytes / std::max<uint64_t>(1, rows);
+        const size_t send_bytes = static_cast<size_t>(chunk_rows * col_bytes);
+        auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + slice.dst_offset + row * col_bytes;
+        peer_transfer_bytes += send_bytes;
+        TC_RETURN_IF_ERROR(clique.send_u8(root_rank, pack_buffers[idx]->get(), send_bytes, static_cast<int>(idx)));
+        TC_RETURN_IF_ERROR(clique.recv_u8(static_cast<int>(idx), dst_ptr, send_bytes, root_rank));
       }
-      const auto& slice = job.slices[idx];
-      const uint64_t col_bytes = slice.dst_size_bytes / std::max<uint64_t>(1, rows);
-      const size_t send_bytes = static_cast<size_t>(chunk_rows * col_bytes);
-      auto* dst_ptr = static_cast<uint8_t*>(participants[idx].gpu_ptr) + slice.dst_offset + row * col_bytes;
-      TC_RETURN_IF_ERROR(clique.send_u8(root_rank, pack_buffers[idx]->get(), send_bytes, static_cast<int>(idx)));
-      TC_RETURN_IF_ERROR(clique.recv_u8(static_cast<int>(idx), dst_ptr, send_bytes, root_rank));
+      TC_RETURN_IF_ERROR(clique.group_end());
+      issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
     }
-    TC_RETURN_IF_ERROR(clique.group_end());
-    TC_RETURN_IF_ERROR(clique.synchronize_all());
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(clique.synchronize_all());
+      sync_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
   }
 
   if (pack_stream != nullptr) {
     TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[static_cast<size_t>(root_rank)].device_id));
     TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(pack_stream));
   }
+  const auto total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "collective_dim1_job name=" << job.name << " bytes=" << job.source.size_bytes << " rows=" << rows
+            << " rows_per_chunk=" << rows_per_chunk << " chunks=" << chunk_count << " pack_alloc=" << pack_alloc_sec
+            << "s read=" << read_sec << "s h2d=" << h2d_sec << "s pack=" << pack_sec << "s issue=" << issue_sec
+            << "s sync=" << sync_sec << "s peer_transfer_bytes=" << peer_transfer_bytes << " total=" << total_sec
+            << "s";
   return absl::OkStatus();
 }
 
@@ -701,22 +1186,7 @@ absl::Status execute_group_collective(
   auto clique = *clique_or;
   const auto clique_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - clique_start).count();
   absl::MutexLock clique_use_lock(&clique->use_mutex());
-
-  PinnedBorrow host_pool;
-  host_pool.pool = pinned_pool;
-  const auto pinned_alloc_start = std::chrono::steady_clock::now();
-  if (pinned_pool->allocate(
-          pinned_pool->slice_bytes(),
-          host_pool.buffers,
-          pinned_timeout,
-          absl::StrCat("collective_disk_load artifact_id=", participants.front().replica_key.artifact_id)) != 0 ||
-      host_pool.buffers.empty()) {
-    return absl::ResourceExhaustedError("failed to allocate pinned buffer for collective disk load");
-  }
-  const auto pinned_alloc_sec =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - pinned_alloc_start).count();
   const size_t chunk_bytes = std::min<size_t>(kPreferredChunkBytes, pinned_pool->slice_bytes());
-  char* host_buffer = host_pool.buffers.front();
 
   const int root_rank = 0;
   std::unique_ptr<common::memory::GpuDeviceMemory> root_stage;
@@ -739,6 +1209,46 @@ absl::Status execute_group_collective(
     return jobs_or.status();
   }
   const auto jobs_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - jobs_start).count();
+  const auto whole_source_start = std::chrono::steady_clock::now();
+  std::unique_ptr<common::memory::GpuDeviceMemory> root_source;
+  bool whole_source_enabled = false;
+  if (participants.front().disk_context->safetensors_segments().empty()) {
+    return absl::FailedPreconditionError("collective disk load requires non-empty safetensors segments");
+  }
+  auto root_source_or = load_whole_source_to_root_buffer_required(
+      participants,
+      participants.front().disk_context->safetensors_segments(),
+      pinned_pool,
+      pinned_timeout,
+      chunk_bytes);
+  if (!root_source_or.ok()) {
+    return root_source_or.status();
+  }
+  root_source = std::move(*root_source_or);
+  whole_source_enabled = true;
+  const auto whole_source_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - whole_source_start).count();
+
+  PinnedBorrow host_pool;
+  host_pool.pool = pinned_pool;
+  double pinned_alloc_sec = 0.0;
+  char* host_buffer = nullptr;
+  if (!whole_source_enabled) {
+    const auto pinned_alloc_start = std::chrono::steady_clock::now();
+    const std::string request_context =
+        absl::StrCat("collective_disk_load artifact_id=", participants.front().replica_key.artifact_id);
+    if (pinned_pool->allocate(pinned_pool->slice_bytes() * 2, host_pool.buffers, pinned_timeout, request_context) !=
+            0 ||
+        host_pool.buffers.empty()) {
+      host_pool.buffers.clear();
+      if (pinned_pool->allocate(pinned_pool->slice_bytes(), host_pool.buffers, pinned_timeout, request_context) != 0 ||
+          host_pool.buffers.empty()) {
+        return absl::ResourceExhaustedError("failed to allocate pinned buffer for collective disk load");
+      }
+    }
+    pinned_alloc_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - pinned_alloc_start).count();
+    host_buffer = host_pool.buffers.front();
+  }
   size_t replicated_jobs = 0;
   size_t dim0_jobs = 0;
   size_t dim1_jobs = 0;
@@ -749,47 +1259,62 @@ absl::Status execute_group_collective(
     const auto job_start = std::chrono::steady_clock::now();
     switch (job.distribution) {
       case TensorJob::Distribution::kReplicated:
-        TC_RETURN_IF_ERROR(execute_replicated_tensor(
-            job,
-            participants,
-            source,
-            *clique,
-            host_buffer,
-            chunk_bytes,
-            root_stage->get(),
-            h2d_stream,
-            ready_event,
-            root_rank));
+        if (whole_source_enabled) {
+          TC_RETURN_IF_ERROR(execute_replicated_tensor_from_root_buffer(
+              job, participants, *clique, root_source->get(), chunk_bytes, root_rank));
+        } else {
+          TC_RETURN_IF_ERROR(execute_replicated_tensor(
+              job,
+              participants,
+              source,
+              *clique,
+              host_buffer,
+              chunk_bytes,
+              root_stage->get(),
+              h2d_stream,
+              ready_event,
+              root_rank));
+        }
         replicated_jobs += 1;
         replicated_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - job_start).count();
         break;
       case TensorJob::Distribution::kDim0Partitioned:
-        TC_RETURN_IF_ERROR(execute_dim0_tensor(
-            job,
-            participants,
-            source,
-            *clique,
-            host_buffer,
-            chunk_bytes,
-            root_stage->get(),
-            h2d_stream,
-            ready_event,
-            root_rank));
+        if (whole_source_enabled) {
+          TC_RETURN_IF_ERROR(execute_dim0_tensor_from_root_buffer(
+              job, participants, *clique, root_source->get(), chunk_bytes, root_rank));
+        } else {
+          TC_RETURN_IF_ERROR(execute_dim0_tensor(
+              job,
+              participants,
+              source,
+              *clique,
+              host_buffer,
+              chunk_bytes,
+              root_stage->get(),
+              h2d_stream,
+              ready_event,
+              root_rank));
+        }
         dim0_jobs += 1;
         dim0_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - job_start).count();
         break;
       case TensorJob::Distribution::kDim1Partitioned:
-        TC_RETURN_IF_ERROR(execute_dim1_tensor(
-            job,
-            participants,
-            source,
-            *clique,
-            host_buffer,
-            chunk_bytes,
-            root_stage->get(),
-            h2d_stream,
-            ready_event,
-            root_rank));
+        if (whole_source_enabled) {
+          TC_RETURN_IF_ERROR(execute_dim1_tensor_from_root_buffer(
+              job, participants, *clique, root_source->get(), chunk_bytes, root_rank));
+        } else {
+          TC_RETURN_IF_ERROR(execute_dim1_tensor(
+              job,
+              participants,
+              source,
+              *clique,
+              host_buffer,
+              chunk_bytes,
+              root_stage->get(),
+              h2d_stream,
+              ready_event,
+              root_rank));
+        }
         dim1_jobs += 1;
         dim1_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - job_start).count();
         break;
@@ -803,6 +1328,8 @@ absl::Status execute_group_collective(
   LOG(INFO) << "collective_disk_load timings: clique_init=" << clique_sec << "s"
             << " clique_cache_hit=" << (clique_cache_hit ? 1 : 0) << " pinned_alloc=" << pinned_alloc_sec << "s"
             << " root_alloc=" << root_alloc_sec << "s"
+            << " whole_source=" << (whole_source_enabled ? 1 : 0) << " whole_source_load=" << whole_source_sec << "s"
+            << " whole_source_bytes=" << (root_source != nullptr ? root_source->size() : 0)
             << " build_jobs=" << jobs_sec << "s"
             << " replicated_jobs=" << replicated_jobs << " replicated_exec=" << replicated_sec << "s"
             << " dim0_jobs=" << dim0_jobs << " dim0_exec=" << dim0_sec << "s"
@@ -955,6 +1482,20 @@ CollectiveDiskLoadResult try_collective_disk_load(
     }
   }
   return wait_for_group_and_maybe_execute(request, pinned_pool, pinned_timeout);
+}
+
+absl::Status warm_collective_clique_cache(const std::vector<int>& device_ids) {
+  if (device_ids.size() <= 1) {
+    return absl::OkStatus();
+  }
+  bool cache_hit = false;
+  auto clique_or = get_or_create_cached_clique(device_ids, &cache_hit);
+  if (!clique_or.ok()) {
+    return clique_or.status();
+  }
+  LOG(INFO) << "collective_disk_load clique prewarm complete device_ids=" << clique_cache_key(device_ids)
+            << " cache_hit=" << (cache_hit ? 1 : 0);
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::store::replica

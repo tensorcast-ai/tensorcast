@@ -109,6 +109,17 @@ service StoreDaemonService {
 
 message GetServerConfigRequest {}
 
+enum DaemonStartupPhase {
+  DAEMON_STARTUP_PHASE_UNSPECIFIED = 0;
+  // gRPC is serving status/config RPCs, but startup-gated data-plane RPCs may
+  // still return UNAVAILABLE while deferred startup completes.
+  DAEMON_STARTUP_PHASE_LISTENING = 1;
+  // Deferred startup completed and startup-gated RPCs are available.
+  DAEMON_STARTUP_PHASE_READY = 2;
+  // Deferred startup failed after the server started listening.
+  DAEMON_STARTUP_PHASE_FAILED = 3;
+}
+
 message GetServerConfigResponse {
   int64 mem_pool_size = 1;
   // Reserved: previously chunk_size (legacy transfer slice)
@@ -125,6 +136,8 @@ message GetServerConfigResponse {
   string local_handle_socket_path = 6;
   // True when CPU shared-memory materialization is enabled.
   bool cpu_shared_memory_enabled = 7;
+  // Single source of truth for daemon startup visibility across CLI, SDK, and tests.
+  DaemonStartupPhase startup_phase = 8;
 }
 
 message RegisterRequest {
@@ -415,6 +428,14 @@ message MaterializeReplicaRequest {
   // location in the local cluster before retrying disk-only.
   uint32 wait_for_shared_disk_ms = 16;
   ExportPolicy export_policy = 17;
+  // Explicit collective group hint for same-host coordinated disk->GPU loads.
+  optional CollectiveLoadGroup collective_load_group = 18;
+}
+
+message CollectiveLoadGroup {
+  string group_id = 1;
+  uint32 world_size = 2;
+  uint32 rank = 3;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.

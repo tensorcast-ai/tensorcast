@@ -96,12 +96,16 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
     std::shared_ptr<store::StoreEngine> engine,
     DaemonOptions options,
     std::shared_ptr<common::AsyncRuntime> async_runtime,
-    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client) {
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client,
+    std::shared_ptr<StartupCoordinator> startup_coordinator) {
   if (!engine) {
     return absl::InvalidArgumentError("DaemonServiceHarness requires StoreEngine");
   }
   if (!async_runtime) {
     async_runtime = std::make_shared<common::AsyncRuntime>();
+  }
+  if (!startup_coordinator) {
+    startup_coordinator = std::make_shared<StartupCoordinator>();
   }
   if (options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.handle_lease_ttl;
@@ -218,6 +222,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .start_time = kernel->start_time(),
       .local_handle_socket_path = options.local_handle_socket_path,
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
+      .startup_coordinator = startup_coordinator,
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
@@ -269,6 +274,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .replica_session_controller = *replica_session_controller,
       .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
+      .startup_coordinator = startup_coordinator,
       .source_registry = &kernel->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{

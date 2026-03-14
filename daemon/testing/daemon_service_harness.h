@@ -11,6 +11,7 @@
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/app/startup_coordinator.h"
 #include "daemon/service/controllers/byte_artifact_controller.h"
 #include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/controllers/key_mapping_controller.h"
@@ -34,7 +35,8 @@ class DaemonServiceHarness {
       std::shared_ptr<store::StoreEngine> engine,
       DaemonOptions options,
       std::shared_ptr<common::AsyncRuntime> async_runtime = nullptr,
-      std::shared_ptr<store::components::IGlobalStoreClient> global_store_client = nullptr);
+      std::shared_ptr<store::components::IGlobalStoreClient> global_store_client = nullptr,
+      std::shared_ptr<StartupCoordinator> startup_coordinator = nullptr);
 
   ~DaemonServiceHarness();
 

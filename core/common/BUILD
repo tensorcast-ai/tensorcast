@@ -57,6 +57,8 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@boringssl//:crypto",
+        "@folly//folly/executors:cpu_thread_pool_executor",
+        "@folly//folly/futures:core",
     ],
 )
 
@@ -149,6 +151,17 @@ sc_cc_library(
     ],
 )
 
+cc_test(
+    name = "pinned_buffer_pool_test",
+    size = "small",
+    srcs = ["memory/pinned_buffer_pool_test.cc"],
+    deps = [
+        ":pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Memory management - Pinned memory
 sc_cc_library(
     name = "pinned_memory_lib",
@@ -172,6 +185,8 @@ sc_cc_library(
         ":pinned_buffer_pool_lib",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
+        "@folly//folly/executors:cpu_thread_pool_executor",
+        "@folly//folly/futures:core",
     ],
 )
 

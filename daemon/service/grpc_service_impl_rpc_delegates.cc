@@ -10,6 +10,9 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
     const v2::MaterializeReplicaRequest* req,
     v2::MaterializeReplicaResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"MaterializeReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->materialize_replica(rctx, *req, *resp);
 }
@@ -18,6 +21,9 @@ Status StoreDaemonServiceImpl::MaterializeIntoTarget(
     grpc::ServerContext* ctx,
     const v2::MaterializeIntoTargetRequest* req,
     v2::MaterializeIntoTargetResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"MaterializeIntoTarget", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->materialize_into_target(rctx, *req, *resp);
 }
@@ -26,6 +32,9 @@ Status StoreDaemonServiceImpl::MaterializeIntoMappedTarget(
     grpc::ServerContext* ctx,
     const v2::MaterializeIntoMappedTargetRequest* req,
     v2::MaterializeIntoTargetResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"MaterializeIntoMappedTarget", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->materialize_into_mapped_target(rctx, *req, *resp);
 }
@@ -34,6 +43,9 @@ Status StoreDaemonServiceImpl::CreateOwnedBinding(
     grpc::ServerContext* ctx,
     const v2::CreateOwnedBindingRequest* req,
     v2::CreateOwnedBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"CreateOwnedBinding", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->create_owned_binding(rctx, *req, *resp);
 }
@@ -42,6 +54,9 @@ Status StoreDaemonServiceImpl::RefillOwnedBinding(
     grpc::ServerContext* ctx,
     const v2::RefillOwnedBindingRequest* req,
     v2::RefillOwnedBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"RefillOwnedBinding", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->refill_owned_binding(rctx, *req, *resp);
 }
@@ -50,6 +65,9 @@ Status StoreDaemonServiceImpl::CloseOwnedBinding(
     grpc::ServerContext* ctx,
     const v2::CloseOwnedBindingRequest* req,
     v2::CloseOwnedBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"CloseOwnedBinding", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->close_owned_binding(rctx, *req, *resp);
 }
@@ -58,6 +76,9 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
     grpc::ServerContext* ctx,
     const v2::ConfirmReplicaRequest* req,
     v2::ConfirmReplicaResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ConfirmReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->confirm(rctx, *req, *resp);
 }
@@ -66,6 +87,9 @@ Status StoreDaemonServiceImpl::ImportArtifactFromPath(
     grpc::ServerContext* ctx,
     const v2::ImportArtifactFromPathRequest* req,
     v2::ImportArtifactFromPathResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ImportArtifactFromPath", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->import_artifact_from_path(rctx, *req, *resp);
 }
@@ -74,6 +98,9 @@ Status StoreDaemonServiceImpl::ImportArtifactFromPathStream(
     grpc::ServerContext* ctx,
     const v2::ImportArtifactFromPathRequest* req,
     grpc::ServerWriter<v2::ImportArtifactFromPathStreamEvent>* writer) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ImportArtifactFromPathStream", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->import_artifact_from_path_stream(rctx, *req, *writer);
 }
@@ -82,6 +109,9 @@ Status StoreDaemonServiceImpl::QueryReplicaStatus(
     grpc::ServerContext* ctx,
     const v2::QueryReplicaStatusRequest* req,
     v2::QueryReplicaStatusResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"QueryReplicaStatus", *ctx, opts_.allow_high_card_attrs};
   return replica_session_controller_->query_replica_status(rctx, *req, *resp);
 }
@@ -90,6 +120,9 @@ Status StoreDaemonServiceImpl::WaitReplicaStatus(
     grpc::ServerContext* ctx,
     const v2::WaitReplicaStatusRequest* req,
     v2::WaitReplicaStatusResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"WaitReplicaStatus", *ctx, opts_.allow_high_card_attrs};
   return replica_session_controller_->wait_replica_status(rctx, *ctx, *req, *resp);
 }
@@ -98,6 +131,9 @@ Status StoreDaemonServiceImpl::ReleaseReplica(
     grpc::ServerContext* ctx,
     const v2::ReleaseReplicaRequest* req,
     v2::ReleaseReplicaResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ReleaseReplica", *ctx, opts_.allow_high_card_attrs};
   return replica_session_controller_->release_replica(rctx, *req, *resp);
 }
@@ -106,6 +142,9 @@ Status StoreDaemonServiceImpl::CreatePlacementLease(
     grpc::ServerContext* ctx,
     const v2::CreatePlacementLeaseRequest* req,
     v2::CreatePlacementLeaseResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"CreatePlacementLease", *ctx, opts_.allow_high_card_attrs};
   return lease_controller_->create_placement_lease(rctx, *req, *resp);
 }
@@ -114,6 +153,9 @@ Status StoreDaemonServiceImpl::RenewPlacementLease(
     grpc::ServerContext* ctx,
     const v2::RenewPlacementLeaseRequest* req,
     v2::RenewPlacementLeaseResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"RenewPlacementLease", *ctx, opts_.allow_high_card_attrs};
   return lease_controller_->renew_placement_lease(rctx, *req, *resp);
 }
@@ -122,6 +164,9 @@ Status StoreDaemonServiceImpl::ReleasePlacementLease(
     grpc::ServerContext* ctx,
     const v2::ReleasePlacementLeaseRequest* req,
     v2::ReleasePlacementLeaseResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ReleasePlacementLease", *ctx, opts_.allow_high_card_attrs};
   return lease_controller_->release_placement_lease(rctx, *req, *resp);
 }
@@ -130,6 +175,9 @@ Status StoreDaemonServiceImpl::AcquireRetentionHandle(
     grpc::ServerContext* ctx,
     const v2::AcquireRetentionHandleRequest* req,
     v2::AcquireRetentionHandleResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"AcquireRetentionHandle", *ctx, opts_.allow_high_card_attrs};
   return lease_controller_->acquire_retention_handle(rctx, *req, *resp);
 }
@@ -138,6 +186,9 @@ Status StoreDaemonServiceImpl::RenewRetentionHandle(
     grpc::ServerContext* ctx,
     const v2::RenewRetentionHandleRequest* req,
     v2::RenewRetentionHandleResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"RenewRetentionHandle", *ctx, opts_.allow_high_card_attrs};
   return lease_controller_->renew_retention_handle(rctx, *req, *resp);
 }
@@ -146,6 +197,9 @@ Status StoreDaemonServiceImpl::ReleaseRetentionHandle(
     grpc::ServerContext* ctx,
     const v2::ReleaseRetentionHandleRequest* req,
     v2::ReleaseRetentionHandleResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ReleaseRetentionHandle", *ctx, opts_.allow_high_card_attrs};
   return lease_controller_->release_retention_handle(rctx, *req, *resp);
 }
@@ -154,6 +208,9 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
     grpc::ServerContext* ctx,
     const v2::PublishReplicaKeyRequest* req,
     v2::PublishReplicaKeyResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"PublishReplicaKey", *ctx, opts_.allow_high_card_attrs};
   return key_mapping_controller_->publish_replica_key(rctx, *req, *resp);
 }
@@ -162,6 +219,9 @@ Status StoreDaemonServiceImpl::ResolveKeyMapping(
     grpc::ServerContext* ctx,
     const v2::ResolveKeyMappingRequest* req,
     v2::ResolveKeyMappingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"ResolveKeyMapping", *ctx, opts_.allow_high_card_attrs};
   return key_mapping_controller_->resolve_key_mapping(rctx, *req, *resp);
 }
@@ -170,6 +230,9 @@ Status StoreDaemonServiceImpl::SwapKeyMapping(
     grpc::ServerContext* ctx,
     const v2::SwapKeyMappingRequest* req,
     v2::SwapKeyMappingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"SwapKeyMapping", *ctx, opts_.allow_high_card_attrs};
   return key_mapping_controller_->swap_key_mapping(rctx, *req, *resp);
 }
@@ -178,6 +241,9 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
     grpc::ServerContext* ctx,
     const v2::GetArtifactIndexByIdRequest* req,
     v2::GetArtifactIndexByIdResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
@@ -266,6 +332,9 @@ Status StoreDaemonServiceImpl::SealAssembly(
     grpc::ServerContext* ctx,
     const v2::SealAssemblyRequest* req,
     v2::SealAssemblyResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"SealAssembly", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->seal_assembly(rctx, *req, *resp);
 }
@@ -274,6 +343,9 @@ Status StoreDaemonServiceImpl::StartSealAssembly(
     grpc::ServerContext* ctx,
     const v2::StartSealAssemblyRequest* req,
     v2::StartSealAssemblyResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"StartSealAssembly", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->start_seal_assembly(rctx, *req, *resp);
 }
@@ -282,6 +354,9 @@ Status StoreDaemonServiceImpl::GetOperation(
     grpc::ServerContext* ctx,
     const tensorcast::operation::v1::GetOperationRequest* req,
     tensorcast::operation::v1::GetOperationResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"GetOperation", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->get_operation(rctx, *req, *resp);
 }
@@ -290,6 +365,9 @@ Status StoreDaemonServiceImpl::WaitOperation(
     grpc::ServerContext* ctx,
     const v2::WaitOperationRequest* req,
     v2::WaitOperationResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"WaitOperation", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->wait_operation(rctx, *req, *resp);
 }
@@ -298,6 +376,9 @@ Status StoreDaemonServiceImpl::StartPersistence(
     grpc::ServerContext* ctx,
     const v2::StartPersistenceRequest* req,
     v2::StartPersistenceResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"StartPersistence", *ctx, opts_.allow_high_card_attrs};
   return persistence_rpc_controller_->start_persistence(rctx, *req, *resp);
 }
@@ -314,6 +395,9 @@ Status StoreDaemonServiceImpl::UnloadReplica(
     grpc::ServerContext* ctx,
     const v2::UnloadReplicaRequest* req,
     v2::UnloadReplicaResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"UnloadReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->unload(rctx, *req, *resp);
 }
@@ -330,6 +414,9 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
     grpc::ServerContext* ctx,
     const v2::WaitReplicaVerificationRequest* req,
     v2::WaitReplicaVerificationResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"WaitReplicaVerification", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->wait_verification(rctx, *req, *resp);
 }
@@ -338,6 +425,9 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
     grpc::ServerContext* ctx,
     const v2::LockTransportChunksRequest* req,
     v2::LockTransportChunksResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"LockTransportChunks", *ctx, opts_.allow_high_card_attrs};
   return transport_controller_->lock(rctx, *req, *resp);
 }
@@ -346,6 +436,9 @@ Status StoreDaemonServiceImpl::PublishTargetReplica(
     grpc::ServerContext* ctx,
     const v2::PublishTargetReplicaRequest* req,
     v2::PublishTargetReplicaResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"PublishTargetReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->publish_target_replica(rctx, *req, *resp);
 }
@@ -354,6 +447,9 @@ Status StoreDaemonServiceImpl::UnlockTransportChunks(
     grpc::ServerContext* ctx,
     const v2::UnlockTransportChunksRequest* req,
     v2::UnlockTransportChunksResponse* /*resp*/) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"UnlockTransportChunks", *ctx, opts_.allow_high_card_attrs};
   v2::UnlockTransportChunksResponse dummy;
   return transport_controller_->unlock(rctx, *req, dummy);
@@ -363,6 +459,9 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
     grpc::ServerContext* ctx,
     const v2::BeginRegisterArtifactRequest* req,
     v2::BeginRegisterArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"BeginRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->begin(rctx, *req, *resp);
 }
@@ -371,6 +470,9 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     grpc::ServerContext* ctx,
     const v2::CommitRegisteredArtifactRequest* req,
     v2::CommitRegisteredArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"CommitRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->commit(rctx, *req, *resp);
 }
@@ -379,6 +481,9 @@ Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
     grpc::ServerContext* ctx,
     const v2::AbortRegisteredArtifactRequest* req,
     v2::AbortRegisteredArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"AbortRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->abort(rctx, *req, *resp);
 }
@@ -387,6 +492,9 @@ Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
     grpc::ServerContext* ctx,
     ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>* reader,
     v2::FeedRegisterArtifactStreamResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"FeedRegisterArtifactStream", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->feed_stream(rctx, *reader, *resp);
 }
@@ -400,6 +508,9 @@ Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
     grpc::ServerContext* ctx,
     const v2::KeepAliveRegisterArtifactRequest* req,
     v2::KeepAliveRegisterArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"KeepAliveRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->keep_alive(rctx, *req, *resp);
 }
@@ -408,6 +519,9 @@ Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
     grpc::ServerContext* ctx,
     const v2::RevokeRegisteredArtifactRequest* req,
     v2::RevokeRegisteredArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   RpcContext rctx{"RevokeRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->revoke(rctx, *req, *resp);
 }

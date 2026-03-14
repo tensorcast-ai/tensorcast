@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,8 @@
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_driver_api.h"
 #include "core/cuda/lazy_nvrtc.h"
+#include "folly/executors/CPUThreadPoolExecutor.h"
+#include "folly/futures/Future.h"
 
 namespace tensorcast::common {
 
@@ -127,6 +130,17 @@ std::optional<int> current_device_best_effort() {
     return device_id;
   }
   return std::nullopt;
+}
+
+size_t startup_parallelism(int task_count) {
+  if (task_count <= 0) {
+    return 1;
+  }
+  const size_t hw = static_cast<size_t>(std::thread::hardware_concurrency());
+  if (hw == 0) {
+    return static_cast<size_t>(task_count);
+  }
+  return std::max<size_t>(1, std::min<size_t>(static_cast<size_t>(task_count), hw));
 }
 
 absl::StatusOr<std::vector<uint8_t>> compute_root_via_host_copy(
@@ -851,19 +865,33 @@ absl::Status prewarm_gpu_hash_nvrtc_for_visible_devices() {
   if (device_count <= 0) {
     return absl::OkStatus();
   }
+  if (device_count == 1) {
+    return prewarm_gpu_hash_nvrtc_for_device(0);
+  }
 
-  const std::optional<int> prior_device = current_device_best_effort();
-  int current_device = prior_device.value_or(-1);
-  absl::Cleanup restore_device = absl::MakeCleanup([&]() { restore_device_best_effort(prior_device, current_device); });
-
+  folly::CPUThreadPoolExecutor executor(startup_parallelism(device_count));
+  auto keep_alive = folly::getKeepAliveToken(executor);
+  std::vector<folly::SemiFuture<absl::Status>> tasks;
+  tasks.reserve(static_cast<size_t>(device_count));
   for (int device_id = 0; device_id < device_count; ++device_id) {
-    if (auto set_status = cuda::set_device(device_id); !set_status.ok()) {
-      return absl::Status(
-          set_status.code(),
-          absl::StrCat("failed to set CUDA device ", device_id, " during GPU hash prewarm: ", set_status.message()));
+    tasks.push_back(folly::via(keep_alive.copy(), [device_id]() -> absl::Status {
+      try {
+        return prewarm_gpu_hash_nvrtc_for_device(device_id);
+      } catch (const std::exception& ex) {
+        return absl::InternalError(
+            absl::StrCat("GPU hash NVRTC prewarm threw for device ", device_id, ": ", ex.what()));
+      }
+    }));
+  }
+
+  auto results = folly::collectAll(std::move(tasks)).get();
+  for (int device_id = 0; device_id < device_count; ++device_id) {
+    const auto& result = results[static_cast<size_t>(device_id)];
+    if (!result.hasValue()) {
+      return absl::InternalError(absl::StrCat("GPU hash NVRTC prewarm future failed for device ", device_id));
     }
-    current_device = device_id;
-    if (auto prewarm_status = prewarm_gpu_hash_nvrtc_for_current_device(device_id); !prewarm_status.ok()) {
+    const absl::Status prewarm_status = result.value();
+    if (!prewarm_status.ok()) {
       return absl::Status(
           prewarm_status.code(),
           absl::StrCat("GPU hash NVRTC prewarm failed for device ", device_id, ": ", prewarm_status.message()));

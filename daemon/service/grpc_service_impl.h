@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "core/store/store_engine.h"
+#include "daemon/app/startup_coordinator.h"
 #include "daemon/service/controllers/byte_artifact_controller.h"
 #include "daemon/service/controllers/key_mapping_controller.h"
 #include "daemon/service/controllers/lease_controller.h"
@@ -50,6 +51,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     ReplicaSessionController& replica_session_controller;
     LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
+    std::shared_ptr<StartupCoordinator> startup_coordinator;
     ArtifactSourceRegistry* source_registry{nullptr};
   };
 
@@ -343,6 +345,8 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       v2::RouteAuthorityStageResponse* resp) override;
 
  private:
+  grpc::Status block_if_startup_pending() const;
+
   store::StoreEngine* engine_;
   MaterializationController* materialization_controller_;
   ByteArtifactController* byte_artifact_controller_;
@@ -358,6 +362,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   ReplicaSessionController* replica_session_controller_;
   LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
+  std::shared_ptr<StartupCoordinator> startup_coordinator_;
   ArtifactSourceRegistry* source_registry_{nullptr};
   Options opts_;
 };

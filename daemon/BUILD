@@ -77,6 +77,16 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "startup_coordinator_lib",
+    srcs = ["app/startup_coordinator.cc"],
+    hdrs = ["app/startup_coordinator.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
     name = "grpc_service_impl",
     srcs = [
         "service/artifact_retire_utils.cc",
@@ -117,6 +127,7 @@ sc_cc_library(
         ":session_lifecycle_lib",
         ":session_manager_hdr",
         ":shutdown_signal_hdr",
+        ":startup_coordinator_lib",
         ":status_controller_hdr",
         ":status_utils",
         ":sweep_tasks_hdr",
@@ -232,6 +243,7 @@ sc_cc_library(
         ":local_handle_server_lib",
         ":persistence_rpc_controller_lib",
         ":replica_session_controller_lib",
+        ":startup_coordinator_lib",
         ":worker_lifecycle",
         ":worker_lifecycle_ports_hdr",
         "//core/common:async_runtime_lib",
@@ -260,6 +272,7 @@ sc_cc_library(
         ":persistence_rpc_controller_lib",
         ":registration_controller_lib",
         ":replica_session_controller_lib",
+        ":startup_coordinator_lib",
         ":status_controller_hdr",
         ":transport_controller_lib",
         "//core/common:async_runtime_lib",
@@ -288,6 +301,28 @@ cc_test(
     srcs = ["app/startup_memory_preflight_test.cc"],
     deps = [
         ":startup_memory_preflight_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "daemon_app_import_root_test",
+    srcs = ["app/daemon_app_import_root_test.cc"],
+    deps = [
+        ":daemon_app_lib",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_startup_gate_test",
+    srcs = ["service/grpc_service_impl_startup_gate_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":startup_coordinator_lib",
+        "//core/store:store_engine",
         "@catch2//:catch2_main",
     ],
 )
@@ -612,6 +647,7 @@ cc_binary(
         "//core/common:trace_manager_lib",
         "//core/communicator:config_io_lib",
         "//core/store:store_engine_options",
+        "//core/store/replica:collective_disk_loader",
         "//proto/tensorcast/config/v1:config_cc",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
