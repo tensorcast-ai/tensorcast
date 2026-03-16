@@ -871,11 +871,14 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
               view.canonical_size_bytes));
     }
 
-    auto spec_or = view::parse_view_spec_json(view.view_spec_json);
-    if (!spec_or.ok()) {
-      return spec_or.status();
+    auto parsed_or = view::parse_view_selection_json(view.view_spec_json);
+    if (!parsed_or.ok()) {
+      return parsed_or.status();
     }
-    auto plan_or = loader::ViewPlanner::compute_bidirectional_view_plan(canonical_index_json, *spec_or);
+    auto plan_or = parsed_or->tensor_names.empty()
+        ? loader::ViewPlanner::compute_bidirectional_view_plan(canonical_index_json, parsed_or->spec)
+        : loader::ViewPlanner::compute_bidirectional_view_plan(
+              canonical_index_json, parsed_or->spec, parsed_or->tensor_names);
     if (!plan_or.ok()) {
       return plan_or.status();
     }
@@ -2670,11 +2673,13 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
   }
   const uint64_t canonical_total_size = *canonical_total_or;
 
-  auto spec_or = view::parse_view_spec_json(view_spec_json);
-  if (!spec_or.ok()) {
-    return spec_or.status();
+  auto parsed_or = view::parse_view_selection_json(view_spec_json);
+  if (!parsed_or.ok()) {
+    return parsed_or.status();
   }
-  auto plan_or = loader::ViewPlanner::compute_view_plan(canonical_index_json, *spec_or);
+  auto plan_or = parsed_or->tensor_names.empty()
+      ? loader::ViewPlanner::compute_view_plan(canonical_index_json, parsed_or->spec)
+      : loader::ViewPlanner::compute_view_plan(canonical_index_json, parsed_or->spec, parsed_or->tensor_names);
   if (!plan_or.ok()) {
     return plan_or.status();
   }
@@ -3055,20 +3060,31 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
         if (!meta_or.ok()) {
           return meta_or.status();
         }
-        auto spec_or = view::parse_view_spec_json(meta_or->view_spec_json);
-        if (!spec_or.ok()) {
-          return spec_or.status();
+        auto parsed_or = view::parse_view_selection_json(meta_or->view_spec_json);
+        if (!parsed_or.ok()) {
+          return parsed_or.status();
         }
-        view_spec = std::move(*spec_or);
+        view_spec = std::move(parsed_or->spec);
+        if (!parsed_or->tensor_names.empty()) {
+          auto plan_or =
+              loader::ViewPlanner::compute_view_plan(canonical_index_json, *view_spec, parsed_or->tensor_names);
+          if (!plan_or.ok()) {
+            return plan_or.status();
+          }
+          target_view_plan = std::move(*plan_or);
+        }
       }
-      if (!view_spec.has_value()) {
+      if (target_view_plan.has_value()) {
+        // Metadata-backed subset views already resolved the target plan.
+      } else if (!view_spec.has_value()) {
         return absl::InvalidArgumentError("view_spec is required to assemble requested view_id");
+      } else {
+        auto plan_or = loader::ViewPlanner::compute_view_plan(canonical_index_json, *view_spec);
+        if (!plan_or.ok()) {
+          return plan_or.status();
+        }
+        target_view_plan = std::move(*plan_or);
       }
-      auto plan_or = loader::ViewPlanner::compute_view_plan(canonical_index_json, *view_spec);
-      if (!plan_or.ok()) {
-        return plan_or.status();
-      }
-      target_view_plan = std::move(*plan_or);
     }
 
     target_ranges = build_target_ranges_from_view_plan(*target_view_plan);
@@ -3456,6 +3472,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     return target_device_or.status();
   }
   const DeviceKey target_device = *target_device_or;
+  auto registry = &config_.replica_runtime->registry();
 
   auto target_ranges_or = build_target_ranges_for_canonical(canonical_index_json, canonical_total_size);
   if (!target_ranges_or.ok()) {
@@ -3485,11 +3502,20 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
       target_device,
       config_.runtime_context->worker_identity(),
       allowed_ptr);
+  bool use_canonical_fallback = false;
+  std::shared_ptr<loader::SeekableSource> canonical_fallback_source;
+  AssemblyPlan plan;
   if (!plan_or.ok()) {
-    return plan_or.status();
+    auto local_source_or = make_local_canonical_source(*registry, assembly_id, target_device, canonical_total_size);
+    if (!local_source_or.ok()) {
+      return plan_or.status();
+    }
+    use_canonical_fallback = true;
+    canonical_fallback_source = *local_source_or;
+  } else {
+    plan = std::move(*plan_or);
   }
-  AssemblyPlan plan = std::move(*plan_or);
-  if (!plan.missing_ranges.empty()) {
+  if (!use_canonical_fallback && !plan.missing_ranges.empty()) {
     return absl::UnavailableError(
         absl::StrCat("seal_assembly missing canonical ranges: ", format_missing_ranges(plan.missing_ranges)));
   }
@@ -3581,27 +3607,33 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     piece_sources.push_back(std::move(source_ptr));
   }
 
-  const uint64_t plan_total_bytes = plan.map.total_bytes;
+  const uint64_t plan_total_bytes = use_canonical_fallback ? canonical_total_size : plan.map.total_bytes;
   loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "seal_assembly");
   auto program_or = compiler.Compile(plan.map);
-  if (!program_or.ok()) {
+  if (!use_canonical_fallback && !program_or.ok()) {
     return program_or.status();
   }
 
   const size_t leaf_chunk_bytes =
       config_.artifact_chunk_bytes == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : config_.artifact_chunk_bytes;
   if (result.sealed_artifact_id.empty()) {
-    loader::ByteRangeMappedSource::Options map_opts{
-        .path = "seal_assembly",
-        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-    };
-    auto hash_source_or =
-        loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
-    if (!hash_source_or.ok()) {
-      return hash_source_or.status();
-    }
-    auto data_mh_or = loader::compute_data_multihash_from_seekable_source(
-        *hash_source_or.value(), plan_total_bytes, leaf_chunk_bytes, std::move(progress_cb));
+    absl::StatusOr<std::string> data_mh_or = [&]() -> absl::StatusOr<std::string> {
+      if (use_canonical_fallback) {
+        return loader::compute_data_multihash_from_seekable_source(
+            *canonical_fallback_source, canonical_total_size, leaf_chunk_bytes, std::move(progress_cb));
+      }
+      loader::ByteRangeMappedSource::Options map_opts{
+          .path = "seal_assembly",
+          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+      };
+      auto hash_source_or =
+          loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+      if (!hash_source_or.ok()) {
+        return hash_source_or.status();
+      }
+      return loader::compute_data_multihash_from_seekable_source(
+          *hash_source_or.value(), plan_total_bytes, leaf_chunk_bytes, std::move(progress_cb));
+    }();
     if (!data_mh_or.ok()) {
       return data_mh_or.status();
     }
@@ -3636,7 +3668,6 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     return result;
   }
 
-  auto registry = &config_.replica_runtime->registry();
   loading::ReplicaKey key;
   key.artifact_id = result.sealed_artifact_id;
   key.device = target_device;
@@ -3669,11 +3700,17 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     }
     auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
 
-    loader::ByteRangeMappedSource::Options map_opts{
-        .path = "seal_assembly",
-        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-    };
-    auto source_or = loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+    absl::StatusOr<std::unique_ptr<loader::SeekableSource>> source_or =
+        [&]() -> absl::StatusOr<std::unique_ptr<loader::SeekableSource>> {
+      if (use_canonical_fallback) {
+        return SharedSourceLoader(canonical_fallback_source).open_source();
+      }
+      loader::ByteRangeMappedSource::Options map_opts{
+          .path = "seal_assembly",
+          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+      };
+      return loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+    }();
     if (!source_or.ok()) {
       return source_or.status();
     }

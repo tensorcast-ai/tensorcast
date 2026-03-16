@@ -74,8 +74,10 @@ MaterializationController::MaterializationController(Dep d)
               .disk_imports = d.disk_imports,
               .bindings = d.binding_registry,
               .shutdown_signal = d.shutdown_signal,
+              .async_runtime = d.async_runtime,
               .identity = d.identity,
               .global_store_client = d.global_store_client,
+              .lifecycle = d.lifecycle,
               .handle_leases = d.handle_leases,
               .capability_tokens = d.capability_tokens,
               .target_materialization_service = &target_materialization_service_,
@@ -113,6 +115,41 @@ grpc::Status MaterializationController::create_owned_binding(
     const v2::CreateOwnedBindingRequest& req,
     v2::CreateOwnedBindingResponse& resp) {
   return owner_binding_service_.create_owned_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::create_binding(
+    RpcContext& rctx,
+    const v2::CreateBindingRequest& req,
+    v2::CreateBindingResponse& resp) {
+  return owner_binding_service_.create_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::commit_binding_artifact(
+    RpcContext& rctx,
+    const v2::CommitBindingArtifactRequest& req,
+    v2::CommitBindingArtifactResponse& resp) {
+  return owner_binding_service_.commit_binding_artifact(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::begin_binding_update(
+    RpcContext& rctx,
+    const v2::BeginBindingUpdateRequest& req,
+    v2::BeginBindingUpdateResponse& resp) {
+  return owner_binding_service_.begin_binding_update(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::submit_binding_contribution(
+    RpcContext& rctx,
+    const v2::SubmitBindingContributionRequest& req,
+    v2::SubmitBindingContributionResponse& resp) {
+  return owner_binding_service_.submit_binding_contribution(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::seal_binding(
+    RpcContext& rctx,
+    const v2::SealBindingRequest& req,
+    v2::SealBindingResponse& resp) {
+  return owner_binding_service_.seal_binding(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::refill_owned_binding(
@@ -188,6 +225,13 @@ grpc::Status MaterializationController::seal_assembly(
     const v2::SealAssemblyRequest& req,
     v2::SealAssemblyResponse& resp) {
   return assembly_operation_service_.seal_assembly(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::start_assembly_attempt(
+    RpcContext& rctx,
+    const v2::StartAssemblyAttemptRequest& req,
+    v2::StartAssemblyAttemptResponse& resp) {
+  return assembly_operation_service_.start_assembly_attempt(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::start_seal_assembly(

@@ -281,7 +281,15 @@ Status validate_target_offsets_against_layout(
     const uint64_t expected_storage_offset = index_entry.logical_offset - range.base_offset;
     if (entry.storage_offset != expected_storage_offset) {
       record_error(record_result, "offset_mismatch");
-      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
+      return {
+          StatusCode::INVALID_ARGUMENT,
+          absl::StrCat(
+              "target_layout storage_offset mismatch for tensor=",
+              entry.name,
+              " expected=",
+              expected_storage_offset,
+              " actual=",
+              entry.storage_offset)};
     }
     if (expected_storage_offset + entry.logical_length > range.length) {
       record_error(record_result, "offset_mismatch");
@@ -298,6 +306,7 @@ struct TargetViewResolution {
   std::optional<std::string> view_data_hash;
   std::optional<store::loader::ViewPlan> view_plan;
   std::optional<std::string> resolved_view_id;
+  std::vector<std::string> metadata_subset_names;
   bool view_id_requested{false};
   bool has_view_transform{false};
 };
@@ -335,13 +344,14 @@ Status hydrate_target_view_from_metadata(
     record_error(record_result, "view_meta_missing");
     return to_grpc_status(view_meta_or.status());
   }
-  auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
-  if (!spec_or.ok()) {
+  auto parsed_or = store::view::parse_view_selection_json(view_meta_or->view_spec_json);
+  if (!parsed_or.ok()) {
     record_error(record_result, "view_parse_failed");
-    return to_grpc_status(spec_or.status());
+    return to_grpc_status(parsed_or.status());
   }
-  view_resolution.view_spec = std::move(*spec_or);
+  view_resolution.view_spec = std::move(parsed_or->spec);
   view_resolution.view_spec_proto = build_view_spec_proto(*view_resolution.view_spec);
+  view_resolution.metadata_subset_names = std::move(parsed_or->tensor_names);
   view_resolution.view_data_hash = view_meta_or->view_data_hash;
   return Status::OK;
 }
@@ -355,8 +365,9 @@ Status compute_target_view_plan(
     v2::TargetLayout::IndexKind index_kind,
     RecordMaterializeResultFn record_result,
     TargetViewResolution& view_resolution) {
+  const bool has_metadata_subset = !view_resolution.metadata_subset_names.empty();
   if (!view_resolution.view_spec.has_value() && !has_subset && index_kind != v2::TargetLayout::INDEX_KIND_VIEW &&
-      !has_ordered_selection) {
+      !has_ordered_selection && !has_metadata_subset) {
     return Status::OK;
   }
 
@@ -366,6 +377,8 @@ Status compute_target_view_plan(
     subset_names = request_names;
   } else if (has_subset) {
     subset_names = layout_names;
+  } else if (has_metadata_subset) {
+    subset_names = view_resolution.metadata_subset_names;
   }
   auto plan_or = store::StoreEngine::compute_view_plan(std::string(canonical_json), plan_spec, subset_names);
   if (!plan_or.ok()) {
@@ -382,23 +395,24 @@ Status validate_target_index_kind_mode(
     bool has_ordered_selection,
     RecordMaterializeResultFn record_result,
     TargetViewResolution& view_resolution) {
+  const bool has_metadata_subset = !view_resolution.metadata_subset_names.empty();
   view_resolution.has_view_transform = view_resolution.view_id_requested ||
       (view_resolution.view_spec.has_value() && view_resolution.view_plan.has_value() &&
        !view_resolution.view_plan->is_identity);
   if (view_resolution.view_id_requested && view_resolution.view_plan.has_value() &&
-      view_resolution.view_plan->is_identity && !has_subset) {
+      view_resolution.view_plan->is_identity && !has_subset && !has_ordered_selection && !has_metadata_subset) {
     record_error(record_result, "view_identity_mismatch");
     return {StatusCode::INVALID_ARGUMENT, "view_id requires a non-identity view spec"};
   }
 
   if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
-    if (view_resolution.has_view_transform || has_subset || has_ordered_selection) {
+    if (view_resolution.has_view_transform || has_subset || has_ordered_selection || has_metadata_subset) {
       record_error(record_result, "index_kind_mismatch");
       return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset selection"};
     }
     return Status::OK;
   }
-  if (!view_resolution.has_view_transform && !has_subset && !has_ordered_selection) {
+  if (!view_resolution.has_view_transform && !has_subset && !has_ordered_selection && !has_metadata_subset) {
     record_error(record_result, "index_kind_mismatch");
     return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or selection order"};
   }

@@ -90,6 +90,25 @@ class MaterializationController {
       const v2::CreateOwnedBindingRequest& req,
       v2::CreateOwnedBindingResponse& resp);
 
+  grpc::Status create_binding(RpcContext& rctx, const v2::CreateBindingRequest& req, v2::CreateBindingResponse& resp);
+
+  grpc::Status commit_binding_artifact(
+      RpcContext& rctx,
+      const v2::CommitBindingArtifactRequest& req,
+      v2::CommitBindingArtifactResponse& resp);
+
+  grpc::Status begin_binding_update(
+      RpcContext& rctx,
+      const v2::BeginBindingUpdateRequest& req,
+      v2::BeginBindingUpdateResponse& resp);
+
+  grpc::Status submit_binding_contribution(
+      RpcContext& rctx,
+      const v2::SubmitBindingContributionRequest& req,
+      v2::SubmitBindingContributionResponse& resp);
+
+  grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
+
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
       const v2::RefillOwnedBindingRequest& req,
@@ -137,6 +156,11 @@ class MaterializationController {
       v2::GetArtifactIndexByIdResponse& resp);
 
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
+
+  grpc::Status start_assembly_attempt(
+      RpcContext& rctx,
+      const v2::StartAssemblyAttemptRequest& req,
+      v2::StartAssemblyAttemptResponse& resp);
 
   grpc::Status start_seal_assembly(
       RpcContext& rctx,

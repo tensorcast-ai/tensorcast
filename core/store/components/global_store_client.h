@@ -212,6 +212,23 @@ struct ViewInfo {
   std::vector<CanonicalRange> canonical_ranges;
 };
 
+struct AssemblyContributionInfo {
+  std::string assembly_id;
+  std::string view_id;
+  std::string binding_id;
+  std::string binding_value_id;
+  std::string coverage_plan_hash;
+  std::string contributor_daemon_id;
+  std::string coordinator_operation_id;
+  uint64_t coordinator_generation{0};
+  std::string lease_id;
+  uint64_t lease_generation{0};
+  std::optional<absl::Time> lease_expires_at;
+  std::string state;
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+};
+
 struct ArtifactBinding {
   std::string from_artifact_id;
   std::string to_artifact_id;
@@ -404,6 +421,8 @@ class IGlobalStoreClient {
       bool include_unavailable = false,
       uint64_t required_capability_flags = 0,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool include_unavailable = true) = 0;
 
   virtual absl::Status unregister_worker_idempotent(
       std::string_view worker_id,
@@ -603,6 +622,11 @@ class IGlobalStoreClient {
       const common::v1::ArtifactDescriptor& descriptor,
       std::string_view canonical_index_data) = 0;
 
+  virtual absl::StatusOr<common::v1::ArtifactDescriptor> get_artifact_descriptor(std::string_view artifact_id) {
+    (void)artifact_id;
+    return absl::UnimplementedError("GetArtifactDescriptor not available");
+  }
+
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
   virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
@@ -665,6 +689,58 @@ class IGlobalStoreClient {
   // ========== Layout v2 ==========
   virtual absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
       std::string_view assembly_id) = 0;
+
+  virtual absl::StatusOr<global_store::AssemblyLayoutBinding> update_assembly_layout_binding(
+      std::string_view assembly_id,
+      std::string_view layout_id,
+      uint64_t expected_binding_version) {
+    return absl::UnimplementedError("UpdateAssemblyLayoutBinding not available");
+  }
+
+  virtual absl::StatusOr<AssemblyContributionInfo> get_assembly_contribution(
+      std::string_view assembly_id,
+      std::string_view view_id) {
+    return absl::UnimplementedError("GetAssemblyContribution not available");
+  }
+
+  virtual absl::StatusOr<AssemblyContributionInfo> upsert_assembly_contribution(
+      const AssemblyContributionInfo& contribution) {
+    (void)contribution;
+    return absl::UnimplementedError("UpsertAssemblyContribution not available");
+  }
+
+  virtual absl::StatusOr<std::vector<AssemblyContributionInfo>> list_assembly_contributions(
+      std::optional<std::string_view> assembly_id = std::nullopt,
+      std::optional<std::string_view> view_id = std::nullopt,
+      std::optional<std::string_view> binding_id = std::nullopt,
+      std::optional<std::string_view> binding_value_id = std::nullopt,
+      const std::vector<std::string>& states = {}) {
+    (void)assembly_id;
+    (void)view_id;
+    (void)binding_id;
+    (void)binding_value_id;
+    (void)states;
+    return absl::UnimplementedError("ListAssemblyContributions not available");
+  }
+
+  virtual absl::StatusOr<AssemblyContributionInfo> update_assembly_contribution_state(
+      std::string_view assembly_id,
+      std::string_view view_id,
+      std::string_view state,
+      std::optional<std::string_view> expected_lease_id = std::nullopt,
+      std::optional<uint64_t> expected_lease_generation = std::nullopt,
+      std::optional<absl::Time> lease_expires_at = std::nullopt,
+      const std::vector<std::string>& current_states = {}) {
+    (void)assembly_id;
+    (void)view_id;
+    (void)state;
+    (void)expected_lease_id;
+    (void)expected_lease_generation;
+    (void)lease_expires_at;
+    (void)current_states;
+    return absl::UnimplementedError("UpdateAssemblyContributionState not available");
+  }
+
   virtual absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) = 0;
   virtual absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) = 0;
   virtual absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) = 0;
@@ -771,7 +847,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
       bool include_unavailable = false,
       uint64_t required_capability_flags = 0,
       const RpcOptions& rpc_options = RpcOptions{}) override;
-
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool include_unavailable = true) override;
   absl::Status unregister_worker_idempotent(
       std::string_view worker_id,
       bool is_graceful_shutdown = true,
@@ -977,6 +1053,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::Status upsert_artifact_metadata(
       const common::v1::ArtifactDescriptor& descriptor,
       std::string_view canonical_index_data) override;
+  absl::StatusOr<common::v1::ArtifactDescriptor> get_artifact_descriptor(std::string_view artifact_id) override;
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
   absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) override;
@@ -990,6 +1067,29 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
       std::string_view assembly_id) override;
+  absl::StatusOr<global_store::AssemblyLayoutBinding> update_assembly_layout_binding(
+      std::string_view assembly_id,
+      std::string_view layout_id,
+      uint64_t expected_binding_version) override;
+  absl::StatusOr<AssemblyContributionInfo> get_assembly_contribution(
+      std::string_view assembly_id,
+      std::string_view view_id) override;
+  absl::StatusOr<AssemblyContributionInfo> upsert_assembly_contribution(
+      const AssemblyContributionInfo& contribution) override;
+  absl::StatusOr<std::vector<AssemblyContributionInfo>> list_assembly_contributions(
+      std::optional<std::string_view> assembly_id = std::nullopt,
+      std::optional<std::string_view> view_id = std::nullopt,
+      std::optional<std::string_view> binding_id = std::nullopt,
+      std::optional<std::string_view> binding_value_id = std::nullopt,
+      const std::vector<std::string>& states = {}) override;
+  absl::StatusOr<AssemblyContributionInfo> update_assembly_contribution_state(
+      std::string_view assembly_id,
+      std::string_view view_id,
+      std::string_view state,
+      std::optional<std::string_view> expected_lease_id = std::nullopt,
+      std::optional<uint64_t> expected_lease_generation = std::nullopt,
+      std::optional<absl::Time> lease_expires_at = std::nullopt,
+      const std::vector<std::string>& current_states = {}) override;
   absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) override;
   absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) override;
   absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) override;

@@ -63,8 +63,7 @@ void RemoteKeySource::abort_timed_out_channel(std::string_view key, uint64_t rem
   if (!close_status.ok()) {
     VLOG(1) << "RemoteKeySource timeout cleanup could not close channel"
             << " artifact_id=" << options_.artifact_id << " key=" << key << " peer=" << options_.ip << ":"
-            << options_.port << " remote_offset=" << remote_offset << " bytes=" << bytes
-            << " status=" << close_status;
+            << options_.port << " remote_offset=" << remote_offset << " bytes=" << bytes << " status=" << close_status;
     return;
   }
   LOG(WARNING) << "RemoteKeySource closed channel after request budget timeout"
@@ -309,7 +308,8 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
       evt_span->End();
-      LOG(ERROR) << "read_at failed for key=" << key << " key_offset=" << key_offset << " bytes=" << to_read << " "
+      LOG(ERROR) << "read_at failed for key=" << key << " key_offset=" << key_offset << " key_size=" << key_size
+                 << " total_size=" << options_.total_size << " bytes=" << to_read << " "
                  << format_cost_breakdown(result) << " status=" << result.status;
       return result.status;
     }

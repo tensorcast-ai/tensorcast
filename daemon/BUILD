@@ -1091,11 +1091,26 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "assembly_coordination_utils_lib",
+    srcs = ["service/controllers/assembly_coordination_utils.cc"],
+    hdrs = ["service/controllers/assembly_coordination_utils.h"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store:global_store_client",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/operation/v1:operation_cc",
+        "@abseil-cpp//absl/time",
+        "@protobuf",
+    ],
+)
+
+sc_cc_library(
     name = "owned_binding_service_lib",
     srcs = ["service/controllers/owned_binding_service.cc"],
     hdrs = ["service/controllers/owned_binding_service.h"],
     deps = [
         ":artifact_source_registry_lib",
+        ":assembly_coordination_utils_lib",
         ":binding_registry_lib",
         ":device_resolver_hdr",
         ":grpc_peer_utils_lib",
@@ -1112,6 +1127,7 @@ sc_cc_library(
         ":target_materialization_service_lib",
         ":worker_identity_store_lib",
         "//core/common:artifact_hash_lib",
+        "//core/common:async_runtime_lib",
         "//core/common:capability_token_lib",
         "//core/common:selection_identity_lib",
         "//core/store:global_store_client",
@@ -1132,6 +1148,7 @@ sc_cc_library(
     srcs = ["service/controllers/assembly_operation_service.cc"],
     hdrs = ["service/controllers/assembly_operation_service.h"],
     deps = [
+        ":assembly_coordination_utils_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":materialization_policy_utils_lib",
@@ -2257,9 +2274,30 @@ cc_test(
 )
 
 cc_test(
+    name = "owned_binding_service_test",
+    srcs = ["service/owned_binding_service_test.cc"],
+    deps = [
+        ":artifact_source_registry_lib",
+        ":binding_registry_lib",
+        ":device_resolver_hdr",
+        ":owned_binding_service_lib",
+        ":rpc_context_hdr",
+        ":shutdown_signal_hdr",
+        ":worker_identity_store_lib",
+        "//core/store:device_registry",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store:testing_global_store_client_stub",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_start_seal_assembly_test",
     srcs = ["service/grpc_service_impl_start_seal_assembly_test.cc"],
     deps = [
+        ":assembly_coordination_utils_lib",
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",

@@ -3439,3 +3439,91 @@ worker_policy:
                 canonical_bytes_covered=128,
                 canonical_ranges=[(0, 128)],
             )
+
+    def test_view_state_service_replaces_assembly_leaf_state_for_same_view(
+        self,
+        services,
+    ):
+        view_state_service = services["view_state"]
+        assembly_id = "cgid:assembly-replace"
+
+        view_state_service.record_view_registration(
+            artifact_id=assembly_id,
+            view_id="view-a",
+            view_spec_json="{}",
+            view_size=64,
+            view_data_hash="vh-a",
+            verified_at=None,
+            canonical_size_bytes=64,
+            canonical_bytes_covered=64,
+            canonical_ranges=[(0, 64)],
+            leaf_writes=[
+                LeafWritePayload(
+                    artifact_id=assembly_id,
+                    space_kind="V",
+                    space_id="view-a",
+                    leaf_idx=0,
+                    digest=b"\x01" * 32,
+                ),
+                LeafWritePayload(
+                    artifact_id=assembly_id,
+                    space_kind="C",
+                    space_id="indexmh",
+                    leaf_idx=0,
+                    digest=b"\x02" * 32,
+                ),
+            ],
+            tensor_intervals={"weights": (0, 64)},
+        )
+
+        view_state_service.record_view_registration(
+            artifact_id=assembly_id,
+            view_id="view-a",
+            view_spec_json="{}",
+            view_size=64,
+            view_data_hash="vh-b",
+            verified_at=None,
+            canonical_size_bytes=64,
+            canonical_bytes_covered=64,
+            canonical_ranges=[(0, 64)],
+            leaf_writes=[
+                LeafWritePayload(
+                    artifact_id=assembly_id,
+                    space_kind="V",
+                    space_id="view-a",
+                    leaf_idx=0,
+                    digest=b"\x03" * 32,
+                ),
+                LeafWritePayload(
+                    artifact_id=assembly_id,
+                    space_kind="C",
+                    space_id="indexmh",
+                    leaf_idx=0,
+                    digest=b"\x04" * 32,
+                ),
+            ],
+            tensor_intervals={"weights": (0, 64)},
+        )
+
+        stored_view = view_state_service.get_view(
+            artifact_id=assembly_id,
+            view_id="view-a",
+        )
+        assert stored_view is not None
+        assert stored_view["view_data_hash"] == "vh-b"
+
+        assert list(
+            view_state_service.get_leaves(
+                artifact_id=assembly_id,
+                space_kind="V",
+                space_id="view-a",
+            )
+        ) == [(0, b"\x03" * 32)]
+
+        assert list(
+            view_state_service.get_leaves(
+                artifact_id=assembly_id,
+                space_kind="C",
+                space_id="indexmh",
+            )
+        ) == [(0, b"\x04" * 32)]

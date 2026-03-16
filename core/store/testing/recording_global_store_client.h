@@ -149,6 +149,10 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("list_active_workers not supported in test stub");
   }
 
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
+    return absl::UnimplementedError("list_active_worker_identities not supported in test stub");
+  }
+
   absl::StatusOr<std::string> register_replica(
       std::string_view artifact_id,
       std::string_view,

@@ -59,6 +59,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/runtime/replica:replica_promotion_manager",
         "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",

@@ -2,9 +2,14 @@
 
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
+#include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
@@ -14,6 +19,7 @@
 #include "daemon/state/binding_registry.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
+#include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
@@ -28,8 +34,10 @@ class OwnedBindingService {
     ArtifactSourceRegistry& disk_imports;
     BindingRegistry& bindings;
     ShutdownSignal& shutdown_signal;
+    common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     common::CapabilityTokenManager* capability_tokens{nullptr};
     TargetMaterializationService* target_materialization_service{nullptr};
@@ -38,10 +46,29 @@ class OwnedBindingService {
 
   explicit OwnedBindingService(Dep d);
 
+  grpc::Status create_binding(RpcContext& rctx, const v2::CreateBindingRequest& req, v2::CreateBindingResponse& resp);
+
   grpc::Status create_owned_binding(
       RpcContext& rctx,
       const v2::CreateOwnedBindingRequest& req,
       v2::CreateOwnedBindingResponse& resp);
+
+  grpc::Status commit_binding_artifact(
+      RpcContext& rctx,
+      const v2::CommitBindingArtifactRequest& req,
+      v2::CommitBindingArtifactResponse& resp);
+
+  grpc::Status begin_binding_update(
+      RpcContext& rctx,
+      const v2::BeginBindingUpdateRequest& req,
+      v2::BeginBindingUpdateResponse& resp);
+
+  grpc::Status submit_binding_contribution(
+      RpcContext& rctx,
+      const v2::SubmitBindingContributionRequest& req,
+      v2::SubmitBindingContributionResponse& resp);
+
+  grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
 
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
@@ -54,7 +81,13 @@ class OwnedBindingService {
       v2::CloseOwnedBindingResponse& resp);
 
  private:
+  struct ContributionLeaseKeepaliveTracker {
+    absl::Mutex mu;
+    absl::flat_hash_map<std::string, std::shared_ptr<std::atomic<bool>>> stop_flags ABSL_GUARDED_BY(mu);
+  };
+
   Dep d_;
+  std::shared_ptr<ContributionLeaseKeepaliveTracker> contribution_keepalive_tracker_;
 };
 
 } // namespace tensorcast::daemon

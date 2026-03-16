@@ -77,6 +77,34 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::CreateOwnedBindingRequest* req,
       v2::CreateOwnedBindingResponse* resp) override;
 
+  grpc::Status CreateBinding(
+      grpc::ServerContext* ctx,
+      const v2::CreateBindingRequest* req,
+      v2::CreateBindingResponse* resp) override;
+
+  grpc::Status CommitBindingArtifact(
+      grpc::ServerContext* ctx,
+      const v2::CommitBindingArtifactRequest* req,
+      v2::CommitBindingArtifactResponse* resp) override;
+
+  grpc::Status BeginBindingUpdate(
+      grpc::ServerContext* ctx,
+      const v2::BeginBindingUpdateRequest* req,
+      v2::BeginBindingUpdateResponse* resp) override;
+
+  grpc::Status SubmitBindingContribution(
+      grpc::ServerContext* ctx,
+      const v2::SubmitBindingContributionRequest* req,
+      v2::SubmitBindingContributionResponse* resp) override;
+
+  grpc::Status SealBinding(grpc::ServerContext* ctx, const v2::SealBindingRequest* req, v2::SealBindingResponse* resp)
+      override;
+
+  grpc::Status StartAssemblyAttempt(
+      grpc::ServerContext* ctx,
+      const v2::StartAssemblyAttemptRequest* req,
+      v2::StartAssemblyAttemptResponse* resp) override;
+
   grpc::Status RefillOwnedBinding(
       grpc::ServerContext* ctx,
       const v2::RefillOwnedBindingRequest* req,

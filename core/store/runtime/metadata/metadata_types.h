@@ -50,6 +50,7 @@ struct StableDramOptions {
 struct ViewRegistration {
   std::string view_id;
   loader::ViewSpec spec;
+  std::vector<std::string> tensor_names;
   ViewPlacement placement{ViewPlacement::kUnspecified};
   uint64_t canonical_size_bytes{0};
   std::vector<CanonicalRange> canonical_ranges;
@@ -142,6 +143,7 @@ struct RegistrationPublication {
   std::string encoding{"json"};
   std::string schema_version{"v3"};
   std::optional<std::string> verification_json;
+  std::optional<std::string> view_data_hash;
   std::string index_multihash;
   std::string data_multihash;
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
