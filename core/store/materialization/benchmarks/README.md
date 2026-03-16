@@ -42,14 +42,17 @@ fallocate -l 8G /tmp/tensorcast_disk_bench.bin
 
 通过 `--mode=...` 选择：
 
-  - `loader`：对比加载策略 A/B/C：
+  - `loader`：对比加载策略 A/B/C 以及 `host_pack` 变体：
     - A：把 payload 先整块读到 GPU “文件缓冲”（可选 GPU 内 pack 到最终布局）。
     - B：先规划 segment，再 VMM reserve+map，按需把片段泵到最终地址。
     - C：基于 B 的“已知完整计划”，按 checkpoint tensor 分组批处理：对非 contiguous slice（典型是 2D 的 `axis=1` 切片）改为顺序读大块 + GPU pack，避免海量碎片化小 IO；并对同源 slice 做读一次 + D2D 复制去重。
+    - host_pack（`--strategy=host_pack` / `hp`）：和 C 做同一件事（把 `axis=1` 的“每行一段”从碎片化读拉回到顺序读），但把 pack 从 GPU（`cudaMemcpy2DAsync` D2D）挪到 host：先顺序读 row-block 到 host staging，再在 CPU 上把列切片 pack 到 pinned host buffer，最后用 1D `cudaMemcpyAsync(H2D)` 写入最终 output（H2D 只传 `bytes(output)` 而不是 `bytes(disk)`）。
 - `safetensors_disk_baseline`：把所有 safetensors payload bytes 按顺序 disk→GPU 读取（不做 per-tensor 规划）。
 - `disk_baseline`：把单个大文件按顺序 disk→GPU 读取。
 - `disk_fragmentation`：按固定 stride 读取大量小段（模拟碎片化/随机访问）。
 - `gpu_peer_baseline`：测一次 GPU0→GPU1 的 `cudaMemcpyPeerAsync`。
+- `h2d_baseline`：测 pinned host→GPU 的 1D H2D 吞吐（`cudaMemcpyAsync`）。
+- `h2d_2d_baseline`：测 pinned host（strided 2D source）→GPU（packed 2D dst）的 H2D 吞吐（`cudaMemcpy2DAsync`；用于模拟 `axis=1` 列切片的典型形态）。
 - `safetensors_hot_host_baseline`：**显式预热 OS page cache**（先顺序读取全部 payload 一次），再测 disk(buffered)→pinned host 吞吐。
 - `safetensors_hot_disk_baseline`：**显式预热 OS page cache** 后，再测 disk(buffered)→pinned host→GPU 的端到端吞吐（含 H2D）。
 - `safetensors_dram_mirror_host_baseline`：显式申请一块大 DRAM 缓冲，把 payload 拷入 DRAM（不计入测量），再测 **DRAM(userspace)→pinned host bounce buffer** 的吞吐；用于和 `safetensors_hot_host_baseline`（page cache→userspace）互相印证。
@@ -152,6 +155,24 @@ bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benc
 
 说明：
 - `--strategy_c_staging_bytes`：用于“顺序读大块→GPU staging→GPU pack”的 staging 缓冲大小；越大通常越能减少每个大 tensor 的 chunk 次数，但也会占用更多显存。
+
+### Loader：Host pack（CPU pack + 1D H2D，对照 Strategy C）
+
+该模式用于和 Strategy C 对照，验证“把 pack 从 GPU copy engine 挪到 CPU”是否划算（尤其在热 cache / P2P source 很快、H2D 成为瓶颈时）。
+
+```bash
+bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benchmark -- \
+  --mode=loader \
+  --strategy=host_pack \
+  --safetensors_dir=/path/to/shards_dir \
+  --device_id=0 \
+  --use_pinned_host_buffer=true \
+  --strategy_c_staging_bytes=$((1024*1024*1024)) \
+  --load_plan_json_path=/path/to/loading-meta.json
+```
+
+说明：
+- 该策略仍然会顺序读取“row-block 超集”（因此 `bytes(disk)` 与 C 类似），但 `bytes(h2d)` 会更接近 `bytes(output)`。
 
 ### Loader：一次跑 A 再跑 B（可选：抽样校验正确性）
 
@@ -307,7 +328,7 @@ bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benc
   - `--pinned_numa_node=N`：把 pinned host slab 绑定到 NUMA node N（best-effort）
   - `--pinned_numa_node=-2`：自动从 CUDA device 的 `/sys/bus/pci/devices/<bus_id>/numa_node` 推断（TP>1 需要 `--h2d_per_gpu_pinned_pool=true`）
   - `--pinned_numa_prefault=true`：在 `cudaHostRegister` 前触页，避免“pin 时隐式 fault”导致的不可控 NUMA 放置
-  - `--h2d_per_gpu_pinned_pool=true`：`h2d_baseline` 为每张 GPU 分配独立 pinned host pool（便于做 NUMA-local 对照）
+  - `--h2d_per_gpu_pinned_pool=true`：`h2d_baseline/h2d_2d_baseline` 为每张 GPU 分配独立 pinned host pool（便于做 NUMA-local 对照）
 
 ```bash
 bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benchmark -- \
@@ -317,6 +338,28 @@ bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benc
   --h2d_bench_bytes=$((8*1024*1024*1024)) \
   --bbuf_size_kb=262144 \
   --buffer_chunks=8 \
+  --use_pinned_host_buffer=true
+```
+
+### H2D 2D 基线（pinned host(strided) → GPU(packed)）
+
+该模式用 `cudaMemcpy2DAsync(..., cudaMemcpyHostToDevice, ...)` 测“2D 形态”的 H2D 吞吐，常用于模拟 `axis=1` 列切片：
+
+- 源（host）：row-major 2D tensor 的“整行 bytes”作为 `srcPitch`（`src_pitch_bytes = full_cols * elem_bytes`）
+- 目标（GPU）：按 slice 列宽紧凑存储，`dstPitch = widthBytes = slice_cols * elem_bytes`
+- copy 参数：`widthBytes = slice_cols * elem_bytes`，`height = rows`
+
+默认参数近似 Qwen2.5-32B 的 MLP gate/up 权重（fp16，`[rows=5120, cols=27648]`，TP=4 时每 rank `slice_cols=6912`）：
+
+```bash
+bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benchmark -- \
+  --mode=h2d_2d_baseline \
+  --tp_world_size=1 --tp_devices=0 \
+  --h2d_bench_bytes=$((8*1024*1024*1024)) \
+  --h2d_2d_width_bytes=13824 \
+  --h2d_2d_height=5120 \
+  --h2d_2d_src_pitch_bytes=55296 \
+  --h2d_2d_dst_pitch_bytes=13824 \
   --use_pinned_host_buffer=true
 ```
 

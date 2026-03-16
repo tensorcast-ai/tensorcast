@@ -114,6 +114,7 @@ enum class BenchMode : uint8_t {
   kSafetensorsDiskBaseline = 4,
   kSafetensorsHostBaseline = 5,
   kH2dBaseline = 6,
+  kH2d2dBaseline = 16,
   kSafetensorsODirectHostBaseline = 7,
   kSafetensorsODirectDiskBaseline = 8,
   kSafetensorsHotHostBaseline = 11,
@@ -124,7 +125,7 @@ enum class BenchMode : uint8_t {
   kMaterializedDiskBaseline = 14,
   kSafetensorsDramMirrorHostBaseline = 15,
 };
-enum class StrategyKind : uint8_t { kA_Eager = 0, kB_LazyCommit = 1, kC_BatchedOptimal = 2 };
+enum class StrategyKind : uint8_t { kA_Eager = 0, kB_LazyCommit = 1, kC_BatchedOptimal = 2, kC_HostPack = 3 };
 enum class NcclOp : uint8_t { kBroadcast = 0, kSendrecv = 1 };
 
 constexpr uint64_t kCorrectnessSampleMaxBytes = 4ull * 1024ull * 1024ull;
@@ -206,6 +207,32 @@ class NullPositionedSink final : public PositionedSink {
   }
 
  private:
+  uint64_t total_size_ = 0;
+  uint64_t bytes_written_ = 0;
+};
+
+class HostBufferSink final : public PositionedSink {
+ public:
+  HostBufferSink(gsl::not_null<uint8_t*> base, uint64_t total_size) : base_(base), total_size_(total_size) {}
+
+  absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override {
+    if (bytes == 0) {
+      return absl::OkStatus();
+    }
+    if (total_size_ > 0 && offset + static_cast<uint64_t>(bytes) > total_size_) {
+      return absl::OutOfRangeError("HostBufferSink: write exceeds total_size");
+    }
+    std::memcpy(base_.get() + offset, src, bytes);
+    bytes_written_ += static_cast<uint64_t>(bytes);
+    return absl::OkStatus();
+  }
+
+  [[nodiscard]] uint64_t bytes_written() const {
+    return bytes_written_;
+  }
+
+ private:
+  gsl::not_null<uint8_t*> base_;
   uint64_t total_size_ = 0;
   uint64_t bytes_written_ = 0;
 };
@@ -295,6 +322,13 @@ struct LoaderConfig {
   // H2D microbench params (pinned host -> GPU)
   uint64_t h2d_bench_bytes = 8ull * 1024ull * 1024ull * 1024ull; // 8 GiB
   bool h2d_per_gpu_pinned_pool = false;
+
+  // H2D 2D microbench params (pinned host strided source -> packed GPU dst; typical for axis=1 slices).
+  // Defaults approximate Qwen2.5-32B MLP gate/up weight ([rows=5120, cols=27648], fp16; TP=4 slice width=6912).
+  uint64_t h2d_2d_width_bytes = 13824; // 6912 * 2
+  uint64_t h2d_2d_height = 5120;
+  uint64_t h2d_2d_src_pitch_bytes = 55296; // 27648 * 2
+  uint64_t h2d_2d_dst_pitch_bytes = 13824; // packed
 };
 
 // Forward declarations (used by Strategy D helpers).
@@ -780,6 +814,9 @@ absl::StatusOr<BenchMode> parse_mode(std::string_view s) {
   if (s == "h2d_baseline") {
     return BenchMode::kH2dBaseline;
   }
+  if (s == "h2d_2d_baseline") {
+    return BenchMode::kH2d2dBaseline;
+  }
   if (s == "safetensors_o_direct_host_baseline") {
     return BenchMode::kSafetensorsODirectHostBaseline;
   }
@@ -988,6 +1025,9 @@ absl::StatusOr<StrategyKind> parse_strategy(std::string_view s) {
   }
   if (s == "c" || s == "C" || s == "batched_optimal" || s == "optimal") {
     return StrategyKind::kC_BatchedOptimal;
+  }
+  if (s == "hp" || s == "host_pack" || s == "c_host_pack") {
+    return StrategyKind::kC_HostPack;
   }
   return absl::InvalidArgumentError(absl::StrCat("Unknown --strategy: ", s));
 }
@@ -3523,6 +3563,639 @@ absl::StatusOr<std::pair<RunResult, StrategyCState>> run_strategy_c_with_state(
   return std::make_pair(r, std::move(s));
 }
 
+absl::StatusOr<std::pair<RunResult, StrategyCState>> run_strategy_c_host_pack_with_state(
+    const LoaderConfig& cfg,
+    const std::vector<std::filesystem::path>& shards) {
+  RunResult r;
+  r.strategy = StrategyKind::kC_HostPack;
+  StrategyCState s;
+  StrategyCStats st;
+  const absl::Time t_total = absl::Now();
+  const auto sched_before = loader::get_gpu_scheduler_stats(cfg.device_id);
+
+  if (!cfg.use_pinned_host_buffer) {
+    return absl::FailedPreconditionError("Strategy host_pack requires --use_pinned_host_buffer=true");
+  }
+
+  // Meta
+  double open_meta = 0.0;
+  auto meta_or = load_metas_from_safetensors(shards, &open_meta);
+  if (!meta_or.ok()) {
+    return meta_or.status();
+  }
+  s.metas = std::move(meta_or->first);
+  r.t.open_meta = open_meta;
+
+  // Plan
+  const absl::Time t_get = absl::Now();
+  if (!cfg.load_plan_json_path.empty()) {
+    uint64_t unique_tensors = 0;
+    TC_ASSIGN_OR_RETURN(s.copies, parse_plan_copy_instances_for_rank(cfg, s.metas, &unique_tensors));
+    r.selected_tensors = unique_tensors;
+    r.selected_copies = s.copies.size();
+  } else {
+    auto selected_or = select_tensors_all(s.metas);
+    if (!selected_or.ok()) {
+      return selected_or.status();
+    }
+    std::vector<const TensorMeta*> selected = *selected_or;
+    std::sort(selected.begin(), selected.end(), [](const TensorMeta* a, const TensorMeta* b) {
+      if (a->offset != b->offset) {
+        return a->offset < b->offset;
+      }
+      return a->name < b->name;
+    });
+    s.copies.clear();
+    s.copies.reserve(selected.size());
+    for (const TensorMeta* tm : selected) {
+      PlannedCopyInstance inst;
+      inst.meta = tm;
+      inst.ckpt_name = tm->name;
+      inst.dst_param = tm->name;
+      inst.slices = {};
+      inst.bytes = tm->size;
+      inst.contiguous = true;
+      inst.contiguous_src_offset = tm->offset;
+      inst.src_sort_key = tm->offset;
+      if (cfg.tp_world_size > 1) {
+        TpContiguousSlice slice;
+        TC_ASSIGN_OR_RETURN(slice, compute_tp_contiguous_slice(*tm, cfg, cfg.tp_rank));
+        inst.bytes = slice.bytes;
+        inst.contiguous_src_offset = tm->offset + slice.offset_in_tensor;
+        inst.src_sort_key = inst.contiguous_src_offset;
+      }
+      s.copies.push_back(std::move(inst));
+    }
+    r.selected_tensors = selected.size();
+    r.selected_copies = selected.size();
+    std::sort(s.copies.begin(), s.copies.end(), [](const PlannedCopyInstance& a, const PlannedCopyInstance& b) {
+      if (a.src_sort_key != b.src_sort_key) {
+        return a.src_sort_key < b.src_sort_key;
+      }
+      if (a.ckpt_name != b.ckpt_name) {
+        return a.ckpt_name < b.ckpt_name;
+      }
+      return a.dst_param < b.dst_param;
+    });
+  }
+
+  uint64_t dst_cursor = 0;
+  for (auto& c : s.copies) {
+    c.dst_offset = dst_cursor;
+    dst_cursor += c.bytes;
+  }
+  s.output_bytes = dst_cursor;
+  r.output_bytes = dst_cursor;
+  r.t.get_calls_total = seconds_since(t_get);
+
+  // Output VMM allocation.
+  const absl::Time t_commit = absl::Now();
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(cfg.device_id));
+  TC_RETURN_IF_ERROR(s.vmm.reserve_and_map(s.output_bytes, cfg.device_id));
+  r.res.vmm_reserved_bytes = s.vmm.reserved_bytes();
+  r.res.vmm_mapped_bytes = s.vmm.mapped_bytes();
+  r.res.vmm_granularity_bytes = s.vmm.granularity_bytes();
+
+  MultiSafetensorsSource backing_src(shards);
+
+  BounceBufferPlan bb;
+  TC_ASSIGN_OR_RETURN(bb, plan_bounce_buffer(cfg));
+  std::unique_ptr<BufferPool> pool_ptr;
+  TC_ASSIGN_OR_RETURN(pool_ptr, make_bounce_buffer_pool(cfg, bb, &r.res));
+  const int io_threads = std::max(1, cfg.io_threads);
+
+  // Group copies by checkpoint tensor to enable batched decisions.
+  struct TensorGroup {
+    const TensorMeta* meta = nullptr;
+    std::vector<size_t> idx;
+    bool staged = false;
+  };
+
+  absl::flat_hash_map<const TensorMeta*, size_t> group_index;
+  group_index.reserve(s.copies.size());
+  std::vector<TensorGroup> groups;
+  groups.reserve(s.copies.size());
+  for (size_t i = 0; i < s.copies.size(); ++i) {
+    const TensorMeta* tm = s.copies[i].meta;
+    auto [it, inserted] = group_index.emplace(tm, groups.size());
+    if (inserted) {
+      TensorGroup g;
+      g.meta = tm;
+      groups.push_back(std::move(g));
+    }
+    groups[it->second].idx.push_back(i);
+  }
+
+  // Decide staged tensors; allocate host staging + pinned pack buffers if needed.
+  bool needs_staging = false;
+  for (auto& g : groups) {
+    const TensorMeta& tm = *g.meta;
+    bool any_non_contig = false;
+    bool axes_ok = true;
+    for (const size_t ci : g.idx) {
+      if (!s.copies[ci].contiguous) {
+        any_non_contig = true;
+      }
+      for (const auto& sl : s.copies[ci].slices) {
+        if (sl.axis < 0 || sl.axis > 1) {
+          axes_ok = false;
+        }
+      }
+    }
+    bool can_pack_2d = false;
+    if (tm.shape.size() == 2 && axes_ok) {
+      TC_ASSIGN_OR_RETURN(can_pack_2d, is_row_major_contiguous(tm));
+    }
+    g.staged = any_non_contig && can_pack_2d;
+    if (g.staged) {
+      needs_staging = true;
+    }
+  }
+
+  std::unique_ptr<uint8_t, decltype(&free)> host_staging(nullptr, &free);
+  uint64_t host_staging_bytes = 0;
+
+  std::unique_ptr<common::memory::PinnedBufferPool> host_pack_pool;
+  uint8_t* host_pack_buf0 = nullptr;
+  uint8_t* host_pack_buf1 = nullptr;
+  size_t host_pack_buf_bytes = 0;
+  cudaStream_t h2d_stream = nullptr;
+  cudaEvent_t h2d_done[2]{nullptr, nullptr};
+  bool h2d_used[2]{false, false};
+
+  if (needs_staging) {
+    s.staging_bytes = std::max<uint64_t>(1, cfg.strategy_c_staging_bytes);
+    host_staging_bytes = s.staging_bytes;
+    if (host_staging_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+      return absl::InvalidArgumentError("host_pack: staging_bytes overflows size_t");
+    }
+    host_staging.reset(reinterpret_cast<uint8_t*>(aligned_alloc(4096, static_cast<size_t>(host_staging_bytes))));
+    if (host_staging == nullptr) {
+      return absl::ResourceExhaustedError("host_pack: failed to allocate host staging buffer");
+    }
+
+    // Compute an upper bound on the max packed output bytes per chunk, used to size pinned pack buffers.
+    uint64_t max_packed_chunk_bytes = 0;
+    for (const auto& g : groups) {
+      if (!g.staged) {
+        continue;
+      }
+      const TensorMeta& tm = *g.meta;
+      if (tm.shape.size() != 2 || tm.elem_size == 0) {
+        continue;
+      }
+
+      // Union row range across copies in this tensor.
+      Slice2D union_slice;
+      union_slice.row_start = std::numeric_limits<int64_t>::max();
+      union_slice.row_size = 0;
+      union_slice.col_start = 0;
+      union_slice.col_size = tm.shape[1];
+      for (const size_t ci : g.idx) {
+        Slice2D sl;
+        TC_ASSIGN_OR_RETURN(sl, extract_slice_2d(tm, s.copies[ci].slices));
+        union_slice.row_start = std::min(union_slice.row_start, sl.row_start);
+        union_slice.row_size = std::max(union_slice.row_size, sl.row_start + sl.row_size);
+      }
+      if (union_slice.row_start == std::numeric_limits<int64_t>::max()) {
+        union_slice.row_start = 0;
+        union_slice.row_size = 0;
+      }
+      const int64_t row_start = std::max<int64_t>(0, union_slice.row_start);
+      const int64_t row_end = std::min<int64_t>(tm.shape[0], union_slice.row_size);
+      if (row_end <= row_start) {
+        continue;
+      }
+
+      const uint64_t cols = static_cast<uint64_t>(tm.shape[1]);
+      const uint64_t elem = static_cast<uint64_t>(tm.elem_size);
+      const uint64_t row_bytes_u64 = cols * elem;
+      if (row_bytes_u64 == 0) {
+        continue;
+      }
+      const uint64_t staging_bytes = s.staging_bytes;
+      uint64_t max_rows_per_chunk = (staging_bytes / row_bytes_u64);
+      if (max_rows_per_chunk == 0) {
+        max_rows_per_chunk = 1;
+      }
+      for (const size_t ci : g.idx) {
+        Slice2D sl;
+        TC_ASSIGN_OR_RETURN(sl, extract_slice_2d(tm, s.copies[ci].slices));
+        if (sl.row_size <= 0 || sl.col_size <= 0) {
+          continue;
+        }
+        const uint64_t rows_u64 = std::min<uint64_t>(max_rows_per_chunk, static_cast<uint64_t>(sl.row_size));
+        const uint64_t col_bytes = static_cast<uint64_t>(sl.col_size) * elem;
+        if (col_bytes == 0) {
+          continue;
+        }
+        if (rows_u64 > (std::numeric_limits<uint64_t>::max() / col_bytes)) {
+          return absl::InvalidArgumentError("host_pack: packed bytes overflow");
+        }
+        max_packed_chunk_bytes = std::max(max_packed_chunk_bytes, rows_u64 * col_bytes);
+      }
+    }
+
+    constexpr uint64_t kAlign = common::memory::PinnedBufferPool::kDirectIOAlignment;
+    const uint64_t pack_chunk_u64 =
+        std::max<uint64_t>(kAlign, ((max_packed_chunk_bytes + kAlign - 1) / kAlign) * kAlign);
+    if (pack_chunk_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+      return absl::InvalidArgumentError("host_pack: pinned pack chunk bytes overflow size_t");
+    }
+    const size_t pack_chunk_bytes = static_cast<size_t>(pack_chunk_u64);
+    if (pack_chunk_bytes > (std::numeric_limits<size_t>::max() / 2u)) {
+      return absl::InvalidArgumentError("host_pack: pinned pack pool bytes overflow size_t");
+    }
+    const size_t pack_total_bytes = pack_chunk_bytes * 2;
+
+    common::memory::PinnedBufferPool::Options pool_opts;
+    pool_opts.name = "host_pack";
+    pool_opts.prefault = cfg.pinned_numa_prefault;
+    TC_ASSIGN_OR_RETURN(pool_opts.numa_node, resolve_pinned_numa_node_for_device(cfg, cfg.device_id));
+    host_pack_pool =
+        std::make_unique<common::memory::PinnedBufferPool>(pack_total_bytes, pack_chunk_bytes, std::move(pool_opts));
+    const auto slabs = host_pack_pool->list_slabs();
+    if (slabs.empty()) {
+      return absl::InternalError("host_pack: pinned pack pool has no slabs");
+    }
+    size_t pinned_total = 0;
+    for (const auto& slab : slabs) {
+      pinned_total += slab.bytes;
+    }
+    r.res.pinned_host_bytes += pinned_total;
+
+    host_pack_buf_bytes = host_pack_pool->slice_bytes();
+    if (slabs[0].bytes < (host_pack_buf_bytes * 2)) {
+      return absl::InternalError("host_pack: pinned slab smaller than 2 slices");
+    }
+    auto* base = reinterpret_cast<uint8_t*>(slabs[0].base.get());
+    host_pack_buf0 = base;
+    host_pack_buf1 = base + host_pack_buf_bytes;
+
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&h2d_stream, cudaStreamNonBlocking));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&h2d_done[0], cudaEventDisableTiming));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&h2d_done[1], cudaEventDisableTiming));
+  }
+
+  // Stream for D2D copies (dedup) and 2D pack on GPU (if needed).
+  cudaStream_t pack_stream = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&pack_stream, cudaStreamNonBlocking));
+  double commit_sec = 0.0;
+  double pack_sec = 0.0;
+
+  auto flush_direct = [&](std::vector<SegmentCopy>& pending, std::vector<D2dCopyOp>& d2d_ops) -> absl::Status {
+    if (pending.empty()) {
+      if (!d2d_ops.empty()) {
+        return absl::InternalError("Internal error: d2d_ops not empty while pending segments empty");
+      }
+      return absl::OkStatus();
+    }
+    auto [merged, planner_stats] = merge_adjacent_segments_by_src(std::move(pending));
+    pending.clear();
+    pending = std::move(merged);
+    uint64_t max_dst_end = 0;
+    for (const auto& seg : pending) {
+      const uint64_t end = seg.dst_offset + static_cast<uint64_t>(seg.bytes);
+      max_dst_end = std::max(max_dst_end, end);
+    }
+    if (max_dst_end > s.output_bytes) {
+      return absl::OutOfRangeError("Strategy host_pack: direct segment write exceeds output buffer bounds");
+    }
+    r.planned_segments += planner_stats.segments_post_merge;
+    r.planner_segments_pre_merge += planner_stats.segments_pre_merge;
+    r.planner_segments_merged += (planner_stats.segments_pre_merge >= planner_stats.segments_post_merge)
+        ? (planner_stats.segments_pre_merge - planner_stats.segments_post_merge)
+        : 0;
+    r.planner_src_runs += planner_stats.src_runs_post_merge;
+    r.planner_src_run_max_bytes = std::max(r.planner_src_run_max_bytes, planner_stats.src_run_max_bytes);
+
+    std::vector<RemappedSource::Segment> remap;
+    remap.reserve(pending.size());
+    for (const auto& seg : pending) {
+      remap.push_back(
+          RemappedSource::Segment{
+              .dst_offset = seg.dst_offset,
+              .src_offset = seg.src_offset,
+              .end_offset = seg.dst_offset + seg.bytes,
+          });
+    }
+    RemappedSource src(gsl::not_null<SeekableSource*>(&backing_src), std::move(remap));
+
+    loader::GpuMemorySink sink(
+        loader::GpuMemorySink::Options{
+            .gpu_base_ptr = gsl::not_null<void*>{s.vmm.base_ptr()},
+            // Strategy C performs sparse writes into the final output buffer; do
+            // not enforce "must write exactly total_size bytes" on close().
+            .total_size = 0,
+            .chunk_size = 128 * 1024 * 1024,
+            .device_id = cfg.device_id,
+            .allocation = nullptr,
+            .gpu_sched_enabled = cfg.gpu_sched_enabled,
+            .gpu_sched_limit_bytes = cfg.gpu_sched_limit_bytes,
+            .gpu_sched_limit_copies = cfg.gpu_sched_limit_copies,
+        });
+
+    uint64_t total_requested_bytes = 0;
+    uint64_t planned_ranges = 0;
+    auto ranges_or = build_pump_ranges_for_copy(pending, io_threads, &total_requested_bytes, &planned_ranges);
+    if (!ranges_or.ok()) {
+      return ranges_or.status();
+    }
+    const auto& ranges = *ranges_or;
+    r.planned_ranges += planned_ranges;
+    r.bytes.disk_read_bytes += total_requested_bytes;
+    r.bytes.h2d_bytes += total_requested_bytes;
+
+    if (auto* adapter = dynamic_cast<StreamingBufferAdapter*>(pool_ptr.get()); adapter != nullptr) {
+      TC_RETURN_IF_ERROR(adapter->get_buffer()->reset_for_new_production());
+    }
+
+    const absl::Time t = absl::Now();
+    TC_RETURN_IF_ERROR(
+        loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
+    TC_RETURN_IF_ERROR(sink.close());
+    commit_sec += seconds_since(t);
+
+    if (!d2d_ops.empty()) {
+      const absl::Time t_d2d = absl::Now();
+      auto* base = static_cast<uint8_t*>(s.vmm.base_ptr());
+      for (const auto& op : d2d_ops) {
+        if (op.bytes == 0) {
+          continue;
+        }
+        TC_RETURN_IF_ERROR(
+            tensorcast::cuda::memcpy_async(
+                base + op.dst_dst_offset, base + op.src_dst_offset, op.bytes, cudaMemcpyDeviceToDevice, pack_stream));
+        r.bytes.d2d_bytes += static_cast<uint64_t>(op.bytes);
+      }
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(pack_stream));
+      pack_sec += seconds_since(t_d2d);
+      d2d_ops.clear();
+    }
+    pending.clear();
+    return absl::OkStatus();
+  };
+
+  std::sort(groups.begin(), groups.end(), [](const TensorGroup& a, const TensorGroup& b) {
+    return a.meta->offset < b.meta->offset;
+  });
+
+  std::vector<SegmentCopy> pending_direct;
+  std::vector<D2dCopyOp> pending_d2d;
+  pending_direct.reserve(s.copies.size());
+  pending_d2d.reserve(s.copies.size());
+
+  size_t next_host_pack_buf = 0;
+
+  // Execute in on-disk tensor order to preserve sequential access.
+  for (auto& g : groups) {
+    const TensorMeta& tm = *g.meta;
+    if (g.staged) {
+      ++st.staged_tensors;
+      TC_RETURN_IF_ERROR(flush_direct(pending_direct, pending_d2d));
+
+      if (!needs_staging || host_staging == nullptr || host_staging_bytes == 0) {
+        return absl::InternalError("host_pack: staged tensor but host staging buffers are not initialized");
+      }
+
+      // Compute union row range for staged reads.
+      Slice2D union_slice;
+      union_slice.row_start = std::numeric_limits<int64_t>::max();
+      union_slice.row_size = 0;
+      union_slice.col_start = 0;
+      union_slice.col_size = tm.shape[1];
+      for (const size_t ci : g.idx) {
+        Slice2D sl;
+        TC_ASSIGN_OR_RETURN(sl, extract_slice_2d(tm, s.copies[ci].slices));
+        union_slice.row_start = std::min(union_slice.row_start, sl.row_start);
+        union_slice.row_size = std::max(union_slice.row_size, sl.row_start + sl.row_size);
+      }
+      if (union_slice.row_start == std::numeric_limits<int64_t>::max()) {
+        union_slice.row_start = 0;
+        union_slice.row_size = 0;
+      }
+      const int64_t row_start = std::max<int64_t>(0, union_slice.row_start);
+      const int64_t row_end = std::min<int64_t>(tm.shape[0], union_slice.row_size);
+      if (row_end <= row_start) {
+        continue;
+      }
+      const uint64_t cols = static_cast<uint64_t>(tm.shape[1]);
+      const uint64_t elem = static_cast<uint64_t>(tm.elem_size);
+      const uint64_t row_bytes_u64 = cols * elem;
+      if (row_bytes_u64 == 0 || row_bytes_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return absl::InvalidArgumentError(absl::StrCat("Row byte size overflow for tensor ", tm.name));
+      }
+      const uint64_t staging_bytes = host_staging_bytes;
+      uint64_t max_rows_per_chunk = (staging_bytes / row_bytes_u64);
+      if (max_rows_per_chunk == 0) {
+        max_rows_per_chunk = 1;
+      }
+
+      auto* out_base = static_cast<uint8_t*>(s.vmm.base_ptr());
+      auto* staging_base = host_staging.get();
+      for (int64_t row = row_start; row < row_end;) {
+        const int64_t chunk_rows = std::min<int64_t>(static_cast<int64_t>(max_rows_per_chunk), row_end - row);
+        const uint64_t chunk_bytes = static_cast<uint64_t>(chunk_rows) * row_bytes_u64;
+        if (chunk_bytes > host_staging_bytes) {
+          return absl::InternalError("host_pack: computed chunk_bytes exceeds host staging buffer");
+        }
+
+        std::vector<RemappedSource::Segment> remap;
+        remap.push_back(
+            RemappedSource::Segment{
+                .dst_offset = 0,
+                .src_offset = tm.offset + static_cast<uint64_t>(row) * row_bytes_u64,
+                .end_offset = chunk_bytes,
+            });
+        RemappedSource src(gsl::not_null<SeekableSource*>(&backing_src), std::move(remap));
+
+        HostBufferSink sink(gsl::not_null<uint8_t*>{staging_base}, chunk_bytes);
+
+        const auto ranges = split_even_ranges(/*base=*/0, chunk_bytes, io_threads);
+        r.planned_ranges += ranges.size();
+        r.planned_segments += 1;
+        r.bytes.disk_read_bytes += chunk_bytes;
+
+        if (auto* adapter = dynamic_cast<StreamingBufferAdapter*>(pool_ptr.get()); adapter != nullptr) {
+          TC_RETURN_IF_ERROR(adapter->get_buffer()->reset_for_new_production());
+        }
+
+        const absl::Time t = absl::Now();
+        TC_RETURN_IF_ERROR(
+            loader::pump_ranges(
+                src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
+        commit_sec += seconds_since(t);
+        ++st.staged_reads;
+
+        // Host pack: staged host buffer -> pinned host -> H2D into final output layout.
+        for (const size_t ci : g.idx) {
+          const PlannedCopyInstance& copy = s.copies[ci];
+          Slice2D sl;
+          TC_ASSIGN_OR_RETURN(sl, extract_slice_2d(tm, copy.slices));
+
+          const int64_t copy_row_start = sl.row_start;
+          const int64_t copy_row_end = sl.row_start + sl.row_size;
+          const int64_t chunk_row_start = row;
+          const int64_t chunk_row_end = row + chunk_rows;
+          const int64_t inter_start = std::max(copy_row_start, chunk_row_start);
+          const int64_t inter_end = std::min(copy_row_end, chunk_row_end);
+          if (inter_end <= inter_start || sl.col_size <= 0 || sl.row_size <= 0) {
+            continue;
+          }
+
+          const uint64_t inter_rows = static_cast<uint64_t>(inter_end - inter_start);
+          const uint64_t col_bytes_u64 = static_cast<uint64_t>(sl.col_size) * elem;
+          if (col_bytes_u64 == 0 || col_bytes_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+            return absl::InvalidArgumentError("host_pack: col_bytes overflow");
+          }
+          if (inter_rows > (std::numeric_limits<uint64_t>::max() / col_bytes_u64)) {
+            return absl::InvalidArgumentError("host_pack: packed bytes overflow");
+          }
+          const uint64_t packed_bytes_u64 = inter_rows * col_bytes_u64;
+          if (packed_bytes_u64 == 0) {
+            continue;
+          }
+          if (packed_bytes_u64 > static_cast<uint64_t>(host_pack_buf_bytes)) {
+            return absl::OutOfRangeError("host_pack: packed_bytes exceeds pinned host pack buffer");
+          }
+
+          const uint64_t src_row_off = static_cast<uint64_t>(inter_start - chunk_row_start);
+          const uint64_t dst_row_off = static_cast<uint64_t>(inter_start - copy_row_start);
+          const uint64_t src_col_off = static_cast<uint64_t>(sl.col_start) * elem;
+
+          const uint8_t* src_ptr = staging_base + src_row_off * row_bytes_u64 + src_col_off;
+          uint8_t* dst_ptr = out_base + copy.dst_offset + dst_row_off * col_bytes_u64;
+
+          // Wait for the selected pack buffer to be free before overwriting.
+          const size_t buf_idx = next_host_pack_buf % 2;
+          next_host_pack_buf += 1;
+          uint8_t* pack_buf = (buf_idx == 0) ? host_pack_buf0 : host_pack_buf1;
+          if (pack_buf == nullptr || h2d_done[buf_idx] == nullptr || h2d_stream == nullptr) {
+            return absl::InternalError("host_pack: pinned pack buffers or CUDA resources are not initialized");
+          }
+          if (h2d_used[buf_idx]) {
+            bool ready = false;
+            TC_RETURN_IF_ERROR(tensorcast::cuda::event_query(h2d_done[buf_idx], &ready));
+            if (!ready) {
+              const absl::Time t_wait = absl::Now();
+              TC_RETURN_IF_ERROR(tensorcast::cuda::event_synchronize(h2d_done[buf_idx]));
+              commit_sec += seconds_since(t_wait);
+            }
+          }
+
+          // CPU pack (row-by-row memcpy) into pinned host buffer.
+          const absl::Time t_pack = absl::Now();
+          const size_t col_bytes = static_cast<size_t>(col_bytes_u64);
+          const size_t src_pitch = static_cast<size_t>(row_bytes_u64);
+          const size_t rows = static_cast<size_t>(inter_rows);
+          for (size_t rr = 0; rr < rows; ++rr) {
+            const uint8_t* src_row = src_ptr + rr * src_pitch;
+            std::memcpy(pack_buf + rr * col_bytes, src_row, col_bytes);
+          }
+          pack_sec += seconds_since(t_pack);
+
+          TC_RETURN_IF_ERROR(
+              tensorcast::cuda::memcpy_async(
+                  dst_ptr, pack_buf, static_cast<size_t>(packed_bytes_u64), cudaMemcpyHostToDevice, h2d_stream));
+          TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(h2d_done[buf_idx], h2d_stream));
+          h2d_used[buf_idx] = true;
+          r.bytes.h2d_bytes += packed_bytes_u64;
+        }
+
+        row += chunk_rows;
+      }
+      continue;
+    }
+
+    // Direct (contiguous) reads; deduplicate identical src slices within a tensor.
+    absl::flat_hash_map<std::string, std::vector<size_t>> by_key;
+    by_key.reserve(g.idx.size());
+    for (const size_t ci : g.idx) {
+      const PlannedCopyInstance& copy = s.copies[ci];
+      if (!copy.contiguous) {
+        // Fallback to segment expansion for non-2D/non-contiguous slices.
+        uint64_t copy_bytes = 0;
+        uint64_t src_key = 0;
+        std::vector<SegmentCopy> segs;
+        TC_ASSIGN_OR_RETURN(
+            segs, build_segments_for_slices(*copy.meta, copy.slices, copy.dst_offset, &copy_bytes, &src_key));
+        pending_direct.insert(pending_direct.end(), segs.begin(), segs.end());
+        ++st.fallback_copies;
+        continue;
+      }
+      const std::string k = std::format("{}:{}", copy.contiguous_src_offset, copy.bytes);
+      by_key[k].push_back(ci);
+    }
+
+    for (auto& it : by_key) {
+      const std::vector<size_t>& copies = it.second;
+      if (copies.empty()) {
+        continue;
+      }
+      const PlannedCopyInstance& primary = s.copies[copies[0]];
+      pending_direct.push_back(
+          SegmentCopy{
+              .src_offset = primary.contiguous_src_offset,
+              .dst_offset = primary.dst_offset,
+              .bytes = static_cast<size_t>(primary.bytes),
+          });
+      ++st.direct_primary_reads;
+
+      for (size_t i = 1; i < copies.size(); ++i) {
+        const PlannedCopyInstance& other = s.copies[copies[i]];
+        pending_d2d.push_back(
+            D2dCopyOp{
+                .src_dst_offset = primary.dst_offset,
+                .dst_dst_offset = other.dst_offset,
+                .bytes = static_cast<size_t>(primary.bytes),
+            });
+        ++st.direct_dedup_copies;
+      }
+    }
+  }
+
+  TC_RETURN_IF_ERROR(flush_direct(pending_direct, pending_d2d));
+
+  if (h2d_stream != nullptr) {
+    const absl::Time t_wait = absl::Now();
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(h2d_stream));
+    commit_sec += seconds_since(t_wait);
+  }
+
+  const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
+  if (sched_after.waits >= sched_before.waits) {
+    r.gpu_sched_waits = sched_after.waits - sched_before.waits;
+  }
+  if (sched_after.wait_sec >= sched_before.wait_sec) {
+    r.gpu_sched_wait_sec = sched_after.wait_sec - sched_before.wait_sec;
+  }
+
+  if (h2d_done[0] != nullptr) {
+    (void)tensorcast::cuda::event_destroy(h2d_done[0]);
+  }
+  if (h2d_done[1] != nullptr) {
+    (void)tensorcast::cuda::event_destroy(h2d_done[1]);
+  }
+  if (h2d_stream != nullptr) {
+    (void)tensorcast::cuda::stream_destroy(h2d_stream);
+  }
+
+  r.t.commit = commit_sec;
+  r.t.pack = pack_sec;
+  r.t.total_ready = seconds_since(t_total);
+  (void)t_commit;
+
+  (void)tensorcast::cuda::stream_destroy(pack_stream);
+
+  r.c_staged_tensors = st.staged_tensors;
+  r.c_staged_reads = st.staged_reads;
+  r.c_direct_primary_reads = st.direct_primary_reads;
+  r.c_direct_dedup_copies = st.direct_dedup_copies;
+  r.c_fallback_copies = st.fallback_copies;
+
+  return std::make_pair(r, std::move(s));
+}
+
 absl::StatusOr<std::pair<RunResult, StrategyBState>> run_strategy_b_with_state(
     const LoaderConfig& cfg,
     const std::vector<std::filesystem::path>& shards) {
@@ -4626,6 +5299,279 @@ absl::Status run_h2d_baseline(const LoaderConfig& cfg) {
   return absl::OkStatus();
 }
 
+absl::Status run_h2d_2d_baseline(const LoaderConfig& cfg) {
+  if (cfg.h2d_bench_bytes == 0) {
+    return absl::InvalidArgumentError("--h2d_bench_bytes must be > 0 for mode=h2d_2d_baseline");
+  }
+  if (!cfg.use_pinned_host_buffer) {
+    return absl::InvalidArgumentError("--use_pinned_host_buffer=true is required for mode=h2d_2d_baseline");
+  }
+  if (cfg.tp_world_size <= 0) {
+    return absl::InvalidArgumentError("--tp_world_size must be > 0 for mode=h2d_2d_baseline");
+  }
+  if (cfg.h2d_2d_width_bytes == 0) {
+    return absl::InvalidArgumentError("--h2d_2d_width_bytes must be > 0 for mode=h2d_2d_baseline");
+  }
+  if (cfg.h2d_2d_height == 0) {
+    return absl::InvalidArgumentError("--h2d_2d_height must be > 0 for mode=h2d_2d_baseline");
+  }
+  if (cfg.h2d_2d_src_pitch_bytes < cfg.h2d_2d_width_bytes) {
+    return absl::InvalidArgumentError("--h2d_2d_src_pitch_bytes must be >= --h2d_2d_width_bytes");
+  }
+  if (cfg.h2d_2d_dst_pitch_bytes < cfg.h2d_2d_width_bytes) {
+    return absl::InvalidArgumentError("--h2d_2d_dst_pitch_bytes must be >= --h2d_2d_width_bytes");
+  }
+
+  const uint64_t width_bytes = cfg.h2d_2d_width_bytes;
+  const uint64_t height = cfg.h2d_2d_height;
+  const uint64_t src_pitch = cfg.h2d_2d_src_pitch_bytes;
+  const uint64_t dst_pitch = cfg.h2d_2d_dst_pitch_bytes;
+
+  if (height > (std::numeric_limits<uint64_t>::max() / width_bytes)) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: width_bytes * height overflow");
+  }
+  if (height > (std::numeric_limits<uint64_t>::max() / src_pitch)) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: src_pitch * height overflow");
+  }
+  if (height > (std::numeric_limits<uint64_t>::max() / dst_pitch)) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: dst_pitch * height overflow");
+  }
+  const uint64_t bytes_per_call = width_bytes * height;
+  const uint64_t src_bytes = src_pitch * height;
+  const uint64_t dst_bytes = dst_pitch * height;
+
+  if (bytes_per_call == 0 || src_bytes == 0 || dst_bytes == 0) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: computed bytes are zero");
+  }
+  if (src_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+      dst_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+      src_pitch > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+      dst_pitch > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+      width_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: size_t overflow");
+  }
+
+  std::vector<int> device_ids;
+  TC_ASSIGN_OR_RETURN(device_ids, build_tp_device_ids(cfg));
+
+  struct HostPool {
+    std::shared_ptr<common::memory::PinnedBufferPool> pool;
+    const uint8_t* base = nullptr;
+    size_t bytes = 0;
+    int numa_node = -1;
+  };
+
+  std::vector<HostPool> host_pools;
+  host_pools.reserve(cfg.h2d_per_gpu_pinned_pool ? static_cast<size_t>(cfg.tp_world_size) : 1u);
+
+  const uint64_t src_bytes_per_rank = src_bytes;
+  uint64_t src_pool_bytes_u64 = src_bytes_per_rank;
+  if (!cfg.h2d_per_gpu_pinned_pool) {
+    const uint64_t tp_u64 = static_cast<uint64_t>(cfg.tp_world_size);
+    if (tp_u64 > 0 && src_bytes_per_rank > (std::numeric_limits<uint64_t>::max() / tp_u64)) {
+      return absl::InvalidArgumentError("h2d_2d_baseline: src_bytes * tp_world_size overflow");
+    }
+    src_pool_bytes_u64 = src_bytes_per_rank * tp_u64;
+  }
+  if (src_pool_bytes_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: src_pool_bytes overflows size_t");
+  }
+  const size_t src_pool_bytes = static_cast<size_t>(src_pool_bytes_u64);
+
+  auto build_one_pool = [&](int device_id) -> absl::StatusOr<HostPool> {
+    common::memory::PinnedBufferPool::Options pool_opts;
+    pool_opts.name = "h2d_2d_baseline";
+    pool_opts.prefault = cfg.pinned_numa_prefault;
+    TC_ASSIGN_OR_RETURN(pool_opts.numa_node, resolve_pinned_numa_node_for_device(cfg, device_id));
+
+    auto pool = std::make_shared<common::memory::PinnedBufferPool>(
+        src_pool_bytes, static_cast<size_t>(src_bytes_per_rank), std::move(pool_opts));
+    const auto slabs = pool->list_slabs();
+    if (slabs.empty()) {
+      return absl::InternalError("h2d_2d_baseline: no pinned slabs");
+    }
+    for (const auto& slab : slabs) {
+      std::memset(slab.base.get(), 0, slab.bytes);
+    }
+    const uint8_t* host_base = reinterpret_cast<const uint8_t*>(slabs[0].base.get());
+    const size_t host_bytes = slabs[0].bytes;
+    if (host_bytes < src_pool_bytes) {
+      return absl::InternalError("h2d_2d_baseline: pinned host slab smaller than src_pool_bytes");
+    }
+    return HostPool{
+        .pool = std::move(pool),
+        .base = host_base,
+        .bytes = host_bytes,
+        .numa_node = pool_opts.numa_node,
+    };
+  };
+
+  if (cfg.pinned_numa_node == -2 && !cfg.h2d_per_gpu_pinned_pool && cfg.tp_world_size > 1) {
+    return absl::InvalidArgumentError(
+        "--pinned_numa_node=-2 (auto) requires --h2d_per_gpu_pinned_pool=true when tp_world_size>1");
+  }
+  if (cfg.h2d_per_gpu_pinned_pool) {
+    for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+      HostPool host;
+      TC_ASSIGN_OR_RETURN(host, build_one_pool(device_ids[static_cast<size_t>(rank)]));
+      host_pools.push_back(std::move(host));
+    }
+  } else {
+    HostPool host;
+    TC_ASSIGN_OR_RETURN(host, build_one_pool(/*device_id=*/cfg.device_id));
+    host_pools.push_back(std::move(host));
+  }
+
+  const uint64_t target_bytes_per_gpu = cfg.h2d_bench_bytes;
+  const uint64_t iters = std::max<uint64_t>(1, (target_bytes_per_gpu + bytes_per_call - 1) / bytes_per_call);
+  if (iters > (std::numeric_limits<uint64_t>::max() / bytes_per_call)) {
+    return absl::InvalidArgumentError("h2d_2d_baseline: bytes_per_call * iters overflow");
+  }
+  const uint64_t bytes_per_gpu = bytes_per_call * iters;
+
+  struct PerGpuCtx {
+    int device_id = -1;
+    std::unique_ptr<common::memory::GpuDeviceMemory> dst;
+    cudaStream_t stream = nullptr;
+    cudaEvent_t done_event = nullptr;
+    double sec = 0.0; // completion time since t0
+  };
+
+  std::vector<PerGpuCtx> gpus(static_cast<size_t>(cfg.tp_world_size));
+  for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+    auto& ctx = gpus[static_cast<size_t>(rank)];
+    ctx.device_id = device_ids[static_cast<size_t>(rank)];
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(ctx.device_id));
+    ctx.dst = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(ctx.dst->allocate(static_cast<size_t>(dst_bytes), ctx.device_id));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&ctx.stream, cudaStreamNonBlocking));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&ctx.done_event, cudaEventDisableTiming));
+  }
+
+  const absl::Time t0 = absl::Now();
+  for (uint64_t iter = 0; iter < iters; ++iter) {
+    for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+      auto& ctx = gpus[static_cast<size_t>(rank)];
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(ctx.device_id));
+      const HostPool& host = host_pools[cfg.h2d_per_gpu_pinned_pool ? static_cast<size_t>(rank) : 0u];
+      const uint64_t rank_off_u64 =
+          cfg.h2d_per_gpu_pinned_pool ? 0ull : (static_cast<uint64_t>(rank) * src_bytes_per_rank);
+      if (!cfg.h2d_per_gpu_pinned_pool) {
+        const uint64_t host_bytes_u64 = static_cast<uint64_t>(host.bytes);
+        if (rank_off_u64 > host_bytes_u64 || (host_bytes_u64 - rank_off_u64) < src_bytes_per_rank) {
+          return absl::InternalError("h2d_2d_baseline: computed src offset exceeds host slab size");
+        }
+      }
+      const void* src = host.base + static_cast<size_t>(rank_off_u64);
+      void* dst_ptr = ctx.dst->get();
+      SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+          dst_ptr,
+          static_cast<size_t>(dst_pitch),
+          src,
+          static_cast<size_t>(src_pitch),
+          static_cast<size_t>(width_bytes),
+          static_cast<size_t>(height),
+          cudaMemcpyHostToDevice,
+          ctx.stream));
+    }
+  }
+  for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+    auto& ctx = gpus[static_cast<size_t>(rank)];
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(ctx.device_id));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(ctx.done_event, ctx.stream));
+  }
+
+  std::vector<bool> done(static_cast<size_t>(cfg.tp_world_size), false);
+  int remaining = cfg.tp_world_size;
+  while (remaining > 0) {
+    for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+      if (done[static_cast<size_t>(rank)]) {
+        continue;
+      }
+      auto& ctx = gpus[static_cast<size_t>(rank)];
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(ctx.device_id));
+      bool ready = false;
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_query(ctx.done_event, &ready));
+      if (!ready) {
+        continue;
+      }
+      done[static_cast<size_t>(rank)] = true;
+      remaining -= 1;
+      ctx.sec = seconds_since(t0);
+    }
+    if (remaining > 0) {
+      absl::SleepFor(absl::Milliseconds(1));
+    }
+  }
+
+  double makespan = 0.0;
+  for (const auto& ctx : gpus) {
+    makespan = std::max(makespan, ctx.sec);
+  }
+
+  for (auto& ctx : gpus) {
+    if (ctx.device_id >= 0) {
+      (void)tensorcast::cuda::set_device(ctx.device_id);
+    }
+    if (ctx.stream != nullptr) {
+      (void)tensorcast::cuda::stream_synchronize(ctx.stream);
+    }
+    if (ctx.done_event != nullptr) {
+      (void)tensorcast::cuda::event_destroy(ctx.done_event);
+      ctx.done_event = nullptr;
+    }
+    if (ctx.stream != nullptr) {
+      (void)tensorcast::cuda::stream_destroy(ctx.stream);
+      ctx.stream = nullptr;
+    }
+    ctx.dst.reset();
+  }
+
+  const double per_gpu_gib = static_cast<double>(bytes_per_gpu) / (1024.0 * 1024.0 * 1024.0);
+  const double agg_gib = per_gpu_gib * static_cast<double>(cfg.tp_world_size);
+  const double agg_gib_s = agg_gib / std::max(1e-9, makespan);
+  std::string per_gpu_str;
+  for (size_t i = 0; i < gpus.size(); ++i) {
+    if (i != 0) {
+      absl::StrAppend(&per_gpu_str, " ");
+    }
+    const auto& ctx = gpus[i];
+    const double gib_s = per_gpu_gib / std::max(1e-9, ctx.sec);
+    absl::StrAppend(&per_gpu_str, std::format("gpu{}={:.3f}GiB/s", ctx.device_id, gib_s));
+  }
+  std::string host_pool_str;
+  for (size_t i = 0; i < host_pools.size(); ++i) {
+    if (i != 0) {
+      absl::StrAppend(&host_pool_str, " ");
+    }
+    absl::StrAppend(&host_pool_str, std::format("pool{}=numa{}", i, host_pools[i].numa_node));
+  }
+
+  LOG(INFO) << std::format(
+      "h2d_2d_baseline tp_world_size={} tp_devices={} target_bytes_per_gpu={} bytes_per_gpu={} iters={} bytes_per_call={} width_bytes={} height={} src_pitch={} dst_pitch={} makespan_sec={:.6f} agg_GiB/s={:.3f} per_gpu=[{}] pinned=true pinned_numa_node={} pinned_numa_prefault={} h2d_per_gpu_pinned_pool={} host_pools=[{}] src_bytes={} dst_bytes={}",
+      cfg.tp_world_size,
+      join_device_ids(device_ids),
+      static_cast<uint64_t>(target_bytes_per_gpu),
+      static_cast<uint64_t>(bytes_per_gpu),
+      static_cast<uint64_t>(iters),
+      static_cast<uint64_t>(bytes_per_call),
+      static_cast<uint64_t>(width_bytes),
+      static_cast<uint64_t>(height),
+      static_cast<uint64_t>(src_pitch),
+      static_cast<uint64_t>(dst_pitch),
+      makespan,
+      agg_gib_s,
+      per_gpu_str,
+      cfg.pinned_numa_node,
+      cfg.pinned_numa_prefault,
+      cfg.h2d_per_gpu_pinned_pool,
+      host_pool_str,
+      static_cast<uint64_t>(src_bytes),
+      static_cast<uint64_t>(dst_bytes));
+
+  return absl::OkStatus();
+}
+
 class OdirectMultiFileSource final : public SeekableSource {
  public:
   explicit OdirectMultiFileSource(std::vector<std::filesystem::path> paths) : paths_(std::move(paths)) {}
@@ -5369,6 +6315,9 @@ absl::Status log_run_result(const LoaderConfig& cfg, const RunResult& r) {
     case StrategyKind::kC_BatchedOptimal:
       strategy = "C_batched_optimal";
       break;
+    case StrategyKind::kC_HostPack:
+      strategy = "C_host_pack";
+      break;
   }
   BounceBufferPlan bb;
   TC_ASSIGN_OR_RETURN(bb, plan_bounce_buffer(cfg));
@@ -5382,6 +6331,14 @@ absl::Status log_run_result(const LoaderConfig& cfg, const RunResult& r) {
         r.planner_src_run_avg_bytes,
         static_cast<uint64_t>(r.planner_src_run_max_bytes));
   } else if (r.strategy == StrategyKind::kC_BatchedOptimal) {
+    planner_stats = std::format(
+        " staged_tensors={} staged_reads={} direct_primary_reads={} direct_dedup_copies={} fallback_copies={}",
+        static_cast<uint64_t>(r.c_staged_tensors),
+        static_cast<uint64_t>(r.c_staged_reads),
+        static_cast<uint64_t>(r.c_direct_primary_reads),
+        static_cast<uint64_t>(r.c_direct_dedup_copies),
+        static_cast<uint64_t>(r.c_fallback_copies));
+  } else if (r.strategy == StrategyKind::kC_HostPack) {
     planner_stats = std::format(
         " staged_tensors={} staged_reads={} direct_primary_reads={} direct_dedup_copies={} fallback_copies={}",
         static_cast<uint64_t>(r.c_staged_tensors),
@@ -5501,13 +6458,13 @@ ABSL_FLAG(
     std::string,
     mode,
     "loader",
-    "One of: loader, disk_baseline, disk_fragmentation, gpu_peer_baseline, safetensors_disk_baseline, safetensors_host_baseline, safetensors_hot_disk_baseline, safetensors_hot_host_baseline, safetensors_dram_mirror_host_baseline, materialize_d, materialized_disk_baseline, h2d_baseline, safetensors_o_direct_host_baseline, safetensors_o_direct_disk_baseline, nccl_baseline, nccl_launch_tax");
+    "One of: loader, disk_baseline, disk_fragmentation, gpu_peer_baseline, safetensors_disk_baseline, safetensors_host_baseline, safetensors_hot_disk_baseline, safetensors_hot_host_baseline, safetensors_dram_mirror_host_baseline, materialize_d, materialized_disk_baseline, h2d_baseline, h2d_2d_baseline, safetensors_o_direct_host_baseline, safetensors_o_direct_disk_baseline, nccl_baseline, nccl_launch_tax");
 
 ABSL_FLAG(
     std::string,
     strategy,
     "a",
-    "Strategy for loader mode: a|b|c. Use --run_both_strategies to run both (A+B only).");
+    "Strategy for loader mode: a|b|c|host_pack (aliases: hp,c_host_pack). Use --run_both_strategies to run both (A+B only).");
 ABSL_FLAG(bool, run_both_strategies, false, "If true, run A then B in one invocation (enables A vs B checks).");
 
 ABSL_FLAG(std::string, safetensors_dir, "", "Directory containing one or more .safetensors shards.");
@@ -5639,12 +6596,36 @@ ABSL_FLAG(
     "Stride between segments for disk_fragmentation.");
 
 ABSL_FLAG(uint64_t, gpu_peer_bytes, 1024ull * 1024ull * 1024ull, "Bytes to copy for gpu_peer_baseline.");
-ABSL_FLAG(uint64_t, h2d_bench_bytes, 8ull * 1024ull * 1024ull * 1024ull, "Bytes to copy for h2d_baseline.");
+ABSL_FLAG(
+    uint64_t,
+    h2d_bench_bytes,
+    8ull * 1024ull * 1024ull * 1024ull,
+    "Bytes to copy per GPU for h2d_baseline and h2d_2d_baseline.");
+ABSL_FLAG(
+    uint64_t,
+    h2d_2d_width_bytes,
+    13824,
+    "For h2d_2d_baseline: bytes per row to copy (widthBytes). Defaults to 6912 fp16 elems (Qwen2.5-32B TP=4 MLP gate/up).");
+ABSL_FLAG(
+    uint64_t,
+    h2d_2d_height,
+    5120,
+    "For h2d_2d_baseline: number of rows to copy (height). Defaults to hidden size 5120 (Qwen2.5-32B).");
+ABSL_FLAG(
+    uint64_t,
+    h2d_2d_src_pitch_bytes,
+    55296,
+    "For h2d_2d_baseline: source pitch in bytes (srcPitch). Defaults to 27648 fp16 elems (Qwen2.5-32B MLP gate/up).");
+ABSL_FLAG(
+    uint64_t,
+    h2d_2d_dst_pitch_bytes,
+    13824,
+    "For h2d_2d_baseline: destination pitch in bytes (dstPitch). Default equals h2d_2d_width_bytes (packed output).");
 ABSL_FLAG(
     bool,
     h2d_per_gpu_pinned_pool,
     false,
-    "For h2d_baseline: allocate a separate pinned host pool per GPU (recommended with pinned_numa_node=-2).");
+    "For h2d_baseline/h2d_2d_baseline: allocate a separate pinned host pool per GPU (recommended with pinned_numa_node=-2).");
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
@@ -5720,6 +6701,10 @@ int main(int argc, char** argv) {
   cfg.gpu_peer_bytes = absl::GetFlag(FLAGS_gpu_peer_bytes);
   cfg.h2d_bench_bytes = absl::GetFlag(FLAGS_h2d_bench_bytes);
   cfg.h2d_per_gpu_pinned_pool = absl::GetFlag(FLAGS_h2d_per_gpu_pinned_pool);
+  cfg.h2d_2d_width_bytes = absl::GetFlag(FLAGS_h2d_2d_width_bytes);
+  cfg.h2d_2d_height = absl::GetFlag(FLAGS_h2d_2d_height);
+  cfg.h2d_2d_src_pitch_bytes = absl::GetFlag(FLAGS_h2d_2d_src_pitch_bytes);
+  cfg.h2d_2d_dst_pitch_bytes = absl::GetFlag(FLAGS_h2d_2d_dst_pitch_bytes);
 
   cfg.safetensors_dir = absl::GetFlag(FLAGS_safetensors_dir);
   cfg.load_plan_json_path = absl::GetFlag(FLAGS_load_plan_json_path);
@@ -5800,6 +6785,14 @@ int main(int argc, char** argv) {
   }
   if (cfg.mode == BenchMode::kH2dBaseline) {
     auto st = tensorcast::store::loader::run_h2d_baseline(cfg);
+    if (!st.ok()) {
+      LOG(ERROR) << st;
+      return 1;
+    }
+    return 0;
+  }
+  if (cfg.mode == BenchMode::kH2d2dBaseline) {
+    auto st = tensorcast::store::loader::run_h2d_2d_baseline(cfg);
     if (!st.ok()) {
       LOG(ERROR) << st;
       return 1;
@@ -6007,6 +7000,22 @@ int main(int argc, char** argv) {
 
   if (cfg.strategy == tensorcast::store::loader::StrategyKind::kC_BatchedOptimal) {
     auto c_or = tensorcast::store::loader::run_strategy_c_with_state(cfg, shards);
+    if (!c_or.ok()) {
+      LOG(ERROR) << c_or.status();
+      return 1;
+    }
+    auto& [c_res, c_state] = *c_or;
+    auto st = tensorcast::store::loader::log_run_result(cfg, c_res);
+    if (!st.ok()) {
+      LOG(ERROR) << st;
+      return 1;
+    }
+    (void)c_state;
+    return 0;
+  }
+
+  if (cfg.strategy == tensorcast::store::loader::StrategyKind::kC_HostPack) {
+    auto c_or = tensorcast::store::loader::run_strategy_c_host_pack_with_state(cfg, shards);
     if (!c_or.ok()) {
       LOG(ERROR) << c_or.status();
       return 1;
