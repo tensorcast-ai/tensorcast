@@ -509,6 +509,11 @@ Current reading:
    `10.12 GB/s` tuning-track result
 3. this aligned pair is now the preferred single-NIC reference for
    cross-framework discussion
+4. a fresh communicator aligned rerun on the same host pair but a different
+   good local pair (`0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1`) reached
+   `20.56 GB/s`, which is meaningfully better than the earlier
+   `19.54 GB/s` same-pair probe but still below Mooncake's aligned
+   `~24.44 GB/s` reference
 
 Earlier same-pair tuning-track numbers on `0360 <- 0496` are still useful as a
 Mooncake incremental-tuning record, but they are no longer the preferred

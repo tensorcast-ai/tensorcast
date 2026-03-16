@@ -49,12 +49,12 @@
       "per_lane_gbps": 161.9864
     },
     "single_nic_probe_0496_0078": {
-      "case_wall_GBps": 19.5352,
-      "case_wall_gbps": 156.2816,
-      "data_plane_GBps": 19.5352,
-      "data_plane_gbps": 156.2816,
-      "per_lane_GBps": 19.5352,
-      "per_lane_gbps": 156.2816
+      "case_wall_GBps": 20.5583,
+      "case_wall_gbps": 164.4664,
+      "data_plane_GBps": 20.5583,
+      "data_plane_gbps": 164.4664,
+      "per_lane_GBps": 20.5583,
+      "per_lane_gbps": 164.4664
     }
   },
   "mooncake": {
@@ -69,8 +69,8 @@
     "aligned_pair": "0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2",
     "comm_best_known_GBps": 20.2483,
     "comm_best_known_case": "/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json",
-    "comm_fresh_probe_GBps": 19.5352,
-    "comm_fresh_probe_case": "/data/tc/single-nic-compare-20260316-161728/comm_initiator_run.json",
+    "comm_fresh_probe_GBps": 20.5583,
+    "comm_fresh_probe_case": "/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json",
     "ib_read_aligned_GBps": 24.465,
     "ib_write_aligned_GBps": 24.5,
     "te_read_aligned_GBps": 24.44,

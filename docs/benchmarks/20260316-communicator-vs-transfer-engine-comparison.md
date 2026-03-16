@@ -51,7 +51,8 @@ Current reading:
    `24.44 ~ 24.45 GB/s`
 3. communicator best-known strict-direct single-big-read remains
    `20.25 GB/s`
-4. a fresh communicator `0496 -> 0078` single-NIC probe was `19.54 GB/s`
+4. a fresh communicator aligned single-NIC probe on
+   `0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1` was `20.56 GB/s`
 
 ### 2.2 Full-8 Framework Throughput Reference
 
@@ -141,7 +142,7 @@ Values used:
 3. Mooncake TE write: `24.45 GB/s`
 4. Mooncake TE read: `24.44 GB/s`
 5. communicator best-known strict-direct read: `20.25 GB/s`
-6. communicator fresh `0496 -> 0078` probe: `19.54 GB/s`
+6. communicator fresh aligned `0496 -> 0078` probe: `20.56 GB/s`
 
 Evidence:
 
@@ -150,7 +151,7 @@ Evidence:
 3. [/data/tc/single-nic-compare-20260316-161728/te_write_mlx5_2.json](/data/tc/single-nic-compare-20260316-161728/te_write_mlx5_2.json)
 4. [/data/tc/single-nic-compare-20260316-161728/te_read_mlx5_2.json](/data/tc/single-nic-compare-20260316-161728/te_read_mlx5_2.json)
 5. [/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json](/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json)
-6. [/data/tc/single-nic-compare-20260316-161728/comm_initiator_run.json](/data/tc/single-nic-compare-20260316-161728/comm_initiator_run.json)
+6. [/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json](/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json)
 
 ### 4.2 Communicator Full-8 Aggregate
 
@@ -220,8 +221,9 @@ These caveats must remain attached to the figures.
 1. raw verbs and Mooncake TE bars in the single-NIC chart are physically
    aligned on the same `GPU2 <-> mlx5_2` pair
 2. communicator best-known single-big-read is still from a different host pair
-3. communicator fresh same-pair probe is included to show the current gap, but
-   it is not yet the final aligned communicator rerun
+3. communicator fresh same-pair probe is now aligned on a different good local
+   pair (`GPU1 <-> mlx5_1`), so the chart should be read as "same host pair,
+   aligned single-NIC references", not "identical GPU ordinal on every bar"
 
 ### 5.2 Operation Direction
 
