@@ -52,18 +52,56 @@ def _get_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_ready(addr: str, timeout_s: float = 20.0) -> None:
+def _wait_ready(addr: str, timeout_s: float = 180.0) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
             channel = grpc.insecure_channel(addr)
             stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
-            stub.GetServerConfig(store_daemon_pb2.GetServerConfigRequest(), timeout=1.0)
+            response = stub.GetServerConfig(
+                store_daemon_pb2.GetServerConfigRequest(), timeout=1.0
+            )
             channel.close()
-            return
+            if response.startup_phase == store_daemon_pb2.DAEMON_STARTUP_PHASE_READY:
+                return
+            if (
+                response.startup_phase
+                == store_daemon_pb2.DAEMON_STARTUP_PHASE_UNSPECIFIED
+            ):
+                return
+            if response.startup_phase == store_daemon_pb2.DAEMON_STARTUP_PHASE_FAILED:
+                raise RuntimeError("daemon startup failed")
         except Exception:  # noqa: BLE001
             time.sleep(0.2)
     raise RuntimeError("daemon failed to start")
+
+
+def _wait_artifact_index_ready(
+    addr: str,
+    artifact_id: str,
+    timeout_s: float = 180.0,
+) -> None:
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        channel = grpc.insecure_channel(addr)
+        stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+        try:
+            response = stub.GetArtifactIndexById(
+                store_daemon_pb2.GetArtifactIndexByIdRequest(artifact_id=artifact_id),
+                timeout=1.0,
+            )
+            if response.tensor_index_data:
+                channel.close()
+                return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+        finally:
+            channel.close()
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"daemon data-plane failed to become ready for artifact_id={artifact_id}: {last_error}"
+    )
 
 
 def _wait_for_worker(gs_port: int, listen_port: int, timeout_s: float = 20.0) -> None:
@@ -316,10 +354,12 @@ def test_inplace_slot_swap_publish_e2e(
             env=env,
         )
         try:
-            _wait_ready(f"127.0.0.1:{listen_port}")
+            daemon_addr = f"127.0.0.1:{listen_port}"
+            _wait_ready(daemon_addr)
             _wait_for_worker(gs_port, listen_port)
+            _wait_artifact_index_ready(daemon_addr, artifact_a_id)
 
-            store = Store(f"127.0.0.1:{listen_port}")
+            store = Store(daemon_addr)
             fallback_a = FallbackOptions(
                 prefer="disk",
                 allow_p2p=False,

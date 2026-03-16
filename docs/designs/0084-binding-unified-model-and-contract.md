@@ -243,6 +243,39 @@ These identities must not be conflated:
   stable locations
 - one local sealed value may or may not have an artifact-backed projection
 
+## Authority Model
+
+The Store Daemon is the sole authority for binding control identity and current
+sealed-value identity.
+
+Normative rules:
+
+- `binding_id`, `binding_value_id`, `seal_generation`, and the presence or
+  absence of a current sealed value are daemon-authored facts
+- successful daemon control-path responses that end in a sealed current value
+  must return the authoritative `BindingValue`
+- the SDK may cache, mirror, and validate daemon-authored binding state, but it
+  must not silently synthesize a replacement `binding_value_id` or current-value
+  snapshot when the daemon response is missing one
+
+This rule is required because `0085` uses `(binding_id, binding_value_id)` as a
+durable contributor identity and mutation-fence anchor.
+
+## State Dimensions
+
+The binding contract has three orthogonal dimensions:
+
+- **value state**
+  - `Allocated`, `ReadyArtifact`, `ReadyLocal`, `Mutable`, `Dirty`
+- **visibility state**
+  - unpublished, published, retiring
+- **control state**
+  - open, closed
+
+The conceptual state machine below remains valid as an explanatory overlay, but
+implementations may expose these dimensions separately rather than forcing one
+flattened enum to represent all combinations.
+
 ## Current Value Categories
 
 `SealedBindingValue` has two categories:
@@ -404,6 +437,9 @@ Constructor rules:
   - `target_tensors` must match `BindingLayout`
   - `device` must be absent or match the supplied tensors exactly
   - `mapping` is optional and only meaningful for mapped or adopted layouts
+  - if `mapping` is accepted by the public surface, it must be wired end-to-end
+    into the binding’s future overwrite path; unsupported `mapping` must fail
+    fast rather than being silently ignored
 
 ## `BindingUpdateEpoch`
 
@@ -416,7 +452,16 @@ It exists to make update windows explicit:
 - overlapping pipelines must fail cleanly if they race for the same binding
 - `0085` must be able to fence stale contributions against sealed value identity
 
-The token is local control identity. It is not artifact identity.
+The token is daemon-authored opaque local control identity. It is not artifact
+identity.
+
+Normative rules:
+
+- the token must be binding-scoped
+- presenting a token for the wrong binding must fail cleanly
+- the SDK may wrap the token in `BindingUpdateEpoch`, but must preserve the
+  daemon-authored identity rather than reconstructing or normalizing it into a
+  weaker local-only form
 
 ## Naming Compliance
 
@@ -513,6 +558,8 @@ V1 rule:
 
 - `begin_update(...)` is synchronous with respect to visibility exclusion and
   drain completion
+- `wait_events` must be honored before the transition RPC is issued; unsupported
+  barrier objects must fail with `INVALID_ARGUMENT` rather than being ignored
 - a non-blocking variant is deferred until it can return a proper
   `Operation[BindingUpdateEpoch]`
 
@@ -560,6 +607,9 @@ State meanings:
 - `Closed`
   - control lifetime ended and best-effort cleanup was requested
 
+The implementation must not treat `Dirty` as “old current value plus a dirty
+bit”. In `Dirty`, no current sealed value exists.
+
 # Safety Guarantees
 
 ## Pointer Stability
@@ -579,6 +629,9 @@ Therefore:
 - entering `Mutable` invalidates the binding’s current value
 - a later successful `seal_current(...)` or `swap(...)` replaces the current
   value atomically
+- entering `Dirty` also invalidates the binding’s current value and clears
+  artifact-backed convenience mirrors until a later successful `swap(...)` or
+  `seal_current(...)`
 - if callers need previous versions to outlive the next mutation, they must be
   retained or promoted elsewhere
 
@@ -589,7 +642,8 @@ Binding control lifetime must integrate with existing daemon lifecycle rules:
 - retire and drain stay the visibility exclusion boundary
 - owner PID exit or explicit close must retire published visibility and cancel
   any mutable window
-- `0085` may add contribution leases that fence `begin_update(...)`
+- `0085` may add contribution leases that fence overwrite entry points such as
+  `begin_update(...)` and `swap(...)`
 
 This keeps binding semantics consistent with the repository’s existing
 lease/guard/finalizer model rather than inventing a parallel cleanup system.
@@ -608,12 +662,16 @@ lease/guard/finalizer model rather than inventing a parallel cleanup system.
 - `DATA_LOSS`
   - refill or seal failed after bytes may already have changed; binding
     transitions to `Dirty`
+  - successful daemon control-path response is missing the authoritative
+    `BindingValue` required by the contract
 
 The dirty rule stays strict:
 
 - once bytes may have changed and the update fails, continuing to treat the old
   value as current is unsafe until a later successful `swap(...)` or
   `seal_current(...)`
+- `Binding.current_value`, `Binding.artifact_id`, and `Binding.selection` must
+  therefore all become absent in `Dirty`
 
 # Schema Changes
 
@@ -680,6 +738,14 @@ The design is accepted when:
   is local-only or absent
 - publish and key activation remain daemon-mediated and valid only for
   artifact-backed current values
+- successful create/refill/commit/seal responses return daemon-authored
+  authoritative current-value identity rather than relying on SDK synthesis
+- `BindingUpdateEpoch` is binding-scoped and wrong-binding token reuse fails
+  cleanly
+- `Dirty` clears `current_value` and artifact-backed mirrors until a later
+  successful overwrite or seal
+- `Store.create_binding(..., mapping=...)` is either implemented end-to-end or
+  rejected explicitly; it is never silently ignored
 - local contiguous slab initialization is expressible without a second
   model-sized persistent weight copy
 - distributed and single-slot promotion of local sealed values is specified in

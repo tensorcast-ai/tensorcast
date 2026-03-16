@@ -55,7 +55,11 @@ class FakeSlotClient:
     def __init__(self, index_bytes: bytes) -> None:
         self._index_bytes = index_bytes
         self.materialize_calls: list[dict[str, Any]] = []
+        self.create_binding_calls: list[dict[str, Any]] = []
         self.create_calls: list[dict[str, Any]] = []
+        self.commit_calls: list[dict[str, Any]] = []
+        self.begin_update_calls: list[dict[str, Any]] = []
+        self.seal_calls: list[dict[str, Any]] = []
         self.refill_calls: list[dict[str, Any]] = []
         self.close_calls: list[str] = []
         self.publish_calls: list[dict[str, Any]] = []
@@ -63,10 +67,36 @@ class FakeSlotClient:
         self.register_calls: list[dict[str, Any]] = []
         self.unregister_calls: list[str] = []
         self.publish_failures = 0
+        self.materialize_failures = 0
+        self.omit_commit_current_value = False
         self._token_counter = 0
         self._region_counter = 0
         self._binding_counter = 0
         self._binding_selections: dict[str, common_pb2.ArtifactSelection] = {}
+        self._binding_layout_ids: dict[str, str] = {}
+        self._binding_generations: dict[str, int] = {}
+        self._binding_value_counter = 0
+
+    def _make_binding_value(
+        self,
+        *,
+        binding_id: str,
+        selection: common_pb2.ArtifactSelection | None,
+    ) -> store_daemon_pb2.BindingValue:
+        self._binding_value_counter += 1
+        generation = self._binding_generations.get(binding_id, 0) + 1
+        self._binding_generations[binding_id] = generation
+        value = store_daemon_pb2.BindingValue(
+            binding_id=binding_id,
+            binding_layout_id=self._binding_layout_ids.get(binding_id, ""),
+            binding_value_id=f"value-{self._binding_value_counter}",
+            seal_generation=generation,
+            is_artifact_backed=selection is not None,
+        )
+        if selection is not None:
+            value.source_artifact_id = str(selection.artifact_id)
+            value.selection.CopyFrom(selection)
+        return value
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         return self._index_bytes
@@ -103,11 +133,41 @@ class FakeSlotClient:
 
     def materialize_into_target_v2(self, **kwargs: Any) -> Any:
         self.materialize_calls.append(kwargs)
+        if self.materialize_failures > 0:
+            self.materialize_failures -= 1
+            raise ArtifactError(
+                "materialize failed after bytes changed",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
         self._token_counter += 1
         token = f"token-{self._token_counter}".encode("utf-8")
+        selection = common_pb2.ArtifactSelection()
+        selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
             target_publication_token=token,
+            resolved_selection=selection,
+        )
+
+    def create_binding(self, **kwargs: Any) -> Any:
+        self.create_binding_calls.append(kwargs)
+        self._binding_counter += 1
+        binding_id = f"client-slot-{self._binding_counter}"
+        self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
+        current_value = None
+        if kwargs.get("initial_selection") is not None:
+            selection = common_pb2.ArtifactSelection()
+            selection.CopyFrom(kwargs["initial_selection"])
+            self._binding_selections[binding_id] = selection
+            current_value = self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            )
+        return types.SimpleNamespace(
+            binding_id=binding_id,
+            target_index_bytes=bytes(kwargs["target_index_bytes"]),
+            current_value=current_value,
         )
 
     def publish_target_replica(self, **kwargs: Any) -> Any:
@@ -130,6 +190,7 @@ class FakeSlotClient:
         self._token_counter += 1
         self._binding_counter += 1
         binding_id = f"owned-slot-{self._binding_counter}"
+        self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["source_selection"])
         self._binding_selections[binding_id] = selection
@@ -139,6 +200,38 @@ class FakeSlotClient:
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             resolved_selection=selection,
             target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            current_value=self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            ),
+        )
+
+    def commit_binding_artifact(self, **kwargs: Any) -> Any:
+        self.commit_calls.append(kwargs)
+        binding_id = str(kwargs["binding_id"])
+        selection = common_pb2.ArtifactSelection()
+        selection.CopyFrom(kwargs["selection"])
+        self._binding_selections[binding_id] = selection
+        if self.omit_commit_current_value:
+            return types.SimpleNamespace()
+        return types.SimpleNamespace(
+            current_value=self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            )
+        )
+
+    def begin_binding_update(self, **kwargs: Any) -> Any:
+        self.begin_update_calls.append(kwargs)
+        return types.SimpleNamespace(update_epoch=f"bue:{kwargs['binding_id']}:1")
+
+    def seal_binding(self, **kwargs: Any) -> Any:
+        self.seal_calls.append(kwargs)
+        return types.SimpleNamespace(
+            current_value=self._make_binding_value(
+                binding_id=str(kwargs["binding_id"]),
+                selection=None,
+            )
         )
 
     def refill_owned_binding(self, **kwargs: Any) -> Any:
@@ -153,6 +246,10 @@ class FakeSlotClient:
             artifact_id=str(selection.artifact_id),
             resolved_selection=selection,
             target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            current_value=self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            ),
         )
 
     def close_owned_binding(self, *, binding_id: str, **_kwargs: Any) -> Any:
@@ -322,6 +419,84 @@ def test_publish_failure_keeps_binding_clean_and_retry(
     binding.publish_replica()
     assert binding._slot.published_lease_id == "lease-1"
     assert len(client.publish_calls) == 2
+
+
+def test_bind_into_failed_materialize_clears_current_value_and_marks_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    _cache_index(runtime, "artifact-2", index_bytes)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+    binding = artifact1.bind_into(target_tensors, packing="byte_space")
+    client.materialize_failures = 2
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.swap(artifact2)
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert binding.current_value is None
+    assert binding.artifact_id is None
+    assert binding.selection is None
+    assert binding._slot.dirty is True
+
+
+def test_bind_into_missing_commit_current_value_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    _cache_index(runtime, "artifact-2", index_bytes)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+    binding = artifact1.bind_into(target_tensors, packing="byte_space")
+    client.omit_commit_current_value = True
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.swap(artifact2)
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert binding.current_value is None
+    assert binding.artifact_id is None
+    assert binding.selection is None
+    assert binding._slot.dirty is True
 
 
 def test_artifact_ref_parsing() -> None:

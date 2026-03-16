@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -12,10 +14,55 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 @dataclass(frozen=True, slots=True)
-class OwnedBindingLayout:
+class BindingLayout:
+    binding_layout_id: str
     target_layout: store_daemon_pb2.TargetLayout
     target_index_bytes: bytes
     dst_specs: tuple[store_daemon_pb2.MappedTensorSpec, ...] = ()
+
+
+OwnedBindingLayout = BindingLayout
+
+
+def _multibase_multihash_sha256(digest: bytes) -> str:
+    if len(digest) != 32:
+        raise ValueError("SHA256 digest must be 32 bytes")
+    mh = b"\x12\x20" + digest
+    encoded = base64.b32encode(mh).decode("ascii").lower().rstrip("=")
+    return f"b{encoded}"
+
+
+def compute_binding_layout_id(
+    *,
+    target_layout: store_daemon_pb2.TargetLayout,
+    target_index_bytes: bytes,
+    dst_specs: Sequence[store_daemon_pb2.MappedTensorSpec] | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(bytes(target_index_bytes))
+    digest.update(target_layout.SerializeToString(deterministic=True))
+    for spec in dst_specs or ():
+        digest.update(spec.SerializeToString(deterministic=True))
+    return f"bl1:{_multibase_multihash_sha256(digest.digest())}"
+
+
+def build_binding_layout(
+    *,
+    target_layout: store_daemon_pb2.TargetLayout,
+    target_index_bytes: bytes,
+    dst_specs: Sequence[store_daemon_pb2.MappedTensorSpec] | None = None,
+) -> BindingLayout:
+    resolved_dst_specs = tuple(dst_specs or ())
+    return BindingLayout(
+        binding_layout_id=compute_binding_layout_id(
+            target_layout=target_layout,
+            target_index_bytes=target_index_bytes,
+            dst_specs=resolved_dst_specs,
+        ),
+        target_layout=target_layout,
+        target_index_bytes=bytes(target_index_bytes),
+        dst_specs=resolved_dst_specs,
+    )
 
 
 def build_owned_layout(
@@ -25,9 +72,10 @@ def build_owned_layout(
     index_kind: store_daemon_pb2.TargetLayout.IndexKind,
     logical_layout_hash: bytes | None,
     view_id: str | None = None,
+    ordered_names: Sequence[str] | None = None,
     dst_specs: Sequence[store_daemon_pb2.MappedTensorSpec] | None = None,
-) -> OwnedBindingLayout:
-    packed_entries = _pack_entries(entries)
+) -> BindingLayout:
+    packed_entries = _pack_entries(entries, ordered_names=ordered_names)
     packed_index = CanonicalIndex(
         entries=tuple(packed_entries),
         total_size_bytes=sum(int(entry.size_bytes) for entry in packed_entries),
@@ -52,20 +100,21 @@ def build_owned_layout(
     resolved_view_id = str(view_id or "").strip()
     if resolved_view_id:
         target_layout.view_id = resolved_view_id
-    for idx, entry in enumerate(packed_entries):
-        storage_id = f"binding:{idx}:{entry.name}"
-        target_layout.storages.add(
-            storage_id=storage_id,
-            device_id=int(device_id),
-            storage_length=int(entry.size_bytes),
-        )
+    storage_id = "binding:coalesced:0"
+    target_layout.storages.add(
+        storage_id=storage_id,
+        device_id=int(device_id),
+        storage_length=int(packed_index.total_size_bytes),
+        mapping_base_offset=0,
+    )
+    for entry in packed_entries:
         target_layout.offsets.add(
             name=entry.name,
             storage_id=storage_id,
-            storage_offset=0,
+            storage_offset=int(entry.segment_offset),
             logical_length=int(entry.size_bytes),
         )
-    return OwnedBindingLayout(
+    return build_binding_layout(
         target_layout=target_layout,
         target_index_bytes=target_index_bytes,
         dst_specs=tuple(dst_specs or ()),
@@ -93,10 +142,16 @@ def build_mapped_tensor_spec(
 
 def _pack_entries(
     entries: Sequence[CanonicalIndexEntry],
+    ordered_names: Sequence[str] | None = None,
 ) -> tuple[CanonicalIndexEntry, ...]:
+    if ordered_names is None:
+        source_entries = list(entries)
+    else:
+        entry_by_name = {str(entry.name): entry for entry in entries}
+        source_entries = [entry_by_name[str(name)] for name in ordered_names]
     packed: list[CanonicalIndexEntry] = []
     cursor = 0
-    for entry in entries:
+    for entry in source_entries:
         packed.append(
             CanonicalIndexEntry(
                 name=str(entry.name),
@@ -113,7 +168,10 @@ def _pack_entries(
 
 
 __all__ = [
+    "BindingLayout",
     "OwnedBindingLayout",
     "build_mapped_tensor_spec",
+    "build_binding_layout",
     "build_owned_layout",
+    "compute_binding_layout_id",
 ]
