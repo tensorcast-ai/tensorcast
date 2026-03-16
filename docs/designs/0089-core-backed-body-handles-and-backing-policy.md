@@ -28,7 +28,6 @@ related_code:
   - daemon/service/payload_transport_broker.cc
   - daemon/service/controllers/transport_controller.cc
 links:
-  plan: ../plans/0089-core-backed-body-handles-and-backing-policy.md
   dependencies:
     - ./0034-stable-memory-tiers.md
     - ./0039-artifact-first-sdk.md

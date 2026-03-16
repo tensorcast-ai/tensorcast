@@ -4,7 +4,7 @@ title: Foundation - Artifact Profiles, Shared Dataplane, and Truth Layering
 status: completed
 areas: ["core", "daemon", "sdk", "docs", "tests"]
 created: 2026-03-09
-last_updated: 2026-03-09
+last_updated: 2026-03-10
 related_code:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
@@ -54,6 +54,8 @@ This foundation defines the hard architectural split that later phases must pres
 - serving capability belongs to the lifecycle kernel and composes over backing truth,
 - routed `byte_artifact` remains an artifact value profile, but its routed authority semantics are epoch-scoped cache
   claims rather than durable per-blob catalog truth,
+- later distributed-control designs may unify protocol shape above these authority modes, but they must not flatten the
+  underlying truth owners into one fake global authority backend,
 - any state that changes future join, idempotency, first-writer, or conflict outcomes must be recoverable truth or be
   explicitly scoped as ephemeral and non-HA,
 - `0090`, `0091`, and `0093` are follow-on phases that refine this foundation rather than redefining it.
@@ -308,6 +310,9 @@ Ordinary artifacts continue to use their existing GS-backed authority flows:
 
 This foundation does not move them onto routed home-daemon per-blob authority.
 
+It also does not require GS-backed ordinary artifacts to adopt the same request-truth backend as routed profiles merely
+because later designs unify distributed protocol shape.
+
 ### 6.2 High-cardinality artifacts
 
 High-cardinality artifacts may continue to use profile-specific routed authority when the profile requires it.
@@ -327,6 +332,8 @@ Required interpretation:
 - routed `byte_artifact` authority answers current home-epoch cache-claim questions,
 - it does not create durable per-blob repository catalog truth merely by existing in a home daemon map,
 - failover or generation cutover may invalidate visible claims for the old epoch by design.
+- later distributed-control protocol unification must preserve this authority-mode split rather than rewriting routed
+  `byte_artifact` as GS-backed per-blob truth.
 
 Forbidden outcome:
 

@@ -4,7 +4,7 @@ title: Phase 0 - Routed Existence Semantics and Single Authority Truth
 status: completed
 areas: ["core", "daemon", "sdk", "docs"]
 created: 2026-03-08
-last_updated: 2026-03-09
+last_updated: 2026-03-10
 related_code:
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -192,6 +192,10 @@ This is the key clarification:
 - a successful get response must bind those layers together through an explicit lifecycle-backed serving capability,
 - none of the above implies that routed `byte_artifact` claims are durable repository catalog truth across epochs.
 
+Later distributed-control protocol unification must preserve this split.
+It may standardize routed request and reply shape, but it must not rewrite routed `byte_artifact` per-blob truth as
+Global Store catalog truth.
+
 ## 1.1 Phase-0 recovery boundary
 
 Phase 0 is a semantic hard-cut for routed answers, not a full routed-HA design.
@@ -319,6 +323,13 @@ Concrete response carriers may differ:
 - a returned `payload_ref`,
 - an inline payload already materialized into the response,
 - a future shared capability type.
+
+Compatibility note:
+
+- a GET-issued `payload_ref` or copied-payload snapshot may preserve already-issued serving continuity for a bounded
+  lifetime,
+- but that compatibility carrier does not create new routed claim truth and must not be treated as the primary authority
+  model for future requests.
 
 But they must all satisfy the same phase-0 contract:
 
@@ -528,6 +539,8 @@ Acceptance criteria:
 - routed claim truth is explicitly distinct from routed visibility truth,
 - the document explicitly scopes phase-0 recovery and does not imply restart or failover preservation of routed per-blob
   claim truth unless implementation adds it,
+- later routed protocol designs may unify transport and owner-reply shape, but they do not change the GS/home-daemon/
+  core-store/lifecycle authority split defined here,
 - `BatchExists` and `HomeBatchGet` cannot report success for an entry whose only retained backing is no longer readable
   in core/store,
 - `HomeBatchGet` cannot report `OK` unless it has also produced a bounded serving capability,

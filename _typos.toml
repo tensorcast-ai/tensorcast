@@ -3,3 +3,8 @@
 extend-ignore-re = [
     "(?i)mis-[a-zA-Z0-9_-]*",
 ]
+
+[files]
+extend-exclude = [
+    "daemon/util/grpc_daemon_transport_test.cc",
+]

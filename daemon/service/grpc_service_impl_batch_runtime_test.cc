@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include "core/store/testing/recording_global_store_client.h"
 #include "daemon/service/artifact_profile_registry.h"
 #include "daemon/service/body_backing_manager.h"
+#include "daemon/state/routed_authority_wire.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -48,6 +50,8 @@ using tensorcast::daemon::v2::HomeBatchPutIfAbsentRequest;
 using tensorcast::daemon::v2::HomeBatchPutIfAbsentResponse;
 using tensorcast::daemon::v2::MaterializeReplicaRequest;
 using tensorcast::daemon::v2::MaterializeReplicaResponse;
+using tensorcast::daemon::v2::RouteAuthorityStageRequest;
+using tensorcast::daemon::v2::RouteAuthorityStageResponse;
 
 constexpr const char* kDaemonId = "daemon-batch-test";
 
@@ -574,9 +578,11 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
   REQUIRE(payload_ref_or.ok());
 
   auto capability_or = harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      harness->kernel().worker_directory_cache(),
       *payload_ref_or,
       artifact_id,
       absl::Now(),
+      absl::Seconds(1),
       kDaemonId,
       tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
       "op-reuse-body");
@@ -669,9 +675,11 @@ TEST_CASE(
   REQUIRE(payload_ref_or.ok());
 
   auto capability_or = harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      harness->kernel().worker_directory_cache(),
       *payload_ref_or,
       artifact_id,
       absl::Now(),
+      absl::Seconds(1),
       kDaemonId,
       tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
       "op-derived-generation");
@@ -733,9 +741,11 @@ TEST_CASE(
   REQUIRE(payload_ref_or.ok());
 
   auto capability_or = harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      harness->kernel().worker_directory_cache(),
       *payload_ref_or,
       artifact_id,
       absl::Now(),
+      absl::Seconds(1),
       kDaemonId,
       tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
       "op-get-snapshot");
@@ -804,6 +814,320 @@ TEST_CASE(
       get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
   REQUIRE(metadata_or.ok());
   CHECK(metadata_or->expires_at <= entry->expires_at);
+}
+
+TEST_CASE("payload_ref front-door context preserves raw credential evidence", "[daemon][batch][payload_ref][context]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Y29udGV4dA~layout_v1~b64u.azA";
+  const std::string payload = "payload-ref-context";
+
+  auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-front-door-context");
+  REQUIRE(payload_ref_or.ok());
+
+  auto context_or = harness->kernel().payload_transport_broker().inspect_payload_ref_context(
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-front-door-context");
+  REQUIRE(context_or.ok());
+  CHECK(context_or->metadata.artifact_id == artifact_id);
+  CHECK(context_or->front_door_context.parsed_credential.address.binding_key == context_or->metadata.payload_id);
+  CHECK(
+      context_or->front_door_context.parsed_credential.constraint_claims.digest_hex == context_or->metadata.digest_hex);
+  REQUIRE(context_or->front_door_context.forwardable_evidence.has_value());
+  CHECK(
+      context_or->front_door_context.forwardable_evidence->evidence_kind ==
+      tensorcast::daemon::CredentialEvidenceKind::kRawCredential);
+  CHECK(
+      context_or->front_door_context.forwardable_evidence->raw_credential_bytes ==
+      std::optional<std::string>(*payload_ref_or));
+  CHECK(context_or->front_door_context.local_observations.empty());
+}
+
+TEST_CASE(
+    "payload_ref issuer routed request rejects missing evidence, projected evidence, and unsanitized local observations",
+    "[daemon][batch][payload_ref][route_builder]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGU~layout_v1~b64u.azQ";
+  const std::string payload = "payload-ref-route-builder";
+
+  auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-route-builder");
+  REQUIRE(payload_ref_or.ok());
+
+  auto context_or = harness->kernel().payload_transport_broker().inspect_payload_ref_context(
+      *payload_ref_or, artifact_id, absl::Now(), tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-route-builder");
+  REQUIRE(context_or.ok());
+
+  auto no_evidence_context = context_or->front_door_context;
+  no_evidence_context.forwardable_evidence.reset();
+  auto no_evidence_request_or = harness->kernel().payload_transport_broker().build_payload_ref_issuer_routed_request(
+      context_or->metadata, no_evidence_context, "127.0.0.1:50051");
+  REQUIRE_FALSE(no_evidence_request_or.ok());
+  CHECK(no_evidence_request_or.status().message() == "payload_ref issuer route requires forwardable_evidence");
+
+  auto projected_context = context_or->front_door_context;
+  projected_context.forwardable_evidence = tensorcast::daemon::ForwardableCredentialEvidence{
+      .evidence_kind = tensorcast::daemon::CredentialEvidenceKind::kIssuerVerifiableProjection,
+      .canonical_projection =
+          tensorcast::daemon::CanonicalCredentialProjection{
+              .projection_kind = "payload_ref",
+              .projection_version = "v1",
+              .projection_bytes = "{}",
+              .projection_digest = "digest",
+              .issuer_binding = "issuer-binding",
+          },
+  };
+  auto projected_request_or = harness->kernel().payload_transport_broker().build_payload_ref_issuer_routed_request(
+      context_or->metadata, projected_context, "127.0.0.1:50051");
+  REQUIRE_FALSE(projected_request_or.ok());
+  CHECK(
+      projected_request_or.status().message() ==
+      "payload_ref issuer route currently supports only raw_credential issuer evidence; canonical projection is not "
+      "supported");
+
+  auto unsanitized_context = context_or->front_door_context;
+  unsanitized_context.local_observations.observations.push_back(
+      tensorcast::daemon::LocalObservation{.observation_kind = "peer_pid", .observation_payload = "1234"});
+  auto unsanitized_request_or = harness->kernel().payload_transport_broker().build_payload_ref_issuer_routed_request(
+      context_or->metadata, unsanitized_context, "127.0.0.1:50051");
+  REQUIRE_FALSE(unsanitized_request_or.ok());
+  CHECK(unsanitized_request_or.status().message() == "local observation is not routable: peer_pid");
+}
+
+TEST_CASE(
+    "payload_ref issuer routed request translates local observations into explicit forwarded claims",
+    "[daemon][batch][payload_ref][route_builder]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dHJhbnNsYXRl~layout_v1~b64u.azU";
+  const std::string payload = "payload-ref-route-translation";
+
+  auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-route-translation");
+  REQUIRE(payload_ref_or.ok());
+
+  auto context_or = harness->kernel().payload_transport_broker().inspect_payload_ref_context(
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-route-translation");
+  REQUIRE(context_or.ok());
+
+  auto translated_context = context_or->front_door_context;
+  translated_context.local_observations.observations.push_back(
+      tensorcast::daemon::LocalObservation{.observation_kind = "peer_pid", .observation_payload = "1234"});
+  const tensorcast::daemon::LocalObservationRoutingRule translation_rule{
+      .observation_kind = "peer_pid",
+      .action = tensorcast::daemon::LocalObservationRoutingAction::kTranslateToForwardedClaim,
+      .forwarded_claim_kind = "peer_pid_claim",
+  };
+  const auto translation_rules =
+      absl::Span<const tensorcast::daemon::LocalObservationRoutingRule>(&translation_rule, 1);
+  auto routed_request_or = harness->kernel().payload_transport_broker().build_payload_ref_issuer_routed_request(
+      context_or->metadata, translated_context, "127.0.0.1:50051", translation_rules);
+  REQUIRE(routed_request_or.ok());
+  CHECK(
+      routed_request_or->hop_auth_context.auth_class ==
+      tensorcast::daemon::DaemonHopAuthClass::kDeploymentTrustedChannel);
+  REQUIRE(routed_request_or->forwardable_evidence.has_value());
+  REQUIRE(routed_request_or->portable_credential_envelope.has_value());
+  CHECK(
+      routed_request_or->portable_credential_envelope->payload_kind ==
+      tensorcast::daemon::DelegationPayloadKind::kPortableCredential);
+  REQUIRE(routed_request_or->forwardable_evidence_envelope.has_value());
+  CHECK(
+      routed_request_or->forwardable_evidence_envelope->delegation_class ==
+      tensorcast::daemon::DelegationClass::kOwnerScopedSensitive);
+  REQUIRE(routed_request_or->forwarded_claims.size() == 1);
+  REQUIRE(routed_request_or->forwarded_claims_envelope.has_value());
+  CHECK(
+      routed_request_or->forwarded_claims_envelope->payload_kind ==
+      tensorcast::daemon::DelegationPayloadKind::kForwardedClaim);
+  CHECK(routed_request_or->forwarded_claims.front().claim_kind == "peer_pid_claim");
+  CHECK(
+      routed_request_or->forwarded_claims.front().provenance ==
+      tensorcast::daemon::ForwardedClaimProvenance::kIngressLocal);
+  CHECK(routed_request_or->forwarded_claims.front().audience_authority_ref.authority_id == kDaemonId);
+  CHECK(
+      routed_request_or->request_metadata.root_request_id ==
+      absl::StrCat("payload-ref:", context_or->metadata.payload_id));
+}
+
+TEST_CASE("RouteAuthorityStage rejects authority mismatch at the receiving daemon", "[daemon][batch][route]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  RouteAuthorityStageRequest req;
+  auto* routed_request = req.mutable_routed_request();
+  auto* authority_ref = routed_request->mutable_authority_ref();
+  authority_ref->set_authority_kind(tensorcast::daemon::v2::ROUTED_AUTHORITY_KIND_ISSUER_DAEMON);
+  authority_ref->set_authority_id("issuer-daemon-a");
+  routed_request->set_path_family("immediate_lowering");
+  routed_request->set_stage_ref("issuer_validate");
+  auto* portable_credential = routed_request->mutable_portable_credential();
+  auto* address = portable_credential->mutable_address();
+  address->set_route_principal_kind("issuer_daemon");
+  address->set_route_principal_id("issuer-daemon-a");
+  address->set_family("serve");
+  address->set_binding_space("payload");
+  address->set_binding_key_kind("payload_id");
+  address->set_binding_key("payload-ref:test");
+  address->set_subject_generation(1);
+  portable_credential->set_front_door_kind("payload_ref");
+  portable_credential->mutable_credential_expires_at()->set_seconds(
+      absl::ToUnixSeconds(absl::Now() + absl::Minutes(1)));
+  portable_credential->set_binding_mode("address_derived");
+  portable_credential->mutable_portable_constraint_claims()->set_artifact_id("artifact-route");
+  routed_request->mutable_request_metadata()->set_root_request_id("root-req-1");
+
+  RouteAuthorityStageResponse resp;
+  grpc::ServerContext ctx;
+  REQUIRE(svc.RouteAuthorityStage(&ctx, &req, &resp).ok());
+  CHECK(resp.status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+  CHECK(resp.message() == "requested authority does not match the receiving daemon");
+  CHECK_FALSE(resp.has_owner_stage_reply());
+}
+
+TEST_CASE("RouteAuthorityStage rejects sender-forged hop auth elevation", "[daemon][batch][route][security]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  RouteAuthorityStageRequest req;
+  auto* routed_request = req.mutable_routed_request();
+  auto* authority_ref = routed_request->mutable_authority_ref();
+  authority_ref->set_authority_kind(tensorcast::daemon::v2::ROUTED_AUTHORITY_KIND_ISSUER_DAEMON);
+  authority_ref->set_authority_id("issuer-daemon-a");
+  routed_request->set_path_family("immediate_lowering");
+  routed_request->set_stage_ref("issuer_validate");
+  auto* portable_credential = routed_request->mutable_portable_credential();
+  auto* address = portable_credential->mutable_address();
+  address->set_route_principal_kind("issuer_daemon");
+  address->set_route_principal_id("issuer-daemon-a");
+  address->set_family("serve");
+  address->set_binding_space("payload");
+  address->set_binding_key_kind("payload_id");
+  address->set_binding_key("payload-ref:test");
+  address->set_subject_generation(1);
+  portable_credential->set_front_door_kind("payload_ref");
+  portable_credential->mutable_credential_expires_at()->set_seconds(
+      absl::ToUnixSeconds(absl::Now() + absl::Minutes(1)));
+  portable_credential->set_binding_mode("address_derived");
+  portable_credential->mutable_portable_constraint_claims()->set_artifact_id("artifact-route");
+  routed_request->mutable_request_metadata()->set_root_request_id("root-req-2");
+  routed_request->mutable_hop_auth_context()->set_auth_class(
+      tensorcast::daemon::v2::ROUTED_DAEMON_HOP_AUTH_CLASS_DAEMON_MUTUAL_AUTH);
+  routed_request->mutable_hop_auth_context()->set_authenticated_peer_daemon_id("issuer-daemon-a");
+
+  RouteAuthorityStageResponse resp;
+  grpc::ServerContext ctx;
+  REQUIRE(svc.RouteAuthorityStage(&ctx, &req, &resp).ok());
+  CHECK(resp.status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+  CHECK(resp.message() == "sender-reported hop auth exceeds transport-derived peer auth");
+}
+
+TEST_CASE("RouteAuthorityStage rejects undeclared path_family or stage_ref", "[daemon][batch][route][dispatch]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGUtZGVjbGFyZWQ~layout_v1~b64u.azk";
+  const std::string payload = "declared-route-check";
+  auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-declared-route");
+  REQUIRE(payload_ref_or.ok());
+
+  auto context_or = harness->kernel().payload_transport_broker().inspect_payload_ref_context(
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-declared-route");
+  REQUIRE(context_or.ok());
+
+  auto routed_request_or = harness->kernel().payload_transport_broker().build_payload_ref_issuer_routed_request(
+      context_or->metadata, context_or->front_door_context, "127.0.0.1:50051");
+  REQUIRE(routed_request_or.ok());
+
+  SECTION("undeclared path_family") {
+    routed_request_or->path_family = "unknown_family";
+    REQUIRE(routed_request_or->portable_credential_envelope.has_value());
+    routed_request_or->portable_credential_envelope->bound_path_family = routed_request_or->path_family;
+  }
+
+  SECTION("undeclared stage_ref") {
+    routed_request_or->stage_ref = "unknown_stage";
+  }
+
+  routed_request_or->forwardable_evidence.reset();
+  routed_request_or->forwardable_evidence_envelope.reset();
+
+  RouteAuthorityStageRequest req;
+  tensorcast::daemon::routed_authority_wire::populate_proto_routed_authority_request(
+      *routed_request_or, req.mutable_routed_request());
+
+  RouteAuthorityStageResponse resp;
+  grpc::ServerContext ctx;
+  REQUIRE(svc.RouteAuthorityStage(&ctx, &req, &resp).ok());
+  CHECK(resp.status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+  CHECK(
+      resp.message() ==
+      absl::StrCat(
+          "undeclared routed authority path/stage: ",
+          req.routed_request().path_family(),
+          "/",
+          req.routed_request().stage_ref()));
+  CHECK_FALSE(resp.has_owner_stage_reply());
+}
+
+TEST_CASE(
+    "RouteAuthorityStage returns ready_for_lowering for local payload_ref issuer validation",
+    "[daemon][batch][route][issuer]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.aXNzdWVyLXJvdXRl~layout_v1~b64u.azE";
+  const std::string payload = "issuer-routed-payload";
+  auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-issuer-route");
+  REQUIRE(payload_ref_or.ok());
+
+  auto context_or = harness->kernel().payload_transport_broker().inspect_payload_ref_context(
+      *payload_ref_or, artifact_id, absl::Now(), tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-issuer-route");
+  REQUIRE(context_or.ok());
+  REQUIRE(context_or->front_door_context.forwardable_evidence.has_value());
+
+  auto routed_request_or = harness->kernel().payload_transport_broker().build_payload_ref_issuer_routed_request(
+      context_or->metadata, context_or->front_door_context, "127.0.0.1:50051");
+  REQUIRE(routed_request_or.ok());
+
+  RouteAuthorityStageRequest req;
+  tensorcast::daemon::routed_authority_wire::populate_proto_routed_authority_request(
+      *routed_request_or, req.mutable_routed_request());
+
+  RouteAuthorityStageResponse resp;
+  grpc::ServerContext ctx;
+  REQUIRE(svc.RouteAuthorityStage(&ctx, &req, &resp).ok());
+  CHECK(resp.status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(resp.has_owner_stage_reply());
+  CHECK(
+      resp.owner_stage_reply().reply_kind() ==
+      tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_READY_FOR_LOWERING);
+  CHECK(resp.owner_stage_reply().answered_by().authority_id() == kDaemonId);
+  CHECK(resp.owner_stage_reply().path_family() == "immediate_lowering");
+  CHECK(resp.owner_stage_reply().stage_ref() == "issuer_validate");
+  CHECK_FALSE(resp.owner_stage_reply().resolved_source_capability().empty());
 }
 
 TEST_CASE(

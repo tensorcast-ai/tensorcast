@@ -1143,10 +1143,18 @@ int main(int argc, char** argv) {
     grpc::SslServerCredentialsOptions ssl_opts;
     if (!ca.empty()) {
       ssl_opts.pem_root_certs = ca;
+      ssl_opts.client_certificate_request = GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
     }
     grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{.private_key = key, .cert_chain = cert};
     ssl_opts.pem_key_cert_pairs.push_back(pkcp);
     creds = grpc::SslServerCredentials(ssl_opts);
+    daemon_opts.inter_daemon_grpc_security = DaemonOptions::InterDaemonGrpcSecurity{
+        .tls_enabled = true,
+        .mutual_auth_enabled = !ca.empty(),
+        .cert_chain_pem = cert,
+        .private_key_pem = key,
+        .root_cert_pem = ca,
+    };
   } else {
     creds = grpc::InsecureServerCredentials();
   }

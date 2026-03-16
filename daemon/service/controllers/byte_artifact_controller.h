@@ -19,6 +19,7 @@
 #include "daemon/state/persistence_manager.h"
 #include "daemon/state/worker_directory_cache.h"
 #include "daemon/state/worker_identity_store.h"
+#include "grpcpp/security/credentials.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
@@ -51,6 +52,7 @@ class ByteArtifactController {
     store::StoreEngine& engine;
     PersistenceManager* persistence_manager{nullptr};
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials;
   };
 
   ByteArtifactController(Dep d, Options options);

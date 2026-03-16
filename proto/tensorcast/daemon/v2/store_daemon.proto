@@ -67,6 +67,7 @@ service StoreDaemonService {
   rpc HomeBatchPutIfAbsent(HomeBatchPutIfAbsentRequest) returns (HomeBatchPutIfAbsentResponse) {}
   rpc HomeBatchTouchTtl(HomeBatchTouchTtlRequest) returns (HomeBatchTouchTtlResponse) {}
   rpc FetchPayloadRefChunk(FetchPayloadRefChunkRequest) returns (FetchPayloadRefChunkResponse) {}
+  rpc RouteAuthorityStage(RouteAuthorityStageRequest) returns (RouteAuthorityStageResponse) {}
 
   // ========== Key mapping and publish ==========
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
@@ -672,6 +673,233 @@ message FetchPayloadRefChunkResponse {
   bytes chunk = 3;
   uint64 total_size = 4;
   bool eof = 5;
+}
+
+enum RoutedAuthorityKind {
+  ROUTED_AUTHORITY_KIND_UNSPECIFIED = 0;
+  ROUTED_AUTHORITY_KIND_CATALOG_OWNER = 1;
+  ROUTED_AUTHORITY_KIND_SHARD_HOME_DAEMON = 2;
+  ROUTED_AUTHORITY_KIND_WORKFLOW_OWNER = 3;
+  ROUTED_AUTHORITY_KIND_OPERATION_OWNER = 4;
+  ROUTED_AUTHORITY_KIND_ISSUER_DAEMON = 5;
+  ROUTED_AUTHORITY_KIND_INTERNAL_AUTHORITY = 6;
+}
+
+enum RoutedFencingPrincipalKind {
+  ROUTED_FENCING_PRINCIPAL_KIND_UNSPECIFIED = 0;
+  ROUTED_FENCING_PRINCIPAL_KIND_ISSUER_DAEMON = 1;
+  ROUTED_FENCING_PRINCIPAL_KIND_WORKFLOW_OWNER = 2;
+  ROUTED_FENCING_PRINCIPAL_KIND_OPERATION = 3;
+  ROUTED_FENCING_PRINCIPAL_KIND_QUEUE_LEADER = 4;
+  ROUTED_FENCING_PRINCIPAL_KIND_BINDING_RECORD = 5;
+  ROUTED_FENCING_PRINCIPAL_KIND_INTERNAL_AUTHORITY = 6;
+}
+
+enum RoutedCredentialEvidenceKind {
+  ROUTED_CREDENTIAL_EVIDENCE_KIND_UNSPECIFIED = 0;
+  ROUTED_CREDENTIAL_EVIDENCE_KIND_RAW_CREDENTIAL = 1;
+  ROUTED_CREDENTIAL_EVIDENCE_KIND_ISSUER_VERIFIABLE_PROJECTION = 2;
+  ROUTED_CREDENTIAL_EVIDENCE_KIND_RELAY_ATTESTED_PROJECTION = 3;
+}
+
+enum RoutedDaemonHopAuthClass {
+  ROUTED_DAEMON_HOP_AUTH_CLASS_UNSPECIFIED = 0;
+  ROUTED_DAEMON_HOP_AUTH_CLASS_LEGACY_UNAUTHENTICATED = 1;
+  ROUTED_DAEMON_HOP_AUTH_CLASS_DEPLOYMENT_TRUSTED_CHANNEL = 2;
+  ROUTED_DAEMON_HOP_AUTH_CLASS_DAEMON_MUTUAL_AUTH = 3;
+}
+
+enum RoutedForwardedClaimProvenance {
+  ROUTED_FORWARDED_CLAIM_PROVENANCE_UNSPECIFIED = 0;
+  ROUTED_FORWARDED_CLAIM_PROVENANCE_AUTHORITY_AUTHENTICATED = 1;
+  ROUTED_FORWARDED_CLAIM_PROVENANCE_RELAY_AUTHENTICATED = 2;
+  ROUTED_FORWARDED_CLAIM_PROVENANCE_INGRESS_LOCAL = 3;
+}
+
+enum RoutedDelegationPayloadKind {
+  ROUTED_DELEGATION_PAYLOAD_KIND_UNSPECIFIED = 0;
+  ROUTED_DELEGATION_PAYLOAD_KIND_PORTABLE_CREDENTIAL = 1;
+  ROUTED_DELEGATION_PAYLOAD_KIND_FORWARDABLE_EVIDENCE = 2;
+  ROUTED_DELEGATION_PAYLOAD_KIND_FORWARDED_CLAIM = 3;
+}
+
+enum RoutedDelegationClass {
+  ROUTED_DELEGATION_CLASS_UNSPECIFIED = 0;
+  ROUTED_DELEGATION_CLASS_BOOTSTRAP_SAFE = 1;
+  ROUTED_DELEGATION_CLASS_OWNER_SCOPED_SENSITIVE = 2;
+  ROUTED_DELEGATION_CLASS_ISSUER_SECRET = 3;
+}
+
+enum RoutedOwnerStageReplyKind {
+  ROUTED_OWNER_STAGE_REPLY_KIND_UNSPECIFIED = 0;
+  ROUTED_OWNER_STAGE_REPLY_KIND_READY_FOR_LOWERING = 1;
+  ROUTED_OWNER_STAGE_REPLY_KIND_CONTINUE_WITH_AUTHORITY = 2;
+  ROUTED_OWNER_STAGE_REPLY_KIND_RETRY_LATER = 3;
+  ROUTED_OWNER_STAGE_REPLY_KIND_ATTACH_EXISTING = 4;
+  ROUTED_OWNER_STAGE_REPLY_KIND_TERMINAL = 5;
+}
+
+enum RoutedTerminalProjectionKind {
+  ROUTED_TERMINAL_PROJECTION_KIND_UNSPECIFIED = 0;
+  ROUTED_TERMINAL_PROJECTION_KIND_SEMANTIC_SUCCESS = 1;
+  ROUTED_TERMINAL_PROJECTION_KIND_SEMANTIC_REJECT = 2;
+  ROUTED_TERMINAL_PROJECTION_KIND_STATUS_SNAPSHOT = 3;
+  ROUTED_TERMINAL_PROJECTION_KIND_FAMILY_DEFINED = 4;
+}
+
+message RoutedFencingContext {
+  RoutedFencingPrincipalKind principal_kind = 1;
+  string principal_id = 2;
+  uint64 epoch = 3;
+}
+
+message AuthorityRef {
+  RoutedAuthorityKind authority_kind = 1;
+  string authority_id = 2;
+  RoutedFencingContext fencing_context = 3;
+}
+
+message PortableBindingAddress {
+  string route_principal_kind = 1;
+  string route_principal_id = 2;
+  string family = 3;
+  string binding_space = 4;
+  string binding_key_kind = 5;
+  string binding_key = 6;
+  uint64 subject_generation = 7;
+  optional string binding_id = 8;
+}
+
+message PortableConstraintClaims {
+  string artifact_id = 1;
+  string digest_alg = 2;
+  string digest_hex = 3;
+  string direction = 4;
+  string operation_id = 5;
+  string holder_scope = 6;
+  bool local_only = 7;
+}
+
+message PortableParsedCredential {
+  PortableBindingAddress address = 1;
+  string front_door_kind = 2;
+  google.protobuf.Timestamp credential_expires_at = 3;
+  string binding_mode = 4;
+  PortableConstraintClaims portable_constraint_claims = 5;
+}
+
+message CanonicalCredentialProjection {
+  string projection_kind = 1;
+  string projection_version = 2;
+  bytes projection_bytes = 3;
+  string projection_digest = 4;
+  string issuer_binding = 5;
+  optional bytes projection_authenticator = 6;
+}
+
+message ForwardableCredentialEvidence {
+  RoutedCredentialEvidenceKind evidence_kind = 1;
+  optional bytes raw_credential_bytes = 2;
+  CanonicalCredentialProjection canonical_projection = 3;
+}
+
+message DaemonHopAuthContext {
+  RoutedDaemonHopAuthClass auth_class = 1;
+  optional string authenticated_peer_daemon_id = 2;
+  optional string transport_peer = 3;
+}
+
+message DelegationEnvelope {
+  AuthorityRef audience_authority_ref = 1;
+  string bound_root_request_id = 2;
+  optional string bound_path_family = 3;
+  optional string bound_edge = 4;
+  RoutedDelegationPayloadKind payload_kind = 5;
+  RoutedDelegationClass delegation_class = 6;
+  google.protobuf.Timestamp not_before = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  optional bytes authenticator = 9;
+}
+
+message ForwardedClaim {
+  string claim_kind = 1;
+  RoutedForwardedClaimProvenance provenance = 2;
+  bytes claim_payload = 3;
+  AuthorityRef minted_by_authority_ref = 4;
+  AuthorityRef audience_authority_ref = 5;
+  string bound_root_request_id = 6;
+  optional string bound_credential_binding_digest = 7;
+  optional string bound_path_family = 8;
+  optional string bound_edge = 9;
+  google.protobuf.Timestamp claim_expires_at = 10;
+  optional bytes claim_authenticator = 11;
+}
+
+message RoutedRequestMetadata {
+  string root_request_id = 1;
+  google.protobuf.Timestamp deadline = 2;
+  optional string trace_context = 3;
+  optional string idempotency_key = 4;
+  optional string credential_binding_digest = 5;
+  uint32 hop_budget_remaining = 6;
+  uint32 retry_attempt = 7;
+}
+
+message RoutedAuthorityRequest {
+  AuthorityRef authority_ref = 1;
+  string path_family = 2;
+  string stage_ref = 3;
+  PortableParsedCredential portable_credential = 4;
+  ForwardableCredentialEvidence forwardable_evidence = 5;
+  DaemonHopAuthContext hop_auth_context = 6;
+  repeated ForwardedClaim forwarded_claims = 7;
+  RoutedRequestMetadata request_metadata = 8;
+  DelegationEnvelope portable_credential_envelope = 9;
+  DelegationEnvelope forwardable_evidence_envelope = 10;
+  DelegationEnvelope forwarded_claims_envelope = 11;
+}
+
+message AuthorityAttachmentRef {
+  AuthorityRef authority_ref = 1;
+  string attachment_kind = 2;
+  string attachment_id = 3;
+  RoutedFencingContext fencing_context = 4;
+}
+
+message AuthorityContinuation {
+  AuthorityRef next_authority_ref = 1;
+  string edge_ref = 2;
+  repeated ForwardedClaim forwarded_claims = 3;
+  optional string continuation_reason = 4;
+  DelegationEnvelope forwarded_claims_envelope = 5;
+}
+
+message TerminalProjection {
+  RoutedTerminalProjectionKind projection_kind = 1;
+  optional string status_code = 2;
+  optional bytes family_payload = 3;
+}
+
+message OwnerStageReply {
+  AuthorityRef answered_by = 1;
+  string path_family = 2;
+  string stage_ref = 3;
+  RoutedOwnerStageReplyKind reply_kind = 4;
+  bytes resolved_source_capability = 5;
+  AuthorityContinuation continuation = 6;
+  AuthorityAttachmentRef attachment_ref = 7;
+  TerminalProjection terminal_projection = 8;
+  optional string diagnostics = 9;
+}
+
+message RouteAuthorityStageRequest {
+  RoutedAuthorityRequest routed_request = 1;
+}
+
+message RouteAuthorityStageResponse {
+  BatchItemStatus status = 1;
+  string message = 2;
+  OwnerStageReply owner_stage_reply = 3;
 }
 
 message ConfirmReplicaRequest {

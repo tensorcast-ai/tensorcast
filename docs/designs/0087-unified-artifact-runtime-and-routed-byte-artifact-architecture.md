@@ -37,7 +37,6 @@ related_code:
   - tensorcast/node_agent/executor.py
   - tensorcast/node_agent/server.py
 links:
-  plan: ../plans/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   dependencies:
     - ./0004-unified-runtime-config.md
     - ./0017-client-generated-artifact-id.md

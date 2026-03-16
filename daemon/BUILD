@@ -37,6 +37,19 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "grpc_daemon_transport_lib",
+    srcs = ["util/grpc_daemon_transport.cc"],
+    hdrs = ["util/grpc_daemon_transport.h"],
+    deps = [
+        ":daemon_options_hdr",
+        ":grpc_peer_utils_lib",
+        ":routed_authority_protocol_hdr",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "path_utils_lib",
     srcs = ["util/path_utils.cc"],
     hdrs = ["util/path_utils.h"],
@@ -162,11 +175,16 @@ sc_cc_library(
     ],
     deps = [
         ":byte_artifact_region_layout_lib",
+        ":daemon_options_hdr",
+        ":distributed_security_kernel_lib",
         ":external_target_access_service_lib",
+        ":grpc_daemon_transport_lib",
         ":grpc_peer_utils_lib",
         ":lifecycle_kernel_lib",
         ":materialization_target_storage_utils_lib",
         ":persistence_manager_lib",
+        ":routed_authority_protocol_hdr",
+        ":routed_authority_wire_hdr",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
         ":status_utils",
@@ -293,6 +311,42 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_header_only_library(
+    name = "routed_authority_protocol_hdr",
+    hdrs = ["state/routed_authority_protocol.h"],
+    deps = [
+        ":lifecycle_kernel_lib",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time:time",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_header_only_library(
+    name = "routed_authority_wire_hdr",
+    hdrs = ["state/routed_authority_wire.h"],
+    deps = [
+        ":routed_authority_protocol_hdr",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
+    name = "distributed_security_kernel_lib",
+    srcs = ["state/distributed_security_kernel.cc"],
+    hdrs = ["state/distributed_security_kernel.h"],
+    deps = [
+        ":grpc_peer_utils_lib",
+        ":routed_authority_protocol_hdr",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time:time",
     ],
 )
@@ -483,6 +537,7 @@ sc_cc_library(
     srcs = ["state/target_publication_registry.cc"],
     hdrs = ["state/target_publication_registry.h"],
     deps = [
+        ":lifecycle_kernel_lib",
         ":types_hdr",
         "//proto/tensorcast/common/v1:common_cc",
         "@abseil-cpp//absl/base:core_headers",
@@ -775,6 +830,7 @@ sc_cc_library(
         ":byte_artifact_runtime_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
+        ":grpc_daemon_transport_lib",
         ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
         ":lifecycle_kernel_lib",
@@ -1126,6 +1182,8 @@ sc_cc_library(
         ":device_resolver_hdr",
         ":lifecycle_kernel_lib",
         ":lip_manager_lib",
+        ":routed_authority_protocol_hdr",
+        ":routed_authority_wire_hdr",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
         ":status_utils",
@@ -1461,7 +1519,10 @@ sc_cc_library(
     hdrs = ["service/controllers/transport_controller.h"],
     deps = [
         ":byte_artifact_runtime_lib",
+        ":distributed_security_kernel_lib",
         ":lip_manager_lib",
+        ":materialization_controller_lib",
+        ":routed_authority_wire_hdr",
         ":rpc_context_hdr",
         ":status_utils",
         ":transport_lock_manager_hdr",
@@ -1492,6 +1553,29 @@ cc_test(
     srcs = ["util/grpc_peer_utils_test.cc"],
     deps = [
         ":grpc_peer_utils_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_daemon_transport_test",
+    srcs = ["util/grpc_daemon_transport_test.cc"],
+    deps = [
+        ":distributed_security_kernel_lib",
+        ":grpc_daemon_transport_lib",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "distributed_security_kernel_test",
+    srcs = ["state/distributed_security_kernel_test.cc"],
+    deps = [
+        ":distributed_security_kernel_lib",
+        "@abseil-cpp//absl/time:time",
         "@catch2//:catch2_main",
     ],
 )
@@ -1642,6 +1726,8 @@ cc_test(
     srcs = ["state/lifecycle_kernel_test.cc"],
     deps = [
         ":lifecycle_kernel_lib",
+        ":routed_authority_protocol_hdr",
+        ":routed_authority_wire_hdr",
         "@abseil-cpp//absl/time:time",
         "@catch2//:catch2_main",
     ],
@@ -1811,6 +1897,8 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        ":routed_authority_protocol_hdr",
+        ":routed_authority_wire_hdr",
         "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
         "//core/store:testing_recording_global_store_client",
@@ -1870,6 +1958,8 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        ":routed_authority_protocol_hdr",
+        ":routed_authority_wire_hdr",
         "//core/common:capability_token_lib",
         "//core/store:store_engine",
         "//core/store:store_engine_options",

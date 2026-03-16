@@ -40,6 +40,7 @@
 #include "daemon/state/verification_tracker.h"
 #include "daemon/state/worker_directory_cache.h"
 #include "daemon/state/worker_identity_store.h"
+#include "grpcpp/security/credentials.h"
 
 namespace tensorcast::daemon {
 
@@ -163,6 +164,10 @@ class DaemonKernel {
     return *worker_directory_cache_;
   }
 
+  [[nodiscard]] std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials() const {
+    return inter_daemon_channel_credentials_;
+  }
+
   [[nodiscard]] PlacementLeaseTokens& placement_lease_tokens() const {
     return *placement_lease_tokens_;
   }
@@ -228,6 +233,7 @@ class DaemonKernel {
   std::unique_ptr<ByteArtifactRouteResolver> byte_artifact_route_resolver_;
   std::unique_ptr<PayloadTransportBroker> payload_transport_broker_;
   std::unique_ptr<WorkerDirectoryCache> worker_directory_cache_;
+  std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials_;
   std::unique_ptr<RetireGates> retire_gates_;
 
   std::atomic<bool> started_{false};

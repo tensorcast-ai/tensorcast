@@ -38,7 +38,6 @@ related_code:
   - docs/architecture/artifact-views-and-retrieval.md
   - docs/architecture/api/materialization-flow.md
 links:
-  plan: ../plans/0078-selection-first-artifact-retrieval.md
   predecessors:
     - ./0039-artifact-first-sdk.md
     - ./0055-programmable-framework.md

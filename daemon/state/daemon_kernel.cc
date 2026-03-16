@@ -9,6 +9,7 @@
 #include "absl/time/time.h"
 #include "daemon/state/pid_monitor.h"
 #include "daemon/state/sweep_tasks.h"
+#include "daemon/util/grpc_daemon_transport.h"
 
 namespace tensorcast::daemon {
 
@@ -141,6 +142,7 @@ DaemonKernel::DaemonKernel(
     byte_artifact_body_store_->invalidate_replica_visibility(payload->key, absl::Now(), "runtime_evicted");
   });
   worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client);
+  inter_daemon_channel_credentials_ = make_inter_daemon_channel_credentials(options_.inter_daemon_grpc_security);
   const std::string local_daemon_id = options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id;
   byte_artifact_route_resolver_ = std::make_unique<ByteArtifactRouteResolver>(
       *byte_artifact_runtime_state_,
@@ -170,6 +172,8 @@ DaemonKernel::DaemonKernel(
           .max_chunk_bytes = options_.byte_artifact_routing.payload_transport.max_chunk_bytes,
           .fetch_deadline = options_.byte_artifact_routing.payload_transport.fetch_deadline,
           .cleanup_interval = options_.byte_artifact_routing.payload_transport.cleanup_interval,
+          .inter_daemon_channel_credentials = inter_daemon_channel_credentials_,
+          .inter_daemon_grpc_security = options_.inter_daemon_grpc_security,
       });
   retire_gates_ = std::make_unique<RetireGates>(refs_, *lifecycle_mgr_, locks_);
 }

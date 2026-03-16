@@ -23,8 +23,14 @@
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "daemon/service/serving_lifecycle.h"
+#include "daemon/state/distributed_security_kernel.h"
+#include "daemon/state/routed_authority_protocol.h"
+#include "daemon/state/routed_authority_wire.h"
 #include "daemon/state/worker_directory_cache.h"
+#include "daemon/util/grpc_daemon_transport.h"
+#include "daemon/util/grpc_peer_utils.h"
 #include "grpcpp/grpcpp.h"
+#include "nlohmann/json.hpp"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
@@ -35,6 +41,9 @@
 namespace tensorcast::daemon {
 
 namespace {
+
+constexpr std::string_view kImmediateLoweringPathFamily = "immediate_lowering";
+constexpr std::string_view kIssuerValidateStageRef = "issuer_validate";
 
 std::string to_lower_copy(std::string_view value) {
   std::string out(value);
@@ -127,6 +136,45 @@ void record_payload_ref_resolution_metrics(BodyCapabilityResolutionMode mode, bo
   }
 }
 
+void record_routed_authority_path_metrics(
+    std::string_view family,
+    std::string_view route_path_kind,
+    std::string_view authority_kind,
+    std::string_view route_source,
+    std::string_view reply_admission_result,
+    std::string_view issuer_loss_outcome,
+    std::string_view reply_kind) {
+  try {
+    auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateUInt64Counter("tc_routed_authority_path_total");
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+    attrs.emplace("family", opentelemetry::common::AttributeValue(std::string(family)));
+    attrs.emplace("route_path_kind", opentelemetry::common::AttributeValue(std::string(route_path_kind)));
+    attrs.emplace("authority_kind", opentelemetry::common::AttributeValue(std::string(authority_kind)));
+    attrs.emplace("route_source", opentelemetry::common::AttributeValue(std::string(route_source)));
+    attrs.emplace("reply_admission_result", opentelemetry::common::AttributeValue(std::string(reply_admission_result)));
+    attrs.emplace("issuer_loss_outcome", opentelemetry::common::AttributeValue(std::string(issuer_loss_outcome)));
+    attrs.emplace("reply_kind", opentelemetry::common::AttributeValue(std::string(reply_kind)));
+    counter->Add(1, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
+  } catch (...) {
+  }
+}
+
+void record_payload_ref_issuer_route_metrics(
+    std::string_view route_source,
+    std::string_view reply_admission_result,
+    std::string_view issuer_loss_outcome,
+    std::string_view reply_kind = "none") {
+  record_routed_authority_path_metrics(
+      "payload_ref",
+      "issuer_route",
+      "issuer_daemon",
+      route_source,
+      reply_admission_result,
+      issuer_loss_outcome,
+      reply_kind);
+}
+
 tensorcast::common::SelectionIdentity make_byte_artifact_selection_identity(std::string_view artifact_id) {
   return tensorcast::common::SelectionIdentity{
       .artifact_id = std::string(artifact_id),
@@ -159,6 +207,291 @@ absl::Status absl_status_from_batch_item_status(v2::BatchItemStatus status, std:
     default:
       return absl::InternalError(std::string(message));
   }
+}
+
+tensorcast::common::v1::PayloadRefDirection payload_ref_direction_from_label(std::string_view direction) {
+  if (direction == "get") {
+    return tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET;
+  }
+  if (direction == "put") {
+    return tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT;
+  }
+  return tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED;
+}
+
+absl::StatusOr<ResolvedSourceCapability> deserialize_payload_ref_routed_resolution(std::string_view payload) {
+  auto json = nlohmann::json::parse(payload, nullptr, false);
+  if (json.is_discarded()) {
+    return absl::InvalidArgumentError("owner-stage resolved_source_capability payload is not valid json");
+  }
+  ResolvedSourceCapability resolution;
+  resolution.selection_identity.artifact_id = json.value("artifact_id", "");
+  if (!absl::HexStringToBytes(
+          json.value("logical_layout_hash_hex", ""), &resolution.selection_identity.logical_layout_hash)) {
+    return absl::InvalidArgumentError("owner-stage resolved_source_capability logical_layout_hash is not valid hex");
+  }
+  if (!absl::HexStringToBytes(json.value("selection_hash_hex", ""), &resolution.selection_identity.selection_hash)) {
+    return absl::InvalidArgumentError("owner-stage resolved_source_capability selection_hash is not valid hex");
+  }
+  resolution.verified_content_descriptor.content_identity.semantic_layout_identity.kind =
+      store::runtime::ingestion::SemanticLayoutKind::kFixedProfileLayout;
+  resolution.verified_content_descriptor.content_identity.logical_size_bytes = json.value("size_bytes", 0ULL);
+  resolution.verified_content_descriptor.content_identity.digest_alg = json.value("digest_alg", "");
+  if (!absl::HexStringToBytes(
+          json.value("digest_hex", ""), &resolution.verified_content_descriptor.content_identity.digest_bytes)) {
+    return absl::InvalidArgumentError("owner-stage resolved_source_capability digest_hex is not valid hex");
+  }
+  if (!absl::HexStringToBytes(json.value("capability_id_hex", ""), &resolution.serving_capability.capability_id)) {
+    return absl::InvalidArgumentError("owner-stage resolved_source_capability capability_id is not valid hex");
+  }
+  resolution.serving_capability.expires_at = absl::FromUnixMillis(json.value("expires_at_ms", 0LL));
+  resolution.serving_capability.mode = static_cast<BodyCapabilityResolutionMode>(json.value("mode", 0));
+  resolution.serving_capability.local = json.value("local", false);
+  resolution.serving_capability.subject_kind = static_cast<ServingCapabilitySubjectKind>(json.value("subject_kind", 1));
+  resolution.serving_capability.lifecycle_owner_ref.owner_kind =
+      static_cast<LifecycleOwnerKind>(json.value("owner_kind", 1));
+  resolution.serving_capability.lifecycle_owner_ref.owner_id = json.value("owner_id", "");
+  resolution.source_kind = static_cast<store::loading::MaterializationSource>(json.value("source_kind", 0));
+  if (!absl::HexStringToBytes(json.value("payload_ref_hex", ""), &resolution.payload_ref)) {
+    return absl::InvalidArgumentError("owner-stage resolved_source_capability payload_ref is not valid hex");
+  }
+  auto validation_status = validate_resolved_source_capability(resolution);
+  if (!validation_status.ok()) {
+    return validation_status;
+  }
+  return resolution;
+}
+
+bool authority_ref_equals(const AuthorityRef& lhs, const AuthorityRef& rhs) {
+  return lhs == rhs;
+}
+
+bool portable_credential_matches(const PortableParsedCredential& lhs, const PortableParsedCredential& rhs) {
+  return lhs.address.route_principal == rhs.address.route_principal && lhs.address.family == rhs.address.family &&
+      lhs.address.binding_space == rhs.address.binding_space &&
+      lhs.address.binding_key_kind == rhs.address.binding_key_kind &&
+      lhs.address.binding_key == rhs.address.binding_key && lhs.front_door_kind == rhs.front_door_kind &&
+      lhs.binding_mode == rhs.binding_mode && lhs.portable_constraint_claims == rhs.portable_constraint_claims;
+}
+
+bool has_prefix(std::string_view value, std::string_view prefix) {
+  return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+DaemonHopAuthContext hop_auth_context_for_route_address(
+    std::string_view route_address,
+    const DaemonOptions::InterDaemonGrpcSecurity& security) {
+  return DaemonHopAuthContext{
+      .auth_class = inter_daemon_hop_auth_class(route_address, security),
+  };
+}
+
+AuthorityRef ingress_forwarding_authority_ref(std::string_view daemon_id) {
+  return AuthorityRef{
+      .authority_kind = AuthorityKind::kInternalAuthority,
+      .authority_id = std::string(daemon_id),
+  };
+}
+
+std::string payload_ref_root_request_id(const PayloadTransportBroker::RefMetadata& metadata) {
+  return absl::StrCat("payload-ref:", metadata.payload_id);
+}
+
+bool is_payload_ref_issuer_stage(std::string_view path_family, std::string_view stage_ref) {
+  return path_family == kImmediateLoweringPathFamily && stage_ref == kIssuerValidateStageRef;
+}
+
+absl::Status undeclared_route_authority_stage_status(std::string_view path_family, std::string_view stage_ref) {
+  return absl::FailedPreconditionError(
+      absl::StrCat("undeclared routed authority path/stage: ", path_family, "/", stage_ref));
+}
+
+absl::StatusOr<std::string_view> require_payload_ref_raw_issuer_evidence(
+    const ForwardableCredentialEvidence& evidence) {
+  if (evidence.evidence_kind != CredentialEvidenceKind::kRawCredential || !evidence.raw_credential_bytes.has_value()) {
+    return absl::FailedPreconditionError(
+        "payload_ref issuer route currently supports only raw_credential issuer evidence; canonical projection is not "
+        "supported");
+  }
+  return *evidence.raw_credential_bytes;
+}
+
+DelegationEnvelope make_delegation_envelope(
+    const AuthorityRef& audience_authority_ref,
+    std::string_view root_request_id,
+    std::string_view path_family,
+    DelegationPayloadKind payload_kind,
+    DelegationClass delegation_class,
+    std::optional<absl::Time> expires_at,
+    std::optional<std::string> bound_edge = std::nullopt) {
+  return DelegationEnvelope{
+      .audience_authority_ref = audience_authority_ref,
+      .bound_root_request_id = std::string(root_request_id),
+      .bound_path_family = std::string(path_family),
+      .bound_edge = std::move(bound_edge),
+      .payload_kind = payload_kind,
+      .delegation_class = delegation_class,
+      .expires_at = expires_at,
+  };
+}
+
+std::string owner_stage_reply_kind_label(OwnerStageReplyKind reply_kind) {
+  switch (reply_kind) {
+    case OwnerStageReplyKind::kReadyForLowering:
+      return "ready_for_lowering";
+    case OwnerStageReplyKind::kContinueWithAuthority:
+      return "continue_with_authority";
+    case OwnerStageReplyKind::kRetryLater:
+      return "retry_later";
+    case OwnerStageReplyKind::kAttachExisting:
+      return "attach_existing";
+    case OwnerStageReplyKind::kTerminal:
+      return "terminal";
+  }
+  return "unknown";
+}
+
+std::optional<LocalObservationRoutingRule> find_local_observation_rule(
+    absl::Span<const LocalObservationRoutingRule> local_observation_rules,
+    std::string_view observation_kind) {
+  for (const auto& local_observation_rule : local_observation_rules) {
+    if (local_observation_rule.observation_kind == observation_kind) {
+      return local_observation_rule;
+    }
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<std::vector<ForwardedClaim>> sanitize_local_observations_for_routing(
+    const LocalObservationSet& local_observations,
+    absl::Span<const LocalObservationRoutingRule> local_observation_rules,
+    const AuthorityRef& minted_by_authority_ref,
+    const AuthorityRef& audience_authority_ref,
+    std::string_view root_request_id,
+    std::string_view path_family,
+    const std::optional<std::string>& credential_binding_digest) {
+  std::vector<ForwardedClaim> forwarded_claims;
+  forwarded_claims.reserve(local_observations.observations.size());
+  for (const auto& observation : local_observations.observations) {
+    const auto local_observation_rule =
+        find_local_observation_rule(local_observation_rules, observation.observation_kind);
+    if (!local_observation_rule.has_value() ||
+        local_observation_rule->action == LocalObservationRoutingAction::kReject) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("local observation is not routable: ", observation.observation_kind));
+    }
+    if (local_observation_rule->action == LocalObservationRoutingAction::kConsume) {
+      continue;
+    }
+    const std::string claim_kind = local_observation_rule->forwarded_claim_kind.value_or(observation.observation_kind);
+    const std::string claim_payload =
+        local_observation_rule->forwarded_claim_payload.value_or(observation.observation_payload);
+    forwarded_claims.push_back(
+        ForwardedClaim{
+            .claim_kind = claim_kind,
+            .provenance = ForwardedClaimProvenance::kIngressLocal,
+            .claim_payload = claim_payload,
+            .minted_by_authority_ref = minted_by_authority_ref,
+            .audience_authority_ref = audience_authority_ref,
+            .bound_root_request_id = std::string(root_request_id),
+            .bound_credential_binding_digest = credential_binding_digest,
+            .bound_path_family = std::string(path_family),
+        });
+  }
+  return forwarded_claims;
+}
+
+absl::StatusOr<OwnerStageReply> owner_stage_reply_from_proto(const v2::OwnerStageReply& proto_reply) {
+  auto reply_shell_or = routed_authority_wire::owner_stage_reply_shell_from_proto(proto_reply);
+  if (!reply_shell_or.ok()) {
+    return reply_shell_or.status();
+  }
+  OwnerStageReply owner_stage_reply = std::move(reply_shell_or->reply);
+  if (reply_shell_or->resolved_source_capability_payload.has_value()) {
+    auto resolved_source_capability_or =
+        deserialize_payload_ref_routed_resolution(*reply_shell_or->resolved_source_capability_payload);
+    if (!resolved_source_capability_or.ok()) {
+      return resolved_source_capability_or.status();
+    }
+    owner_stage_reply.resolved_source_capability =
+        std::make_shared<ResolvedSourceCapability>(std::move(*resolved_source_capability_or));
+  }
+  auto validation_status = routed_authority_wire::validate_owner_stage_reply_shape(owner_stage_reply);
+  if (!validation_status.ok()) {
+    return validation_status;
+  }
+  return owner_stage_reply;
+}
+
+std::optional<absl::StatusCode> absl_status_code_from_string(std::string_view status_code) {
+  if (status_code == "cancelled") {
+    return absl::StatusCode::kCancelled;
+  }
+  if (status_code == "unknown") {
+    return absl::StatusCode::kUnknown;
+  }
+  if (status_code == "invalid_argument") {
+    return absl::StatusCode::kInvalidArgument;
+  }
+  if (status_code == "deadline_exceeded") {
+    return absl::StatusCode::kDeadlineExceeded;
+  }
+  if (status_code == "not_found") {
+    return absl::StatusCode::kNotFound;
+  }
+  if (status_code == "already_exists") {
+    return absl::StatusCode::kAlreadyExists;
+  }
+  if (status_code == "permission_denied") {
+    return absl::StatusCode::kPermissionDenied;
+  }
+  if (status_code == "resource_exhausted") {
+    return absl::StatusCode::kResourceExhausted;
+  }
+  if (status_code == "failed_precondition") {
+    return absl::StatusCode::kFailedPrecondition;
+  }
+  if (status_code == "aborted") {
+    return absl::StatusCode::kAborted;
+  }
+  if (status_code == "out_of_range") {
+    return absl::StatusCode::kOutOfRange;
+  }
+  if (status_code == "unimplemented") {
+    return absl::StatusCode::kUnimplemented;
+  }
+  if (status_code == "internal") {
+    return absl::StatusCode::kInternal;
+  }
+  if (status_code == "unavailable") {
+    return absl::StatusCode::kUnavailable;
+  }
+  if (status_code == "data_loss") {
+    return absl::StatusCode::kDataLoss;
+  }
+  if (status_code == "unauthenticated") {
+    return absl::StatusCode::kUnauthenticated;
+  }
+  return std::nullopt;
+}
+
+absl::Status terminal_projection_to_status(const TerminalProjection& terminal_projection, std::string_view message) {
+  if (terminal_projection.status_code.has_value()) {
+    if (const auto status_code = absl_status_code_from_string(*terminal_projection.status_code);
+        status_code.has_value()) {
+      return absl::Status(*status_code, std::string(message));
+    }
+  }
+  switch (terminal_projection.projection_kind) {
+    case TerminalProjectionKind::kSemanticReject:
+      return absl::PermissionDeniedError(std::string(message));
+    case TerminalProjectionKind::kStatusSnapshot:
+      return absl::UnavailableError(std::string(message));
+    case TerminalProjectionKind::kSemanticSuccess:
+    case TerminalProjectionKind::kFamilyDefined:
+      return absl::FailedPreconditionError(std::string(message));
+  }
+  return absl::FailedPreconditionError(std::string(message));
 }
 
 class SharedStringSource final : public store::loader::SeekableSource {
@@ -229,13 +562,14 @@ class RemotePayloadRefSource final : public store::loader::SeekableSource {
     std::string artifact_id;
     std::string operation_id;
     std::string address;
+    std::shared_ptr<grpc::ChannelCredentials> channel_credentials;
     std::uint64_t max_chunk_bytes{1ULL << 20};
     absl::Duration fetch_deadline{absl::Seconds(5)};
   };
 
   explicit RemotePayloadRefSource(Options options)
       : options_(std::move(options)),
-        channel_(grpc::CreateChannel(options_.address, grpc::InsecureChannelCredentials())),
+        channel_(create_inter_daemon_channel(options_.address, options_.channel_credentials)),
         stub_(v2::StoreDaemonService::NewStub(channel_)) {}
 
   [[nodiscard]] uint64_t total_bytes() const override {
@@ -942,6 +1276,350 @@ absl::StatusOr<PayloadTransportBroker::RefMetadata> PayloadTransportBroker::insp
   return metadata;
 }
 
+FrontDoorCredentialContext PayloadTransportBroker::build_payload_ref_front_door_context(
+    const RefMetadata& metadata,
+    std::string_view payload_ref,
+    std::uint64_t subject_generation) const {
+  ParsedCredential parsed_credential{
+      .address =
+          CapabilityBindingAddress{
+              .route_principal = make_issuer_route_principal(
+                  metadata.issuer_daemon_id.empty() ? daemon_id_ : metadata.issuer_daemon_id),
+              .family = LifecycleCapabilityFamily::kServe,
+              .binding_space = LifecycleBindingSpace::kPayload,
+              .binding_key_kind = BindingKeyKind::kPayloadId,
+              .binding_key = metadata.payload_id,
+              .epochs =
+                  LifecycleEpochs{
+                      .subject_generation = subject_generation == 0 ? 1 : subject_generation,
+                  },
+          },
+      .front_door_kind = LifecycleFrontDoorKind::kPayloadRef,
+      .credential_expires_at = metadata.expires_at,
+      .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+      .binding_mode = LifecycleBindingMode::kAddressDerived,
+      .constraint_claims =
+          ConstraintClaims{
+              .artifact_id = metadata.artifact_id,
+              .digest_alg = metadata.digest_alg,
+              .digest_hex = metadata.digest_hex,
+              .direction = payload_direction_label(metadata.direction),
+              .operation_id = metadata.operation_id,
+          },
+  };
+
+  return FrontDoorCredentialContext{
+      .parsed_credential = std::move(parsed_credential),
+      .forwardable_evidence =
+          ForwardableCredentialEvidence{
+              .evidence_kind = CredentialEvidenceKind::kRawCredential,
+              .raw_credential_bytes = std::string(payload_ref),
+          },
+      .local_observations = LocalObservationSet{},
+  };
+}
+
+absl::StatusOr<AuthorityRef> PayloadTransportBroker::derive_issuer_authority_ref(
+    const FrontDoorCredentialContext& front_door_context) const {
+  const auto& route_principal = front_door_context.parsed_credential.address.route_principal;
+  if (route_principal.principal_kind != LifecycleRoutePrincipalKind::kIssuerDaemon ||
+      route_principal.principal_id.empty()) {
+    return absl::FailedPreconditionError("payload_ref issuer authority must derive from issuer route_principal");
+  }
+  return AuthorityRef{
+      .authority_kind = AuthorityKind::kIssuerDaemon,
+      .authority_id = route_principal.principal_id,
+  };
+}
+
+absl::StatusOr<PortableParsedCredential> PayloadTransportBroker::derive_payload_ref_portable_credential(
+    const FrontDoorCredentialContext& front_door_context) const {
+  const ParsedCredential& parsed_credential = front_door_context.parsed_credential;
+  if (parsed_credential.carriage_kind != CredentialCarriageKind::kSelfDescribing) {
+    return absl::FailedPreconditionError("payload_ref portable credential requires self-describing carriage");
+  }
+  return PortableParsedCredential{
+      .address = parsed_credential.address,
+      .front_door_kind = parsed_credential.front_door_kind,
+      .credential_expires_at = parsed_credential.credential_expires_at,
+      .binding_mode = parsed_credential.binding_mode,
+      .portable_constraint_claims = parsed_credential.constraint_claims,
+  };
+}
+
+absl::StatusOr<OwnerStageReply> PayloadTransportBroker::resolve_payload_ref_issuer_reply(
+    std::string_view payload_ref,
+    const LocalResolvedPayload& local_resolved_payload,
+    bool remote_consumer) {
+  if (lifecycle_kernel_ == nullptr) {
+    return absl::FailedPreconditionError("payload_ref lifecycle kernel is unavailable");
+  }
+  auto issuer_authority_ref_or = derive_issuer_authority_ref(local_resolved_payload.front_door_context);
+  if (!issuer_authority_ref_or.ok()) {
+    return issuer_authority_ref_or.status();
+  }
+  auto admitted_or = lifecycle_kernel_->admit_redemption(local_resolved_payload.front_door_context.parsed_credential);
+  if (!admitted_or.ok()) {
+    return admitted_or.status();
+  }
+  const auto release_use_guard = [&]() {
+    auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
+    LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
+  };
+
+  ResolvedSourceCapability resolution;
+  resolution.selection_identity = make_byte_artifact_selection_identity(local_resolved_payload.metadata.artifact_id);
+  resolution.verified_content_descriptor = local_resolved_payload.descriptor.layout_id.empty()
+      ? payload_metadata_to_verified_content_descriptor(local_resolved_payload.metadata, /*layout_id=*/"")
+      : body_descriptor_to_verified_content_descriptor(local_resolved_payload.descriptor);
+
+  if (remote_consumer) {
+    resolution.source_kind = store::loading::MaterializationSource::kP2P;
+    resolution.payload_ref = std::string(payload_ref);
+    auto capability_or = mint_serving_capability(
+        MintServingCapabilityRequest{
+            .capability_id = std::string(payload_ref),
+            .expires_at = local_resolved_payload.metadata.expires_at,
+            .mode = BodyCapabilityResolutionMode::kChunkRpcFallback,
+            .local = false,
+            .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
+            .lifecycle_owner_ref =
+                LifecycleOwnerRef{
+                    .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
+                    .owner_id = local_resolved_payload.metadata.payload_id,
+                },
+        });
+    if (!capability_or.ok()) {
+      release_use_guard();
+      return capability_or.status();
+    }
+    resolution.serving_capability = std::move(*capability_or);
+  } else {
+    const bool prefer_payload_snapshot =
+        local_resolved_payload.metadata.direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET &&
+        local_resolved_payload.payload;
+    if (!local_resolved_payload.body_handle.empty() && !prefer_payload_snapshot) {
+      resolution.source_kind = store::loading::MaterializationSource::kLocalReplica;
+      resolution.body_capability = ResolvedBodyCapability{
+          .mode = BodyCapabilityResolutionMode::kLocalBodyHandle,
+          .local = true,
+          .body_handle = local_resolved_payload.body_handle,
+          .descriptor = local_resolved_payload.descriptor,
+      };
+      auto backing_identity = local_resolved_payload.backing_identity;
+      if (!backing_identity.has_value()) {
+        backing_identity =
+            body_descriptor_to_backing_identity(local_resolved_payload.descriptor, local_resolved_payload.body_handle);
+      }
+      if (!backing_identity.has_value() ||
+          !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
+        release_use_guard();
+        return absl::FailedPreconditionError("payload_ref backing_identity is missing or inconsistent");
+      }
+      std::uint64_t backing_instance_generation = local_resolved_payload.backing_instance_generation;
+      if (backing_instance_generation == 0) {
+        backing_instance_generation = local_resolved_payload.body_handle.binding_generation();
+      }
+      if (backing_instance_generation == 0) {
+        release_use_guard();
+        return absl::FailedPreconditionError("payload_ref backing_instance_generation is missing");
+      }
+      auto capability_or = mint_serving_capability(
+          MintServingCapabilityRequest{
+              .capability_id = std::string(payload_ref),
+              .expires_at = local_resolved_payload.metadata.expires_at,
+              .mode = resolution.body_capability->mode,
+              .local = true,
+              .subject_kind = ServingCapabilitySubjectKind::kBacking,
+              .lifecycle_owner_ref =
+                  LifecycleOwnerRef{
+                      .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
+                      .owner_id = local_resolved_payload.metadata.payload_id,
+                  },
+              .backing_identity = backing_identity,
+              .backing_instance_generation = backing_instance_generation,
+          });
+      if (!capability_or.ok()) {
+        release_use_guard();
+        return capability_or.status();
+      }
+      resolution.backing_identity = std::move(backing_identity);
+      resolution.serving_capability = std::move(*capability_or);
+    } else {
+      resolution.source_kind = store::loading::MaterializationSource::kLocalReplica;
+      resolution.inline_payload = local_resolved_payload.payload;
+      auto capability_or = mint_serving_capability(
+          MintServingCapabilityRequest{
+              .capability_id = std::string(payload_ref),
+              .expires_at = local_resolved_payload.metadata.expires_at,
+              .mode = BodyCapabilityResolutionMode::kLoader,
+              .local = true,
+              .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
+              .lifecycle_owner_ref =
+                  LifecycleOwnerRef{
+                      .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
+                      .owner_id = local_resolved_payload.metadata.payload_id,
+                  },
+          });
+      if (!capability_or.ok()) {
+        release_use_guard();
+        return capability_or.status();
+      }
+      resolution.serving_capability = std::move(*capability_or);
+    }
+  }
+
+  auto validation_status = validate_resolved_source_capability(resolution);
+  if (!validation_status.ok()) {
+    release_use_guard();
+    return validation_status;
+  }
+  record_payload_ref_resolution_metrics(resolution.serving_capability.mode, /*local=*/!remote_consumer);
+  release_use_guard();
+  return OwnerStageReply{
+      .answered_by = *issuer_authority_ref_or,
+      .path_family = std::string(kImmediateLoweringPathFamily),
+      .stage_ref = std::string(kIssuerValidateStageRef),
+      .reply_kind = OwnerStageReplyKind::kReadyForLowering,
+      .resolved_source_capability = std::make_shared<ResolvedSourceCapability>(std::move(resolution)),
+  };
+}
+
+absl::StatusOr<ResolvedSourceCapability> PayloadTransportBroker::resolve_payload_ref_capability_from_reply(
+    const OwnerStageReply& issuer_reply) const {
+  switch (issuer_reply.reply_kind) {
+    case OwnerStageReplyKind::kReadyForLowering: {
+      if (!issuer_reply.resolved_source_capability) {
+        return absl::DataLossError("payload_ref issuer reply omitted resolved_source_capability");
+      }
+      auto validation_status = validate_resolved_source_capability(*issuer_reply.resolved_source_capability);
+      if (!validation_status.ok()) {
+        return validation_status;
+      }
+      return *issuer_reply.resolved_source_capability;
+    }
+    case OwnerStageReplyKind::kRetryLater:
+      return absl::UnavailableError("payload_ref issuer replied retry_later; immediate lowering is not available");
+    case OwnerStageReplyKind::kAttachExisting:
+      return absl::FailedPreconditionError(
+          issuer_reply.attachment_ref.has_value()
+              ? absl::StrCat(
+                    "payload_ref issuer replied attach_existing via ",
+                    issuer_reply.attachment_ref->attachment_kind,
+                    ":",
+                    issuer_reply.attachment_ref->attachment_id)
+              : "payload_ref issuer replied attach_existing; immediate lowering is not available");
+    case OwnerStageReplyKind::kTerminal:
+      if (!issuer_reply.terminal_projection.has_value()) {
+        return absl::DataLossError("payload_ref issuer terminal reply omitted terminal_projection");
+      }
+      return terminal_projection_to_status(
+          *issuer_reply.terminal_projection,
+          "payload_ref issuer replied terminal; immediate lowering is not available");
+    case OwnerStageReplyKind::kContinueWithAuthority:
+      return absl::FailedPreconditionError(
+          "payload_ref issuer route must not continue_with_authority to a third authority");
+  }
+  return absl::FailedPreconditionError("payload_ref issuer reply kind is unsupported");
+}
+
+absl::StatusOr<PayloadTransportBroker::PayloadRefFrontDoorContext> PayloadTransportBroker::inspect_payload_ref_context(
+    std::string_view payload_ref,
+    std::string_view expected_artifact_id,
+    absl::Time now,
+    tensorcast::common::v1::PayloadRefDirection expected_direction,
+    std::string_view expected_operation_id) {
+  auto resolved_or = resolve_local_payload_ref_record(
+      payload_ref, expected_artifact_id, now, expected_direction, expected_operation_id);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
+  }
+  return PayloadRefFrontDoorContext{
+      .metadata = resolved_or->metadata,
+      .front_door_context = resolved_or->front_door_context,
+  };
+}
+
+absl::StatusOr<RoutedAuthorityRequest> PayloadTransportBroker::build_payload_ref_issuer_routed_request(
+    const RefMetadata& metadata,
+    const FrontDoorCredentialContext& front_door_context,
+    std::string_view route_address,
+    absl::Span<const LocalObservationRoutingRule> local_observation_rules) const {
+  if (!front_door_context.forwardable_evidence.has_value()) {
+    return absl::FailedPreconditionError("payload_ref issuer route requires forwardable_evidence");
+  }
+  auto raw_payload_ref_or = require_payload_ref_raw_issuer_evidence(*front_door_context.forwardable_evidence);
+  if (!raw_payload_ref_or.ok()) {
+    return raw_payload_ref_or.status();
+  }
+  auto issuer_authority_ref_or = derive_issuer_authority_ref(front_door_context);
+  if (!issuer_authority_ref_or.ok()) {
+    return issuer_authority_ref_or.status();
+  }
+  auto portable_credential_or = derive_payload_ref_portable_credential(front_door_context);
+  if (!portable_credential_or.ok()) {
+    return portable_credential_or.status();
+  }
+  const std::string root_request_id = payload_ref_root_request_id(metadata);
+  auto forwarded_claims_or = sanitize_local_observations_for_routing(
+      front_door_context.local_observations,
+      local_observation_rules,
+      ingress_forwarding_authority_ref(daemon_id_),
+      *issuer_authority_ref_or,
+      root_request_id,
+      kImmediateLoweringPathFamily,
+      std::nullopt);
+  if (!forwarded_claims_or.ok()) {
+    return forwarded_claims_or.status();
+  }
+  RoutedAuthorityRequest routed_request{
+      .authority_ref = *issuer_authority_ref_or,
+      .path_family = std::string(kImmediateLoweringPathFamily),
+      .stage_ref = std::string(kIssuerValidateStageRef),
+      .portable_credential = *portable_credential_or,
+      .forwardable_evidence = front_door_context.forwardable_evidence,
+      .portable_credential_envelope = make_delegation_envelope(
+          *issuer_authority_ref_or,
+          root_request_id,
+          kImmediateLoweringPathFamily,
+          DelegationPayloadKind::kPortableCredential,
+          DelegationClass::kBootstrapSafe,
+          front_door_context.parsed_credential.credential_expires_at),
+      .forwardable_evidence_envelope = make_delegation_envelope(
+          *issuer_authority_ref_or,
+          root_request_id,
+          kImmediateLoweringPathFamily,
+          DelegationPayloadKind::kForwardableEvidence,
+          DelegationClass::kOwnerScopedSensitive,
+          front_door_context.parsed_credential.credential_expires_at),
+      .hop_auth_context = hop_auth_context_for_route_address(route_address, options_.inter_daemon_grpc_security),
+      .forwarded_claims = std::move(*forwarded_claims_or),
+      .forwarded_claims_envelope = std::nullopt,
+      .request_metadata =
+          RoutedRequestMetadata{
+              .root_request_id = std::move(root_request_id),
+              .hop_budget_remaining = 1,
+          },
+  };
+  if (!routed_request.forwarded_claims.empty()) {
+    routed_request.forwarded_claims_envelope = make_delegation_envelope(
+        *issuer_authority_ref_or,
+        routed_request.request_metadata.root_request_id,
+        routed_request.path_family,
+        DelegationPayloadKind::kForwardedClaim,
+        DelegationClass::kOwnerScopedSensitive,
+        front_door_context.parsed_credential.credential_expires_at);
+  }
+  if (!metadata.operation_id.empty()) {
+    routed_request.request_metadata.idempotency_key = metadata.operation_id;
+  }
+  auto validation_status = routed_authority_wire::validate_routed_authority_request_shape(routed_request);
+  if (!validation_status.ok()) {
+    return validation_status;
+  }
+  return routed_request;
+}
+
 absl::StatusOr<PayloadTransportBroker::ResolvedPayload> PayloadTransportBroker::resolve_local_payload_ref(
     std::string_view payload_ref,
     std::string_view expected_artifact_id,
@@ -970,9 +1648,11 @@ absl::StatusOr<PayloadTransportBroker::ResolvedPayload> PayloadTransportBroker::
 }
 
 absl::StatusOr<ResolvedSourceCapability> PayloadTransportBroker::resolve_payload_ref_capability(
+    WorkerDirectoryCache& worker_directory_cache,
     std::string_view payload_ref,
     std::string_view expected_artifact_id,
     absl::Time now,
+    absl::Duration worker_directory_staleness_budget,
     std::string_view local_daemon_id,
     tensorcast::common::v1::PayloadRefDirection expected_direction,
     std::string_view expected_operation_id) {
@@ -999,164 +1679,205 @@ absl::StatusOr<ResolvedSourceCapability> PayloadTransportBroker::resolve_payload
     if (!local_or.ok()) {
       return local_or.status();
     }
-    if (lifecycle_kernel_ == nullptr) {
-      return absl::FailedPreconditionError("payload_ref lifecycle kernel is unavailable");
+    auto issuer_reply_or = resolve_payload_ref_issuer_reply(payload_ref, *local_or, /*remote_consumer=*/false);
+    if (!issuer_reply_or.ok()) {
+      return issuer_reply_or.status();
     }
-    ParsedCredential credential{
-        .address =
-            CapabilityBindingAddress{
-                .route_principal = make_issuer_route_principal(daemon_id_),
-                .family = LifecycleCapabilityFamily::kServe,
-                .binding_space = LifecycleBindingSpace::kPayload,
-                .binding_key_kind = BindingKeyKind::kPayloadId,
-                .binding_key = local_or->metadata.payload_id,
-                .epochs =
-                    LifecycleEpochs{
-                        .subject_generation =
-                            local_or->backing_instance_generation == 0 ? 1 : local_or->backing_instance_generation,
-                    },
-            },
-        .front_door_kind = LifecycleFrontDoorKind::kPayloadRef,
-        .credential_expires_at = local_or->metadata.expires_at,
-        .carriage_kind = CredentialCarriageKind::kSelfDescribing,
-        .binding_mode = LifecycleBindingMode::kAddressDerived,
-        .constraint_claims =
-            ConstraintClaims{
-                .artifact_id = local_or->metadata.artifact_id,
-                .digest_alg = local_or->metadata.digest_alg,
-                .digest_hex = local_or->metadata.digest_hex,
-                .direction = payload_direction_label(local_or->metadata.direction),
-                .operation_id = local_or->metadata.operation_id,
-            },
-    };
-    auto admitted_or = lifecycle_kernel_->admit_redemption(credential);
-    if (!admitted_or.ok()) {
-      return admitted_or.status();
-    }
-    const auto release_use_guard = [&]() {
-      auto release_status = lifecycle_kernel_->release_use_guard(admitted_or->use_guard);
-      LOG_IF(WARNING, !release_status.ok()) << "payload_ref: failed to release local use guard: " << release_status;
-    };
-    ResolvedSourceCapability resolution;
-    resolution.selection_identity = make_byte_artifact_selection_identity(local_or->metadata.artifact_id);
-    resolution.verified_content_descriptor = local_or->descriptor.layout_id.empty()
-        ? payload_metadata_to_verified_content_descriptor(local_or->metadata, /*layout_id=*/"")
-        : body_descriptor_to_verified_content_descriptor(local_or->descriptor);
-    const bool prefer_payload_snapshot =
-        local_or->metadata.direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET && local_or->payload;
-    if (!local_or->body_handle.empty() && !prefer_payload_snapshot) {
-      resolution.source_kind = store::loading::MaterializationSource::kLocalReplica;
-      resolution.body_capability = ResolvedBodyCapability{
-          .mode = BodyCapabilityResolutionMode::kLocalBodyHandle,
-          .local = true,
-          .body_handle = local_or->body_handle,
-          .descriptor = local_or->descriptor,
-      };
-      auto backing_identity = local_or->backing_identity;
-      if (!backing_identity.has_value()) {
-        backing_identity = body_descriptor_to_backing_identity(local_or->descriptor, local_or->body_handle);
-      }
-      if (!backing_identity.has_value() ||
-          !store::runtime::ingestion::backing_identity_matches_replica_key(*backing_identity)) {
-        release_use_guard();
-        return absl::FailedPreconditionError("payload_ref backing_identity is missing or inconsistent");
-      }
-      std::uint64_t backing_instance_generation = local_or->backing_instance_generation;
-      if (backing_instance_generation == 0) {
-        backing_instance_generation = local_or->body_handle.binding_generation();
-      }
-      if (backing_instance_generation == 0) {
-        release_use_guard();
-        return absl::FailedPreconditionError("payload_ref backing_instance_generation is missing");
-      }
-      auto capability_or = mint_serving_capability(
-          MintServingCapabilityRequest{
-              .capability_id = std::string(payload_ref),
-              .expires_at = local_or->metadata.expires_at,
-              .mode = resolution.body_capability->mode,
-              .local = true,
-              .subject_kind = ServingCapabilitySubjectKind::kBacking,
-              .lifecycle_owner_ref =
-                  LifecycleOwnerRef{
-                      .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
-                      .owner_id = local_or->metadata.payload_id,
-                  },
-              .backing_identity = backing_identity,
-              .backing_instance_generation = backing_instance_generation,
-          });
-      if (!capability_or.ok()) {
-        release_use_guard();
-        return capability_or.status();
-      }
-      resolution.backing_identity = std::move(backing_identity);
-      resolution.serving_capability = std::move(*capability_or);
-      auto source_status = validate_resolved_source_capability(resolution);
-      if (!source_status.ok()) {
-        release_use_guard();
-        return source_status;
-      }
-      record_payload_ref_resolution_metrics(resolution.body_capability->mode, /*local=*/true);
-      release_use_guard();
-      return resolution;
-    }
-    resolution.source_kind = store::loading::MaterializationSource::kLocalReplica;
-    resolution.inline_payload = local_or->payload;
-    auto capability_or = mint_serving_capability(
-        MintServingCapabilityRequest{
-            .capability_id = std::string(payload_ref),
-            .expires_at = local_or->metadata.expires_at,
-            .mode = BodyCapabilityResolutionMode::kLoader,
-            .local = true,
-            .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
-            .lifecycle_owner_ref =
-                LifecycleOwnerRef{
-                    .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
-                    .owner_id = local_or->metadata.payload_id,
-                },
-        });
-    if (!capability_or.ok()) {
-      release_use_guard();
-      return capability_or.status();
-    }
-    resolution.serving_capability = std::move(*capability_or);
-    auto source_status = validate_resolved_source_capability(resolution);
-    if (!source_status.ok()) {
-      release_use_guard();
-      return source_status;
-    }
-    record_payload_ref_resolution_metrics(resolution.serving_capability.mode, /*local=*/true);
-    release_use_guard();
-    return resolution;
+    return resolve_payload_ref_capability_from_reply(*issuer_reply_or);
   }
+  const FrontDoorCredentialContext front_door_context =
+      build_payload_ref_front_door_context(*metadata_or, payload_ref, 1);
+  return resolve_remote_payload_ref_capability_via_issuer_route(
+      worker_directory_cache, payload_ref, *metadata_or, front_door_context, now, worker_directory_staleness_budget);
+}
 
-  ResolvedSourceCapability resolution;
-  resolution.selection_identity = make_byte_artifact_selection_identity(metadata_or->artifact_id);
-  resolution.verified_content_descriptor = payload_metadata_to_verified_content_descriptor(*metadata_or, "");
-  resolution.source_kind = store::loading::MaterializationSource::kP2P;
-  resolution.payload_ref = std::string(payload_ref);
-  auto capability_or = mint_serving_capability(
-      MintServingCapabilityRequest{
-          .capability_id = std::string(payload_ref),
-          .expires_at = metadata_or->expires_at,
-          .mode = BodyCapabilityResolutionMode::kChunkRpcFallback,
-          .local = false,
-          .subject_kind = ServingCapabilitySubjectKind::kCopiedPayload,
-          .lifecycle_owner_ref =
-              LifecycleOwnerRef{
-                  .owner_kind = LifecycleOwnerKind::kPayloadRefToken,
-                  .owner_id = metadata_or->payload_id,
-              },
-      });
-  if (!capability_or.ok()) {
-    return capability_or.status();
+absl::StatusOr<ResolvedSourceCapability> PayloadTransportBroker::resolve_remote_payload_ref_capability_via_issuer_route(
+    WorkerDirectoryCache& worker_directory_cache,
+    std::string_view payload_ref,
+    const RefMetadata& metadata,
+    const FrontDoorCredentialContext& front_door_context,
+    absl::Time now,
+    absl::Duration worker_directory_staleness_budget) {
+  auto issuer_authority_ref_or = derive_issuer_authority_ref(front_door_context);
+  if (!issuer_authority_ref_or.ok()) {
+    return issuer_authority_ref_or.status();
   }
-  resolution.serving_capability = std::move(*capability_or);
-  auto source_status = validate_resolved_source_capability(resolution);
-  if (!source_status.ok()) {
-    return source_status;
+  auto address_or = worker_directory_cache.resolve_daemon_address(
+      issuer_authority_ref_or->authority_id, now, worker_directory_staleness_budget);
+  if (!address_or.ok()) {
+    record_payload_ref_issuer_route_metrics("remote", "route_resolution_failed", "route_unavailable");
+    LOG(WARNING) << "payload_ref issuer route resolution failed for authority_id="
+                 << issuer_authority_ref_or->authority_id << ": " << address_or.status();
+    return address_or.status();
   }
-  record_payload_ref_resolution_metrics(resolution.serving_capability.mode, /*local=*/false);
-  return resolution;
+  const AuthorityLocatorResult initial_locator_result{
+      .authority_ref = *issuer_authority_ref_or,
+      .target_daemon_id = issuer_authority_ref_or->authority_id,
+      .target_address = *address_or,
+      .resolved_at = now,
+      .staleness_budget = worker_directory_staleness_budget,
+  };
+
+  auto channel = create_inter_daemon_channel(*address_or, options_.inter_daemon_channel_credentials);
+  auto stub = v2::StoreDaemonService::NewStub(channel);
+  grpc::ClientContext client_ctx;
+  client_ctx.set_deadline(
+      std::chrono::system_clock::now() + std::chrono::milliseconds(absl::ToInt64Milliseconds(fetch_deadline())));
+
+  auto routed_request_or = build_payload_ref_issuer_routed_request(metadata, front_door_context, *address_or);
+  if (!routed_request_or.ok()) {
+    record_payload_ref_issuer_route_metrics("remote", "request_build_failed", "none");
+    return routed_request_or.status();
+  }
+  v2::RouteAuthorityStageRequest request;
+  routed_authority_wire::populate_proto_routed_authority_request(*routed_request_or, request.mutable_routed_request());
+
+  v2::RouteAuthorityStageResponse response;
+  const auto rpc_status = stub->RouteAuthorityStage(&client_ctx, request, &response);
+  if (!rpc_status.ok()) {
+    record_payload_ref_issuer_route_metrics("remote", "rpc_transport_error", "route_unavailable");
+    LOG(WARNING) << "payload_ref issuer route rpc failed for authority_id=" << issuer_authority_ref_or->authority_id
+                 << " address=" << *address_or << ": " << rpc_status.error_message();
+    return absl::UnavailableError(rpc_status.error_message());
+  }
+  auto item_status = absl_status_from_batch_item_status(response.status(), response.message());
+  if (!item_status.ok()) {
+    const bool issuer_loss = item_status.code() == absl::StatusCode::kNotFound ||
+        item_status.code() == absl::StatusCode::kFailedPrecondition;
+    record_payload_ref_issuer_route_metrics(
+        "remote", "issuer_stage_error", issuer_loss ? "issuer_state_missing" : "none");
+    if (issuer_loss) {
+      LOG(WARNING) << "payload_ref issuer route failed closed for authority_id="
+                   << issuer_authority_ref_or->authority_id << " due to issuer-stage state loss: " << item_status;
+    }
+    return item_status;
+  }
+  if (!response.has_owner_stage_reply()) {
+    record_payload_ref_issuer_route_metrics("remote", "reply_missing", "none");
+    return absl::DataLossError("payload_ref issuer route omitted owner_stage_reply");
+  }
+  const auto client_transport_security_context =
+      DistributedSecurityKernel::transport_security_context_from_client_context(client_ctx);
+  const auto authenticated_peer_identity =
+      DistributedSecurityKernel::derive_authenticated_peer_identity(client_transport_security_context);
+  std::optional<AuthorityLocatorResult> current_locator_result;
+  auto current_address_or = worker_directory_cache.resolve_daemon_address(
+      issuer_authority_ref_or->authority_id, absl::Now(), worker_directory_staleness_budget);
+  if (current_address_or.ok()) {
+    current_locator_result = AuthorityLocatorResult{
+        .authority_ref = *issuer_authority_ref_or,
+        .target_daemon_id = issuer_authority_ref_or->authority_id,
+        .target_address = *current_address_or,
+        .resolved_at = absl::Now(),
+        .staleness_budget = worker_directory_staleness_budget,
+    };
+  }
+  auto reply_admission_status = DistributedSecurityKernel::admit_reply(
+      request.routed_request(),
+      response.owner_stage_reply(),
+      authenticated_peer_identity,
+      initial_locator_result,
+      current_locator_result,
+      DistributedSecurityKernel::declared_stage_disclosure_policy(request.routed_request()).continuity_class);
+  if (!reply_admission_status.ok()) {
+    const std::string issuer_loss_outcome =
+        reply_admission_status.code() == absl::StatusCode::kUnavailable ? "continuity_lost" : "binding_failed";
+    record_payload_ref_issuer_route_metrics("remote", "reply_admission_failed", issuer_loss_outcome);
+    LOG(WARNING) << "payload_ref issuer reply admission failed for authority_id="
+                 << issuer_authority_ref_or->authority_id << ": " << reply_admission_status;
+    return reply_admission_status;
+  }
+  auto owner_stage_reply_or = owner_stage_reply_from_proto(response.owner_stage_reply());
+  if (!owner_stage_reply_or.ok()) {
+    record_payload_ref_issuer_route_metrics("remote", "reply_payload_invalid", "none");
+    return owner_stage_reply_or.status();
+  }
+  auto resolution_or = resolve_payload_ref_capability_from_reply(*owner_stage_reply_or);
+  if (!resolution_or.ok()) {
+    record_payload_ref_issuer_route_metrics(
+        "remote",
+        owner_stage_reply_or->reply_kind == OwnerStageReplyKind::kReadyForLowering ? "reply_projection_failed"
+                                                                                   : "reply_non_lowering",
+        "none",
+        owner_stage_reply_kind_label(owner_stage_reply_or->reply_kind));
+    return resolution_or.status();
+  }
+  if (resolution_or->payload_ref != payload_ref) {
+    record_payload_ref_issuer_route_metrics(
+        "remote", "reply_payload_mismatch", "none", owner_stage_reply_kind_label(owner_stage_reply_or->reply_kind));
+    return absl::FailedPreconditionError("payload_ref issuer reply payload_ref mismatch");
+  }
+  record_payload_ref_issuer_route_metrics(
+      "remote", "admitted", "none", owner_stage_reply_kind_label(owner_stage_reply_or->reply_kind));
+  return *resolution_or;
+}
+
+absl::StatusOr<std::optional<OwnerStageReply>> PayloadTransportBroker::maybe_route_authority_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  if (is_payload_ref_issuer_stage(routed_request.path_family, routed_request.stage_ref)) {
+    auto reply_or = route_payload_ref_issuer_stage(routed_request, now);
+    if (!reply_or.ok()) {
+      return reply_or.status();
+    }
+    return std::optional<OwnerStageReply>(std::move(*reply_or));
+  }
+  return std::optional<OwnerStageReply>();
+}
+
+absl::StatusOr<OwnerStageReply> PayloadTransportBroker::route_authority_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  auto maybe_reply_or = maybe_route_authority_stage(routed_request, now);
+  if (!maybe_reply_or.ok()) {
+    return maybe_reply_or.status();
+  }
+  if (!maybe_reply_or->has_value()) {
+    return undeclared_route_authority_stage_status(routed_request.path_family, routed_request.stage_ref);
+  }
+  return std::move(**maybe_reply_or);
+}
+
+absl::StatusOr<OwnerStageReply> PayloadTransportBroker::route_payload_ref_issuer_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  if (!routed_request.forwardable_evidence.has_value()) {
+    return absl::FailedPreconditionError("payload_ref issuer route requires forwardable_evidence");
+  }
+  if (!is_payload_ref_issuer_stage(routed_request.path_family, routed_request.stage_ref)) {
+    return undeclared_route_authority_stage_status(routed_request.path_family, routed_request.stage_ref);
+  }
+  auto raw_payload_ref_or = require_payload_ref_raw_issuer_evidence(*routed_request.forwardable_evidence);
+  if (!raw_payload_ref_or.ok()) {
+    return raw_payload_ref_or.status();
+  }
+  const std::string_view raw_payload_ref = *raw_payload_ref_or;
+  const auto expected_direction =
+      payload_ref_direction_from_label(routed_request.portable_credential.portable_constraint_claims.direction);
+  auto local_resolved_or = resolve_local_payload_ref_record(
+      raw_payload_ref,
+      routed_request.portable_credential.portable_constraint_claims.artifact_id,
+      now,
+      expected_direction,
+      routed_request.portable_credential.portable_constraint_claims.operation_id);
+  if (!local_resolved_or.ok()) {
+    return local_resolved_or.status();
+  }
+  auto issuer_authority_ref_or = derive_issuer_authority_ref(local_resolved_or->front_door_context);
+  if (!issuer_authority_ref_or.ok()) {
+    return issuer_authority_ref_or.status();
+  }
+  if (!authority_ref_equals(*issuer_authority_ref_or, routed_request.authority_ref)) {
+    return absl::FailedPreconditionError("payload_ref issuer authority mismatch");
+  }
+  auto portable_credential_or = derive_payload_ref_portable_credential(local_resolved_or->front_door_context);
+  if (!portable_credential_or.ok()) {
+    return portable_credential_or.status();
+  }
+  if (!portable_credential_matches(*portable_credential_or, routed_request.portable_credential)) {
+    return absl::FailedPreconditionError("payload_ref portable credential mismatches issuer-validated state");
+  }
+  return resolve_payload_ref_issuer_reply(raw_payload_ref, *local_resolved_or, /*remote_consumer=*/true);
 }
 
 absl::StatusOr<PayloadTransportBroker::LocalResolvedPayload> PayloadTransportBroker::resolve_local_payload_ref_record(
@@ -1220,8 +1941,13 @@ absl::StatusOr<PayloadTransportBroker::LocalResolvedPayload> PayloadTransportBro
   if (metadata_or->operation_id != it->second.metadata.operation_id) {
     return absl::FailedPreconditionError("payload_ref operation_id mismatch");
   }
+  std::uint64_t subject_generation = it->second.backing_instance_generation;
+  if (subject_generation == 0 && !it->second.body_handle.empty()) {
+    subject_generation = it->second.body_handle.binding_generation();
+  }
   return LocalResolvedPayload{
       .metadata = it->second.metadata,
+      .front_door_context = build_payload_ref_front_door_context(it->second.metadata, payload_ref, subject_generation),
       .payload = it->second.payload,
       .body_handle = it->second.body_handle,
       .descriptor = it->second.descriptor,
@@ -1324,7 +2050,14 @@ absl::StatusOr<PayloadTransportBroker::PayloadLoader> PayloadTransportBroker::op
     return metadata_or.status();
   }
   auto resolution_or = resolve_payload_ref_capability(
-      payload_ref, expected_artifact_id, now, local_daemon_id, expected_direction, expected_operation_id);
+      worker_directory_cache,
+      payload_ref,
+      expected_artifact_id,
+      now,
+      worker_directory_staleness_budget,
+      local_daemon_id,
+      expected_direction,
+      expected_operation_id);
   if (!resolution_or.ok()) {
     return resolution_or.status();
   }
@@ -1369,6 +2102,7 @@ absl::StatusOr<PayloadTransportBroker::PayloadLoader> PayloadTransportBroker::op
                   .artifact_id = std::string(expected_artifact_id),
                   .operation_id = std::string(expected_operation_id),
                   .address = *address_or,
+                  .channel_credentials = options_.inter_daemon_channel_credentials,
                   .max_chunk_bytes = options_.max_chunk_bytes,
                   .fetch_deadline = options_.fetch_deadline,
               },

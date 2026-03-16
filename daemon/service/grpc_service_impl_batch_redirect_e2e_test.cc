@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -23,6 +24,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/capability_token.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
@@ -84,6 +86,10 @@ std::filesystem::path make_tmp_dir(std::string_view label) {
   std::filesystem::remove_all(path);
   std::filesystem::create_directories(path);
   return path;
+}
+
+uint32_t grpc_port_from_address(std::string_view address) {
+  return static_cast<uint32_t>(std::stoi(std::string(address.substr(address.find(':') + 1))));
 }
 
 uint64_t shard_for_artifact(std::string_view artifact_id, uint64_t shard_count) {
@@ -405,26 +411,84 @@ struct GrpcDaemon {
     REQUIRE(harness->start().ok());
 
     if (start_server) {
-      grpc::ServerBuilder builder;
-      int selected_port = 0;
-      builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
-      builder.RegisterService(&harness->service());
-      server = builder.BuildAndStart();
-      REQUIRE(server != nullptr);
-      REQUIRE(selected_port != 0);
-      address = "127.0.0.1:" + std::to_string(selected_port);
+      start_insecure_server();
     }
   }
 
-  ~GrpcDaemon() {
+  void start_insecure_server() {
+    grpc::ServerBuilder builder;
+    int selected_port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+    builder.RegisterService(&harness->service());
+    server = builder.BuildAndStart();
+    REQUIRE(server != nullptr);
+    REQUIRE(selected_port != 0);
+    address = "127.0.0.1:" + std::to_string(selected_port);
+  }
+
+  void shutdown_server() {
     if (server) {
       server->Shutdown();
+      server.reset();
     }
+    address.clear();
+  }
+
+  ~GrpcDaemon() {
+    shutdown_server();
   }
 
   std::unique_ptr<DaemonServiceHarness> harness;
   std::unique_ptr<grpc::Server> server;
   std::string address;
+};
+
+class RouteAuthorityStageTestService final : public tensorcast::daemon::v2::StoreDaemonService::Service {
+ public:
+  using ReplyBuilder = std::function<void(
+      const tensorcast::daemon::v2::RouteAuthorityStageRequest&,
+      tensorcast::daemon::v2::RouteAuthorityStageResponse*)>;
+  using FetchBuilder = std::function<void(
+      const tensorcast::daemon::v2::FetchPayloadRefChunkRequest&,
+      tensorcast::daemon::v2::FetchPayloadRefChunkResponse*)>;
+
+  explicit RouteAuthorityStageTestService(ReplyBuilder reply_builder, FetchBuilder fetch_builder = {})
+      : reply_builder_(std::move(reply_builder)), fetch_builder_(std::move(fetch_builder)) {}
+
+  grpc::Status RouteAuthorityStage(
+      grpc::ServerContext*,
+      const tensorcast::daemon::v2::RouteAuthorityStageRequest* req,
+      tensorcast::daemon::v2::RouteAuthorityStageResponse* resp) override {
+    if (reply_builder_) {
+      reply_builder_(*req, resp);
+    } else {
+      resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+      auto* reply = resp->mutable_owner_stage_reply();
+      reply->mutable_answered_by()->CopyFrom(req->routed_request().authority_ref());
+      reply->set_path_family(req->routed_request().path_family());
+      reply->set_stage_ref(req->routed_request().stage_ref());
+      reply->set_reply_kind(tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_READY_FOR_LOWERING);
+      reply->set_resolved_source_capability("{}");
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status FetchPayloadRefChunk(
+      grpc::ServerContext*,
+      const tensorcast::daemon::v2::FetchPayloadRefChunkRequest* req,
+      tensorcast::daemon::v2::FetchPayloadRefChunkResponse* resp) override {
+    if (fetch_builder_) {
+      fetch_builder_(*req, resp);
+    } else {
+      resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+      resp->set_message("fetch handler not configured");
+    }
+    return grpc::Status::OK;
+  }
+
+ private:
+  ReplyBuilder reply_builder_;
+  FetchBuilder fetch_builder_;
 };
 
 TEST_CASE("BatchExists retries on stale shard-home fence redirect (remote home)", "[daemon][batch][redirect][e2e]") {
@@ -715,6 +779,700 @@ TEST_CASE("Batch get/put transport payload_ref over remote home daemon", "[daemo
 
   release_test_region(*front.harness, source_region);
   release_test_region(*front.harness, target_region);
+}
+
+TEST_CASE(
+    "payload_ref remote issuer validation uses canonical routed owner rpc",
+    "[daemon][batch][redirect][issuer_route]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_issuer_route");
+  const auto root_home = make_tmp_dir("home_payload_ref_issuer_route");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(
+      kHomeDaemonId,
+      "127.0.0.1",
+      static_cast<uint32_t>(std::stoi(home.address.substr(home.address.find(':') + 1))),
+      kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.aXNzdWVyLXJvdXRlLXJlbW90ZQ~layout_v1~b64u.azI";
+  const std::string payload = "remote-issuer-route-payload";
+
+  auto payload_ref_or = home.harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-remote-issuer-route");
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::Seconds(10),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-remote-issuer-route");
+  REQUIRE(capability_or.ok());
+  CHECK(capability_or->serving_capability.mode == tensorcast::daemon::BodyCapabilityResolutionMode::kChunkRpcFallback);
+  CHECK_FALSE(capability_or->serving_capability.local);
+  CHECK(capability_or->payload_ref == *payload_ref_or);
+
+  auto metadata_or = home.harness->kernel().payload_transport_broker().inspect_payload_ref(
+      *payload_ref_or, absl::Now(), /*require_not_expired=*/true);
+  REQUIRE(metadata_or.ok());
+  REQUIRE(home.harness->kernel()
+              .lifecycle_kernel()
+              .release_capability(absl::StrCat("payload-ref:", metadata_or->payload_id))
+              .ok());
+
+  auto stale_capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::Seconds(10),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-remote-issuer-route");
+  REQUIRE_FALSE(stale_capability_or.ok());
+  CHECK(stale_capability_or.status().code() == absl::StatusCode::kNotFound);
+}
+
+TEST_CASE(
+    "payload_ref remote issuer route refreshes a stale daemon address before routing",
+    "[daemon][batch][redirect][issuer_route][stale_route]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_refresh_route");
+  const auto root_home = make_tmp_dir("home_payload_ref_refresh_route");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGUtcmVmcmVzaA~layout_v1~b64u.azQ";
+  const std::string payload = "refresh-route-payload";
+  auto payload_ref_or = home.harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-refresh-route");
+  REQUIRE(payload_ref_or.ok());
+
+  const auto cached_at = absl::Now();
+  auto cached_address_or = front.harness->kernel().worker_directory_cache().resolve_daemon_address(
+      kHomeDaemonId, cached_at, absl::Seconds(10));
+  REQUIRE(cached_address_or.ok());
+  REQUIRE(*cached_address_or == home.address);
+
+  const std::string stale_address = home.address;
+  home.shutdown_server();
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    home.start_insecure_server();
+    if (home.address != stale_address) {
+      break;
+    }
+    home.shutdown_server();
+  }
+  REQUIRE(home.address != stale_address);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag);
+
+  auto refreshed_capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      cached_at + absl::Seconds(2),
+      absl::Seconds(1),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-refresh-route");
+  REQUIRE(refreshed_capability_or.ok());
+  CHECK(refreshed_capability_or->payload_ref == *payload_ref_or);
+  CHECK(
+      refreshed_capability_or->serving_capability.mode ==
+      tensorcast::daemon::BodyCapabilityResolutionMode::kChunkRpcFallback);
+}
+
+TEST_CASE(
+    "payload_ref remote issuer route drops a stale daemon address when refresh no longer finds the issuer",
+    "[daemon][batch][redirect][issuer_route][stale_route]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_missing_route");
+  const auto root_home = make_tmp_dir("home_payload_ref_missing_route");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGUtbWlzc2luZw~layout_v1~b64u.azU";
+  const std::string payload = "missing-route-payload";
+  auto payload_ref_or = home.harness->kernel().payload_transport_broker().issue_payload_ref(
+      artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-missing-route");
+  REQUIRE(payload_ref_or.ok());
+
+  const auto cached_at = absl::Now();
+  auto cached_address_or = front.harness->kernel().worker_directory_cache().resolve_daemon_address(
+      kHomeDaemonId, cached_at, absl::Seconds(10));
+  REQUIRE(cached_address_or.ok());
+
+  home.shutdown_server();
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", /*grpc_port=*/0, kShardHomeEligibleFlag);
+
+  auto missing_route_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      cached_at + absl::Seconds(2),
+      absl::Seconds(1),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-missing-route");
+  REQUIRE_FALSE(missing_route_or.ok());
+  CHECK(missing_route_or.status().code() == absl::StatusCode::kNotFound);
+  CHECK(missing_route_or.status().message() == "daemon endpoint not found");
+}
+
+TEST_CASE(
+    "payload_ref remote issuer reply fails closed on answered_by mismatch",
+    "[daemon][batch][redirect][issuer_route][reply_admission]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_reply_admission");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+
+  RouteAuthorityStageTestService fake_service([&](const auto& req, auto* resp) {
+    resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+    auto* reply = resp->mutable_owner_stage_reply();
+    reply->mutable_answered_by()->set_authority_kind(tensorcast::daemon::v2::ROUTED_AUTHORITY_KIND_ISSUER_DAEMON);
+    reply->mutable_answered_by()->set_authority_id("daemon-wrong");
+    reply->set_path_family(req.routed_request().path_family());
+    reply->set_stage_ref(req.routed_request().stage_ref());
+    reply->set_reply_kind(tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_READY_FOR_LOWERING);
+  });
+  grpc::ServerBuilder builder;
+  int selected_port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+  builder.RegisterService(&fake_service);
+  auto server = builder.BuildAndStart();
+  REQUIRE(server != nullptr);
+  REQUIRE(selected_port != 0);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cmVwbHktYWRtaXNzaW9u~layout_v1~b64u.azY";
+  tensorcast::common::v1::PayloadRefScope scope;
+  scope.set_payload_id("payload-reply-admission");
+  scope.set_artifact_id(artifact_id);
+  scope.set_payload_size(5);
+  scope.set_digest_alg("sha256");
+  scope.set_digest_hex("275876e34cf609db118f3d84b799a790");
+  scope.set_direction(tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET);
+  scope.set_operation_id("op-reply-admission");
+  auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  REQUIRE(scope_or.ok());
+  auto payload_ref_or = front.harness->kernel().capability_tokens()->mint(
+      kHomeDaemonId,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
+      *scope_or,
+      static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(1))));
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::Seconds(10),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-reply-admission");
+  REQUIRE_FALSE(capability_or.ok());
+  CHECK(capability_or.status().code() == absl::StatusCode::kFailedPrecondition);
+  CHECK(capability_or.status().message() == "owner_stage_reply answered_by mismatch");
+
+  server->Shutdown();
+}
+
+TEST_CASE(
+    "payload_ref remote issuer request carries hop auth context and retry_later stays non-terminal",
+    "[daemon][batch][redirect][issuer_route][retry]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_retry_later");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+
+  tensorcast::daemon::v2::RouteAuthorityStageRequest captured_request;
+  absl::Mutex captured_mu;
+  RouteAuthorityStageTestService fake_service([&](const auto& req, auto* resp) {
+    {
+      absl::MutexLock lock(&captured_mu);
+      captured_request = req;
+    }
+    resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+    auto* reply = resp->mutable_owner_stage_reply();
+    reply->mutable_answered_by()->CopyFrom(req.routed_request().authority_ref());
+    reply->set_path_family(req.routed_request().path_family());
+    reply->set_stage_ref(req.routed_request().stage_ref());
+    reply->set_reply_kind(tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_RETRY_LATER);
+    auto* attachment = reply->mutable_attachment_ref();
+    attachment->mutable_authority_ref()->CopyFrom(req.routed_request().authority_ref());
+    attachment->set_attachment_kind("operation");
+    attachment->set_attachment_id("op-retry-later");
+  });
+  grpc::ServerBuilder builder;
+  int selected_port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+  builder.RegisterService(&fake_service);
+  auto server = builder.BuildAndStart();
+  REQUIRE(server != nullptr);
+  REQUIRE(selected_port != 0);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cmV0cnktbGF0ZXI~layout_v1~b64u.azY";
+  tensorcast::common::v1::PayloadRefScope scope;
+  scope.set_payload_id("payload-retry-later");
+  scope.set_artifact_id(artifact_id);
+  scope.set_payload_size(5);
+  scope.set_digest_alg("sha256");
+  scope.set_digest_hex("275876e34cf609db118f3d84b799a790");
+  scope.set_direction(tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET);
+  scope.set_operation_id("op-retry-later");
+  auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  REQUIRE(scope_or.ok());
+  auto payload_ref_or = front.harness->kernel().capability_tokens()->mint(
+      kHomeDaemonId,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
+      *scope_or,
+      static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(1))));
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::Seconds(10),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-retry-later");
+  REQUIRE_FALSE(capability_or.ok());
+  CHECK(capability_or.status().code() == absl::StatusCode::kUnavailable);
+
+  {
+    absl::MutexLock lock(&captured_mu);
+    REQUIRE(captured_request.has_routed_request());
+    CHECK(captured_request.routed_request().has_hop_auth_context());
+    CHECK(
+        captured_request.routed_request().hop_auth_context().auth_class() ==
+        tensorcast::daemon::v2::ROUTED_DAEMON_HOP_AUTH_CLASS_DEPLOYMENT_TRUSTED_CHANNEL);
+    CHECK(captured_request.routed_request().has_portable_credential_envelope());
+    CHECK(
+        captured_request.routed_request().portable_credential_envelope().bound_root_request_id() ==
+        "payload-ref:payload-retry-later");
+    CHECK(
+        captured_request.routed_request().portable_credential_envelope().payload_kind() ==
+        tensorcast::daemon::v2::ROUTED_DELEGATION_PAYLOAD_KIND_PORTABLE_CREDENTIAL);
+    CHECK(captured_request.routed_request().has_forwardable_evidence_envelope());
+    CHECK(
+        captured_request.routed_request().forwardable_evidence_envelope().payload_kind() ==
+        tensorcast::daemon::v2::ROUTED_DELEGATION_PAYLOAD_KIND_FORWARDABLE_EVIDENCE);
+    CHECK(captured_request.routed_request().forwarded_claims_size() == 0);
+  }
+
+  server->Shutdown();
+}
+
+TEST_CASE(
+    "payload_ref remote issuer terminal reply surfaces terminal status",
+    "[daemon][batch][redirect][issuer_route][terminal]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_terminal");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+
+  RouteAuthorityStageTestService fake_service([&](const auto& req, auto* resp) {
+    resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+    auto* reply = resp->mutable_owner_stage_reply();
+    reply->mutable_answered_by()->CopyFrom(req.routed_request().authority_ref());
+    reply->set_path_family(req.routed_request().path_family());
+    reply->set_stage_ref(req.routed_request().stage_ref());
+    reply->set_reply_kind(tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_TERMINAL);
+    auto* terminal = reply->mutable_terminal_projection();
+    terminal->set_projection_kind(tensorcast::daemon::v2::ROUTED_TERMINAL_PROJECTION_KIND_SEMANTIC_REJECT);
+    terminal->set_status_code("permission_denied");
+  });
+  grpc::ServerBuilder builder;
+  int selected_port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+  builder.RegisterService(&fake_service);
+  auto server = builder.BuildAndStart();
+  REQUIRE(server != nullptr);
+  REQUIRE(selected_port != 0);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dGVybWluYWw~layout_v1~b64u.azc";
+  tensorcast::common::v1::PayloadRefScope scope;
+  scope.set_payload_id("payload-terminal");
+  scope.set_artifact_id(artifact_id);
+  scope.set_payload_size(5);
+  scope.set_digest_alg("sha256");
+  scope.set_digest_hex("275876e34cf609db118f3d84b799a790");
+  scope.set_direction(tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET);
+  scope.set_operation_id("op-terminal");
+  auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  REQUIRE(scope_or.ok());
+  auto payload_ref_or = front.harness->kernel().capability_tokens()->mint(
+      kHomeDaemonId,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
+      *scope_or,
+      static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(1))));
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::Seconds(10),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-terminal");
+  REQUIRE_FALSE(capability_or.ok());
+  CHECK(capability_or.status().code() == absl::StatusCode::kPermissionDenied);
+
+  server->Shutdown();
+}
+
+TEST_CASE(
+    "payload_ref remote issuer stage failure does not fall back to chunk fetch for authority",
+    "[daemon][batch][redirect][issuer_route][fail_closed]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_fail_closed");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+
+  absl::Mutex fetch_mu;
+  std::size_t fetch_payload_ref_chunk_calls = 0;
+  RouteAuthorityStageTestService fake_service(
+      [&](const auto&, auto* resp) {
+        resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+        resp->set_message("issuer admission rejected");
+      },
+      [&](const auto&, auto* resp) {
+        absl::MutexLock lock(&fetch_mu);
+        ++fetch_payload_ref_chunk_calls;
+        resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+        resp->set_total_size(5);
+        resp->set_chunk("wrong");
+        resp->set_eof(true);
+      });
+  grpc::ServerBuilder builder;
+  int selected_port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+  builder.RegisterService(&fake_service);
+  auto server = builder.BuildAndStart();
+  REQUIRE(server != nullptr);
+  REQUIRE(selected_port != 0);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.ZmFpbC1jbG9zZWQ~layout_v1~b64u.azg";
+  tensorcast::common::v1::PayloadRefScope scope;
+  scope.set_payload_id("payload-fail-closed");
+  scope.set_artifact_id(artifact_id);
+  scope.set_payload_size(5);
+  scope.set_digest_alg("sha256");
+  scope.set_digest_hex("275876e34cf609db118f3d84b799a790");
+  scope.set_direction(tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET);
+  scope.set_operation_id("op-fail-closed");
+  auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  REQUIRE(scope_or.ok());
+  auto payload_ref_or = front.harness->kernel().capability_tokens()->mint(
+      kHomeDaemonId,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
+      *scope_or,
+      static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(1))));
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::Seconds(10),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-fail-closed");
+  REQUIRE_FALSE(capability_or.ok());
+  CHECK(capability_or.status().code() == absl::StatusCode::kFailedPrecondition);
+  CHECK(capability_or.status().message() == "issuer admission rejected");
+
+  {
+    absl::MutexLock lock(&fetch_mu);
+    CHECK(fetch_payload_ref_chunk_calls == 0);
+  }
+
+  server->Shutdown();
+}
+
+TEST_CASE(
+    "payload_ref remote issuer reply fails closed when continuity changes after a shape-valid reply",
+    "[daemon][batch][redirect][issuer_route][continuity]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_payload_ref_continuity");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false,
+      /*inline_payload_threshold_bytes=*/8);
+
+  RouteAuthorityStageTestService fake_service([&](const auto&, auto* resp) {
+    gs->upsert_worker(kHomeDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+    resp->set_status(tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+    auto* reply = resp->mutable_owner_stage_reply();
+    reply->mutable_answered_by()->set_authority_kind(tensorcast::daemon::v2::ROUTED_AUTHORITY_KIND_ISSUER_DAEMON);
+    reply->mutable_answered_by()->set_authority_id(kHomeDaemonId);
+    reply->set_path_family("immediate_lowering");
+    reply->set_stage_ref("issuer_validate");
+    reply->set_reply_kind(tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_READY_FOR_LOWERING);
+    reply->set_resolved_source_capability("{}");
+  });
+  grpc::ServerBuilder builder;
+  int selected_port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+  builder.RegisterService(&fake_service);
+  auto server = builder.BuildAndStart();
+  REQUIRE(server != nullptr);
+  REQUIRE(selected_port != 0);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Y29udGludWl0eS1pc3N1ZXI~layout_v1~b64u.azM";
+  tensorcast::common::v1::PayloadRefScope scope;
+  scope.set_payload_id("payload-continuity");
+  scope.set_artifact_id(artifact_id);
+  scope.set_payload_size(5);
+  scope.set_digest_alg("sha256");
+  scope.set_digest_hex("275876e34cf609db118f3d84b799a790");
+  scope.set_direction(tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET);
+  scope.set_operation_id("op-continuity");
+  auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  REQUIRE(scope_or.ok());
+  auto payload_ref_or = front.harness->kernel().capability_tokens()->mint(
+      kHomeDaemonId,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PAYLOAD_REF,
+      *scope_or,
+      static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(1))));
+  REQUIRE(payload_ref_or.ok());
+
+  auto capability_or = front.harness->kernel().payload_transport_broker().resolve_payload_ref_capability(
+      front.harness->kernel().worker_directory_cache(),
+      *payload_ref_or,
+      artifact_id,
+      absl::Now(),
+      absl::ZeroDuration(),
+      kFrontDaemonId,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-continuity");
+  REQUIRE_FALSE(capability_or.ok());
+  CHECK(capability_or.status().code() == absl::StatusCode::kUnavailable);
+
+  server->Shutdown();
 }
 
 TEST_CASE(

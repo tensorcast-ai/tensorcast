@@ -20,6 +20,7 @@
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "daemon/service/artifact_profile_registry.h"
+#include "daemon/util/grpc_daemon_transport.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
 #include "grpcpp/grpcpp.h"
@@ -676,9 +677,11 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
       });
     } else if (!item.payload_ref().empty()) {
       auto source_capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
+          d_.worker_directory_cache,
           item.payload_ref(),
           artifact_id,
           now,
+          absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
           local_daemon_id,
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
           req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
@@ -983,7 +986,7 @@ grpc::Status ByteArtifactController::batch_exists(
           }
           break;
         }
-        auto channel = grpc::CreateChannel(*address_or, grpc::InsecureChannelCredentials());
+        auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
         auto stub = v2::StoreDaemonService::NewStub(channel);
         grpc::ClientContext client_ctx;
         client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);
@@ -1308,7 +1311,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
           }
           break;
         }
-        auto channel = grpc::CreateChannel(*address_or, grpc::InsecureChannelCredentials());
+        auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
         auto stub = v2::StoreDaemonService::NewStub(channel);
         grpc::ClientContext client_ctx;
         client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);
@@ -1500,9 +1503,11 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       });
     } else if (!pending->payload_ref.empty()) {
       auto source_capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
+          d_.worker_directory_cache,
           pending->payload_ref,
           pending->artifact_id,
           now,
+          absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
           local_daemon_id,
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
           operation_id);
@@ -1834,7 +1839,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
         }
         break;
       }
-      auto channel = grpc::CreateChannel(*address_or, grpc::InsecureChannelCredentials());
+      auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
       auto stub = v2::StoreDaemonService::NewStub(channel);
       grpc::ClientContext client_ctx;
       client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);
@@ -2068,7 +2073,7 @@ grpc::Status ByteArtifactController::batch_touch_ttl(
           }
           break;
         }
-        auto channel = grpc::CreateChannel(*address_or, grpc::InsecureChannelCredentials());
+        auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
         auto stub = v2::StoreDaemonService::NewStub(channel);
         grpc::ClientContext client_ctx;
         client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);

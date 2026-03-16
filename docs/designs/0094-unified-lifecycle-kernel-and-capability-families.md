@@ -4,7 +4,7 @@ title: Phase 3 - Local Lifecycle Kernel, Fencing-Aware Capability Semantics, and
 status: accepted
 areas: ["core", "daemon", "sdk", "docs", "tests"]
 created: 2026-03-09
-last_updated: 2026-03-10
+last_updated: 2026-03-16
 related_code:
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0011-unified-session-lifecycle-leases.md
@@ -15,7 +15,7 @@ related_code:
   - docs/designs/0091-selection-identity-resolved-source-and-verified-content-descriptor.md
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
-  - docs/designs/0095-issuer-routed-capability-redemption-and-handoff-boundary.md
+  - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
   - docs/designs/0096-workflow-companion-admission-and-fencing.md
   - docs/architecture/api/policy-persistence.md
   - core/common/capability_token.h
@@ -49,7 +49,6 @@ related_code:
   - daemon/service/controllers/byte_artifact_controller.cc
   - daemon/service/controllers/registration_controller.cc
 links:
-  plan: ../plans/0094-unified-lifecycle-kernel-and-capability-families.md
   dependencies:
     - ./0001-docs-system-design.md
     - ./0011-unified-session-lifecycle-leases.md
@@ -62,7 +61,7 @@ links:
     - ./0093-backing-identity-and-retained-backing-ownership.md
     - ../architecture/api/policy-persistence.md
   followups:
-    - ./0095-issuer-routed-capability-redemption-and-handoff-boundary.md
+    - ./0100-distributed-authority-handoff-security-and-public-surfaces.md
     - ./0096-workflow-companion-admission-and-fencing.md
 ---
 
@@ -108,8 +107,8 @@ Phase 3 now standardizes five long-term rules:
    are distinct and not interchangeable,
 3. redemption is a shared protocol seam:
    - front-door parse or decode,
-   - issuer-side lifecycle admission,
-   - workflow admission when required,
+   - then one or more distributed stages declared by `0100` when the path is non-local,
+   - with local lifecycle admission or adopted protection applied where the declared path family requires it,
    - then family realization into the shared dataplane,
 4. the lifecycle kernel in this repository means the volatile protection kernel:
    - it protects a bounded runtime promise that truth or workflow already authorized,
@@ -121,8 +120,8 @@ Phase 3 now standardizes five long-term rules:
 This design therefore makes three boundaries explicit:
 
 1. `0094` owns the local kernel and local capability state machine,
-2. `0095` owns issuer-routed redemption, endpoint resolution, and the handoff or recovery boundary for issued
-   capabilities,
+2. `0100` owns distributed-authority ingress, issuer-routed redemption, endpoint resolution, and the handoff or
+   recovery boundary for issued capabilities,
 3. `0096` owns the workflow-companion protocol for replay, currentness, fencing, and status.
 
 This document now serves as the accepted post-landing baseline for the `0094` cut.
@@ -168,8 +167,8 @@ Focused verification for the landed cut includes:
 What remains outside the completed `0094` cut is not the local kernel itself, but the higher-level protocol work around
 it:
 
-- `0095` still needs to finish the shared issuer-routing protocol and route-directory contract on top of the landed
-  `LifecycleRoutePrincipal` boundary.
+- `0100` still needs to finish the shared distributed-authority protocol, route-directory contract, and issuer handoff
+  rules on top of the landed `LifecycleRoutePrincipal` boundary.
 - `0096` still needs to finish the shared workflow gate and workflow outcome protocol on top of the landed
   `WorkflowCompanionRef` and lifecycle use-guard boundary.
 - generic internal-record and standalone binding-issuance APIs remain reserved follow-up concepts; they are not part of
@@ -185,8 +184,7 @@ Accepted decisions for the landed Phase-3 cut:
 3. Route discovery, issuer handoff or recovery, and workflow semantic truth remain outside the kernel by design.
 4. The accepted source of truth for the shared lifecycle object model is the executable surface in
    `daemon/state/lifecycle_kernel.h`; design prose must follow that surface unless a later change updates both together.
-5. The completed execution record for this cut remains in
-   `docs/plans/0094-unified-lifecycle-kernel-and-capability-families.md`.
+5. The final execution record for this cut is captured in this design; no companion plan is retained after completion.
 
 # Problem Statement
 
@@ -314,8 +312,8 @@ adapters instead of converging on stable family semantics.
 - Standardize structured workflow references through `WorkflowCompanionRef` rather than raw `workflow_ref` strings.
 - Standardize one shared redemption seam:
   - front-door parse or decode,
-  - issuer-side lifecycle admission,
-  - workflow admission when required,
+  - then one or more `0100`-declared distributed stages when the path is non-local,
+  - with lifecycle admission or adopted protection applied where the declared path requires it,
   - family realization into shared execution.
 - Standardize an admission transaction that atomically checks active lifecycle state and acquires runtime protection
   before family realization starts.
@@ -326,7 +324,7 @@ adapters instead of converging on stable family semantics.
 - Preserve `0093` by treating `ServingCapability` as the `serve`-family projection of the shared lifecycle contract.
 - Preserve `0089` and `0092` by keeping execution and transport ordering outside the lifecycle kernel.
 - Preserve the explicit non-recoverability of issued capability state in this phase.
-- Make the long-term split with `0095` and `0096` explicit instead of leaving it implicit.
+- Make the long-term split with `0100` and `0096` explicit instead of leaving it implicit.
 
 ## Non-Goals
 
@@ -358,7 +356,7 @@ flowchart LR
   C["Workflow semantic state<br>0055 0060 0096"] --> B
   B --> D["Family resolver"]
   D --> E["Shared dataplane<br>0089 0092"]
-  B -. issuer-routed redemption .-> F["0095"]
+  B -. issuer-routed redemption .-> F["0100"]
   A --> G["Future recovery or handoff"]
   C --> G
   B -. not recovered in phase 3 .-> G
@@ -372,7 +370,7 @@ Phase 3 standardizes six adjacent categories:
 | workflow semantic state | what is replayable, current, fenced, cancellable, or waiting | `0055`, `0060`, family workflow owners, `0096` | only if separately designed |
 | local lifecycle subject | what runtime subject is protected now | issuer-local lifecycle kernel | no |
 | local lifecycle capability | what bounded promise exists now | issuer-local lifecycle kernel over `SessionLifecycleManager` | no |
-| redemption protocol context | how a credential is parsed, routed, and admitted | front-door adapters plus `0095` and `0096` seams | no |
+| redemption protocol context | how a credential is parsed, routed, and admitted | front-door adapters plus `0100` and `0096` seams | no |
 | runtime realization | how an admitted capability becomes loader, export, pin, or publish admission | family resolvers plus shared dataplane | no |
 
 Normative rules:
@@ -380,7 +378,7 @@ Normative rules:
 1. `0093` remains authoritative for whether a new promise may be minted honestly.
 2. `0094` is authoritative for how a mintable promise is represented, admitted, renewed, drained, and released once it
    exists.
-3. `0095` is authoritative for issuer-routed redemption and the handoff or recovery boundary for issued capabilities.
+3. `0100` is authoritative for issuer-routed redemption and the handoff or recovery boundary for issued capabilities.
 4. `0096` is authoritative for workflow admission, currentness, replay, fencing, and the declared recovery boundary for
    those semantic outcomes.
 5. `0089` and `0092` remain authoritative for transport ordering, lowering, and execution seams.
@@ -404,7 +402,7 @@ flowchart LR
   B --> C["ParsedCredential"]
   C --> D{"issuer local?"}
   D -- yes --> E["admit_redemption<br>resolve plus protect"]
-  D -- no --> F["route to issuer<br>0095"]
+  D -- no --> F["route to issuer<br>0100"]
   F --> E
   E --> G["workflow admission<br>0096 when required"]
   G --> H["family realization"]
@@ -862,12 +860,12 @@ Repository-wide redemption becomes a five-step contract:
 
 1. front-door parse or decode:
    - raw credential or local transport request -> `ParsedCredential`,
-2. issuer-side lifecycle admission:
-   - `ParsedCredential.address` -> active capability context plus runtime protection,
-3. workflow admission when required:
-   - admitted capability context plus `WorkflowCompanionRef` -> admit, reject, replay, or fenced outcome,
+2. distributed path-family execution when the path is non-local:
+   - `0100` declares the legal owner stages, ordering, and reply transitions,
+3. lifecycle admission or adopted protection:
+   - the owning stage acquires `LifecycleUseGuard` or an explicit adopted equivalent before irreversible realization,
 4. family realization or handoff:
-   - admitted capability context -> loader, export, pin, or publish admission,
+   - admitted or adopted context -> loader, export, pin, or publish admission,
 5. release or adopt the runtime protection:
    - explicit release on reject,
    - or handoff to the family-owned execution path.
@@ -875,7 +873,7 @@ Repository-wide redemption becomes a five-step contract:
 Cross-daemon redemption is explicit:
 
 - if the issuer is local, the local kernel resolves the address directly,
-- if the issuer is remote, the caller routes redemption to the issuer according to `0095`,
+- if the issuer is remote, the caller routes redemption to the issuer according to `0100`,
 - remote consumers do not become lifecycle co-owners of issuer-owned capability state.
 
 Critical security rule:
@@ -984,6 +982,14 @@ Implementations may still factor pure lookup helpers internally.
 The family-facing contract must nevertheless be admission, not naked resolve, because admission is the point where the
 kernel turns current local state into protected runtime use.
 
+Critical boundary rule:
+
+- `LifecycleUseGuard` is owner-local runtime protection.
+- It is not a public SDK object.
+- It is not a distributed routing primitive.
+- It is not serializable or forwardable across daemon hops.
+- Cross-owner paths must convert admitted use into an explicitly adopted equivalent before returning to ingress.
+
 Executable-scope note:
 
 - the accepted `0094` baseline does not include a standalone generic `issue_binding_record(...)` API;
@@ -995,13 +1001,16 @@ Deliberate design points:
 
 - raw token bytes stay outside the kernel,
 - local peer-credential checks stay outside the kernel,
-- remote routing stays outside the kernel and is specified by `0095`,
-- workflow admission stays outside the kernel and is specified by `0096`,
+- remote routing stays outside the kernel and is specified by `0100`,
+- workflow semantic ownership stays outside the kernel and is specified by `0096`,
+- distributed stage ordering stays outside the kernel and is specified by `0100`,
 - transport-path and loader choice stay outside the kernel,
 - lifecycle record indexing, generation or fencing checks, admission, renewal, release, and finalization stay inside
   the kernel.
 - family realization begins only after `admit_redemption` returns an active `LifecycleUseGuard` or an equivalent adopted
   protection.
+- that adopted protection must be explicit; for byte-moving distributed paths, `0093` defines the canonical bridge as
+  `ResolvedSourceCapability.serving_capability`.
 
 ## 7. State machines and clocks
 
@@ -1053,11 +1062,16 @@ Required rules:
 1. no family may start irreversible realization without an admitted `LifecycleUseGuard` or an equivalent protection that
    was explicitly adopted from it,
 2. if admission races with drain, expiry, or release, exactly one side wins and the loser fails closed,
-3. workflow semantic checks that run after lifecycle admission must either:
+3. whether workflow semantic checks happen before or after lifecycle admission is path-family-owned by `0100`, not by
+   `0094`,
+4. workflow semantic checks that run after lifecycle admission must either:
    - keep the `LifecycleUseGuard` held while they decide,
    - or explicitly release it before returning a non-admit outcome,
-4. the concrete implementation may map `LifecycleUseGuard` onto `SessionLifecycleManager` guards, lease refs, or an
+5. the concrete implementation may map `LifecycleUseGuard` onto `SessionLifecycleManager` guards, lease refs, or an
    equivalent direct successor, but the semantic contract must be shared.
+6. any equivalent adopted protection must be named by the owning design; it must not be implied by a private owner-local
+   execution state.
+7. `LifecycleUseGuard` itself must never cross a daemon hop; distributed designs return only an adopted equivalent.
 
 ### 7.3 Binding-record state machine
 
@@ -1215,7 +1229,7 @@ After Phase 3:
 
 - remains responsible for `payload_ref` parsing, inline snapshot cache, and chunk fallback,
 - no longer remains the primary lifecycle owner for serving promises,
-- continues supporting issuer-routed redemption through `WorkerDirectoryCache` or its `0095` successor,
+- continues supporting issuer-routed redemption through `WorkerDirectoryCache` or its `0100`-defined successor,
 - broker-local maps become capability records or adapter caches rather than a second semantic lifecycle system.
 
 Current grounding:
@@ -1286,7 +1300,7 @@ After the accepted `0094` cut:
 - a generic internal-record surface remains reserved follow-up work only if later cuts prove it is needed across
   multiple subsystems.
 
-## 10. Relationship to `0055`, `0060`, `0095`, `0096`, and future recovery
+## 10. Relationship to `0055`, `0060`, `0100`, `0096`, and future recovery
 
 `0055` remains authoritative for:
 
@@ -1305,8 +1319,10 @@ After the accepted `0094` cut:
 - delivery semantics,
 - and issuer-routing requirements for queue-managed issuer-scoped resources.
 
-`0095` is the companion design for:
+`0100` is the companion design for:
 
+- distributed-authority ingress,
+- portable credential or evidence routing rules,
 - issuer-routed redemption,
 - route directory semantics,
 - stale-route refresh,
@@ -1380,6 +1396,7 @@ Required invariants:
 7. Authority turnover must not be approximated by "best effort" local routing; stale `FencingContext` values must
    reject stale credentials when the family requires fencing.
 8. Remote redemption must not drop security-relevant claims while routing to the issuer.
+9. Remote redemption must not forward `LifecycleUseGuard`; it may only return an explicitly adopted equivalent.
 9. Workflow companion state must not be inferred from capability presence alone.
 10. Family adapters may cache results, but authoritative validity must still come from issuer-local lifecycle state plus
    required workflow admission.
@@ -1431,7 +1448,7 @@ Required error split:
 - Make the lifecycle kernel own token protobuf parsing and raw credential bytes.
   - Rejected because token bytes and local transport security are front-door concerns, not core lifecycle concerns.
 - Make the lifecycle kernel own remote routing and transport-path selection.
-  - Rejected because routing belongs to `0095` and shared execution belongs to `0089` and `0092`.
+  - Rejected because routing belongs to `0100` and shared execution belongs to `0089` and `0092`.
 - Force every compatibility profile onto one wire shape immediately.
   - Rejected because local opaque-token adapters are still required for local security and compatibility in Phase 3.
 - Keep the public lifecycle API as pure lookup plus later use.
@@ -1488,7 +1505,7 @@ This phase standardizes:
 - front-door adapter boundaries,
 - and shared observability semantics.
 
-Any future durable handoff or recovered-capability work belongs to `0095` or a later follow-up design and must define
+Any future durable handoff or recovered-capability work belongs to `0100` or a later follow-up design and must define
 its own schema changes explicitly.
 
 # Trade-offs & Risks
@@ -1565,7 +1582,7 @@ Acceptance criteria:
 The accepted `0094` baseline is intentionally narrow.
 The following work remains on top of it:
 
-- `0095` must finish the daemon-owned issuer-routing protocol on top of `LifecycleRoutePrincipal`:
+- `0100` must finish the daemon-owned distributed-authority protocol on top of `LifecycleRoutePrincipal`:
   - stable route identity must be expressed through the shared route-principal vocabulary rather than through an
     adapter-specific `issuer_daemon_id` shape,
   - route resolution must remain daemon-owned so SDK clients continue to connect only to their node-local daemon,
@@ -1591,5 +1608,6 @@ The following work remains on top of it:
 - `0091` for shared selection and content truth.
 - `0092` for the repository-wide lifecycle-versus-truth-versus-execution constitution.
 - `0093` for backing truth, `PolicyVisibilityRef`, and `ServingCapability`.
-- `0095` for issuer-routed redemption, route directories, and the handoff or recovery boundary for issued capabilities.
+- `0100` for distributed-authority ingress, issuer-routed redemption, route directories, and the handoff or recovery
+  boundary for issued capabilities.
 - `0096` for workflow-companion admission, currentness, replay, and fencing.

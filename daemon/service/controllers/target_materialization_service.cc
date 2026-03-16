@@ -464,6 +464,32 @@ absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::
   return target_publish_service_.remember_target_publication(std::move(record));
 }
 
+absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> TargetMaterializationService::
+    inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now) {
+  return target_publish_service_.inspect_target_publication_context(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> TargetMaterializationService::
+    build_target_publication_workflow_routed_request_for_testing(
+        const v2::PublishTargetReplicaRequest& req,
+        absl::Time now) const {
+  return target_publish_service_.build_target_publication_workflow_routed_request(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> TargetMaterializationService::
+    build_target_publication_workflow_continuation_request_for_testing(
+        const RoutedAuthorityRequest& routed_request,
+        const OwnerStageReply& workflow_gate_reply) const {
+  return target_publish_service_.build_target_publication_workflow_continuation_request(
+      routed_request, workflow_gate_reply);
+}
+
+absl::StatusOr<std::optional<OwnerStageReply>> TargetMaterializationService::maybe_route_authority_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  return target_publish_service_.maybe_route_authority_stage(routed_request, now);
+}
+
 grpc::Status TargetMaterializationService::materialize_into_target(
     RpcContext& rctx,
     const v2::MaterializeIntoTargetRequest& req,

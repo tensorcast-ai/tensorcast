@@ -14,6 +14,14 @@
 namespace tensorcast::daemon {
 
 struct DaemonOptions {
+  struct InterDaemonGrpcSecurity {
+    bool tls_enabled{false};
+    bool mutual_auth_enabled{false};
+    std::string cert_chain_pem;
+    std::string private_key_pem;
+    std::string root_cert_pem;
+  };
+
   struct PostSealPolicy {
     bool migrate_views{false};
     bool migrate_transpose_only{false};
@@ -52,6 +60,7 @@ struct DaemonOptions {
 
   // Stable daemon identity for control-plane actions (derived from DaemonConfig.daemon_id).
   std::string daemon_id;
+  InterDaemonGrpcSecurity inter_daemon_grpc_security{};
 
   struct ByteArtifactRouting {
     struct PayloadTransport {

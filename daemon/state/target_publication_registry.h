@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/types.h"
 #include "tensorcast/common/v1/common.pb.h"
 
@@ -37,6 +38,9 @@ class TargetPublicationRegistry {
     absl::Time expires_at{absl::InfinitePast()};
     std::string capability_id;
     std::uint64_t lease_id{0};
+    std::optional<WorkflowBindingProjection> workflow_binding_projection;
+    std::optional<WorkflowOutcomeProjection> replay_outcome_projection;
+    WorkflowRecoveryClass workflow_recovery_class{WorkflowRecoveryClass::kEphemeralProcessLocal};
     std::vector<LeaseSegMeta> segments;
     std::vector<RegisterStorageMeta> storages;
   };

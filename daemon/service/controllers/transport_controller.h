@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "core/store/store_engine.h"
 #include "daemon/service/payload_transport_broker.h"
 #include "daemon/service/rpc_context.h"
@@ -13,12 +15,15 @@
 
 namespace tensorcast::daemon {
 
+class MaterializationController;
+
 class TransportController {
  public:
   struct Dep {
     store::StoreEngine& engine;
     TransportLockManager& locks;
     LipManager& lip;
+    MaterializationController* materialization_controller{nullptr};
     PayloadTransportBroker* payload_transport_broker{nullptr};
   };
 
@@ -35,6 +40,11 @@ class TransportController {
       RpcContext& rctx,
       const v2::FetchPayloadRefChunkRequest& req,
       v2::FetchPayloadRefChunkResponse& resp);
+
+  grpc::Status route_authority_stage(
+      RpcContext& rctx,
+      const v2::RouteAuthorityStageRequest& req,
+      v2::RouteAuthorityStageResponse& resp);
 
  private:
   Dep d_;

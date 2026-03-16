@@ -222,6 +222,14 @@ Status StoreDaemonServiceImpl::FetchPayloadRefChunk(
   return transport_controller_->fetch_payload_ref_chunk(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::RouteAuthorityStage(
+    grpc::ServerContext* ctx,
+    const v2::RouteAuthorityStageRequest* req,
+    v2::RouteAuthorityStageResponse* resp) {
+  RpcContext rctx{"RouteAuthorityStage", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->route_authority_stage(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::HomeBatchTouchTtl(
     grpc::ServerContext* ctx,
     const v2::HomeBatchTouchTtlRequest* req,

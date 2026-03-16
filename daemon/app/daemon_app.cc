@@ -177,6 +177,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
           .engine = app->kernel_->engine(),
           .persistence_manager = app->kernel_->persistence_manager(),
           .global_store_client = app->options_.global_store_client,
+          .inter_daemon_channel_credentials = app->kernel_->inter_daemon_channel_credentials(),
       },
       ByteArtifactController::Options{
           .routing =

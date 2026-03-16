@@ -322,6 +322,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::FetchPayloadRefChunkRequest* req,
       v2::FetchPayloadRefChunkResponse* resp) override;
 
+  grpc::Status RouteAuthorityStage(
+      grpc::ServerContext* ctx,
+      const v2::RouteAuthorityStageRequest* req,
+      v2::RouteAuthorityStageResponse* resp) override;
+
  private:
   store::StoreEngine* engine_;
   MaterializationController* materialization_controller_;

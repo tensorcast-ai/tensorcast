@@ -6,8 +6,10 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 #include "absl/status/statusor.h"
+#include "absl/time/time.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
@@ -26,6 +28,7 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/ref_tracker.h"
+#include "daemon/state/routed_authority_protocol.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
@@ -83,6 +86,22 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
+
+  [[nodiscard]] absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext>
+  inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now);
+
+  [[nodiscard]] absl::StatusOr<RoutedAuthorityRequest> build_target_publication_workflow_routed_request_for_testing(
+      const v2::PublishTargetReplicaRequest& req,
+      absl::Time now) const;
+
+  [[nodiscard]] absl::StatusOr<RoutedAuthorityRequest>
+  build_target_publication_workflow_continuation_request_for_testing(
+      const RoutedAuthorityRequest& routed_request,
+      const OwnerStageReply& workflow_gate_reply) const;
+
+  [[nodiscard]] absl::StatusOr<std::optional<OwnerStageReply>> maybe_route_authority_stage(
+      const RoutedAuthorityRequest& routed_request,
+      absl::Time now);
 
   grpc::Status import_artifact_from_path(
       RpcContext& rctx,

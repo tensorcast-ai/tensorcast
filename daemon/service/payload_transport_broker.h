@@ -14,15 +14,24 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
 #include "core/common/capability_token.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "daemon/service/body_backing_types.h"
 #include "daemon/service/byte_artifact_body_handle.h"
+#include "daemon/state/daemon_options.h"
 #include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/session_lifecycle.h"
+#include "grpcpp/security/credentials.h"
 #include "tensorcast/common/v1/capability_token.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
+
+struct AuthorityRef;
+struct PortableParsedCredential;
+struct OwnerStageReply;
+struct RoutedAuthorityRequest;
 
 class WorkerDirectoryCache;
 
@@ -33,6 +42,8 @@ class PayloadTransportBroker {
     std::uint64_t max_chunk_bytes{1ULL << 20};
     absl::Duration fetch_deadline{absl::Seconds(5)};
     absl::Duration cleanup_interval{absl::Minutes(1)};
+    std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials;
+    DaemonOptions::InterDaemonGrpcSecurity inter_daemon_grpc_security{};
   };
 
   struct RefMetadata {
@@ -56,6 +67,11 @@ class PayloadTransportBroker {
     RefMetadata metadata;
     std::unique_ptr<store::IArtifactLoader> loader;
     bool remote{false};
+  };
+
+  struct PayloadRefFrontDoorContext {
+    RefMetadata metadata;
+    FrontDoorCredentialContext front_door_context;
   };
 
   PayloadTransportBroker(
@@ -102,6 +118,14 @@ class PayloadTransportBroker {
       absl::Time now,
       bool require_not_expired) const;
 
+  [[nodiscard]] absl::StatusOr<PayloadRefFrontDoorContext> inspect_payload_ref_context(
+      std::string_view payload_ref,
+      std::string_view expected_artifact_id,
+      absl::Time now,
+      tensorcast::common::v1::PayloadRefDirection expected_direction =
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
+      std::string_view expected_operation_id = "");
+
   [[nodiscard]] absl::StatusOr<ResolvedPayload> resolve_local_payload_ref(
       std::string_view payload_ref,
       std::string_view expected_artifact_id,
@@ -111,9 +135,11 @@ class PayloadTransportBroker {
       std::string_view expected_operation_id = "");
 
   [[nodiscard]] absl::StatusOr<ResolvedSourceCapability> resolve_payload_ref_capability(
+      WorkerDirectoryCache& worker_directory_cache,
       std::string_view payload_ref,
       std::string_view expected_artifact_id,
       absl::Time now,
+      absl::Duration worker_directory_staleness_budget,
       std::string_view local_daemon_id,
       tensorcast::common::v1::PayloadRefDirection expected_direction =
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
@@ -157,7 +183,17 @@ class PayloadTransportBroker {
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
       std::string_view expected_operation_id = "");
 
+  [[nodiscard]] absl::StatusOr<RoutedAuthorityRequest> build_payload_ref_issuer_routed_request(
+      const RefMetadata& metadata,
+      const FrontDoorCredentialContext& front_door_context,
+      std::string_view route_address,
+      absl::Span<const LocalObservationRoutingRule> local_observation_rules = {}) const;
+
   void prune(absl::Time now);
+
+  [[nodiscard]] const std::string& daemon_id() const {
+    return daemon_id_;
+  }
 
   [[nodiscard]] std::uint64_t max_chunk_bytes() const {
     return options_.max_chunk_bytes;
@@ -167,9 +203,18 @@ class PayloadTransportBroker {
     return options_.fetch_deadline;
   }
 
+  [[nodiscard]] absl::StatusOr<OwnerStageReply> route_authority_stage(
+      const RoutedAuthorityRequest& routed_request,
+      absl::Time now);
+
+  [[nodiscard]] absl::StatusOr<std::optional<OwnerStageReply>> maybe_route_authority_stage(
+      const RoutedAuthorityRequest& routed_request,
+      absl::Time now);
+
  private:
   struct LocalResolvedPayload {
     RefMetadata metadata;
+    FrontDoorCredentialContext front_door_context;
     std::shared_ptr<const std::string> payload;
     BodyHandle body_handle;
     BodyDescriptor descriptor;
@@ -193,6 +238,30 @@ class PayloadTransportBroker {
       absl::Time now,
       tensorcast::common::v1::PayloadRefDirection expected_direction,
       std::string_view expected_operation_id);
+  [[nodiscard]] absl::StatusOr<AuthorityRef> derive_issuer_authority_ref(
+      const FrontDoorCredentialContext& front_door_context) const;
+  [[nodiscard]] absl::StatusOr<PortableParsedCredential> derive_payload_ref_portable_credential(
+      const FrontDoorCredentialContext& front_door_context) const;
+  [[nodiscard]] absl::StatusOr<OwnerStageReply> resolve_payload_ref_issuer_reply(
+      std::string_view payload_ref,
+      const LocalResolvedPayload& local_resolved_payload,
+      bool remote_consumer);
+  [[nodiscard]] absl::StatusOr<OwnerStageReply> route_payload_ref_issuer_stage(
+      const RoutedAuthorityRequest& routed_request,
+      absl::Time now);
+  [[nodiscard]] absl::StatusOr<ResolvedSourceCapability> resolve_payload_ref_capability_from_reply(
+      const OwnerStageReply& issuer_reply) const;
+  [[nodiscard]] absl::StatusOr<ResolvedSourceCapability> resolve_remote_payload_ref_capability_via_issuer_route(
+      WorkerDirectoryCache& worker_directory_cache,
+      std::string_view payload_ref,
+      const RefMetadata& metadata,
+      const FrontDoorCredentialContext& front_door_context,
+      absl::Time now,
+      absl::Duration worker_directory_staleness_budget);
+  [[nodiscard]] FrontDoorCredentialContext build_payload_ref_front_door_context(
+      const RefMetadata& metadata,
+      std::string_view payload_ref,
+      std::uint64_t subject_generation) const;
   [[nodiscard]] std::string mint_payload_id() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void prune_locked(absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 

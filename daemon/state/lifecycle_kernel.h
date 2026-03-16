@@ -4,9 +4,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
@@ -17,6 +19,10 @@
 #include "core/store/runtime/ingestion/artifact_truth.h"
 
 namespace tensorcast::daemon {
+
+enum class AuthorityKind : std::uint8_t;
+struct AuthorityRef;
+struct AuthorityAttachmentRef;
 
 enum class LifecycleCapabilityFamily : std::uint8_t {
   kServe = 0,
@@ -142,6 +148,130 @@ struct WorkflowCompanionRef {
   bool operator==(const WorkflowCompanionRef&) const = default;
 };
 
+enum class WorkflowRecoveryClass : std::uint8_t {
+  kEphemeralProcessLocal = 0,
+  kLocalRecoverable = 1,
+  kReplicatedAuthority = 2,
+};
+
+enum class WorkflowDecisionClass : std::uint8_t {
+  kAdmit = 0,
+  kReplay = 1,
+  kStaleCurrent = 2,
+  kFenced = 3,
+  kCancelled = 4,
+  kFailedPrecondition = 5,
+};
+
+enum class WorkflowObservationKind : std::uint8_t {
+  kReplayLookup = 0,
+  kJoinLookup = 1,
+  kStatus = 2,
+  kWait = 3,
+  kCurrentness = 4,
+};
+
+enum class WorkflowOutcomeProjectionKind : std::uint8_t {
+  kExistingCapability = 0,
+  kStatusSnapshot = 1,
+  kCurrentWinnerHint = 2,
+  kFamilyDefined = 3,
+};
+
+enum class WorkflowCompletionClass : std::uint8_t {
+  kCompleted = 0,
+  kFailed = 1,
+  kCancelled = 2,
+  kReleasedWithoutRealization = 3,
+};
+
+struct WorkflowIssueContext {
+  std::string family;
+  std::optional<std::string> adapter_kind;
+  std::optional<WorkflowCompanionRef> requested_workflow_ref;
+  std::optional<std::string> currentness_key;
+  std::optional<std::string> request_operation_id;
+  std::optional<FencingContext> requested_fencing_context;
+
+  bool operator==(const WorkflowIssueContext&) const = default;
+};
+
+struct WorkflowBindingProjection {
+  WorkflowCompanionRef resolved_workflow_ref;
+
+  bool operator==(const WorkflowBindingProjection&) const = default;
+};
+
+struct WorkflowRedemptionContext {
+  std::string family;
+  std::optional<std::string> adapter_kind;
+  WorkflowCompanionRef workflow_ref;
+  std::optional<std::string> capability_id;
+  std::optional<std::string> subject_id;
+  std::optional<std::string> binding_id;
+  std::optional<FencingContext> lifecycle_fencing_context;
+  std::optional<std::string> request_operation_id;
+
+  bool operator==(const WorkflowRedemptionContext&) const = default;
+};
+
+struct WorkflowOutcomeProjection {
+  WorkflowOutcomeProjectionKind projection_kind{WorkflowOutcomeProjectionKind::kFamilyDefined};
+  std::string owner_workflow_id;
+  std::shared_ptr<AuthorityAttachmentRef> attachment_ref;
+  std::optional<std::string> existing_capability_id;
+  std::optional<std::string> status_summary;
+  std::optional<std::string> current_winner_workflow_id;
+  std::optional<std::string> family_payload;
+
+  bool operator==(const WorkflowOutcomeProjection&) const = default;
+};
+
+struct WorkflowGateDecision {
+  WorkflowDecisionClass decision_class{WorkflowDecisionClass::kFailedPrecondition};
+  WorkflowCompanionRef resolved_workflow_ref;
+  std::optional<WorkflowBindingProjection> binding_projection;
+  std::optional<WorkflowOutcomeProjection> outcome_projection;
+  std::optional<std::string> diagnostics;
+
+  bool operator==(const WorkflowGateDecision&) const = default;
+};
+
+struct WorkflowObservationQuery {
+  WorkflowCompanionRef workflow_ref;
+  WorkflowObservationKind observation_kind{WorkflowObservationKind::kStatus};
+  std::optional<std::string> adapter_kind;
+  std::optional<std::string> capability_id;
+  std::optional<std::string> subject_id;
+  std::optional<std::string> binding_id;
+  std::optional<absl::Time> wait_deadline;
+  std::optional<std::string> request_operation_id;
+
+  bool operator==(const WorkflowObservationQuery&) const = default;
+};
+
+struct WorkflowObservationResult {
+  WorkflowObservationKind observation_kind{WorkflowObservationKind::kStatus};
+  WorkflowCompanionRef resolved_workflow_ref;
+  std::optional<WorkflowOutcomeProjection> outcome_projection;
+  std::optional<bool> ready;
+  std::optional<std::string> diagnostics;
+
+  bool operator==(const WorkflowObservationResult&) const = default;
+};
+
+struct WorkflowCompletionContext {
+  std::string family;
+  std::optional<std::string> adapter_kind;
+  WorkflowCompanionRef workflow_ref;
+  WorkflowCompletionClass completion_class{WorkflowCompletionClass::kCompleted};
+  std::optional<std::string> capability_id;
+  std::optional<std::string> subject_id;
+  std::optional<std::string> completion_details;
+
+  bool operator==(const WorkflowCompletionContext&) const = default;
+};
+
 [[nodiscard]] inline LifecycleRoutePrincipal make_issuer_route_principal(std::string_view issuer_daemon_id) {
   return LifecycleRoutePrincipal{
       .principal_kind = LifecycleRoutePrincipalKind::kIssuerDaemon,
@@ -210,6 +340,8 @@ struct CapabilityBindingAddress {
   std::string binding_key;
   LifecycleEpochs epochs;
   std::optional<std::string> binding_id;
+
+  bool operator==(const CapabilityBindingAddress&) const = default;
 };
 
 struct LifecycleBindingRecord {
@@ -229,6 +361,83 @@ struct ParsedCredential {
   CredentialCarriageKind carriage_kind{CredentialCarriageKind::kSelfDescribing};
   LifecycleBindingMode binding_mode{LifecycleBindingMode::kAddressDerived};
   ConstraintClaims constraint_claims;
+
+  bool operator==(const ParsedCredential&) const = default;
+};
+
+enum class CredentialEvidenceKind : std::uint8_t {
+  kRawCredential = 0,
+  kIssuerVerifiableProjection = 1,
+  kRelayAttestedProjection = 2,
+};
+
+enum class LocalObservationRoutingAction : std::uint8_t {
+  kConsume = 0,
+  kReject = 1,
+  kTranslateToForwardedClaim = 2,
+};
+
+struct CanonicalCredentialProjection {
+  std::string projection_kind;
+  std::string projection_version;
+  std::string projection_bytes;
+  std::string projection_digest;
+  std::string issuer_binding;
+  std::optional<std::string> projection_authenticator;
+
+  bool operator==(const CanonicalCredentialProjection&) const = default;
+};
+
+struct ForwardableCredentialEvidence {
+  CredentialEvidenceKind evidence_kind{CredentialEvidenceKind::kRawCredential};
+  std::optional<std::string> raw_credential_bytes;
+  std::optional<CanonicalCredentialProjection> canonical_projection;
+
+  bool operator==(const ForwardableCredentialEvidence&) const = default;
+};
+
+struct LocalObservation {
+  std::string observation_kind;
+  std::string observation_payload;
+
+  bool operator==(const LocalObservation&) const = default;
+};
+
+struct LocalObservationSet {
+  std::vector<LocalObservation> observations;
+
+  [[nodiscard]] bool empty() const {
+    return observations.empty();
+  }
+
+  bool operator==(const LocalObservationSet&) const = default;
+};
+
+struct LocalObservationRoutingRule {
+  std::string observation_kind;
+  LocalObservationRoutingAction action{LocalObservationRoutingAction::kReject};
+  std::optional<std::string> forwarded_claim_kind;
+  std::optional<std::string> forwarded_claim_payload;
+
+  bool operator==(const LocalObservationRoutingRule&) const = default;
+};
+
+struct FrontDoorCredentialContext {
+  ParsedCredential parsed_credential;
+  std::optional<ForwardableCredentialEvidence> forwardable_evidence;
+  LocalObservationSet local_observations;
+
+  bool operator==(const FrontDoorCredentialContext&) const = default;
+};
+
+struct PortableParsedCredential {
+  CapabilityBindingAddress address;
+  LifecycleFrontDoorKind front_door_kind{LifecycleFrontDoorKind::kInternalRecord};
+  absl::Time credential_expires_at{absl::InfinitePast()};
+  LifecycleBindingMode binding_mode{LifecycleBindingMode::kAddressDerived};
+  ConstraintClaims portable_constraint_claims;
+
+  bool operator==(const PortableParsedCredential&) const = default;
 };
 
 struct BindingResolution {

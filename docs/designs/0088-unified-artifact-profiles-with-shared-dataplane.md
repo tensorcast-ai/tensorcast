@@ -1,10 +1,10 @@
 ---
 slug: unified-artifact-profiles-with-shared-dataplane
 title: Unified Artifact Profiles with Shared Dataplane
-status: proposed
+status: accepted
 areas: ["core", "daemon", "sdk", "global_store", "proto", "docs"]
 created: 2026-03-08
-last_updated: 2026-03-08
+last_updated: 2026-03-11
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -63,6 +63,10 @@ The long-term bridge out of that specialization must also stay explicit:
 - but any path that will move bytes must next converge on one shared source-capability shape,
 - then lower through one shared `ArtifactLoweringPlan`,
 - then execute through the same core-owned dataplane runtime as every other artifact profile.
+- terminal front-door reply shaping may still differ by profile, but that does not authorize a second steady-state
+  dataplane below the bridge.
+- non-local authority paths must also converge on one canonical distributed-control line; sharing request or reply names
+  alone is not enough if stage order, reply admissibility, or public projection semantics diverge.
 
 After source resolution, all byte movement must reuse the existing TensorCast dataplane:
 
@@ -77,6 +81,39 @@ After source resolution, all byte movement must reuse the existing TensorCast da
 
 This is a hard-cut target architecture. No compatibility shims, dual stack, or transitional parallel dataplane should be
 retained.
+
+# Implementation Status
+
+Accepted and implemented for the shared lowering and shared dataplane baseline on 2026-03-11.
+
+Landed outcomes:
+
+- `ArtifactLoweringPlan` and `MaterializationFacade::execute_artifact_lowering_plan(...)` are now the shared lowering
+  and execution seam for artifact materialization.
+- `byte_artifact` into-target and replica-staging paths build shared lowering plans and dispatch them through
+  `StoreEngine` rather than running a profile-private steady-state copy runtime in daemon controllers.
+- `StoreEngine::ingest_from_buffer_internal(...)` is implemented as the shared in-memory ingestion entrypoint.
+- `ByteArtifactBodyStore` now acts as metadata plus body-handle state, and `ByteArtifactRegionLayout` is only a
+  placement-lowering helper that opens standard GPU memory sources.
+
+What remains outside the completed `0088` cut is follow-up work above this seam rather than another dataplane:
+
+- `0093` and `0094` own backing-truth and lifecycle bridging above shared execution.
+- `0100` owns routed ingress, issuer handoff, distributed protocol, and trust semantics above shared lowering.
+
+# Decision Record
+
+Accepted decisions for the landed cut:
+
+1. `0088` is the repository baseline for one shared lowering path and one shared core-owned dataplane executor across
+   artifact profiles.
+2. `byte_artifact` remains an artifact profile with specialized authority semantics, not a second runtime or data model.
+3. Any path that will move bytes must converge on shared lowering and shared execution before steady-state transfer.
+4. Front-door, route, or target-layout helpers may remain profile-specific, but they must not become a second
+   steady-state copy engine.
+
+The sections below preserve the pre-landing problem statement and target architecture that this accepted cut
+standardized.
 
 # Problem Statement
 
@@ -112,7 +149,8 @@ project loses the single most important form of reuse: reuse of the shared memor
 
 # Current Implementation Snapshot
 
-As of the current staged code line, the repository is in an in-between state:
+As of the current code line, the repository has completed the shared dataplane convergence cut and retains only
+follow-up work above that seam:
 
 - semantic and control-plane convergence is real:
   - `tensorcast/common/selection_contract.py` already treats `byte_artifact` as an artifact profile,
@@ -127,12 +165,14 @@ As of the current staged code line, the repository is in an in-between state:
   - `core/store/materialization/dataplane/sources/memory_source.h` already exposes CPU and GPU memory sources,
   - `core/store/materialization/dataplane/sinks/target_layout_gpu_sink.h` and
     `core/store/materialization/dataplane/runtime/pump.h` already centralize GPU target writes and scheduling.
-- the biggest architectural gap is that byte-artifact steady-state data movement still bypasses that substrate:
-  - `daemon/service/controllers/byte_artifact_controller.cc` reassembles `payload_ref` into host strings,
-  - `daemon/service/byte_artifact_region_layout.cc` performs direct `cudaMemcpyHostToDevice` /
-    `cudaMemcpyDeviceToHost`,
-  - `daemon/service/byte_artifact_body_store.cc` primarily owns raw payload bytes rather than body handles,
-  - `core/store/store_engine.cc` still leaves `ingest_from_buffer_internal(...)` unimplemented.
+- the former architectural gap is now closed through shared lowering and execution:
+  - `daemon/service/controllers/byte_artifact_controller.cc` builds `ArtifactLoweringPlan` values and dispatches them
+    through `StoreEngine::execute_artifact_lowering_plan(...)`,
+  - `daemon/service/byte_artifact_region_layout.cc` only acquires target regions and opens standard
+    `GpuMemorySource` adapters,
+  - `daemon/service/byte_artifact_body_store.cc` stores metadata plus retained body handles rather than owning a copy
+    engine,
+  - `core/store/store_engine.cc` now implements `ingest_from_buffer_internal(...)`.
 
 This design is specifically about eliminating that last category.
 
@@ -224,7 +264,11 @@ Long-term rule:
 - profile authority may produce either:
   - a resolved source-capability result for byte movement,
   - or an attach/resume result for long-lived observe, wait, replay, or status flows.
+- when a distributed path involves a non-local owner, the authority reply must first pass through the canonical
+  distributed-control protocol from `0100` before it enters shared lowering.
 - if the next step is byte movement, the profile runtime must convert the authority answer into one shared lowering shape.
+- if the reply is already terminal at the front door, that reply is response shaping rather than a second execution
+  substrate.
 
 Required interpretation:
 
@@ -248,10 +292,14 @@ The following rules are normative:
 1. There is one artifact object model, not one object model per workload family.
 2. There is one selection model, and profile specialization must not create a second selector contract.
 3. There is one steady-state dataplane executor, and it is core-owned.
-4. Profile variation is expressed through profile runtimes and lowering, not through service-layer copy engines.
-5. Long-lived memory and export lifecycles remain attached to the existing core residency / lease / publish / retire
+4. There is one canonical distributed-control protocol line for non-local authority paths; child designs must reuse the
+   routed request / owner reply / stage-order / reply-admissibility / public projection algebra rather than minting
+   profile-private control dialects.
+5. Profile variation is expressed through profile runtimes and lowering, not through service-layer copy engines or
+   private routed-control protocols.
+6. Long-lived memory and export lifecycles remain attached to the existing core residency / lease / publish / retire
    model; profile code may reference those objects but must not define a second memory lifecycle.
-6. Observability, operation identity, and completion semantics must remain unified after lowering; profiles must not
+7. Observability, operation identity, and completion semantics must remain unified after lowering; profiles must not
    create private success/failure accounting for the same byte movement.
 
 ### 1.3 Dataplane ownership rule
@@ -372,6 +420,8 @@ Normative rules:
 - daemon controllers must not handcraft executor call arguments item-by-item,
 - profile runtimes lower to `ArtifactLoweringPlan`,
 - the core shared executor consumes `ArtifactLoweringPlan` or a mechanically equivalent core-owned translation of it.
+- controller-owned lowering helpers that still exist in the current code line are transitional only and must not become the
+  long-term owner of lowering semantics.
 
 ### 4.2 Required lowering target
 
@@ -520,13 +570,13 @@ The following table defines the intended migration of current modules.
 
 | Current module | Current role | Target role |
 | --- | --- | --- |
-| `daemon/service/controllers/byte_artifact_controller.cc` | request validation, route resolution, payload fetch, target writes, aggregation | request validation, shard batching, authority dispatch, result aggregation only |
+| `daemon/service/controllers/byte_artifact_controller.cc` | request validation, route resolution, lowering-plan construction, shared-executor dispatch, aggregation | request validation, shard batching, authority dispatch, result aggregation only |
 | `daemon/service/byte_artifact_route_resolver.cc` | partial home-fence validation and owned-lease handling | single owner of all byte-artifact route and redirect policy |
-| `daemon/service/byte_artifact_body_store.cc` | raw payload bytes + invariant + TTL | metadata and body-handle store, not copy engine |
+| `daemon/service/byte_artifact_body_store.cc` | metadata, retained body handles, backing truth, and TTL/index state | metadata and body-handle store, not copy engine |
 | `daemon/service/payload_transport_broker.cc` | token issuance plus payload lookup | token issuance plus source-capability resolution |
-| `daemon/service/byte_artifact_region_layout.cc` | region mapping plus direct copies | placement-lowering helper only; no steady-state copy logic |
+| `daemon/service/byte_artifact_region_layout.cc` | region mapping and standard GPU source opening | placement-lowering helper only; no steady-state copy logic |
 | `daemon/service/artifact_profile_registry.h` | validator helper | profile-runtime factory / registry only |
-| `core/store/store_engine.cc::ingest_from_buffer_internal` | currently unimplemented | shared in-memory artifact ingestion entrypoint |
+| `core/store/store_engine.cc::ingest_from_buffer_internal` | shared in-memory artifact ingestion entrypoint | shared in-memory artifact ingestion entrypoint |
 | `core/store/runtime/ingestion/materialization_facade.cc` | shared executor for into-target flows | canonical shared dataplane executor for byte-artifact lowering as well |
 
 ## 10. Required architectural decisions
@@ -647,6 +697,8 @@ Required:
 - registry/factory ownership distinct from runtime ownership,
 - explicit lowering contract from profile runtime to shared dataplane,
 - explicit distinction between authority logic and copy logic.
+- controller-owned lowering builders are transitional only and must collapse into profile runtime plus shared lowering
+  builder ownership.
 
 ## 2. Keep the dataplane core-owned
 
@@ -713,11 +765,11 @@ Controllers must not reimplement route cache policy or redirect retry semantics.
 The shared runtime must support materializing from memory-backed artifact bodies without forcing a separate byte-artifact
 copy path.
 
-That includes finishing the core in-memory ingest path so profile runtimes can hand standard in-memory sources to the
-shared executor.
+That includes keeping the core in-memory ingest path in the shared runtime so profile runtimes can hand standard
+in-memory sources to the shared executor.
 
-Concretely, the current unimplemented `StoreEngine::ingest_from_buffer_internal(...)` path must be replaced by a real
-shared runtime path rather than worked around in daemon controllers.
+Concretely, `StoreEngine::ingest_from_buffer_internal(...)` is now part of the accepted shared runtime path rather than
+something worked around in daemon controllers.
 
 # Schema Changes
 
@@ -779,6 +831,12 @@ Acceptance criteria:
 - no new byte-artifact-specific copy substrate is introduced in daemon or core.
 - any distributed authority path that will move bytes first produces a shared source-capability result and then lowers to
   the same `ArtifactLoweringPlan` / shared executor path as other artifact flows.
+- any distributed authority path that does not yet move bytes still uses the shared routed-control protocol line for
+  continuation, attachment, or terminal projection rather than inventing a private control dialect.
+- any distributed authority path that does not move bytes returns only an explicit attach/resume continuation and does not
+  invent a parallel public control model.
+- terminal inline payload or payload-capability replies are treated as bounded front-door projections only and must not be
+  used to justify a second steady-state dataplane.
 
 # References
 

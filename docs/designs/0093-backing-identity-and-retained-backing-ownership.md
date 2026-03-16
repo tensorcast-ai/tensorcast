@@ -1,10 +1,10 @@
 ---
 slug: backing-identity-and-retained-backing-ownership
 title: Phase 2 - Backing Identity, Retained Backing Ownership, and Shared Lifecycle Capability
-status: proposed
+status: accepted
 areas: ["core", "daemon", "docs", "tests"]
 created: 2026-03-09
-last_updated: 2026-03-09
+last_updated: 2026-03-11
 related_code:
   - docs/designs/0049-cpu-shared-memory-materialization.md
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
@@ -40,7 +40,6 @@ related_code:
   - daemon/state/persistence_manager.h
   - daemon/state/persistence_manager.cc
 links:
-  plan: ../plans/0093-01-authority-to-dataplane-convergence.md
   dependencies:
     - ./0049-cpu-shared-memory-materialization.md
     - ./0092-artifact-profiles-shared-dataplane-and-truth-layering.md
@@ -93,14 +92,44 @@ This design defines:
 
 # Implementation Status
 
-Proposed only.
+Accepted and implemented for the Phase-2 backing-truth and authority-to-dataplane bridge baseline on 2026-03-11.
 
-This document is the semantic target for the next implementation cut. It does not claim that the current `0090` /
-`0091` code line already satisfies the contract below.
+Landed outcomes:
+
+- `BackingIdentity` is now the full `ReplicaKey`-carrying backing subject under
+  `core/store/runtime/ingestion/artifact_truth.h`, and serving paths validate that identity before use.
+- daemon authority state and backing truth are split between `AuthorityRecord` / authority entries and `BackingRecord` /
+  backing tables instead of hiding backing ownership inside `BodyHandle` fields.
+- `ServingCapability`, `LifecycleOwnerRef`, and `ResolvedSourceCapability` are concrete shared bridge objects under
+  `daemon/service/body_backing_types.h`.
+- `payload_ref`, home-authority resolution, and policy-backed restore all return `ResolvedSourceCapability` before
+  lowering into the shared dataplane.
+- `PolicyVisibilityRef` now carries verified content plus actionable control truth for policy-backed restore, while
+  `claim_deleted` remains non-resurrectable.
+
+What remains outside the completed `0093` cut is now explicit:
+
+- `0094` owns the executable lifecycle-kernel object model layered on top of this baseline.
+- `0100` owns routed ingress, issuer handoff, distributed protocol, and trust follow-up work above this bridge.
+
+# Decision Record
+
+Accepted decisions for the landed Phase-2 cut:
+
+1. `0093` is the repository baseline for retained backing truth, `ServingCapability`, and
+   `ResolvedSourceCapability`.
+2. `BodyStore` and its concrete byte-artifact implementation remain an authority index plus backing-truth table, not a
+   hidden lifecycle owner.
+3. The backing subject is identified by the full retained `ReplicaKey`, while repeated bindings of the same backing are
+   distinguished by `instance_generation`.
+4. `0094` extends lifecycle semantics above this baseline, but it does not retake ownership of backing truth or the
+   authority-to-dataplane bridge defined here.
+
+The sections below preserve the pre-landing problem statement that motivated the accepted `0093` cut.
 
 # Problem Statement
 
-Current repository state has five structural ambiguities.
+The pre-landing repository state had five structural ambiguities.
 
 ## 1. `BackingIdentity` is under-specified
 
@@ -288,6 +317,7 @@ Phase 2 introduces one normalized bridge object between authority semantics and 
 `ResolvedSourceCapability` means:
 
 - authority and lifecycle have already validated that a bounded serve or source-resolution promise may be used now,
+- any owner-local admission transaction has already been converted into a cross-owner adopted protection,
 - the result is now ready to be lowered into shared execution,
 - but target-specific lowering has not happened yet.
 
@@ -298,11 +328,11 @@ Minimum required fields:
 - `serving_capability`
 - optional `backing_identity`
 - `source_kind`
-- one concrete source-resolution form:
+- one concrete source-resolution form that is immediately lowerable:
   - loader-backed source,
   - `payload_ref`,
   - local handle-backed source,
-  - policy-backed source reference.
+  - copied-payload snapshot source.
 
 Normative rules:
 
@@ -310,8 +340,13 @@ Normative rules:
 2. `ResolvedSourceCapability` is not a public SDK routing primitive.
 3. Any distributed or routed path that will move bytes must first produce `ResolvedSourceCapability` before it lowers to
    `ArtifactLoweringPlan` or a mechanically equivalent core-owned lowering object.
-4. Paths that do not move bytes yet must return an explicit attach/resume handle rather than inventing an ad hoc partial
+4. Any restore, rematerialization, or policy-path repair required to make a source executable must happen before
+   `ResolvedSourceCapability` is returned.
+5. Paths that do not move bytes yet must return an explicit attach/resume handle rather than inventing an ad hoc partial
    source result.
+6. A routed owner must not return a half-admitted or owner-private pre-execution state in place of `ResolvedSourceCapability`.
+7. In this phase, `ResolvedSourceCapability.serving_capability` is the canonical adopted-protection bridge compatible with
+   `0094` and `0100`.
 
 ## 2. `BackingIdentity` and `ReplicaKey`
 
@@ -944,6 +979,8 @@ Acceptance criteria:
 - `ServingCapability` is minted only by the lifecycle kernel and is not stored as authority truth,
 - `ResolvedSourceCapability` is the required bridge from authority/lifecycle success to shared lowering for any path that
   will move bytes,
+- `ResolvedSourceCapability` carries the adopted protection that crosses owner boundaries; owner-local admission state does
+  not,
 - `ServingCapability` binds to an explicit `lifecycle_owner_ref` and supports at least:
   - `backing`,
   - `copied_payload`,

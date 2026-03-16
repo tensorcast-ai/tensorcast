@@ -100,6 +100,32 @@ grpc::Status MaterializationController::publish_target_replica(
   return target_materialization_service_.publish_target_replica(rctx, req, resp);
 }
 
+absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> MaterializationController::
+    inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now) {
+  return target_materialization_service_.inspect_target_publication_context_for_testing(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> MaterializationController::
+    build_target_publication_workflow_routed_request_for_testing(
+        const v2::PublishTargetReplicaRequest& req,
+        absl::Time now) const {
+  return target_materialization_service_.build_target_publication_workflow_routed_request_for_testing(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> MaterializationController::
+    build_target_publication_workflow_continuation_request_for_testing(
+        const RoutedAuthorityRequest& routed_request,
+        const OwnerStageReply& workflow_gate_reply) const {
+  return target_materialization_service_.build_target_publication_workflow_continuation_request_for_testing(
+      routed_request, workflow_gate_reply);
+}
+
+absl::StatusOr<std::optional<OwnerStageReply>> MaterializationController::maybe_route_authority_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  return target_materialization_service_.maybe_route_authority_stage(routed_request, now);
+}
+
 grpc::Status MaterializationController::import_artifact_from_path(
     RpcContext& rctx,
     const v2::ImportArtifactFromPathRequest& req,

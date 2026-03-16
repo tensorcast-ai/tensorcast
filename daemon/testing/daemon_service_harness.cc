@@ -147,6 +147,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
           .engine = kernel->engine(),
           .persistence_manager = kernel->persistence_manager(),
           .global_store_client = global_store_client,
+          .inter_daemon_channel_credentials = kernel->inter_daemon_channel_credentials(),
       },
       ByteArtifactController::Options{
           .routing =
@@ -203,6 +204,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .engine = kernel->engine(),
       .locks = kernel->transport_lock_manager(),
       .lip = kernel->lip_manager(),
+      .materialization_controller = materialization_controller.get(),
       .payload_transport_broker = &kernel->payload_transport_broker(),
   };
   auto transport_controller = std::make_unique<TransportController>(tdep);
