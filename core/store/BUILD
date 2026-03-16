@@ -15,6 +15,7 @@ sc_header_only_library(
         ":device_types",
         "//core/common:memory_location_lib",
         "//core/communicator:engine_hdrs",
+        "//core/communicator:routing_context_lib",
         "@gsl",
     ],
 )
@@ -131,6 +132,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":device_types",
+        ":endpoint_id",
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/communicator:utils_lib",
@@ -167,6 +169,7 @@ sc_cc_library(
         ":communication_types",
         "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
+        "//core/communicator:routing_context_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )
@@ -207,6 +210,19 @@ sc_header_only_library(
     name = "worker_identity",
     hdrs = ["components/worker_identity.h"],
     visibility = ["//visibility:public"],
+)
+
+sc_cc_library(
+    name = "endpoint_id",
+    srcs = ["components/endpoint_id.cc"],
+    hdrs = ["components/endpoint_id.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_types",
+        ":worker_identity",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+    ],
 )
 
 sc_cc_library(

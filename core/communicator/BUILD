@@ -202,6 +202,7 @@ sc_cc_library(
     deps = [
         ":common_lib",
         ":ibv_wrap_lib",
+        ":lldp_source_lib",
         ":metric_lib",
         ":queue_lib",
         ":utils_lib",
@@ -485,6 +486,166 @@ sc_cc_library(
     ],
 )
 
+# ========== Topology model ==========
+
+sc_cc_library(
+    name = "topology_lib",
+    srcs = ["topology/topology.cc"],
+    hdrs = ["topology/topology.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+sc_cc_library(
+    name = "simple_numa_topology_lib",
+    srcs = ["topology/simple_numa_topology.cc"],
+    hdrs = ["topology/simple_numa_topology.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":topology_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+sc_cc_library(
+    name = "lldp_source_lib",
+    srcs = ["topology/discovery/lldp_source.cc"],
+    hdrs = ["topology/discovery/lldp_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "nvlink_source_lib",
+    srcs = ["topology/discovery/nvlink_source.cc"],
+    hdrs = ["topology/discovery/nvlink_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "host_topology_builder_lib",
+    srcs = ["topology/discovery/host_topology_builder.cc"],
+    hdrs = ["topology/discovery/host_topology_builder.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lldp_source_lib",
+        ":nvlink_source_lib",
+        ":topology_lib",
+        "//core/cuda:cuda_api_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_binary(
+    name = "simple_numa_topology_tool",
+    srcs = ["topology/simple_numa_topology_tool.cc"],
+    deps = [
+        ":config_io_lib",
+        ":host_topology_builder_lib",
+        ":simple_numa_topology_lib",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+# ========== Routing wrapper (Phase 2) ==========
+
+sc_cc_library(
+    name = "routing_types_lib",
+    srcs = ["routing/types.cc"],
+    hdrs = ["routing/types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":constants_lib",
+        "@abseil-cpp//absl/hash:hash",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_header_only_library(
+    name = "routing_read_helpers_lib",
+    hdrs = ["routing/read_helpers.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":request_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_adapter_lib",
+    srcs = ["routing/adapter.cc"],
+    hdrs = ["routing/adapter.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":engine_lib",
+        ":request_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_connection_lib",
+    srcs = ["routing/connection.cc"],
+    hdrs = ["routing/connection.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":routing_adapter_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+        ":topology_lib",
+        "//core/common:async_runtime_lib",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_channel_lib",
+    srcs = ["routing/route_channel.cc"],
+    hdrs = ["routing/route_channel.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":routing_connection_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_context_lib",
+    srcs = ["routing/routing_context.cc"],
+    hdrs = ["routing/routing_context.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":engine_lib",
+        ":routing_adapter_lib",
+        ":routing_channel_lib",
+        ":routing_connection_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+        ":topology_lib",
+        "//core/common:async_runtime_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
 # Aggregate target removed; depend on specific libs instead.
 
 # Tests
@@ -604,6 +765,58 @@ cc_test(
     srcs = ["config_io_test.cc"],
     deps = [
         ":config_io_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "topology_test",
+    srcs = ["topology/topology_test.cc"],
+    deps = [
+        ":simple_numa_topology_lib",
+        ":topology_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "discovery_test",
+    srcs = ["topology/discovery/discovery_test.cc"],
+    deps = [
+        ":host_topology_builder_lib",
+        ":lldp_source_lib",
+        ":nvlink_source_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "routing_adapter_test",
+    srcs = ["routing/adapter_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
+    deps = [
+        ":constants_lib",
+        ":routing_adapter_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "routing_context_test",
+    srcs = ["routing/routing_context_test.cc"],
+    deps = [
+        ":routing_connection_lib",
+        ":routing_context_lib",
+        "//core/common:async_runtime_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

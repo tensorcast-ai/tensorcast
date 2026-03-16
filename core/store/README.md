@@ -384,6 +384,7 @@ IO helpers (`write_at`, `map_file_segments`).
 - Loaders (`DiskLoader`, `P2PLoader`)
   - Abstracted via `IArtifactLoader` to produce a `SeekableSource`
   - P2P path muxes a remote source with an optional on-disk fallback (`MuxSeekableSource`)
+  - Remote reads prefer routed communicator channels when endpoint metadata + routing context are available, and strictly fall back to direct `ip/port` reads on any routed failure
 
 - TransferService
   - Builds target sinks (GPU or VS region) and computes ranges from chunk indices
@@ -399,6 +400,7 @@ IO helpers (`write_at`, `map_file_segments`).
 
 - CommunicationManager
   - Wraps `Communicator`; registers memory for P2P and provides shared engine to loaders
+  - Optionally carries a `RoutingContext` for routed-read integration while preserving direct-read fallback
   - `StoreEngineOptions.p2p_port=0` (default) binds an ephemeral P2P port chosen by the OS; set an explicit port for stable endpoints
 
 ## Content-Addressed Identity and Verification (RFC-0007)

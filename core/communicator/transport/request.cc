@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
 
 #include "core/communicator/transport/request.h"
 
@@ -60,7 +61,30 @@ void ReadRequest::set_result(absl::Status status) {
   }
   status_.status = status;
   result_.set_value(status_);
+  std::function<void()> callback;
+  {
+    absl::MutexLock lock(&result_mu_);
+    callback = std::move(on_result_);
+  }
+  if (callback) {
+    callback();
+  }
   notify_completion(status);
+}
+
+void ReadRequest::set_on_result(std::function<void()> callback) {
+  bool invoke_now = false;
+  {
+    absl::MutexLock lock(&result_mu_);
+    if (result_set_.load(std::memory_order_acquire)) {
+      invoke_now = true;
+    } else {
+      on_result_ = std::move(callback);
+    }
+  }
+  if (invoke_now && callback) {
+    callback();
+  }
 }
 
 bool ReadRequest::is_result_set() {

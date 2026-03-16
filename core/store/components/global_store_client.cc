@@ -24,6 +24,7 @@
 #include "absl/time/time.h"
 #include "core/common/otel/grpc_propagation.h"
 #include "core/communicator/misc/utils.h"
+#include "core/store/components/endpoint_id.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "tensorcast/common/v1/common.pb.h"
@@ -2567,6 +2568,7 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
   replica.memory_size = info.memory_size();
   replica.memory_type = convert_from_proto_memory_type(info.memory_type());
   replica.device_id = info.device_id();
+  replica.endpoint_id = derive_endpoint_id(replica.node_id, replica.memory_type, static_cast<int>(replica.device_id));
 
   if (info.has_transport()) {
     const auto& transport = info.transport();

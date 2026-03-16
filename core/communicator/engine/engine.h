@@ -91,6 +91,20 @@ class Communicator {
       uint64_t remote_offset = 0);
 
   /**
+   * Read a locally registered tensor directly from the in-process tensor store.
+   * This path bypasses network transports and is used by same-node adapters
+   * (for example NVLINK/PCIE local datapaths) when source data is available in
+   * the same process.
+   */
+  transport::future_read_result_t read_tensor_local(
+      const std::string& key,
+      uint64_t addr,
+      uint64_t bytes,
+      int dev_type,
+      int dev_id,
+      uint64_t remote_offset = 0);
+
+  /**
    * Register a partition tensor
    * @param tensor_key the unique tensor key
    * @param addr uint64 address

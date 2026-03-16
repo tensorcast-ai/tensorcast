@@ -146,6 +146,7 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints) override;
 
+  void prepare_p2p_source(P2PSource* source) const override;
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
       std::string_view target_artifact_id,

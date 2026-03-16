@@ -163,6 +163,9 @@ absl::Status P2PSourceAdapter::prepare(const P2PSource& source, IngestionContext
   P2PSource normalized = source;
   normalized.comm_engine =
       gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager->get_shared_engine()};
+  if (!normalized.routing_context) {
+    normalized.routing_context = comm_manager->routing_context();
+  }
   ctx.p2p.source = std::move(normalized);
   return absl::OkStatus();
 }

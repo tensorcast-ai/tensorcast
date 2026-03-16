@@ -13,6 +13,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "core/store/components/endpoint_id.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -508,12 +509,17 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     p2p_src.size_bytes = remote.memory_size;
     p2p_src.ip = remote.node_address;
     p2p_src.port = static_cast<uint16_t>(remote.node_port);
+    p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity_, target_device);
+    p2p_src.remote_endpoint_id = remote.endpoint_id;
     p2p_src.memory_keys = remote.remote_memory_keys;
     p2p_src.buf_sizes = remote.buffer_sizes;
     p2p_src.verification_json = remote.verification_json;
     p2p_src.enable_checksum = true;
     p2p_src.location.type = remote.memory_type;
     p2p_src.location.device_id = remote.device_id;
+    p2p_src.request_budget = hints.request_budget;
+    p2p_src.artifact_id = std::string(artifact_id);
+    backend_->prepare_p2p_source(&p2p_src);
     if (has_disk_source && allow_disk && preference != loading::SourcePreference::kPreferP2P) {
       p2p_src.fallback_disk_dir = disk_source->path.string();
     }

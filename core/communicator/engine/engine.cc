@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <format>
 #include <limits>
@@ -580,6 +581,7 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     hdr->num_segments = seg_count;
     hdr->window_seq = staged_window.window_seq;
     hdr->credit_granted = static_cast<uint32_t>(staged_window.granted_credit);
+    hdr->request_offset = session.request.offset;
     hdr->more_segments = staged_window.more_segments ? 1 : 0;
 
     std::vector<StageLeaseKey> inserted_keys;
@@ -1682,6 +1684,135 @@ void Communicator::set_dram_lease_provider(const std::shared_ptr<HostPinnedCpuSt
   }
 }
 
+future_read_result_t Communicator::read_tensor_local(
+    const std::string& key,
+    uint64_t addr,
+    uint64_t bytes,
+    int dev_type,
+    int dev_id,
+    uint64_t remote_offset) {
+  std::promise<transport::read_result_t> promise;
+  auto future = promise.get_future();
+  transport::read_result_t result;
+  result.tensor_key = key;
+
+  auto local_tensor = store_.get_tensor(key);
+  if (local_tensor == nullptr) {
+    result.status = absl::NotFoundError(absl::StrCat("local tensor not found: key=", key));
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  const uint64_t tensor_bytes = local_tensor->get_bytes();
+  if (remote_offset > tensor_bytes || bytes > tensor_bytes - remote_offset) {
+    result.status = absl::OutOfRangeError(absl::StrCat(
+        "local read range out of bounds: key=",
+        key,
+        " offset=",
+        remote_offset,
+        " bytes=",
+        bytes,
+        " tensor_bytes=",
+        tensor_bytes));
+    promise.set_value(std::move(result));
+    return future;
+  }
+  if (bytes == 0) {
+    result.status = absl::OkStatus();
+    promise.set_value(std::move(result));
+    return future;
+  }
+  if (addr == 0) {
+    result.status = absl::InvalidArgumentError("local read destination address must be non-zero");
+    promise.set_value(std::move(result));
+    return future;
+  }
+  if (dev_type != COMMUNICATE_ENGINE_DEV_CPU && dev_type != COMMUNICATE_ENGINE_DEV_GPU) {
+    result.status = absl::InvalidArgumentError(absl::StrCat("unsupported destination device type: ", dev_type));
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  const int src_dev_type = local_tensor->get_mem_type();
+  const int src_dev_id = local_tensor->get_device_id();
+  const uint64_t src_addr = local_tensor->get_uint64_addr();
+  if (src_addr == 0) {
+    result.status = absl::FailedPreconditionError(absl::StrCat("local tensor address is null: key=", key));
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  const void* src_ptr = reinterpret_cast<const void*>(src_addr + remote_offset);
+  void* dst_ptr = reinterpret_cast<void*>(addr);
+
+  auto wrap_cuda_status = [&key](const char* op, absl::Status status) -> absl::Status {
+    if (status.ok()) {
+      return status;
+    }
+    return absl::Status(
+        status.code(),
+        absl::StrCat("local tensor copy ", op, " failed for key=", key, ": ", status.message()));
+  };
+
+  absl::Status copy_status = absl::OkStatus();
+  if (src_dev_type == COMMUNICATE_ENGINE_DEV_CPU && dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
+    std::memcpy(dst_ptr, src_ptr, bytes);
+  } else if (src_dev_type == COMMUNICATE_ENGINE_DEV_CPU && dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+    if (dev_id < 0) {
+      copy_status = absl::InvalidArgumentError("destination GPU device id must be non-negative");
+    } else {
+      copy_status = wrap_cuda_status("set_device(dst_gpu)", cuda::set_device(dev_id));
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("cpu_to_gpu", cuda::memcpy(dst_ptr, src_ptr, bytes, cudaMemcpyHostToDevice));
+      }
+    }
+  } else if (src_dev_type == COMMUNICATE_ENGINE_DEV_GPU && dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
+    if (src_dev_id < 0) {
+      copy_status = absl::InvalidArgumentError("source tensor has invalid GPU device id");
+    } else {
+      copy_status = wrap_cuda_status("set_device(src_gpu)", cuda::set_device(src_dev_id));
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("gpu_to_cpu", cuda::memcpy(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost));
+      }
+    }
+  } else if (src_dev_type == COMMUNICATE_ENGINE_DEV_GPU && dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+    if (src_dev_id < 0 || dev_id < 0) {
+      copy_status = absl::InvalidArgumentError("source/destination GPU device id must be non-negative");
+    } else if (src_dev_id == dev_id) {
+      copy_status = wrap_cuda_status("set_device(d2d)", cuda::set_device(dev_id));
+      if (copy_status.ok()) {
+        copy_status =
+            wrap_cuda_status("gpu_to_gpu_same_device", cuda::memcpy(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice));
+      }
+    } else {
+      int can_access = 0;
+      copy_status = wrap_cuda_status("device_can_access_peer", cuda::device_can_access_peer(&can_access, dev_id, src_dev_id));
+      if (copy_status.ok() && can_access == 0) {
+        copy_status = absl::FailedPreconditionError(
+            absl::StrCat("peer access unavailable between dst_device=", dev_id, " and src_device=", src_dev_id));
+      }
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("enable_peer_access", cuda::enable_peer_access(dev_id, src_dev_id));
+      }
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status(
+            "memcpy_peer_async",
+            cuda::memcpy_peer_async(dst_ptr, dev_id, src_ptr, src_dev_id, bytes));
+      }
+      if (copy_status.ok()) {
+        copy_status = wrap_cuda_status("device_synchronize", cuda::device_synchronize());
+      }
+    }
+  } else {
+    copy_status = absl::InvalidArgumentError(absl::StrCat(
+        "unsupported local copy matrix: src_dev_type=", src_dev_type, " dst_dev_type=", dev_type));
+  }
+
+  result.status = copy_status;
+  promise.set_value(std::move(result));
+  return future;
+}
+
 absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_count) {
   inited_.store(true);
   if (server_context_->open(ip, port, [this](tcp_transport_t t) { return this->on_new_client(t); }) != SUCCESS) {
@@ -2230,6 +2361,7 @@ absl::Status Communicator::handle_mtcp_read_request(
   const uint64_t stage_chunk_hint = task.stage_chunk_bytes > 0 ? task.stage_chunk_bytes : request.bytes;
   hdr->credit_granted = static_cast<uint32_t>(
       std::min<uint64_t>(stage_chunk_hint, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  hdr->request_offset = request.offset;
   hdr->more_segments = 0;
   absl::Status shutdown_status = absl::CancelledError("communicator shutting down");
   if (stop_.load(std::memory_order_relaxed)) {
@@ -2451,8 +2583,28 @@ void Communicator::do_read_request_loop() {
     VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
             << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
 
-    // Put into pending BEFORE send to prevent response racing ahead of insertion
     const std::string req_key = req->get_key();
+    auto existing = pending_requests_.get(req_key);
+    if (existing != nullptr) {
+      if (!existing->is_result_set()) {
+        LOG(ERROR) << "[do_read_request_loop] duplicate in-flight READ_REQUEST key=" << req_key;
+        req->set_result(absl::AlreadyExistsError("duplicate in-flight read request key"));
+        continue;
+      }
+      LOG(WARNING) << "[do_read_request_loop] replacing stale completed pending request key=" << req_key;
+      pending_requests_.erase_if(req_key, existing);
+    }
+
+    std::weak_ptr<transport::ReadRequest> weak_req = req;
+    req->set_on_result([this, req_key, weak_req]() {
+      auto locked = weak_req.lock();
+      if (locked == nullptr) {
+        return;
+      }
+      pending_requests_.erase_if(req_key, locked);
+    });
+
+    // Put into pending BEFORE send to prevent response racing ahead of insertion
     pending_requests_.put(req_key, req);
 
     if (transport->send(msg) == SUCCESS) {
@@ -2487,7 +2639,7 @@ misc::result_t Communicator::on_receive_request(
       CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
       auto transport = rdma_context_->create_transport(local_dev_name);
 
-      if (transport->connect(&req->qp_info) == misc::SUCCESS) {
+      if (transport != nullptr && transport->connect(&req->qp_info) == misc::SUCCESS) {
         channel->set_transport(local_dev_name, peer_dev_name, transport);
         auto rsp = EngineMessage::make_message<ProtoRdmaConnectResponse>(ENGINE_OP_RDMA_CONNECT_RESPONSE);
         auto* payload = rsp->get_payload<ProtoRdmaConnectResponse>();
@@ -2497,7 +2649,12 @@ misc::result_t Communicator::on_receive_request(
         memcpy(payload->dst_dev_name, req->dst_dev_name, kMaxDevName);
         COMM_CHECK(t->send(rsp));
       } else {
-        LOG(WARNING) << "failed to rdma connect from " << t->get_remote_url() << ": net_dev=" << local_dev_name;
+        if (transport == nullptr) {
+          LOG(WARNING) << "failed to create rdma transport from " << t->get_remote_url()
+                       << ": net_dev=" << local_dev_name;
+        } else {
+          LOG(WARNING) << "failed to rdma connect from " << t->get_remote_url() << ": net_dev=" << local_dev_name;
+        }
         auto rsp = EngineMessage::make_message<ProtoRdmaConnectFailed>(ENGINE_OP_RDMA_CONNECT_FAILED);
         auto* payload = rsp->get_payload<ProtoRdmaConnectFailed>();
         memcpy(payload->src_dev_name, req->src_dev_name, kMaxDevName);
@@ -2663,8 +2820,66 @@ misc::result_t Communicator::on_receive_response(
     const engine_message_t& msg) {
   LOG(INFO) << "[on_receive_response] Received response op=" << msg->get_op() << " from " << t->get_remote_url();
 
+  auto handle_rdma_connect_failure = [&](const std::string& local_dev_name,
+                                         const std::string& peer_dev_name,
+                                         const char* failure_reason) {
+    LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name
+               << " peer=" << peer_dev_name << " reason=" << failure_reason;
+
+    auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+    if (endpoint == nullptr) {
+      return;
+    }
+
+    uint64_t generation = 0;
+    Channel::HandshakeState from_state = Channel::HandshakeState::kIdle;
+    {
+      absl::MutexLock lock(&endpoint->mu);
+      generation = endpoint->generation;
+      from_state = endpoint->state;
+    }
+
+    auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+    const absl::Status status = absl::UnavailableError(failure_reason);
+    for (auto& pending : failed_reads) {
+      pending_requests_.erase_if_present(pending.request->get_key());
+      pending.request->set_result(status);
+    }
+
+    {
+      absl::MutexLock lock(&endpoint->mu);
+      log_handshake_transition(
+          local_dev_name,
+          peer_dev_name,
+          from_state,
+          Channel::HandshakeState::kFailed,
+          endpoint->generation,
+          endpoint->pending_reads.size());
+      endpoint->state = Channel::HandshakeState::kFailed;
+      endpoint->transport.reset();
+      endpoint->failure_count += 1;
+      endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+      endpoint->retry_scheduled = false;
+    }
+  };
+
   switch (msg->get_op()) {
     case ENGINE_OP_RDMA_CONNECT_RESPONSE: {
+      if (msg->get_payload_size() == sizeof(ProtoRdmaConnectFailed)) {
+        auto* failed = msg->get_payload<ProtoRdmaConnectFailed>();
+        std::string peer_dev_name = reinterpret_cast<char*>(failed->dst_dev_name);
+        std::string local_dev_name = reinterpret_cast<char*>(failed->src_dev_name);
+        LOG(WARNING) << "[on_receive_response] Received RDMA_CONNECT_RESPONSE with failed payload; "
+                        "treating as connect failure";
+        handle_rdma_connect_failure(local_dev_name, peer_dev_name, "remote RDMA connect failed");
+        break;
+      }
+      if (msg->get_payload_size() < sizeof(ProtoRdmaConnectResponse)) {
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_RESPONSE payload too small: got="
+                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectResponse);
+        break;
+      }
+
       LOG(INFO) << "get rdma response from " << t->get_remote_url();
 
       auto* req = msg->get_payload<ProtoRdmaConnectResponse>();
@@ -3109,44 +3324,16 @@ misc::result_t Communicator::on_receive_response(
       break;
     }
     case ENGINE_OP_RDMA_CONNECT_FAILED: {
-      auto* req = msg->get_payload<ProtoRdmaConnectFailed>();
-      std::string peer_dev_name = reinterpret_cast<char*>(req->dst_dev_name);
-      std::string local_dev_name = reinterpret_cast<char*>(req->src_dev_name);
-      LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name << " peer=" << peer_dev_name;
-
-      auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
-      if (endpoint == nullptr) {
+      if (msg->get_payload_size() < sizeof(ProtoRdmaConnectFailed)) {
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED payload too small: got="
+                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectFailed);
         break;
       }
 
-      uint64_t generation = 0;
-      {
-        absl::MutexLock lock(&endpoint->mu);
-        generation = endpoint->generation;
-      }
-
-      auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
-      const absl::Status status = absl::UnavailableError("remote RDMA connect failed");
-      for (auto& pending : failed_reads) {
-        pending_requests_.erase_if_present(pending.request->get_key());
-        pending.request->set_result(status);
-      }
-
-      {
-        absl::MutexLock lock(&endpoint->mu);
-        log_handshake_transition(
-            local_dev_name,
-            peer_dev_name,
-            Channel::HandshakeState::kConnectRequested,
-            Channel::HandshakeState::kFailed,
-            endpoint->generation,
-            endpoint->pending_reads.size());
-        endpoint->state = Channel::HandshakeState::kFailed;
-        endpoint->transport.reset();
-        endpoint->failure_count += 1;
-        endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
-        endpoint->retry_scheduled = false;
-      }
+      auto* req = msg->get_payload<ProtoRdmaConnectFailed>();
+      std::string peer_dev_name = reinterpret_cast<char*>(req->dst_dev_name);
+      std::string local_dev_name = reinterpret_cast<char*>(req->src_dev_name);
+      handle_rdma_connect_failure(local_dev_name, peer_dev_name, "remote RDMA connect failed");
       break;
     }
     case ENGINE_OP_READ_FAILED: {

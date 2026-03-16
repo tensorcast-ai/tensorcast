@@ -28,6 +28,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
 #include "core/cuda/cuda_ipc.h"
+#include "core/store/components/endpoint_id.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/device_registry.h"
@@ -311,6 +312,17 @@ absl::Status load_assembled_ranges_into_replica(
 
   replica->set_ready_signal(target_location, absl::OkStatus());
   return absl::OkStatus();
+}
+
+void fill_runtime_p2p_bindings(
+    const std::shared_ptr<components::CommunicationManager>& comm_manager,
+    P2PSource* source) {
+  if (source == nullptr || !comm_manager || !comm_manager->is_enabled()) {
+    return;
+  }
+  source->comm_engine = gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{
+      comm_manager->get_shared_engine()};
+  source->routing_context = comm_manager->routing_context();
 }
 
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
@@ -1862,12 +1874,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.size_bytes = remote.memory_size;
         p2p_src.ip = remote.node_address;
         p2p_src.port = static_cast<uint16_t>(remote.node_port);
+        p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
+        p2p_src.remote_endpoint_id = remote.endpoint_id;
         p2p_src.memory_keys = remote.remote_memory_keys;
         p2p_src.buf_sizes = remote.buffer_sizes;
         p2p_src.verification_json = remote.verification_json;
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        fill_runtime_p2p_bindings(comm_manager, &p2p_src);
         p2p_src.request_budget = hints.request_budget;
         p2p_src.artifact_id = hints.artifact_id;
         if (has_disk_source && allow_disk && !prefer_p2p) {
@@ -2746,6 +2761,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
   }
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool comm_enabled = comm_manager && comm_manager->is_enabled();
+  const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
   auto& replica_registry = config_.replica_runtime->registry();
 
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
@@ -2795,6 +2811,9 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
               .buffer_sizes = std::move(buffer_sizes),
               .ip = remote.node_address,
               .port = static_cast<uint16_t>(remote.node_port),
+              .local_endpoint_id = local_endpoint_id,
+              .remote_endpoint_id = remote.endpoint_id,
+              .routing_context = comm_manager->routing_context(),
               .total_size = remote.memory_size,
           };
           source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
@@ -2827,6 +2846,9 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
           .buffer_sizes = std::move(buffer_sizes),
           .ip = remote.node_address,
           .port = static_cast<uint16_t>(remote.node_port),
+          .local_endpoint_id = local_endpoint_id,
+          .remote_endpoint_id = remote.endpoint_id,
+          .routing_context = comm_manager->routing_context(),
           .total_size = remote.memory_size,
       };
       source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
@@ -3131,6 +3153,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   }
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool comm_enabled = comm_manager && comm_manager->is_enabled();
+  const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, request.target_device());
   auto& replica_registry = config_.replica_runtime->registry();
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
@@ -3181,7 +3204,12 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
               .buffer_sizes = std::move(buffer_sizes),
               .ip = remote.node_address,
               .port = static_cast<uint16_t>(remote.node_port),
+              .local_endpoint_id = local_endpoint_id,
+              .remote_endpoint_id = remote.endpoint_id,
+              .routing_context = comm_manager->routing_context(),
               .total_size = remote.memory_size,
+              .request_budget = request.hints().request_budget,
+              .artifact_id = request.canonical_artifact_id(),
           };
           source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
         } else {
@@ -3213,7 +3241,12 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
           .buffer_sizes = std::move(buffer_sizes),
           .ip = remote.node_address,
           .port = static_cast<uint16_t>(remote.node_port),
+          .local_endpoint_id = local_endpoint_id,
+          .remote_endpoint_id = remote.endpoint_id,
+          .routing_context = comm_manager->routing_context(),
           .total_size = remote.memory_size,
+          .request_budget = request.hints().request_budget,
+          .artifact_id = request.canonical_artifact_id(),
       };
       source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
     }
@@ -3269,7 +3302,6 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
       source_ptr =
           std::make_shared<loader::CpuMemorySource>(gsl::not_null<const void*>{canonicalized->data()}, total_bytes);
     }
-
     piece_sources.push_back(std::move(source_ptr));
   }
 
@@ -3524,6 +3556,8 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
   if (!comm_manager || !comm_manager->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
+  const components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
+  const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
 
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
@@ -3550,6 +3584,9 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
         .buffer_sizes = std::move(buffer_sizes),
         .ip = remote.node_address,
         .port = static_cast<uint16_t>(remote.node_port),
+        .local_endpoint_id = local_endpoint_id,
+        .remote_endpoint_id = remote.endpoint_id,
+        .routing_context = comm_manager->routing_context(),
         .total_size = remote.memory_size,
     };
     std::shared_ptr<loader::SeekableSource> source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
@@ -3945,6 +3982,10 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_p2p(
     const loading::MaterializeHints& hints,
     bool publish_to_global_store) {
   return run_p2p_ingestion_internal(artifact_identifier, source, target, hints, publish_to_global_store);
+}
+
+void MaterializationFacade::prepare_p2p_source(P2PSource* source) const {
+  fill_runtime_p2p_bindings(config_.runtime_context->communication_manager(), source);
 }
 
 absl::Status MaterializationFacade::register_replica_with_global_store(

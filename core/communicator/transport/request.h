@@ -68,6 +68,7 @@ class ReadRequest {
   void set_remote_tensor(remote_tensor_t tensor);
   future_read_result_t get_future();
   void set_result(absl::Status result);
+  void set_on_result(std::function<void()> callback);
   bool is_result_set();
 
   [[nodiscard]] uint64_t request_id() const {
@@ -195,6 +196,8 @@ class ReadRequest {
   uint16_t dst_port_;
   std::promise<read_result_t> result_;
   std::atomic_bool result_set_;
+  absl::Mutex result_mu_;
+  std::function<void()> on_result_ ABSL_GUARDED_BY(result_mu_);
 
   misc::Timer timer_;
   read_result_t status_;
