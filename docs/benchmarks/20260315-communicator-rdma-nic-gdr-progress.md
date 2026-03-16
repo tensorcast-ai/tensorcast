@@ -50,7 +50,20 @@ The communicator side has two GPU RDMA modes:
    - expected signal: `zero_copy=1`
 2. `Stage RDMA`
    - GPU memory is copied into a staging buffer before RDMA
+   - unless explicitly qualified as `GPU_VRAM`, this means the default
+     `host-pinned` staged backend
    - expected signal: `zero_copy=0`
+
+Backend selection note for this report:
+
+1. staged-RDMA backend is controlled by communicator config
+   `communicator.rdma.staging_backend`
+2. if that field is omitted or left `UNSPECIFIED`, runtime treats it as
+   `STAGED_RDMA_BACKEND_HOST_PINNED`
+3. this benchmark report does not use an environment-variable switch for staged
+   backend selection
+4. therefore, any unqualified `Stage RDMA` mention in this document should be
+   read as `host-pinned staged RDMA`
 
 Execution policy for this study:
 
@@ -88,6 +101,14 @@ For the key same-pair comparison work in this summary, the most useful pair was:
 2. initiator:
    - `gpu-h800-0496.host.platform.shaipower.com`
 
+Role meaning in this report:
+
+1. `target` is the host that registers and serves the source tensor
+2. `initiator` is the host that issues `read_tensor()` and pulls the bytes into
+   its own local buffer
+3. shorthand like `0360 <- 0496` therefore means the read is initiated from
+   `0496` against tensor data hosted on `0360`
+
 On this pair:
 
 1. `GPU0 <-> mlx5_0` is preferred
@@ -95,6 +116,14 @@ On this pair:
 3. `GPU5 <-> mlx5_6`
 4. `GPU6 <-> mlx5_7`
 5. `GPU7 <-> mlx5_8`
+
+Pair meaning in this report:
+
+1. each `GPU <-> mlx5_x` entry is a host-local preferred GPU/NIC affinity pair
+2. these are not cross-host pairings between target and initiator
+3. for mapping cases, each host should keep its own local preferred
+   `GPU <-> NIC` relationship, then the two hosts are combined into explicit
+   lane pairs across the network
 
 ### 3.4 Metric Semantics
 
@@ -394,23 +423,37 @@ Same-host real hardware smoke conclusions:
 The most important missing view is not just *what* we changed, but *how much*
 each change moved the result.
 
-Two notes are important before reading the table:
+Three notes are important before reading the tables:
 
 1. the current communicator bench field name `bw_gbps` is historically named
    but the reported value is used here as `GB/s`
-2. only the entries below with a stable before/after pair are presented as
-   quantitative A/B comparisons
+2. the entries below are same-workload before/after deltas, but they are not
+   all strict single-factor ablations
+3. where multiple fixes landed together, the table explicitly treats the result
+   as a bundled or cumulative milestone rather than an isolated causal proof
 
-#### 4.6.1 Communicator A/B Impact Table
+#### 4.6.1 Bundled Same-workload Deltas
+
+These rows are useful because the workload and host pair stayed stable, but the
+`after` result includes multiple fixes together. Read them as cumulative
+milestones, not as strict one-factor ablations.
 
 | Optimization Track | Workload | Before | After | Delta | Main Reading | Evidence |
 |---|---|---:|---:|---:|---|---|
 | direct repeated-read path hardening | `0078 <- 0496`, strict direct, `GPU0 + mlx5_0`, `threads=8` | `1.78507 GB/s` | `11.5755 GB/s` | `+548.5%` (`6.48x`) | repeated direct reads stopped wasting work on request collisions, repeated MR registration, direct credit leaks, and refill races | `/data/tc/comm-bench-20260315-gpu-direct-mlx5_0-threads8-fixed-open-user-132524/result.json` -> `/data/tc/comm-postopt-0078-0496-manual-rerun4-141623/initiator.log` |
 | single large `read_tensor()` cumulative gain | `0360 <- 0496`, `64 MiB`, `threads=1`, `batch=1`, `qp_count=4` | `1.43004 GB/s` | `20.2483 GB/s` | `+1315.9%` (`14.16x`) | large single-request throughput only reached line-rate class after the transport and control-path fixes were combined | `/data/tc/comm-tune-0360-0496-bigread-t1-qp4-attempt1-020457/result.json` -> `/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json` |
+
+#### 4.6.2 Stepwise Near-isolated Deltas
+
+These rows are closer to an ablation chain because each step keeps the same
+workload and changes only one narrow layer on top of the previous step.
+
+| Optimization Track | Workload | Before | After | Delta | Main Reading | Evidence |
+|---|---|---:|---:|---:|---|---|
 | adaptive direct chunking plus `outstanding_wr` alone | same single-large-read workload as above | `1.43004 GB/s` | `1.29556 GB/s` | `-9.4%` | chunking the request into `16 x 4 MiB` and raising QP send depth did not help on their own because the control TCP path was still dominant | `/data/tc/comm-tune-0360-0496-bigread-t1-qp4-attempt1-020457/result.json` -> `/data/tc/comm-tune-0360-0496-bigread-t1-qp4-adaptive2-attempt1-024552/result.json` |
 | low-latency control TCP on top of the chunked direct path | same single-large-read workload as above | `1.29556 GB/s` | `20.2483 GB/s` | `+1462.9%` (`15.63x`) | once `TCP_NODELAY` and `TCP_QUICKACK` were enabled, the already-chunked direct path finally translated into end-to-end throughput | `/data/tc/comm-tune-0360-0496-bigread-t1-qp4-adaptive2-attempt1-024552/result.json` -> `/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json` |
 
-#### 4.6.2 Parameter and Topology Sensitivity Table
+#### 4.6.3 Parameter and Topology Sensitivity Table
 
 These are also important, but they are not all pure code A/Bs.
 
@@ -420,7 +463,7 @@ These are also important, but they are not all pure code A/Bs.
 | Mooncake `MC_SLICE_SIZE` on top of `RO=1` | `RO=1`: `10.12 GB/s` | `RO=1 + SLICE=1MiB`: `8.69 GB/s` | `-14.1%` | larger slice size is not automatically better | `/data/tc/mooncake-tuning-0360-0496-003649/moon_ro1_initiator_exec.json` -> `/data/tc/mooncake-tuning-0360-0496-003649/moon_ro1_slice1m_initiator_exec.json` |
 | communicator full-8 local affinity | `map8_id`: `150.56 GB/s` data-plane aggregate | `map8_target_bad_local`: `83.61 GB/s` data-plane aggregate | `-44.3%` | keeping each host's local `GPU <-> NIC` pairing correct matters far more than the remote permutation itself | `/data/tc/comm-map8-id-rerun-attempt1-043514/result.json` -> `/data/tc/comm-map8-target-bad-local-attempt1-052344/result.json` |
 
-#### 4.6.3 Cases Without A Clean Numeric A/B
+#### 4.6.4 Cases Without A Clean Numeric A/B
 
 Some changes were still important even though they do not have a fair
 "same-workload before/after" number:
@@ -438,12 +481,43 @@ Some changes were still important even though they do not have a fair
 
 ### 5.1 Reference Hardware and Mooncake Baselines
 
-Key same-pair reference numbers on `0360 <- 0496`:
+The strongest current single-NIC cross-framework reference is now the aligned
+physical pair:
+
+1. initiator:
+   - `gpu-h800-0496.host.platform.shaipower.com`
+2. target:
+   - `gpu-h800-0078.host.platform.shaipower.com`
+3. aligned local pair on both hosts:
+   - `GPU2 <-> mlx5_2`
+
+Aligned single-NIC reference numbers on that pair:
 
 | Metric | Result | Evidence |
 |---|---:|---|
-| raw verbs single-NIC ceiling | `127.79 Gb/s` = `15.97 GB/s` | `/data/tc/mooncake-tuning-0360-0496-003649/verbs` |
-| Mooncake preferred GDR (`RO=1`) | `10.12 GB/s` | `/data/tc/mooncake-tuning-0360-0496-003649/moon_ro1_initiator_exec.json` |
+| raw verbs `ib_write_bw` | `196.00 Gbps` = `24.50 GB/s` | `/data/tc/single-nic-compare-20260316-161728/ib_write_bw_client_run_nopin.json` |
+| raw verbs `ib_read_bw` | `195.72 Gbps` = `24.46 GB/s` | `/data/tc/single-nic-compare-20260316-161728/ib_read_bw_client_run_nopin.json` |
+| Mooncake TE aligned write | `24.45 GB/s` | `/data/tc/single-nic-compare-20260316-161728/te_write_mlx5_2.json` |
+| Mooncake TE aligned read | `24.44 GB/s` | `/data/tc/single-nic-compare-20260316-161728/te_read_mlx5_2.json` |
+
+Current reading:
+
+1. Mooncake's `~24.4 GB/s` single-NIC result is real when the physical
+   `GPU <-> NIC` pair is actually aligned
+2. on that aligned pair, Mooncake TE is effectively sitting on top of the raw
+   single-NIC verbs ceiling rather than merely approaching the earlier
+   `10.12 GB/s` tuning-track result
+3. this aligned pair is now the preferred single-NIC reference for
+   cross-framework discussion
+
+Earlier same-pair tuning-track numbers on `0360 <- 0496` are still useful as a
+Mooncake incremental-tuning record, but they are no longer the preferred
+single-NIC cross-framework reference:
+
+| Metric | Result | Evidence |
+|---|---:|---|
+| raw verbs single-NIC reference point | `127.79 Gb/s` = `15.97 GB/s` | `/data/tc/mooncake-tuning-0360-0496-003649/verbs` |
+| Mooncake preferred GDR in that earlier tuning track (`RO=1`) | `10.12 GB/s` | `/data/tc/mooncake-tuning-0360-0496-003649/moon_ro1_initiator_exec.json` |
 | Mooncake far GDR (`RO=1`) | `7.92 GB/s` | `/data/tc/mooncake-far-0360-0496-004020` |
 
 Mooncake full-8 framework best-practice reference:

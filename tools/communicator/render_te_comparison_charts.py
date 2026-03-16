@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Iterable
 
 
 REPO_ROOT = Path("/data/workspace/tensorcast-280")
@@ -20,6 +20,7 @@ COMM_CASES = {
     "map8_half_swap": Path("/data/tc/comm-map8-half-swap-attempt2-052059/result.json"),
     "map8_target_bad_local": Path("/data/tc/comm-map8-target-bad-local-attempt1-052344/result.json"),
     "single_big_read": Path("/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json"),
+    "single_nic_probe_0496_0078": Path("/data/tc/single-nic-compare-20260316-161728/comm_initiator_run.json"),
 }
 
 MOONCAKE = {
@@ -31,9 +32,36 @@ MOONCAKE = {
     "map8_target_bad_local_gbps": 34.88 * 8.0,
 }
 
+SINGLE_NIC_CASES = {
+    "ib_write_aligned": Path("/data/tc/single-nic-compare-20260316-161728/ib_write_bw_client_run_nopin.json"),
+    "ib_read_aligned": Path("/data/tc/single-nic-compare-20260316-161728/ib_read_bw_client_run_nopin.json"),
+    "te_write_aligned": Path("/data/tc/single-nic-compare-20260316-161728/te_write_mlx5_2.json"),
+    "te_read_aligned": Path("/data/tc/single-nic-compare-20260316-161728/te_read_mlx5_2.json"),
+}
+
 
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def extract_mooncake_throughput_GBps(path: Path) -> float:
+    payload = load_json(path)
+    stderr = payload.get("stderr", "")
+    for line in reversed(stderr.splitlines()):
+        match = re.search(r"throughput ([0-9]+(?:\.[0-9]+)?) GB/s", line)
+        if match:
+            return float(match.group(1))
+    raise ValueError(f"failed to extract Mooncake throughput from {path}")
+
+
+def extract_ib_bw_gbps(path: Path) -> float:
+    payload = load_json(path)
+    stdout = payload.get("stdout", "")
+    for line in reversed(stdout.splitlines()):
+        fields = line.split()
+        if len(fields) >= 4 and fields[0].isdigit():
+            return float(fields[3])
+    raise ValueError(f"failed to extract ib_*_bw result from {path}")
 
 
 def communicator_case_metrics(path: Path) -> dict[str, float]:
@@ -56,6 +84,27 @@ def communicator_case_metrics(path: Path) -> dict[str, float]:
             "per_lane_GBps": data_plane_GBps / float(lane_count),
             "per_lane_gbps": (data_plane_GBps * 8.0) / float(lane_count),
         }
+    if "parsed" not in payload:
+        stdout = payload.get("stdout", "")
+        for line in reversed(stdout.splitlines()):
+            if not line.startswith("SUMMARY "):
+                continue
+            fields: dict[str, str] = {}
+            for token in line.split():
+                if "=" not in token:
+                    continue
+                key, value = token.split("=", 1)
+                fields[key] = value
+            data_plane_GBps = float(fields.get("bw_GBps", fields["bw_gbps"]))
+            return {
+                "data_plane_GBps": data_plane_GBps,
+                "data_plane_gbps": data_plane_GBps * 8.0,
+                "case_wall_GBps": data_plane_GBps,
+                "case_wall_gbps": data_plane_GBps * 8.0,
+                "per_lane_GBps": data_plane_GBps,
+                "per_lane_gbps": data_plane_GBps * 8.0,
+            }
+        raise ValueError(f"failed to parse communicator stdout summary from {path}")
     summary = payload["parsed"]["summary"]
     data_plane_GBps = float(summary.get("bw_GBps", summary["bw_gbps"]))
     return {
@@ -208,14 +257,54 @@ def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     comm_metrics = {name: communicator_case_metrics(path) for name, path in COMM_CASES.items()}
+    single_nic = {
+        "ib_write_aligned_GBps": extract_ib_bw_gbps(SINGLE_NIC_CASES["ib_write_aligned"]) / 8.0,
+        "ib_read_aligned_GBps": extract_ib_bw_gbps(SINGLE_NIC_CASES["ib_read_aligned"]) / 8.0,
+        "te_write_aligned_GBps": extract_mooncake_throughput_GBps(SINGLE_NIC_CASES["te_write_aligned"]),
+        "te_read_aligned_GBps": extract_mooncake_throughput_GBps(SINGLE_NIC_CASES["te_read_aligned"]),
+        "comm_best_known_GBps": comm_metrics["single_big_read"]["per_lane_GBps"],
+        "comm_fresh_probe_GBps": comm_metrics["single_nic_probe_0496_0078"]["per_lane_GBps"],
+        "aligned_pair": "0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2",
+        "comm_best_known_case": str(COMM_CASES["single_big_read"]),
+        "comm_fresh_probe_case": str(COMM_CASES["single_nic_probe_0496_0078"]),
+    }
 
     comparison = {
         "mooncake": MOONCAKE,
         "communicator": comm_metrics,
+        "single_nic": single_nic,
     }
     (DATA_DIR / "20260316-communicator-vs-te-comparison.json").write_text(
         json.dumps(comparison, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+
+    render_bar_chart(
+        title="Single-NIC Aligned Reference",
+        subtitle="Matched physical GPU/NIC pair for verbs and Mooncake; communicator bars shown with explicit caveats",
+        labels=[
+            "IB verbs\nwrite aligned",
+            "IB verbs\nread aligned",
+            "Mooncake TE\nwrite aligned",
+            "Mooncake TE\nread aligned",
+            "Comm best-known\nstrict read",
+            "Comm 0496->0078\nfresh probe",
+        ],
+        values=[
+            extract_ib_bw_gbps(SINGLE_NIC_CASES["ib_write_aligned"]) / 8.0,
+            extract_ib_bw_gbps(SINGLE_NIC_CASES["ib_read_aligned"]) / 8.0,
+            extract_mooncake_throughput_GBps(SINGLE_NIC_CASES["te_write_aligned"]),
+            extract_mooncake_throughput_GBps(SINGLE_NIC_CASES["te_read_aligned"]),
+            comm_metrics["single_big_read"]["per_lane_GBps"],
+            comm_metrics["single_nic_probe_0496_0078"]["per_lane_GBps"],
+        ],
+        colors=["#1f4b99", "#5d84d6", "#9c4f2f", "#d48459", "#2a7f62", "#7fbf9f"],
+        unit="GB/s",
+        note=(
+            "Aligned pair: 0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2. "
+            "Communicator best-known is a different host pair; fresh 0496->0078 probe is shown separately."
+        ),
+        output_path=IMAGE_DIR / "communicator_vs_te_single_nic_reference_20260316.svg",
     )
 
     render_bar_chart(
@@ -268,30 +357,6 @@ def main() -> int:
         output_path=IMAGE_DIR / "communicator_vs_te_mapping_norm_20260316.svg",
     )
 
-    render_bar_chart(
-        title="Per-lane Reference",
-        subtitle="Single-object and full-8 lane-level reference values",
-        labels=[
-            "TE full-8\nper-lane avg",
-            "Comm full-8\nper-lane avg",
-            "Comm single\nbig read",
-            "Comm bad-local\nper-lane avg",
-        ],
-        values=[
-            (MOONCAKE["full8_te_best_gbps"] / 8.0) / 8.0,
-            max(
-                comm_metrics["map8_id"]["per_lane_GBps"],
-                comm_metrics["map8_within_swap"]["per_lane_GBps"],
-                comm_metrics["map8_half_swap"]["per_lane_GBps"],
-            ),
-            comm_metrics["single_big_read"]["per_lane_GBps"],
-            comm_metrics["map8_target_bad_local"]["per_lane_GBps"],
-        ],
-        colors=["#7f5539", "#2a7f62", "#204b57", "#a33f2f"],
-        unit="GB/s",
-        note="TE value is write-path full-8 average; communicator single-big-read is strict direct read_tensor",
-        output_path=IMAGE_DIR / "communicator_vs_te_per_lane_20260316.svg",
-    )
     return 0
 
 
