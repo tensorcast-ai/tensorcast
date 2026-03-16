@@ -697,11 +697,14 @@ grpc::Status commit_piece_view_registration(
     return {StatusCode::FAILED_PRECONDITION, "piece registration missing tensor_index_data"};
   }
 
-  const auto view_spec_or = store::view::parse_view_spec_json(meta.view_spec_json);
-  if (!view_spec_or.ok()) {
-    return to_grpc_status(view_spec_or.status());
+  const auto parsed_or = store::view::parse_view_selection_json(meta.view_spec_json);
+  if (!parsed_or.ok()) {
+    return to_grpc_status(parsed_or.status());
   }
-  const auto plan_or = store::loader::ViewPlanner::compute_bidirectional_view_plan(meta.index_data, *view_spec_or);
+  const auto plan_or = parsed_or->tensor_names.empty()
+      ? store::loader::ViewPlanner::compute_bidirectional_view_plan(meta.index_data, parsed_or->spec)
+      : store::loader::ViewPlanner::compute_bidirectional_view_plan(
+            meta.index_data, parsed_or->spec, parsed_or->tensor_names);
   if (!plan_or.ok()) {
     return to_grpc_status(plan_or.status());
   }
@@ -1057,6 +1060,29 @@ grpc::Status commit_piece_view_registration(
   }
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(meta.device_id);
 
+  store::components::ViewStateUpdate update;
+  update.artifact_id = meta.client_artifact_id;
+  update.view_id = meta.view_id;
+  update.view_spec_json = meta.view_spec_json;
+  update.view_size_bytes = view_total;
+  update.view_data_hash = view_data_hash;
+  update.mark_verified = true;
+  update.canonical_size_bytes = canonical_size_bytes;
+  update.canonical_bytes_covered = covered_bytes;
+  update.canonical_ranges.reserve(canonical_ranges.size());
+  for (const auto& range : canonical_ranges) {
+    store::components::CanonicalRange canonical_range;
+    canonical_range.offset = range.offset;
+    canonical_range.length = range.length;
+    update.canonical_ranges.push_back(std::move(canonical_range));
+  }
+  update.leaf_writes = std::move(leaf_writes);
+  update.proof_digests = std::move(proof_digests);
+  absl::Status update_status = dep.global_store_client->update_artifact_view_state(update);
+  if (!update_status.ok()) {
+    return to_grpc_status(update_status);
+  }
+
   auto replica_id_or = dep.global_store_client->register_memory_replica(
       meta.client_artifact_id,
       worker_id,
@@ -1102,29 +1128,6 @@ grpc::Status commit_piece_view_registration(
     }
   } replica_rollback{
       .client = dep.global_store_client.get(), .artifact_id = meta.client_artifact_id, .replica_id = replica_id};
-
-  store::components::ViewStateUpdate update;
-  update.artifact_id = meta.client_artifact_id;
-  update.view_id = meta.view_id;
-  update.view_spec_json = meta.view_spec_json;
-  update.view_size_bytes = view_total;
-  update.view_data_hash = view_data_hash;
-  update.mark_verified = true;
-  update.canonical_size_bytes = canonical_size_bytes;
-  update.canonical_bytes_covered = covered_bytes;
-  update.canonical_ranges.reserve(canonical_ranges.size());
-  for (const auto& range : canonical_ranges) {
-    store::components::CanonicalRange canonical_range;
-    canonical_range.offset = range.offset;
-    canonical_range.length = range.length;
-    update.canonical_ranges.push_back(std::move(canonical_range));
-  }
-  update.leaf_writes = std::move(leaf_writes);
-  update.proof_digests = std::move(proof_digests);
-  absl::Status update_status = dep.global_store_client->update_artifact_view_state(update);
-  if (!update_status.ok()) {
-    return to_grpc_status(update_status);
-  }
 
   // Publish response metadata.
   auto* desc = resp.mutable_artifact_descriptor();
@@ -1463,8 +1466,8 @@ grpc::Status apply_begin_view_registration(
   if (!req.has_tensor_index_data()) {
     return {StatusCode::INVALID_ARGUMENT, "view registration requires tensor_index_data"};
   }
-  if (req.view().spec().tensors().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "view registration requires non-empty view spec"};
+  if (req.view().spec().tensors().empty() && req.view().tensor_names().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "view registration requires a view spec or tensor_names"};
   }
   auto placement = ToPlacement(req.view().placement());
   if (placement == store::StoreEngine::ViewPlacement::kUnspecified) {
@@ -1494,7 +1497,12 @@ grpc::Status apply_begin_view_registration(
   }
   view_reg.view_id = resolved_view_id;
   view_reg.spec = std::move(*spec_or);
-  meta.view_spec_json = store::view::build_view_spec_json(view_reg.spec);
+  for (const auto& tensor_name : req.view().tensor_names()) {
+    if (!tensor_name.empty()) {
+      view_reg.tensor_names.push_back(tensor_name);
+    }
+  }
+  meta.view_spec_json = store::view::build_view_spec_json(view_reg.spec, view_reg.tensor_names);
   view_reg.placement = placement;
   view_reg.canonical_size_bytes = req.view().canonical_size_bytes();
   view_reg.registration_kind = registration_kind;

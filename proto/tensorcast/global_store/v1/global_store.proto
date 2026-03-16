@@ -99,6 +99,10 @@ service AssemblyViewService {
   rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
   rpc GetAssemblyRuntimePolicy(GetAssemblyRuntimePolicyRequest) returns (GetAssemblyRuntimePolicyResponse) {}
   rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
+  rpc GetAssemblyContribution(GetAssemblyContributionRequest) returns (GetAssemblyContributionResponse) {}
+  rpc UpsertAssemblyContribution(UpsertAssemblyContributionRequest) returns (UpsertAssemblyContributionResponse) {}
+  rpc ListAssemblyContributions(ListAssemblyContributionsRequest) returns (ListAssemblyContributionsResponse) {}
+  rpc UpdateAssemblyContributionState(UpdateAssemblyContributionStateRequest) returns (UpdateAssemblyContributionStateResponse) {}
 }
 
 // Workflow domain: lease-based long-running operations and placement/persistence plans.
@@ -583,6 +587,70 @@ message UpdateAssemblyRuntimePolicyRequest {
 message UpdateAssemblyRuntimePolicyResponse {
   Status status = 1;
   AssemblyRuntimePolicy policy = 2;
+}
+
+message AssemblyContribution {
+  string assembly_id = 1;
+  string view_id = 2;
+  string binding_id = 3;
+  string binding_value_id = 4;
+  string coverage_plan_hash = 5;
+  string contributor_daemon_id = 6;
+  string coordinator_operation_id = 7;
+  uint64 coordinator_generation = 8;
+  string lease_id = 9;
+  uint64 lease_generation = 10;
+  google.protobuf.Timestamp lease_expires_at = 11;
+  string state = 12;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp updated_at = 14;
+}
+
+message GetAssemblyContributionRequest {
+  string assembly_id = 1;
+  string view_id = 2;
+}
+
+message GetAssemblyContributionResponse {
+  Status status = 1;
+  AssemblyContribution contribution = 2;
+}
+
+message UpsertAssemblyContributionRequest {
+  AssemblyContribution contribution = 1;
+}
+
+message UpsertAssemblyContributionResponse {
+  Status status = 1;
+  AssemblyContribution contribution = 2;
+}
+
+message ListAssemblyContributionsRequest {
+  string assembly_id = 1;
+  string view_id = 2;
+  string binding_id = 3;
+  string binding_value_id = 4;
+  repeated string states = 5;
+}
+
+message ListAssemblyContributionsResponse {
+  Status status = 1;
+  repeated AssemblyContribution contributions = 2;
+}
+
+message UpdateAssemblyContributionStateRequest {
+  string assembly_id = 1;
+  string view_id = 2;
+  string state = 3;
+  string expected_lease_id = 4;
+  uint64 expected_lease_generation = 5;
+  repeated string current_states = 6;
+  google.protobuf.Timestamp lease_expires_at = 7;
+}
+
+message UpdateAssemblyContributionStateResponse {
+  Status status = 1;
+  AssemblyContribution contribution = 2;
 }
 
 message LeafWrite {

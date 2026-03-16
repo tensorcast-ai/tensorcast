@@ -23,9 +23,12 @@ class BindingRegistry {
   struct Record {
     mutable absl::Mutex mu;
     std::string binding_id;
+    std::string binding_layout_id;
     int owner_pid{0};
     int device_id{-1};
     std::string device_uuid;
+    v2::BindingOwnership ownership{v2::BINDING_OWNERSHIP_UNSPECIFIED};
+    v2::BindingState state{v2::BINDING_STATE_UNSPECIFIED};
     bool mapped{false};
     bool closed{false};
     int export_refs{0};
@@ -37,6 +40,10 @@ class BindingRegistry {
     std::string target_index_json;
     std::string target_layout_hash;
     std::string current_artifact_id;
+    std::string current_binding_value_id;
+    uint64_t seal_generation{0};
+    uint64_t update_epoch_counter{0};
+    std::string active_update_epoch;
     std::string target_write_token;
     v2::CopyPlan copy_plan;
     std::vector<v2::MappedTensorSpec> dst_tensors;

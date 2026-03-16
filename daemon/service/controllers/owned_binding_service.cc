@@ -2,20 +2,28 @@
 
 #include "daemon/service/controllers/owned_binding_service.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/random/random.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "daemon/service/controllers/assembly_coordination_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
@@ -29,6 +37,7 @@
 #include "core/common/selection_identity.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "folly/futures/Future.h"
 #include "gsl/pointers"
 
 namespace tensorcast::daemon {
@@ -52,6 +61,7 @@ using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
 using store::loading::MaterializationSource;
+namespace coordination = assembly_coordination;
 
 std::chrono::milliseconds resolve_owner_request_budget(const grpc::ServerContext& server_context) {
   using clock = std::chrono::system_clock;
@@ -326,6 +336,144 @@ absl::StatusOr<std::string> maybe_mint_target_write_token(
   return *token_or;
 }
 
+std::string mint_binding_value_id() {
+  return mint_random_id(16);
+}
+
+void fill_binding_value(const BindingRegistry::Record& record, v2::BindingValue& value) {
+  value.set_binding_id(record.binding_id);
+  value.set_binding_layout_id(record.binding_layout_id);
+  value.set_binding_value_id(record.current_binding_value_id);
+  value.set_seal_generation(record.seal_generation);
+  if (!record.current_artifact_id.empty()) {
+    value.set_source_artifact_id(record.current_artifact_id);
+  }
+  if (!record.current_selection.artifact_id().empty()) {
+    value.mutable_selection()->CopyFrom(record.current_selection);
+  }
+  value.set_is_artifact_backed(!record.current_artifact_id.empty());
+}
+
+void mark_ready_artifact(
+    BindingRegistry::Record* record,
+    std::string_view artifact_id,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    std::string_view target_write_token) {
+  record->current_artifact_id = std::string(artifact_id);
+  record->current_selection = selection;
+  record->target_write_token = std::string(target_write_token);
+  record->state = v2::BINDING_STATE_READY_ARTIFACT;
+  record->active_update_epoch.clear();
+  record->current_binding_value_id = mint_binding_value_id();
+  record->seal_generation += 1;
+}
+
+void mark_allocated(BindingRegistry::Record* record) {
+  record->current_artifact_id.clear();
+  record->current_selection.Clear();
+  record->target_write_token.clear();
+  record->current_binding_value_id.clear();
+  record->state = v2::BINDING_STATE_ALLOCATED;
+  record->active_update_epoch.clear();
+}
+
+void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch) {
+  record->current_artifact_id.clear();
+  record->current_selection.Clear();
+  record->target_write_token.clear();
+  record->current_binding_value_id.clear();
+  record->state = v2::BINDING_STATE_MUTABLE;
+  record->active_update_epoch = std::string(update_epoch);
+}
+
+void mark_ready_local(BindingRegistry::Record* record) {
+  record->current_artifact_id.clear();
+  record->current_selection.Clear();
+  record->target_write_token.clear();
+  record->state = v2::BINDING_STATE_READY_LOCAL;
+  record->active_update_epoch.clear();
+  record->current_binding_value_id = mint_binding_value_id();
+  record->seal_generation += 1;
+}
+
+void mark_dirty(BindingRegistry::Record* record) {
+  record->current_artifact_id.clear();
+  record->current_selection.Clear();
+  record->target_write_token.clear();
+  record->current_binding_value_id.clear();
+  record->state = v2::BINDING_STATE_DIRTY;
+  record->active_update_epoch.clear();
+}
+
+std::string next_update_epoch(BindingRegistry::Record* record) {
+  record->update_epoch_counter += 1;
+  return absl::StrCat("bue:", record->binding_id, ":", record->update_epoch_counter);
+}
+
+store::loading::ReplicaKey contribution_lease_subject(std::string_view binding_id, std::string_view binding_value_id) {
+  return store::loading::ReplicaKey{
+      .artifact_id = absl::StrCat("binding-contribution:", binding_id, ":", binding_value_id),
+      .view_id = std::nullopt,
+      .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+}
+
+std::string daemon_identity_for_contribution(const WorkerIdentityStore& identity) {
+  auto daemon_id = identity.daemon_id();
+  if (!daemon_id.empty()) {
+    return daemon_id;
+  }
+  auto worker_id = identity.worker_id();
+  if (!worker_id.empty()) {
+    return worker_id;
+  }
+  return "unknown-daemon";
+}
+
+absl::Status ensure_no_live_binding_contributions(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& client,
+    std::string_view binding_id,
+    std::string_view binding_value_id) {
+  if (binding_id.empty() || binding_value_id.empty()) {
+    return absl::OkStatus();
+  }
+  if (!client || !client->is_connected()) {
+    return absl::OkStatus();
+  }
+  auto contributions_or = client->list_assembly_contributions(
+      /*assembly_id=*/std::nullopt,
+      /*view_id=*/std::nullopt,
+      binding_id,
+      binding_value_id,
+      {"accepted"});
+  if (!contributions_or.ok()) {
+    return contributions_or.status();
+  }
+  if (contributions_or->empty()) {
+    return absl::OkStatus();
+  }
+  auto active_identities_or = coordination::list_active_contributor_identities(client);
+  if (!active_identities_or.ok()) {
+    return active_identities_or.status();
+  }
+  const auto& active_identities = *active_identities_or;
+  const absl::Time now = absl::Now();
+  std::vector<std::string> assemblies;
+  assemblies.reserve(contributions_or->size());
+  for (const auto& contribution : *contributions_or) {
+    if (!coordination::assembly_contribution_is_live(contribution, now, &active_identities)) {
+      continue;
+    }
+    assemblies.push_back(contribution.assembly_id);
+  }
+  if (assemblies.empty()) {
+    return absl::OkStatus();
+  }
+  return absl::FailedPreconditionError(
+      absl::StrCat("binding value has live assembly contributions: ", absl::StrJoin(assemblies, ",")));
+}
+
 v2::MaterializeIntoTargetRequest build_unmapped_request(
     const tensorcast::common::v1::ArtifactSelection& source_selection,
     std::string_view artifact_id,
@@ -385,7 +533,168 @@ v2::MaterializeIntoMappedTargetRequest build_mapped_request(
 
 } // namespace
 
-OwnedBindingService::OwnedBindingService(Dep d) : d_(std::move(d)) {}
+OwnedBindingService::OwnedBindingService(Dep d)
+    : d_(std::move(d)), contribution_keepalive_tracker_(std::make_shared<ContributionLeaseKeepaliveTracker>()) {}
+
+grpc::Status OwnedBindingService::create_binding(
+    RpcContext& rctx,
+    const v2::CreateBindingRequest& req,
+    v2::CreateBindingResponse& resp) {
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req.ownership() == v2::BINDING_OWNERSHIP_UNSPECIFIED) {
+    return {StatusCode::INVALID_ARGUMENT, "ownership is required"};
+  }
+  if (req.binding_layout_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_layout_id is required"};
+  }
+  if (req.target_layout().storages_size() == 0 || req.target_layout().offsets_size() == 0) {
+    return {StatusCode::INVALID_ARGUMENT, "target_layout storages and offsets are required"};
+  }
+  if (req.target_index_bytes().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "target_index_bytes is required"};
+  }
+  if (req.binding_layout_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_layout_id is required"};
+  }
+  if (req.pid() <= 0) {
+    return {StatusCode::INVALID_ARGUMENT, "pid is required"};
+  }
+  const bool mapped = req.copy_plan().entries_size() > 0 || req.dst_tensors_size() > 0;
+  if (mapped && (req.copy_plan().entries_size() == 0 || req.dst_tensors_size() == 0)) {
+    return {StatusCode::INVALID_ARGUMENT, "mapped binding requires copy_plan and dst_tensors"};
+  }
+  if (!mapped && (req.copy_plan().entries_size() > 0 || req.dst_tensors_size() > 0)) {
+    return {StatusCode::INVALID_ARGUMENT, "unmapped binding must not include copy_plan or dst_tensors"};
+  }
+  if (req.has_initial_selection() && req.initial_selection().artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "initial_selection.artifact_id is required when provided"};
+  }
+  if (!req.has_initial_selection() && req.has_source_artifact_id()) {
+    return {StatusCode::INVALID_ARGUMENT, "source_artifact_id requires initial_selection"};
+  }
+  if (!req.has_initial_selection() && !req.target_write_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "target_write_token requires initial_selection"};
+  }
+  if (req.ownership() == v2::BINDING_OWNERSHIP_DAEMON && req.has_initial_selection()) {
+    return {StatusCode::INVALID_ARGUMENT, "daemon-owned CreateBinding does not accept initial_selection"};
+  }
+
+  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
+  if (device.type != DeviceType::GPU || device.ordinal < 0) {
+    return {StatusCode::INVALID_ARGUMENT, "binding requires a CUDA device"};
+  }
+
+  google::protobuf::RepeatedPtrField<std::string> no_tensor_filter;
+  auto descriptors_or = build_descriptors_from_index(
+      std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
+      no_tensor_filter,
+      req.device_uuid());
+  if (!descriptors_or.ok()) {
+    return to_grpc_status(descriptors_or.status());
+  }
+
+  std::unique_ptr<common::memory::GpuDeviceMemory> allocation;
+  cuda::IpcHandleBytes handle_bytes;
+  if (req.ownership() == v2::BINDING_OWNERSHIP_DAEMON) {
+    if (d_.handle_leases == nullptr) {
+      return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
+    }
+    auto offsets_or = resolve_target_offsets(req.target_layout());
+    if (!offsets_or.ok()) {
+      return to_grpc_status(offsets_or.status());
+    }
+    uint64_t logical_total_size = 0;
+    for (const auto& offset : *offsets_or) {
+      const uint64_t end = offset.storage_offset + offset.logical_length;
+      if (end > logical_total_size) {
+        logical_total_size = end;
+      }
+    }
+    if (logical_total_size == 0) {
+      return {StatusCode::INVALID_ARGUMENT, "target_layout logical size must be non-zero"};
+    }
+    allocation = std::make_unique<common::memory::GpuDeviceMemory>();
+    if (auto allocate_status = allocation->allocate(logical_total_size, device.ordinal); !allocate_status.ok()) {
+      return to_grpc_status(allocate_status);
+    }
+    handle_bytes = cuda::IpcHandleBytes::from_native(allocation->get_handle());
+    if (!handle_bytes.is_valid()) {
+      return {StatusCode::FAILED_PRECONDITION, "failed to export CUDA IPC handle for binding"};
+    }
+    auto storage_layout_or = build_owned_storage_layout(
+        req.target_layout(), device.ordinal, gsl::not_null<void*>{allocation->get()}, handle_bytes);
+    if (!storage_layout_or.ok()) {
+      return to_grpc_status(storage_layout_or.status());
+    }
+    (void)storage_layout_or;
+  }
+
+  auto record = std::make_shared<BindingRegistry::Record>();
+  record->binding_id = mint_binding_id();
+  record->binding_layout_id = req.binding_layout_id();
+  record->owner_pid = req.pid();
+  record->device_id = device.ordinal;
+  record->device_uuid = req.device_uuid();
+  record->ownership = req.ownership();
+  record->state = v2::BINDING_STATE_ALLOCATED;
+  record->mapped = mapped;
+  record->closed = false;
+  record->export_refs = req.ownership() == v2::BINDING_OWNERSHIP_DAEMON ? 1 : 0;
+  record->allocation = std::move(allocation);
+  record->handle_bytes = handle_bytes;
+  record->target_layout = req.target_layout();
+  record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
+  record->target_layout_hash = compute_target_layout_hash(req.target_layout());
+  if (mapped) {
+    record->copy_plan = req.copy_plan();
+    record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
+  }
+  if (req.has_initial_selection()) {
+    record->source_selection = req.initial_selection();
+    mark_ready_artifact(
+        record.get(),
+        req.has_source_artifact_id() ? req.source_artifact_id() : req.initial_selection().artifact_id(),
+        req.initial_selection(),
+        std::string_view(req.target_write_token().data(), req.target_write_token().size()));
+  } else {
+    mark_allocated(record.get());
+  }
+
+  if (auto insert_status = d_.bindings.insert(record); !insert_status.ok()) {
+    return to_grpc_status(insert_status);
+  }
+
+  if (req.ownership() == v2::BINDING_OWNERSHIP_DAEMON) {
+    auto token_or = d_.handle_leases->mint_external_cuda_lease(
+        req.pid(),
+        [registry = &d_.bindings, binding_id = record->binding_id]() { registry->release_export_ref(binding_id); });
+    if (!token_or.ok()) {
+      const bool closed = d_.bindings.close_control(record->binding_id);
+      if (!closed) {
+        LOG(WARNING) << "binding cleanup could not find binding_id=" << record->binding_id;
+      }
+      d_.bindings.release_export_ref(record->binding_id);
+      return to_grpc_status(token_or.status());
+    }
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(
+        handle_bytes.as_string_view().data(), handle_bytes.as_string_view().size());
+    resp.mutable_mem_handle()->set_lease_token(*token_or);
+    for (auto& descriptor : descriptors_or->descriptors) {
+      *resp.add_payloads() = std::move(descriptor);
+    }
+  }
+
+  resp.set_binding_id(record->binding_id);
+  resp.set_target_index_bytes(req.target_index_bytes());
+  resp.set_state(record->state);
+  if (!record->current_binding_value_id.empty()) {
+    fill_binding_value(*record, *resp.mutable_current_value());
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
 
 grpc::Status OwnedBindingService::create_owned_binding(
     RpcContext& rctx,
@@ -405,6 +714,9 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
   if (req.target_index_bytes().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "target_index_bytes is required"};
+  }
+  if (req.binding_layout_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_layout_id is required"};
   }
   if (req.pid() <= 0) {
     return {StatusCode::INVALID_ARGUMENT, "pid is required"};
@@ -632,9 +944,11 @@ grpc::Status OwnedBindingService::create_owned_binding(
     binding_id = mint_binding_id();
     record = std::make_shared<BindingRegistry::Record>();
     record->binding_id = binding_id;
+    record->binding_layout_id = req.binding_layout_id();
     record->owner_pid = req.pid();
     record->device_id = device.ordinal;
     record->device_uuid = req.device_uuid();
+    record->ownership = v2::BINDING_OWNERSHIP_DAEMON;
     record->mapped = mapped;
     record->closed = false;
     record->export_refs = 1;
@@ -642,11 +956,10 @@ grpc::Status OwnedBindingService::create_owned_binding(
     record->handle_bytes = handle_bytes;
     record->source_selection = req.source_selection();
     record->source_selection.set_artifact_id(resolution.resolved_artifact_id);
-    record->current_selection = current_selection;
     record->target_layout = req.target_layout();
     record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
     record->target_layout_hash = target_layout_hash;
-    record->current_artifact_id = resolution.resolved_artifact_id;
+    mark_ready_artifact(record.get(), resolution.resolved_artifact_id, current_selection, std::string());
     if (mapped) {
       record->copy_plan = req.copy_plan();
       record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
@@ -706,11 +1019,447 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
   resp.mutable_resolved_selection()->CopyFrom(current_selection);
   resp.set_source(to_proto_source(result_or->source));
+  resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
+  fill_binding_value(*record, *resp.mutable_current_value());
   {
     absl::MutexLock lock(&record->mu);
     if (target_write_token_or.ok()) {
       record->target_write_token = *target_write_token_or;
     }
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status OwnedBindingService::commit_binding_artifact(
+    RpcContext& rctx,
+    const v2::CommitBindingArtifactRequest& req,
+    v2::CommitBindingArtifactResponse& resp) {
+  if (req.binding_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_id is required"};
+  }
+  if (!req.has_selection() || req.selection().artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required"};
+  }
+  auto record_or = d_.bindings.get(req.binding_id());
+  if (!record_or.ok()) {
+    return to_grpc_status(record_or.status());
+  }
+  const auto record = *record_or;
+  std::string current_binding_value_id;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is mutable"};
+    }
+    if (record->state == v2::BINDING_STATE_DIRTY) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is dirty"};
+    }
+    current_binding_value_id = record->current_binding_value_id;
+  }
+  if (auto contribution_status =
+          ensure_no_live_binding_contributions(d_.global_store_client, record->binding_id, current_binding_value_id);
+      !contribution_status.ok()) {
+    return to_grpc_status(contribution_status);
+  }
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is mutable"};
+    }
+    if (record->state == v2::BINDING_STATE_DIRTY) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is dirty"};
+    }
+    if (!current_binding_value_id.empty() && record->current_binding_value_id != current_binding_value_id) {
+      return {StatusCode::FAILED_PRECONDITION, "binding current value changed during artifact commit"};
+    }
+    mark_ready_artifact(
+        record.get(),
+        req.has_source_artifact_id() ? req.source_artifact_id() : req.selection().artifact_id(),
+        req.selection(),
+        std::string_view(req.target_write_token().data(), req.target_write_token().size()));
+    resp.set_state(record->state);
+    fill_binding_value(*record, *resp.mutable_current_value());
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status OwnedBindingService::begin_binding_update(
+    RpcContext& rctx,
+    const v2::BeginBindingUpdateRequest& req,
+    v2::BeginBindingUpdateResponse& resp) {
+  if (req.binding_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_id is required"};
+  }
+  auto record_or = d_.bindings.get(req.binding_id());
+  if (!record_or.ok()) {
+    return to_grpc_status(record_or.status());
+  }
+  const auto record = *record_or;
+  std::string current_binding_value_id;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_DIRTY) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is dirty"};
+    }
+    if (record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is already mutable"};
+    }
+    current_binding_value_id = record->current_binding_value_id;
+  }
+  if (auto contribution_status =
+          ensure_no_live_binding_contributions(d_.global_store_client, record->binding_id, current_binding_value_id);
+      !contribution_status.ok()) {
+    return to_grpc_status(contribution_status);
+  }
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_DIRTY) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is dirty"};
+    }
+    if (record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is already mutable"};
+    }
+    if (!current_binding_value_id.empty() && record->current_binding_value_id != current_binding_value_id) {
+      return {StatusCode::FAILED_PRECONDITION, "binding current value changed during update preparation"};
+    }
+    const std::string update_epoch = next_update_epoch(record.get());
+    mark_mutable(record.get(), update_epoch);
+    resp.set_update_epoch(update_epoch);
+    resp.set_state(record->state);
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status OwnedBindingService::submit_binding_contribution(
+    RpcContext& rctx,
+    const v2::SubmitBindingContributionRequest& req,
+    v2::SubmitBindingContributionResponse& resp) {
+  if (req.assembly_id().empty() || req.layout_id().empty() || req.contribution_contract_hash().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "assembly_id, layout_id, and contribution_contract_hash are required"};
+  }
+  if (req.binding_id().empty() || req.binding_value_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_id and binding_value_id are required"};
+  }
+  if (req.coverage_plan_hash().empty() || req.coordinator_operation_id().empty() || req.coordinator_generation() == 0) {
+    return {
+        StatusCode::INVALID_ARGUMENT,
+        "coverage_plan_hash, coordinator_operation_id, and coordinator_generation are required"};
+  }
+  if (req.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_UNSPECIFIED) {
+    return {StatusCode::INVALID_ARGUMENT, "contribution_kind is required"};
+  }
+  if (req.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL && req.view_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "piece contributions require view_id"};
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+    return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+  if (d_.lifecycle == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "session lifecycle is unavailable"};
+  }
+
+  auto record_or = d_.bindings.get(req.binding_id());
+  if (!record_or.ok()) {
+    return to_grpc_status(record_or.status());
+  }
+  const auto record = *record_or;
+
+  int owner_pid = 0;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_DIRTY || record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is not sealed"};
+    }
+    if (record->current_binding_value_id.empty()) {
+      return {StatusCode::FAILED_PRECONDITION, "binding has no current sealed value"};
+    }
+    if (record->current_binding_value_id != req.binding_value_id()) {
+      return {StatusCode::FAILED_PRECONDITION, "binding_value_id is no longer current"};
+    }
+    owner_pid = record->owner_pid;
+  }
+
+  auto binding_or = d_.global_store_client->get_assembly_layout_binding(req.assembly_id());
+  if (!binding_or.ok()) {
+    return to_grpc_status(binding_or.status());
+  }
+  if (binding_or->layout_id() != req.layout_id()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly layout binding changed"};
+  }
+
+  tensorcast::operation::v1::GetOperationRequest get_operation_req;
+  get_operation_req.set_operation_id(req.coordinator_operation_id());
+  auto operation_or = d_.global_store_client->get_operation(get_operation_req);
+  if (!operation_or.ok()) {
+    return to_grpc_status(operation_or.status());
+  }
+  if (operation_or->lease_generation() != req.coordinator_generation()) {
+    return {StatusCode::FAILED_PRECONDITION, "coordinator generation changed"};
+  }
+  if (!coordination::operation_lease_is_live(*operation_or)) {
+    return {StatusCode::FAILED_PRECONDITION, "coordinator lease is no longer live"};
+  }
+  if (!coordination::operation_allows_contributions(*operation_or)) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt is no longer accepting contributions"};
+  }
+
+  tensorcast::daemon::v2::SealAssemblySnapshot operation_snapshot;
+  if (!operation_or->has_snapshot() || !operation_or->snapshot().UnpackTo(&operation_snapshot)) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt snapshot is unavailable"};
+  }
+  if (operation_snapshot.layout_id() != req.layout_id()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt layout changed"};
+  }
+  if (operation_snapshot.contribution_contract_hash() != req.contribution_contract_hash()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly contribution contract changed"};
+  }
+  if (!operation_snapshot.has_contribution_contract()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt contract snapshot is unavailable"};
+  }
+
+  const auto contract_status = coordination::validate_contribution_contract_entry(
+      operation_snapshot.contribution_contract(), req.contribution_kind(), req.view_id());
+  if (!contract_status.ok()) {
+    return to_grpc_status(contract_status);
+  }
+  const std::string row_view_id = coordination::contribution_slot_view_id(req.contribution_kind(), req.view_id());
+  auto active_identities_or = coordination::list_active_contributor_identities(d_.global_store_client);
+  if (!active_identities_or.ok()) {
+    return to_grpc_status(active_identities_or.status());
+  }
+  const auto& active_identities = *active_identities_or;
+  const absl::Time now = absl::Now();
+
+  auto existing_or = d_.global_store_client->get_assembly_contribution(req.assembly_id(), row_view_id);
+  if (existing_or.ok()) {
+    const bool existing_live = coordination::assembly_contribution_is_live(*existing_or, now, &active_identities);
+    const bool same_coordinator_attempt = existing_or->coordinator_operation_id == req.coordinator_operation_id() &&
+        existing_or->coordinator_generation == req.coordinator_generation();
+    if (existing_or->binding_id == req.binding_id() && existing_or->binding_value_id == req.binding_value_id() &&
+        existing_live) {
+      resp.set_accepted(true);
+      resp.set_already_exists(true);
+      resp.set_lease_id(existing_or->lease_id);
+      resp.set_lease_generation(existing_or->lease_generation);
+      resp.set_state(existing_or->state);
+      rctx.mark_success();
+      return Status::OK;
+    }
+    if (existing_live && !same_coordinator_attempt) {
+      return {StatusCode::FAILED_PRECONDITION, "assembly contribution slot is already occupied by a live contributor"};
+    }
+  } else if (!absl::IsNotFound(existing_or.status())) {
+    return to_grpc_status(existing_or.status());
+  }
+
+  auto lease_id_holder = std::make_shared<std::string>();
+  auto contribution_stop = std::make_shared<std::atomic<bool>>(false);
+  auto contribution_client = d_.global_store_client;
+  const std::string assembly_id = req.assembly_id();
+  const std::string view_id = row_view_id;
+  auto lease_or = d_.lifecycle->create_use_lease(
+      contribution_lease_subject(req.binding_id(), req.binding_value_id()),
+      owner_pid,
+      {[contribution_client, assembly_id, view_id, lease_id_holder, contribution_stop]() -> absl::Status {
+        contribution_stop->store(true, std::memory_order_relaxed);
+        if (!contribution_client || !contribution_client->is_connected() || lease_id_holder->empty()) {
+          return absl::OkStatus();
+        }
+        auto state_or = contribution_client->update_assembly_contribution_state(
+            assembly_id,
+            view_id,
+            "stale",
+            *lease_id_holder,
+            /*expected_lease_generation=*/1,
+            /*lease_expires_at=*/std::nullopt,
+            {"accepted"});
+        if (!state_or.ok() && !absl::IsNotFound(state_or.status())) {
+          return state_or.status();
+        }
+        return absl::OkStatus();
+      }});
+  if (!lease_or.ok()) {
+    return to_grpc_status(lease_or.status());
+  }
+  *lease_id_holder = absl::StrCat(*lease_or);
+
+  store::components::AssemblyContributionInfo contribution;
+  contribution.assembly_id = req.assembly_id();
+  contribution.view_id = row_view_id;
+  contribution.binding_id = req.binding_id();
+  contribution.binding_value_id = req.binding_value_id();
+  contribution.coverage_plan_hash = req.coverage_plan_hash();
+  contribution.contributor_daemon_id = daemon_identity_for_contribution(d_.identity);
+  contribution.coordinator_operation_id = req.coordinator_operation_id();
+  contribution.coordinator_generation = req.coordinator_generation();
+  contribution.lease_id = *lease_id_holder;
+  contribution.lease_generation = 1;
+  contribution.lease_expires_at = absl::Now() + coordination::kContributionLeaseTtl;
+  contribution.state = "accepted";
+  auto upsert_or = d_.global_store_client->upsert_assembly_contribution(contribution);
+  if (!upsert_or.ok()) {
+    if (absl::IsFailedPrecondition(upsert_or.status())) {
+      auto current_or = d_.global_store_client->get_assembly_contribution(req.assembly_id(), row_view_id);
+      if (current_or.ok() && current_or->binding_id == req.binding_id() &&
+          current_or->binding_value_id == req.binding_value_id() &&
+          coordination::assembly_contribution_is_live(*current_or, now, &active_identities)) {
+        d_.lifecycle->release_lease(*lease_or);
+        resp.set_accepted(true);
+        resp.set_already_exists(true);
+        resp.set_lease_id(current_or->lease_id);
+        resp.set_lease_generation(current_or->lease_generation);
+        resp.set_state(current_or->state);
+        rctx.mark_success();
+        return Status::OK;
+      }
+    }
+    d_.lifecycle->release_lease(*lease_or);
+    return to_grpc_status(upsert_or.status());
+  }
+
+  {
+    absl::MutexLock lock(&contribution_keepalive_tracker_->mu);
+    contribution_keepalive_tracker_->stop_flags[contribution.lease_id] = contribution_stop;
+  }
+  auto tracker = contribution_keepalive_tracker_;
+  auto executor = d_.async_runtime.blocking_executor();
+  const std::string lease_id = contribution.lease_id;
+  const uint64_t lease_generation = contribution.lease_generation;
+  auto keepalive = std::make_shared<std::function<void()>>();
+  std::weak_ptr<std::function<void()>> keepalive_weak = keepalive;
+  *keepalive = [tracker,
+                contribution_client,
+                contribution_stop,
+                executor,
+                keepalive_weak,
+                &timekeeper = d_.async_runtime.timekeeper(),
+                assembly_id,
+                view_id,
+                lease_id,
+                lease_generation]() mutable {
+    if (contribution_stop->load(std::memory_order_relaxed)) {
+      absl::MutexLock lock(&tracker->mu);
+      auto it = tracker->stop_flags.find(lease_id);
+      if (it != tracker->stop_flags.end() && it->second == contribution_stop) {
+        tracker->stop_flags.erase(it);
+      }
+      return;
+    }
+    timekeeper
+        .after(std::chrono::milliseconds(absl::ToInt64Milliseconds(coordination::kContributionLeaseRefreshInterval)))
+        .via(executor)
+        .thenValue([tracker,
+                    contribution_client,
+                    contribution_stop,
+                    keepalive_weak,
+                    assembly_id,
+                    view_id,
+                    lease_id,
+                    lease_generation](folly::Unit) mutable {
+          if (contribution_stop->load(std::memory_order_relaxed)) {
+            absl::MutexLock lock(&tracker->mu);
+            auto it = tracker->stop_flags.find(lease_id);
+            if (it != tracker->stop_flags.end() && it->second == contribution_stop) {
+              tracker->stop_flags.erase(it);
+            }
+            return;
+          }
+          auto refresh_or = contribution_client->update_assembly_contribution_state(
+              assembly_id,
+              view_id,
+              "accepted",
+              lease_id,
+              lease_generation,
+              absl::Now() + coordination::kContributionLeaseTtl,
+              {"accepted"});
+          if (!refresh_or.ok()) {
+            if (!absl::IsNotFound(refresh_or.status())) {
+              LOG(WARNING) << "assembly contribution keepalive failed for assembly=" << assembly_id
+                           << " view_id=" << view_id << ": " << refresh_or.status();
+              auto next = keepalive_weak.lock();
+              if (next != nullptr) {
+                (*next)();
+              }
+              return;
+            }
+            contribution_stop->store(true, std::memory_order_relaxed);
+          }
+          auto next = keepalive_weak.lock();
+          if (next != nullptr) {
+            (*next)();
+          }
+        });
+  };
+  (*keepalive)();
+
+  if (existing_or.ok() && existing_or->contributor_daemon_id == contribution.contributor_daemon_id &&
+      existing_or->lease_id != contribution.lease_id) {
+    uint64_t old_lease_id = 0;
+    if (absl::SimpleAtoi(existing_or->lease_id, &old_lease_id)) {
+      d_.lifecycle->release_lease(old_lease_id);
+    }
+  }
+
+  resp.set_accepted(true);
+  resp.set_already_exists(false);
+  resp.set_lease_id(upsert_or->lease_id);
+  resp.set_lease_generation(upsert_or->lease_generation);
+  resp.set_state(upsert_or->state);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status OwnedBindingService::seal_binding(
+    RpcContext& rctx,
+    const v2::SealBindingRequest& req,
+    v2::SealBindingResponse& resp) {
+  if (req.binding_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_id is required"};
+  }
+  if (req.update_epoch().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "update_epoch is required"};
+  }
+  auto record_or = d_.bindings.get(req.binding_id());
+  if (!record_or.ok()) {
+    return to_grpc_status(record_or.status());
+  }
+  const auto record = *record_or;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state != v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is not mutable"};
+    }
+    if (record->active_update_epoch != req.update_epoch()) {
+      mark_dirty(record.get());
+      return {StatusCode::FAILED_PRECONDITION, "update_epoch mismatch"};
+    }
+    mark_ready_local(record.get());
+    resp.set_state(record->state);
+    fill_binding_value(*record, *resp.mutable_current_value());
   }
   rctx.mark_success();
   return Status::OK;
@@ -745,10 +1494,14 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   tensorcast::common::v1::ArtifactSelection source_selection;
   v2::CopyPlan copy_plan;
   std::vector<v2::MappedTensorSpec> dst_tensors;
+  std::string current_binding_value_id;
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
       return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is mutable"};
     }
     owner_pid = record->owner_pid;
     device_id = record->device_id;
@@ -759,6 +1512,12 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     source_selection = record->source_selection;
     copy_plan = record->copy_plan;
     dst_tensors = record->dst_tensors;
+    current_binding_value_id = record->current_binding_value_id;
+  }
+  if (auto contribution_status =
+          ensure_no_live_binding_contributions(d_.global_store_client, record->binding_id, current_binding_value_id);
+      !contribution_status.ok()) {
+    return to_grpc_status(contribution_status);
   }
 
   auto effective_policy =
@@ -936,6 +1695,10 @@ grpc::Status OwnedBindingService::refill_owned_binding(
             hints,
             disk_source);
   if (!result_or.ok()) {
+    {
+      absl::MutexLock lock(&record->mu);
+      mark_dirty(record.get());
+    }
     return to_grpc_status(result_or.status());
   }
 
@@ -955,9 +1718,11 @@ grpc::Status OwnedBindingService::refill_owned_binding(
 
   {
     absl::MutexLock lock(&record->mu);
-    record->current_selection = current_selection;
-    record->current_artifact_id = resolution.resolved_artifact_id;
-    record->target_write_token = target_write_token_or.ok() ? *target_write_token_or : std::string();
+    mark_ready_artifact(
+        record.get(),
+        resolution.resolved_artifact_id,
+        current_selection,
+        target_write_token_or.ok() ? *target_write_token_or : std::string());
   }
 
   resp.set_artifact_id(resolution.resolved_artifact_id);
@@ -966,6 +1731,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     resp.set_target_write_token(*target_write_token_or);
   }
   resp.mutable_resolved_selection()->CopyFrom(current_selection);
+  resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
+  fill_binding_value(*record, *resp.mutable_current_value());
   rctx.mark_success();
   return Status::OK;
 }

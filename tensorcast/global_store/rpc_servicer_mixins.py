@@ -17,6 +17,9 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
     ArtifactQueryRpcHandler,
 )
+from tensorcast.global_store.rpc.assembly_contribution_rpc_handler import (
+    AssemblyContributionRpcHandler,
+)
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
@@ -54,6 +57,7 @@ class AssemblyViewRpcServicerMixin:
     layout_spec_rpc_handler: LayoutSpecRpcHandler
     layout_binding_rpc_handler: LayoutBindingRpcHandler
     layout_runtime_policy_rpc_handler: LayoutRuntimePolicyRpcHandler
+    assembly_contribution_rpc_handler: AssemblyContributionRpcHandler
 
     def GetArtifactInfoById(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.artifact_query_rpc_handler.get_artifact_info_by_id(request, context)
@@ -122,6 +126,36 @@ class AssemblyViewRpcServicerMixin:
     ) -> Any:
         return self.layout_runtime_policy_rpc_handler.update_assembly_runtime_policy(
             request, context
+        )
+
+    def GetAssemblyContribution(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_contribution_rpc_handler.get_assembly_contribution(
+            request, context
+        )
+
+    def UpsertAssemblyContribution(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_contribution_rpc_handler.upsert_assembly_contribution(
+            request, context
+        )
+
+    def ListAssemblyContributions(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_contribution_rpc_handler.list_assembly_contributions(
+            request, context
+        )
+
+    def UpdateAssemblyContributionState(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return (
+            self.assembly_contribution_rpc_handler.update_assembly_contribution_state(
+                request, context
+            )
         )
 
 

@@ -52,6 +52,7 @@ from tensorcast.global_store.repositories import (
     ArtifactLayoutAttachmentRepository,
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
+    AssemblyContributionRepository,
     AssemblyLayoutBindingRepository,
     AssemblyRuntimePolicyRepository,
     ChunkDirectoryRepository,
@@ -87,6 +88,9 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 )
 from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
     ArtifactQueryRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_contribution_rpc_handler import (
+    AssemblyContributionRpcHandler,
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
@@ -233,6 +237,9 @@ class GlobalStoreServicer(
             self.connection
         )
         self.layout_spec_repository = LayoutSpecRepository(self.connection)
+        self.assembly_contribution_repository = AssemblyContributionRepository(
+            self.connection
+        )
         self.assembly_layout_binding_repository = AssemblyLayoutBindingRepository(
             self.connection
         )
@@ -326,6 +333,12 @@ class GlobalStoreServicer(
         )
         self.layout_runtime_policy_rpc_handler = LayoutRuntimePolicyRpcHandler(
             assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
+            logger=logger,
+        )
+        self.assembly_contribution_rpc_handler = AssemblyContributionRpcHandler(
+            assembly_contribution_repository=self.assembly_contribution_repository,
             datetime_to_timestamp=datetime_to_timestamp,
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,

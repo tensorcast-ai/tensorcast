@@ -50,6 +50,72 @@ Status StoreDaemonServiceImpl::CreateOwnedBinding(
   return materialization_controller_->create_owned_binding(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::CreateBinding(
+    grpc::ServerContext* ctx,
+    const v2::CreateBindingRequest* req,
+    v2::CreateBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"CreateBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->create_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::CommitBindingArtifact(
+    grpc::ServerContext* ctx,
+    const v2::CommitBindingArtifactRequest* req,
+    v2::CommitBindingArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"CommitBindingArtifact", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->commit_binding_artifact(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::BeginBindingUpdate(
+    grpc::ServerContext* ctx,
+    const v2::BeginBindingUpdateRequest* req,
+    v2::BeginBindingUpdateResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"BeginBindingUpdate", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->begin_binding_update(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::SealBinding(
+    grpc::ServerContext* ctx,
+    const v2::SealBindingRequest* req,
+    v2::SealBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"SealBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->seal_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::SubmitBindingContribution(
+    grpc::ServerContext* ctx,
+    const v2::SubmitBindingContributionRequest* req,
+    v2::SubmitBindingContributionResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"SubmitBindingContribution", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->submit_binding_contribution(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::StartAssemblyAttempt(
+    grpc::ServerContext* ctx,
+    const v2::StartAssemblyAttemptRequest* req,
+    v2::StartAssemblyAttemptResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"StartAssemblyAttempt", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->start_assembly_attempt(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::RefillOwnedBinding(
     grpc::ServerContext* ctx,
     const v2::RefillOwnedBindingRequest* req,

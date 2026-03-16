@@ -10,7 +10,11 @@ service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  rpc CreateBinding(CreateBindingRequest) returns (CreateBindingResponse) {}
   rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
+  rpc CommitBindingArtifact(CommitBindingArtifactRequest) returns (CommitBindingArtifactResponse) {}
+  rpc BeginBindingUpdate(BeginBindingUpdateRequest) returns (BeginBindingUpdateResponse) {}
+  rpc SealBinding(SealBindingRequest) returns (SealBindingResponse) {}
   rpc RefillOwnedBinding(RefillOwnedBindingRequest) returns (RefillOwnedBindingResponse) {}
   rpc CloseOwnedBinding(CloseOwnedBindingRequest) returns (CloseOwnedBindingResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
@@ -81,6 +85,10 @@ service StoreDaemonService {
   rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+  // Create a fresh assembly workspace bound to a layout contract.
+  rpc StartAssemblyAttempt(StartAssemblyAttemptRequest) returns (StartAssemblyAttemptResponse) {}
+  // Record a binding-backed contribution after bytes have been registered onto the assembly trunk.
+  rpc SubmitBindingContribution(SubmitBindingContributionRequest) returns (SubmitBindingContributionResponse) {}
   // Seal an assembly (cgid) into a stable mi2 identity.
   rpc SealAssembly(SealAssemblyRequest) returns (SealAssemblyResponse) {}
   // Start sealing as a long-tail Operation.
@@ -296,6 +304,7 @@ message ViewRegistrationOptions {
   repeated CanonicalRange ranges = 5;
   bool allow_partial = 6 [deprecated = true];
   ViewRegistrationKind registration_kind = 7;
+  repeated string tensor_names = 8;
 }
 
 enum ViewRegistrationKind {
@@ -529,6 +538,54 @@ message MaterializeIntoTargetResponse {
   tensorcast.common.v1.ArtifactSelection resolved_selection = 9;
 }
 
+enum BindingOwnership {
+  BINDING_OWNERSHIP_UNSPECIFIED = 0;
+  BINDING_OWNERSHIP_DAEMON = 1;
+  BINDING_OWNERSHIP_CLIENT = 2;
+}
+
+enum BindingState {
+  BINDING_STATE_UNSPECIFIED = 0;
+  BINDING_STATE_ALLOCATED = 1;
+  BINDING_STATE_READY_ARTIFACT = 2;
+  BINDING_STATE_READY_LOCAL = 3;
+  BINDING_STATE_MUTABLE = 4;
+  BINDING_STATE_DIRTY = 5;
+}
+
+message BindingValue {
+  string binding_id = 1;
+  string binding_layout_id = 2;
+  string binding_value_id = 3;
+  uint64 seal_generation = 4;
+  optional string source_artifact_id = 5;
+  tensorcast.common.v1.ArtifactSelection selection = 6;
+  bool is_artifact_backed = 7;
+}
+
+message CreateBindingRequest {
+  BindingOwnership ownership = 1;
+  TargetLayout target_layout = 2;
+  bytes target_index_bytes = 3;
+  int32 pid = 4;
+  string device_uuid = 5;
+  string binding_layout_id = 6;
+  tensorcast.common.v1.ArtifactSelection initial_selection = 7;
+  optional string source_artifact_id = 8;
+  bytes target_write_token = 9;
+  CopyPlan copy_plan = 10;
+  repeated MappedTensorSpec dst_tensors = 11;
+}
+
+message CreateBindingResponse {
+  string binding_id = 1;
+  MemCopyHandle mem_handle = 2;
+  bytes target_index_bytes = 3;
+  repeated TensorPayloadDescriptor payloads = 4;
+  BindingState state = 5;
+  BindingValue current_value = 6;
+}
+
 message CreateOwnedBindingRequest {
   tensorcast.common.v1.ArtifactSelection source_selection = 1;
   TargetLayout target_layout = 2;
@@ -541,6 +598,7 @@ message CreateOwnedBindingRequest {
   TransformPlacement placement = 9;
   CopyPlan copy_plan = 10;
   repeated MappedTensorSpec dst_tensors = 11;
+  string binding_layout_id = 12;
 }
 
 message CreateOwnedBindingResponse {
@@ -552,6 +610,39 @@ message CreateOwnedBindingResponse {
   bytes target_write_token = 6;
   tensorcast.common.v1.ArtifactSelection resolved_selection = 7;
   MaterializationSource source = 8;
+  BindingState state = 9;
+  BindingValue current_value = 10;
+}
+
+message CommitBindingArtifactRequest {
+  string binding_id = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 2;
+  optional string source_artifact_id = 3;
+  bytes target_write_token = 4;
+}
+
+message CommitBindingArtifactResponse {
+  BindingState state = 1;
+  BindingValue current_value = 2;
+}
+
+message BeginBindingUpdateRequest {
+  string binding_id = 1;
+}
+
+message BeginBindingUpdateResponse {
+  string update_epoch = 1;
+  BindingState state = 2;
+}
+
+message SealBindingRequest {
+  string binding_id = 1;
+  string update_epoch = 2;
+}
+
+message SealBindingResponse {
+  BindingState state = 1;
+  BindingValue current_value = 2;
 }
 
 message RefillOwnedBindingRequest {
@@ -568,6 +659,8 @@ message RefillOwnedBindingResponse {
   MaterializationSource source = 2;
   bytes target_write_token = 3;
   tensorcast.common.v1.ArtifactSelection resolved_selection = 4;
+  BindingState state = 5;
+  BindingValue current_value = 6;
 }
 
 message CloseOwnedBindingRequest {
@@ -1284,6 +1377,63 @@ message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
 }
 
+message ContributionContractEntry {
+  string view_id = 1;
+  BindingContributionKind contribution_kind = 2;
+  string coverage_semantics = 3;
+}
+
+message ContributionContractSnapshot {
+  string layout_id = 1;
+  repeated ContributionContractEntry required_contributions = 2;
+  bool require_live_contributions = 3;
+}
+
+message AssemblyAttemptRef {
+  string assembly_id = 1;
+  string layout_id = 2;
+  string contribution_contract_hash = 3;
+  string coordinator_operation_id = 4;
+  uint64 coordinator_generation = 5;
+  repeated string expected_view_ids = 6;
+  ContributionContractSnapshot contribution_contract = 7;
+}
+
+message StartAssemblyAttemptRequest {
+  string layout_id = 1;
+}
+
+message StartAssemblyAttemptResponse {
+  AssemblyAttemptRef attempt = 1;
+}
+
+enum BindingContributionKind {
+  BINDING_CONTRIBUTION_KIND_UNSPECIFIED = 0;
+  BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL = 1;
+  BINDING_CONTRIBUTION_KIND_CANONICAL_FULL = 2;
+}
+
+message SubmitBindingContributionRequest {
+  string assembly_id = 1;
+  string layout_id = 2;
+  string contribution_contract_hash = 3;
+  string binding_id = 4;
+  string binding_value_id = 5;
+  string view_id = 6;
+  string coverage_plan_hash = 7;
+  BindingContributionKind contribution_kind = 8;
+  string coordinator_operation_id = 9;
+  uint64 coordinator_generation = 10;
+}
+
+message SubmitBindingContributionResponse {
+  bool accepted = 1;
+  bool already_exists = 2;
+  string lease_id = 3;
+  uint64 lease_generation = 4;
+  string state = 5;
+}
+
 message SealAssemblyRequest {
   string assembly_id = 1;
   bool publish_canonical = 2;
@@ -1297,12 +1447,21 @@ message SealAssemblyResponse {
 
 message SealAssemblyResult {
   tensorcast.common.v1.ArtifactDescriptor artifact = 1;
+  string representation_contract_hash = 2;
+  tensorcast.common.v1.ArtifactDescriptor serving_artifact = 3;
+  string source_version_key = 4;
+  string serving_version_key = 5;
+  string serving_manifest_ref = 6;
 }
 
 message StartSealAssemblyRequest {
   string assembly_id = 1;
   // Optional explicit layout selection; if absent, sealing uses the current assembly layout binding (if any).
   string layout_id = 2;
+  // Optional attempt fence for layout-qualified assembly waits.
+  uint64 expected_coordinator_generation = 3;
+  // Optional fallback attempt snapshot used when the coordinator record is not yet visible.
+  SealAssemblySnapshot attempt_snapshot = 4;
 }
 
 message StartSealAssemblyResponse {
@@ -1321,6 +1480,10 @@ message SealAssemblySnapshot {
   string layout_id = 2;
   uint64 assembly_layout_binding_version = 3;
   repeated SealAssemblySnapshotView views = 4;
+  string contribution_contract_hash = 5;
+  repeated string expected_view_ids = 6;
+  ContributionContractSnapshot contribution_contract = 7;
+  string publication_policy_json = 8;
 }
 
 message WaitOperationRequest {

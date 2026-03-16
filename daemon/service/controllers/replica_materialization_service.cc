@@ -325,6 +325,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   std::string resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
   std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
   std::optional<std::string> fallback_artifact_id = std::move(artifact_resolution.fallback_artifact_id);
+  std::optional<bool> post_seal_view_reuse_safe;
   const bool gs_connected = artifact_resolution.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
   std::optional<ArtifactSourceRegistry::Entry> local_import = std::move(artifact_resolution.local_import);
@@ -530,6 +531,21 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires artifact_id for routing"};
     }
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, selection.view_id());
+    if (!view_meta_or.ok() && fallback_artifact_id.has_value() && absl::IsNotFound(view_meta_or.status()) &&
+        d_.post_seal_policy.reuse_views_if_safe) {
+      if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+        return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+      }
+      auto safe_or =
+          check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
+      if (!safe_or.ok()) {
+        return to_grpc_status(safe_or.status());
+      }
+      post_seal_view_reuse_safe = *safe_or;
+      if (*safe_or) {
+        view_meta_or = d_.engine.get_view_metadata(*fallback_artifact_id, selection.view_id());
+      }
+    }
     if (!view_meta_or.ok()) {
       return to_grpc_status(view_meta_or.status());
     }
@@ -747,19 +763,22 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (!result.ok() && view_requested && fallback_artifact_id.has_value() && absl::IsNotFound(result.status())) {
     bool allow_reuse = false;
     if (d_.post_seal_policy.reuse_views_if_safe) {
-      if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+      if (!post_seal_view_reuse_safe.has_value()) {
+        if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+        }
+        auto safe_or =
+            check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
+        if (!safe_or.ok()) {
+          LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *fallback_artifact_id
+                       << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return to_grpc_status(safe_or.status());
+        }
+        post_seal_view_reuse_safe = *safe_or;
       }
-      auto safe_or =
-          check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
-      if (!safe_or.ok()) {
-        LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *fallback_artifact_id
-                     << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(safe_or.status());
-      }
-      allow_reuse = *safe_or;
+      allow_reuse = *post_seal_view_reuse_safe;
       if (!allow_reuse) {
         LOG(WARNING) << "post-seal view reuse disabled: proof commitments mismatch for assembly="
                      << *fallback_artifact_id << " mi2=" << resolved_artifact_id;

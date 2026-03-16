@@ -59,6 +59,10 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("unregister_worker not supported in GlobalStoreClientStub");
   }
 
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
+    return absl::UnimplementedError("list_active_worker_identities not supported in GlobalStoreClientStub");
+  }
+
   absl::StatusOr<std::string> register_replica(
       std::string_view,
       std::string_view,
