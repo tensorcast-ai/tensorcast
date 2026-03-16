@@ -20,7 +20,7 @@ COMM_CASES = {
     "map8_half_swap": Path("/data/tc/comm-map8-half-swap-attempt2-052059/result.json"),
     "map8_target_bad_local": Path("/data/tc/comm-map8-target-bad-local-attempt1-052344/result.json"),
     "single_big_read": Path("/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json"),
-    "single_nic_probe_0496_0078": Path("/data/tc/single-nic-compare-20260316-161728/comm_initiator_run.json"),
+    "single_nic_probe_0496_0078": Path("/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json"),
 }
 
 MOONCAKE = {
@@ -301,8 +301,8 @@ def main() -> int:
         colors=["#1f4b99", "#5d84d6", "#9c4f2f", "#d48459", "#2a7f62", "#7fbf9f"],
         unit="GB/s",
         note=(
-            "Aligned pair: 0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2. "
-            "Communicator best-known is a different host pair; fresh 0496->0078 probe is shown separately."
+            "Raw verbs and Mooncake use 0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2. "
+            "Communicator fresh aligned probe uses 0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1."
         ),
         output_path=IMAGE_DIR / "communicator_vs_te_single_nic_reference_20260316.svg",
     )

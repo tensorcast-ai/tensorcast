@@ -2,7 +2,7 @@
 <rect width="100%" height="100%" fill="#faf8f2"/>
 <text x="490.0" y="36.0" font-family="Arial, sans-serif" font-size="26" font-weight="bold" text-anchor="middle">Single-NIC Aligned Reference</text>
 <text x="490.0" y="62.0" font-family="Arial, sans-serif" font-size="14" font-weight="normal" text-anchor="middle">Matched physical GPU/NIC pair for verbs and Mooncake; communicator bars shown with explicit caveats</text>
-<text x="490.0" y="84.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Aligned pair: 0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2. Communicator best-known is a different host pair; fresh 0496->0078 probe is shown separately.</text>
+<text x="490.0" y="84.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Raw verbs and Mooncake use 0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2. Communicator fresh aligned probe uses 0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1.</text>
 <line x1="90" y1="490.0" x2="910" y2="490.0" stroke="#d6d1c4" stroke-width="1"/>
 <text x="78.0" y="495.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">0</text>
 <line x1="90" y1="414.0" x2="910" y2="414.0" stroke="#d6d1c4" stroke-width="1"/>
@@ -38,8 +38,8 @@
 <text x="705.0" y="201.6" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">20.25</text>
 <text x="705.0" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Comm best-known</text>
 <text x="705.0" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">strict read</text>
-<rect x="802.0" y="219.5" width="79.3" height="270.5" rx="4" fill="#7fbf9f"/>
-<text x="841.7" y="211.5" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">19.54</text>
+<rect x="802.0" y="205.3" width="79.3" height="284.7" rx="4" fill="#7fbf9f"/>
+<text x="841.7" y="197.3" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">20.56</text>
 <text x="841.7" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Comm 0496->0078</text>
 <text x="841.7" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">fresh probe</text>
 </svg>
