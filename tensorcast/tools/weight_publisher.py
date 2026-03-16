@@ -22,6 +22,7 @@ from tensorcast.api._config import (
     StorePolicy,
     StorePolicyProfile,
 )
+from tensorcast.api.operation import OperationStatus
 from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.types import PersistenceStatusResult, TensorDict
 
@@ -185,7 +186,7 @@ class WeightPublisher:
         wait_persistence_s = 0.0
         if self._config.wait_persistence:
             persistence_start = time.monotonic()
-            self._wait_for_persistence(registered.persistence_task_id, artifact_id)
+            self._wait_for_persistence(registered, artifact_id)
             wait_persistence_s = time.monotonic() - persistence_start
 
         verify_key_mapping_s = 0.0
@@ -324,14 +325,19 @@ class WeightPublisher:
             suffix = f"{suffix}-{nonce}"
         return suffix[:200]
 
-    def _wait_for_persistence(self, task_id: str | None, artifact_id: str) -> None:
+    def _wait_for_persistence(self, registered: object, artifact_id: str) -> None:
+        task_id = getattr(registered, "persistence_task_id", None)
         if not task_id:
             return
+        if hasattr(registered, "persistence_operation"):
+            operation = registered.persistence_operation()
+        else:
+            operation = tensorcast.persistence_operation(task_id=task_id)
         deadline = time.monotonic() + self._config.persistence_timeout_s
         while True:
-            status = tensorcast.query_persistence_status(task_id=task_id)
-            if _is_persistence_terminal(
-                status, self._config.allow_degraded_persistence
+            status = operation.status()
+            if _is_persistence_operation_terminal(
+                status, task_id=task_id, allow_degraded=self._config.allow_degraded_persistence
             ):
                 return
             if time.monotonic() >= deadline:
@@ -588,6 +594,30 @@ def _is_persistence_terminal(
         raise RuntimeError(
             f"persistence degraded: task_id={status.task_id} reason={status.degraded_reason}"
         )
+    return False
+
+
+def _is_persistence_operation_terminal(
+    status: OperationStatus, *, task_id: str, allow_degraded: bool
+) -> bool:
+    if status.state == "success":
+        return True
+    if status.state in {"failed", "cancelled"}:
+        message = (
+            status.error.message
+            if status.error is not None and status.error.message
+            else status.message or "operation failed"
+        )
+        raise RuntimeError(f"persistence failed: task_id={task_id} error={message}")
+    if status.state == "degraded":
+        if allow_degraded:
+            return True
+        message = (
+            status.error.message
+            if status.error is not None and status.error.message
+            else status.message or "operation degraded"
+        )
+        raise RuntimeError(f"persistence degraded: task_id={task_id} reason={message}")
     return False
 
 

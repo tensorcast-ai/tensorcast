@@ -748,6 +748,7 @@ class RegistrationPipeline:
             registration_result=result,
             persistence_task_id=persistence_task_id,
             local_stable_tier=result.local_stable_tier,
+            _daemon_endpoint=self._runtime.daemon_endpoint,
         )
 
     @staticmethod

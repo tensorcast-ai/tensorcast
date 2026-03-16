@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-03-04
+last_updated: 2026-03-10
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py
@@ -381,6 +381,15 @@ A unified interface for long-tail workflows (Phase-0: sync/blocking only):
 This split keeps the **user-facing `Operation[T]` API uniform** while avoiding unnecessary Global Store load for
 high-frequency or local-only actions.
 
+Repo-wide continuation rule:
+
+- distributed owner-return, replay, attach, wait, cancel, and status flows should converge on `Operation[T]` or an
+  immediate family-defined result at the public SDK boundary,
+- daemon-internal routing or attachment carriers must not become a second public continuation model next to `Operation[T]`.
+- when a distributed authority flow projects to `Operation[T]`, the implementation must retain enough authority-scoped
+  recovery metadata to reattach honestly; bare `operation_id` alone is not a sufficient distributed continuation
+  contract.
+
 ### Plan (new orchestration IR)
 
 A composable plan expressing:
@@ -519,6 +528,11 @@ Why this is the most consistent:
 
 Unified operation interface. New programmable control-plane actions should return an `Operation[T]`; existing long-tail surfaces (persistence task ids) should be adapted to this interface for consistency.
 
+Additional repo-wide rule:
+
+- when a distributed owner hands control back for later wait, replay, attach, or retry, the caller-visible surface should
+  still be `Operation[T]` unless a narrower family-specific public contract is explicitly defined.
+
 **Phase-0 design rule:** public APIs are sync/blocking only (no `async def`, no `await`).
 
 ```python
@@ -594,6 +608,8 @@ Notes (required):
 `Operation` is always scoped to an execution target (a specific daemon/worker for daemon-owned actions, or a specific
 engine instance for in-process actions). The SDK MUST retain enough target information to implement
 `status/wait/cancel` without assuming `operation_id` is globally unique.
+For distributed authority continuations, the SDK or backing runtime MUST also retain enough authority-scope and recovery
+information to reattach through the correct owner contract rather than assuming plain `operation_id` is sufficient.
 
 #### Operation is a system primitive (not just an SDK wrapper)
 
@@ -634,6 +650,8 @@ For correctness, daemon-owned actions MUST have daemon-side, operation-scoped st
   - re-submitting the same deterministic action with the same `ctx.idempotency_key` (joins the same operation id), or
   - using a fresh context/budget to query status (a dedicated “attach by operation_id” API may be added in future
     designs).
+- future distributed authority designs must preserve this public re-attach model rather than exposing raw daemon-internal
+  attachment carriers directly to callers.
 
 **Failure reporting (required)**
 

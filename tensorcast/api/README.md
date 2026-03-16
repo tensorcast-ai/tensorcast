@@ -28,7 +28,11 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 - Tier constraints are enforced: `shared_disk` forbids retention fields, `stable_dram` supports only `min_replicas=1`, remote-only stable tiers disallow retention settings, and `must` local stable tiers require `pinned` retention.
 - `CommitRegisteredArtifact` returns a `local_stable_tier` result (`ready`/`degraded`/`skipped`) on `RegisteredArtifact` when the resolved policy requests `stable_dram(scope=local)`. `must` failures raise commit errors; `should` failures are surfaced as `degraded` while the commit remains successful.
 - The registration pipeline invokes daemon RPC `StartPersistence` only when the resolved policy requires shared disk or remote stable DRAM, and records the returned `persistence_task_id` on `RegisteredArtifact` (persistence prefers a daemon-owned local stable DRAM source when present).
-- Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state; the SDK does not poll automatically.
+- Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state.
+- Use `Store.persistence_operation` (or module helper `tensorcast.api.store.persistence_operation`) when persistence status should stay on the unified `Operation[T]` surface instead of manual polling around raw task ids.
+- The top-level package also re-exports `tensorcast.persistence_operation(...)` for tools that already depend on the
+  root TensorCast facade.
+- `RegisteredArtifact.persistence_operation()` reattaches to that same persistence task through the originating daemon endpoint; it fails closed when no `persistence_task_id` was minted.
 
 ## Artifact Handles & Metadata Cache
 

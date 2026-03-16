@@ -549,6 +549,7 @@ class Store:
             ctx=ctx,
             context=context,
             result_factory=_decode,
+            operation_ref=start_resp.operation,
         )
 
     def _persistence_status_from_proto(
@@ -591,6 +592,19 @@ class Store:
         op_id = task_id or f"persist:{artifact_id or ''}"
         created_at = time.monotonic()
 
+        def _operation_context(
+            *,
+            effective_task_id: str | None,
+            effective_artifact_id: str | None,
+        ) -> dict[str, str]:
+            context = {"operation_kind": "persistence_task"}
+            if effective_task_id:
+                context["task_id"] = effective_task_id
+            if effective_artifact_id:
+                context["artifact_id"] = effective_artifact_id
+                context["target_artifact_id"] = effective_artifact_id
+            return context
+
         def _ctx_remaining_timeout_s() -> float | None:
             if ctx is None or ctx.deadline_ms is None:
                 return None
@@ -625,10 +639,10 @@ class Store:
                         status_code="DEADLINE_EXCEEDED",
                         message="CallContext deadline exceeded",
                         retryable=True,
-                        context={
-                            "task_id": task_id or "",
-                            "artifact_id": artifact_id or "",
-                        },
+                        context=_operation_context(
+                            effective_task_id=task_id,
+                            effective_artifact_id=artifact_id,
+                        ),
                     ),
                 )
             try:
@@ -643,10 +657,10 @@ class Store:
                         status_code="DEADLINE_EXCEEDED",
                         message=str(exc),
                         retryable=True,
-                        context={
-                            "task_id": task_id or "",
-                            "artifact_id": artifact_id or "",
-                        },
+                        context=_operation_context(
+                            effective_task_id=task_id,
+                            effective_artifact_id=artifact_id,
+                        ),
                     ),
                 )
             state: str
@@ -673,10 +687,10 @@ class Store:
                     else "DEADLINE_EXCEEDED",
                     message=message,
                     retryable=True,
-                    context={
-                        "task_id": result.task_id,
-                        "artifact_id": result.artifact_id,
-                    },
+                    context=_operation_context(
+                        effective_task_id=result.task_id or task_id,
+                        effective_artifact_id=result.artifact_id or artifact_id,
+                    ),
                 )
             return OperationStatus(
                 state=state,  # type: ignore[arg-type]
@@ -1192,6 +1206,17 @@ def query_persistence_status(
     )
 
 
+def persistence_operation(
+    *,
+    task_id: str | None = None,
+    artifact_id: str | None = None,
+    ctx: CallContext | None = None,
+) -> Operation[PersistenceStatusResult]:
+    return _coerce_store().persistence_operation(
+        task_id=task_id, artifact_id=artifact_id, ctx=ctx
+    )
+
+
 def seal_assembly(
     assembly_id: str,
     *,
@@ -1316,6 +1341,7 @@ __all__ = [
     "put",
     "put_async",
     "query_persistence_status",
+    "persistence_operation",
     "register_view",
     "register_piece",
     "register_vram_region",
