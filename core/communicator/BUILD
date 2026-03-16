@@ -175,6 +175,18 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "communicator_bench_binary",
+    srcs = ["bench/communicator_bench.cc"],
+    deps = [
+        ":engine_lib",
+        ":rdma_lib",
+        "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
 # Combined net_dev and partition_tensor to avoid circular dependency
 sc_cc_library(
     name = "partition_tensor_lib",

@@ -16,6 +16,7 @@ ReadRequest::ReadRequest(
     uint16_t dst_port,
     tensor_t local,
     uint64_t remote_offset,
+    uint64_t request_id,
     int rail_id)
     : local_tensor_(std::move(local)),
       tensor_key_(std::move(tensor_key)),
@@ -24,8 +25,16 @@ ReadRequest::ReadRequest(
       result_set_(false),
       timer_(true),
       remote_offset_(remote_offset),
+      request_id_(request_id),
       rail_id_(rail_id) {
   status_.tensor_key = tensor_key_;
+  status_.local_rail_id = rail_id_;
+  if (local_tensor_ != nullptr) {
+    auto dev = local_tensor_->get_dev();
+    if (dev != nullptr) {
+      status_.local_nic = dev->get_name();
+    }
+  }
 }
 
 tensor_t ReadRequest::get_local_tensor() const {
@@ -45,9 +54,12 @@ future_read_result_t ReadRequest::get_future() {
 }
 
 void ReadRequest::set_result(absl::Status status) {
+  bool expected = false;
+  if (!result_set_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    return;
+  }
   status_.status = status;
   result_.set_value(status_);
-  result_set_.store(true);
   notify_completion(status);
 }
 
@@ -62,7 +74,7 @@ std::string ReadRequest::get_dst_url() {
 }
 
 std::string ReadRequest::get_key() {
-  return get_request_key(tensor_key_, remote_offset_);
+  return get_request_instance_key(tensor_key_, remote_offset_, request_id_);
 }
 
 void ReadRequest::record_request_response() {

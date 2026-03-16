@@ -355,7 +355,13 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
   local_tensor->set_read_ready();
 
   auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
-      "rdma_handshake_tensor", "127.0.0.1", 65000, local_tensor, /*remote_offset=*/0, net_dev->get_rail_id());
+      "rdma_handshake_tensor",
+      "127.0.0.1",
+      65000,
+      local_tensor,
+      /*remote_offset=*/0,
+      /*request_id=*/11,
+      /*rail_id=*/net_dev->get_rail_id());
   auto remote_tensor = std::make_shared<tensorcast::communicator::transport::RemotePartitionTensor>(
       "rdma_handshake_tensor", remote_dev_name, /*addr=*/0xABC0, local_tensor->get_bytes(), /*rkey=*/0x1234);
   read_request->set_remote_tensor(remote_tensor);
@@ -497,7 +503,12 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
   local_tensor->set_read_ready();
 
   auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
-      "rdma_handshake_tensor_fail", "127.0.0.1", 65001, local_tensor, /*remote_offset=*/0);
+      "rdma_handshake_tensor_fail",
+      "127.0.0.1",
+      65001,
+      local_tensor,
+      /*remote_offset=*/0,
+      /*request_id=*/13);
   auto remote_tensor = std::make_shared<tensorcast::communicator::transport::RemotePartitionTensor>(
       "rdma_handshake_tensor_fail", remote_dev_name, /*addr=*/0xCAF0, local_tensor->get_bytes(), /*rkey=*/0xABCD);
   read_request->set_remote_tensor(remote_tensor);
@@ -571,6 +582,127 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
     CommunicatorTestPeer::channels(client).del(read_request->get_dst_url());
   }
 
+  ::close(sv[1]);
+  CommunicatorTestPeer::stop_workers(client);
+
+  auto free_status = tensorcast::cuda::free(local_gpu_buffer);
+  REQUIRE(free_status.ok());
+}
+
+TEST_CASE("RDMA connect failure cleanup tolerates missing pending request", "[rdma][communicator][handshake]") {
+  using tensorcast::communicator::base::CHANNEL_RDMA;
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
+  using tensorcast::communicator::misc::STRNCPY;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+
+  auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
+  auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);
+  REQUIRE(net_dev != nullptr);
+  const std::string local_dev_name = net_dev->get_name();
+  const std::string remote_dev_name = "peer.nic.cleanup";
+
+  constexpr size_t local_bytes = 128;
+  uint8_t* local_gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(reinterpret_cast<void**>(&local_gpu_buffer), local_bytes);
+  REQUIRE(alloc_status.ok());
+
+  auto local_tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "rdma_cleanup_tensor",
+      reinterpret_cast<uint64_t>(local_gpu_buffer),
+      static_cast<uint64_t>(local_bytes),
+      COMMUNICATE_ENGINE_DEV_GPU,
+      net_dev);
+  local_tensor->set_device_id(0);
+  local_tensor->register_mr(net_dev.get());
+  local_tensor->set_read_ready();
+
+  auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
+      "rdma_cleanup_tensor", "127.0.0.1", 65002, local_tensor, /*remote_offset=*/0, /*request_id=*/17);
+  auto remote_tensor = std::make_shared<tensorcast::communicator::transport::RemotePartitionTensor>(
+      "rdma_cleanup_tensor", remote_dev_name, /*addr=*/0xBEE0, local_tensor->get_bytes(), /*rkey=*/0xBEEF);
+  read_request->set_remote_tensor(remote_tensor);
+
+  CommunicatorTestPeer::pending_requests(client).put(read_request->get_key(), read_request);
+
+  int sv[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  auto control_ctx = std::make_shared<tensorcast::communicator::transport::TcpContext>();
+  struct sockaddr_in remote_addr{};
+  remote_addr.sin_family = AF_INET;
+  remote_addr.sin_port = htons(65002);
+  remote_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  auto control_transport =
+      std::make_shared<tensorcast::communicator::transport::TcpTransport>(control_ctx.get(), sv[0], remote_addr);
+
+  auto channel = std::make_shared<Channel>(
+      control_transport,
+      CHANNEL_RDMA,
+      /*buffers_per_flow=*/2,
+      /*max_window_segments=*/2);
+  CommunicatorTestPeer::channels(client).put(read_request->get_dst_url(), channel);
+
+  const uint32_t payload_size = sizeof(ProtoReadResponseExHeader) + sizeof(ProtoReadResponseExSeg);
+  auto response = std::make_shared<EngineMessage>(ENGINE_OP_READ_RESPONSE_EX, payload_size);
+  auto* hdr = response->get_payload<ProtoReadResponseExHeader>();
+  STRNCPY(hdr->tensor_key, "rdma_cleanup_tensor", kMaxTensorNameLen);
+  hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+  hdr->staged = 1;
+  STRNCPY(hdr->nic_name, remote_dev_name, kMaxDevName);
+  hdr->request_offset = 0;
+  hdr->request_id = 17;
+  hdr->num_segments = 1;
+  hdr->window_seq = 0;
+  hdr->credit_granted = 1;
+  hdr->more_segments = 0;
+  auto* seg =
+      reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
+  seg->addr = remote_tensor->get_uint64_addr();
+  seg->offset = 0;
+  seg->bytes = static_cast<uint32_t>(local_tensor->get_bytes());
+  seg->rkey = remote_tensor->get_rkey();
+
+  auto status = CommunicatorTestPeer::on_receive_response(client, channel, control_transport, response);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  auto endpoint = channel->get_rdma_endpoint(local_dev_name, remote_dev_name);
+  REQUIRE(endpoint != nullptr);
+  {
+    absl::MutexLock lock(&endpoint->mu);
+    REQUIRE(endpoint->state == Channel::HandshakeState::kConnectRequested);
+    REQUIRE(endpoint->pending_reads.size() == 1);
+  }
+
+  // Simulate a concurrent cleanup racing ahead of the connect-failed handler.
+  REQUIRE(CommunicatorTestPeer::pending_requests(client).erase_if_present(read_request->get_key()));
+  REQUIRE_FALSE(CommunicatorTestPeer::pending_requests(client).exist(read_request->get_key()));
+
+  auto connect_failed = EngineMessage::make_message<ProtoRdmaConnectFailed>(ENGINE_OP_RDMA_CONNECT_FAILED);
+  auto* fail_payload = connect_failed->get_payload<ProtoRdmaConnectFailed>();
+  STRNCPY(fail_payload->src_dev_name, local_dev_name, kMaxDevName);
+  STRNCPY(fail_payload->dst_dev_name, remote_dev_name, kMaxDevName);
+
+  status = CommunicatorTestPeer::on_receive_response(client, channel, control_transport, connect_failed);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  CHECK(read_request->is_result_set());
+  CHECK(absl::IsUnavailable(read_request->status_.status));
+  {
+    absl::MutexLock lock(&endpoint->mu);
+    CHECK(endpoint->state == Channel::HandshakeState::kFailed);
+    CHECK(endpoint->pending_reads.empty());
+  }
+
+  if (CommunicatorTestPeer::channels(client).exist(read_request->get_dst_url())) {
+    CommunicatorTestPeer::channels(client).del(read_request->get_dst_url());
+  }
   ::close(sv[1]);
   CommunicatorTestPeer::stop_workers(client);
 

@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/communicator/misc/metric.h"
@@ -26,7 +26,7 @@ PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t
 PartitionTensor::~PartitionTensor() {
   for (auto dev : devs_) {
     if (registered_[dev->get_name()]->load()) {
-      if (mrs_[dev->get_name()] != nullptr) {
+      if (owns_mr_[dev->get_name()] && mrs_[dev->get_name()] != nullptr) {
         CHECK_WARN(misc::wrap_ibv_dereg_mr(mrs_[dev->get_name()]), "failed to dereg mr");
       }
       registered_[dev->get_name()]->store(false);
@@ -44,6 +44,7 @@ void PartitionTensor::add_dev(const net_dev_t& dev) {
   devs_.push_back(std::move(dev));
   registered_[dev->get_name()] = std::make_shared<std::atomic_bool>(false);
   mrs_[dev->get_name()] = nullptr;
+  owns_mr_[dev->get_name()] = false;
 }
 
 void PartitionTensor::add_dev_list(const std::vector<net_dev_t>& devs) {
@@ -155,8 +156,17 @@ void PartitionTensor::register_mr(const NetDev* dev) {
     mrs_[dev->get_name()] = nullptr;
   } else {
     regmr_costs_[dev->get_name()] = timer.record();
+    owns_mr_[dev->get_name()] = true;
   }
   registered_[dev->get_name()]->store(true);
+}
+
+void PartitionTensor::set_registered_mr(const net_dev_t& dev, struct ibv_mr* mr, bool owns_mr, uint64_t regmr_cost) {
+  const std::string& dev_name = dev->get_name();
+  mrs_[dev_name] = mr;
+  regmr_costs_[dev_name] = regmr_cost;
+  owns_mr_[dev_name] = owns_mr;
+  registered_[dev_name]->store(mr != nullptr);
 }
 
 RemotePartitionTensor::RemotePartitionTensor(
