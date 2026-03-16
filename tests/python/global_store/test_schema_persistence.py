@@ -54,6 +54,7 @@ def test_piece_schema_columns_present(db_connection) -> None:
     assert "artifact_bindings" in tables
     assert "layout_specs" in tables
     assert "assembly_layout_bindings" in tables
+    assert "assembly_contributions" in tables
     assert "artifact_layout_attachments" in tables
     assert "assembly_runtime_policies" in tables
     assert "operations" in tables
@@ -72,6 +73,22 @@ def test_piece_schema_columns_present(db_connection) -> None:
 
     binding_columns = _column_names(db_connection, "artifact_bindings")
     assert {"from_artifact_id", "to_artifact_id", "kind"}.issubset(binding_columns)
+
+    contribution_columns = _column_names(db_connection, "assembly_contributions")
+    assert {
+        "assembly_id",
+        "view_id",
+        "binding_id",
+        "binding_value_id",
+        "coverage_plan_hash",
+        "contributor_daemon_id",
+        "coordinator_operation_id",
+        "coordinator_generation",
+        "lease_id",
+        "lease_generation",
+        "lease_expires_at",
+        "state",
+    }.issubset(contribution_columns)
 
 
 def test_persistence_tables_accept_inserts(db_connection) -> None:

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
+#include "core/store/runtime/ingestion/artifact_truth.h"
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/store_policy_resolver.h"
 #include "daemon/state/types.h"
@@ -89,6 +91,8 @@ struct PersistenceTaskState {
   std::string task_id;
   std::string plan_id;
   std::string artifact_id;
+  std::string source_artifact_id;
+  std::optional<store::runtime::ingestion::VerifiedContentDescriptor> verified_content_descriptor;
   std::string key_hint;
   v2::PlacementPolicy placement_policy{v2::PLACEMENT_POLICY_UNSPECIFIED};
   bool persist_to_shared_disk{false};
@@ -115,10 +119,29 @@ struct PersistenceTaskState {
 // Persistence task tracker with lightweight shard planning/state machine.
 class PersistenceManager {
  public:
+  enum class PolicySourceKind : std::uint8_t {
+    kUnspecified = 0,
+    kSharedDisk = 1,
+  };
+
   struct PersistenceSource {
     std::string artifact_id;
+    std::string source_artifact_id;
     uint64_t total_size_bytes{0};
+    std::optional<store::runtime::ingestion::VerifiedContentDescriptor> verified_content_descriptor;
   };
+
+  struct PolicySourceRecord {
+    std::string artifact_id;
+    std::string path_id;
+    PolicySourceKind path_kind{PolicySourceKind::kUnspecified};
+    std::string control_ref;
+    std::string workflow_task_id;
+    std::filesystem::path local_path;
+    std::optional<store::runtime::ingestion::VerifiedContentDescriptor> verified_content_descriptor;
+  };
+
+  using ResolveExternalSourceFn = std::function<absl::StatusOr<PersistenceSource>(std::string_view artifact_id)>;
 
   explicit PersistenceManager(
       BackgroundScheduler* scheduler,
@@ -152,6 +175,7 @@ class PersistenceManager {
     }
     PersistenceSource source;
     source.artifact_id = std::move(artifact_id);
+    source.source_artifact_id = source.artifact_id;
     source.total_size_bytes = total_size_bytes;
     return start_task_with_source(std::move(source), resolved).value();
   }
@@ -162,6 +186,7 @@ class PersistenceManager {
       uint64_t total_size_bytes = 64ULL * 1024 * 1024) {
     PersistenceSource source;
     source.artifact_id = std::move(artifact_id);
+    source.source_artifact_id = source.artifact_id;
     source.total_size_bytes = total_size_bytes;
     return start_task_with_source(std::move(source), policy).value();
   }
@@ -176,6 +201,12 @@ class PersistenceManager {
   void set_global_store_client(store::components::IGlobalStoreClient* client);
   void set_storage_path(std::filesystem::path storage_root);
   void set_max_concurrency(uint32_t max_concurrency);
+  void set_external_source_resolver(ResolveExternalSourceFn resolver);
+
+  [[nodiscard]] std::vector<PolicySourceRecord> list_policy_sources(absl::string_view artifact_id) const;
+  [[nodiscard]] std::optional<PolicySourceRecord> resolve_policy_source(
+      absl::string_view artifact_id,
+      std::optional<absl::string_view> expected_control_ref = std::nullopt) const;
 
   [[nodiscard]] bool is_spill_evictable(
       absl::string_view artifact_id,
@@ -228,6 +259,13 @@ class PersistenceManager {
       const PersistenceTaskState& task,
       const PersistenceShardState& shard,
       PersistenceTargetState& target);
+  void index_task_locked(const PersistenceTaskState& task) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void rebuild_policy_source_registry_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void refresh_policy_source_registry_locked(const PersistenceTaskState& task) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  [[nodiscard]] bool task_has_actionable_shared_disk_locked(const PersistenceTaskState& task) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  [[nodiscard]] std::optional<PolicySourceRecord> policy_source_record_locked(const PersistenceTaskState& task) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   static bool is_terminal(v2::PersistenceState state);
   static store::components::PersistenceReport build_report(const PersistenceTaskState& task);
   static tensorcast::global_store::v1::PersistenceState to_global_state(v2::PersistenceState state);
@@ -250,10 +288,14 @@ class PersistenceManager {
   std::filesystem::path task_log_path_;
   std::filesystem::path storage_root_;
   std::string cluster_id_;
+  ResolveExternalSourceFn external_source_resolver_;
 
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, PersistenceTaskState> tasks_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::string> artifact_to_task_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> artifact_to_tasks_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, PolicySourceRecord> policy_sources_by_control_ref_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> artifact_policy_sources_ ABSL_GUARDED_BY(mu_);
   std::atomic<uint64_t> counter_{0};
 
   struct DurabilityState {

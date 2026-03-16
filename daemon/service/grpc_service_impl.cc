@@ -2,9 +2,9 @@
 
 #include "daemon/service/grpc_service_impl.h"
 
-#include <nlohmann/json.hpp>
 #include <unistd.h>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,7 +20,6 @@
 #include "core/store/components/global_store_client.h"
 #include "daemon/service/artifact_retire_utils.h"
 #include "daemon/util/status_utils.h"
-#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -363,6 +362,7 @@ absl::StatusOr<DrainedLeaseResolution> drain_lease_for_retire(
 StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
     : engine_(&deps.engine),
       materialization_controller_(&deps.materialization_controller),
+      byte_artifact_controller_(&deps.byte_artifact_controller),
       registration_controller_(&deps.registration_controller),
       transport_controller_(&deps.transport_controller),
       status_controller_(&deps.status_controller),
@@ -375,8 +375,20 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       replica_session_controller_(&deps.replica_session_controller),
       lease_controller_(&deps.lease_controller),
       shutdown_signal_(&deps.shutdown_signal),
+      startup_coordinator_(std::move(deps.startup_coordinator)),
       source_registry_(deps.source_registry),
       opts_(std::move(opts)) {}
+
+grpc::Status StoreDaemonServiceImpl::block_if_startup_pending() const {
+  if (!startup_coordinator_) {
+    return grpc::Status::OK;
+  }
+  const absl::Status status = startup_coordinator_->startup_barrier_status();
+  if (status.ok()) {
+    return grpc::Status::OK;
+  }
+  return to_grpc_status(status);
+}
 
 Status StoreDaemonServiceImpl::ClearMem(
     grpc::ServerContext* ctx,
@@ -403,6 +415,9 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
 
   if (shutdown_signal_->is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
   }
   if (req->owner_pid() <= 0) {
     return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
@@ -461,6 +476,9 @@ Status StoreDaemonServiceImpl::UnregisterVramRegion(
   if (req->region_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "region_id is required"};
   }
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
   if (req->owner_pid() <= 0) {
     return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
   }
@@ -492,6 +510,9 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
   }
   if (shutdown_signal_->is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
   }
   if (req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
@@ -601,6 +622,9 @@ Status StoreDaemonServiceImpl::RetirePublishedReplica(
   }
   if (shutdown_signal_->is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
   }
   if (req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};

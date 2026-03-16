@@ -16,6 +16,7 @@ struct FullDigestDecision {
 };
 
 [[nodiscard]] FullDigestDecision resolve_full_digest_decision(const IngestionContext& ctx);
+[[nodiscard]] bool should_skip_disk_verification(const IngestionContext& ctx);
 
 class VerificationStage {
  public:

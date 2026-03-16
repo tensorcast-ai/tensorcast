@@ -71,6 +71,23 @@ worker_policy:
     snapshot_max_rows: 200
     # Publish interval hint for daemons; lower improves freshness but adds write load.
     publish_interval: 5s
+  transport_scheduler:
+    # Queue-based group dispatch is the unified scheduler path for cross-host runs.
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+    source_balance_weights:
+      replica_load_weight: 1.0
+      worker_load_weight: 1.0
+      recent_assignment_penalty_weight: 1.0
+      diffusion_bonus_weight: 1.0
+    group_dispatch:
+      fairness_floor_ratio: 0.25
+      completion_bias_weight: 1.0
+      starvation_aging_threshold: 5s
+      queue_scan_limit: 128
+      dispatch_batch_limit: 16
+      group_source_spread_weight: 2.0
+      group_source_soft_cap_ratio: 1.3
+      group_source_min_candidates_for_enforce: 3
 
 # v2 limits and retention policies.
 limits:

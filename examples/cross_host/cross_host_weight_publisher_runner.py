@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 #  Copyright (c) 2026, TensorCast Team.
 
-# Copyright (c) 2026, TensorCast Team.
-
 from __future__ import annotations
 
 import argparse
@@ -97,9 +95,7 @@ def estimate_receiver_timeout_floor_sec(args: argparse.Namespace) -> float:
     tp_world_size = max(1, int(args.tp_world_size))
     total_payload_gib = float(max(0, int(args.tp_total_bytes))) / float(1024**3)
     per_rank_payload_gib = (
-        total_payload_gib / float(tp_world_size)
-        if total_payload_gib > 0.0
-        else 0.0
+        total_payload_gib / float(tp_world_size) if total_payload_gib > 0.0 else 0.0
     )
     # Empirical lower bound from multi-host TP4 runs:
     # rank-local bind/swap latency grows with per-rank payload and fanout.
@@ -141,7 +137,8 @@ def estimate_keep_last_stable_cap(args: argparse.Namespace) -> int | None:
     if per_version_bytes <= 0:
         return None
     publisher_daemon_config = str(
-        getattr(args, "publisher_daemon_config", "") or getattr(args, "daemon_config", "")
+        getattr(args, "publisher_daemon_config", "")
+        or getattr(args, "daemon_config", "")
     ).strip()
     if not publisher_daemon_config:
         return None
@@ -172,7 +169,9 @@ def estimate_publish_to_apply_floor_sec(args: argparse.Namespace) -> float:
         1.5, per_rank_apply_budget_s * 0.25
     )
     visibility_budget_s = max(8.0, float(args.publish_interval_s) * 2.0)
-    guard_s = 10.0 if str(args.transport_group_mode).strip().lower() == "tp_version" else 6.0
+    guard_s = (
+        10.0 if str(args.transport_group_mode).strip().lower() == "tp_version" else 6.0
+    )
     floor = visibility_budget_s + tp_wave_budget_s + queue_budget_s + guard_s
     return float(max(20.0, math.ceil(floor)))
 
@@ -1260,6 +1259,13 @@ def start_remote_daemon(
             f"else tensorcast-cli daemon stop --session {shlex.quote(daemon_session)} >/dev/null 2>&1 || true; fi"
         ),
         (
+            "python -c "
+            '"from tensorcast.cli_utils.paths import runtime_state_path; '
+            "from tensorcast.cli_utils.process import clear_runtime_global_store; "
+            'p=runtime_state_path(); clear_runtime_global_store(p, preserve_cluster_token=False) if p.exists() else None" '
+            ">/dev/null 2>&1 || true"
+        ),
+        (
             "if command -v timeout >/dev/null 2>&1; then "
             f"timeout 180s {start_expr}; "
             f"else {start_expr}; fi"
@@ -1279,11 +1285,41 @@ def start_remote_daemon(
             5, "export TEST_TMPDIR=${TEST_TMPDIR:-/tmp/tensorcast_fake_backend}"
         )
         start_cmd.insert(6, 'mkdir -p "$TEST_TMPDIR"')
-    output = run_remote(
-        process_id,
-        "; ".join(start_cmd),
-        timeout_sec=max(60.0, timeout_sec),
-    )
+    max_start_attempts = 2
+    output: str | None = None
+    for attempt in range(1, max_start_attempts + 1):
+        try:
+            output = run_remote(
+                process_id,
+                "; ".join(start_cmd),
+                timeout_sec=max(60.0, timeout_sec),
+            )
+            break
+        except RuntimeError as exc:
+            if (
+                attempt >= max_start_attempts
+                or "Daemon exited with code 0 during startup" not in str(exc)
+            ):
+                raise
+            print(
+                "[daemon-start] transient startup failure; retrying",
+                f"process={process_id}",
+                f"session={daemon_session}",
+                f"attempt={attempt}/{max_start_attempts}",
+                flush=True,
+            )
+            stop_remote_daemon(
+                process_id=process_id,
+                repo_root=repo_root,
+                daemon_session=daemon_session,
+                timeout_sec=max(30.0, timeout_sec),
+            )
+            time.sleep(1.0)
+    if output is None:
+        raise RuntimeError(
+            "daemon startup did not produce output: "
+            f"process={process_id}, session={daemon_session}"
+        )
     status = extract_last_json_object(output)
     daemon_status = status.get("daemon")
     if not isinstance(daemon_status, dict):
@@ -1330,12 +1366,18 @@ def stop_remote_daemon(
         ),
         (
             f"for pid in $(pgrep -f -- {daemon_pattern} || true); do "
+            'if [[ "$pid" == "$$" || "$pid" == "$PPID" ]]; then continue; fi; '
+            'cmdline="$(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null || true)"; '
+            'if [[ "${cmdline}" != *"tensorcast_daemon --config"* ]]; then continue; fi; '
             'kill -TERM "$pid" >/dev/null 2>&1 || true; '
             "done"
         ),
         "sleep 1",
         (
             f"for pid in $(pgrep -f -- {daemon_pattern} || true); do "
+            'if [[ "$pid" == "$$" || "$pid" == "$PPID" ]]; then continue; fi; '
+            'cmdline="$(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null || true)"; '
+            'if [[ "${cmdline}" != *"tensorcast_daemon --config"* ]]; then continue; fi; '
             'kill -KILL "$pid" >/dev/null 2>&1 || true; '
             "done"
         ),
@@ -1365,6 +1407,13 @@ def preclean_remote_role_processes(
             "if command -v timeout >/dev/null 2>&1; then "
             "timeout 30s tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; "
             "else tensorcast-cli daemon stop --force >/dev/null 2>&1 || true; fi"
+        ),
+        (
+            "python -c "
+            '"from tensorcast.cli_utils.paths import runtime_state_path; '
+            "from tensorcast.cli_utils.process import clear_runtime_global_store; "
+            'p=runtime_state_path(); clear_runtime_global_store(p, preserve_cluster_token=False) if p.exists() else None" '
+            ">/dev/null 2>&1 || true"
         ),
         "pkill -TERM -f '[t]ensorcast_daemon --config' >/dev/null 2>&1 || true",
         "sleep 1",
@@ -1409,6 +1458,7 @@ def build_e2e_command(
     start_version: int,
     num_versions: int,
     keep_last: int,
+    pre_publish_trim_margin: int,
     publish_interval_s: float,
     poll_interval_s: float,
     receiver_timeout_s: float,
@@ -1499,6 +1549,8 @@ def build_e2e_command(
                 str(publish_interval_s),
                 "--keep-last",
                 str(keep_last),
+                "--pre-publish-trim-margin",
+                str(pre_publish_trim_margin),
                 "--retention-timeout-s",
                 str(retention_timeout_s),
                 "--weights-root",
@@ -1871,7 +1923,9 @@ def _extract_group_probe_progress_snapshot(probe: dict[str, Any]) -> dict[str, i
     }
 
 
-def _progress_snapshot_token(snapshot: dict[str, int]) -> tuple[int, int, int, int, int]:
+def _progress_snapshot_token(
+    snapshot: dict[str, int],
+) -> tuple[int, int, int, int, int]:
     return (
         int(snapshot.get("total_transports", 0)),
         int(snapshot.get("requester_tagged_transports", 0)),
@@ -1891,7 +1945,9 @@ def evaluate_waiting_lease(
 ) -> dict[str, Any]:
     snapshot = _extract_group_probe_progress_snapshot(probe)
     current_token = _progress_snapshot_token(snapshot)
-    progressed = previous_progress_token is None or current_token != previous_progress_token
+    progressed = (
+        previous_progress_token is None or current_token != previous_progress_token
+    )
     if progressed or previous_progress_mono is None:
         effective_progress_mono = float(now_mono)
     else:
@@ -2036,7 +2092,9 @@ def merge_timeout_analysis_with_waiting_guard(
     merged["transport_timeout_observed"] = bool(transport_counts)
     merged["waiting_lease"] = {
         "renew_count": int(p0_guard.get("lease_renew_count", 0)),
-        "no_progress_limit_s": float(max(0.0, p0_guard.get("no_progress_limit_s", 0.0))),
+        "no_progress_limit_s": float(
+            max(0.0, p0_guard.get("no_progress_limit_s", 0.0))
+        ),
         "max_no_progress_elapsed_s": float(
             max(0.0, p0_guard.get("max_no_progress_elapsed_s", 0.0))
         ),
@@ -3003,6 +3061,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--retention-timeout-s", type=float, default=90.0)
+    parser.add_argument(
+        "--pre-publish-trim-margin",
+        type=int,
+        default=1,
+        help=(
+            "Publisher pre-publish trim margin. "
+            "effective_pre_publish_keep = max(0, keep_last - margin)."
+        ),
+    )
     parser.add_argument("--receiver-apply-mode", default="binding_swap")
     parser.add_argument(
         "--allow-receiver-skips",
@@ -3058,6 +3125,8 @@ def main(argv: list[str]) -> int:
         raise ValueError("start-version must be > 0")
     if args.keep_last < 0:
         raise ValueError("keep-last must be >= 0")
+    if int(args.pre_publish_trim_margin) < 0:
+        raise ValueError("pre-publish-trim-margin must be >= 0")
     if args.keep_last > args.num_versions:
         raise ValueError("keep-last must be <= num-versions")
     if int(args.tp_world_size) <= 0:
@@ -3116,7 +3185,10 @@ def main(argv: list[str]) -> int:
         )
 
     configured_keep_last = int(args.keep_last)
-    if bool(args.keep_last_auto_adjust) and configured_keep_last < effective_keep_last_floor:
+    if (
+        bool(args.keep_last_auto_adjust)
+        and configured_keep_last < effective_keep_last_floor
+    ):
         args.keep_last = effective_keep_last_floor
         print(
             "[preflight] auto-adjust keep-last "
@@ -3454,6 +3526,7 @@ def main(argv: list[str]) -> int:
             start_version=int(args.start_version),
             num_versions=int(args.num_versions),
             keep_last=int(args.keep_last),
+            pre_publish_trim_margin=int(args.pre_publish_trim_margin),
             publish_interval_s=float(args.publish_interval_s),
             poll_interval_s=float(args.poll_interval_s),
             receiver_timeout_s=float(args.receiver_timeout_s),
@@ -3500,6 +3573,7 @@ def main(argv: list[str]) -> int:
                 start_version=int(args.start_version),
                 num_versions=int(args.num_versions),
                 keep_last=int(args.keep_last),
+                pre_publish_trim_margin=int(args.pre_publish_trim_margin),
                 publish_interval_s=float(args.publish_interval_s),
                 poll_interval_s=float(args.poll_interval_s),
                 receiver_timeout_s=float(args.receiver_timeout_s),
@@ -4184,6 +4258,7 @@ def main(argv: list[str]) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "keep_last": int(args.keep_last),
+            "pre_publish_trim_margin": int(args.pre_publish_trim_margin),
             "publish_interval_s": float(args.publish_interval_s),
             "poll_interval_s": float(args.poll_interval_s),
             "receiver_timeout_s": float(args.receiver_timeout_s),
@@ -4300,9 +4375,9 @@ def main(argv: list[str]) -> int:
                 "waiting_timeout_reasons": summary.get("timeout_analysis", {}).get(
                     "waiting_timeout_reason_counts", {}
                 ),
-                "transport_timeout_reasons": summary.get(
-                    "timeout_analysis", {}
-                ).get("transport_timeout_reason_counts", {}),
+                "transport_timeout_reasons": summary.get("timeout_analysis", {}).get(
+                    "transport_timeout_reason_counts", {}
+                ),
                 "throughput_peak_gib_s": summary["performance"][
                     "transport_throughput_gib_s"
                 ].get("peak_active_throughput_gib_s", 0.0),

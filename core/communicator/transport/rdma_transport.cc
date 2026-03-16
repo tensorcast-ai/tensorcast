@@ -1,5 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
+#include <algorithm>
 #include <utility>
 
 #include "absl/log/log.h"
@@ -16,6 +17,7 @@ RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t 
       dev_(std::move(dev)),
       io_thread_(std::move(th)),
       qp_count_(context->qp_count()),
+      max_send_wr_(context->outstanding_wr()),
       next_qp_index_(0),
       local_gid_({}),
       gid_idx_(-1),
@@ -114,14 +116,15 @@ misc::result_t RdmaTransport::do_init_qp() {
   }
 
   LOG(INFO) << "Initializing " << qp_count_ << " QPs for device " << dev_->get_name()
-            << " (bonding_balance=" << (context_->bonding_balance() ? "true" : "false") << ")";
+            << " (bonding_balance=" << (context_->bonding_balance() ? "true" : "false")
+            << " max_send_wr=" << max_send_wr_ << ")";
 
   struct ibv_qp_init_attr init_attr{};
   misc::CLEAR(init_attr);
   init_attr.send_cq = dev_->get_cq();
   init_attr.recv_cq = dev_->get_cq();
   init_attr.qp_type = IBV_QPT_RC;
-  init_attr.cap.max_send_wr = 64;
+  init_attr.cap.max_send_wr = std::max(1, max_send_wr_);
   init_attr.cap.max_recv_wr = 16;
   init_attr.cap.max_send_sge = 1;
   init_attr.cap.max_recv_sge = 1;
@@ -252,7 +255,7 @@ misc::result_t RdmaTransport::do_post_send() {
   }
 
   req->record_rdma_queue_done();
-  req->add_expected_completions(1);
+  req->note_rdma_window(1, /*final_window=*/true);
 
   struct ibv_send_wr read_wr{};
   struct ibv_send_wr* read_bad_wr;
@@ -311,66 +314,72 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     return misc::INVALID_ARGUMENT;
   }
 
-  // Prepare batch of WRs
-  std::vector<ibv_send_wr> wrs(segs.size());
-  std::vector<ibv_sge> sges(segs.size());
-  struct ibv_send_wr* bad_wr = nullptr;
-
   auto* mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
   request->record_rdma_queue_done();
-
-  // Select QP using round robin first to encode in wr_id
-  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
-  struct ibv_qp* selected_qp = qps_[qp_index];
-
-  // Encode both transport_index and qp_index in wr_id
-  uint64_t encoded_wr_id = (static_cast<uint64_t>(transport_index_) << 16) | static_cast<uint64_t>(qp_index);
-
+  std::array<std::vector<size_t>, kMaxQpCount> qp_seg_indices;
+  const size_t start_qp = static_cast<size_t>(next_qp_index_.fetch_add(static_cast<int>(segs.size())));
   for (size_t i = 0; i < segs.size(); ++i) {
-    auto& wr = wrs[i];
-    auto& sge = sges[i];
-    misc::CLEAR(wr);
-    misc::CLEAR(sge);
-    wr.wr_id = encoded_wr_id;
-    wr.opcode = IBV_WR_RDMA_READ;
-    wr.send_flags = IBV_SEND_SIGNALED;
-    wr.num_sge = 1;
-    wr.sg_list = &sge;
-    wr.wr.rdma.remote_addr = segs[i].remote_addr;
-    wr.wr.rdma.rkey = segs[i].rkey;
-    sge.addr = segs[i].local_addr;
-    sge.length = segs[i].length;
-    sge.lkey = mr->lkey;
-    wr.next = (i + 1 < segs.size()) ? &wrs[i + 1] : nullptr;
+    const int qp_index = static_cast<int>((start_qp + i) % static_cast<size_t>(qp_count_));
+    qp_seg_indices[qp_index].push_back(i);
   }
 
-  auto res = misc::wrap_ibv_post_send(selected_qp, wrs.data(), &bad_wr);
-  if (res) {
-    size_t posted_count = (bad_wr != nullptr) ? static_cast<size_t>(bad_wr - wrs.data()) : 0;
-    if (posted_count > 0) {
-      for (size_t i = 0; i < posted_count; ++i) {
-        request->enqueue_completion_bytes(segs[i].length);
-      }
-      for (size_t i = 0; i < posted_count; ++i) {
-        per_qp_inflight_queues_[qp_index].push(request);
-      }
-      LOG(WARNING) << "[rdma_transport] partial post: " << posted_count << "/" << segs.size()
-                   << " WRs posted before failure";
+  size_t total_posted = 0;
+  size_t qp_used = 0;
+  for (int qp_index = 0; qp_index < qp_count_; ++qp_index) {
+    const auto& indices = qp_seg_indices[qp_index];
+    if (indices.empty()) {
+      continue;
     }
-    request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
-    LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " res=" << res
-                 << " errno=" << errno;
-    return misc::FAILED;
+    ++qp_used;
+
+    std::vector<ibv_send_wr> wrs(indices.size());
+    std::vector<ibv_sge> sges(indices.size());
+    struct ibv_send_wr* bad_wr = nullptr;
+    const uint64_t encoded_wr_id = (static_cast<uint64_t>(transport_index_) << 16) | static_cast<uint64_t>(qp_index);
+    for (size_t i = 0; i < indices.size(); ++i) {
+      const auto& seg = segs[indices[i]];
+      auto& wr = wrs[i];
+      auto& sge = sges[i];
+      misc::CLEAR(wr);
+      misc::CLEAR(sge);
+      wr.wr_id = encoded_wr_id;
+      wr.opcode = IBV_WR_RDMA_READ;
+      wr.send_flags = IBV_SEND_SIGNALED;
+      wr.num_sge = 1;
+      wr.sg_list = &sge;
+      wr.wr.rdma.remote_addr = seg.remote_addr;
+      wr.wr.rdma.rkey = seg.rkey;
+      sge.addr = seg.local_addr;
+      sge.length = seg.length;
+      sge.lkey = mr->lkey;
+      wr.next = (i + 1 < indices.size()) ? &wrs[i + 1] : nullptr;
+    }
+
+    auto res = misc::wrap_ibv_post_send(qps_[qp_index], wrs.data(), &bad_wr);
+    size_t posted_count = indices.size();
+    if (res != misc::SUCCESS) {
+      posted_count = (bad_wr != nullptr) ? static_cast<size_t>(bad_wr - wrs.data()) : 0;
+    }
+    for (size_t i = 0; i < posted_count; ++i) {
+      request->enqueue_completion_bytes(segs[indices[i]].length);
+      per_qp_inflight_queues_[qp_index].push(request);
+    }
+    total_posted += posted_count;
+
+    if (res != misc::SUCCESS) {
+      if (posted_count > 0) {
+        LOG(WARNING) << "[rdma_transport] partial post on QP " << qp_index << ": " << posted_count << "/"
+                     << indices.size() << " WRs posted before failure";
+      }
+      request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
+      LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " qp=" << qp_index
+                   << " res=" << res << " errno=" << errno;
+      return misc::FAILED;
+    }
   }
 
-  // Track N inflight completions for this request in per-QP queue
-  for (size_t i = 0; i < segs.size(); ++i) {
-    request->enqueue_completion_bytes(segs[i].length);
-    per_qp_inflight_queues_[qp_index].push(request);
-  }
-
-  LOG(INFO) << "[rdma_transport] Posted " << segs.size() << " RDMA READ WRs on QP " << qp_index
-            << " for request=" << request->get_key();
+  LOG(INFO) << "[rdma_transport] Posted " << total_posted << " RDMA READ WRs across " << qp_used
+            << " QPs for request=" << request->get_key();
   return misc::SUCCESS;
 }
 

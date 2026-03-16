@@ -28,7 +28,11 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 - Tier constraints are enforced: `shared_disk` forbids retention fields, `stable_dram` supports only `min_replicas=1`, remote-only stable tiers disallow retention settings, and `must` local stable tiers require `pinned` retention.
 - `CommitRegisteredArtifact` returns a `local_stable_tier` result (`ready`/`degraded`/`skipped`) on `RegisteredArtifact` when the resolved policy requests `stable_dram(scope=local)`. `must` failures raise commit errors; `should` failures are surfaced as `degraded` while the commit remains successful.
 - The registration pipeline invokes daemon RPC `StartPersistence` only when the resolved policy requires shared disk or remote stable DRAM, and records the returned `persistence_task_id` on `RegisteredArtifact` (persistence prefers a daemon-owned local stable DRAM source when present).
-- Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state; the SDK does not poll automatically.
+- Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state.
+- Use `Store.persistence_operation` (or module helper `tensorcast.api.store.persistence_operation`) when persistence status should stay on the unified `Operation[T]` surface instead of manual polling around raw task ids.
+- The top-level package also re-exports `tensorcast.persistence_operation(...)` for tools that already depend on the
+  root TensorCast facade.
+- `RegisteredArtifact.persistence_operation()` reattaches to that same persistence task through the originating daemon endpoint; it fails closed when no `persistence_task_id` was minted.
 
 ## Artifact Handles & Metadata Cache
 
@@ -50,10 +54,12 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 
 ## Programmable Control-Plane Primitives
 
-- `tensorcast.context(...) -> CallContext` is a pure per-call container for deadline/idempotency/tags. Handle factories
+- `tensorcast.context(...) -> CallContext` is a pure per-call container for deadline/idempotency/execution hints. Handle factories
   remain context-free (`tensorcast.artifact(...)` / `Store.artifact(...)`).
 - Action APIs accept `*, ctx: CallContext | None = None` as a keyword-only parameter; `ctx` does not participate in
   artifact/view identity, but `ctx.idempotency_key` seeds deterministic operation ids for joinable actions.
+- Collective disk loads are explicit at the API boundary via `CallContext.collective=CollectiveLoadGroup(...)`; the SDK
+  no longer infers collective mode from ambient GPU environment variables or overloads `replica_uuid` with group hints.
 - Long-tail control-plane actions return `Operation[T]` (sync/blocking): use `status()` / `result()` / `cancel()` to
   implement wait/cancel without ad-hoc polling loops.
 - `Artifact.prefetch(...)` warms a **daemon-owned** replica and supports both GPU and CPU/DRAM placement:
@@ -140,8 +146,8 @@ canonical artifact. Key behaviours:
 - `registration_kind="piece"` (or `register_piece`) registers dense view pieces
   for partial coverage. Piece registration is selection-only (narrow only), does
   not allow transpose, and requires server placement.
-- `allow_partial` is deprecated and maps to `registration_kind="piece"`. Sparse
-  canonical zero-fill semantics are removed.
+- Sparse canonical zero-fill semantics are removed; piece registration now uses
+  `register_piece(...)` or `registration_kind="piece"` only.
 - `canonical_index_bytes` can be supplied to bootstrap a new assembly without
   requiring prior Global Store state.
 

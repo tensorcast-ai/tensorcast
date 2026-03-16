@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="620" viewBox="0 0 980 620">
+<rect width="100%" height="100%" fill="#faf8f2"/>
+<text x="490.0" y="36.0" font-family="Arial, sans-serif" font-size="26" font-weight="bold" text-anchor="middle">Single-NIC Aligned Reference</text>
+<text x="490.0" y="62.0" font-family="Arial, sans-serif" font-size="14" font-weight="normal" text-anchor="middle">Matched physical GPU/NIC pair for verbs and Mooncake; communicator bars shown with explicit caveats</text>
+<text x="490.0" y="84.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Raw verbs and Mooncake use 0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2. Communicator fresh aligned probe uses 0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1.</text>
+<line x1="90" y1="490.0" x2="910" y2="490.0" stroke="#d6d1c4" stroke-width="1"/>
+<text x="78.0" y="495.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">0</text>
+<line x1="90" y1="414.0" x2="910" y2="414.0" stroke="#d6d1c4" stroke-width="1"/>
+<text x="78.0" y="419.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">5</text>
+<line x1="90" y1="338.0" x2="910" y2="338.0" stroke="#d6d1c4" stroke-width="1"/>
+<text x="78.0" y="343.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">11</text>
+<line x1="90" y1="262.0" x2="910" y2="262.0" stroke="#d6d1c4" stroke-width="1"/>
+<text x="78.0" y="267.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">16</text>
+<line x1="90" y1="186.0" x2="910" y2="186.0" stroke="#d6d1c4" stroke-width="1"/>
+<text x="78.0" y="191.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">22</text>
+<line x1="90" y1="110.0" x2="910" y2="110.0" stroke="#d6d1c4" stroke-width="1"/>
+<text x="78.0" y="115.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="end">27</text>
+<line x1="90" y1="110" x2="90" y2="490" stroke="#222" stroke-width="2"/>
+<line x1="90" y1="490" x2="910" y2="490" stroke="#222" stroke-width="2"/>
+<text x="34.0" y="90.0" font-family="Arial, sans-serif" font-size="13" font-weight="normal" text-anchor="start">GB/s</text>
+<rect x="118.7" y="150.7" width="79.3" height="339.3" rx="4" fill="#1f4b99"/>
+<text x="158.3" y="142.7" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">24.50</text>
+<text x="158.3" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">IB verbs</text>
+<text x="158.3" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">write aligned</text>
+<rect x="255.4" y="151.2" width="79.3" height="338.8" rx="4" fill="#5d84d6"/>
+<text x="295.0" y="143.2" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">24.46</text>
+<text x="295.0" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">IB verbs</text>
+<text x="295.0" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">read aligned</text>
+<rect x="392.0" y="151.4" width="79.3" height="338.6" rx="4" fill="#9c4f2f"/>
+<text x="431.7" y="143.4" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">24.45</text>
+<text x="431.7" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Mooncake TE</text>
+<text x="431.7" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">write aligned</text>
+<rect x="528.7" y="151.5" width="79.3" height="338.5" rx="4" fill="#d48459"/>
+<text x="568.3" y="143.5" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">24.44</text>
+<text x="568.3" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Mooncake TE</text>
+<text x="568.3" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">read aligned</text>
+<rect x="665.4" y="209.6" width="79.3" height="280.4" rx="4" fill="#2a7f62"/>
+<text x="705.0" y="201.6" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">20.25</text>
+<text x="705.0" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Comm best-known</text>
+<text x="705.0" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">strict read</text>
+<rect x="802.0" y="205.3" width="79.3" height="284.7" rx="4" fill="#7fbf9f"/>
+<text x="841.7" y="197.3" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle">20.56</text>
+<text x="841.7" y="514.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">Comm 0496->0078</text>
+<text x="841.7" y="530.0" font-family="Arial, sans-serif" font-size="12" font-weight="normal" text-anchor="middle">fresh probe</text>
+</svg>

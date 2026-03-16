@@ -152,6 +152,20 @@ CREATE TABLE IF NOT EXISTS memory_tier_leases (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_tier_leases_node_artifact ON memory_tier_leases(node_id, artifact_id, state);
 
+-- Shard-home lease fencing records for `cgid:byte_artifact~...` routing.
+-- These are low-cardinality (one row per shard_id) and are the strong-consistency
+-- authority for shard ownership.
+CREATE TABLE IF NOT EXISTS shard_home_leases (
+    shard_id BIGINT PRIMARY KEY,
+    holder_daemon_id TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    lease_generation BIGINT NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_shard_home_leases_holder ON shard_home_leases(holder_daemon_id);
+CREATE INDEX IF NOT EXISTS idx_shard_home_leases_expires_at ON shard_home_leases(expires_at);
+
 -- Artifacts: content-addressed artifact IDs (design-0007)
 CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,          -- "mi2:<index_multihash>:<data_multihash>"
@@ -543,6 +557,29 @@ CREATE TABLE IF NOT EXISTS piece_proof_digests (
     PRIMARY KEY (assembly_id, view_id, tensor_name, proof_schema_version, proof_chunk_idx)
 );
 CREATE INDEX IF NOT EXISTS idx_piece_proof_digests_tensor ON piece_proof_digests(assembly_id, view_id, tensor_name);
+
+-- Current contributor occupant per assembly view slot.
+CREATE TABLE IF NOT EXISTS assembly_contributions (
+    assembly_id TEXT NOT NULL,
+    view_id TEXT NOT NULL,
+    binding_id TEXT NOT NULL,
+    binding_value_id TEXT NOT NULL,
+    coverage_plan_hash TEXT NOT NULL,
+    contributor_daemon_id TEXT NOT NULL,
+    coordinator_operation_id TEXT NOT NULL,
+    coordinator_generation BIGINT NOT NULL,
+    lease_id TEXT NOT NULL,
+    lease_generation BIGINT NOT NULL,
+    lease_expires_at TIMESTAMP WITH TIME ZONE NULL,
+    state TEXT NOT NULL CHECK (state IN ('accepted','stale','released','aborted')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (assembly_id, view_id)
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_contributions_assembly_state
+    ON assembly_contributions(assembly_id, state);
+CREATE INDEX IF NOT EXISTS idx_assembly_contributions_binding_value
+    ON assembly_contributions(binding_id, binding_value_id);
 
 -- Assembly → sealed bindings (cgid -> mi2)
 CREATE TABLE IF NOT EXISTS artifact_bindings (

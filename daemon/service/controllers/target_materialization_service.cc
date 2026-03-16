@@ -65,12 +65,9 @@ using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
-using materialization_target_storage::acquire_error_reason;
-using materialization_target_storage::AcquireTargetStoragesError;
-using materialization_target_storage::TargetStorageLease;
 using store::loading::MaterializationSource;
 
-std::string mint_write_id() {
+std::string mint_publication_id() {
   thread_local absl::BitGen bitgen;
   std::string raw;
   raw.resize(16);
@@ -78,6 +75,38 @@ std::string mint_write_id() {
     raw[i] = static_cast<char>(absl::Uniform<uint32_t>(bitgen, 0u, 256u));
   }
   return absl::BytesToHexString(raw);
+}
+
+std::string build_publication_key(
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const tensorcast::common::v1::ByteSpaceRef& byte_space,
+    std::string_view target_layout_hash,
+    int owner_pid,
+    std::string_view device_uuid) {
+  std::string key = absl::StrCat(
+      selection.artifact_id(),
+      "|",
+      selection.view_id(),
+      "|",
+      selection.logical_layout_hash(),
+      "|",
+      selection.selection_hash(),
+      "|",
+      selection.view_subset_hash(),
+      "|",
+      static_cast<int>(byte_space.kind()),
+      "|",
+      byte_space.id(),
+      "|",
+      target_layout_hash,
+      "|",
+      owner_pid,
+      "|",
+      device_uuid);
+  for (const auto& name : selection.tensor_names()) {
+    absl::StrAppend(&key, "|t:", name);
+  }
+  return key;
 }
 
 std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
@@ -414,6 +443,8 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
               .lip_manager = d_.lip_manager,
               .devices = d_.devices,
               .identity = d_.identity,
+              .lifecycle = d_.lifecycle,
+              .lifecycle_kernel = d_.lifecycle_kernel,
               .global_store_client = d_.global_store_client,
               .capability_tokens = d_.capability_tokens,
               .max_concurrency = d_.max_concurrency,
@@ -428,9 +459,35 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
   }
 }
 
-TargetWriteRegistry::Record TargetMaterializationService::insert_target_write_for_testing(
-    TargetWriteRegistry::Record record) {
-  return target_publish_service_.remember_target_write(std::move(record));
+absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::insert_target_publication_for_testing(
+    TargetPublicationRegistry::Record record) {
+  return target_publish_service_.remember_target_publication(std::move(record));
+}
+
+absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> TargetMaterializationService::
+    inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now) {
+  return target_publish_service_.inspect_target_publication_context(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> TargetMaterializationService::
+    build_target_publication_workflow_routed_request_for_testing(
+        const v2::PublishTargetReplicaRequest& req,
+        absl::Time now) const {
+  return target_publish_service_.build_target_publication_workflow_routed_request(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> TargetMaterializationService::
+    build_target_publication_workflow_continuation_request_for_testing(
+        const RoutedAuthorityRequest& routed_request,
+        const OwnerStageReply& workflow_gate_reply) const {
+  return target_publish_service_.build_target_publication_workflow_continuation_request(
+      routed_request, workflow_gate_reply);
+}
+
+absl::StatusOr<std::optional<OwnerStageReply>> TargetMaterializationService::maybe_route_authority_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  return target_publish_service_.maybe_route_authority_stage(routed_request, now);
 }
 
 grpc::Status TargetMaterializationService::materialize_into_target(
@@ -483,19 +540,15 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout must include at least one storage entry"};
   }
 
-  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
-      record_materialize_into_target(
-          "error", "storage_not_region", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
-    }
-    if (storage.device_id() != device.ordinal) {
-      record_materialize_into_target(
-          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage.device_id does not match device_uuid"};
-    }
+  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
+      rctx.server_context().peer(), "MaterializeIntoTarget", layout, req.pid(), req.device_uuid());
+  if (!validated_target_or.ok()) {
+    record_materialize_into_target(
+        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(validated_target_or.status());
   }
+  auto validated_target = std::move(*validated_target_or);
+  const auto device = validated_target.device;
 
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
@@ -577,14 +630,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::CANCELLED, "request cancelled before transfer"};
   }
 
-  AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
-  auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), req.pid(), &acquire_error);
-  if (!storage_lease_or.ok()) {
-    record_materialize_into_target(
-        "error", acquire_error_reason(acquire_error), v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(storage_lease_or.status());
-  }
-  TargetStorageLease storage_lease = std::move(*storage_lease_or);
+  auto storage_lease = std::move(validated_target.storage_lease);
 
   std::vector<TargetLayoutSpan> verification_spans;
   if (verify_external_target) {
@@ -722,12 +768,12 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     }
 
     const std::string layout_hash = compute_target_layout_hash(layout);
-    const std::string write_id = mint_write_id();
-    const absl::Time expires_at = absl::Now() + TargetPublishService::target_write_token_ttl();
+    const std::string publication_id = mint_publication_id();
+    const absl::Time expires_at = absl::Now() + TargetPublishService::target_publication_token_ttl();
 
     auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
     if (!stable_index_or.ok()) {
-      VLOG(1) << "MaterializeIntoTarget: failed to rebuild canonical index for target write token: "
+      VLOG(1) << "MaterializeIntoTarget: failed to rebuild canonical index for target publication token: "
               << stable_index_or.status();
     } else {
       std::string stable_index_json = std::move(*stable_index_or);
@@ -737,26 +783,30 @@ grpc::Status TargetMaterializationService::materialize_into_target(
       std::string index_key_hex =
           absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
 
-      tensorcast::common::v1::TargetWriteScope scope;
-      scope.set_write_id(write_id);
+      tensorcast::common::v1::TargetPublicationScope scope;
+      scope.set_publication_id(publication_id);
       scope.mutable_selection()->CopyFrom(resolved_selection);
       scope.mutable_byte_space()->CopyFrom(byte_space);
       scope.set_device_uuid(req.device_uuid());
       scope.set_owner_pid(req.pid());
       scope.set_target_layout_hash(layout_hash);
+      if (req.has_operation_id()) {
+        scope.set_operation_id(req.operation_id());
+      }
 
       auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
       if (scope_or.ok()) {
         const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(expires_at));
         auto token_or = capability_tokens_->mint(
             d_.identity.daemon_id(),
-            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE,
+            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION,
             *scope_or,
             expires_at_ms);
         if (token_or.ok()) {
-          TargetWriteRegistry::Record record;
-          record.write_id = write_id;
-          record.layout_key = layout_hash;
+          TargetPublicationRegistry::Record record;
+          record.publication_id = publication_id;
+          record.publication_key =
+              build_publication_key(resolved_selection, byte_space, layout_hash, req.pid(), req.device_uuid());
           record.target_layout_hash = layout_hash;
           record.selection = resolved_selection;
           record.byte_space = byte_space;
@@ -770,14 +820,18 @@ grpc::Status TargetMaterializationService::materialize_into_target(
           record.expires_at = expires_at;
           record.segments = std::move(publish_segments);
           record.storages = std::move(publish_storages);
-          auto inserted = target_publish_service_.remember_target_write(std::move(record));
-          (void)inserted;
-          resp.set_target_write_token(*token_or);
+          auto inserted_or = target_publish_service_.remember_target_publication(std::move(record));
+          if (inserted_or.ok()) {
+            resp.set_target_publication_token(*token_or);
+          } else {
+            VLOG(1) << "MaterializeIntoTarget: failed to register target publication lifecycle: "
+                    << inserted_or.status();
+          }
         } else {
-          VLOG(1) << "MaterializeIntoTarget: failed to mint target_write_token: " << token_or.status();
+          VLOG(1) << "MaterializeIntoTarget: failed to mint target_publication_token: " << token_or.status();
         }
       } else {
-        VLOG(1) << "MaterializeIntoTarget: failed to serialize target_write scope: " << scope_or.status();
+        VLOG(1) << "MaterializeIntoTarget: failed to serialize target_publication scope: " << scope_or.status();
       }
     }
   }
@@ -844,19 +898,15 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout must include at least one storage entry"};
   }
 
-  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
-      record_materialize_into_target(
-          "error", "storage_not_region", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
-    }
-    if (storage.device_id() != device.ordinal) {
-      record_materialize_into_target(
-          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage.device_id does not match device_uuid"};
-    }
+  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
+      rctx.server_context().peer(), "MaterializeIntoMappedTarget", layout, req.pid(), req.device_uuid());
+  if (!validated_target_or.ok()) {
+    record_materialize_into_target(
+        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(validated_target_or.status());
   }
+  auto validated_target = std::move(*validated_target_or);
+  const auto device = validated_target.device;
 
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
@@ -900,14 +950,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   auto publish_segments = std::move(mapped_plan.publish_segments);
   auto copy_plan = std::move(mapped_plan.copy_plan);
 
-  AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
-  auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), req.pid(), &acquire_error);
-  if (!storage_lease_or.ok()) {
-    record_materialize_into_target(
-        "error", acquire_error_reason(acquire_error), v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(storage_lease_or.status());
-  }
-  TargetStorageLease storage_lease = std::move(*storage_lease_or);
+  auto storage_lease = std::move(validated_target.storage_lease);
 
   std::optional<store::loading::DiskSource> disk_source;
   if (normalized_disk_path.has_value()) {
@@ -1013,12 +1056,12 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     }
 
     const std::string layout_hash = compute_target_layout_hash(layout);
-    const std::string write_id = mint_write_id();
-    const absl::Time expires_at = absl::Now() + TargetPublishService::target_write_token_ttl();
+    const std::string publication_id = mint_publication_id();
+    const absl::Time expires_at = absl::Now() + TargetPublishService::target_publication_token_ttl();
 
     auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
     if (!stable_index_or.ok()) {
-      VLOG(1) << "MaterializeIntoMappedTarget: failed to rebuild canonical index for target write token: "
+      VLOG(1) << "MaterializeIntoMappedTarget: failed to rebuild canonical index for target publication token: "
               << stable_index_or.status();
     } else {
       std::string stable_index_json = std::move(*stable_index_or);
@@ -1028,26 +1071,30 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
       std::string index_key_hex =
           absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
 
-      tensorcast::common::v1::TargetWriteScope scope;
-      scope.set_write_id(write_id);
+      tensorcast::common::v1::TargetPublicationScope scope;
+      scope.set_publication_id(publication_id);
       scope.mutable_selection()->CopyFrom(resolved_selection);
       scope.mutable_byte_space()->CopyFrom(byte_space);
       scope.set_device_uuid(req.device_uuid());
       scope.set_owner_pid(req.pid());
       scope.set_target_layout_hash(layout_hash);
+      if (req.has_operation_id()) {
+        scope.set_operation_id(req.operation_id());
+      }
 
       auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
       if (scope_or.ok()) {
         const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(expires_at));
         auto token_or = capability_tokens_->mint(
             d_.identity.daemon_id(),
-            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE,
+            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION,
             *scope_or,
             expires_at_ms);
         if (token_or.ok()) {
-          TargetWriteRegistry::Record record;
-          record.write_id = write_id;
-          record.layout_key = layout_hash;
+          TargetPublicationRegistry::Record record;
+          record.publication_id = publication_id;
+          record.publication_key =
+              build_publication_key(resolved_selection, byte_space, layout_hash, req.pid(), req.device_uuid());
           record.target_layout_hash = layout_hash;
           record.selection = resolved_selection;
           record.byte_space = byte_space;
@@ -1061,14 +1108,18 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
           record.expires_at = expires_at;
           record.segments = std::move(publish_segments);
           record.storages = std::move(publish_storages);
-          auto inserted = target_publish_service_.remember_target_write(std::move(record));
-          (void)inserted;
-          resp.set_target_write_token(*token_or);
+          auto inserted_or = target_publish_service_.remember_target_publication(std::move(record));
+          if (inserted_or.ok()) {
+            resp.set_target_publication_token(*token_or);
+          } else {
+            VLOG(1) << "MaterializeIntoMappedTarget: failed to register target publication lifecycle: "
+                    << inserted_or.status();
+          }
         } else {
-          VLOG(1) << "MaterializeIntoMappedTarget: failed to mint target_write_token: " << token_or.status();
+          VLOG(1) << "MaterializeIntoMappedTarget: failed to mint target_publication_token: " << token_or.status();
         }
       } else {
-        VLOG(1) << "MaterializeIntoMappedTarget: failed to serialize target_write scope: " << scope_or.status();
+        VLOG(1) << "MaterializeIntoMappedTarget: failed to serialize target_publication scope: " << scope_or.status();
       }
     }
   }
@@ -1089,6 +1140,11 @@ grpc::Status TargetMaterializationService::publish_target_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
   return target_publish_service_.publish_target_replica(rctx, req, resp);
+}
+
+absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::remember_target_publication(
+    TargetPublicationRegistry::Record record) {
+  return target_publish_service_.remember_target_publication(std::move(record));
 }
 
 } // namespace tensorcast::daemon

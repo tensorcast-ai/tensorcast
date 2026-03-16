@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -16,6 +16,7 @@
 #include "core/store/materialization/dataplane/contracts/loader.h"
 // Prefer explicit includes over forward declarations
 #include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 
 namespace tensorcast::store {
 
@@ -60,6 +61,8 @@ class DiskLoader : public IArtifactLoader {
    */
   absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> get_verification_info() const;
 
+  [[nodiscard]] absl::StatusOr<std::shared_ptr<const loader::DiskArtifactContext>> shared_context() const;
+
   // NEW: Provide disk-backed source for pumping
   absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override ABSL_LOCKS_EXCLUDED(mutex_);
 
@@ -67,6 +70,7 @@ class DiskLoader : public IArtifactLoader {
   mutable absl::Mutex mutex_; // Protects initialization state and partition info access
 
   loading::DiskSource source_ ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<const loader::DiskArtifactContext> shared_context_ ABSL_GUARDED_BY(mutex_);
   uint64_t artifact_size_ = 0;
   std::vector<std::filesystem::path> partition_paths_;
   std::vector<size_t> partition_sizes_;

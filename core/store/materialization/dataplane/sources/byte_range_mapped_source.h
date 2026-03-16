@@ -20,6 +20,9 @@ class ByteRangeMappedSource final : public SeekableSource {
   struct Options {
     std::string path;
     bool enable_direct_write_at{true};
+    uint64_t direct_gather_min_row_len_bytes{4ULL * 1024};
+    size_t direct_gather_min_total_bytes{4ULL * 1024 * 1024};
+    uint64_t direct_gather_max_rows_touched{12ULL * 1024};
   };
 
   static absl::StatusOr<std::unique_ptr<ByteRangeMappedSource>> Create(
@@ -66,7 +69,14 @@ class ByteRangeMappedSource final : public SeekableSource {
       const ByteRangeRun& run,
       uint64_t run_offset,
       uint8_t* dst,
-      size_t bytes);
+      size_t bytes,
+      uint64_t* pack_us_total,
+      size_t* pack_bytes_total,
+      uint64_t* cache_lookup_us_total,
+      uint64_t* block_prepare_us_total,
+      uint64_t* block_load_us_total,
+      uint64_t* row_copy_us_total,
+      size_t* row_copy_bytes_total);
   absl::Status zero_fill_to_grant(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant);
 
   struct Stats {

@@ -407,7 +407,7 @@ IO helpers (`write_at`, `map_file_segments`).
 
 During disk ingestion or commit of in-memory registration:
 - `index_multihash` is derived from canonical index bytes (safetensors or tensor_index.json). When absent, it is computed.
-- `data_multihash` is computed by compiling the canonical `ByteRangeMap` (DATA + PAD) into a `ByteRangeProgram` and streaming via `ByteRangeMappedSource` with PAD treated as zero. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise it falls back to contiguous GPU hashing using the runtime-compiled NVRTC SHA256 kernel (with the old CPU streaming path as automatic fallback). The GPU lane now ingests 64-byte message blocks directly, auto-tunes leaf chunking down to 512 KiB to keep ≥4K leaves resident for large tensors, and returns digests via pinned host memory with async copies to overlap compute and transfer. When NVRTC compilation fails, the status text now embeds the compiler log and the exact NVRTC options so driver/toolkit mismatches are easier to diagnose, and the kernel source is self-contained (uint64 typedefs) so NVRTC toolchains without standard headers still compile cleanly.
+- `data_multihash` is computed by compiling the canonical `ByteRangeMap` (DATA + PAD) into a `ByteRangeProgram` and streaming via `ByteRangeMappedSource` with PAD treated as zero. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise real-CUDA deployments use contiguous GPU hashing via the runtime-compiled NVRTC SHA256 kernel. The daemon now prewarms that NVRTC kernel during startup for every visible GPU and fails fast if compilation/module load fails, so driver/toolkit mismatches surface before the first materialize. In real CUDA mode there is no automatic CPU fallback for GPU full-digest hashing; FakeCuda continues to use the host-copy path. The GPU lane ingests 64-byte message blocks directly, auto-tunes leaf chunking down to 512 KiB to keep ≥4K leaves resident for large tensors, and returns digests via pinned host memory with async copies to overlap compute and transfer. When NVRTC compilation fails, the status text embeds the compiler log and the exact NVRTC options so driver/toolkit mismatches are easier to diagnose, and the kernel source is self-contained (uint64 typedefs) so NVRTC toolchains without standard headers still compile cleanly.
 - For disk ingestion, missing descriptors are materialized under the artifact directory:
   - `artifact_descriptor.json` (index/data multihash, sizes)
   - `tensor_index.json` (canonical, when needed)
@@ -436,7 +436,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - ReplicaLoadController uses a single `absl::Mutex` with per-location condition variables to gate state transitions.
 - `ready_signal` from `ReplicaHandle` can be subscribed to via `subscribe_ready()` / `wait_ready(...)` and resolves with the final `absl::Status` of the load/copy.
 - Unsafe releases during LOADING mark the destination `FAILED` with last error preserved for diagnostics.
-- TransferService limits one active transfer per GPU; disk read/write concurrency is configured via `MaterializeHints::pipeline_concurrency` (propagated to `pump_ranges`).
+- TransferService limits one active transfer per GPU; per-request disk producer concurrency is `min(server.num_threads, MaterializeHints::pipeline_concurrency)` with a floor of 1, and that bound is propagated to `pump_ranges` / `ensure_loaded_async`.
 
 ## Metrics
 

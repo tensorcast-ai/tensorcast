@@ -3,6 +3,7 @@
 #include "daemon/app/daemon_app.h"
 
 #include <filesystem>
+#include <thread>
 #include <utility>
 
 #include <fcntl.h>
@@ -124,6 +125,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (options.grpc.listen_addr.empty()) {
     return absl::InvalidArgumentError("DaemonApp requires listen_addr");
   }
+  if (!options.startup_coordinator) {
+    options.startup_coordinator = std::make_shared<StartupCoordinator>();
+  }
   if (options.daemon_options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.daemon_options.handle_lease_ttl;
     if (ttl_ms.count() < 0) {
@@ -156,8 +160,45 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   LOG(INFO) << "Import metadata root initialized at " << options.daemon_options.import_root.string();
 
   auto app = std::unique_ptr<DaemonApp>(new DaemonApp(std::move(options)));
-  app->kernel_ =
-      std::make_unique<DaemonKernel>(app->options_.engine, app->options_.async_runtime, app->options_.daemon_options);
+  app->kernel_ = std::make_unique<DaemonKernel>(
+      app->options_.engine,
+      app->options_.async_runtime,
+      app->options_.daemon_options,
+      app->options_.global_store_client);
+
+  app->external_target_access_service_ = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
+      .devices = app->kernel_->device_resolver(),
+      .regions = app->kernel_->region_registry(),
+  });
+  app->byte_artifact_controller_ = std::make_unique<ByteArtifactController>(
+      ByteArtifactController::Dep{
+          .body_store = app->kernel_->byte_artifact_body_store(),
+          .route_resolver = app->kernel_->byte_artifact_route_resolver(),
+          .payload_transport_broker = app->kernel_->payload_transport_broker(),
+          .worker_directory_cache = app->kernel_->worker_directory_cache(),
+          .external_target_access_service = *app->external_target_access_service_,
+          .identity_store = app->kernel_->worker_identity_store(),
+          .engine = app->kernel_->engine(),
+          .persistence_manager = app->kernel_->persistence_manager(),
+          .global_store_client = app->options_.global_store_client,
+          .inter_daemon_channel_credentials = app->kernel_->inter_daemon_channel_credentials(),
+      },
+      ByteArtifactController::Options{
+          .routing =
+              {
+                  .shard_count = app->options_.daemon_options.byte_artifact_routing.shard_count,
+                  .inline_payload_threshold_bytes =
+                      app->options_.daemon_options.byte_artifact_routing.inline_payload_threshold_bytes,
+                  .route_staleness_budget = app->options_.daemon_options.byte_artifact_routing.route_staleness_budget,
+                  .lease_ttl = app->options_.daemon_options.byte_artifact_routing.lease_ttl,
+                  .keepalive_interval = app->options_.daemon_options.byte_artifact_routing.keepalive_interval,
+                  .worker_directory_staleness_budget =
+                      app->options_.daemon_options.byte_artifact_routing.worker_directory_staleness_budget,
+                  .routing_epoch = app->options_.daemon_options.byte_artifact_routing.routing_epoch,
+                  .shard_home_eligible = app->options_.daemon_options.byte_artifact_routing.shard_home_eligible,
+              },
+          .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
+      });
 
   if (app->options_.global_store_client && app->kernel_->persistence_manager()) {
     app->kernel_->persistence_manager()->set_global_store_client(app->options_.global_store_client.get());
@@ -175,12 +216,15 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
       .disk_imports = app->kernel_->source_registry(),
+      .binding_registry = app->kernel_->binding_registry(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
       .async_runtime = app->kernel_->async_runtime(),
       .identity = app->kernel_->worker_identity_store(),
+      .external_target_access_service = *app->external_target_access_service_,
       .global_store_client = app->options_.global_store_client,
       .max_concurrency = app->options_.daemon_options.max_concurrency,
       .lifecycle = &app->kernel_->lifecycle_manager(),
+      .lifecycle_kernel = &app->kernel_->lifecycle_kernel(),
       .handle_leases = app->kernel_->handle_leases(),
       .capability_tokens = app->kernel_->capability_tokens(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
@@ -207,7 +251,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   TransportController::Dep tdep{
       .engine = app->kernel_->engine(),
       .locks = app->kernel_->transport_lock_manager(),
-      .lip = app->kernel_->lip_manager()};
+      .lip = app->kernel_->lip_manager(),
+      .payload_transport_broker = &app->kernel_->payload_transport_broker(),
+  };
   app->transport_controller_ = std::make_unique<TransportController>(tdep);
 
   StatusController::Dep sdep{
@@ -218,12 +264,15 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .start_time = app->kernel_->start_time(),
       .local_handle_socket_path = app->options_.daemon_options.local_handle_socket_path,
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
+      .startup_coordinator = app->options_.startup_coordinator,
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
   KeyMappingController::Dep kmdep{
       .engine = app->kernel_->engine(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .source_registry = &app->kernel_->source_registry(),
+      .global_store_client = app->options_.global_store_client,
   };
   app->key_mapping_controller_ = std::make_unique<KeyMappingController>(kmdep);
 
@@ -242,6 +291,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   LeaseController::Dep ldep{
       .engine = app->kernel_->engine(),
       .lifecycle = app->kernel_->lifecycle_manager(),
+      .lifecycle_kernel = app->kernel_->lifecycle_kernel(),
       .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
       .capability_tokens = app->kernel_->capability_tokens(),
       .retention_registry = app->kernel_->retention_registry(),
@@ -253,6 +303,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = app->kernel_->engine(),
       .materialization_controller = *app->materialization_controller_,
+      .byte_artifact_controller = *app->byte_artifact_controller_,
       .registration_controller = *app->registration_controller_,
       .transport_controller = *app->transport_controller_,
       .status_controller = *app->status_controller_,
@@ -265,6 +316,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .replica_session_controller = *app->replica_session_controller_,
       .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .startup_coordinator = app->options_.startup_coordinator,
       .source_registry = &app->kernel_->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
@@ -315,6 +367,32 @@ absl::Status DaemonApp::start() {
     return grpc_st;
   }
 
+  if (options_.deferred_startup_work) {
+    options_.startup_coordinator->begin_startup(
+        "daemon startup still in progress: registering pinned pools and prewarming GPU caches");
+    auto deferred_work = options_.deferred_startup_work;
+    auto startup_coordinator = options_.startup_coordinator;
+    auto startup_failure_is_fatal = startup_failure_is_fatal_;
+    std::thread([deferred_work = std::move(deferred_work),
+                 startup_coordinator = std::move(startup_coordinator),
+                 startup_failure_is_fatal]() mutable {
+      const absl::Status startup_status = deferred_work();
+      if (startup_status.ok()) {
+        startup_coordinator->mark_ready();
+        LOG(INFO) << "Deferred daemon startup tasks completed";
+        return;
+      }
+      startup_coordinator->mark_failed(startup_status);
+      if (!startup_failure_is_fatal->load(std::memory_order_acquire)) {
+        LOG(WARNING) << "Deferred daemon startup failed after shutdown began: " << startup_status;
+        return;
+      }
+      LOG(FATAL) << "Deferred daemon startup failed: " << startup_status;
+    }).detach();
+  } else if (options_.startup_coordinator) {
+    options_.startup_coordinator->mark_ready();
+  }
+
   if (worker_lifecycle_manager_) {
     auto st = worker_lifecycle_manager_->start();
     if (!st.ok()) {
@@ -336,6 +414,7 @@ absl::Status DaemonApp::stop(absl::Time deadline) {
   if (!stop_called_.compare_exchange_strong(expected, true)) {
     return absl::OkStatus();
   }
+  startup_failure_is_fatal_->store(false, std::memory_order_release);
 
   kernel_->begin_shutdown();
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from tensorcast._c_ext import compute_view_index_bytes
-from tensorcast.api.store.view_composer import compute_view_id
+from tensorcast.common.identity import is_byte_artifact_id, validate_byte_artifact_cgid
 from tensorcast.common.selection_identity import (
+    compute_byte_artifact_logical_layout_hash,
+    compute_byte_artifact_selection_hash,
     compute_logical_layout_hash,
     compute_selection_hash,
     compute_view_subset_hash,
@@ -68,6 +70,37 @@ def compute_selected_index_bytes(
     return bytes(payload["view_index_bytes"])
 
 
+def _build_byte_artifact_selection(
+    *,
+    artifact_id: str,
+    view_spec: common_pb2.ViewSpec | None,
+    tensor_names: Sequence[str] | None,
+    view_subset_hash: bytes | None,
+    view_id: str | None,
+) -> common_pb2.ArtifactSelection:
+    if view_spec is not None and view_spec.tensors:
+        raise ValueError("byte artifact selection does not support view transforms")
+    if view_id:
+        raise ValueError("byte artifact selection does not support view_id")
+
+    ordered_names = tuple(str(name) for name in (tensor_names or ()))
+    if len(set(ordered_names)) != len(ordered_names):
+        raise ValueError("tensor_names must be unique")
+    if ordered_names:
+        raise ValueError("byte artifact selection supports full selection only")
+
+    provided_subset_hash = bytes(view_subset_hash or b"")
+    if provided_subset_hash:
+        raise ValueError("byte artifact selection does not support view_subset_hash")
+
+    return common_pb2.ArtifactSelection(
+        artifact_id=artifact_id,
+        view_id="",
+        logical_layout_hash=compute_byte_artifact_logical_layout_hash(),
+        selection_hash=compute_byte_artifact_selection_hash(),
+    )
+
+
 def build_artifact_selection(
     *,
     artifact_id: str,
@@ -81,6 +114,16 @@ def build_artifact_selection(
 ) -> common_pb2.ArtifactSelection:
     if not artifact_id:
         raise ValueError("artifact_id is required for selection")
+
+    if is_byte_artifact_id(artifact_id):
+        validate_byte_artifact_cgid(artifact_id)
+        return _build_byte_artifact_selection(
+            artifact_id=artifact_id,
+            view_spec=view_spec,
+            tensor_names=tensor_names,
+            view_subset_hash=view_subset_hash,
+            view_id=view_id,
+        )
 
     canonical_bytes = bytes(canonical_index_bytes or b"")
     if not canonical_bytes:
@@ -106,6 +149,8 @@ def build_artifact_selection(
     if has_transform:
         if view_spec is None:
             raise ValueError("view_spec is required for view transform selection")
+        from tensorcast.api.store.view_composer import compute_view_id
+
         resolved_view_id = compute_view_id(view_spec, canonical_bytes)
         if view_id and str(view_id) != resolved_view_id:
             raise ValueError("view_id does not match view_spec")

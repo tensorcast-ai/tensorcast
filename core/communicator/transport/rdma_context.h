@@ -63,6 +63,10 @@ class RdmaContext {
     qp_retry_ = qp_retry;
   }
 
+  void set_outstanding_wr(int outstanding_wr) {
+    outstanding_wr_ = outstanding_wr;
+  }
+
   // Multi-QP configuration
   void set_multi_qp_config(int qp_count, bool bonding_balance) {
     qp_count_ = qp_count;
@@ -85,6 +89,10 @@ class RdmaContext {
     return qp_count_;
   }
 
+  int outstanding_wr() const {
+    return outstanding_wr_;
+  }
+
   bool bonding_balance() const {
     return bonding_balance_;
   }
@@ -100,6 +108,7 @@ class RdmaContext {
   int qp_timeout_ = 20;
   int qp_retry_ = 7;
   int qp_count_ = 1;
+  int outstanding_wr_ = 64;
   bool bonding_balance_ = false;
 };
 

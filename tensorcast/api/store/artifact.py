@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import hashlib
 import logging
 import threading
 import time
@@ -15,7 +17,7 @@ from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
 
 import torch
 
-from tensorcast.api._device import device_uuid_for, resolve_device
+from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for, resolve_device
 from tensorcast.api._view_ops import (
     SliceSpec,
     ViewSpecBuildResult,
@@ -30,13 +32,18 @@ from tensorcast.api.operation import (
     PollingOperation,
 )
 from tensorcast.api.store.binding import Binding
+from tensorcast.api.store.binding_state import parse_binding_value_or_raise
 from tensorcast.api.store.cache import ArtifactCacheEntry
-from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.mapped_binding import (
     CopyPlan,
     compute_mapped_view_id,
+    compute_mapped_view_id_from_specs,
+    infer_mapped_target_entries,
     normalize_copy_plan,
     validate_copy_plan,
     view_narrow_ranges,
@@ -44,6 +51,16 @@ from tensorcast.api.store.mapped_binding import (
 from tensorcast.api.store.materialization import (
     MaterializationPipeline,
     _build_source_policy,
+)
+from tensorcast.api.store.owned_binding_layout import (
+    BindingLayout,
+    build_binding_layout,
+    build_mapped_tensor_spec,
+    build_owned_layout,
+)
+from tensorcast.api.store.owned_binding_slot import (
+    OwnedBindingSlot,
+    restore_owned_binding_tensors,
 )
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import (
@@ -63,14 +80,33 @@ from tensorcast.api.store.view_composer import (
     ViewSpecComposer,
     compute_view_id,
 )
+from tensorcast.common.identity import is_byte_artifact_id, validate_byte_artifact_cgid
 from tensorcast.common.selection_contract import (
     build_artifact_selection,
     compute_selected_index_bytes,
+)
+from tensorcast.common.selection_identity import (
+    compute_logical_layout_hash,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
+
+
+def _has_validated_byte_artifact_profile(artifact_id: str) -> bool:
+    if not is_byte_artifact_id(artifact_id):
+        return False
+    try:
+        validate_byte_artifact_cgid(artifact_id)
+    except ValueError as exc:
+        raise ArtifactError(
+            f"artifact_id must be a valid byte artifact cgid: {exc}",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        ) from exc
+    return True
+
 
 if TYPE_CHECKING:
     from tensorcast.api._config import GetArtifactOptions
@@ -97,6 +133,62 @@ class ArtifactDescriptor:
     tensor_metas: Mapping[str, TensorMeta]
     total_bytes: int
     generation: int | None
+
+
+def _ordered_subset_entry_names(
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> tuple[str, ...]:
+    requested = tuple(str(name) for name in tensor_names)
+    if not requested:
+        return ()
+    requested_set = set(requested)
+    ordered = tuple(
+        str(entry.name)
+        for entry in canonical_index.entries
+        if str(entry.name) in requested_set
+    )
+    if len(ordered) != len(requested_set):
+        known = {str(entry.name) for entry in canonical_index.entries}
+        unknown = sorted(requested_set - known)
+        raise ArtifactError(
+            f"View references unknown tensor(s): {', '.join(unknown)}",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    return ordered
+
+
+def _build_subset_view_spec_proto(
+    *,
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> common_pb2.ViewSpec | None:
+    ordered_names = _ordered_subset_entry_names(canonical_index, tensor_names)
+    if not ordered_names:
+        return None
+    entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+    proto = common_pb2.ViewSpec()
+    for name in ordered_names:
+        entry = entry_by_name[name]
+        if not entry.shape:
+            raise ArtifactError(
+                "subset view identity requires tensors with at least one dimension",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        dim0 = int(entry.shape[0])
+        if dim0 <= 0:
+            raise ArtifactError(
+                "subset view identity requires non-empty leading dimensions",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        op = proto.tensors[name].ops.add()
+        op.narrow.dim = 0
+        op.narrow.start = 0
+        op.narrow.length = dim0
+    return proto
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +223,7 @@ class MaterializationDiagnostics:
     budget_elapsed_sec: float | None
     budget_remaining_sec: float | None
     budget_exit_reason: str | None
+    breakdown: Mapping[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +433,61 @@ def _build_transport_operation_id(
         return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}rid={request_id}"
 
     return base_operation_id
+
+
+def _register_client_binding(
+    *,
+    runtime: "StoreRuntimeContext",
+    device_id: int,
+    region_layout,
+    canonical_index_bytes: bytes,
+    selection: common_pb2.ArtifactSelection | None,
+    source_artifact_id: str | None,
+    target_publication_token: bytes | None,
+    ctx: CallContext | None,
+) -> tuple[str, BindingLayout, object | None]:
+    binding_layout = build_binding_layout(
+        target_layout=region_layout.layout,
+        target_index_bytes=bytes(
+            region_layout.view_index_bytes or canonical_index_bytes
+        ),
+    )
+    timeout_s = _ctx_timeout_s(ctx)
+    response = runtime.ensure_client().create_binding(
+        ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_CLIENT,
+        target_layout=binding_layout.target_layout,
+        target_index_bytes=binding_layout.target_index_bytes,
+        device_uuid=device_uuid_for(device_id),
+        binding_layout_id=binding_layout.binding_layout_id,
+        initial_selection=selection,
+        source_artifact_id=source_artifact_id,
+        target_publication_token=target_publication_token,
+        timeout_s=timeout_s if timeout_s is not None else 60.0,
+    )
+    try:
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="CreateBinding",
+            expected_binding_id=str(response.binding_id),
+            expected_binding_layout_id=binding_layout.binding_layout_id,
+        )
+    except ArtifactError:
+        with contextlib.suppress(Exception):
+            runtime.ensure_client().close_owned_binding(
+                binding_id=str(response.binding_id)
+            )
+        raise
+    if metadata is None:
+        raise ArtifactError(
+            "CreateBinding returned empty current_value for artifact-backed binding",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    return (
+        str(response.binding_id),
+        binding_layout,
+        metadata,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,18 +746,23 @@ class Artifact:
         ctx: CallContext | None = None,
     ) -> TensorDictMaterializationResult:
         artifact_id = self._ensure_identified()
+        selection_breakdown: dict[str, float] = {}
+        selection_prepare_start = time.perf_counter()
+        view_metadata = self._ensure_view_metadata_cache(
+            require_index_bytes=True,
+            timing_out=selection_breakdown,
+        )
+        selection_prepare_sec = time.perf_counter() - selection_prepare_start
         requested_names = (
-            tuple(self._view_metadata.tensor_names)
-            if self._view_metadata is not None and self._view_metadata.tensor_names
+            tuple(view_metadata.tensor_names)
+            if view_metadata is not None and view_metadata.tensor_names
             else None
         )
         _, runtime, pipeline = self._require_components()
         view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = (
-            self._view_metadata.view_data_hash if self._view_metadata else None
-        )
+        view_data_hash = view_metadata.view_data_hash or None if view_metadata else None
         view_index_hint = (
-            self._view_metadata.view_index_bytes if self._view_metadata else None
+            view_metadata.view_index_bytes or None if view_metadata else None
         )
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
         materialize_start = time.perf_counter()
@@ -638,6 +791,19 @@ class Artifact:
             else:
                 output = {name: state[name] for name in requested_names}
             return_end = time.perf_counter()
+            breakdown: dict[str, float] = {}
+            if selection_prepare_sec > 0:
+                breakdown["selection_prepare_sec"] = selection_prepare_sec
+            for name, value in selection_breakdown.items():
+                breakdown[f"selection_{name}"] = float(value)
+            payload_bind_timing = getattr(payload, "bind_timing", None) or {}
+            payload_materialize_timing = (
+                getattr(payload, "materialize_timing", None) or {}
+            )
+            for name, value in payload_materialize_timing.items():
+                breakdown[f"materialize_{name}"] = float(value)
+            for name, value in payload_bind_timing.items():
+                breakdown[f"bind_{name}"] = float(value)
             diagnostics = MaterializationDiagnostics(
                 source=_materialization_source_label(payload.source),
                 source_code=(
@@ -671,6 +837,7 @@ class Artifact:
                 budget_elapsed_sec=payload.budget_elapsed_sec,
                 budget_remaining_sec=payload.budget_remaining_sec,
                 budget_exit_reason=payload.budget_exit_reason,
+                breakdown=breakdown or None,
             )
             logger.debug(
                 "store.tensor_dict.materialized",
@@ -726,12 +893,11 @@ class Artifact:
         effective_index = self._effective_index()
         _ = self._validate_tensor_names(effective_index, None)
         _, _, pipeline = self._require_components()
+        view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
         view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = (
-            self._view_metadata.view_data_hash if self._view_metadata else None
-        )
+        view_data_hash = view_metadata.view_data_hash or None if view_metadata else None
         view_index_hint = (
-            self._view_metadata.view_index_bytes if self._view_metadata else None
+            view_metadata.view_index_bytes or None if view_metadata else None
         )
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
         pipeline.get_into(
@@ -818,49 +984,69 @@ class Artifact:
     def view_builder(self) -> ViewBuilder:
         return ViewBuilder(artifact_ref=weakref.ref(self), composer=ViewSpecComposer())
 
-    def deferred_loader(
-        self,
-        *,
-        device: torch.device | str,
-        packing: str = "append",
-        capacity_bytes: int | None = None,
-    ) -> DeferredLoader:
-        """Return a deferred loader for vLLM-style placeholder binding."""
-        self._require_components()
-        return DeferredLoader(
-            artifact=self,
-            device=device,
-            packing=packing,
-            capacity_bytes=capacity_bytes,
-        )
-
     def bind(
         self,
         device: torch.device | str,
         *,
+        mapping: CopyPlan | None = None,
         packing: str = "byte_space",
         capacity_bytes: int | None = None,
         publish: bool = False,
         ctx: CallContext | None = None,
     ) -> Binding:
-        """Allocate placeholders, fill from this artifact, and return a Binding."""
+        """Allocate daemon-owned target tensors, fill from this artifact, and return a Binding."""
         self._require_components()
-        base_index = self._effective_index()
-        if not base_index.entries:
+        effective_index = self._effective_index()
+        if not effective_index.entries:
             raise ArtifactError(
                 "Artifact index is empty",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        with self.deferred_loader(
-            device=device,
+        device_obj = torch.device(device)
+        if device_obj.type != "cuda":
+            raise ArtifactError(
+                "bind() requires a CUDA device",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        required_capacity = int(effective_index.total_size_bytes)
+        if mapping is not None:
+            self._ensure_metadata()
+            canonical_index = self._canonical_index
+            if canonical_index is None:
+                raise ArtifactError(
+                    "Missing canonical index for bind()",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            inferred_entries = infer_mapped_target_entries(
+                plan=normalize_copy_plan(mapping),
+                canonical_index=canonical_index,
+                view_narrows=view_narrow_ranges(self._view_spec),
+            )
+            required_capacity = sum(int(entry.size_bytes) for entry in inferred_entries)
+        if capacity_bytes is not None:
+            requested_capacity = int(capacity_bytes)
+            if requested_capacity <= 0:
+                raise ArtifactError(
+                    "capacity_bytes must be positive",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if requested_capacity < required_capacity:
+                raise ArtifactError(
+                    "capacity_bytes is smaller than the selected artifact layout",
+                    status_code="RESOURCE_EXHAUSTED",
+                    retryable=False,
+                )
+        return self._bind_owned(
+            device=device_obj,
+            mapping=mapping,
             packing=packing,
-            capacity_bytes=capacity_bytes,
-        ) as loader:
-            for entry in base_index.entries:
-                loader.tensor(entry.name)
-            slot = loader.commit()
-        return Binding(slot, publish=publish, ctx=ctx)
+            publish=publish,
+            ctx=ctx,
+        )
 
     def bind_into(
         self,
@@ -1116,17 +1302,23 @@ class Artifact:
             )
             raise
 
-        storage_ids = tuple(
-            storage.storage_id for storage in region_layout.layout.storages
+        binding_id, binding_layout, current_value_metadata = _register_client_binding(
+            runtime=runtime,
+            device_id=device_id,
+            region_layout=region_layout,
+            canonical_index_bytes=canonical_index_bytes,
+            selection=(
+                response.resolved_selection
+                if hasattr(response, "resolved_selection")
+                else None
+            ),
+            source_artifact_id=self._ensure_identified(),
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
+            ctx=ctx,
         )
-        commit_result = DeferredCommitResult(
-            tensor_names=region_layout.selection_names,
-            view_id=region_layout.view_id,
-            view_subset_hash=region_layout.view_subset_hash,
-            storage_ids=storage_ids,
-            logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=None,
-        )
+
         slot = InplaceSlot(
             store=store,
             runtime=runtime,
@@ -1134,14 +1326,18 @@ class Artifact:
             tensors=target_tensors,
             device=first_tensor.device,
             device_id=device_id,
-            region_id=None,
-            region_layout=region_layout,
+            layout=binding_layout,
+            binding_id=binding_id,
+            region_ids=region_layout.region_ids,
+            selection_names=region_layout.selection_names,
+            view_id=region_layout.view_id,
+            view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             fallback=self._fallback,
-            commit_result=commit_result,
-            artifact_id=self._ensure_identified(),
-            canonical_index_bytes=canonical_index_bytes,
-            target_write_token=getattr(response, "target_write_token", None),
+            current_value_metadata=current_value_metadata,
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
         )
         return Binding(slot, publish=publish, ctx=ctx)
 
@@ -1407,17 +1603,23 @@ class Artifact:
             )
             raise
 
-        storage_ids = tuple(
-            storage.storage_id for storage in region_layout.layout.storages
+        binding_id, binding_layout, current_value_metadata = _register_client_binding(
+            runtime=runtime,
+            device_id=device_id,
+            region_layout=region_layout,
+            canonical_index_bytes=canonical_index_bytes,
+            selection=(
+                response.resolved_selection
+                if hasattr(response, "resolved_selection")
+                else None
+            ),
+            source_artifact_id=self._ensure_identified(),
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
+            ctx=ctx,
         )
-        commit_result = DeferredCommitResult(
-            tensor_names=region_layout.selection_names,
-            view_id=region_layout.view_id,
-            view_subset_hash=region_layout.view_subset_hash,
-            storage_ids=storage_ids,
-            logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=None,
-        )
+
         slot = InplaceSlot(
             store=store,
             runtime=runtime,
@@ -1425,17 +1627,313 @@ class Artifact:
             tensors=target_tensors,
             device=first_tensor.device,
             device_id=device_id,
-            region_id=None,
-            region_layout=region_layout,
+            layout=binding_layout,
+            binding_id=binding_id,
+            region_ids=region_layout.region_ids,
+            selection_names=region_layout.selection_names,
+            view_id=region_layout.view_id,
+            view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             fallback=self._fallback,
-            commit_result=commit_result,
-            artifact_id=self._ensure_identified(),
-            canonical_index_bytes=canonical_index_bytes,
-            target_write_token=getattr(response, "target_write_token", None),
+            current_value_metadata=current_value_metadata,
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
             copy_plan=copy_plan,
         )
         return Binding(slot, publish=publish, ctx=ctx)
+
+    def _bind_owned(
+        self,
+        *,
+        device: torch.device,
+        mapping: CopyPlan | None,
+        packing: str,
+        publish: bool,
+        ctx: CallContext | None,
+    ) -> Binding:
+        store, runtime, _ = self._require_components()
+        self._ensure_metadata()
+        canonical_index_bytes = self._canonical_index_bytes
+        canonical_index = self._canonical_index
+        if canonical_index_bytes is None or canonical_index is None:
+            raise ArtifactError(
+                "Missing canonical index for bind()",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        mode = str(packing).strip().lower()
+        if mode not in {"append", "plan", "byte_space"}:
+            raise ArtifactError(
+                "packing must be 'append', 'plan', or 'byte_space'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        device_id = resolve_device(device, allow_cpu=False)
+        view_spec_proto = (
+            self._view_spec.proto
+            if self._view_spec is not None and not self._view_spec.is_identity
+            else None
+        )
+
+        source_selection = self._build_owner_source_selection(
+            packing=mode if mapping is None else "byte_space",
+            view_spec_proto=view_spec_proto,
+            canonical_index_bytes=canonical_index_bytes,
+        )
+        index_kind = (
+            store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
+            if source_selection.view_id or source_selection.tensor_names
+            else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
+        )
+        view_id = str(source_selection.view_id or "")
+        logical_layout_hash = bytes(source_selection.logical_layout_hash)
+
+        copy_plan_proto: store_daemon_pb2.CopyPlan | None = None
+        dst_specs: tuple[store_daemon_pb2.MappedTensorSpec, ...] = ()
+        if mapping is None:
+            owner_layout = build_owned_layout(
+                entries=self._effective_index().entries,
+                device_id=device_id,
+                index_kind=index_kind,
+                logical_layout_hash=logical_layout_hash,
+                view_id=view_id or None,
+                ordered_names=tuple(source_selection.tensor_names)
+                if source_selection.tensor_names
+                else None,
+            )
+        else:
+            if mode != "byte_space":
+                raise ArtifactError(
+                    "mapped binding requires packing='byte_space'",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            normalized_plan = normalize_copy_plan(mapping)
+            inferred_entries = infer_mapped_target_entries(
+                plan=normalized_plan,
+                canonical_index=canonical_index,
+                view_narrows=view_narrow_ranges(self._view_spec),
+            )
+            target_spec_payloads = [
+                {
+                    "name": entry.name,
+                    "dtype": str(entry.dtype),
+                    "shape": tuple(int(v) for v in entry.shape),
+                    "stride": tuple(int(v) for v in entry.stride),
+                    "logical_length": int(entry.size_bytes),
+                }
+                for entry in inferred_entries
+            ]
+            mapped_view_id = compute_mapped_view_id_from_specs(
+                canonical_index_bytes=canonical_index_bytes,
+                source_view_id=self._mapped_source_view_id(runtime),
+                plan=normalized_plan,
+                target_specs=target_spec_payloads,
+            )
+            dst_specs = tuple(
+                build_mapped_tensor_spec(
+                    name=entry.name,
+                    shape=entry.shape,
+                    stride=entry.stride,
+                    dtype=str(entry.dtype),
+                    logical_length=int(entry.size_bytes),
+                )
+                for entry in inferred_entries
+            )
+            owner_layout = build_owned_layout(
+                entries=inferred_entries,
+                device_id=device_id,
+                index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW,
+                logical_layout_hash=None,
+                view_id=mapped_view_id,
+                dst_specs=dst_specs,
+            )
+            copy_plan_proto = store_daemon_pb2.CopyPlan(version=1)
+            for entry in normalized_plan:
+                entry_proto = copy_plan_proto.entries.add()
+                entry_proto.ckpt_name = str(entry.ckpt_name)
+                entry_proto.dst_name = str(entry.dst_name)
+                if entry.ckpt_range is not None:
+                    entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
+                    entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
+                    entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
+                if entry.dst_range is not None:
+                    entry_proto.dst_range.dim = int(entry.dst_range.dim)
+                    entry_proto.dst_range.start = int(entry.dst_range.start)
+                    entry_proto.dst_range.end = int(entry.dst_range.end)
+
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        effective_prefer = (
+            self._fallback.prefer if self._fallback is not None else "auto"
+        )
+        if self._fallback is not None:
+            if self._fallback.prefer == "p2p":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
+                )
+            elif self._fallback.prefer == "disk":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+                )
+        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
+        if effective_prefer == "local":
+            allow_p2p = False
+        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
+        if effective_prefer == "local":
+            allow_disk = False
+        source_policy = _build_source_policy(
+            preference=preference,
+            allow_p2p=allow_p2p,
+            allow_disk=allow_disk,
+        )
+        rpc_timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = runtime.ensure_client().create_owned_binding(
+                source_selection=source_selection,
+                target_layout=owner_layout.target_layout,
+                target_index_bytes=owner_layout.target_index_bytes,
+                device_uuid=device_uuid_for(device_id),
+                binding_layout_id=owner_layout.binding_layout_id,
+                preference=preference,
+                source_policy=source_policy,
+                copy_plan=copy_plan_proto,
+                dst_specs=dst_specs,
+                operation_id=_build_transport_operation_id(
+                    base_operation_id=uuid.uuid4().hex,
+                    ctx=ctx,
+                ),
+                timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            if any(
+                marker in message
+                for marker in (
+                    "CreateOwnedBinding",
+                    "createownedbinding",
+                    "Method not found",
+                    "UNIMPLEMENTED",
+                )
+            ):
+                raise ArtifactError(
+                    "Owned binding is not supported by the connected StoreDaemon",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                ) from exc
+            error = map_materialization_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=False,
+            ) from exc
+
+        try:
+            tensors = restore_owned_binding_tensors(
+                response=response,
+                runtime=runtime,
+                device_id=device_id,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                runtime.ensure_client().close_owned_binding(
+                    binding_id=str(response.binding_id)
+                )
+            raise
+
+        try:
+            current_value_metadata = parse_binding_value_or_raise(
+                response.current_value if hasattr(response, "current_value") else None,
+                rpc_name="CreateOwnedBinding",
+                expected_binding_id=str(response.binding_id),
+                expected_binding_layout_id=owner_layout.binding_layout_id,
+            )
+        except ArtifactError:
+            with contextlib.suppress(Exception):
+                runtime.ensure_client().close_owned_binding(
+                    binding_id=str(response.binding_id)
+                )
+            raise
+
+        slot = OwnedBindingSlot(
+            store=store,
+            runtime=runtime,
+            tensors=tensors,
+            layout=owner_layout,
+            binding_id=str(response.binding_id),
+            current_value_metadata=current_value_metadata,
+            device=device,
+            device_id=device_id,
+            fallback=self._fallback,
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
+        )
+        if slot.current_value_metadata is None:
+            with contextlib.suppress(Exception):
+                runtime.ensure_client().close_owned_binding(
+                    binding_id=str(response.binding_id)
+                )
+            raise ArtifactError(
+                "CreateOwnedBinding returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return Binding(slot, publish=publish, ctx=ctx)
+
+    def _build_owner_source_selection(
+        self,
+        *,
+        packing: str,
+        view_spec_proto: common_pb2.ViewSpec | None,
+        canonical_index_bytes: bytes,
+    ) -> common_pb2.ArtifactSelection:
+        selection_names: tuple[str, ...] = ()
+        view_metadata: ViewMetadataCache | None = None
+        if packing != "byte_space":
+            selection_names = tuple(
+                entry.name for entry in self._effective_index().entries
+            )
+        else:
+            view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
+            if view_metadata is not None and view_metadata.tensor_names:
+                selection_names = tuple(view_metadata.tensor_names)
+
+        if view_spec_proto is None and selection_names:
+            view_spec_proto = _build_subset_view_spec_proto(
+                canonical_index=self._ensure_metadata(),
+                tensor_names=selection_names,
+            )
+
+        has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
+        layout_index_bytes: bytes | None = None
+        if (
+            packing == "byte_space"
+            and view_metadata is not None
+            and view_metadata.view_index_bytes
+        ):
+            layout_index_bytes = bytes(view_metadata.view_index_bytes)
+        elif has_transform or selection_names:
+            layout_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=view_spec_proto,
+                tensor_names=selection_names,
+            )
+
+        try:
+            return build_artifact_selection(
+                artifact_id=self._ensure_identified(),
+                canonical_index_bytes=canonical_index_bytes,
+                layout_index_bytes=layout_index_bytes,
+                view_spec=view_spec_proto,
+                tensor_names=selection_names,
+            )
+        except ValueError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            ) from exc
 
     def batch(self, *, device: torch.device | str) -> "BatchContext":
         from tensorcast.api.store.batch_context import BatchContext
@@ -1455,8 +1953,9 @@ class Artifact:
         self._ensure_identified()
         loop = asyncio.get_running_loop()
         view_hash = None
-        if self._view_metadata is not None:
-            view_hash = self._view_metadata.view_data_hash
+        view_metadata = self._ensure_view_metadata_cache(require_view_hash=True)
+        if view_metadata is not None:
+            view_hash = view_metadata.view_data_hash or None
         elif self._view_spec is not None:
             view_hash = ViewSpecComposer.hash_view_spec(self._view_spec)
         batcher = getattr(store, "_batcher", None)
@@ -1507,18 +2006,37 @@ class Artifact:
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
 
-        device_obj = (
-            torch.device(f"cuda:{int(device)}")
-            if isinstance(device, int)
-            else torch.device(device)
-        )
-        if device_obj.type == "cpu":
-            raise ArtifactError(
-                "prefetch does not support CPU devices",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
-        device_id = int(device_obj.index if device_obj.index is not None else 0)
+        if ctx is not None and ctx.idempotency_key:
+            # Deterministic operation ids require stable index bytes for logical layout hashing.
+            self._ensure_metadata()
+
+        if isinstance(device, int):
+            if device < 0:
+                device_obj = torch.device("cpu")
+                device_id = CPU_DEVICE_ID
+            else:
+                device_obj = torch.device(f"cuda:{int(device)}")
+                device_id = int(device)
+        else:
+            if isinstance(device, str) and device.strip().lower() == "dram":
+                device_obj = torch.device("cpu")
+                device_id = CPU_DEVICE_ID
+            else:
+                device_obj = (
+                    device if isinstance(device, torch.device) else torch.device(device)
+                )
+                if device_obj.type == "cpu":
+                    device_id = CPU_DEVICE_ID
+                elif device_obj.type == "cuda":
+                    device_id = int(
+                        device_obj.index if device_obj.index is not None else 0
+                    )
+                else:
+                    raise ArtifactError(
+                        f"prefetch does not support device type {device_obj.type!r}",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
         daemon_id = (
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
@@ -1528,10 +2046,70 @@ class Artifact:
 
         deterministic_replica_uuid: str | None = None
         if ctx is not None and ctx.idempotency_key:
+            canonical_index_bytes = self._canonical_index_bytes
+            if canonical_index_bytes is None:
+                raise ArtifactError(
+                    "Canonical index bytes unavailable for deterministic prefetch",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=True,
+                )
+
+            needs_view_index = bool(view_id)
+            index_bytes = canonical_index_bytes
+            if needs_view_index:
+                if view_index_hint is not None:
+                    index_bytes = view_index_hint
+                else:
+                    if view_spec_proto is None:
+                        raise ArtifactError(
+                            "View index bytes unavailable for deterministic prefetch",
+                            status_code="FAILED_PRECONDITION",
+                            retryable=True,
+                        )
+                    from tensorcast._c_ext import compute_view_index_bytes
+
+                    normalized_ops: dict[str, list[dict[str, int | str]]] = {}
+                    if view_spec_proto.tensors:
+                        for name, ops in view_spec_proto.tensors.items():
+                            op_list: list[dict[str, int | str]] = []
+                            for op in ops.ops:
+                                if op.HasField("narrow"):
+                                    op_list.append(
+                                        {
+                                            "type": "narrow",
+                                            "dim": int(op.narrow.dim),
+                                            "start": int(op.narrow.start),
+                                            "length": int(op.narrow.length),
+                                        }
+                                    )
+                                elif op.HasField("transpose"):
+                                    op_list.append(
+                                        {
+                                            "type": "transpose",
+                                            "dim0": int(op.transpose.dim0),
+                                            "dim1": int(op.transpose.dim1),
+                                        }
+                                    )
+                            if op_list:
+                                normalized_ops[str(name)] = op_list
+                    payload = compute_view_index_bytes(
+                        canonical_index_bytes, normalized_ops
+                    )
+                    index_bytes = bytes(payload["view_index_bytes"])
+
+            logical_layout_hash = compute_logical_layout_hash(
+                index_bytes=index_bytes, needs_view_index=needs_view_index
+            ).hex()
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
-            action_fingerprint = f"prefetch|daemon={daemon_id}|selection={selection_hash}|device={device_id}|lease=NO_LEASE|v1"
+            idempotency_key_hex = hashlib.sha256(
+                ctx.idempotency_key.encode("utf-8")
+            ).hexdigest()
+            action_fingerprint = (
+                f"prefetch|daemon={daemon_id}|artifact={artifact_id}|layout={logical_layout_hash}"
+                f"|selection={selection_hash}|device={device_id}|lease=NO_LEASE|v1"
+            )
             deterministic_replica_uuid = str(
-                uuid.uuid5(ns, f"{ctx.idempotency_key}|{action_fingerprint}")
+                uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
             )
 
         replica_uuid = deterministic_replica_uuid or (
@@ -1876,13 +2454,18 @@ class Artifact:
             ) from exc
 
     def _mapped_source_view_id(self, runtime: "StoreRuntimeContext") -> str:
-        if self._view_metadata is not None and self._view_metadata.view_id:
-            return str(self._view_metadata.view_id)
+        view_metadata = self._ensure_view_metadata_cache(require_view_id=True)
+        if view_metadata is not None and view_metadata.view_id:
+            return str(view_metadata.view_id)
         return self._control_plane_view_id(runtime)
 
     def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
         artifact_id = self._ensure_identified()
         runtime = self._runtime_if_available()
+        view_metadata = self._ensure_view_metadata_cache(
+            require_index_bytes=True,
+            require_view_id=True,
+        )
 
         view_spec_proto: common_pb2.ViewSpec | None = None
         if self._view_spec is not None and not self._view_spec.is_identity:
@@ -1895,8 +2478,14 @@ class Artifact:
                 )
 
         selection_names: tuple[str, ...] = ()
-        if self._view_metadata is not None and self._view_metadata.tensor_names:
-            selection_names = tuple(self._view_metadata.tensor_names)
+        if view_metadata is not None and view_metadata.tensor_names:
+            selection_names = tuple(view_metadata.tensor_names)
+
+        if view_spec_proto is None and selection_names:
+            view_spec_proto = _build_subset_view_spec_proto(
+                canonical_index=self._ensure_metadata(),
+                tensor_names=selection_names,
+            )
 
         canonical_index_bytes = self._canonical_index_bytes
         if canonical_index_bytes is None and runtime is not None:
@@ -1913,8 +2502,8 @@ class Artifact:
         has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
         has_subset = bool(selection_names)
         layout_index_bytes: bytes | None = None
-        if self._view_metadata is not None and self._view_metadata.view_index_bytes:
-            layout_index_bytes = bytes(self._view_metadata.view_index_bytes)
+        if view_metadata is not None and view_metadata.view_index_bytes:
+            layout_index_bytes = bytes(view_metadata.view_index_bytes)
         elif has_transform or has_subset:
             layout_index_bytes = compute_selected_index_bytes(
                 canonical_index_bytes=canonical_index_bytes,
@@ -2015,8 +2604,7 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                resolved = runtime.resolve_key_mapping_cached(key=self._key_hint)
-                artifact_id = resolved[0] if isinstance(resolved, tuple) else resolved
+                artifact_id = runtime.resolve_key_mapping_cached(key=self._key_hint)
                 if not artifact_id:
                     raise ArtifactError(
                         f"Artifact key '{self._key_hint}' is not mapped",
@@ -2112,9 +2700,147 @@ class Artifact:
 
     def _effective_index(self) -> CanonicalIndex:
         base_index = self._ensure_metadata()
-        if self._view_metadata is not None:
-            return self._view_metadata.selected_index
+        view_metadata = self._ensure_view_metadata_cache(require_selected_index=True)
+        if view_metadata is not None and view_metadata.selected_index is not None:
+            return view_metadata.selected_index
         return base_index
+
+    def _ensure_view_metadata_cache(
+        self,
+        *,
+        require_index_bytes: bool = False,
+        require_view_hash: bool = False,
+        require_view_id: bool = False,
+        require_selected_index: bool = False,
+        timing_out: dict[str, float] | None = None,
+    ) -> ViewMetadataCache | None:
+        cache = self._view_metadata
+        if cache is None:
+            return None
+        needs_index_bytes = require_index_bytes and not cache.view_index_bytes
+        needs_view_hash = require_view_hash and not cache.view_data_hash
+        needs_view_id = (
+            require_view_id
+            and not cache.view_id
+            and self._view_spec is not None
+            and not self._view_spec.is_identity
+        )
+        needs_selected_index = require_selected_index and cache.selected_index is None
+        if not (
+            needs_index_bytes
+            or needs_view_hash
+            or needs_view_id
+            or needs_selected_index
+        ):
+            return cache
+
+        canonical_index = self._ensure_metadata()
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None:
+            canonical_index_bytes = canonical_index_to_bytes(canonical_index)
+
+        with self._lock:
+            cache = self._view_metadata
+            if cache is None:
+                return None
+            view_index_bytes = cache.view_index_bytes
+            view_data_hash = cache.view_data_hash
+            view_id = cache.view_id
+            selected_index = cache.selected_index
+
+            if require_index_bytes and not view_index_bytes:
+                view_spec_proto = self._view_spec.proto if self._view_spec else None
+                compute_index_start = time.perf_counter()
+                view_index_bytes = compute_selected_index_bytes(
+                    canonical_index_bytes=canonical_index_bytes,
+                    view_spec=view_spec_proto,
+                    tensor_names=cache.tensor_names,
+                )
+                if timing_out is not None:
+                    timing_out["index_bytes_sec"] = (
+                        time.perf_counter() - compute_index_start
+                    )
+            if require_selected_index and selected_index is None:
+                if not view_index_bytes:
+                    view_spec_proto = self._view_spec.proto if self._view_spec else None
+                    compute_index_start = time.perf_counter()
+                    view_index_bytes = compute_selected_index_bytes(
+                        canonical_index_bytes=canonical_index_bytes,
+                        view_spec=view_spec_proto,
+                        tensor_names=cache.tensor_names,
+                    )
+                    if timing_out is not None:
+                        timing_out["index_bytes_sec"] = timing_out.get(
+                            "index_bytes_sec", 0.0
+                        ) + (time.perf_counter() - compute_index_start)
+                parse_index_start = time.perf_counter()
+                selected_index = canonical_index_from_bytes(view_index_bytes)
+                if timing_out is not None:
+                    timing_out["index_parse_sec"] = (
+                        time.perf_counter() - parse_index_start
+                    )
+            if require_view_hash and not view_data_hash:
+                hash_start = time.perf_counter()
+                view_data_hash = ViewSpecComposer.hash_view_spec(
+                    self._view_spec,
+                    subset=cache.tensor_names,
+                )
+                if timing_out is not None:
+                    timing_out["view_hash_sec"] = time.perf_counter() - hash_start
+            if (
+                require_view_id
+                and not view_id
+                and (
+                    (self._view_spec is not None and not self._view_spec.is_identity)
+                    or cache.tensor_names
+                )
+            ):
+                view_proto = (
+                    self._view_spec.proto
+                    if self._view_spec is not None and not self._view_spec.is_identity
+                    else _build_subset_view_spec_proto(
+                        canonical_index=canonical_index,
+                        tensor_names=cache.tensor_names,
+                    )
+                )
+                if view_proto is None:
+                    raise ArtifactError(
+                        "View spec proto missing while computing view_id",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                view_id_start = time.perf_counter()
+                view_id = compute_view_id(view_proto, canonical_index_bytes)
+                if timing_out is not None:
+                    timing_out["view_id_sec"] = time.perf_counter() - view_id_start
+
+            if (
+                view_index_bytes == cache.view_index_bytes
+                and view_data_hash == cache.view_data_hash
+                and view_id == cache.view_id
+                and selected_index == cache.selected_index
+            ):
+                return cache
+
+            cache = ViewMetadataCache(
+                view_id=view_id,
+                view_index_bytes=view_index_bytes,
+                view_data_hash=view_data_hash,
+                tensor_names=cache.tensor_names,
+                nbytes=(
+                    int(selected_index.total_size_bytes)
+                    if selected_index is not None
+                    else cache.nbytes
+                ),
+                selected_index=selected_index,
+            )
+            self._view_metadata = cache
+            if selected_index is not None:
+                self._tensor_metas = {
+                    entry.name: _meta_from_entry(entry)
+                    for entry in selected_index.entries
+                }
+            return cache
 
     @staticmethod
     def _normalize_view_inputs(

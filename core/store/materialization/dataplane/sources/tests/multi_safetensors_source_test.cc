@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
 
@@ -16,16 +16,33 @@ using tensorcast::store::loader::MultiSafetensorsSource;
 
 namespace {
 
-std::filesystem::path make_temp_dir(const std::string& prefix) {
-  auto base = std::filesystem::temp_directory_path();
-  std::random_device rd;
-  std::mt19937_64 gen(rd());
-  std::uniform_int_distribution<uint64_t> dist;
-  auto name = absl::StrFormat("%s-%016x", prefix, dist(gen));
-  auto dir = base / name;
-  std::filesystem::create_directories(dir);
-  return dir;
-}
+class ScopedTempDir {
+ public:
+  explicit ScopedTempDir(const std::string& prefix) : path_(make_temp_dir(prefix)) {}
+
+  ~ScopedTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  const std::filesystem::path& path() const {
+    return path_;
+  }
+
+ private:
+  static std::filesystem::path make_temp_dir(const std::string& prefix) {
+    auto base = std::filesystem::temp_directory_path();
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+    auto name = absl::StrFormat("%s-%016x", prefix, dist(gen));
+    auto dir = base / name;
+    std::filesystem::create_directories(dir);
+    return dir;
+  }
+
+  std::filesystem::path path_;
+};
 
 void write_u64_le(std::ofstream& out, uint64_t v) {
   unsigned char buf[8];
@@ -63,32 +80,30 @@ TEST_CASE("MultiSafetensorsSource concatenates payloads", "[safetensors]") {
     b[i] = static_cast<unsigned char>(0x80 + (i & 0x7F));
   }
 
-  auto dir = make_temp_dir("st_multi_src");
+  ScopedTempDir dir("st_multi_src");
   auto p1 = create_safetensors_file(
-      dir, "0001.safetensors", a, "{\"t0\":{\"dtype\":\"U8\",\"shape\":[128],\"data_offsets\":[0,128]}}");
+      dir.path(), "0001.safetensors", a, "{\"t0\":{\"dtype\":\"U8\",\"shape\":[128],\"data_offsets\":[0,128]}}");
   auto p2 = create_safetensors_file(
-      dir, "0002.safetensors", b, "{\"t1\":{\"dtype\":\"U8\",\"shape\":[256],\"data_offsets\":[0,256]}}");
+      dir.path(), "0002.safetensors", b, "{\"t1\":{\"dtype\":\"U8\",\"shape\":[256],\"data_offsets\":[0,256]}}");
 
-  MultiSafetensorsSource src({p1, p2});
-  std::vector<unsigned char> buf(512);
+  {
+    MultiSafetensorsSource src({p1, p2});
+    std::vector<unsigned char> buf(512);
 
-  // Read across boundary: last 16 of a + first 64 of b
-  auto got = src.read_at(112, buf.data(), 80);
-  REQUIRE(got.ok());
-  REQUIRE(*got == 80);
-  for (size_t i = 0; i < 16; ++i) {
-    REQUIRE(buf[i] == a[112 + i]);
+    // Read across boundary: last 16 of a + first 64 of b
+    auto got = src.read_at(112, buf.data(), 80);
+    REQUIRE(got.ok());
+    REQUIRE(*got == 80);
+    for (size_t i = 0; i < 16; ++i) {
+      REQUIRE(buf[i] == a[112 + i]);
+    }
+    for (size_t i = 0; i < 64; ++i) {
+      REQUIRE(buf[16 + i] == b[i]);
+    }
+
+    // EOF beyond total size
+    auto eof = src.read_at(128 + 256, buf.data(), buf.size());
+    REQUIRE(eof.ok());
+    REQUIRE(*eof == 0);
   }
-  for (size_t i = 0; i < 64; ++i) {
-    REQUIRE(buf[16 + i] == b[i]);
-  }
-
-  // EOF beyond total size
-  auto eof = src.read_at(128 + 256, buf.data(), buf.size());
-  REQUIRE(eof.ok());
-  REQUIRE(*eof == 0);
-
-  std::filesystem::remove(p1);
-  std::filesystem::remove(p2);
-  std::filesystem::remove(dir);
 }

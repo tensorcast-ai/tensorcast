@@ -64,6 +64,13 @@ class OperationStatus:
     error: OperationError | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _OperationRefDescriptor:
+    operation_id: str
+    kind: str | None = None
+    target_artifact_id: str | None = None
+
+
 class OperationTimeoutError(ArtifactError):
     def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message, status_code="DEADLINE_EXCEEDED", retryable=retryable)
@@ -255,6 +262,20 @@ def _global_store_status_to_operation_status(
     )
 
 
+def _operation_ref_descriptor_from_proto(
+    operation_id: str,
+    operation_ref: operation_pb2.OperationRef | None,
+) -> _OperationRefDescriptor:
+    if operation_ref is None:
+        return _OperationRefDescriptor(operation_id=operation_id)
+    ref_operation_id = str(operation_ref.operation_id or "") or operation_id
+    return _OperationRefDescriptor(
+        operation_id=ref_operation_id,
+        kind=str(operation_ref.kind or "") or None,
+        target_artifact_id=str(operation_ref.target_artifact_id or "") or None,
+    )
+
+
 class DaemonReplicaOperation(Operation[T]):
     """Daemon-scoped operation backed by replica_uuid + Wait/Query/Release RPCs."""
 
@@ -433,12 +454,16 @@ class DaemonGlobalStoreOperation(Operation[T]):
         ctx: CallContext | None,
         context: Mapping[str, str] | None,
         result_factory: Callable[[operation_pb2.GetOperationResponse], T],
+        operation_ref: operation_pb2.OperationRef | None = None,
     ) -> None:
         self.operation_id = str(operation_id)
         self._runtime_ref = runtime_ref
         self._ctx = ctx
         self._created_at = time.monotonic()
-        self._context = context
+        self._context = dict(context or {})
+        self._operation_ref = _operation_ref_descriptor_from_proto(
+            self.operation_id, operation_ref
+        )
         self._result_factory = result_factory
 
     def _runtime(self) -> _Runtime:
@@ -453,6 +478,31 @@ class DaemonGlobalStoreOperation(Operation[T]):
 
     def _client(self) -> _DaemonGlobalStoreClient:
         return cast(_DaemonGlobalStoreClient, self._runtime().ensure_client())
+
+    def _refresh_operation_ref(
+        self, operation_ref: operation_pb2.OperationRef | None
+    ) -> None:
+        descriptor = _operation_ref_descriptor_from_proto(
+            self.operation_id, operation_ref
+        )
+        if descriptor.operation_id != self.operation_id:
+            return
+        self._operation_ref = descriptor
+
+    def _operation_context(self) -> Mapping[str, str] | None:
+        context = dict(self._context)
+        if self._operation_ref.kind is not None:
+            context.setdefault("operation_kind", self._operation_ref.kind)
+        if self._operation_ref.target_artifact_id is not None:
+            context.setdefault(
+                "target_artifact_id", self._operation_ref.target_artifact_id
+            )
+        runtime = self._runtime_ref()
+        if runtime is not None:
+            daemon_endpoint = str(getattr(runtime, "daemon_endpoint", "") or "")
+            if daemon_endpoint:
+                context.setdefault("daemon_endpoint", daemon_endpoint)
+        return context or None
 
     def _ctx_remaining_timeout_s(self) -> float | None:
         if self._ctx is None or self._ctx.deadline_ms is None:
@@ -473,7 +523,7 @@ class DaemonGlobalStoreOperation(Operation[T]):
                     status_code="DEADLINE_EXCEEDED",
                     message="CallContext deadline exceeded",
                     retryable=True,
-                    context=self._context,
+                    context=self._operation_context(),
                 ),
             )
 
@@ -494,12 +544,14 @@ class DaemonGlobalStoreOperation(Operation[T]):
                     status_code=_coerce_grpc_status_code(code),
                     message=message,
                     retryable=_retryable_for_grpc(code),
-                    context=self._context,
+                    context=self._operation_context(),
                 ),
             )
 
+        if resp.HasField("ref"):
+            self._refresh_operation_ref(resp.ref)
         return _global_store_status_to_operation_status(
-            resp.status, context=self._context
+            resp.status, context=self._operation_context()
         )
 
     def wait(self, *, timeout_s: float | None = None) -> T:
@@ -553,8 +605,10 @@ class DaemonGlobalStoreOperation(Operation[T]):
                 )
                 _raise_api_error(error, cause=exc)
 
+            if resp.HasField("ref"):
+                self._refresh_operation_ref(resp.ref)
             status = _global_store_status_to_operation_status(
-                resp.status, context=self._context
+                resp.status, context=self._operation_context()
             )
             if status.state == "success":
                 return self._result_factory(resp)

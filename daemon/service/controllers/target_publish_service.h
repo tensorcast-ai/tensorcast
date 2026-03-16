@@ -3,15 +3,21 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 
+#include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/device_resolver.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/target_write_registry.h"
+#include "daemon/state/routed_authority_protocol.h"
+#include "daemon/state/session_lifecycle.h"
+#include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
+#include "tensorcast/common/v1/capability_token.pb.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
@@ -22,6 +28,8 @@ class TargetPublishService {
     LipManager& lip_manager;
     DeviceResolver& devices;
     WorkerIdentityStore& identity;
+    SessionLifecycleManager& lifecycle;
+    LifecycleKernel& lifecycle_kernel;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
@@ -29,9 +37,33 @@ class TargetPublishService {
 
   explicit TargetPublishService(Dep d);
 
-  static absl::Duration target_write_token_ttl();
+  static absl::Duration target_publication_token_ttl();
 
-  TargetWriteRegistry::Record remember_target_write(TargetWriteRegistry::Record record);
+  struct TargetPublicationFrontDoorContext {
+    TargetPublicationRegistry::Record record;
+    tensorcast::common::v1::TargetPublicationScope scope;
+    tensorcast::common::v1::ByteSpaceRef normalized_byte_space;
+    FrontDoorCredentialContext front_door_context;
+  };
+
+  [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> remember_target_publication(
+      TargetPublicationRegistry::Record record);
+
+  [[nodiscard]] absl::StatusOr<TargetPublicationFrontDoorContext> inspect_target_publication_context(
+      const v2::PublishTargetReplicaRequest& req,
+      absl::Time now) const;
+
+  [[nodiscard]] absl::StatusOr<RoutedAuthorityRequest> build_target_publication_workflow_routed_request(
+      const v2::PublishTargetReplicaRequest& req,
+      absl::Time now) const;
+
+  [[nodiscard]] absl::StatusOr<RoutedAuthorityRequest> build_target_publication_workflow_continuation_request(
+      const RoutedAuthorityRequest& routed_request,
+      const OwnerStageReply& workflow_gate_reply) const;
+
+  [[nodiscard]] absl::StatusOr<std::optional<OwnerStageReply>> maybe_route_authority_stage(
+      const RoutedAuthorityRequest& routed_request,
+      absl::Time now);
 
   grpc::Status publish_target_replica(
       RpcContext& rctx,
@@ -41,7 +73,7 @@ class TargetPublishService {
  private:
   Dep d_;
   common::CapabilityTokenManager* capability_tokens_{nullptr};
-  TargetWriteRegistry target_write_registry_;
+  std::shared_ptr<TargetPublicationRegistry> target_publication_registry_;
 };
 
 } // namespace tensorcast::daemon

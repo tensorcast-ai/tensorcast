@@ -74,8 +74,10 @@ TensorCast exposes a process-wide store session and module-level helpers.
 - `tensorcast.init(...)`: establishes a runtime (connect to an existing daemon
   or launch services). In `mode="auto"`, concurrent callers under the same
   runtime root coordinate so one process launches and the rest connect to the
-  same daemon. In `mode="create"`, you can also start (or reuse) a local
-  Global Store by setting `global_store_mode="start"`; use
+  same daemon. In `mode="create"`, you can also start a local
+  Global Store by setting `global_store_mode="start"`; this requires that no
+  healthy local Global Store is already recorded under the current runtime
+  root, otherwise startup fails. Use
   `global_store_config_path=...` (or `$TENSORCAST_GLOBAL_STORE_CONFIG`) to pick
   the Global Store YAML. Implementation: [tensorcast/startup.py](../../../tensorcast/startup.py).
 - `tensorcast.store(...)`: returns the process-wide `Store` (lazy initialization).
@@ -248,7 +250,7 @@ Key parameter:
 
 ### Store.register_view (register a view-derived artifact)
 
-Signature: `tensorcast.register_view(tensors, *, artifact_id=None, key=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None, canonical_index_bytes=None, registration_kind=None)`
+Signature: `tensorcast.register_view(tensors, *, artifact_id=None, key=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, options=None, canonical_index_bytes=None, registration_kind=None)`
 
 `register_view` is for cases where the canonical artifact can be derived from a
 view/slice/transpose of an existing tensor dict.
@@ -269,7 +271,6 @@ View inputs:
   partial coverage (full canonical coverage should use `"canonical"`).
 - `canonical_index_bytes`: optional bootstrap path for new assemblies; required to
   register the first piece without prior Global Store state.
-- `allow_partial`: deprecated compatibility flag mapped to `registration_kind="piece"`.
 
 Example:
 
@@ -338,10 +339,11 @@ Materialization behavior is controlled by `FallbackOptions` and
 Disk paths are not supplied by the SDK; when disk fallback is enabled the daemon
 resolves managed disk locations via Global Store.
 
-`GetArtifactOptions` is used by the materialization pipeline; most applications
-won’t pass it directly today, but it is important for understanding behavior
-like region-backed `get_into`, pinned allocation timeouts, and “wait for
-completion”.
+`GetArtifactOptions` is execution-only. It does not control source selection;
+that remains the responsibility of `FallbackOptions`. Most applications won’t
+pass `GetArtifactOptions` directly today, but it is important for understanding
+behavior like region-backed `get_into`, pinned allocation timeouts, and “wait
+for completion”.
 
 - Type: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py) (`GetArtifactOptions`, `RegionBackedMode`)
 

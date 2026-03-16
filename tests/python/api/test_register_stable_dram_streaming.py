@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import pytest
 
 from tensorcast.api._config import PlanType, RegisterArtifactOptions
+from tensorcast.api._errors import TensorCastError
 from tensorcast.api._register import (
     _prepare_build,
     _stable_dram_feed_upload_workers,
@@ -122,6 +124,7 @@ def test_stable_dram_uploader_streams_cpu_chunks_when_no_staging_handle() -> Non
         handle=handle,
         handshake=handshake,
         cancel_event=None,
+        require_cpu_memfd_publish=False,
     )
 
     assert result is artifact
@@ -177,6 +180,7 @@ def test_stable_dram_uploader_uses_cpu_memfd_publish_when_handshake_has_memfd(
             handle=handle,
             handshake=handshake,
             cancel_event=None,
+            require_cpu_memfd_publish=True,
         )
 
         assert result is artifact
@@ -196,6 +200,29 @@ def test_stable_dram_uploader_uses_cpu_memfd_publish_when_handshake_has_memfd(
         if fd_path is not None:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(fd_path)
+
+
+def test_stable_dram_uploader_requires_cpu_memfd_publish_when_requested() -> None:
+    artifact = {"a": torch.arange(8, dtype=torch.float32)}
+    ctx, layout, _ = _prepare_build(artifact, device_id=0)
+
+    fake_ctl = _FakeDaemonCtl()
+    handle = _FakeRegisteredArtifact(
+        registration_id="reg-stable-require-memfd", client=fake_ctl
+    )
+    uploader = _StableDramUploader()
+    handshake = StableDramHandshake(staging_cuda_ipc_handle=b"")
+
+    with pytest.raises(TensorCastError, match="cpu memfd publish is required"):
+        uploader.upload(
+            artifact=artifact,
+            ctx=ctx,
+            layout=layout,
+            handle=handle,
+            handshake=handshake,
+            cancel_event=None,
+            require_cpu_memfd_publish=True,
+        )
 
 
 def test_stable_dram_uploader_uses_1mb_chunk_with_concurrent_workers(
@@ -224,6 +251,7 @@ def test_stable_dram_uploader_uses_1mb_chunk_with_concurrent_workers(
         handle=handle,
         handshake=handshake,
         cancel_event=None,
+        require_cpu_memfd_publish=False,
     )
 
     assert result is artifact

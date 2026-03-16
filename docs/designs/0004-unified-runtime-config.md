@@ -10,12 +10,12 @@ related_code:
   - tensorcast/daemon_config.py
   - tensorcast/common/config/normalize.py
 created: 2025-09-09
-last_updated: 2025-09-10
+last_updated: 2026-03-11
 ---
 
 # Summary
 
-Standardize all runtime configuration across TensorCast behind a single, strong‑typed configuration file per process. Protobuf is the authoritative schema; YAML/JSON are operator‑friendly carriers that load into the same Protobuf messages. Processes accept one flag only, `--config=/path/to/file.{yaml,json}`, and no environment variables or ad‑hoc flags influence runtime behavior. Unknown keys are rejected. Configuration changes take effect on restart; no hot reload is supported.
+Standardize all runtime configuration across TensorCast behind a single, strong‑typed configuration file per process. Protobuf is the authoritative schema; YAML/JSON are operator‑friendly carriers that load into the same Protobuf messages. Processes accept one flag only, `--config=/path/to/file.{yaml,json}`, and no ad‑hoc environment variables or flags influence runtime behavior. Launcher-specific process environment must be declared explicitly in config. Unknown keys are rejected. Configuration changes take effect on restart; no hot reload is supported.
 
 This design integrates and supersedes prior communicator‑only configuration unification by embedding `tensorcast.communicator.v1.CommunicatorConfig` as a subsection under the daemon configuration.
 
@@ -24,7 +24,7 @@ This design integrates and supersedes prior communicator‑only configuration un
 - Single entry point: exactly one `--config` per process; no other sources.
 - Strong typing: Protobuf schemas for all runtime config with centralized defaulting and validation.
 - Unified format: YAML/JSON load into the same Protobuf messages.
-- Zero environment variables: move OTel, logging, and other knobs into explicit config.
+- Zero ad-hoc environment variables: move OTel, logging, and other knobs into explicit config; if a process needs launch-time environment, declare it explicitly in the config schema.
 - Predictable behavior: reject unknown fields and eliminate conflicting priority rules.
 - Cross‑language parity: shared schema and consistent loaders for C++ and Python.
 
@@ -44,6 +44,7 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `high_availability`: `global_store_endpoints`, heartbeat/periodic sync/retry.
   - `communicator`: `tensorcast.communicator.v1.CommunicatorConfig` (reused schema).
   - `engine`: `*_bytes`, streaming and CPU VS sizing, `streaming_buffer_chunks`.
+  - `envs`: launcher-only environment variables applied by the CLI/SDK when spawning the daemon binary. `LD_LIBRARY_PATH` is merged deterministically as inherited entries, then `envs.LD_LIBRARY_PATH`, then auto-discovered TensorCast/PyTorch/CUDA library directories.
   - `pinned_memory`: daemon-wide pinned budget, class pools, and allocation timeout.
   - `observability`: OTel (lang‑agnostic), logging (enum level, sinks), tracing; `otel_cxx` holds C++‑specific toggles.
   - `compatibility`: targeted compatibility switches (e.g., `confirm_requires_disk_path`, `verification_timeout_status`).
@@ -99,10 +100,13 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 
 # Invariants & Error Model
 
-- Single source of truth: only the final configuration file influences runtime behavior for covered areas; ENV and ad‑hoc flags are not read by processes.
+- Single source of truth: only the final configuration file influences runtime behavior for covered areas; ambient ENV and ad‑hoc flags are not read by processes. Launcher environment, when required, is also sourced from that same file.
 - Determinism: all defaults are applied in one place; behavior does not depend on process environment.
 - Fail‑fast: unknown fields, type mismatches, and invalid units/durations cause startup failure.
 - Cross‑language equivalence: the same file yields identical Protobuf messages in C++ and Python.
+- Distributed namespace profiles (for example byte artifact routing invariants such as shard count/hash version/lease
+  staleness policy) must be modeled as typed config fields and remain cluster-consistent; incompatible rolling changes
+  must have an explicit cutover strategy instead of mixed semantics.
 
 # Schema Outline & Conventions
 
@@ -120,7 +124,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 
 # Alternatives & Rationale
 
-- Continue with ENV/flags: rejected due to fragmentation, hidden precedence, and drift between components and languages.
+- Continue with ENV/flags: rejected due to fragmentation, hidden precedence, and drift between components and languages. If launch-time environment is unavoidable, it must be modeled explicitly in the config schema rather than supplied out-of-band.
 - Hybrid (config + ENV overrides): rejected to keep behavior predictable and debuggable; forbidding overrides avoids surprises in production.
 - JSON‑only without Protobuf: rejected; Protobuf provides strong typing, enums, and presence semantics across languages.
 - Hot reload: deferred; requires explicit dynamic‑safe field catalog and re‑init semantics, which is out of scope.
@@ -128,7 +132,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 # Compatibility & Migration
 
 - Communicator: integrate RFC‑0013 outcomes by embedding `tensorcast.communicator.v1.CommunicatorConfig` under `DaemonConfig.communicator`; remove `--comm_config_path` and related flags/ENV.
-- Flags/ENV mapping: legacy flags and environment variables are mapped into explicit fields (e.g., daemon lifecycle intervals, VRAM fraction, OTel/logging). After migration they are ignored by processes.
+- Flags/ENV mapping: legacy flags and environment variables are mapped into explicit fields (e.g., daemon lifecycle intervals, VRAM fraction, OTel/logging). After migration ambient values are ignored by processes; any launcher-only environment must be carried via explicit config fields such as `DaemonConfig.envs`.
 - Restart boundary: all fields are startup‑only; changes require a process restart. No partial runtime mutation is supported.
 - Schema discipline: new runtime behavior enters via `.proto` first; code reads from Protobuf messages only. Deprecated fields are removed with `reserved` guards.
 
@@ -151,7 +155,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 - Loaders in C++ and Python apply the same defaults and equivalent normalization rules:
   - Enum aliases (e.g., `grpc`, `info`) are accepted and canonicalized.
   - Durations use canonical Protobuf strings; C++ additionally accepts `ms/s/m/h` shorthand.
-- Environment variables and ad‑hoc flags that previously affected runtime behavior are removed or ignored in favor of config fields.
+- Environment variables and ad‑hoc flags that previously affected runtime behavior are removed or ignored in favor of config fields; launcher-only daemon environment is configured explicitly via `DaemonConfig.envs`.
 - Example configurations in `examples/config/store_daemon_config.yaml` and `examples/config/global_store_config.yaml` stay in sync with config changes (add/remove fields or default updates).
 - Documentation for daemon, global store, and client reflects the single‑file configuration model.
 

@@ -69,6 +69,7 @@ struct RdmaReadSession {
   net_dev_t dev;
   tcp_transport_t control_transport;
   std::shared_ptr<void> read_guard;
+  std::unique_ptr<FlowCreditLedger> direct_ledger;
   std::unique_ptr<StagingWindow> window;
   bool zero_copy = false;
 };
@@ -146,6 +147,22 @@ const char* DirectFallbackReasonToString(DirectFallbackReason reason) {
   return "unknown";
 }
 
+uint32_t ReadFailedReasonFromStatus(const absl::Status& status) {
+  if (absl::IsNotFound(status)) {
+    return TENSORCAST_READ_FAILED_NO_TENSOR;
+  }
+  if (absl::IsOutOfRange(status)) {
+    return TENSORCAST_READ_FAILED_OVERFLOW;
+  }
+  if (absl::IsResourceExhausted(status) || absl::IsUnavailable(status)) {
+    return TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED;
+  }
+  if (absl::IsFailedPrecondition(status)) {
+    return TENSORCAST_READ_FAILED_DIRECT_RDMA_REQUIRED;
+  }
+  return TENSORCAST_READ_FAILED_MEM_MISMATCH;
+}
+
 v1::RdmaConfig::StagedRdmaBackend NormalizeStagedBackend(const v1::CommunicatorConfig& config) {
   auto backend = config.rdma().staging_backend();
   if (backend == v1::RdmaConfig::STAGED_RDMA_BACKEND_UNSPECIFIED) {
@@ -180,13 +197,14 @@ StagingWindow::StageFn MakeStageFunction(
     const net_dev_t& dev,
     MrCache* mr_cache,
     std::string tensor_key,
+    std::string request_key,
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
     ibv_mr* direct_mr) {
   if (use_direct) {
     const uint64_t base_addr = tensor->get_uint64_addr();
     const uint64_t tensor_bytes = tensor->get_bytes();
-    return [tensor, ledger, tensor_key = std::move(tensor_key), base_addr, tensor_bytes, direct_mr](
+    return [tensor, ledger, request_key = std::move(request_key), base_addr, tensor_bytes, direct_mr](
                uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
       if (offset + bytes > tensor_bytes) {
         return absl::OutOfRangeError("direct RDMA stage exceeded tensor bounds");
@@ -194,7 +212,7 @@ StagingWindow::StageFn MakeStageFunction(
       void* device_ptr = reinterpret_cast<void*>(base_addr + offset);
       StageLease::Metadata metadata;
       metadata.transport = StageTransport::kRdma;
-      metadata.request_key = transport::get_request_key(tensor_key, offset);
+      metadata.request_key = request_key;
       metadata.offset = offset;
       metadata.bytes = bytes;
       metadata.zero_copy = true;
@@ -217,7 +235,7 @@ StagingWindow::StageFn MakeStageFunction(
   }
 
   auto fallback_stager = stager;
-  return [fallback_stager, tensor, dev, ledger, mr_cache, tensor_key = std::move(tensor_key), staged_backend](
+  return [fallback_stager, tensor, dev, ledger, mr_cache, request_key = std::move(request_key), staged_backend](
              uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
     constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
     auto staged_or = fallback_stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kTry);
@@ -265,7 +283,7 @@ StagingWindow::StageFn MakeStageFunction(
 
     StageLease::Metadata metadata;
     metadata.transport = StageTransport::kRdma;
-    metadata.request_key = transport::get_request_key(tensor_key, offset);
+    metadata.request_key = request_key;
     metadata.offset = offset;
     metadata.bytes = bytes;
     metadata.zero_copy = false;
@@ -478,6 +496,33 @@ double bytes_to_gib(uint64_t bytes) {
   return static_cast<double>(bytes) / kBytesPerGiB;
 }
 
+uint64_t compute_direct_chunk_bytes(uint64_t total_bytes, uint64_t base_chunk, uint32_t base_window, int qp_count) {
+  if (total_bytes == 0) {
+    return std::max<uint64_t>(1, base_chunk);
+  }
+  constexpr uint64_t kMinDirectChunkBytes = 1ULL << 20;
+  const uint32_t target_segments =
+      std::max<uint32_t>(16, std::max<uint32_t>(1, base_window) * static_cast<uint32_t>(std::max(1, qp_count)));
+  uint64_t desired_chunk = (total_bytes + target_segments - 1) / target_segments;
+  desired_chunk = std::max<uint64_t>(std::min<uint64_t>(total_bytes, kMinDirectChunkBytes), desired_chunk);
+  if (base_chunk > 0) {
+    desired_chunk = std::min<uint64_t>(desired_chunk, base_chunk);
+  }
+  return std::max<uint64_t>(1, std::min<uint64_t>(desired_chunk, total_bytes));
+}
+
+uint32_t compute_direct_window_segments(uint64_t total_bytes, uint64_t chunk_size, uint32_t base_window, int qp_count) {
+  if (chunk_size == 0) {
+    return base_window;
+  }
+  const uint64_t total_segments = (total_bytes + chunk_size - 1) / chunk_size;
+  if (total_segments == 0) {
+    return std::max<uint32_t>(1, base_window);
+  }
+  const uint32_t scaled_window = std::max<uint32_t>(1, base_window) * static_cast<uint32_t>(std::max(1, qp_count));
+  return static_cast<uint32_t>(std::min<uint64_t>(total_segments, scaled_window));
+}
+
 RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
   RdmaDriveResult result;
   while (true) {
@@ -507,6 +552,7 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
         zero_copy_bytes += segment.bytes;
       }
     }
+    const bool all_zero_copy = zero_copy_segments == staged_window.segments.size();
     if (zero_copy_segments > 0) {
       const int device_id = session.tensor ? session.tensor->get_device_id() : -1;
       record_direct_window_metrics(device_id, zero_copy_segments, zero_copy_bytes);
@@ -526,8 +572,11 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     auto* hdr = rsp->get_payload<ProtoReadResponseExHeader>();
     memcpy(hdr->tensor_key, session.request.tensor_key, kMaxTensorNameLen);
     hdr->transport_type = ENGINE_TRANSPORT_RDMA;
-    hdr->staged = 1;
+    hdr->staged = all_zero_copy ? 0 : 1;
     misc::STRNCPY(hdr->nic_name, session.dev ? session.dev->get_name().c_str() : "", kMaxDevName);
+    hdr->request_offset = session.request.offset;
+    hdr->request_id = session.request.request_id;
+    hdr->zero_copy = session.zero_copy ? 1 : 0;
     hdr->rail_id = session.dev ? session.dev->get_rail_id() : 0;
     hdr->num_segments = seg_count;
     hdr->window_seq = staged_window.window_seq;
@@ -560,21 +609,35 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
           .window_seq = metadata.window_seq,
           .segment_idx = metadata.segment_idx,
       };
-      flow_state.registry.put(key, segment.lease);
-      inserted_keys.push_back(key);
+      if (hdr->staged) {
+        flow_state.registry.put(key, segment.lease);
+        inserted_keys.push_back(key);
+      }
     }
 
     misc::result_t send_res = session.control_transport->send(rsp);
     if (send_res != misc::SUCCESS) {
       LOG(ERROR) << "Failed to send RDMA READ_RESPONSE_EX window: res=" << send_res;
-      for (const auto& key : inserted_keys) {
-        auto lease_or = flow_state.registry.take(key);
-        if (lease_or.ok()) {
-          lease_or->release();
+      if (hdr->staged) {
+        for (const auto& key : inserted_keys) {
+          auto lease_or = flow_state.registry.take(key);
+          if (lease_or.ok()) {
+            lease_or->release();
+          }
+        }
+      } else {
+        for (auto& segment : staged_window.segments) {
+          segment.lease.release();
         }
       }
       result.status = absl::InternalError("failed to send RDMA window");
       return result;
+    }
+
+    if (!hdr->staged) {
+      for (auto& segment : staged_window.segments) {
+        segment.lease.release();
+      }
     }
 
     if (!staged_window.more_segments) {
@@ -1136,6 +1199,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     // Apply typed RDMA QP tuning
     rdma_context_->set_qp_params(
         config_.rdma().traffic_class(), config_.rdma().qp_timeout(), config_.rdma().qp_retry());
+    rdma_context_->set_outstanding_wr(config_.rdma().outstanding_wr());
     // Apply multi-QP configuration
     rdma_context_->set_multi_qp_config(config_.rdma().qp_count(), config_.rdma().bonding_balance());
     int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
@@ -1319,7 +1383,8 @@ void Communicator::fail_mtcp_read_task(const MtcpReadTask& task, absl::Status st
   }
 
   const std::string tensor_key(reinterpret_cast<const char*>(task.request.tensor_key));
-  const std::string request_key = transport::get_request_key(tensor_key, task.request.offset);
+  const std::string request_key =
+      transport::get_request_instance_key(tensor_key, task.request.offset, task.request.request_id);
   const std::string peer = task.control_transport ? task.control_transport->get_remote_url() : std::string();
   this->finish_source_transfer_progress(make_transfer_id(request_key, peer), status);
 
@@ -1328,6 +1393,7 @@ void Communicator::fail_mtcp_read_task(const MtcpReadTask& task, absl::Status st
     auto* payload = fail_msg->get_payload<ProtoReadFailed>();
     memcpy(payload->tensor_key, task.request.tensor_key, kMaxTensorNameLen);
     payload->offset = task.request.offset;
+    payload->request_id = task.request.request_id;
     payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
     misc::result_t send_res = task.control_transport->send(fail_msg);
     if (send_res != misc::SUCCESS) {
@@ -1371,7 +1437,8 @@ void Communicator::release_gpu_channel_slot() {
 
 void Communicator::process_mtcp_read_task(MtcpReadTask task) {
   const std::string tensor_key_for_progress(reinterpret_cast<const char*>(task.request.tensor_key));
-  const std::string request_key_for_progress = transport::get_request_key(tensor_key_for_progress, task.request.offset);
+  const std::string request_key_for_progress =
+      transport::get_request_instance_key(tensor_key_for_progress, task.request.offset, task.request.request_id);
   const std::string peer_for_progress =
       task.control_transport ? task.control_transport->get_remote_url() : std::string();
   const std::string transfer_id = make_transfer_id(request_key_for_progress, peer_for_progress);
@@ -1455,7 +1522,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
 
     StageLease::Metadata metadata;
     metadata.transport = StageTransport::kMtcp;
-    metadata.request_key = transport::get_request_key(tensor_key, offset);
+    metadata.request_key = request_key;
     metadata.offset = offset;
     metadata.bytes = bytes;
     metadata.segment_idx = segment_idx;
@@ -1793,28 +1860,14 @@ future_read_result_t Communicator::read_tensor(
             << " dst=" << dst_ip << ":" << dst_port << ", key=" << key << " ,offset=" << remote_offset
             << ", net_dev=" << (net_dev == nullptr ? "none" : net_dev->get_name());
 
-  auto local_tensor = store_.get_tensor(key);
-
-  const bool existing_tensor_conflicts = local_tensor != nullptr &&
-      (local_tensor->get_uint64_addr() != addr || local_tensor->get_bytes() != bytes ||
-       local_tensor->get_mem_type() != dev_type ||
-       (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id));
-
-  const bool needs_new_tensor = local_tensor == nullptr || local_tensor->get_uint64_addr() != addr ||
-      local_tensor->get_bytes() != bytes || local_tensor->get_mem_type() != dev_type ||
-      (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id);
-
-  if (needs_new_tensor) {
-    local_tensor = std::make_shared<PartitionTensor>(key, addr, bytes, dev_type, net_dev);
-    local_tensor->set_read_unready();
-    if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
-      local_tensor->set_device_id(dev_id);
-    }
-    // Preserve an existing source-side key mapping when this read uses the same
-    // key but a different destination buffer in-process (self-read path).
-    if (!existing_tensor_conflicts) {
-      store_.register_tensor(local_tensor);
-    }
+  // Request-side destination buffers must stay request-scoped. Reusing the
+  // shared source tensor store here causes same-process loopback reads to
+  // overwrite the advertised source tensor metadata with the destination
+  // window metadata for the in-flight request.
+  auto local_tensor = std::make_shared<PartitionTensor>(key, addr, bytes, dev_type, net_dev);
+  local_tensor->set_read_unready();
+  if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+    local_tensor->set_device_id(dev_id);
   }
 
   if (enable_rdma_ && net_dev != nullptr) {
@@ -1823,13 +1876,40 @@ future_read_result_t Communicator::read_tensor(
       local_tensor->add_dev(net_dev);
     }
     if (!local_tensor->is_registered(net_dev)) {
-      net_dev->reg_async(local_tensor);
+      bool cached_mr_installed = false;
+      if (meta_mr_cache_ != nullptr) {
+        constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+        auto ptr = reinterpret_cast<void*>(addr);
+        if (ptr != nullptr) {
+          auto mr_result =
+              meta_mr_cache_->get_or_register(net_dev->get_pd(), gsl::not_null<void*>{ptr}, bytes, kAccess);
+          if (mr_result.mr != nullptr) {
+            local_tensor->set_registered_mr(net_dev, mr_result.mr, /*owns_mr=*/false);
+            cached_mr_installed = true;
+          }
+        }
+      }
+      if (!cached_mr_installed) {
+        net_dev->reg_async(local_tensor);
+      }
     }
   }
   local_tensor->set_read_ready();
 
   auto req = std::make_shared<transport::ReadRequest>(
-      key, dst_ip, dst_port, local_tensor, remote_offset, net_dev != nullptr ? net_dev->get_rail_id() : -1);
+      key,
+      dst_ip,
+      dst_port,
+      local_tensor,
+      remote_offset,
+      next_request_id_.fetch_add(1, std::memory_order_relaxed),
+      net_dev != nullptr ? net_dev->get_rail_id() : -1);
+  const std::string req_key = req->get_key();
+  req->status_.transport_is_rdma = enable_rdma_;
+  if (net_dev != nullptr) {
+    req->status_.local_nic = net_dev->get_name();
+    req->status_.local_rail_id = net_dev->get_rail_id();
+  }
   const std::string peer = std::format("{}:{}", dst_ip, dst_port);
   auto target_progress = create_transfer_progress_state(
       make_transfer_id(req->get_key(), peer), req->get_key(), peer, "target", enable_rdma_ ? "rdma" : "mtcp", bytes);
@@ -1842,10 +1922,16 @@ future_read_result_t Communicator::read_tensor(
             add_transfer_progress_bytes(state, done - prev);
           }
         },
-        [state = std::move(target_progress)](const absl::Status& status) { finish_transfer_progress(state, status); });
+        [this, req_key, state = std::move(target_progress)](const absl::Status& status) {
+          pending_requests_.erase_if_present(req_key);
+          finish_transfer_progress(state, status);
+        });
+  } else {
+    req->set_progress_callbacks(
+        {}, [this, req_key](const absl::Status&) { pending_requests_.erase_if_present(req_key); });
   }
   LOG(INFO) << "[read_tensor] Creating request: key=" << key << " dst=" << dst_ip << ":" << dst_port
-            << " req_key=" << req->get_key() << " req_rail=" << req->get_rail_id();
+            << " req_key=" << req_key << " req_rail=" << req->get_rail_id();
   request_queue_.push(req);
   LOG(INFO) << "[read_tensor] Request pushed to queue successfully for key=" << key;
   return req->get_future();
@@ -1861,6 +1947,9 @@ absl::Status Communicator::register_tensor_ex(
   // Check for zero-size tensor
   if (bytes == 0) {
     return absl::InvalidArgumentError("Cannot register zero-size tensor");
+  }
+  if (opts.direct_rdma_required && !opts.direct_rdma_enabled) {
+    return absl::InvalidArgumentError("direct_rdma_required requires direct_rdma_enabled=true");
   }
 
   net_dev_t net_dev = nullptr;
@@ -1896,6 +1985,9 @@ absl::Status Communicator::register_tensor_ex(
   }
   if (opts.direct_rdma_enabled) {
     tensor->set_direct_rdma_enabled(true);
+  }
+  if (opts.direct_rdma_required) {
+    tensor->set_direct_rdma_required(true);
   }
 
   if (enable_rdma_ && opts.register_mr) {
@@ -1937,31 +2029,14 @@ absl::Status Communicator::handle_rdma_read_request(
   }
 
   tensor->wait_read_ready();
-  int16_t src_rail_id = request.rail_id;
   auto dev = tensor->get_dev();
   if (dev == nullptr) {
     return absl::InternalError("tensor missing RDMA device");
   }
-  if (dev->get_rail_id() != src_rail_id) {
-    auto dev_by_rail = rdma_context_->get_dev_by_rail(src_rail_id);
-    if (dev_by_rail == nullptr) {
-      LOG(WARNING) << "failed to get net dev by rail: rail_id=" << src_rail_id
-                   << "use the default dev with rail_id=" << dev->get_rail_id();
-      // use default rail dev
-      request.rail_id = dev->get_rail_id();
-    } else {
-      tensor->add_dev(dev_by_rail);
-    }
-
-    dev = dev_by_rail;
-
-    if (!tensor->is_registered(dev_by_rail)) {
-      // sync or async?
-      tensor->register_mr(dev_by_rail.get());
-      // dev_by_rail->reg_async(tensor);
-    }
-    // reg tensor to the new rail
-  }
+  // The request rail is the initiator's local rail, not an instruction for the
+  // target to rebind its own tensor onto the same rail number. For cross-host
+  // GPU/NIC mapping experiments the target must keep its local preferred NIC.
+  request.rail_id = dev->get_rail_id();
 
   const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
   const int device_id = tensor->get_device_id();
@@ -1996,7 +2071,7 @@ absl::Status Communicator::handle_rdma_read_request(
   const uint64_t total_bytes = request.bytes;
   const uint64_t start_offset = request.offset;
   const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
-  const std::string request_key = transport::get_request_key(tensor_key, start_offset);
+  const std::string request_key = transport::get_request_instance_key(tensor_key, start_offset, request.request_id);
   const std::string peer = control_transport ? control_transport->get_remote_url() : std::string();
   const std::string transfer_id = make_transfer_id(request_key, peer);
   (void)register_source_transfer_progress(request_key, peer, "rdma", total_bytes, std::move(read_guard));
@@ -2037,10 +2112,21 @@ absl::Status Communicator::handle_rdma_read_request(
     LOG_FIRST_N(WARNING, 1) << "RDMA zero-copy fallback for tensor=" << tensor_key
                             << " reason=" << DirectFallbackReasonToString(fallback_reason);
     record_direct_fallback_metric(fallback_reason);
+    if (tensor->direct_rdma_required()) {
+      const absl::Status direct_required_status = absl::FailedPreconditionError(
+          absl::StrCat(
+              "direct RDMA required for tensor=",
+              tensor_key,
+              " but unavailable: reason=",
+              DirectFallbackReasonToString(fallback_reason)));
+      finish_source_transfer_progress(transfer_id, direct_required_status);
+      return direct_required_status;
+    }
   }
 
   const uint64_t chunk_size = use_direct
-      ? (direct_rdma_chunk_bytes_ > 0 ? direct_rdma_chunk_bytes_ : request.bytes)
+      ? compute_direct_chunk_bytes(
+            total_bytes, direct_rdma_chunk_bytes_, flow_state->max_window_segments, config_.rdma().qp_count())
       : (stager && stager->get_chunk_size() > 0 ? stager->get_chunk_size() : request.bytes);
 
   const bool using_gpu_vram_stager =
@@ -2048,10 +2134,6 @@ absl::Status Communicator::handle_rdma_read_request(
   const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
       ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
       : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
-
-  auto stage_fn = MakeStageFunction(
-      tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, staged_backend, use_direct, direct_mr);
-
   auto session = std::make_shared<RdmaReadSession>();
   session->request = request;
   session->tensor_key = tensor_key;
@@ -2062,12 +2144,29 @@ absl::Status Communicator::handle_rdma_read_request(
   session->control_transport = control_transport;
   session->transfer_id = transfer_id;
   session->zero_copy = use_direct;
-  session->window = std::make_unique<StagingWindow>(
-      flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
+
+  uint32_t window_segments = flow_state->max_window_segments;
+  if (use_direct) {
+    window_segments = compute_direct_window_segments(
+        total_bytes, chunk_size, flow_state->max_window_segments, config_.rdma().qp_count());
+    session->direct_ledger = std::make_unique<FlowCreditLedger>(static_cast<int>(window_segments));
+    ledger_ptr = session->direct_ledger.get();
+  }
+
+  auto stage_fn = MakeStageFunction(
+      tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, request_key, staged_backend, use_direct, direct_mr);
+  session->window =
+      std::make_unique<StagingWindow>(*ledger_ptr, stage_fn, total_bytes, chunk_size, start_offset, window_segments);
 
   flow_state->rdma_pending_reads.push_back(session);
+  LOG(INFO) << "[rdma_session] queued request=" << request_key << " zero_copy=" << use_direct
+            << " pending_reads=" << flow_state->rdma_pending_reads.size()
+            << " outstanding_credit=" << ledger_ptr->outstanding_credit() << " window_segments=" << window_segments;
 
   auto status = resume_rdma_reads(channel);
+  LOG(INFO) << "[rdma_session] resume status request=" << request_key << " status=" << status
+            << " pending_reads=" << flow_state->rdma_pending_reads.size()
+            << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
   if (!status.ok()) {
     finish_source_transfer_progress(transfer_id, status);
     return status;
@@ -2081,61 +2180,88 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
   if (!flow_state) {
     return absl::OkStatus();
   }
-  if (flow_state->rdma_refill_in_progress) {
+  bool expected = false;
+  if (!flow_state->rdma_refill_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    flow_state->rdma_refill_requested.store(true, std::memory_order_release);
+    LOG(INFO) << "[rdma_resume] refill already in progress; request another pass pending_reads="
+              << flow_state->rdma_pending_reads.size()
+              << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
     return absl::OkStatus();
   }
 
-  flow_state->rdma_refill_in_progress = true;
-  absl::Cleanup guard([flow_state]() { flow_state->rdma_refill_in_progress = false; });
-
   absl::Status first_error = absl::OkStatus();
 
-  while (!flow_state->rdma_pending_reads.empty()) {
-    auto session = flow_state->rdma_pending_reads.front();
-    auto result = DriveRdmaSession(*flow_state, *session);
+  while (true) {
+    LOG(INFO) << "[rdma_resume] pass begin pending_reads=" << flow_state->rdma_pending_reads.size()
+              << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
+    flow_state->rdma_refill_requested.store(false, std::memory_order_release);
 
-    if (!result.status.ok()) {
-      if (absl::IsResourceExhausted(result.status) || absl::IsUnavailable(result.status)) {
-        if (!result.made_progress && flow_state->rdma_pending_reads.size() > 1) {
-          flow_state->rdma_pending_reads.pop_front();
-          flow_state->rdma_pending_reads.push_back(std::move(session));
+    while (!flow_state->rdma_pending_reads.empty()) {
+      auto session = flow_state->rdma_pending_reads.front();
+      auto result = DriveRdmaSession(*flow_state, *session);
+      LOG(INFO) << "[rdma_resume] drove request=" << session->request_key << " status=" << result.status
+                << " completed=" << result.completed << " made_progress=" << result.made_progress
+                << " pending_reads=" << flow_state->rdma_pending_reads.size()
+                << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
+
+      if (!result.status.ok()) {
+        if (absl::IsResourceExhausted(result.status) || absl::IsUnavailable(result.status)) {
+          if (!result.made_progress && flow_state->rdma_pending_reads.size() > 1) {
+            flow_state->rdma_pending_reads.pop_front();
+            flow_state->rdma_pending_reads.push_back(std::move(session));
+          }
+          break;
         }
+
+        LOG(ERROR) << "Failed to service RDMA read request=" << session->request_key << " status=" << result.status;
+
+        auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+        auto* payload = rsp->get_payload<ProtoReadFailed>();
+        memcpy(payload->tensor_key, session->request.tensor_key, kMaxTensorNameLen);
+        payload->offset = session->request.offset;
+        payload->request_id = session->request.request_id;
+        payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+        misc::result_t send_res = session->control_transport->send(rsp);
+        if (send_res != misc::SUCCESS) {
+          LOG(WARNING) << "Failed to send READ_FAILED after staging failure: " << send_res;
+        }
+
+        flow_state->rdma_pending_reads.pop_front();
+        if (!session->transfer_id.empty()) {
+          this->finish_source_transfer_progress(session->transfer_id, result.status);
+        }
+        if (first_error.ok()) {
+          first_error = result.status;
+        }
+        continue;
+      }
+
+      if (result.completed) {
+        flow_state->rdma_pending_reads.pop_front();
+        continue;
+      }
+
+      if (result.made_progress) {
+        // Wait for RDMA ACKs to return credit before continuing.
         break;
       }
 
-      LOG(ERROR) << "Failed to service RDMA read request=" << session->request_key << " status=" << result.status;
-
-      auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
-      auto* payload = rsp->get_payload<ProtoReadFailed>();
-      memcpy(payload->tensor_key, session->request.tensor_key, kMaxTensorNameLen);
-      payload->offset = session->request.offset;
-      payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
-      misc::result_t send_res = session->control_transport->send(rsp);
-      if (send_res != misc::SUCCESS) {
-        LOG(WARNING) << "Failed to send READ_FAILED after staging failure: " << send_res;
-      }
-
-      flow_state->rdma_pending_reads.pop_front();
-      if (!session->transfer_id.empty()) {
-        this->finish_source_transfer_progress(session->transfer_id, result.status);
-      }
-      if (first_error.ok()) {
-        first_error = result.status;
-      }
-      continue;
+      break; // Defensive: no progress and no status; avoid tight loop.
     }
 
-    if (result.completed) {
-      flow_state->rdma_pending_reads.pop_front();
-      continue;
-    }
-
-    if (result.made_progress) {
-      // Wait for RDMA ACKs to return credit before continuing.
+    flow_state->rdma_refill_in_progress.store(false, std::memory_order_release);
+    LOG(INFO) << "[rdma_resume] pass end pending_reads=" << flow_state->rdma_pending_reads.size()
+              << " requested_again=" << flow_state->rdma_refill_requested.load(std::memory_order_acquire)
+              << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
+    if (!flow_state->rdma_refill_requested.load(std::memory_order_acquire) || flow_state->rdma_pending_reads.empty() ||
+        !first_error.ok()) {
       break;
     }
 
-    break; // Defensive: no progress and no status; avoid tight loop.
+    expected = false;
+    if (!flow_state->rdma_refill_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      break;
+    }
   }
 
   return first_error;
@@ -2170,6 +2296,7 @@ absl::Status Communicator::handle_mtcp_read_request(
       auto* payload = fail_msg->get_payload<ProtoReadFailed>();
       memcpy(payload->tensor_key, request.tensor_key, kMaxTensorNameLen);
       payload->offset = request.offset;
+      payload->request_id = request.request_id;
       payload->reason = absl::IsResourceExhausted(slot_or.status()) ? TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED
                                                                     : TENSORCAST_READ_FAILED_MEM_MISMATCH;
       misc::result_t send_res = control_transport->send(fail_msg);
@@ -2227,6 +2354,8 @@ absl::Status Communicator::handle_mtcp_read_request(
   hdr->transport_type = ENGINE_TRANSPORT_MTCP;
   hdr->staged = 0;
   misc::STRCPY(hdr->nic_name, "");
+  hdr->request_offset = request.offset;
+  hdr->request_id = request.request_id;
   hdr->num_segments = 1;
   hdr->window_seq = 0;
   const uint64_t stage_chunk_hint = task.stage_chunk_bytes > 0 ? task.stage_chunk_bytes : request.bytes;
@@ -2256,7 +2385,8 @@ absl::Status Communicator::handle_mtcp_read_request(
     return shutdown_status;
   }
 
-  const std::string request_key = communicator::transport::get_request_key(tensor_key, request.offset);
+  const std::string request_key =
+      communicator::transport::get_request_instance_key(tensor_key, request.offset, request.request_id);
   const std::string peer = control_transport ? control_transport->get_remote_url() : std::string();
   const std::string transfer_id = make_transfer_id(request_key, peer);
   (void)register_source_transfer_progress(request_key, peer, "mtcp", request.bytes, std::move(task.read_guard));
@@ -2446,6 +2576,7 @@ void Communicator::do_read_request_loop() {
     request->transport_type = enable_rdma_ ? ENGINE_TRANSPORT_RDMA : ENGINE_TRANSPORT_MTCP;
     request->offset = req->remote_offset_;
     request->bytes = req->get_local_tensor()->get_bytes();
+    request->request_id = req->request_id();
 
     request->rail_id = req->get_rail_id();
 
@@ -2578,13 +2709,17 @@ misc::result_t Communicator::on_receive_request(
         auto* payload = rsp->get_payload<ProtoReadFailed>();
         memcpy(payload->tensor_key, req->tensor_key, 512);
         payload->offset = req->offset;
+        payload->request_id = req->request_id;
         payload->reason = TENSORCAST_READ_FAILED_NO_TENSOR;
         COMM_CHECK(t->send(rsp));
       } else if (req->offset + req->bytes > tensor->get_bytes()) {
+        LOG(ERROR) << "[on_receive_request] READ_REQUEST overflow: key=" << tensor_key
+                   << " tensor_bytes=" << tensor->get_bytes() << " offset=" << req->offset << " size=" << req->bytes;
         auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
         auto* payload = rsp->get_payload<ProtoReadFailed>();
         memcpy(payload->tensor_key, req->tensor_key, 512);
         payload->offset = req->offset;
+        payload->request_id = req->request_id;
         payload->reason = TENSORCAST_READ_FAILED_OVERFLOW;
         COMM_CHECK(t->send(rsp));
       } else {
@@ -2594,6 +2729,7 @@ misc::result_t Communicator::on_receive_request(
           auto* payload = rsp->get_payload<ProtoReadFailed>();
           memcpy(payload->tensor_key, req->tensor_key, 512);
           payload->offset = req->offset;
+          payload->request_id = req->request_id;
           payload->reason = TENSORCAST_READ_FAILED_NO_TENSOR;
           COMM_CHECK(t->send(rsp));
           LOG(WARNING) << "Read request rejected for retiring tensor key=" << tensor_key
@@ -2606,14 +2742,28 @@ misc::result_t Communicator::on_receive_request(
         if (enable_rdma_ && req->transport_type == ENGINE_TRANSPORT_RDMA) {
           auto status = handle_rdma_read_request(channel, t, *req, tensor, std::move(read_guard));
           if (!status.ok()) {
+            auto failure = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+            auto* payload = failure->get_payload<ProtoReadFailed>();
+            memcpy(payload->tensor_key, req->tensor_key, kMaxTensorNameLen);
+            payload->offset = req->offset;
+            payload->request_id = req->request_id;
+            payload->reason = ReadFailedReasonFromStatus(status);
+            COMM_CHECK(t->send(failure));
             LOG(WARNING) << "RDMA read request failed: " << status;
-            return misc::FAILED;
+            break;
           }
         } else {
           auto status = handle_mtcp_read_request(channel, t, *req, tensor, std::move(read_guard));
           if (!status.ok()) {
+            auto failure = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+            auto* payload = failure->get_payload<ProtoReadFailed>();
+            memcpy(payload->tensor_key, req->tensor_key, kMaxTensorNameLen);
+            payload->offset = req->offset;
+            payload->request_id = req->request_id;
+            payload->reason = ReadFailedReasonFromStatus(status);
+            COMM_CHECK(t->send(failure));
             LOG(WARNING) << "MTCP read request failed: " << status;
-            return misc::FAILED;
+            break;
           }
         }
       }
@@ -2629,10 +2779,8 @@ misc::result_t Communicator::on_receive_request(
         break;
       }
       for (uint32_t i = 0; i < hdr->num_segments; ++i) {
-        auto* s = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
-            reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoRdmaReadDoneExHeader) + i * sizeof(ProtoRdmaReadDoneExSeg));
         StageLeaseKey key{
-            .request_key = transport::get_request_key(tensor_key, s->offset),
+            .request_key = transport::get_request_instance_key(tensor_key, hdr->request_offset, hdr->request_id),
             .window_seq = hdr->window_seq,
             .segment_idx = i,
         };
@@ -2694,7 +2842,7 @@ misc::result_t Communicator::on_receive_response(
     auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
     const absl::Status status = absl::UnavailableError(failure_reason);
     for (auto& pending : failed_reads) {
-      pending_requests_.del(pending.request->get_key());
+      pending_requests_.erase_if_present(pending.request->get_key());
       pending.request->set_result(status);
     }
 
@@ -2772,7 +2920,7 @@ misc::result_t Communicator::on_receive_response(
         auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
         const absl::Status status = absl::UnavailableError("rdma transport missing while processing connect response");
         for (auto& pending : failed_reads) {
-          pending_requests_.del(pending.request->get_key());
+          pending_requests_.erase_if_present(pending.request->get_key());
           pending.request->set_result(status);
         }
         {
@@ -2800,7 +2948,7 @@ misc::result_t Communicator::on_receive_response(
           auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
           const absl::Status status = absl::UnavailableError("remote RDMA connect failed");
           for (auto& pending : failed_reads) {
-            pending_requests_.del(pending.request->get_key());
+            pending_requests_.erase_if_present(pending.request->get_key());
             pending.request->set_result(status);
           }
           {
@@ -2838,7 +2986,7 @@ misc::result_t Communicator::on_receive_response(
       for (auto& pending : ready_reads) {
         auto res = transport->read_multi(pending.request, pending.segments);
         if (res != misc::SUCCESS) {
-          pending_requests_.del(pending.request->get_key());
+          pending_requests_.erase_if_present(pending.request->get_key());
           pending.request->set_result(absl::UnavailableError("rdma read_multi failed after handshake"));
         }
       }
@@ -2871,12 +3019,17 @@ misc::result_t Communicator::on_receive_response(
       LOG(INFO) << "[on_receive_response] READ_RESPONSE_EX: key=" << tensor_key << " segs=" << hdr->num_segments
                 << " transport=" << (hdr->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA")
                 << " offset=" << seg0->offset << " bytes=" << seg0->bytes << " stage_hint=" << hdr->credit_granted;
-      auto req_key = transport::get_request_key(tensor_key, hdr->request_offset);
+      auto req_key = transport::get_request_instance_key(tensor_key, hdr->request_offset, hdr->request_id);
       auto read_request = pending_requests_.get(req_key);
       if (read_request == nullptr) {
         LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX: pending request not found for " << req_key;
         break;
       }
+      read_request->status_.transport_is_rdma = hdr->transport_type == ENGINE_TRANSPORT_RDMA;
+      read_request->status_.remote_nic = peer_dev_name;
+      read_request->status_.remote_rail_id = hdr->rail_id;
+      read_request->status_.rdma_staged_response = hdr->staged != 0;
+      read_request->status_.rdma_zero_copy_response = hdr->zero_copy != 0;
       read_request->record_request_response();
 
       if (enable_rdma_ && hdr->transport_type == ENGINE_TRANSPORT_RDMA) {
@@ -2908,19 +3061,24 @@ misc::result_t Communicator::on_receive_response(
           ack_offsets.emplace_back(s->offset);
         }
 
-        read_request->register_response_window(static_cast<int>(rdma_segs.size()), hdr->more_segments == 0);
+        read_request->note_rdma_window(static_cast<int>(rdma_segs.size()), hdr->more_segments == 0);
 
         if (hdr->staged) {
           auto ctrl = channel->get_control();
           const std::string staged_key = tensor_key;
+          const uint64_t request_offset = read_request->remote_offset_;
+          const uint64_t request_id = read_request->request_id();
           read_request->set_ack_sender(
-              [ctrl, staged_key](uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
+              [ctrl, staged_key, request_offset, request_id](
+                  uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
                 auto ack = std::make_shared<EngineMessage>(
                     ENGINE_OP_RDMA_READ_DONE_EX,
                     static_cast<uint32_t>(
                         sizeof(ProtoRdmaReadDoneExHeader) + offsets.size() * sizeof(ProtoRdmaReadDoneExSeg)));
                 auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
                 misc::STRNCPY(h->tensor_key, staged_key, kMaxTensorNameLen);
+                h->request_offset = request_offset;
+                h->request_id = request_id;
                 h->num_segments = static_cast<uint32_t>(offsets.size());
                 h->window_seq = window_seq;
                 h->final_window = final_window ? 1 : 0;
@@ -3078,7 +3236,7 @@ misc::result_t Communicator::on_receive_response(
           LOG(WARNING) << "[rdma_handshake] immediate failure handling read: request=" << read_request->get_key()
                        << " status=" << immediate_failure;
           read_request->set_result(immediate_failure);
-          pending_requests_.del(req_key);
+          pending_requests_.erase_if_present(req_key);
           break;
         }
 
@@ -3086,7 +3244,7 @@ misc::result_t Communicator::on_receive_response(
           auto res = transport_to_use->read_multi(read_request, rdma_segs);
           if (res != misc::SUCCESS) {
             read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
-            pending_requests_.del(req_key);
+            pending_requests_.erase_if_present(req_key);
           }
           break;
         }
@@ -3099,7 +3257,7 @@ misc::result_t Communicator::on_receive_response(
             const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
             auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
             for (auto& pending : failed_reads) {
-              pending_requests_.del(pending.request->get_key());
+              pending_requests_.erase_if_present(pending.request->get_key());
               pending.request->set_result(send_error);
             }
             {
@@ -3161,7 +3319,7 @@ misc::result_t Communicator::on_receive_response(
       } else {
         LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX unsupported transport type";
         read_request->set_result(absl::InternalError("READ_RESPONSE_EX unsupported transport type"));
-        pending_requests_.del(req_key);
+        pending_requests_.erase_if_present(req_key);
       }
       break;
     }
@@ -3181,7 +3339,7 @@ misc::result_t Communicator::on_receive_response(
     case ENGINE_OP_READ_FAILED: {
       auto* rsp = msg->get_payload<ProtoReadFailed>();
       auto tensor_key = std::string(reinterpret_cast<char*>(rsp->tensor_key));
-      auto req_key = transport::get_request_key(tensor_key, rsp->offset);
+      auto req_key = transport::get_request_instance_key(tensor_key, rsp->offset, rsp->request_id);
 
       LOG(ERROR) << "[on_receive_response] READ_FAILED: key=" << tensor_key << " offset=" << rsp->offset
                  << " reason=" << rsp->reason;
@@ -3203,6 +3361,9 @@ misc::result_t Communicator::on_receive_response(
           break;
         case TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED:
           failure_status = absl::ResourceExhaustedError("GPU staging pool capacity exceeded");
+          break;
+        case TENSORCAST_READ_FAILED_DIRECT_RDMA_REQUIRED:
+          failure_status = absl::FailedPreconditionError("direct RDMA required but unavailable on peer");
           break;
         case TENSORCAST_READ_FAILED_MEM_MISMATCH:
         default:
@@ -3344,7 +3505,7 @@ void Communicator::start_pending_rdma_handshake(
         const absl::Status status = absl::InternalError("failed to allocate RDMA transport");
         auto failed_reads = drain_pending_reads_for_generation(endpoint, 0);
         for (auto& pending : failed_reads) {
-          pending_requests_.del(pending.request->get_key());
+          pending_requests_.erase_if_present(pending.request->get_key());
           pending.request->set_result(status);
         }
         {
@@ -3367,7 +3528,7 @@ void Communicator::start_pending_rdma_handshake(
         const absl::Status status = absl::InternalError("failed to prepare RDMA connect info");
         auto failed_reads = drain_pending_reads_for_generation(endpoint, 0);
         for (auto& pending : failed_reads) {
-          pending_requests_.del(pending.request->get_key());
+          pending_requests_.erase_if_present(pending.request->get_key());
           pending.request->set_result(status);
         }
         {
@@ -3409,7 +3570,7 @@ void Communicator::start_pending_rdma_handshake(
       const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
       auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
       for (auto& pending : failed_reads) {
-        pending_requests_.del(pending.request->get_key());
+        pending_requests_.erase_if_present(pending.request->get_key());
         pending.request->set_result(send_error);
       }
       {

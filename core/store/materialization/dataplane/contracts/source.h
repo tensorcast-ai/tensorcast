@@ -23,6 +23,11 @@ class SeekableSource : public Source {
 
   virtual absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) = 0;
 
+  // Optional raw CPU memory pointer for fast-path gather.
+  [[nodiscard]] virtual const uint8_t* cpu_base_ptr() const {
+    return nullptr;
+  }
+
   // Optional zero-copy capability: direct write into destination address space.
   // Default implementations disable the feature.
   [[nodiscard]] virtual bool supports_direct_write_at() const {

@@ -14,7 +14,7 @@ import subprocess
 import sys
 from distutils.cmd import Command
 from pathlib import Path
-from shutil import copyfile, rmtree, which
+from shutil import copyfile, copytree, ignore_patterns, rmtree, which
 
 import torch  # Import torch to get version info
 import yaml
@@ -23,9 +23,8 @@ from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.editable_wheel import editable_wheel
 from setuptools.command.install import install
-from wheel.bdist_wheel import bdist_wheel
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension  # noqa: E402
-
+from wheel.bdist_wheel import bdist_wheel
 
 # Import torch version validation utilities
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
@@ -439,18 +438,7 @@ def copy_schema_sql() -> None:
 
 def ensure_proto_python_generated() -> None:
     """Ensure generated Python protos exist and are linked into the package tree."""
-    proto_gen_dir = Path(dir_path) / "proto" / "gen" / "python" / "tensorcast"
-    if not proto_gen_dir.exists():
-        script_path = Path(dir_path) / "tools" / "build_proto_python.sh"
-        if not script_path.exists():
-            raise RuntimeError(
-                f"Missing generated protos at {proto_gen_dir} and build script not found at {script_path}"
-            )
-        print("Generating Python proto stubs via tools/build_proto_python.sh")
-        subprocess.check_call(["bash", str(script_path)], cwd=dir_path)
-
-    if not proto_gen_dir.exists():
-        raise RuntimeError(f"Python proto stubs not found at {proto_gen_dir}")
+    proto_gen_dir = get_generated_proto_python_dir()
 
     proto_link = Path(dir_path) / "tensorcast" / "proto"
     if proto_link.exists():
@@ -466,6 +454,46 @@ def ensure_proto_python_generated() -> None:
         print(f"Created symlink: {proto_link} -> {proto_gen_dir}")
     except Exception as e:
         print(f"Warning: Failed to create proto symlink: {e}")
+
+
+def get_generated_proto_python_dir() -> Path:
+    """Return the generated proto source tree used for packaging."""
+    proto_gen_dir = Path(dir_path) / "proto" / "gen" / "python" / "tensorcast"
+    if not proto_gen_dir.exists():
+        script_path = Path(dir_path) / "tools" / "build_proto_python.sh"
+        if not script_path.exists():
+            raise RuntimeError(
+                f"Missing generated protos at {proto_gen_dir} and build script not found at {script_path}"
+            )
+        print("Generating Python proto stubs via tools/build_proto_python.sh")
+        subprocess.check_call(["bash", str(script_path)], cwd=dir_path)
+
+    if not proto_gen_dir.exists():
+        raise RuntimeError(f"Python proto stubs not found at {proto_gen_dir}")
+
+    return proto_gen_dir
+
+
+def materialize_generated_proto_tree(build_lib: str) -> None:
+    """Copy generated proto modules into the wheel build tree.
+
+    Wheels cannot reliably package the repo's tensorcast/proto symlink, so we
+    copy the generated files into build/lib/tensorcast/proto instead.
+    """
+    proto_src = get_generated_proto_python_dir()
+    proto_dst = Path(build_lib) / "tensorcast" / "proto"
+
+    if proto_dst.is_symlink():
+        proto_dst.unlink()
+    elif proto_dst.exists():
+        rmtree(proto_dst)
+
+    copytree(
+        proto_src,
+        proto_dst,
+        ignore=ignore_patterns("__pycache__", "*.pyc"),
+    )
+    print(f"Copied generated protos to {proto_dst}")
 
 
 def find_bazel_daemon_binary() -> Path | None:
@@ -614,15 +642,6 @@ class EditableWheelCommand(editable_wheel):
         copy_schema_sql()
         editable_wheel.run(self)
 
-class BuildPyCommand(build_py):
-    description = "Builds the Python package sources"
-
-    def run(self):
-        ensure_proto_python_generated()
-        build_py.run(self)
-        copy_example_configs(self.build_lib)
-
-
 class CleanCommand(Command):
     """Custom clean command to tidy up the project root."""
 
@@ -677,6 +696,7 @@ class BuildPyCommand(build_py):
     def run(self):
         ensure_proto_python_generated()
         build_py.run(self)
+        materialize_generated_proto_tree(self.build_lib)
 
 
 ext_modules = []
@@ -915,13 +935,13 @@ setup(
             "*.so",
             "lib/*.so",
             "bin/*",
-            "proto/**/*.py",
-            "proto/**/*.pyi",
         ]
     },
     exclude_package_data={
-        # "tensorcast": [
-        #     "tensorcast/csrc/*.cc",
-        # ],
+        "tensorcast": [
+            "proto",
+            "proto/*",
+            "proto/**/*",
+        ],
     },
 )

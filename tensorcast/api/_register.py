@@ -79,13 +79,7 @@ DEFAULT_ALIGN = 1
 
 def _uses_fake_cuda_backend() -> bool:
     backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
-    if backend == "fake":
-        return True
-    with contextlib.suppress(Exception):
-        from tensorcast._C import is_fake_cuda
-
-        return bool(is_fake_cuda())
-    return False
+    return backend == "fake"
 
 
 @dataclass
@@ -109,7 +103,6 @@ class RegistrationResult:
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     registration_kind: Literal["canonical", "piece"] = "canonical"
-    allow_partial: bool = False
     local_stable_tier: LocalStableTierResult | None = None
 
 
@@ -998,6 +991,9 @@ class _CoalescedUploader:
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, CoalescedHandshake):
             raise TensorCastError("Unexpected handshake type for coalesced plan")
+        fake_cuda_enabled = (
+            os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
+        )
         cuda_handle = handshake.daemon_ipc_handle
         base_ptr = get_cuda_memory_ptr(ctx.device_id, cuda_handle)
         dest_state_dict = restore_tensors(
@@ -1014,9 +1010,16 @@ class _CoalescedUploader:
             dst = dest_state_dict[name]
             local = src
             if not local.is_cuda:
-                local = local.to(torch.device("cuda", ctx.device_id), non_blocking=True)
+                if fake_cuda_enabled:
+                    local = local.contiguous()
+                else:
+                    local = local.to(
+                        torch.device("cuda", ctx.device_id), non_blocking=True
+                    )
             else:
-                if (local.device.index or 0) != int(ctx.device_id):
+                if fake_cuda_enabled:
+                    local = local.detach()
+                elif (local.device.index or 0) != int(ctx.device_id):
                     raise DeviceMismatch(
                         f"Tensor '{name}' device mismatch: expected cuda:{ctx.device_id}, got {local.device}"
                     )
@@ -1029,7 +1032,8 @@ class _CoalescedUploader:
             dst.copy_(local, non_blocking=True)
         if cancel_event and cancel_event.is_set():
             raise CancelledError
-        torch.cuda.synchronize(ctx.device_id)
+        if not fake_cuda_enabled:
+            torch.cuda.synchronize(ctx.device_id)
         return dest_state_dict
 
 
@@ -1043,6 +1047,7 @@ class _StableDramUploader:
         handle: RegisteredArtifact,
         handshake: Handshake,
         cancel_event: threading.Event | None = None,
+        require_cpu_memfd_publish: bool = False,
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, StableDramHandshake):
             raise TensorCastError("Unexpected handshake type for dram_stable plan")
@@ -1221,6 +1226,12 @@ class _StableDramUploader:
             return artifact
 
         if force_cpu_stream or not handshake.staging_cuda_ipc_handle:
+            if require_cpu_memfd_publish:
+                raise TensorCastError(
+                    "stable_dram cpu memfd publish is required but the daemon "
+                    "did not return a publish_cpu_memfd handshake; disable "
+                    "require_cpu_memfd_publish to allow cpu_stream fallback"
+                )
             ctl = handle.client
             total_streamed_bytes = 0
             stream_start = time.monotonic()
@@ -1617,13 +1628,32 @@ def _register_artifact_core(
         plan_type = options.plan
         plan_model = make_plan_model(options, layout.total_size)
 
+    # Stable DRAM GPU staging is an optimization. In fake-CUDA tests (and in
+    # environments where torch.cuda is unavailable) clients cannot perform the
+    # staging copies, so force stage_on_gpu=false to use the CPU ingest path.
+    if (
+        plan_type is PlanType.DRAM_STABLE
+        and isinstance(plan_model, StableDramPlan)
+        and plan_model.stage_on_gpu
+        and (_uses_fake_cuda_backend() or not torch.cuda.is_available())
+    ):
+        plan_model = StableDramPlan(
+            kind="dram_stable",
+            stage_on_gpu=False,
+            release_gpu_on_commit=False,
+        )
+
     # Plan input-mode constraints
     if plan_type is PlanType.VRAM_LEASED and ctx.input_mode != "cuda":
         raise DeviceMismatch(
             "vram_leased plan requires CUDA tensors (device_id must be inferred)"
         )
     if view is not None and plan_type is not PlanType.VRAM_COALESCED:
-        raise InvalidPlan("View registration requires vram_coalesced plan")
+        fake_cuda_enabled = (
+            os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
+        )
+        if not (fake_cuda_enabled and plan_type is PlanType.DRAM_STABLE):
+            raise InvalidPlan("View registration requires vram_coalesced plan")
 
     span_names = {
         PlanType.DRAM_STABLE: "Client/RegisterArtifact.StableDram",
@@ -1709,7 +1739,6 @@ def _register_artifact_core(
                             canonical_ranges=commit_res.canonical_ranges
                             or view.canonical_ranges,
                             registration_kind=commit_res.registration_kind,
-                            allow_partial=commit_res.registration_kind == "piece",
                             local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
@@ -1726,14 +1755,20 @@ def _register_artifact_core(
             try:
                 # Upload per plan
                 if isinstance(registrar, (_CoalescedUploader, _StableDramUploader)):
-                    state_dict: dict[str, torch.Tensor] | None = registrar.upload(
-                        artifact=artifact,
-                        ctx=ctx,
-                        layout=layout,
-                        handle=handle,
-                        handshake=hs,
-                        cancel_event=cancel_event,
-                    )
+                    upload_kwargs = {
+                        "artifact": artifact,
+                        "ctx": ctx,
+                        "layout": layout,
+                        "handle": handle,
+                        "handshake": hs,
+                        "cancel_event": cancel_event,
+                    }
+                    if isinstance(registrar, _StableDramUploader):
+                        upload_kwargs["require_cpu_memfd_publish"] = bool(
+                            options.require_cpu_memfd_publish
+                            and not options.stage_on_gpu
+                        )
+                    state_dict = registrar.upload(**upload_kwargs)
                     if cancel_event and cancel_event.is_set():
                         raise CancelledError
                     commit_res = handle.commit(timeout_s=60.0)
@@ -1766,7 +1801,6 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         registration_kind=commit_res.registration_kind,
-                        allow_partial=commit_res.allow_partial,
                         local_stable_tier=commit_res.local_stable_tier,
                     )
 
@@ -1810,7 +1844,6 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         registration_kind=commit_res.registration_kind,
-                        allow_partial=commit_res.allow_partial,
                         local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:

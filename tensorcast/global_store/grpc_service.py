@@ -52,6 +52,7 @@ from tensorcast.global_store.repositories import (
     ArtifactLayoutAttachmentRepository,
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
+    AssemblyContributionRepository,
     AssemblyLayoutBindingRepository,
     AssemblyRuntimePolicyRepository,
     ChunkDirectoryRepository,
@@ -63,6 +64,7 @@ from tensorcast.global_store.repositories import (
     PendingTransportRequestRepository,
     ProofRepository,
     ReplicaRepository,
+    ShardHomeLeaseRepository,
     TransportRepository,
     ViewCoverageRepository,
     ViewRepository,
@@ -88,6 +90,9 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
     ArtifactQueryRpcHandler,
 )
+from tensorcast.global_store.rpc.assembly_contribution_rpc_handler import (
+    AssemblyContributionRpcHandler,
+)
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
@@ -109,6 +114,9 @@ from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
 from tensorcast.global_store.rpc.replica_registration_rpc_handler import (
     ReplicaRegistrationRpcHandler,
 )
+from tensorcast.global_store.rpc.shard_home_lease_rpc_handler import (
+    ShardHomeLeaseRpcHandler,
+)
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.view_proof_rpc_handler import ViewProofRpcHandler
 from tensorcast.global_store.rpc.worker_rpc_handler import WorkerRpcHandler
@@ -127,6 +135,7 @@ from tensorcast.global_store.services import (
     InstanceService,
     PlacementService,
     RecoveryService,
+    ShardHomeLeaseService,
     TransportService,
     ViewStateService,
     WorkerControlReducer,
@@ -233,6 +242,9 @@ class GlobalStoreServicer(
             self.connection
         )
         self.layout_spec_repository = LayoutSpecRepository(self.connection)
+        self.assembly_contribution_repository = AssemblyContributionRepository(
+            self.connection
+        )
         self.assembly_layout_binding_repository = AssemblyLayoutBindingRepository(
             self.connection
         )
@@ -244,6 +256,7 @@ class GlobalStoreServicer(
         )
         self.proof_repository = ProofRepository(self.connection)
         self.operation_repository = OperationRepository(self.connection)
+        self.shard_home_lease_repository = ShardHomeLeaseRepository(self.connection)
 
     def _init_catalog_handlers(self) -> None:
         """Initialize handlers for artifact catalog and workflow metadata."""
@@ -326,6 +339,12 @@ class GlobalStoreServicer(
         )
         self.layout_runtime_policy_rpc_handler = LayoutRuntimePolicyRpcHandler(
             assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
+            logger=logger,
+        )
+        self.assembly_contribution_rpc_handler = AssemblyContributionRpcHandler(
+            assembly_contribution_repository=self.assembly_contribution_repository,
             datetime_to_timestamp=datetime_to_timestamp,
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,
@@ -509,6 +528,14 @@ class GlobalStoreServicer(
         )
         self.worker_state_sync_rpc_handler = WorkerStateSyncRpcHandler(
             recovery_service=self.recovery_service,
+            logger=logger,
+        )
+        self.shard_home_lease_service = ShardHomeLeaseService(
+            self.shard_home_lease_repository
+        )
+        self.shard_home_lease_rpc_handler = ShardHomeLeaseRpcHandler(
+            shard_home_lease_service=self.shard_home_lease_service,
+            datetime_to_timestamp=datetime_to_timestamp,
             logger=logger,
         )
 

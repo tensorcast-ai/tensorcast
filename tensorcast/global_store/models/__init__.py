@@ -15,6 +15,7 @@ from .persistence import (
     PlacementTarget,
 )
 from .replica import ByteSpaceKind, ByteSpaceRef, ExportState, MemoryType, Replica
+from .shard_home_lease import ShardHomeLease
 from .transport import (
     Transport,
     TransportCompletionOutcome,
@@ -30,6 +31,7 @@ __all__ = [
     "TransportSchedulingGroup",
     "Worker",
     "WorkerMemoryTierState",
+    "ShardHomeLease",
     "MemoryType",
     "ByteSpaceKind",
     "ByteSpaceRef",

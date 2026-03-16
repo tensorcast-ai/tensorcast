@@ -266,7 +266,6 @@ TEST_CASE(
 
   auto* view = breq.mutable_view();
   view->set_canonical_size_bytes(16);
-  view->set_allow_partial(false);
   view->set_registration_kind(tensorcast::daemon::v2::VIEW_REGISTRATION_KIND_CANONICAL);
   view->set_placement(tensorcast::daemon::v2::TRANSFORM_PLACEMENT_SERVER);
   auto& tensors = *view->mutable_spec()->mutable_tensors();
@@ -307,35 +306,6 @@ TEST_CASE("BeginRegisterArtifact rejects missing registration_kind", "[daemon][r
   auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   REQUIRE(status.error_message().find("view.registration_kind must be specified") != std::string::npos);
-}
-
-TEST_CASE("BeginRegisterArtifact rejects allow_partial legacy flag", "[daemon][registration][view]") {
-  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
-  auto harness = make_harness(engine);
-  auto& service = harness->service();
-
-  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
-  breq.set_device_id(0);
-  breq.set_total_size(16);
-  breq.set_owner_pid(getpid());
-  breq.set_client_artifact_id("cgid:piece-allow-partial");
-  auto* idx = breq.mutable_tensor_index_data();
-  idx->set_data(R"({"weights":[0,32,[8],[1],"torch.float32",0]})");
-  idx->set_schema_version("v3");
-  idx->set_encoding("json");
-
-  auto* view = breq.mutable_view();
-  view->set_canonical_size_bytes(32);
-  view->set_placement(tensorcast::daemon::v2::TRANSFORM_PLACEMENT_SERVER);
-  view->set_allow_partial(true);
-  view->set_registration_kind(tensorcast::daemon::v2::VIEW_REGISTRATION_KIND_PIECE);
-  view->mutable_spec()->CopyFrom(make_narrow_view_spec(0, 4));
-
-  grpc::ServerContext ctx;
-  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
-  auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
-  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
-  REQUIRE(status.error_message().find("allow_partial") != std::string::npos);
 }
 
 TEST_CASE("BeginRegisterArtifact rejects full coverage transpose piece", "[daemon][registration][view]") {

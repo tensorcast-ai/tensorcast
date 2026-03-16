@@ -18,6 +18,7 @@ from tensorcast._c_ext import (
     get_cuda_memory_handle_with_offset,
 )
 from tensorcast.api._config import RegisterArtifactOptions, StorePolicy
+from tensorcast.api._device import device_uuid_for, resolve_device
 from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
@@ -53,19 +54,26 @@ from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
 )
-from tensorcast.api.store.binding import Binding
+from tensorcast.api.store.binding import Binding, BindingUpdateEpoch, SealedBindingValue
+from tensorcast.api.store.binding_state import parse_binding_value_or_raise
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
-from tensorcast.api.store.inplace_slot import InplaceSlot
+from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
 from tensorcast.api.store.mapped_binding import (
     CopyPlan,
     CopyPlanEntry,
     Range,
     TargetTensors,
+    normalize_copy_plan,
 )
 from tensorcast.api.store.materialization import MaterializationPipeline
+from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.owned_binding_slot import (
+    OwnedBindingSlot,
+    restore_owned_binding_tensors,
+)
+from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import (
     StoreRuntimeContext,
@@ -94,16 +102,134 @@ from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.daemon_ctl import get_daemon_client
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
     ArtifactDescriptor as TypedArtifactDescriptor,
 )
 from tensorcast.types import (
+    AssemblyAttemptRef,
     DeregisterArtifactOutcome,
+    PartialSealResult,
+    PublishedModelVersion,
     SealAssemblyResult,
     VramRegionHandle,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_plan_to_proto(
+    mapping: CopyPlan,
+) -> store_daemon_pb2.CopyPlan:
+    normalized = normalize_copy_plan(mapping)
+    proto = store_daemon_pb2.CopyPlan(version=1)
+    for entry in normalized:
+        entry_proto = proto.entries.add()
+        entry_proto.ckpt_name = str(entry.ckpt_name)
+        entry_proto.dst_name = str(entry.dst_name)
+        if entry.ckpt_range is not None:
+            entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
+            entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
+            entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
+        if entry.dst_range is not None:
+            entry_proto.dst_range.dim = int(entry.dst_range.dim)
+            entry_proto.dst_range.start = int(entry.dst_range.start)
+            entry_proto.dst_range.end = int(entry.dst_range.end)
+    return proto
+
+
+def _normalize_target_layout_contract(
+    target_layout: store_daemon_pb2.TargetLayout,
+) -> tuple[
+    int,
+    int,
+    int,
+    str,
+    bytes,
+    tuple[tuple[int, int], ...],
+    tuple[tuple[str, int, int, int], ...],
+]:
+    storage_order = {
+        str(storage.storage_id): idx
+        for idx, storage in enumerate(target_layout.storages)
+    }
+    storages = tuple(
+        (int(storage.device_id), int(storage.storage_length))
+        for storage in target_layout.storages
+    )
+    offsets = tuple(
+        sorted(
+            (
+                str(offset.name),
+                int(storage_order[str(offset.storage_id)]),
+                int(offset.storage_offset),
+                int(offset.logical_length),
+            )
+            for offset in target_layout.offsets
+        )
+    )
+    return (
+        int(target_layout.layout_kind),
+        int(target_layout.index_kind),
+        int(target_layout.tensor_spec_kind),
+        str(target_layout.view_id or ""),
+        bytes(target_layout.logical_layout_hash),
+        storages,
+        offsets,
+    )
+
+
+def _validate_client_binding_targets(
+    *,
+    layout: BindingLayout,
+    target_tensors: Mapping[str, torch.Tensor],
+    device_id: int,
+    pipeline: MaterializationPipeline,
+    expected_index: CanonicalIndex,
+) -> None:
+    if layout.target_layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW:
+        selection_order = tuple(
+            str(offset.name) for offset in layout.target_layout.offsets
+        )
+        derived_layout = pipeline._build_region_backed_layout(
+            canonical_index=expected_index,
+            canonical_index_bytes=layout.target_index_bytes,
+            target=target_tensors,
+            device_id=device_id,
+            tensor_names=selection_order,
+            view_spec=None,
+            view_id=str(layout.target_layout.view_id or "") or None,
+            view_index_hint=layout.target_index_bytes,
+            selection_order=selection_order,
+        )
+        if bytes(derived_layout.view_index_bytes or b"") != bytes(
+            layout.target_index_bytes
+        ):
+            raise ArtifactError(
+                "target_tensors do not match BindingLayout index bytes",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+    else:
+        derived_layout = pipeline._build_region_backed_layout(
+            canonical_index=expected_index,
+            canonical_index_bytes=layout.target_index_bytes,
+            target=target_tensors,
+            device_id=device_id,
+            tensor_names=None,
+            view_spec=None,
+            view_id=None,
+            view_index_hint=None,
+            selection_order=None,
+        )
+    if _normalize_target_layout_contract(
+        derived_layout.layout
+    ) != _normalize_target_layout_contract(layout.target_layout):
+        raise ArtifactError(
+            "target_tensors do not match the BindingLayout storage contract",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
 
 
 def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
@@ -113,6 +239,30 @@ def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
         return ArtifactIdKind.CGID
     inferred = infer_artifact_id_kind(artifact_id)
     return inferred or ArtifactIdKind.MI2
+
+
+def _fallback_contribution_contract_proto(
+    attempt: AssemblyAttemptRef,
+) -> store_daemon_pb2.ContributionContractSnapshot:
+    snapshot = store_daemon_pb2.ContributionContractSnapshot(
+        layout_id=str(attempt.layout_id),
+        require_live_contributions=True,
+    )
+    if attempt.expected_view_ids:
+        for view_id in attempt.expected_view_ids:
+            entry = snapshot.required_contributions.add()
+            entry.view_id = str(view_id)
+            entry.contribution_kind = (
+                store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
+            )
+            entry.coverage_semantics = "phase1_layout_expected_view"
+        return snapshot
+
+    entry = snapshot.required_contributions.add()
+    entry.view_id = "__canonical_full__"
+    entry.contribution_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
+    entry.coverage_semantics = "phase1_canonical_full"
+    return snapshot
 
 
 def _split_mi2_artifact_id(artifact_id: str) -> tuple[str | None, str | None]:
@@ -461,6 +611,253 @@ class Store:
             device=device,
         )
 
+    def create_binding(
+        self,
+        layout: BindingLayout,
+        *,
+        ownership: str = "daemon",
+        device: torch.device | str | None = None,
+        target_tensors: Mapping[str, torch.Tensor] | None = None,
+        mapping: CopyPlan | None = None,
+        ctx: CallContext | None = None,
+    ) -> Binding:
+        if not isinstance(layout, BindingLayout):
+            raise ArtifactError(
+                "layout must be a BindingLayout",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        normalized_mapping: tuple[CopyPlanEntry, ...] | None = None
+        copy_plan_proto: store_daemon_pb2.CopyPlan | None = None
+        if mapping is not None:
+            normalized_mapping = normalize_copy_plan(mapping)
+            if not layout.dst_specs:
+                raise ArtifactError(
+                    "mapping requires a mapped BindingLayout with dst_specs",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            copy_plan_proto = _copy_plan_to_proto(normalized_mapping)
+        elif layout.dst_specs:
+            raise ArtifactError(
+                "mapped BindingLayout requires mapping",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        runtime = self._runtime
+        client = runtime.ensure_client()
+        timeout_s = _ctx_timeout_s(ctx)
+        mode = str(ownership).strip().lower()
+        if mode == "daemon":
+            if device is None:
+                raise ArtifactError(
+                    "device is required for daemon-owned bindings",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if target_tensors is not None:
+                raise ArtifactError(
+                    "target_tensors must be omitted for daemon-owned bindings",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            device_obj = torch.device(device)
+            device_id = resolve_device(device_obj, allow_cpu=False)
+            response = client.create_binding(
+                ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_DAEMON,
+                target_layout=layout.target_layout,
+                target_index_bytes=layout.target_index_bytes,
+                device_uuid=device_uuid_for(device_id),
+                binding_layout_id=layout.binding_layout_id,
+                copy_plan=copy_plan_proto,
+                dst_specs=layout.dst_specs if copy_plan_proto is not None else None,
+                timeout_s=timeout_s if timeout_s is not None else 600.0,
+            )
+            try:
+                tensors = restore_owned_binding_tensors(
+                    response=response,
+                    runtime=runtime,
+                    device_id=device_id,
+                )
+                current_value_metadata = parse_binding_value_or_raise(
+                    response.current_value
+                    if hasattr(response, "current_value")
+                    else None,
+                    rpc_name="CreateBinding",
+                    expected_binding_id=str(response.binding_id),
+                    expected_binding_layout_id=layout.binding_layout_id,
+                )
+            except Exception:
+                with contextlib.suppress(Exception):
+                    client.close_owned_binding(binding_id=str(response.binding_id))
+                raise
+            slot = OwnedBindingSlot(
+                store=self,
+                runtime=runtime,
+                tensors=tensors,
+                layout=layout,
+                binding_id=str(response.binding_id),
+                current_value_metadata=current_value_metadata,
+                device=device_obj,
+                device_id=device_id,
+                fallback=None,
+                target_publication_token=None,
+            )
+            return Binding(slot)
+
+        if mode != "client":
+            raise ArtifactError(
+                "ownership must be 'daemon' or 'client'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not target_tensors:
+            raise ArtifactError(
+                "target_tensors are required for client-owned bindings",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        expected_index = canonical_index_from_bytes(layout.target_index_bytes)
+        expected_names = {entry.name for entry in expected_index.entries}
+        if {str(name) for name in target_tensors} != expected_names:
+            raise ArtifactError(
+                "target_tensors must match the BindingLayout tensor set",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if device is not None:
+            requested_device_id = resolve_device(torch.device(device), allow_cpu=False)
+        else:
+            requested_device_id = None
+        first_tensor = next(iter(target_tensors.values()))
+        if not first_tensor.is_cuda:
+            raise ArtifactError(
+                "client-owned bindings require CUDA target tensors",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        device_id = resolve_device(first_tensor.device, allow_cpu=False)
+        if requested_device_id is not None and requested_device_id != device_id:
+            raise ArtifactError(
+                "device does not match target_tensors",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        for name, tensor in target_tensors.items():
+            if not isinstance(tensor, torch.Tensor):
+                raise ArtifactError(
+                    f"target tensor '{name}' must be a torch.Tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_cuda:
+                raise ArtifactError(
+                    f"target tensor '{name}' must be CUDA",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if resolve_device(tensor.device, allow_cpu=False) != device_id:
+                raise ArtifactError(
+                    "target_tensors must share the same CUDA device",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+        for entry in expected_index.entries:
+            tensor = target_tensors[entry.name]
+            if tensor.dtype != entry.dtype:
+                raise ArtifactError(
+                    f"target tensor '{entry.name}' dtype does not match BindingLayout",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if tuple(int(v) for v in tensor.shape) != tuple(
+                int(v) for v in entry.shape
+            ):
+                raise ArtifactError(
+                    f"target tensor '{entry.name}' shape does not match BindingLayout",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if tuple(int(v) for v in tensor.stride()) != tuple(
+                int(v) for v in entry.stride
+            ):
+                raise ArtifactError(
+                    f"target tensor '{entry.name}' stride does not match BindingLayout",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+
+        region_ids: list[str] = []
+        try:
+            for base_ptr, nbytes in sorted(
+                collect_storage_bases(target_tensors).items()
+            ):
+                handle = self.register_vram_region(
+                    device_id=device_id,
+                    base_ptr=base_ptr,
+                    size_bytes=nbytes,
+                    ttl_ms=0,
+                )
+                region_ids.append(handle.region_id)
+            _validate_client_binding_targets(
+                layout=layout,
+                target_tensors=target_tensors,
+                device_id=device_id,
+                pipeline=self._materialization,
+                expected_index=expected_index,
+            )
+            response = client.create_binding(
+                ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_CLIENT,
+                target_layout=layout.target_layout,
+                target_index_bytes=layout.target_index_bytes,
+                device_uuid=device_uuid_for(device_id),
+                binding_layout_id=layout.binding_layout_id,
+                copy_plan=copy_plan_proto,
+                dst_specs=layout.dst_specs if copy_plan_proto is not None else None,
+                timeout_s=timeout_s if timeout_s is not None else 600.0,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                for region_id in region_ids:
+                    self.unregister_vram_region(region_id)
+            raise
+        try:
+            current_value_metadata = parse_binding_value_or_raise(
+                response.current_value if hasattr(response, "current_value") else None,
+                rpc_name="CreateBinding",
+                expected_binding_id=str(response.binding_id),
+                expected_binding_layout_id=layout.binding_layout_id,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                client.close_owned_binding(binding_id=str(response.binding_id))
+            with contextlib.suppress(Exception):
+                for region_id in region_ids:
+                    self.unregister_vram_region(region_id)
+            raise
+        slot = InplaceSlot(
+            store=self,
+            runtime=runtime,
+            pipeline=self._materialization,
+            tensors=target_tensors,
+            device=first_tensor.device,
+            device_id=device_id,
+            layout=layout,
+            binding_id=str(response.binding_id),
+            region_ids=tuple(region_ids),
+            selection_names=tuple(
+                offset.name for offset in layout.target_layout.offsets
+            ),
+            view_id=str(layout.target_layout.view_id or "") or None,
+            view_subset_hash=None,
+            view_spec=None,
+            fallback=None,
+            current_value_metadata=current_value_metadata,
+            target_publication_token=None,
+            copy_plan=normalized_mapping,
+        )
+        return Binding(slot)
+
     def query_persistence_status(
         self, *, task_id: str | None = None, artifact_id: str | None = None
     ) -> PersistenceStatusResult:
@@ -581,6 +978,147 @@ class Store:
             degraded_reason=resp.degraded_reason or None,
             last_error=resp.last_error or None,
             shards=tuple(shards),
+        )
+
+    def start_assembly_attempt(
+        self,
+        *,
+        layout_id: str,
+        ctx: CallContext | None = None,
+    ) -> AssemblyAttemptRef:
+        del ctx
+        return self._runtime.ensure_client().start_assembly_attempt(layout_id=layout_id)
+
+    def wait_assembly_attempt(
+        self,
+        attempt: AssemblyAttemptRef | str,
+        *,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        client = self._runtime.ensure_client()
+        operation_id: str
+        assembly_id: str
+        fallback_snapshot: store_daemon_pb2.SealAssemblySnapshot | None = None
+        trigger_timeout_s: float | None = None
+        if isinstance(attempt, AssemblyAttemptRef):
+            operation_id = attempt.coordinator_operation_id
+            assembly_id = attempt.assembly_id
+            fallback_snapshot = store_daemon_pb2.SealAssemblySnapshot(
+                assembly_id=attempt.assembly_id,
+                layout_id=attempt.layout_id,
+                contribution_contract_hash=attempt.contribution_contract_hash,
+            )
+            fallback_snapshot.expected_view_ids.extend(attempt.expected_view_ids)
+            if attempt.contribution_contract_proto:
+                fallback_snapshot.contribution_contract.ParseFromString(
+                    attempt.contribution_contract_proto
+                )
+            else:
+                fallback_snapshot.contribution_contract.CopyFrom(
+                    _fallback_contribution_contract_proto(attempt)
+                )
+            trigger_timeout_s = (
+                10.0 if timeout_s is None else max(1.0, min(float(timeout_s), 10.0))
+            )
+            # Piece/view replicas are published asynchronously through worker-state
+            # reconciliation. A short settle window avoids sealing against a view
+            # set whose metadata exists but whose transport-eligible replicas have
+            # not become visible yet.
+            time.sleep(1.0)
+            try:
+                current = client.get_operation(
+                    operation_id,
+                    timeout_s=trigger_timeout_s,
+                )
+            except Exception:
+                current = None
+            if (
+                current is None
+                or current.status.state == operation_pb2.OPERATION_STATE_PENDING
+            ):
+                client.start_seal_assembly(
+                    assembly_id=attempt.assembly_id,
+                    layout_id=attempt.layout_id,
+                    expected_coordinator_generation=attempt.coordinator_generation,
+                    attempt_snapshot=fallback_snapshot,
+                    timeout_s=trigger_timeout_s,
+                )
+        else:
+            operation_id = str(attempt)
+            assembly_id = ""
+        wait_timeout_s = 120.0 if timeout_s is None else float(timeout_s)
+        resp = client.wait_operation(
+            operation_id,
+            timeout_ms=max(1, int(wait_timeout_s * 1000)),
+            timeout_s=wait_timeout_s + 5.0,
+        )
+        if resp.status.state != operation_pb2.OPERATION_STATE_SUCCESS:
+            message = (
+                resp.status.message or "Assembly attempt did not complete successfully"
+            )
+            if resp.status.HasField("error"):
+                message = resp.status.error.message or message
+            raise ArtifactError(
+                message,
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        payload = store_daemon_pb2.SealAssemblyResult()
+        if not resp.status.result.Unpack(payload):
+            raise ArtifactError(
+                "Unexpected assembly attempt result type",
+                status_code="INTERNAL",
+                retryable=False,
+            )
+        artifact = payload.artifact
+        descriptor = TypedArtifactDescriptor(
+            artifact_id=str(artifact.artifact_id),
+            index_multihash=str(artifact.index_multihash or "") or None,
+            data_multihash=str(artifact.data_multihash or "") or None,
+            schema_version=str(artifact.schema_version or "") or None,
+            encoding=str(artifact.encoding or "") or None,
+            total_size=int(artifact.total_size),
+            id_kind=_artifact_id_kind_from_proto(
+                artifact.id_kind, artifact.artifact_id
+            ),
+        )
+        return PublishedModelVersion(
+            assembly_id=assembly_id,
+            source_artifact_id=descriptor.artifact_id,
+            source_descriptor=descriptor,
+            serving_artifact_id=(
+                str(payload.serving_artifact.artifact_id)
+                if payload.HasField("serving_artifact")
+                and payload.serving_artifact.artifact_id
+                else None
+            ),
+            serving_descriptor=(
+                TypedArtifactDescriptor(
+                    artifact_id=str(payload.serving_artifact.artifact_id),
+                    index_multihash=str(payload.serving_artifact.index_multihash or "")
+                    or None,
+                    data_multihash=str(payload.serving_artifact.data_multihash or "")
+                    or None,
+                    schema_version=str(payload.serving_artifact.schema_version or "")
+                    or None,
+                    encoding=str(payload.serving_artifact.encoding or "") or None,
+                    total_size=int(payload.serving_artifact.total_size),
+                    id_kind=_artifact_id_kind_from_proto(
+                        payload.serving_artifact.id_kind,
+                        payload.serving_artifact.artifact_id,
+                    ),
+                )
+                if payload.HasField("serving_artifact")
+                and payload.serving_artifact.artifact_id
+                else None
+            ),
+            source_version_key=str(payload.source_version_key or "") or None,
+            serving_version_key=str(payload.serving_version_key or "") or None,
+            representation_contract_hash=(
+                str(payload.representation_contract_hash or "") or None
+            ),
+            serving_manifest_ref=str(payload.serving_manifest_ref or "") or None,
         )
 
     def persistence_operation(
@@ -1188,11 +1726,62 @@ def put_async(
     )
 
 
+def create_binding(
+    layout: BindingLayout,
+    *,
+    ownership: str = "daemon",
+    device: torch.device | str | None = None,
+    target_tensors: Mapping[str, torch.Tensor] | None = None,
+    mapping: CopyPlan | None = None,
+    ctx: CallContext | None = None,
+) -> Binding:
+    return _coerce_store().create_binding(
+        layout,
+        ownership=ownership,
+        device=device,
+        target_tensors=target_tensors,
+        mapping=mapping,
+        ctx=ctx,
+    )
+
+
 def query_persistence_status(
     *, task_id: str | None = None, artifact_id: str | None = None
 ) -> PersistenceStatusResult:
     return _coerce_store().query_persistence_status(
         task_id=task_id, artifact_id=artifact_id
+    )
+
+
+def persistence_operation(
+    *,
+    task_id: str | None = None,
+    artifact_id: str | None = None,
+    ctx: CallContext | None = None,
+) -> Operation[PersistenceStatusResult]:
+    return _coerce_store().persistence_operation(
+        task_id=task_id, artifact_id=artifact_id, ctx=ctx
+    )
+
+
+def start_assembly_attempt(
+    *,
+    layout_id: str,
+    ctx: CallContext | None = None,
+) -> AssemblyAttemptRef:
+    return _coerce_store().start_assembly_attempt(layout_id=layout_id, ctx=ctx)
+
+
+def wait_assembly_attempt(
+    attempt: AssemblyAttemptRef | str,
+    *,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().wait_assembly_attempt(
+        attempt,
+        timeout_s=timeout_s,
+        ctx=ctx,
     )
 
 
@@ -1280,14 +1869,14 @@ __all__ = [
     "ArtifactError",
     "ArtifactFuture",
     "ArtifactStatusCode",
+    "AssemblyAttemptRef",
     "Binding",
+    "BindingLayout",
+    "BindingUpdateEpoch",
     "CanonicalIndex",
     "CanonicalIndexEntry",
     "CopyPlan",
     "CopyPlanEntry",
-    "DeferredCommitResult",
-    "DeferredLoader",
-    "InplaceSlot",
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",
@@ -1295,9 +1884,12 @@ __all__ = [
     "MaterializationBatcher",
     "PlacementPin",
     "PrefetchedReplica",
+    "PartialSealResult",
+    "PublishedModelVersion",
     "RegisteredArtifact",
     "ReplicaInfo",
     "RetryPolicy",
+    "SealedBindingValue",
     "StoreCapabilities",
     "Store",
     "StoreOptions",
@@ -1311,6 +1903,7 @@ __all__ = [
     "PersistenceShardStatus",
     "artifact",
     "artifact_async",
+    "create_binding",
     "from_disk",
     "store",
     "shutdown_process_store",
@@ -1320,12 +1913,15 @@ __all__ = [
     "put",
     "put_async",
     "query_persistence_status",
+    "persistence_operation",
+    "start_assembly_attempt",
     "register_view",
     "register_piece",
     "register_vram_region",
     "unregister_vram_region",
     "deregister_artifact",
     "seal_assembly",
+    "wait_assembly_attempt",
     "get_daemon_client",
     "require_runtime",
     "_register_artifact_core",

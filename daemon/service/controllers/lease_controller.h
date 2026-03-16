@@ -10,6 +10,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/placement_lease_tokens.h"
 #include "daemon/state/retention_registry.h"
 #include "daemon/state/session_lifecycle.h"
@@ -23,6 +24,7 @@ class LeaseController {
   struct Dep {
     store::StoreEngine& engine;
     SessionLifecycleManager& lifecycle;
+    LifecycleKernel& lifecycle_kernel;
     PlacementLeaseTokens& placement_lease_tokens;
     common::CapabilityTokenManager* capability_tokens{nullptr};
     RetentionRegistry* retention_registry{nullptr};

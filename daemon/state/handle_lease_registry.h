@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,6 +24,7 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/unified_memory_authority.h"
 #include "core/store/store_engine.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/session_lifecycle.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
@@ -47,7 +49,11 @@ class HandleLeaseRegistry {
     uint32_t max_mints_per_second{0};
   };
 
-  HandleLeaseRegistry(Options opts, store::StoreEngine& engine, SessionLifecycleManager& lifecycle);
+  HandleLeaseRegistry(
+      Options opts,
+      store::StoreEngine& engine,
+      SessionLifecycleManager& lifecycle,
+      LifecycleKernel& lifecycle_kernel);
 
   [[nodiscard]] absl::StatusOr<std::string> mint_cuda_ipc_lease(const store::loading::ReplicaKey& key, pid_t pid);
 
@@ -57,14 +63,27 @@ class HandleLeaseRegistry {
       CpuMemfdDescriptor memfd,
       absl::Span<const uint32_t> exported_chunks);
 
+  [[nodiscard]] absl::StatusOr<std::string> mint_external_cuda_lease(pid_t pid, std::function<void()> cleanup);
+
   [[nodiscard]] absl::Status release(const std::string& lease_token);
 
+  void handle_pid_exit(pid_t pid);
+
   [[nodiscard]] absl::StatusOr<CpuMemfdDescriptor> get_cpu_memfd_descriptor(const std::string& lease_token) const;
+
+  [[nodiscard]] absl::StatusOr<ParsedCredential> build_parsed_credential(
+      const std::string& lease_token,
+      LifecycleFrontDoorKind front_door_kind,
+      absl::Time now) const;
+
+  [[nodiscard]] LifecycleKernel* lifecycle_kernel() const {
+    return lifecycle_kernel_;
+  }
 
   [[nodiscard]] size_t size() const;
 
  private:
-  enum class HandleKind : uint8_t { kCudaIpc = 0, kCpuMemfd = 1 };
+  enum class HandleKind : uint8_t { kCudaIpc = 0, kCpuMemfd = 1, kExternal = 2 };
 
   struct CpuExportState;
   struct GpuExportState;
@@ -75,6 +94,8 @@ class HandleLeaseRegistry {
     SessionLifecycleManager::LeaseId lease_id{0};
     std::shared_ptr<CpuExportState> cpu_export_state;
     std::shared_ptr<GpuExportState> gpu_export_state;
+    pid_t external_owner_pid{0};
+    std::function<void()> external_cleanup;
   };
 
   struct CpuExportState {
@@ -111,6 +132,7 @@ class HandleLeaseRegistry {
   const Options opts_;
   store::StoreEngine* engine_;
   SessionLifecycleManager* lifecycle_;
+  LifecycleKernel* lifecycle_kernel_;
 
   mutable absl::Mutex mu_;
   absl::BitGen bitgen_ ABSL_GUARDED_BY(mu_);

@@ -2,6 +2,7 @@
 
 #include "core/store/materialization/dataplane/runtime/pump.h"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -331,6 +332,13 @@ void run_range_producer(
     absl::Span<const std::pair<uint64_t, size_t>> ranges,
     std::atomic<size_t>& range_index,
     PumpState& state) {
+  const absl::Time producer_start = absl::Now();
+  uint64_t produced_chunks = 0;
+  uint64_t produced_bytes = 0;
+  uint64_t wait_free_chunk_us_total = 0;
+  uint64_t read_at_us_total = 0;
+  uint64_t mark_ready_us_total = 0;
+
   const auto fail_producer = [&](absl::Status status) {
     absl::MutexLock lock(&state.status_mutex);
     if (state.producer_status.ok()) {
@@ -352,7 +360,11 @@ void run_range_producer(
     uint64_t current_offset = offset;
 
     while (remaining > 0 && !state.should_stop.load(std::memory_order_acquire)) {
+      const absl::Time wait_free_start = absl::Now();
       auto slot_result = pool.get_free_chunk();
+      const uint64_t wait_free_us =
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - wait_free_start)));
+      wait_free_chunk_us_total += wait_free_us;
       if (!slot_result.ok()) {
         fail_producer(slot_result.status());
         break;
@@ -375,7 +387,11 @@ void run_range_producer(
         break;
       }
 
+      const absl::Time read_start = absl::Now();
       auto read_result = src.read_at(current_offset, buffer, to_read);
+      const uint64_t read_us =
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - read_start)));
+      read_at_us_total += read_us;
       if (!read_result.ok()) {
         fail_producer(read_result.status());
         break;
@@ -409,7 +425,11 @@ void run_range_producer(
         state.chunk_offsets.emplace(chunk_id, current_offset);
       }
 
+      const absl::Time mark_ready_start = absl::Now();
       auto status = pool.mark_chunk_ready(slot_id, chunk_id, bytes_read);
+      const uint64_t mark_ready_us =
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - mark_ready_start)));
+      mark_ready_us_total += mark_ready_us;
       if (!status.ok()) {
         record_copy_failure("cpu");
         fail_producer(status);
@@ -421,8 +441,19 @@ void run_range_producer(
       remaining -= bytes_read;
       // Transfer ownership to consumer; avoid returning the slot here
       lease.release();
+      produced_chunks += 1;
+      produced_bytes += bytes_read;
+      VLOG(2) << "pump_producer_chunk range_index=" << idx << " chunk_id=" << chunk_id << " slot=" << slot_id
+              << " src_offset=" << (current_offset - bytes_read) << " bytes=" << bytes_read
+              << " wait_free_chunk_us=" << wait_free_us << " read_at_us=" << read_us
+              << " mark_chunk_ready_us=" << mark_ready_us << " remaining_in_range=" << remaining;
     }
   }
+  VLOG(2) << "pump_producer_summary ranges=" << ranges.size() << " produced_chunks=" << produced_chunks
+          << " produced_bytes=" << produced_bytes << " wait_free_chunk_us_total=" << wait_free_chunk_us_total
+          << " read_at_us_total=" << read_at_us_total << " mark_chunk_ready_us_total=" << mark_ready_us_total
+          << " duration_us="
+          << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - producer_start)));
 }
 
 } // namespace

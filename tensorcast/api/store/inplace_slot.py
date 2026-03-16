@@ -13,6 +13,11 @@ from tensorcast.api import _metrics as store_metrics
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
+from tensorcast.api.store.binding_state import (
+    BindingValueMetadata,
+    clone_selection,
+    parse_binding_value_or_raise,
+)
 from tensorcast.api.store.mapped_binding import (
     CopyPlanEntry,
     compute_mapped_view_id,
@@ -20,6 +25,7 @@ from tensorcast.api.store.mapped_binding import (
     view_narrow_ranges,
 )
 from tensorcast.api.store.materialization import _build_source_policy
+from tensorcast.api.store.owned_binding_layout import BindingLayout
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError, FallbackOptions
@@ -37,7 +43,7 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
     from tensorcast.api.store.artifact import Artifact
-    from tensorcast.api.store.deferred_loader import DeferredCommitResult
+    from tensorcast.api.store.binding import BindingUpdateEpoch
     from tensorcast.api.store.materialization import (
         MaterializationPipeline,
         _RegionBackedLayout,
@@ -141,14 +147,16 @@ class InplaceSlot:
         tensors: Mapping[str, torch.Tensor],
         device: torch.device,
         device_id: int,
-        region_id: str | None,
-        region_layout: "_RegionBackedLayout",
+        layout: BindingLayout,
+        binding_id: str,
+        region_ids: Sequence[str] | None,
+        selection_names: Sequence[str] | None,
+        view_id: str | None,
+        view_subset_hash: bytes | None,
         view_spec: common_pb2.ViewSpec | None,
         fallback: FallbackOptions | None,
-        commit_result: "DeferredCommitResult",
-        artifact_id: str,
-        canonical_index_bytes: bytes,
-        target_write_token: bytes | None,
+        current_value_metadata: BindingValueMetadata | None,
+        target_publication_token: bytes | None,
         copy_plan: Sequence[CopyPlanEntry] | None = None,
     ) -> None:
         if not tensors:
@@ -162,34 +170,35 @@ class InplaceSlot:
         self._pipeline = pipeline
         self._tensors = dict(tensors)
         self._tensors_view: Mapping[str, torch.Tensor] = MappingProxyType(self._tensors)
+        self._layout = layout
+        self._binding_id = str(binding_id)
+        self._binding_layout_id = str(layout.binding_layout_id)
         self._device = device
         self._device_id = int(device_id)
-        self._region_id = region_id
-        self._region_layout = region_layout
-        self._region_ids = (
-            tuple(region_layout.region_ids)
-            if getattr(region_layout, "region_ids", None)
-            else (region_id,)
-            if region_id
-            else ()
-        )
+        self._region_ids = tuple(region_ids or ())
         self._view_spec = view_spec
         self._fallback = fallback
-        self._artifact_id = str(artifact_id)
-        self._canonical_index_bytes = bytes(canonical_index_bytes)
-        self._target_write_token = (
-            bytes(target_write_token) if target_write_token else None
+        self._current_value_metadata = current_value_metadata
+        self._artifact_id = (
+            str(current_value_metadata.source_artifact_id)
+            if current_value_metadata is not None
+            and current_value_metadata.source_artifact_id is not None
+            else None
+        )
+        self._contribution_source_artifact_id = self._artifact_id
+        self._target_publication_token = (
+            bytes(target_publication_token) if target_publication_token else None
         )
         self._copy_plan = tuple(copy_plan) if copy_plan is not None else None
 
-        self._selection_names = tuple(region_layout.selection_names)
-        self._view_id = _normalize_view_id(region_layout.view_id)
-        self._view_subset_hash = bytes(region_layout.view_subset_hash or b"")
-        self._logical_layout_hash = bytes(region_layout.layout.logical_layout_hash)
+        self._selection_names = tuple(str(name) for name in (selection_names or ()))
+        self._view_id = _normalize_view_id(view_id)
+        self._view_subset_hash = bytes(view_subset_hash or b"")
+        self._logical_layout_hash = bytes(layout.target_layout.logical_layout_hash)
         if not self._logical_layout_hash:
-            index_bytes = region_layout.view_index_bytes or self._canonical_index_bytes
+            index_bytes = bytes(layout.target_index_bytes)
             needs_view_index = (
-                region_layout.layout.index_kind
+                layout.target_layout.index_kind
                 == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
             )
             self._logical_layout_hash = compute_logical_layout_hash(
@@ -200,7 +209,12 @@ class InplaceSlot:
             view_id=self._view_id,
             view_subset_hash=self._view_subset_hash,
         )
-        self._commit_result = commit_result
+        self._seal_generation_counter = (
+            int(current_value_metadata.seal_generation)
+            if current_value_metadata is not None
+            else 0
+        )
+        self._active_update_epoch: str | None = None
         self._published_lease_id: str | None = None
         self._published_replica_id: str | None = None
         self._dirty = False
@@ -214,24 +228,34 @@ class InplaceSlot:
         return self._tensors_view
 
     @property
-    def artifact_id(self) -> str:
+    def binding_id(self) -> str:
+        return self._binding_id
+
+    @property
+    def binding_layout_id(self) -> str:
+        return self._binding_layout_id
+
+    @property
+    def layout(self) -> BindingLayout:
+        return self._layout
+
+    @property
+    def current_value_metadata(self) -> BindingValueMetadata | None:
+        return self._current_value_metadata
+
+    @property
+    def artifact_id(self) -> str | None:
         return self._artifact_id
 
     @property
-    def selection(self) -> common_pb2.ArtifactSelection:
-        selection = common_pb2.ArtifactSelection(
-            artifact_id=self._artifact_id,
-            view_id=self._view_id,
-            logical_layout_hash=self._logical_layout_hash,
-            selection_hash=self._selection_hash,
-        )
-        if self._view_subset_hash:
-            selection.view_subset_hash = self._view_subset_hash
-        if self._view_spec is not None:
-            selection.view_spec.CopyFrom(self._view_spec)
-        if self._selection_names:
-            selection.tensor_names.extend(self._selection_names)
-        return selection
+    def contribution_source_artifact_id(self) -> str | None:
+        return self._contribution_source_artifact_id
+
+    @property
+    def selection(self) -> common_pb2.ArtifactSelection | None:
+        if self._current_value_metadata is None:
+            return None
+        return clone_selection(self._current_value_metadata.selection)
 
     @property
     def byte_space(self) -> common_pb2.ByteSpaceRef:
@@ -247,10 +271,6 @@ class InplaceSlot:
     @property
     def device(self) -> torch.device:
         return self._device
-
-    @property
-    def commit_result(self) -> "DeferredCommitResult":
-        return self._commit_result
 
     @property
     def published_lease_id(self) -> str | None:
@@ -283,6 +303,12 @@ class InplaceSlot:
             )
         if self._published_lease_id is not None:
             return
+        if self._artifact_id is None or self.selection is None:
+            raise ArtifactError(
+                "publish_replica requires an artifact-backed current value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         if not _selection_publishable(
             selection_names=self._selection_names,
             view_subset_hash=self._view_subset_hash,
@@ -293,9 +319,9 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_write_token:
+        if not self._target_publication_token:
             raise ArtifactError(
-                "target_write_token missing; daemon publish not available",
+                "target_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -304,7 +330,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_write_token=self._target_write_token,
+                target_publication_token=self._target_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -347,6 +373,88 @@ class InplaceSlot:
             drain_timeout_s=drain_timeout_s,
             ctx=ctx,
         )
+
+    def begin_update(
+        self,
+        *,
+        drain_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> "BindingUpdateEpoch":
+        from tensorcast.api.store.binding import BindingUpdateEpoch
+
+        self._ensure_open()
+        operation_id = uuid.uuid4().hex
+        if self._published_lease_id is not None:
+            self._retire_published(
+                operation_id=operation_id,
+                wait=True,
+                drain_timeout_s=drain_timeout_s,
+                ctx=ctx,
+            )
+        timeout_s = _ctx_timeout_s(ctx)
+        response = self._runtime.ensure_client().begin_binding_update(
+            binding_id=self._binding_id,
+            timeout_s=timeout_s if timeout_s is not None else 30.0,
+        )
+        update_epoch = str(getattr(response, "update_epoch", "") or "")
+        if not update_epoch:
+            raise ArtifactError(
+                "BeginBindingUpdate returned an empty update_epoch",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._active_update_epoch = update_epoch
+        self._current_value_metadata = None
+        self._artifact_id = None
+        self._target_publication_token = None
+        self._dirty = False
+        return BindingUpdateEpoch(
+            binding_id=self._binding_id,
+            update_epoch=update_epoch,
+        )
+
+    def seal_current(
+        self,
+        *,
+        update_epoch: "BindingUpdateEpoch | str | int",
+        ctx: CallContext | None = None,
+    ) -> None:
+        self._ensure_open()
+        update_epoch_token = self._normalize_update_epoch(update_epoch)
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().seal_binding(
+                binding_id=self._binding_id,
+                update_epoch=update_epoch_token,
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._enter_dirty_state()
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="SealBinding",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "SealBinding returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._active_update_epoch = None
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._artifact_id = None
+        self._target_publication_token = None
+        self._dirty = False
 
     def swap(
         self,
@@ -459,7 +567,7 @@ class InplaceSlot:
                         timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    self._dirty = True
+                    self._enter_dirty_state()
                     message = str(exc)
                     if (
                         "MaterializeIntoMappedTarget" in message
@@ -485,7 +593,7 @@ class InplaceSlot:
                     response.status
                     != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
                 ):
-                    self._dirty = True
+                    self._enter_dirty_state()
                     raise ArtifactError(
                         "MaterializeIntoMappedTarget returned non-success status",
                         status_code="DATA_LOSS",
@@ -493,7 +601,7 @@ class InplaceSlot:
                     )
                 break
             if response is None or region_layout is None:
-                self._dirty = True
+                self._enter_dirty_state()
                 raise ArtifactError(
                     "MaterializeIntoMappedTarget retry failed to produce a response",
                     status_code="DATA_LOSS",
@@ -507,10 +615,17 @@ class InplaceSlot:
             self._update_state_from_layout(
                 region_layout=region_layout,
                 view_spec=view_spec_proto,
-                artifact_id=artifact_id,
-                canonical_index_bytes=canonical_index_bytes,
-                target_write_token=getattr(response, "target_write_token", None),
+                target_publication_token=getattr(
+                    response, "target_publication_token", None
+                ),
                 fallback=resolved._fallback,
+            )
+            self._mark_artifact_backed_current(
+                artifact_id=artifact_id,
+                selection=selection,
+                target_publication_token=getattr(
+                    response, "target_publication_token", None
+                ),
             )
             if publish:
                 self._publish_with_operation_id(
@@ -588,7 +703,7 @@ class InplaceSlot:
                     timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )
             except Exception as exc:  # noqa: BLE001
-                self._dirty = True
+                self._enter_dirty_state()
                 error = map_materialization_error(exc)
                 if attempt == 0 and _is_region_error(error):
                     self._refresh_regions()
@@ -604,7 +719,7 @@ class InplaceSlot:
                 response.status
                 != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
             ):
-                self._dirty = True
+                self._enter_dirty_state()
                 raise ArtifactError(
                     "MaterializeIntoTarget returned non-success status",
                     status_code="DATA_LOSS",
@@ -612,7 +727,7 @@ class InplaceSlot:
                 )
             break
         if response is None or region_layout is None:
-            self._dirty = True
+            self._enter_dirty_state()
             raise ArtifactError(
                 "MaterializeIntoTarget retry failed to produce a response",
                 status_code="DATA_LOSS",
@@ -626,10 +741,17 @@ class InplaceSlot:
         self._update_state_from_layout(
             region_layout=region_layout,
             view_spec=view_spec_proto,
-            artifact_id=artifact_id,
-            canonical_index_bytes=canonical_index_bytes,
-            target_write_token=getattr(response, "target_write_token", None),
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
             fallback=resolved._fallback,
+        )
+        self._mark_artifact_backed_current(
+            artifact_id=artifact_id,
+            selection=selection,
+            target_publication_token=getattr(
+                response, "target_publication_token", None
+            ),
         )
 
         if publish:
@@ -649,6 +771,11 @@ class InplaceSlot:
         with contextlib.suppress(Exception):
             if self._published_lease_id is not None:
                 self.retire(wait=False)
+        with contextlib.suppress(Exception):
+            if self._binding_id:
+                self._runtime.ensure_client().close_owned_binding(
+                    binding_id=self._binding_id
+                )
         self._closed = True
         self._release_regions()
 
@@ -677,7 +804,9 @@ class InplaceSlot:
     def _ensure_layout_match(self, region_layout: "_RegionBackedLayout") -> None:
         layout_hash = bytes(region_layout.layout.logical_layout_hash)
         if not layout_hash:
-            index_bytes = region_layout.view_index_bytes or self._canonical_index_bytes
+            index_bytes = (
+                region_layout.view_index_bytes or self._layout.target_index_bytes
+            )
             needs_view_index = (
                 region_layout.layout.index_kind
                 == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
@@ -716,8 +845,6 @@ class InplaceSlot:
 
     def _refresh_regions(self) -> None:
         stale_ids = tuple(self._region_ids)
-        if not stale_ids and self._region_id:
-            stale_ids = (self._region_id,)
         self._release_regions()
         for region_id in stale_ids:
             if not region_id:
@@ -736,7 +863,6 @@ class InplaceSlot:
             )
             new_ids.append(handle.region_id)
         self._region_ids = tuple(new_ids)
-        self._region_id = None
 
     def _resolve_source_policy(
         self, fallback: FallbackOptions | None
@@ -786,7 +912,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             _ = client.retire_published_replica(
-                artifact_id=self._artifact_id,
+                artifact_id=self._artifact_id or "",
                 byte_space=self.byte_space,
                 lease_id=lease_id,
                 device_id=self._device_id,
@@ -813,9 +939,9 @@ class InplaceSlot:
         owner_pid: int | None = None,
         ctx: CallContext | None,
     ) -> None:
-        if not self._target_write_token:
+        if not self._target_publication_token:
             raise ArtifactError(
-                "target_write_token missing; daemon publish not available",
+                "target_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -823,7 +949,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_write_token=self._target_write_token,
+                target_publication_token=self._target_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -850,37 +976,31 @@ class InplaceSlot:
         )
 
     def _release_regions(self) -> None:
-        if not self._region_ids and self._region_id:
-            self._region_ids = (self._region_id,)
         for region_id in self._region_ids:
             if not region_id:
                 continue
             with contextlib.suppress(Exception):
                 self._store.unregister_vram_region(region_id)
         self._region_ids = ()
-        self._region_id = None
 
     def _update_state_from_layout(
         self,
         *,
         region_layout: "_RegionBackedLayout",
         view_spec: common_pb2.ViewSpec | None,
-        artifact_id: str,
-        canonical_index_bytes: bytes,
-        target_write_token: bytes | None,
+        target_publication_token: bytes | None,
         fallback: FallbackOptions | None,
     ) -> None:
-        self._region_layout = region_layout
         self._region_ids = tuple(region_layout.region_ids)
         self._view_spec = view_spec
-        self._artifact_id = str(artifact_id)
-        self._canonical_index_bytes = bytes(canonical_index_bytes)
         self._selection_names = tuple(region_layout.selection_names)
         self._view_id = _normalize_view_id(region_layout.view_id)
         self._view_subset_hash = bytes(region_layout.view_subset_hash or b"")
         self._logical_layout_hash = bytes(region_layout.layout.logical_layout_hash)
         if not self._logical_layout_hash:
-            index_bytes = region_layout.view_index_bytes or self._canonical_index_bytes
+            index_bytes = (
+                region_layout.view_index_bytes or self._layout.target_index_bytes
+            )
             needs_view_index = (
                 region_layout.layout.index_kind
                 == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
@@ -894,20 +1014,87 @@ class InplaceSlot:
             view_subset_hash=self._view_subset_hash,
         )
         self._fallback = fallback
-        self._target_write_token = (
-            bytes(target_write_token) if target_write_token else None
+        self._target_publication_token = (
+            bytes(target_publication_token) if target_publication_token else None
         )
-        storage_ids = tuple(
-            storage.storage_id for storage in region_layout.layout.storages
+
+    def _mark_artifact_backed_current(
+        self,
+        *,
+        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
+        target_publication_token: bytes | None,
+    ) -> None:
+        self._artifact_id = str(artifact_id)
+        self._contribution_source_artifact_id = str(artifact_id)
+        try:
+            response = self._runtime.ensure_client().commit_binding_artifact(
+                binding_id=self._binding_id,
+                selection=selection,
+                source_artifact_id=artifact_id,
+                target_publication_token=target_publication_token,
+                timeout_s=30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._enter_dirty_state()
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value
+            if response is not None and hasattr(response, "current_value")
+            else None,
+            rpc_name="CommitBindingArtifact",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
         )
-        self._commit_result = type(self._commit_result)(
-            tensor_names=self._selection_names,
-            view_id=region_layout.view_id,
-            view_subset_hash=region_layout.view_subset_hash,
-            storage_ids=storage_ids,
-            logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=None,
+        if metadata is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "CommitBindingArtifact returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._target_publication_token = (
+            bytes(target_publication_token) if target_publication_token else None
         )
+        self._dirty = False
+
+    def _enter_dirty_state(self) -> None:
+        self._active_update_epoch = None
+        self._current_value_metadata = None
+        self._artifact_id = None
+        self._target_publication_token = None
+        self._dirty = True
+
+    def _normalize_update_epoch(
+        self,
+        update_epoch: "BindingUpdateEpoch | str | int",
+    ) -> str:
+        if hasattr(update_epoch, "update_epoch"):
+            binding_id = getattr(update_epoch, "binding_id", None)
+            if binding_id is not None and str(binding_id) != self._binding_id:
+                raise ArtifactError(
+                    "BindingUpdateEpoch does not belong to this binding",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            return str(update_epoch.update_epoch)
+        token = str(update_epoch)
+        if token.startswith("bue:"):
+            parts = token.split(":", 2)
+            if len(parts) == 3 and parts[1] and parts[1] != self._binding_id:
+                raise ArtifactError(
+                    "update_epoch token does not belong to this binding",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+        return token
 
 
 __all__ = ["InplaceSlot"]

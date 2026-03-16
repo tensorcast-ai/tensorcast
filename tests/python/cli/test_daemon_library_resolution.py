@@ -10,11 +10,15 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable, Mapping
 
 import pytest
 
-from tensorcast.cli_utils.proc import build_daemon_process_env
+from tensorcast.cli_utils.proc import (
+    _discover_daemon_library_paths,
+    build_daemon_process_env,
+)
 
 _REQUIRED_LIBRARIES: tuple[str, ...] = (
     "libnvrtc.so.12",
@@ -134,7 +138,7 @@ def _load_shared_objects_in_subprocess(
     return [str(item) for item in decoded]
 
 
-def test_build_daemon_process_env_keeps_user_ld_library_path_prefix(
+def test_build_daemon_process_env_keeps_configured_ld_library_path_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user_prefix = "/data/cuda/compat:/usr/local/lib"
@@ -147,16 +151,86 @@ def test_build_daemon_process_env_keeps_user_ld_library_path_prefix(
         ),
     )
 
-    env = build_daemon_process_env({"LD_LIBRARY_PATH": user_prefix})
+    env = build_daemon_process_env(
+        {"LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"},
+        {"LD_LIBRARY_PATH": user_prefix},
+    )
     ld_library_path = env.get("LD_LIBRARY_PATH")
     assert ld_library_path is not None
 
     entries = [entry for entry in ld_library_path.split(":") if entry]
     assert entries[0] == "/data/cuda/compat"
     assert entries[1] == "/usr/local/lib"
+    assert entries[2] == "/usr/local/nvidia/lib64"
     assert "/tensorcast/lib" in entries
     assert "/torch/lib" in entries
     assert entries.count("/data/cuda/compat") == 1
+
+
+def test_build_daemon_process_env_merges_configured_launcher_envs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._discover_daemon_library_paths",
+        lambda: (
+            Path("/tensorcast/lib"),
+            Path("/torch/lib"),
+        ),
+    )
+
+    env = build_daemon_process_env(
+        {"LD_LIBRARY_PATH": "/base/lib:/shared/lib", "PATH": "/usr/bin"},
+        {
+            "LD_LIBRARY_PATH": "/config/lib:/shared/lib",
+            "NCCL_DEBUG": "INFO",
+        },
+    )
+
+    assert env["NCCL_DEBUG"] == "INFO"
+    assert env["PATH"] == "/usr/bin"
+    assert env["LD_LIBRARY_PATH"].split(":") == [
+        "/config/lib",
+        "/shared/lib",
+        "/base/lib",
+        "/tensorcast/lib",
+        "/torch/lib",
+    ]
+
+
+def test_discover_daemon_library_paths_avoids_importing_torch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    torch_root = site_packages / "torch"
+    torch_lib = torch_root / "lib"
+    nvidia_lib = site_packages / "nvidia" / "cuda_runtime" / "lib"
+    torch_lib.mkdir(parents=True)
+    nvidia_lib.mkdir(parents=True)
+
+    real_import = __import__
+
+    def _guarded_import(name, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if name == "torch":
+            raise AssertionError("torch should not be imported during discovery")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _guarded_import)
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: (
+            SimpleNamespace(
+                origin=str(torch_root / "__init__.py"),
+                submodule_search_locations=[str(torch_root)],
+            )
+            if name == "torch"
+            else None
+        ),
+    )
+
+    paths = _discover_daemon_library_paths()
+
+    assert torch_lib.resolve() in paths
+    assert nvidia_lib.resolve() in paths
 
 
 @pytest.mark.integration

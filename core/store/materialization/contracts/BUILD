@@ -48,6 +48,7 @@ sc_header_only_library(
     hdrs = ["loading_spec.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":byte_range_map",
         ":view_id",
         "//core/common:ready_signal_lib",
         "//core/store:communication_types",

@@ -4,7 +4,7 @@ title: Selection-First Artifact Retrieval And Materialization Hard Cut
 areas: ["sdk", "daemon", "core", "proto"]
 status: draft
 created: 2026-02-14
-last_updated: 2026-02-14
+last_updated: 2026-03-04
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/view_composer.py
@@ -33,16 +33,13 @@ related_code:
   - core/common/selection_identity.cc
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
-  - docs/designs/0061-slot-based-inplace-binding-and-swap.md
-  - docs/designs/0063-binding-first-inplace-updates.md
+  - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/architecture/artifact-views-and-retrieval.md
   - docs/architecture/api/materialization-flow.md
 links:
-  plan: ../plans/0078-selection-first-artifact-retrieval.md
   predecessors:
     - ./0039-artifact-first-sdk.md
     - ./0055-programmable-framework.md
-    - ./0061-slot-based-inplace-binding-and-swap.md
 ---
 
 # Summary
@@ -54,7 +51,7 @@ Hard-cut retrieval and materialization to one selection model with one identity 
 - Retrieval call sites no longer re-pass tensor-name filters.
 - All materialization RPCs consume the same selection contract and stop accepting duplicated selection and identity fields as independent inputs.
 - `MaterializeByKey` is removed from the data path. Key lookup remains `ResolveKeyMapping` before materialization.
-- Responses and target write scopes carry resolved selection identity explicitly to eliminate ambiguity.
+- Responses and target publication scopes carry resolved selection identity explicitly to eliminate ambiguity.
 
 This is a deliberate pre-launch breaking change. No dual stack and no compatibility shims are retained.
 
@@ -129,12 +126,17 @@ flowchart LR
 6. `selection.tensor_names` is an ordered stream when present and must be preserved end-to-end.
 7. `selection.view_subset_hash` is membership hash over sorted unique `tensor_names`; it must not depend on stream order.
 8. Selection hashing and layout hashing remain shared Python/C++ behavior (`tensorcast/common/selection_identity.py`, `core/common/selection_identity.cc`).
-9. Daemon controllers parse and validate selection exactly once, then pass one resolved selection plan through control/data path.
-10. Responses, target write scopes, and retention scopes use the same resolved selection identity; no re-encoding from legacy request-local fields.
-11. Python selection construction must use one shared contract helper (`tensorcast/common/selection_contract.py`) for artifact, materialization, deferred, inplace, and region-backed flows.
-12. `view_id` is authoritative only when derived from `compute_view_id(view_spec, canonical_index_bytes)`; cached `view_id` values are advisory and must be recomputed for identity validation.
-13. Canonical index and selected/view index hints are semantically disjoint; canonical hints must never fallback to selected/view hints.
-14. Replica and target/mapped-target daemon flows must share one validation implementation and emit server-resolved `resolved_selection`.
+9. Byte artifacts (see `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`) use a **fixed selection profile**:
+   - no views and no subsets,
+   - `logical_layout_hash` and `selection_hash` are fixed constants validated by controllers (not derived from index bytes).
+10. Daemon controllers parse and validate selection exactly once, then pass one resolved selection plan through control/data path.
+11. Responses, target publication scopes, and retention scopes use the same resolved selection identity; no re-encoding from legacy request-local fields.
+12. Python selection construction must use one shared contract helper per selection profile:
+    - tensor-dict artifacts: `tensorcast/common/selection_contract.py`
+    - byte artifacts: a fixed-profile builder (see `0087`)
+13. `view_id` is authoritative only when derived from `compute_view_id(view_spec, canonical_index_bytes)`; cached `view_id` values are advisory and must be recomputed for identity validation.
+14. Canonical index and selected/view index hints are semantically disjoint; canonical hints must never fallback to selected/view hints.
+15. Replica and target/mapped-target daemon flows must share one validation implementation and emit server-resolved `resolved_selection`.
 
 ## Canonical Selection Contract
 
@@ -147,8 +149,8 @@ flowchart LR
 | `view_spec` | transform operations | optional; when present must match `view_id` |
 | `tensor_names` | ordered packed stream selection | must not contain duplicates |
 | `view_subset_hash` | order-independent membership hash | must match sorted unique `tensor_names`; empty when full selection |
-| `logical_layout_hash` | hash of selected index bytes plus index kind | daemon recomputes and must match |
-| `selection_hash` | hash over normalized view and subset identity | daemon recomputes and must match |
+| `logical_layout_hash` | hash of selected index bytes plus index kind (or fixed profile hash) | daemon recomputes (or validates fixed profile) and must match |
+| `selection_hash` | hash over normalized view and subset identity (or fixed profile hash) | daemon recomputes (or validates fixed profile) and must match |
 
 Proto3 required semantics:
 
@@ -166,6 +168,7 @@ Proto3 required semantics:
 | Subset + View | non-empty | set | non-empty | selected index + view kind |
 | Prefetch / Plan / Node-agent | same as above | same as above | same as above | same as above |
 | Region-backed get_into / mapped-target | same as above | same as above | same as above | same as above |
+| Byte artifact (0087) | empty | unset | empty (or normalized `["payload"]`) | fixed profile digest (0087) |
 
 ## SDK API Contract Hard Cut
 
@@ -203,7 +206,11 @@ Hard-cut removals:
 
 ### Internal selection construction
 
-Each retrieval/materialization path builds `ArtifactSelection` through the single helper `tensorcast/common/selection_contract.py::build_artifact_selection(...)`.
+Each tensor-dict retrieval/materialization path builds `ArtifactSelection` through the shared helper
+`tensorcast/common/selection_contract.py::build_artifact_selection(...)`.
+
+Byte artifacts use a fixed selection profile (see `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`) and
+must not use the tensor-dict selection hashing path.
 
 - `artifact_id`: required.
 - `view_id`: deterministic for non-identity transforms only.
@@ -216,6 +223,12 @@ Each retrieval/materialization path builds `ArtifactSelection` through the singl
 - Canonical index hints and selected/view index hints are separate inputs: `canonical_index_bytes_hint` must never fallback from `view_index_bytes_hint`.
 - Region-backed, deferred, inplace slot, and direct materialization paths all call the same selection helper and enforce the same validation rules.
 - `ViewMetadataCache.selected_index` carries selected/view index material; `ViewMetadataCache.view_id` is not treated as authoritative identity without recomputation from canonical index bytes.
+
+Byte artifact selection construction (required):
+
+- `view_id` must be empty and `view_spec` must be unset.
+- subset selection must be rejected.
+- `logical_layout_hash` and `selection_hash` are fixed constants and are validated by controllers.
 
 Execution-layer convergence requirements:
 
@@ -258,9 +271,10 @@ Responses must expose resolved selection identity explicitly:
 - Controllers validate `ArtifactSelection` consistency once:
   - `selection.view_subset_hash` matches `selection.tensor_names`
   - view identity and view spec are coherent
-- `selection_hash` and `logical_layout_hash` are recomputed and must match request values.
+- `selection_hash` and `logical_layout_hash` are recomputed (tensor-dict profile) or validated against fixed profile
+  constants (byte artifact profile), and must match request values.
 - Payload descriptor construction uses resolved selection, not independent request fields.
-- Target write token and retention paths reuse the exact resolved selection object without re-encoding.
+- Target publication token and retention paths reuse the exact resolved selection object without re-encoding.
 - Response metadata exposes resolved selection for observability and cache hydration.
 - Replica and target/mapped-target share one validator module (`daemon/service/controllers/selection_validation_utils.{h,cc}`) for tensor-name, subset-hash, logical-layout-hash, and selection-hash checks.
 - Replica response `resolved_selection` is server-resolved output, not a request copy-through.
@@ -411,8 +425,7 @@ Hard gates for merge:
 
 - `docs/designs/0039-artifact-first-sdk.md`
 - `docs/designs/0055-programmable-framework.md`
-- `docs/designs/0061-slot-based-inplace-binding-and-swap.md`
-- `docs/designs/0063-binding-first-inplace-updates.md`
+- `docs/designs/0084-binding-unified-model-and-contract.md`
 - `docs/architecture/artifact-views-and-retrieval.md`
 - `docs/architecture/api/materialization-flow.md`
 - `docs/architecture/api/region-backed.md`

@@ -18,15 +18,19 @@
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/random/random.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/sources/memory_source.h"
+#include "daemon/service/controllers/assembly_coordination_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_post_seal_utils.h"
 #include "daemon/util/status_utils.h"
@@ -39,13 +43,13 @@ namespace tensorcast::daemon {
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
+namespace coordination = assembly_coordination;
 using materialization_policy::spec_includes_transpose;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_post_seal::compute_view_meta_digest;
 using status_utils::to_grpc_status;
 
 namespace {
-
 class OperationLeaseGuard {
  public:
   OperationLeaseGuard(
@@ -86,6 +90,20 @@ std::string compute_seal_operation_id(std::string_view assembly_id) {
   return tensorcast::common::multibase_multihash_sha256(digest);
 }
 
+std::string mint_random_hex_id(size_t bytes_len) {
+  thread_local absl::BitGen bitgen;
+  std::string raw;
+  raw.resize(bytes_len);
+  for (size_t i = 0; i < raw.size(); ++i) {
+    raw[i] = static_cast<char>(absl::Uniform<uint32_t>(bitgen, 0u, 256u));
+  }
+  return absl::BytesToHexString(raw);
+}
+
+std::string mint_assembly_attempt_id() {
+  return absl::StrCat("cgid:assembly-attempt-", mint_random_hex_id(8));
+}
+
 std::string owner_id_for_operation(const WorkerIdentityStore& identity) {
   auto daemon_id = identity.daemon_id();
   if (!daemon_id.empty()) {
@@ -103,12 +121,52 @@ bool retryable_status(const absl::Status& st) {
       absl::IsUnknown(st);
 }
 
+absl::Status finalize_assembly_contributions(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& client,
+    std::string_view assembly_id,
+    std::string_view target_state,
+    const std::vector<std::string>& current_states) {
+  if (!client || !client->is_connected()) {
+    return absl::OkStatus();
+  }
+  auto rows_or = client->list_assembly_contributions(
+      assembly_id,
+      /*view_id=*/std::nullopt,
+      /*binding_id=*/std::nullopt,
+      /*binding_value_id=*/std::nullopt,
+      current_states);
+  if (!rows_or.ok()) {
+    return rows_or.status();
+  }
+  for (const auto& row : *rows_or) {
+    auto update_or = client->update_assembly_contribution_state(
+        row.assembly_id,
+        row.view_id,
+        target_state,
+        /*expected_lease_id=*/std::nullopt,
+        /*expected_lease_generation=*/std::nullopt,
+        /*lease_expires_at=*/std::nullopt,
+        current_states);
+    if (!update_or.ok() && !absl::IsNotFound(update_or.status())) {
+      return update_or.status();
+    }
+  }
+  return absl::OkStatus();
+}
+
 constexpr uint64_t kProofChunkBytesV1 = 4ULL * 1024 * 1024;
 
 struct TensorInterval {
   std::string tensor_name;
   uint64_t offset{0};
   uint64_t size_bytes{0};
+};
+
+struct PublicationPolicy {
+  std::optional<std::string> source_version_key;
+  std::optional<std::string> serving_version_key;
+  std::optional<std::string> serving_artifact_id;
+  std::optional<std::string> serving_manifest_ref;
 };
 
 absl::StatusOr<std::vector<TensorInterval>> parse_tensor_intervals(std::string_view canonical_index_json) {
@@ -145,10 +203,249 @@ absl::StatusOr<std::vector<TensorInterval>> parse_tensor_intervals(std::string_v
   return out;
 }
 
+std::optional<std::string> read_optional_json_string(const nlohmann::json& json, std::string_view key) {
+  auto it = json.find(std::string(key));
+  if (it == json.end() || it->is_null()) {
+    return std::nullopt;
+  }
+  if (!it->is_string()) {
+    return std::nullopt;
+  }
+  const std::string value = it->get<std::string>();
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+absl::StatusOr<std::optional<PublicationPolicy>> parse_publication_policy_json(std::string_view policy_json) {
+  if (policy_json.empty()) {
+    return std::nullopt;
+  }
+  nlohmann::json j;
+  try {
+    j = nlohmann::json::parse(policy_json, nullptr, true);
+  } catch (const std::exception& ex) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse publication policy JSON: ", ex.what()));
+  }
+  if (!j.is_object()) {
+    return absl::InvalidArgumentError("publication policy JSON must be an object");
+  }
+
+  PublicationPolicy policy;
+  policy.source_version_key = read_optional_json_string(j, "source_version_key");
+  policy.serving_version_key = read_optional_json_string(j, "serving_version_key");
+  policy.serving_artifact_id = read_optional_json_string(j, "serving_artifact_id");
+  policy.serving_manifest_ref = read_optional_json_string(j, "serving_manifest_ref");
+
+  if (policy.serving_artifact_id.has_value() && !policy.serving_version_key.has_value()) {
+    return absl::FailedPreconditionError("serving_artifact_id requires serving_version_key");
+  }
+  if (policy.serving_manifest_ref.has_value() && !policy.serving_version_key.has_value()) {
+    return absl::FailedPreconditionError("serving_manifest_ref requires serving_version_key");
+  }
+  if (!policy.source_version_key.has_value() && !policy.serving_version_key.has_value() &&
+      !policy.serving_artifact_id.has_value() && !policy.serving_manifest_ref.has_value()) {
+    return std::nullopt;
+  }
+  return policy;
+}
+
+void copy_artifact_descriptor(
+    const tensorcast::common::v1::ArtifactDescriptor& src,
+    tensorcast::common::v1::ArtifactDescriptor* dst) {
+  ABSL_CHECK(dst != nullptr);
+  dst->CopyFrom(src);
+}
+
+absl::Status publish_immutable_key(store::StoreEngine* engine, std::string_view key, std::string_view artifact_id) {
+  ABSL_CHECK(engine != nullptr);
+  if (key.empty()) {
+    return absl::InvalidArgumentError("immutable key must not be empty");
+  }
+  if (artifact_id.empty()) {
+    return absl::InvalidArgumentError("immutable key publication requires artifact_id");
+  }
+
+  auto existing_or = engine->resolve_key_mapping(key);
+  if (existing_or.ok()) {
+    if (existing_or->artifact_id == artifact_id) {
+      return absl::OkStatus();
+    }
+    return absl::AlreadyExistsError(
+        absl::StrCat(
+            "immutable key already points to a different artifact: key=",
+            key,
+            " current=",
+            existing_or->artifact_id,
+            " requested=",
+            artifact_id));
+  }
+  if (!absl::IsNotFound(existing_or.status())) {
+    return existing_or.status();
+  }
+  return engine->upsert_key_mapping(key, artifact_id);
+}
+
 } // namespace
 
 AssemblyOperationService::AssemblyOperationService(Dep d)
-    : d_(std::move(d)), seal_operation_tracker_(std::make_shared<SealOperationTracker>()) {}
+    : d_(std::move(d)),
+      seal_operation_tracker_(std::make_shared<SealOperationTracker>()),
+      coordinator_keepalive_tracker_(std::make_shared<CoordinatorKeepaliveTracker>()) {}
+
+grpc::Status AssemblyOperationService::start_assembly_attempt(
+    RpcContext& rctx,
+    const v2::StartAssemblyAttemptRequest& req,
+    v2::StartAssemblyAttemptResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.layout.id", req.layout_id());
+
+  if (req.layout_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "layout_id is required"};
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+    return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+
+  auto layout_or = d_.global_store_client->get_layout_spec(req.layout_id());
+  if (!layout_or.ok()) {
+    return to_grpc_status(layout_or.status());
+  }
+
+  const std::string assembly_id = mint_assembly_attempt_id();
+  auto binding_or = d_.global_store_client->update_assembly_layout_binding(
+      assembly_id,
+      req.layout_id(),
+      /*expected_binding_version=*/0);
+  if (!binding_or.ok()) {
+    return to_grpc_status(binding_or.status());
+  }
+
+  const std::string coordinator_operation_id = compute_seal_operation_id(assembly_id);
+  const auto contribution_contract = coordination::build_phase1_contribution_contract(
+      req.layout_id(), layout_or->layout().expected_view_ids(), /*require_live_contributions=*/true);
+  const std::string contribution_contract_hash =
+      coordination::compute_contribution_contract_hash(contribution_contract);
+
+  tensorcast::daemon::v2::SealAssemblySnapshot snapshot_msg;
+  snapshot_msg.set_assembly_id(assembly_id);
+  snapshot_msg.set_layout_id(req.layout_id());
+  snapshot_msg.set_assembly_layout_binding_version(binding_or->binding_version());
+  snapshot_msg.set_contribution_contract_hash(contribution_contract_hash);
+  *snapshot_msg.mutable_contribution_contract() = contribution_contract;
+  for (const auto& view_id : layout_or->layout().expected_view_ids()) {
+    snapshot_msg.add_expected_view_ids(view_id);
+  }
+
+  tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
+  lease_req.set_operation_id(coordinator_operation_id);
+  lease_req.set_kind("seal_assembly");
+  lease_req.set_target_artifact_id(assembly_id);
+  lease_req.set_owner_id(owner_id_for_operation(d_.identity));
+  lease_req.set_ttl_ms(0);
+  auto lease_or = d_.global_store_client->acquire_operation_lease(lease_req);
+  if (!lease_or.ok()) {
+    return to_grpc_status(lease_or.status());
+  }
+  if (!lease_or->acquired()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt coordinator is already owned by another daemon"};
+  }
+
+  google::protobuf::Any snapshot_any;
+  snapshot_any.PackFrom(snapshot_msg);
+  tensorcast::operation::v1::UpdateOperationRequest pending;
+  pending.set_operation_id(coordinator_operation_id);
+  pending.set_lease_generation(lease_or->lease().lease_generation());
+  auto* status = pending.mutable_status();
+  status->set_state(tensorcast::operation::v1::OPERATION_STATE_PENDING);
+  status->set_message("assembly attempt open");
+  status->set_progress(0.0);
+  *status->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  pending.mutable_snapshot()->CopyFrom(snapshot_any);
+  auto update_status = d_.global_store_client->update_operation(pending);
+  if (!update_status.ok()) {
+    tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
+    release_req.set_lease_token(lease_or->lease().lease_token());
+    auto release_or = d_.global_store_client->release_operation_lease(release_req);
+    if (!release_or.ok()) {
+      LOG(WARNING) << "release_operation_lease failed after StartAssemblyAttempt update failure for op="
+                   << coordinator_operation_id << ": " << release_or.status();
+    }
+    return to_grpc_status(update_status);
+  }
+
+  auto keepalive_stop = std::make_shared<std::atomic<bool>>(false);
+  {
+    absl::MutexLock lock(&coordinator_keepalive_tracker_->mu);
+    coordinator_keepalive_tracker_->stop_flags[coordinator_operation_id] = keepalive_stop;
+  }
+  auto tracker = coordinator_keepalive_tracker_;
+  auto client_sp = d_.global_store_client;
+  auto executor = d_.async_runtime.blocking_executor();
+  auto keepalive = std::make_shared<std::function<void()>>();
+  std::weak_ptr<std::function<void()>> keepalive_weak = keepalive;
+  const std::string lease_token = lease_or->lease().lease_token();
+  *keepalive = [tracker,
+                client_sp,
+                keepalive_stop,
+                executor,
+                keepalive_weak,
+                &timekeeper = d_.async_runtime.timekeeper(),
+                coordinator_operation_id,
+                lease_token]() mutable {
+    if (keepalive_stop->load(std::memory_order_relaxed)) {
+      absl::MutexLock lock(&tracker->mu);
+      auto it = tracker->stop_flags.find(coordinator_operation_id);
+      if (it != tracker->stop_flags.end() && it->second == keepalive_stop) {
+        tracker->stop_flags.erase(it);
+      }
+      return;
+    }
+    timekeeper.after(std::chrono::milliseconds(5000))
+        .via(executor)
+        .thenValue([tracker, client_sp, keepalive_stop, keepalive_weak, coordinator_operation_id, lease_token](
+                       folly::Unit) mutable {
+          if (keepalive_stop->load(std::memory_order_relaxed)) {
+            absl::MutexLock lock(&tracker->mu);
+            auto it = tracker->stop_flags.find(coordinator_operation_id);
+            if (it != tracker->stop_flags.end() && it->second == keepalive_stop) {
+              tracker->stop_flags.erase(it);
+            }
+            return;
+          }
+          tensorcast::operation::v1::KeepaliveOperationLeaseRequest keepalive_req;
+          keepalive_req.set_lease_token(lease_token);
+          keepalive_req.set_ttl_ms(0);
+          auto keepalive_or = client_sp->keepalive_operation_lease(keepalive_req);
+          if (!keepalive_or.ok()) {
+            LOG(WARNING) << "attempt coordinator keepalive failed for op=" << coordinator_operation_id << ": "
+                         << keepalive_or.status();
+          }
+          auto next = keepalive_weak.lock();
+          if (next != nullptr) {
+            (*next)();
+          }
+        });
+  };
+  (*keepalive)();
+
+  auto* attempt = resp.mutable_attempt();
+  attempt->set_assembly_id(assembly_id);
+  attempt->set_layout_id(req.layout_id());
+  attempt->set_contribution_contract_hash(contribution_contract_hash);
+  attempt->set_coordinator_operation_id(coordinator_operation_id);
+  attempt->set_coordinator_generation(lease_or->lease().lease_generation());
+  for (const auto& view_id : layout_or->layout().expected_view_ids()) {
+    attempt->add_expected_view_ids(view_id);
+  }
+  *attempt->mutable_contribution_contract() = contribution_contract;
+  rctx.mark_success();
+  return Status::OK;
+}
 
 grpc::Status AssemblyOperationService::seal_assembly(
     RpcContext& rctx,
@@ -216,6 +513,53 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
   out_ref->set_kind("seal_assembly");
   out_ref->set_target_artifact_id(req.assembly_id());
 
+  std::optional<tensorcast::daemon::v2::SealAssemblySnapshot> preloaded_attempt_snapshot;
+  bool preloaded_snapshot_from_request = false;
+  if (!req.layout_id().empty()) {
+    std::optional<tensorcast::daemon::v2::SealAssemblySnapshot> fallback_request_snapshot;
+    if (req.has_attempt_snapshot()) {
+      if (req.attempt_snapshot().assembly_id() != req.assembly_id()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt assembly changed"};
+      }
+      if (req.attempt_snapshot().layout_id() != req.layout_id()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt layout changed"};
+      }
+      if (!req.attempt_snapshot().has_contribution_contract() ||
+          req.attempt_snapshot().contribution_contract_hash().empty()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt contract snapshot is unavailable"};
+      }
+      fallback_request_snapshot = req.attempt_snapshot();
+    }
+    tensorcast::operation::v1::GetOperationRequest get_req;
+    get_req.set_operation_id(operation_id);
+    auto existing_or = d_.global_store_client->get_operation(get_req);
+    if (existing_or.ok()) {
+      tensorcast::daemon::v2::SealAssemblySnapshot snapshot;
+      if (!existing_or->has_snapshot() || !existing_or->snapshot().UnpackTo(&snapshot)) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt snapshot is unavailable"};
+      }
+      if (snapshot.assembly_id() != req.assembly_id()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt assembly changed"};
+      }
+      if (snapshot.layout_id() != req.layout_id()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt layout changed"};
+      }
+      if (req.expected_coordinator_generation() != 0 &&
+          existing_or->lease_generation() != req.expected_coordinator_generation()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt coordinator generation changed"};
+      }
+      if (!snapshot.has_contribution_contract() || snapshot.contribution_contract_hash().empty()) {
+        return {StatusCode::FAILED_PRECONDITION, "assembly attempt contract snapshot is unavailable"};
+      }
+      preloaded_attempt_snapshot = std::move(snapshot);
+    } else if (fallback_request_snapshot.has_value()) {
+      preloaded_attempt_snapshot = std::move(*fallback_request_snapshot);
+      preloaded_snapshot_from_request = true;
+    } else {
+      return {StatusCode::FAILED_PRECONDITION, "assembly attempt snapshot is unavailable"};
+    }
+  }
+
   tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
   lease_req.set_operation_id(operation_id);
   lease_req.set_kind("seal_assembly");
@@ -243,6 +587,14 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
   const std::string lease_token = lease.lease_token();
   const std::string assembly_id = req.assembly_id();
   const std::string layout_id = req.layout_id();
+  {
+    absl::MutexLock lock(&coordinator_keepalive_tracker_->mu);
+    auto it = coordinator_keepalive_tracker_->stop_flags.find(operation_id);
+    if (it != coordinator_keepalive_tracker_->stop_flags.end()) {
+      it->second->store(true, std::memory_order_relaxed);
+      coordinator_keepalive_tracker_->stop_flags.erase(it);
+    }
+  }
 
   auto seal_tracker = seal_operation_tracker_;
   bool should_start = false;
@@ -270,6 +622,8 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
          operation_id,
          assembly_id,
          layout_id,
+         preloaded_attempt_snapshot,
+         preloaded_snapshot_from_request,
          lease_generation,
          lease_token]() mutable -> void {
           if (client_sp == nullptr) {
@@ -320,7 +674,11 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
           tensorcast::daemon::v2::SealAssemblySnapshot snapshot_msg;
           google::protobuf::Any snapshot_any;
           bool snapshot_loaded = false;
-          {
+          if (preloaded_attempt_snapshot.has_value() && !preloaded_snapshot_from_request) {
+            snapshot_msg = *preloaded_attempt_snapshot;
+            snapshot_any.PackFrom(snapshot_msg);
+            snapshot_loaded = true;
+          } else {
             tensorcast::operation::v1::GetOperationRequest get_req;
             get_req.set_operation_id(operation_id);
             auto existing_or = client_sp->get_operation(get_req);
@@ -338,6 +696,17 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
               LOG(WARNING) << "get_operation failed while loading seal snapshot (op=" << operation_id
                            << "): " << existing_or.status();
             }
+            if (!snapshot_loaded && preloaded_attempt_snapshot.has_value()) {
+              snapshot_msg = *preloaded_attempt_snapshot;
+              snapshot_any.PackFrom(snapshot_msg);
+              snapshot_loaded = true;
+            }
+          }
+
+          if (!snapshot_loaded && final_status.ok()) {
+            if (!layout_id.empty()) {
+              final_status = absl::FailedPreconditionError("assembly attempt snapshot is unavailable");
+            }
           }
 
           if (!snapshot_loaded && final_status.ok()) {
@@ -350,6 +719,23 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
               if (binding_or.ok()) {
                 snapshot_msg.set_layout_id(binding_or->layout_id());
                 snapshot_msg.set_assembly_layout_binding_version(binding_or->binding_version());
+              }
+            }
+
+            if (!snapshot_msg.layout_id().empty()) {
+              auto layout_or = client_sp->get_layout_spec(snapshot_msg.layout_id());
+              if (!layout_or.ok()) {
+                final_status = layout_or.status();
+              } else {
+                const auto contract = coordination::build_phase1_contribution_contract(
+                    snapshot_msg.layout_id(),
+                    layout_or->layout().expected_view_ids(),
+                    /*require_live_contributions=*/false);
+                for (const auto& view_id : layout_or->layout().expected_view_ids()) {
+                  snapshot_msg.add_expected_view_ids(view_id);
+                }
+                snapshot_msg.set_contribution_contract_hash(coordination::compute_contribution_contract_hash(contract));
+                *snapshot_msg.mutable_contribution_contract() = contract;
               }
             }
 
@@ -373,6 +759,15 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
             if (final_status.ok()) {
               snapshot_any.PackFrom(snapshot_msg);
               snapshot_loaded = true;
+            }
+          }
+
+          if (final_status.ok() && snapshot_loaded && snapshot_msg.publication_policy_json().empty()) {
+            auto policy_or = client_sp->get_assembly_runtime_policy(assembly_id);
+            if (policy_or.ok()) {
+              snapshot_msg.set_publication_policy_json(policy_or->policy_json());
+            } else if (!absl::IsNotFound(policy_or.status())) {
+              final_status = policy_or.status();
             }
           }
 
@@ -428,6 +823,88 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
               }
               if (final_status.ok() && !expected.empty()) {
                 final_status = absl::FailedPreconditionError("seal snapshot view missing from current view set");
+              }
+            }
+          }
+
+          if (final_status.ok() && snapshot_msg.expected_view_ids_size() > 0) {
+            auto current_views_or = client_sp->list_views(assembly_id);
+            if (!current_views_or.ok()) {
+              final_status = current_views_or.status();
+            } else {
+              absl::flat_hash_set<std::string> current_view_ids;
+              current_view_ids.reserve(current_views_or->size());
+              for (const auto& view : *current_views_or) {
+                if (!view.view_id.empty()) {
+                  current_view_ids.insert(view.view_id);
+                }
+              }
+              for (const auto& required_view_id : snapshot_msg.expected_view_ids()) {
+                if (!current_view_ids.contains(required_view_id)) {
+                  final_status = absl::FailedPreconditionError(
+                      absl::StrCat("required expected_view_id missing from current view set: ", required_view_id));
+                  break;
+                }
+              }
+            }
+          }
+
+          if (final_status.ok() && snapshot_msg.has_contribution_contract()) {
+            bool requires_piece_views = false;
+            for (const auto& entry : snapshot_msg.contribution_contract().required_contributions()) {
+              if (entry.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL) {
+                requires_piece_views = true;
+                break;
+              }
+            }
+            if (requires_piece_views) {
+              auto current_views_or = client_sp->list_views(assembly_id);
+              if (!current_views_or.ok()) {
+                final_status = current_views_or.status();
+              } else {
+                absl::flat_hash_set<std::string> current_view_ids;
+                current_view_ids.reserve(current_views_or->size());
+                for (const auto& view : *current_views_or) {
+                  if (!view.view_id.empty()) {
+                    current_view_ids.insert(view.view_id);
+                  }
+                }
+                for (const auto& entry : snapshot_msg.contribution_contract().required_contributions()) {
+                  if (entry.contribution_kind() != v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL) {
+                    continue;
+                  }
+                  if (entry.view_id().empty() || current_view_ids.contains(entry.view_id())) {
+                    continue;
+                  }
+                  final_status = absl::FailedPreconditionError(
+                      absl::StrCat("required expected_view_id missing from current view set: ", entry.view_id()));
+                  break;
+                }
+              }
+            }
+          }
+
+          if (final_status.ok() && snapshot_msg.has_contribution_contract() &&
+              snapshot_msg.contribution_contract().require_live_contributions()) {
+            auto accepted_or = client_sp->list_assembly_contributions(
+                assembly_id,
+                /*view_id=*/std::nullopt,
+                /*binding_id=*/std::nullopt,
+                /*binding_value_id=*/std::nullopt,
+                {"accepted"});
+            if (!accepted_or.ok()) {
+              final_status = accepted_or.status();
+            } else {
+              auto active_identities_or = coordination::list_active_contributor_identities(client_sp);
+              if (!active_identities_or.ok()) {
+                final_status = active_identities_or.status();
+              }
+              if (final_status.ok()) {
+                final_status = coordination::validate_live_required_contributions(
+                    snapshot_msg.contribution_contract(),
+                    absl::MakeConstSpan(*accepted_or),
+                    *active_identities_or,
+                    absl::Now());
               }
             }
           }
@@ -781,6 +1258,65 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
             if (seal_or->total_size > 0) {
               artifact->set_total_size(seal_or->total_size);
             }
+            if (!snapshot_msg.contribution_contract_hash().empty()) {
+              result_msg.set_representation_contract_hash(snapshot_msg.contribution_contract_hash());
+            }
+
+            if (final_status.ok() && !snapshot_msg.publication_policy_json().empty()) {
+              auto publication_policy_or = parse_publication_policy_json(snapshot_msg.publication_policy_json());
+              if (!publication_policy_or.ok()) {
+                final_status = publication_policy_or.status();
+              } else if (publication_policy_or->has_value()) {
+                const auto& publication_policy = **publication_policy_or;
+                if (publication_policy.source_version_key.has_value()) {
+                  final_status =
+                      publish_immutable_key(engine, *publication_policy.source_version_key, sealed_artifact_id);
+                  if (final_status.ok()) {
+                    result_msg.set_source_version_key(*publication_policy.source_version_key);
+                  }
+                }
+
+                tensorcast::common::v1::ArtifactDescriptor serving_descriptor;
+                bool serving_descriptor_ready = false;
+                if (final_status.ok() && publication_policy.serving_version_key.has_value()) {
+                  if (publication_policy.serving_artifact_id.has_value()) {
+                    auto serving_descriptor_or =
+                        client_sp->get_artifact_descriptor(*publication_policy.serving_artifact_id);
+                    if (!serving_descriptor_or.ok()) {
+                      final_status = serving_descriptor_or.status();
+                    } else {
+                      serving_descriptor = *serving_descriptor_or;
+                      serving_descriptor_ready = true;
+                    }
+                  } else {
+                    serving_descriptor = *result_msg.mutable_artifact();
+                    serving_descriptor_ready = true;
+                  }
+                }
+
+                if (final_status.ok() && publication_policy.serving_version_key.has_value()) {
+                  ABSL_CHECK(serving_descriptor_ready);
+                  final_status = publish_immutable_key(
+                      engine, *publication_policy.serving_version_key, serving_descriptor.artifact_id());
+                  if (final_status.ok()) {
+                    copy_artifact_descriptor(serving_descriptor, result_msg.mutable_serving_artifact());
+                    result_msg.set_serving_version_key(*publication_policy.serving_version_key);
+                    if (publication_policy.serving_manifest_ref.has_value()) {
+                      result_msg.set_serving_manifest_ref(*publication_policy.serving_manifest_ref);
+                    }
+                  }
+                }
+              }
+            }
+
+            if (final_status.ok()) {
+              auto contribution_finalize_status =
+                  finalize_assembly_contributions(client_sp, assembly_id, "released", {"accepted"});
+              if (!contribution_finalize_status.ok()) {
+                LOG(WARNING) << "finalize assembly contributions (released) failed for assembly=" << assembly_id << ": "
+                             << contribution_finalize_status;
+              }
+            }
 
             tensorcast::operation::v1::UpdateOperationRequest success;
             success.set_operation_id(operation_id);
@@ -797,6 +1333,12 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
           }
 
           if (!final_status.ok()) {
+            auto contribution_finalize_status =
+                finalize_assembly_contributions(client_sp, assembly_id, "aborted", {"accepted", "stale"});
+            if (!contribution_finalize_status.ok()) {
+              LOG(WARNING) << "finalize assembly contributions (aborted) failed for assembly=" << assembly_id << ": "
+                           << contribution_finalize_status;
+            }
             tensorcast::operation::v1::UpdateOperationRequest failed;
             failed.set_operation_id(operation_id);
             failed.set_lease_generation(lease_generation);

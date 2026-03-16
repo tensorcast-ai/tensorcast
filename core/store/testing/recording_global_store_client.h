@@ -59,6 +59,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool fail_register_replica{false};
   bool fail_acknowledge_lease{false};
   bool fail_disk_location_upsert{false};
+  absl::Status upsert_artifact_metadata_status{absl::OkStatus()};
   absl::Status unregister_replica_status{absl::OkStatus()};
   absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
   bool drain_success{true};
@@ -70,6 +71,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::optional<std::string> canonical_index_json;
   std::string cluster_id{"cluster-test"};
   std::vector<components::ArtifactDiskLocation> disk_locations;
+  std::vector<common::v1::ArtifactDescriptor> upserted_artifact_metadata_descriptors;
+  std::vector<std::string> upserted_artifact_metadata_indices;
 
   struct TransportReplicaInfo {
     std::string artifact_id;
@@ -137,6 +140,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   absl::Status unregister_worker(std::string_view, bool) override {
     return absl::UnimplementedError("unregister_worker not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_workers not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
+    return absl::UnimplementedError("list_active_worker_identities not supported in test stub");
   }
 
   absl::StatusOr<std::string> register_replica(
@@ -417,6 +431,43 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("reconcile_worker_state not supported in test stub");
   }
 
+  absl::StatusOr<components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t,
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("acquire_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("keepalive_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<components::ShardHomeLeaseKeepaliveInput>&,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_keepalive_shard_home_leases not supported in test stub");
+  }
+
+  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const components::RpcOptions&) override {
+    return absl::UnimplementedError("release_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<components::ShardHomeRouteInfo> get_shard_home_lease(uint64_t, const components::RpcOptions&)
+      override {
+    return absl::UnimplementedError("get_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_get_shard_home_leases not supported in test stub");
+  }
+
   bool is_connected() const override {
     return connected;
   }
@@ -430,6 +481,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view) override {
     return absl::UnimplementedError("resolve_key_mapping not supported in test stub");
+  }
+
+  absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) override {
+    upserted_artifact_metadata_descriptors.push_back(descriptor);
+    upserted_artifact_metadata_indices.emplace_back(canonical_index_data);
+    return upsert_artifact_metadata_status;
   }
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {

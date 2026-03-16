@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -38,19 +38,16 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   const size_t size1 = page_size * 3; // 12288 bytes
   const size_t total_size = size0 + size1;
 
-  fs::path base = fs::temp_directory_path() / "basic_cpu_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  tensorcast::testing::TestTempDir base("basic_cpu_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
-  fs::path path0 = base / artifact_dir_name / p0;
-  fs::path path1 = base / artifact_dir_name / p1;
+  fs::path path0 = base.path() / artifact_dir_name / p0;
+  fs::path path1 = base.path() / artifact_dir_name / p1;
   REQUIRE(create_dummy_file(path0, size0, 'A'));
   REQUIRE(create_dummy_file(path1, size1, 'B'));
 
   // RFC-0007 metadata for standard partitions
-  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
   // Read combined original data
   auto data0 = read_file_content(path0);
@@ -72,7 +69,7 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   // UMA is managed internally by ReplicaLoadController.
   // Use new DiskSource
   DiskSource disk_src;
-  disk_src.path = base / artifact_dir_name;
+  disk_src.path = base.path() / artifact_dir_name;
 
   // Use aggregate initialization for ReplicaConfig
   // Set max_buffer_bytes to match the available pool size
@@ -134,9 +131,4 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
     auto ptrs_after = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE(ptrs_after.empty());
   }
-
-  // Teardown
-  replica.reset();
-  pool.reset();
-  fs::remove_all(base);
 }

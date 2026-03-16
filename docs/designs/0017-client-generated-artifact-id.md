@@ -15,18 +15,20 @@ related_code:
 
 # Summary
 
-Introduce an alternative artifact identity kind, CGID (Client‑Generated ID), for high‑churn, runtime artifacts such as KVCache blocks used by PagedAttention. CGID complements, not replaces, the existing content‑addressed identity (mi2) defined in 0007. It removes server‑side hashing from hot registration paths while preserving simple routing, zero‑copy/P2P transport, and explicit lifecycle (register → serve → deregister).
+Introduce an alternative artifact identity kind, CGID (Client‑Generated ID), for high‑churn, runtime artifacts such as cache blocks (paged KV motivating case). CGID complements, not replaces, the existing content‑addressed identity (mi2) defined in 0007. It removes server‑side hashing from hot registration paths while preserving simple routing, zero‑copy/P2P transport, and explicit lifecycle (register → serve → deregister).
 
 Key outcomes
 - Dual identity kinds: `artifact_id` can be either `mi2:...` (content‑addressed) or `cgid:...` (client‑generated).
 - Low‑overhead registration: CGID path skips `index_multihash`/`data_multihash` computation; daemon trusts a client‑supplied identifier.
 - Same verbs and flows: Keep `register/put` and handle-based materialization from the API design doc; a single optional `artifact_id` parameter (when set to a `cgid:`) selects the CGID path.
 - Short‑lived/ephemeral by default: CGID artifacts are intended for runtime residency with TTL/explicit deregistration; no tree‑hash leaves or de‑dup semantics.
+- Namespace profiles may define tighter authority/routing rules on top of generic CGID. In particular, `cgid:byte_artifact~...`
+  follows the byte artifact profile defined by `0087`.
 
 # Goals / Non‑Goals
 
 Goals
-- Eliminate commit‑time hashing for KV‑style high‑frequency registrations without changing the public API shape.
+- Eliminate commit‑time hashing for cache‑style high‑frequency registrations (paged KV motivating case) without changing the public API shape.
 - Preserve transport correctness and isolation: existing transport lock + staged export guarantees continue to apply.
 - Make identity space explicit and validated across SDK/daemon/Global Store (GS) so both `mi2:` and `cgid:` are first‑class.
 
@@ -45,7 +47,13 @@ Non‑Goals
   - `cgid:` — client‑generated, opaque id. Validation:
     - ASCII, length 8..200
     - Allowed chars: RFC 3986 unreserved `[-._~A-Za-z0-9]` (covers hex and base64url without `=`)
-    - Recommended profile for KVCache: `cgid:<block_hash_hex64>` where `<block_hash_hex64>` is caller‑computed SHA‑256 hex of the logical block (or other collision‑resistant hash used by the engine). The daemon does not recompute or verify content.
+    - If the caller wants namespacing or multiple embedded fields, it MUST use a suffix profile that stays within the
+      allowed character set (e.g., `cgid:<ns>~<id>` with `~` as a delimiter). The `:` character is not allowed in the
+      CGID suffix (it is only used for the `cgid:` prefix itself).
+    - Generic profile example: `cgid:<block_hash_hex64>` where `<block_hash_hex64>` is caller‑computed SHA‑256 hex of
+      a logical block (or other collision‑resistant hash used by the engine).
+    - Byte artifact namespace profile: `cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>`
+      (see `0087`).
 
 Semantics
 - `cgid:` denotes an ephemeral identity: no de‑dup, no tree‑hash, no GS leaves. Routing and transport are keyed by the id string and device residency.
@@ -68,7 +76,7 @@ tc.register(tensors, *,
 
 # Convenience wrappers (optional):
 # tc.register_cgid(tensors, cgid: str, *, key=None, ttl_ms=None)
-# Deprecated helper: use `tc.register(..., artifact_id=f"cgid:{block_hash}")` to reuse KV layouts.
+# Deprecated helper: use `tc.register(..., artifact_id=f"cgid:{block_hash}")` to reuse cache layouts.
 ```
 
 Rules
@@ -77,6 +85,8 @@ Rules
 - Supplying an `artifact_id` that does not start with `cgid:` is invalid (SDK or daemon rejects to avoid forged mi2 ids).
 - `ttl_ms` continues to control lease keepalive for LIP replicas; CGID favors short to medium TTL.
 - `get/get_into` accept either `artifact_id` (which can be `mi2:` or `cgid:`) or `key`, unchanged from the current Store API design.
+- Namespace note: `cgid:byte_artifact~...` is governed by byte artifact profile authority/routing (home shard + fencing) and is
+  not a normal GS per-blob catalog entry.
 
 ## 3. Daemon changes (registration/commit identity)
 
@@ -116,6 +126,9 @@ Persistence model
 - `ArtifactRepository` upserts descriptors with explicit `id_kind`. `mi2:` records retain digests; `cgid:` records store `NULL` digests.
 - `ReplicaRepository` persists `expires_at` when supplied (favoring short-lived CGID replicas) while keeping existing write paths for MI2 replicas untouched.
 - Key mappings continue to target either identity kind; consumers must be prepared for empty digest fields when resolving CGID entries.
+- Namespace override (required): this per-blob persistence model does **not** apply to `cgid:byte_artifact~...`.
+  Byte artifact ids MUST NOT be inserted into `artifacts` / `artifact_replicas`; GS authority for that namespace is limited
+  to shard-lease metadata (see `0087`).
 
 Minimal schema evolution (illustrative; exact patch in the plan that changes `schema.sql`):
 ```sql
@@ -132,6 +145,8 @@ ALTER TABLE replicas
 
 Routing behavior
 - `GetArtifactInfoById` must accept both id kinds. When the id has prefix `cgid:`, fields specific to mi2 (leaves, digests) are empty/omitted; callers should not request `include_leaves`.
+- For `cgid:byte_artifact~...`, route/authority is profile-specific and does not rely on GS per-blob `GetArtifactInfoById`
+  as source of truth.
 
 ## 5. Error model & invariants
 
@@ -140,6 +155,8 @@ Invariants
 - `cgid:` artifacts are not verifiable by tree hash within TensorCast; integrity is the caller’s responsibility. Transport correctness is still enforced (locks, PAD zero‑fill, range checks).
 - Canonical index bytes, when present, must remain self‑consistent with the provided storage/alias metadata; the daemon continues to enforce index layout rules in registration.
 - CGID descriptors intentionally propagate empty digest fields; consumers should treat `index_multihash` / `data_multihash` as unset when `id_kind` is `CGID`.
+- Namespace profiles may further constrain authority and persistence. `cgid:byte_artifact~...` is the required exception in
+  which per-blob GS cataloging is disabled.
 
 Errors
 - `INVALID_ARGUMENT`: client supplied an `artifact_id`/`client_artifact_id` that does not start with `cgid:` or violates grammar.
@@ -149,7 +166,8 @@ Errors
 ## 6. Observability & policy
 
 - Tag metrics and logs with identity kind (derived from `artifact_id` prefix) to distinguish CGID vs MI2 paths (register latency, bytes, retries).
-- Admission control: deployments may configure policies to allow/deny CGID usage, enforce namespaces (e.g., `cgid:kv:<hash>`), or limit per‑tenant cardinality/TTL.
+- Admission control: deployments may configure policies to allow/deny CGID usage, enforce namespaces (e.g.,
+  `cgid:kv~<hash>`), or limit per‑tenant cardinality/TTL.
 
 # Compatibility & Acceptance Criteria
 
@@ -161,7 +179,9 @@ Compatibility
 Acceptance criteria
 - Registering with `artifact_id="cgid:..."` returns the same `artifact_id` and does not compute/return mi2 digests.
 - `get/get_into` successfully materialize replicas by CGID across nodes, using existing transport locks.
-- GS can list/resolve replicas for `cgid:` ids and omit mi2‑specific fields without breaking consumers.
+- GS can list/resolve replicas for generic `cgid:` namespaces (non-byte artifact) and omit mi2‑specific fields without
+  breaking consumers.
+- `cgid:byte_artifact~...` is excluded from GS per-blob catalogs and uses shard-lease authority + home routing semantics.
 - Mixed deployments (some clients using mi2, some using CGID) operate without behavioral regressions.
 
 # Trade‑offs & Risks
@@ -171,12 +191,14 @@ Trade‑offs
 - Duplicate CGIDs (caller error) would alias independent content; deployments should namespace or sign CGIDs where necessary.
 
 Risks & mitigations
-- Collision/abuse: recommend namespacing (`cgid:<ns>:<id>`), tenancy scoping, and rate/cardinality limits.
+- Collision/abuse: recommend namespacing (`cgid:<ns>~<id>`), tenancy scoping, and rate/cardinality limits.
 - Misuse of mi2‑only APIs: explicit `id_kind` in responses and clear error codes reduce surprises; SDK wrappers can gate usage at call sites.
 
 # References
 
 - Identity (mi2): [0007 Content‑Addressed Artifact ID](./0007-content-addressed-artifact-id.md)
+- Byte artifact profile authority/routing: [0056 Programmable Framework Advanced Design](./0056-programmable-framework-adv.md)
+- Unified byte artifact runtime contract: [0087 Unified Artifact Runtime and Routed Byte Artifact Architecture](./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
 - Session API: [api-design](../architecture/api/api-design.md#store-and-entry-points)
 - Views: [Artifact Views and Retrieval](../architecture/artifact-views-and-retrieval.md)
 

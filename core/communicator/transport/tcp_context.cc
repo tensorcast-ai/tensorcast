@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 extern "C" {
 #include <arpa/inet.h>
@@ -25,6 +25,22 @@ extern "C" {
 namespace tensorcast::communicator::transport {
 
 constexpr static int kTcpContextBatchSize = 16;
+
+namespace {
+
+void configure_low_latency_socket(int fd) {
+  int one = 1;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+    PLOG(WARNING) << "failed to set TCP_NODELAY";
+  }
+#ifdef TCP_QUICKACK
+  if (setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one)) != 0) {
+    PLOG(WARNING) << "failed to set TCP_QUICKACK";
+  }
+#endif
+}
+
+} // namespace
 
 TcpContext::TcpContext() : stop_(false) {
   listen_epoll_fd_ = wrap_epoll_create(1);
@@ -134,6 +150,8 @@ absl::StatusOr<tcp_transport_t> TcpContext::connect(const std::string& ip, uint1
     return absl::ErrnoToStatus(errno, absl::StrFormat("failed to connect to %s:%d, return=%d", ip, port, ret));
   }
 
+  configure_low_latency_socket(sock_fd);
+
   return std::make_shared<TcpTransport>(this, sock_fd, remote_addr);
 }
 
@@ -221,6 +239,8 @@ void TcpContext::do_accept() {
     PLOG(ERROR) << "[do_accept] failed to do accept";
     return;
   }
+
+  configure_low_latency_socket(sock_fd);
 
   on_accept_(std::make_shared<TcpTransport>(this, sock_fd, remote_addr));
 }

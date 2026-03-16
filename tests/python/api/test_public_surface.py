@@ -19,6 +19,7 @@ def test_tensorcast_exports_programmable_primitives() -> None:
     assert hasattr(tc, "context")
     assert callable(tc.context)
     assert hasattr(tc, "CallContext")
+    assert hasattr(tc, "CollectiveLoadGroup")
     assert hasattr(tc, "Operation")
     assert hasattr(tc, "plan")
     assert callable(tc.plan)

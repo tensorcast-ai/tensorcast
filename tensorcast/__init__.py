@@ -109,6 +109,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "ArtifactDescriptor": ("tensorcast.api", "ArtifactDescriptor"),
     "ArtifactError": ("tensorcast.api", "ArtifactError"),
     "ArtifactFuture": ("tensorcast.api", "ArtifactFuture"),
+    "AssemblyAttemptRef": ("tensorcast.api", "AssemblyAttemptRef"),
     "FallbackOptions": ("tensorcast.api", "FallbackOptions"),
     "GetArtifactOptions": ("tensorcast.api", "GetArtifactOptions"),
     "PlanType": ("tensorcast.api", "PlanType"),
@@ -129,6 +130,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "calculate_tensor_device_offsets",
     ),
     "CallContext": ("tensorcast.api", "CallContext"),
+    "CollectiveLoadGroup": ("tensorcast.api", "CollectiveLoadGroup"),
     "CapabilityDirectoryClient": (
         "tensorcast.capability_directory",
         "CapabilityDirectoryClient",
@@ -146,6 +148,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "PlanResult": ("tensorcast.api", "PlanResult"),
     "PlanStepRef": ("tensorcast.api", "PlanStepRef"),
     "PlanStepResult": ("tensorcast.api", "PlanStepResult"),
+    "PartialSealResult": ("tensorcast.api", "PartialSealResult"),
+    "PublishedModelVersion": ("tensorcast.api", "PublishedModelVersion"),
     "Instance": ("tensorcast.api", "Instance"),
     "Worker": ("tensorcast.api", "Worker"),
     "TargetSpec": ("tensorcast.api", "TargetSpec"),
@@ -162,6 +166,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "from_disk": ("tensorcast.api.store", "from_disk"),
     "put": ("tensorcast.api.store", "put"),
     "put_async": ("tensorcast.api.store", "put_async"),
+    "persistence_operation": ("tensorcast.api.store", "persistence_operation"),
     "query_persistence_status": ("tensorcast.api.store", "query_persistence_status"),
     "register": ("tensorcast.api.store", "register"),
     "register_async": ("tensorcast.api.store", "register_async"),
@@ -169,9 +174,12 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "register_piece": ("tensorcast.api.store", "register_piece"),
     "register_vram_region": ("tensorcast.api.store", "register_vram_region"),
     "seal_assembly": ("tensorcast.api.store", "seal_assembly"),
+    "start_assembly_attempt": ("tensorcast.api.store", "start_assembly_attempt"),
     "store": ("tensorcast.api.store", "store"),
     "unregister_vram_region": ("tensorcast.api.store", "unregister_vram_region"),
+    "wait_assembly_attempt": ("tensorcast.api.store", "wait_assembly_attempt"),
     "init": ("tensorcast.startup", "init"),
+    "PortConfig": ("tensorcast.startup", "PortConfig"),
     "is_initialized": ("tensorcast.startup", "is_initialized"),
     "shutdown": ("tensorcast.startup", "shutdown"),
 }
@@ -203,6 +211,7 @@ if TYPE_CHECKING:
         CallContext,
         CapabilityDirectoryClient,
         CapabilityDirectoryOptions,
+        CollectiveLoadGroup,
         FallbackOptions,
         GetArtifactOptions,
         Instance,
@@ -237,6 +246,7 @@ if TYPE_CHECKING:
         artifact_async,
         deregister_artifact,
         from_disk,
+        persistence_operation,
         put,
         put_async,
         query_persistence_status,
@@ -247,7 +257,12 @@ if TYPE_CHECKING:
         store,
         unregister_vram_region,
     )
-    from tensorcast.startup import init, is_initialized, shutdown  # noqa: F401
+    from tensorcast.startup import (  # noqa: F401
+        PortConfig,
+        init,
+        is_initialized,
+        shutdown,
+    )
 
 
 __all__ = [
@@ -269,6 +284,7 @@ __all__ = [
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "CallContext",
+    "CollectiveLoadGroup",
     "Operation",
     "OperationError",
     "OperationStatus",
@@ -291,6 +307,7 @@ __all__ = [
     "register",
     "register_async",
     "register_view",
+    "persistence_operation",
     "put",
     "put_async",
     "query_persistence_status",

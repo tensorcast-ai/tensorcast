@@ -1,10 +1,14 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef TESTS_COMMON_H_
 #define TESTS_COMMON_H_
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 #include <unistd.h>
@@ -28,6 +32,33 @@ int parse_options(int argc, char* argv[]);
 
 // File operations
 namespace tensorcast::testing {
+
+class TestTempDir {
+ public:
+  explicit TestTempDir(std::string_view prefix) : path_(make_unique_path(prefix)) {
+    std::filesystem::create_directories(path_);
+  }
+
+  ~TestTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  const std::filesystem::path& path() const {
+    return path_;
+  }
+
+ private:
+  static std::filesystem::path make_unique_path(std::string_view prefix) {
+    static std::atomic<uint64_t> counter{0};
+    const auto ticks = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    return std::filesystem::temp_directory_path() /
+        (std::string(prefix) + "_" + std::to_string(static_cast<uint64_t>(::getpid())) + "_" + std::to_string(ticks) +
+         "_" + std::to_string(counter.fetch_add(1)));
+  }
+
+  std::filesystem::path path_;
+};
 
 // Helper function to create a dummy file with patterned content.
 // Returns true on success, false otherwise.

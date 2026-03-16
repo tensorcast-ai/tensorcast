@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <utility>
@@ -105,7 +106,7 @@ absl::Status initialize_context(
   ctx.hints = hints;
   ctx.storage_path = config.storage_path;
   ctx.artifact_chunk_bytes = config.artifact_chunk_bytes;
-  ctx.num_threads = config.num_threads;
+  ctx.num_threads = loading::resolve_materialization_concurrency(config.num_threads, hints);
   ctx.pinned_memory_timeout = config.pinned_memory_timeout;
   ctx.options = config.engine_options;
   ctx.replica_runtime = config.replica_runtime;
@@ -175,27 +176,43 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_disk(
     return status;
   };
 
-  auto status = DiskSourceAdapter::prepare(source, ctx);
+  absl::Status status;
+  {
+    SC_TRACE_SCOPE("DiskSourcePrepare");
+    status = DiskSourceAdapter::prepare(source, ctx);
+  }
   if (!status.ok()) {
     return fail(status);
   }
 
-  status = MetadataStage::process(ctx);
+  {
+    SC_TRACE_SCOPE("MetadataStage");
+    status = MetadataStage::process(ctx);
+  }
   if (!status.ok()) {
     return fail(status);
   }
 
-  status = AllocationStage::allocate(ctx);
+  {
+    SC_TRACE_SCOPE("AllocationStage");
+    status = AllocationStage::allocate(ctx);
+  }
   if (!status.ok()) {
     return fail(status);
   }
 
-  status = VerificationStage::verify(ctx);
+  {
+    SC_TRACE_SCOPE("VerificationStage");
+    status = VerificationStage::verify(ctx);
+  }
   if (!status.ok()) {
     return fail(status);
   }
 
-  auto handle_or = HandleStage::build(ctx);
+  auto handle_or = [&]() -> absl::StatusOr<loading::ReplicaHandle> {
+    SC_TRACE_SCOPE("HandleStage");
+    return HandleStage::build(ctx);
+  }();
   if (!handle_or.ok()) {
     return fail(handle_or.status());
   }
@@ -252,7 +269,10 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_p2p(
     return status;
   };
 
-  auto prepare_status = P2PSourceAdapter::prepare(source, ctx);
+  auto prepare_status = [&]() {
+    SC_TRACE_SCOPE("P2PSourcePrepare");
+    return P2PSourceAdapter::prepare(source, ctx);
+  }();
   if (!prepare_status.ok()) {
     return fail_with_status(prepare_status);
   }
@@ -265,22 +285,34 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_p2p(
   p2p_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(ctx.p2p.source.size_bytes));
   p2p_span->SetAttribute("tc.location", target.location.type == common::memory::MemoryLocation::GPU ? "gpu" : "cpu");
 
-  auto metadata_status = MetadataStage::process(ctx);
+  auto metadata_status = [&]() {
+    SC_TRACE_SCOPE("MetadataStage");
+    return MetadataStage::process(ctx);
+  }();
   if (!metadata_status.ok()) {
     return fail_with_status(metadata_status);
   }
 
-  auto alloc_status = AllocationStage::allocate(ctx);
+  auto alloc_status = [&]() {
+    SC_TRACE_SCOPE("AllocationStage");
+    return AllocationStage::allocate(ctx);
+  }();
   if (!alloc_status.ok()) {
     return fail_with_status(alloc_status);
   }
 
-  auto verify_status = VerificationStage::verify(ctx);
+  auto verify_status = [&]() {
+    SC_TRACE_SCOPE("VerificationStage");
+    return VerificationStage::verify(ctx);
+  }();
   if (!verify_status.ok()) {
     return fail_with_status(verify_status);
   }
 
-  auto handle_or = HandleStage::build(ctx);
+  auto handle_or = [&]() -> absl::StatusOr<loading::ReplicaHandle> {
+    SC_TRACE_SCOPE("HandleStage");
+    return HandleStage::build(ctx);
+  }();
   if (!handle_or.ok()) {
     return fail_with_status(handle_or.status());
   }

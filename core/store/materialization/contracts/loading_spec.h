@@ -2,9 +2,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -14,6 +16,7 @@
 
 #include "absl/hash/hash.h"
 #include "absl/status/status.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "folly/futures/Future.h"
 
 #include "core/common/ready_signal.h"
@@ -64,6 +67,28 @@ struct InlineBufferSource {
   uint64_t size_bytes;
 };
 
+inline std::string build_synthetic_payload_canonical_index_json(uint64_t byte_length) {
+  return std::string("{\"payload\":[0,") + std::to_string(byte_length) + ",[" + std::to_string(byte_length) +
+      "],[1],\"torch.uint8\",0]}";
+}
+
+inline loader::ByteRangeMap build_identity_byte_range_map(uint64_t total_bytes) {
+  loader::ByteRangeMap map;
+  map.total_bytes = total_bytes;
+  map.num_sources = 1;
+  if (total_bytes > 0) {
+    map.segments.push_back(
+        loader::ByteRangeSegment{
+            .kind = loader::ByteRangeSegment::Kind::kData,
+            .dst_offset = 0,
+            .length = total_bytes,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return map;
+}
+
 using ArtifactSource = std::variant<
     DiskSource,
     P2PSource,
@@ -106,6 +131,12 @@ struct TransportSchedulingGroupHint {
   uint64_t epoch{0};
 };
 
+struct CollectiveLoadGroupHint {
+  std::string group_id;
+  uint32_t world_size{0};
+  uint32_t rank{0};
+};
+
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
@@ -120,6 +151,8 @@ struct MaterializeHints {
   std::string transport_request_id;
   // Optional scheduler group hint for fairness/completion-aware dispatch.
   std::optional<TransportSchedulingGroupHint> transport_scheduling_group;
+  // Optional same-host multi-rank hint for shared-window disk loading.
+  std::optional<CollectiveLoadGroupHint> collective_load_group;
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
   bool prefer_pageable_cpu{false};
@@ -135,6 +168,16 @@ struct MaterializeHints {
 
   std::optional<VariantIdentity> variant;
 };
+
+inline int resolve_materialization_concurrency(int daemon_num_threads, const MaterializeHints& hints) {
+  const int bounded_daemon_threads = std::max(1, daemon_num_threads);
+  if (hints.pipeline_concurrency == 0) {
+    return bounded_daemon_threads;
+  }
+  const uint32_t bounded_hint =
+      std::min<uint32_t>(hints.pipeline_concurrency, static_cast<uint32_t>(std::numeric_limits<int>::max()));
+  return std::max(1, std::min(bounded_daemon_threads, static_cast<int>(bounded_hint)));
+}
 
 struct ReplicaLoadSpec {
   std::string identifier;

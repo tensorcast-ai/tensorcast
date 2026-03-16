@@ -89,6 +89,26 @@ std::string register_stable_artifact(
   return commit_or->artifact_id;
 }
 
+PersistenceTaskState advance_task_to_terminal(
+    PersistenceManager& mgr,
+    std::string_view task_id,
+    int max_iterations = 60) {
+  PersistenceTaskState task;
+  for (int i = 0; i < max_iterations; ++i) {
+    mgr.advance_once_for_test();
+    auto maybe = mgr.get_by_task_id(task_id);
+    REQUIRE(maybe.has_value());
+    task = *maybe;
+    if (task.state == PERSISTENCE_STATE_SUCCESS || task.state == PERSISTENCE_STATE_FAILED ||
+        task.state == PERSISTENCE_STATE_DEGRADED) {
+      return task;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  FAIL("persistence task did not reach terminal state");
+  return task;
+}
+
 } // namespace
 
 TEST_CASE("PersistenceManager advances state machine", "[daemon][persistence]") {
@@ -151,6 +171,146 @@ TEST_CASE("PersistenceManager advances state machine", "[daemon][persistence]") 
     }
   }
   REQUIRE(location_seen);
+}
+
+TEST_CASE(
+    "PersistenceManager persists routed byte-artifact content via external backing source",
+    "[daemon][persistence][byte_artifact]") {
+  const auto storage_root = make_test_storage_root("byte_artifact_external_source");
+  tensorcast::store::StoreEngine engine(make_engine_opts(storage_root));
+  const uint64_t total_size = 8ULL * 1024 * 1024;
+  const std::string physical_artifact_id = "__tc_byte_body__:persist_source";
+  (void)register_stable_artifact(engine, physical_artifact_id, total_size);
+
+  auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
+  auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());
+
+  PersistenceManager mgr(nullptr, nullptr, &engine, nullptr, engine.get_artifact_chunk_bytes());
+  mgr.set_global_store_client(client_ptr);
+  mgr.set_storage_path(storage_root);
+  mgr.set_local_node_id("node-local");
+  mgr.set_external_source_resolver(
+      [&](std::string_view artifact_id) -> absl::StatusOr<PersistenceManager::PersistenceSource> {
+        if (artifact_id != "cgid:byte_artifact~tenant~engine~b64u.cGVyc2lzdA~layout_v1~b64u.azE") {
+          return absl::NotFoundError("unknown byte-artifact persistence source");
+        }
+        tensorcast::store::runtime::ingestion::VerifiedContentDescriptor verified;
+        verified.content_identity.semantic_layout_identity.kind =
+            tensorcast::store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId;
+        verified.content_identity.semantic_layout_identity.value = "layout_v1";
+        verified.content_identity.logical_size_bytes = total_size;
+        verified.content_identity.digest_alg = "sha256";
+        verified.content_identity.digest_bytes.assign(32, '\x01');
+        return PersistenceManager::PersistenceSource{
+            .artifact_id = std::string(artifact_id),
+            .source_artifact_id = physical_artifact_id,
+            .total_size_bytes = total_size,
+            .verified_content_descriptor = verified,
+        };
+      });
+
+  ResolvedStorePolicy policy;
+  policy.shared_disk_requirement = RequirementLevel::kMust;
+  auto task_or = mgr.start_task("cgid:byte_artifact~tenant~engine~b64u.cGVyc2lzdA~layout_v1~b64u.azE", policy);
+  REQUIRE(task_or.ok());
+  const auto task = *task_or;
+
+  PersistenceTaskState final;
+  bool done = false;
+  for (int i = 0; i < 60; ++i) {
+    mgr.advance_once_for_test();
+    auto maybe = mgr.get_by_task_id(task.task_id);
+    REQUIRE(maybe.has_value());
+    final = *maybe;
+    if (final.state == PERSISTENCE_STATE_SUCCESS || final.state == PERSISTENCE_STATE_FAILED ||
+        final.state == PERSISTENCE_STATE_DEGRADED) {
+      done = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  REQUIRE(done);
+  REQUIRE(final.state == PERSISTENCE_STATE_SUCCESS);
+  REQUIRE(final.source_artifact_id == physical_artifact_id);
+  REQUIRE(final.verified_content_descriptor.has_value());
+
+  auto shared_disk_source = mgr.resolve_policy_source(final.artifact_id);
+  REQUIRE(shared_disk_source.has_value());
+  REQUIRE(shared_disk_source->path_kind == PersistenceManager::PolicySourceKind::kSharedDisk);
+  REQUIRE(shared_disk_source->verified_content_descriptor == final.verified_content_descriptor);
+  REQUIRE(std::filesystem::exists(shared_disk_source->local_path / "artifact_descriptor.json"));
+  REQUIRE(std::filesystem::exists(shared_disk_source->local_path / "tensor_index.json"));
+}
+
+TEST_CASE(
+    "PersistenceManager drops shared-disk source once backing path disappears",
+    "[daemon][persistence][source_truth]") {
+  const auto storage_root = make_test_storage_root("shared_disk_source_missing");
+  tensorcast::store::StoreEngine engine(make_engine_opts(storage_root));
+  const uint64_t total_size = 8ULL * 1024 * 1024;
+  const auto artifact_id = register_stable_artifact(engine, "mi2:source_missing:index", total_size);
+
+  auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
+  auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());
+
+  PersistenceManager mgr(nullptr, nullptr, &engine, nullptr, engine.get_artifact_chunk_bytes());
+  mgr.set_global_store_client(client_ptr);
+  mgr.set_storage_path(storage_root);
+  mgr.set_local_node_id("node-local");
+
+  const auto task = mgr.start_task_for_test(artifact_id, PLACEMENT_POLICY_LOCAL_ONLY, true, total_size);
+  const auto final = advance_task_to_terminal(mgr, task.task_id);
+  REQUIRE(final.state == PERSISTENCE_STATE_SUCCESS);
+
+  auto source = mgr.resolve_policy_source(artifact_id);
+  REQUIRE(source.has_value());
+  std::filesystem::remove_all(source->local_path);
+
+  REQUIRE_FALSE(mgr.resolve_policy_source(artifact_id).has_value());
+  REQUIRE_FALSE(mgr.resolve_policy_source(artifact_id, task.task_id).has_value());
+  REQUIRE(mgr.list_policy_sources(artifact_id).empty());
+}
+
+TEST_CASE(
+    "PersistenceManager keeps older actionable shared-disk source after a later failed task",
+    "[daemon][persistence][source_truth]") {
+  const auto storage_root = make_test_storage_root("shared_disk_source_truth");
+  tensorcast::store::StoreEngine engine(make_engine_opts(storage_root));
+  const uint64_t total_size = 8ULL * 1024 * 1024;
+  const auto artifact_id = register_stable_artifact(engine, "mi2:source_truth:index", total_size);
+
+  auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
+  auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());
+
+  PersistenceManager mgr(nullptr, nullptr, &engine, nullptr, engine.get_artifact_chunk_bytes());
+  mgr.set_global_store_client(client_ptr);
+  mgr.set_storage_path(storage_root);
+  mgr.set_local_node_id("node-local");
+
+  const auto first = mgr.start_task_for_test(artifact_id, PLACEMENT_POLICY_LOCAL_ONLY, true, total_size);
+  const auto first_final = advance_task_to_terminal(mgr, first.task_id);
+  REQUIRE(first_final.state == PERSISTENCE_STATE_SUCCESS);
+
+  mgr.set_fail_shared_disk_for_test(true);
+  const auto second = mgr.start_task_for_test(artifact_id, PLACEMENT_POLICY_LOCAL_ONLY, true, total_size);
+  const auto second_final = advance_task_to_terminal(mgr, second.task_id);
+  REQUIRE(second_final.state == PERSISTENCE_STATE_FAILED);
+
+  auto latest = mgr.get_latest_for_artifact(artifact_id);
+  REQUIRE(latest.has_value());
+  REQUIRE(latest->task_id == second.task_id);
+
+  auto source = mgr.resolve_policy_source(artifact_id);
+  REQUIRE(source.has_value());
+  REQUIRE(source->control_ref == first.task_id);
+  REQUIRE(source->workflow_task_id == first.task_id);
+  REQUIRE(std::filesystem::exists(source->local_path / "artifact_descriptor.json"));
+  const auto listed_sources = mgr.list_policy_sources(artifact_id);
+  REQUIRE(listed_sources.size() == 1);
+  REQUIRE(listed_sources.front().control_ref == first.task_id);
+  REQUIRE(mgr.resolve_policy_source(artifact_id, first.task_id).has_value());
+  REQUIRE_FALSE(mgr.resolve_policy_source(artifact_id, second.task_id).has_value());
 }
 
 TEST_CASE("PersistenceManager tracks latest task per artifact", "[daemon][persistence]") {
@@ -463,6 +623,60 @@ TEST_CASE("PersistenceManager reloads task log snapshots", "[daemon][persistence
   auto recovered = reloaded.get_latest_for_artifact("artifact-log");
   REQUIRE(recovered.has_value());
   REQUIRE(recovered->state == PERSISTENCE_STATE_SUCCESS);
+
+  std::filesystem::remove(log_path);
+}
+
+TEST_CASE(
+    "PersistenceManager reloads actionable shared-disk sources from task log",
+    "[daemon][persistence][log][shared_disk]") {
+  const auto log_path = std::filesystem::temp_directory_path() / "tensorcast_persist_shared_disk_log.jsonl";
+  const auto storage_root = make_test_storage_root("reload_shared_disk_source");
+  std::filesystem::remove(log_path);
+
+  tensorcast::store::StoreEngine engine(make_engine_opts(storage_root));
+  const uint64_t total_size = 8ULL * 1024 * 1024;
+  const auto artifact_id = register_stable_artifact(engine, "mi2:reload_shared_disk:index", total_size);
+
+  auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
+  auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());
+
+  std::string task_id;
+  {
+    PersistenceManager mgr(
+        nullptr, nullptr, &engine, nullptr, engine.get_artifact_chunk_bytes(), std::chrono::milliseconds(5), log_path);
+    mgr.set_global_store_client(client_ptr);
+    mgr.set_storage_path(storage_root);
+    mgr.set_local_node_id("node-local");
+
+    auto task = mgr.start_task_for_test(artifact_id, PLACEMENT_POLICY_LOCAL_ONLY, true, total_size);
+    task_id = task.task_id;
+    const auto final = advance_task_to_terminal(mgr, task.task_id);
+    REQUIRE(final.state == PERSISTENCE_STATE_SUCCESS);
+    REQUIRE(final.disk_location_registered);
+    REQUIRE(mgr.is_spill_evictable(artifact_id, true, false));
+  }
+
+  PersistenceManager reloaded(
+      nullptr, nullptr, &engine, nullptr, engine.get_artifact_chunk_bytes(), std::chrono::milliseconds(5), log_path);
+  reloaded.set_storage_path(storage_root);
+
+  auto recovered = reloaded.get_latest_for_artifact(artifact_id);
+  REQUIRE(recovered.has_value());
+  REQUIRE(recovered->task_id == task_id);
+  REQUIRE(recovered->state == PERSISTENCE_STATE_SUCCESS);
+  REQUIRE(recovered->disk_location_registered);
+  REQUIRE_FALSE(recovered->disk_relative_path.empty());
+
+  auto source = reloaded.resolve_policy_source(artifact_id);
+  REQUIRE(source.has_value());
+  REQUIRE(source->control_ref == task_id);
+  REQUIRE(source->workflow_task_id == task_id);
+  REQUIRE(std::filesystem::exists(source->local_path / "artifact_descriptor.json"));
+  const auto listed_sources = reloaded.list_policy_sources(artifact_id);
+  REQUIRE(listed_sources.size() == 1);
+  REQUIRE(listed_sources.front().control_ref == task_id);
+  REQUIRE(reloaded.is_spill_evictable(artifact_id, true, false));
 
   std::filesystem::remove(log_path);
 }

@@ -114,6 +114,8 @@ enum class BenchMode : uint8_t {
   kSafetensorsDiskBaseline = 4,
   kSafetensorsHostBaseline = 5,
   kH2dBaseline = 6,
+  kH2dNcclBroadcastBaseline = 16,
+  kH2dNcclBroadcastPipelineBaseline = 17,
   kSafetensorsODirectHostBaseline = 7,
   kSafetensorsODirectDiskBaseline = 8,
   kSafetensorsHotHostBaseline = 11,
@@ -295,11 +297,15 @@ struct LoaderConfig {
   // H2D microbench params (pinned host -> GPU)
   uint64_t h2d_bench_bytes = 8ull * 1024ull * 1024ull * 1024ull; // 8 GiB
   bool h2d_per_gpu_pinned_pool = false;
+  int h2d_nccl_warmup = 1;
+  int h2d_nccl_iters = 3;
 };
 
 // Forward declarations (used by Strategy D helpers).
 absl::Status run_disk_baseline(const LoaderConfig& cfg);
 absl::Status log_run_result(const LoaderConfig& cfg, const RunResult& r);
+absl::Status run_h2d_nccl_broadcast_baseline(const LoaderConfig& cfg);
+absl::Status run_h2d_nccl_broadcast_pipeline_baseline(const LoaderConfig& cfg);
 
 std::string join_device_ids(const std::vector<int>& device_ids) {
   std::string out;
@@ -470,12 +476,28 @@ class NcclClique {
   }
 
   absl::Status group_end_and_wait(std::string_view what) {
-    TC_RETURN_IF_ERROR(nccl_result_to_status(ncclGroupEnd(), "ncclGroupEnd"));
+    TC_RETURN_IF_ERROR(group_end());
+    return wait_all(what);
+  }
+
+  absl::Status group_end() {
+    return nccl_result_to_status(ncclGroupEnd(), "ncclGroupEnd");
+  }
+
+  absl::Status wait_all(std::string_view what) {
     for (int rank = 0; rank < world_size(); ++rank) {
       TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_ids_[rank]));
       TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(done_events_[rank], streams_[rank]));
     }
     return wait_all_with_timeout(absl::Seconds(options_.nccl_timeout_sec), what);
+  }
+
+  absl::Status wait_stream_on_event(int rank, cudaEvent_t event) {
+    if (rank < 0 || rank >= world_size()) {
+      return absl::InvalidArgumentError("NcclClique::wait_stream_on_event: rank out of range");
+    }
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_ids_[rank]));
+    return tensorcast::cuda::stream_wait_event(streams_[rank], event);
   }
 
  private:
@@ -779,6 +801,12 @@ absl::StatusOr<BenchMode> parse_mode(std::string_view s) {
   }
   if (s == "h2d_baseline") {
     return BenchMode::kH2dBaseline;
+  }
+  if (s == "h2d_nccl_broadcast_baseline") {
+    return BenchMode::kH2dNcclBroadcastBaseline;
+  }
+  if (s == "h2d_nccl_broadcast_pipeline_baseline") {
+    return BenchMode::kH2dNcclBroadcastPipelineBaseline;
   }
   if (s == "safetensors_o_direct_host_baseline") {
     return BenchMode::kSafetensorsODirectHostBaseline;
@@ -4626,6 +4654,368 @@ absl::Status run_h2d_baseline(const LoaderConfig& cfg) {
   return absl::OkStatus();
 }
 
+absl::Status run_h2d_nccl_broadcast_baseline(const LoaderConfig& cfg) {
+  if (cfg.h2d_bench_bytes == 0) {
+    return absl::InvalidArgumentError("--h2d_bench_bytes must be > 0 for mode=h2d_nccl_broadcast_baseline");
+  }
+  if (!cfg.use_pinned_host_buffer) {
+    return absl::InvalidArgumentError("--use_pinned_host_buffer=true is required for mode=h2d_nccl_broadcast_baseline");
+  }
+  if (cfg.tp_world_size <= 1) {
+    return absl::InvalidArgumentError("--tp_world_size must be > 1 for mode=h2d_nccl_broadcast_baseline");
+  }
+  if (cfg.h2d_nccl_iters <= 0) {
+    return absl::InvalidArgumentError("--h2d_nccl_iters must be > 0 for mode=h2d_nccl_broadcast_baseline");
+  }
+  if (cfg.h2d_nccl_warmup < 0) {
+    return absl::InvalidArgumentError("--h2d_nccl_warmup must be >= 0 for mode=h2d_nccl_broadcast_baseline");
+  }
+
+  BounceBufferPlan bb;
+  TC_ASSIGN_OR_RETURN(bb, plan_bounce_buffer(cfg));
+
+  std::vector<int> device_ids;
+  TC_ASSIGN_OR_RETURN(device_ids, build_tp_device_ids(cfg));
+  const int root_rank = 0;
+  const int root_device = device_ids[static_cast<size_t>(root_rank)];
+  const uint64_t bytes_per_gpu = cfg.h2d_bench_bytes;
+
+  struct HostPool {
+    std::shared_ptr<common::memory::PinnedBufferPool> pool;
+    const uint8_t* base = nullptr;
+    size_t bytes = 0;
+    size_t chunk_bytes = 0;
+    int numa_node = -1;
+  };
+
+  auto build_one_pool = [&](int device_id) -> absl::StatusOr<HostPool> {
+    common::memory::PinnedBufferPool::Options pool_opts;
+    pool_opts.name = "h2d_nccl_broadcast_baseline";
+    pool_opts.prefault = cfg.pinned_numa_prefault;
+    TC_ASSIGN_OR_RETURN(pool_opts.numa_node, resolve_pinned_numa_node_for_device(cfg, device_id));
+
+    auto pool = std::make_shared<common::memory::PinnedBufferPool>(
+        static_cast<size_t>(bb.total_bytes), bb.chunk_bytes, std::move(pool_opts));
+    const auto slabs = pool->list_slabs();
+    if (slabs.empty()) {
+      return absl::InternalError("h2d_nccl_broadcast_baseline: no pinned slabs");
+    }
+    for (const auto& slab : slabs) {
+      std::memset(slab.base.get(), 0, slab.bytes);
+    }
+    const size_t chunk_bytes = pool->slice_bytes();
+    const uint8_t* host_base = reinterpret_cast<const uint8_t*>(slabs[0].base.get());
+    const size_t host_bytes = slabs[0].bytes;
+    if (host_bytes < chunk_bytes) {
+      return absl::InternalError("h2d_nccl_broadcast_baseline: pinned host slab smaller than one chunk");
+    }
+    return HostPool{
+        .pool = std::move(pool),
+        .base = host_base,
+        .bytes = host_bytes,
+        .chunk_bytes = chunk_bytes,
+        .numa_node = pool_opts.numa_node,
+    };
+  };
+
+  HostPool host;
+  TC_ASSIGN_OR_RETURN(host, build_one_pool(root_device));
+
+  struct PerGpuCtx {
+    int device_id = -1;
+    std::unique_ptr<common::memory::GpuDeviceMemory> dst;
+  };
+
+  std::vector<PerGpuCtx> gpus(static_cast<size_t>(cfg.tp_world_size));
+  for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+    auto& ctx = gpus[static_cast<size_t>(rank)];
+    ctx.device_id = device_ids[static_cast<size_t>(rank)];
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(ctx.device_id));
+    ctx.dst = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(ctx.dst->allocate(static_cast<size_t>(bytes_per_gpu), ctx.device_id));
+  }
+
+  cudaStream_t h2d_stream = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&h2d_stream, cudaStreamNonBlocking));
+
+  NcclClique clique;
+  TC_ASSIGN_OR_RETURN(
+      clique,
+      NcclClique::create(
+          NcclClique::Options{
+              .device_ids = device_ids,
+              .nccl_timeout_sec = cfg.nccl_timeout_sec,
+          }));
+
+  auto run_one_iteration = [&](int iter_idx, double* h2d_sec_total, double* nccl_sec_total) -> absl::Status {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device));
+    uint64_t copied = 0;
+    const absl::Time h2d_t0 = absl::Now();
+    while (copied < bytes_per_gpu) {
+      const size_t bytes = static_cast<size_t>(std::min<uint64_t>(bytes_per_gpu - copied, host.chunk_bytes));
+      const uint64_t host_off =
+          (host.bytes == bytes) ? 0 : ((copied + static_cast<uint64_t>(iter_idx) * 4096ull) % (host.bytes - bytes));
+      const void* src = host.base + host_off;
+      void* dst_ptr = static_cast<uint8_t*>(gpus[static_cast<size_t>(root_rank)].dst->get()) + copied;
+      TC_RETURN_IF_ERROR(tensorcast::cuda::memcpy_async(dst_ptr, src, bytes, cudaMemcpyHostToDevice, h2d_stream));
+      copied += static_cast<uint64_t>(bytes);
+    }
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(h2d_stream));
+    *h2d_sec_total += seconds_since(h2d_t0);
+
+    const absl::Time nccl_t0 = absl::Now();
+    TC_RETURN_IF_ERROR(clique.group_start());
+    for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+      void* buf = gpus[static_cast<size_t>(rank)].dst->get();
+      TC_RETURN_IF_ERROR(clique.broadcast_u8(rank, buf, buf, static_cast<size_t>(bytes_per_gpu), root_rank));
+    }
+    TC_RETURN_IF_ERROR(clique.group_end_and_wait(
+        absl::StrCat("h2d_nccl_broadcast_baseline bytes=", static_cast<uint64_t>(bytes_per_gpu))));
+    *nccl_sec_total += seconds_since(nccl_t0);
+    return absl::OkStatus();
+  };
+
+  double warmup_h2d_sec = 0.0;
+  double warmup_nccl_sec = 0.0;
+  for (int iter = 0; iter < cfg.h2d_nccl_warmup; ++iter) {
+    TC_RETURN_IF_ERROR(run_one_iteration(iter, &warmup_h2d_sec, &warmup_nccl_sec));
+  }
+  TC_RETURN_IF_ERROR(clique.barrier());
+
+  double h2d_sec_total = 0.0;
+  double nccl_sec_total = 0.0;
+  const absl::Time total_t0 = absl::Now();
+  for (int iter = 0; iter < cfg.h2d_nccl_iters; ++iter) {
+    TC_RETURN_IF_ERROR(run_one_iteration(iter, &h2d_sec_total, &nccl_sec_total));
+  }
+  TC_RETURN_IF_ERROR(clique.barrier());
+  const double total_sec = seconds_since(total_t0);
+
+  if (h2d_stream != nullptr) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(h2d_stream));
+  }
+
+  const double root_gib =
+      (static_cast<double>(bytes_per_gpu) * static_cast<double>(cfg.h2d_nccl_iters)) / (1024.0 * 1024.0 * 1024.0);
+  const double delivered_gib = root_gib * static_cast<double>(cfg.tp_world_size);
+  const double nccl_delivery_gib = root_gib * static_cast<double>(cfg.tp_world_size - 1);
+  const double avg_iter_us = (total_sec / static_cast<double>(cfg.h2d_nccl_iters)) * 1e6;
+
+  LOG(INFO) << std::format(
+      "h2d_nccl_broadcast_baseline tp_world_size={} tp_devices={} root_rank={} root_device={} bytes_per_gpu={} warmup={} iters={} total_sec={:.6f} avg_iter_us={:.3f} end_to_end_agg_GiB/s={:.3f} root_h2d_GiB/s={:.3f} nccl_root_GiB/s={:.3f} nccl_delivery_GiB/s={:.3f} pinned=true bbuf_size_kb={} buffer_chunks={} chunk_bytes={} pinned_numa_node={} pinned_numa_prefault={} root_host_pool=numa{}",
+      cfg.tp_world_size,
+      join_device_ids(device_ids),
+      root_rank,
+      root_device,
+      static_cast<uint64_t>(bytes_per_gpu),
+      cfg.h2d_nccl_warmup,
+      cfg.h2d_nccl_iters,
+      total_sec,
+      avg_iter_us,
+      delivered_gib / std::max(1e-9, total_sec),
+      root_gib / std::max(1e-9, h2d_sec_total),
+      root_gib / std::max(1e-9, nccl_sec_total),
+      nccl_delivery_gib / std::max(1e-9, nccl_sec_total),
+      static_cast<int64_t>(cfg.bbuf_size_kb),
+      bb.chunks,
+      bb.chunk_bytes,
+      cfg.pinned_numa_node,
+      cfg.pinned_numa_prefault,
+      host.numa_node);
+  return absl::OkStatus();
+}
+
+absl::Status run_h2d_nccl_broadcast_pipeline_baseline(const LoaderConfig& cfg) {
+  if (cfg.h2d_bench_bytes == 0) {
+    return absl::InvalidArgumentError("--h2d_bench_bytes must be > 0 for mode=h2d_nccl_broadcast_pipeline_baseline");
+  }
+  if (!cfg.use_pinned_host_buffer) {
+    return absl::InvalidArgumentError(
+        "--use_pinned_host_buffer=true is required for mode=h2d_nccl_broadcast_pipeline_baseline");
+  }
+  if (cfg.tp_world_size <= 1) {
+    return absl::InvalidArgumentError("--tp_world_size must be > 1 for mode=h2d_nccl_broadcast_pipeline_baseline");
+  }
+  if (cfg.h2d_nccl_iters <= 0) {
+    return absl::InvalidArgumentError("--h2d_nccl_iters must be > 0 for mode=h2d_nccl_broadcast_pipeline_baseline");
+  }
+
+  BounceBufferPlan bb;
+  TC_ASSIGN_OR_RETURN(bb, plan_bounce_buffer(cfg));
+
+  std::vector<int> device_ids;
+  TC_ASSIGN_OR_RETURN(device_ids, build_tp_device_ids(cfg));
+  const int root_rank = 0;
+  const int root_device = device_ids[static_cast<size_t>(root_rank)];
+  const uint64_t bytes_per_gpu = cfg.h2d_bench_bytes;
+
+  struct HostPool {
+    std::shared_ptr<common::memory::PinnedBufferPool> pool;
+    const uint8_t* base = nullptr;
+    size_t bytes = 0;
+    size_t chunk_bytes = 0;
+    int numa_node = -1;
+  };
+
+  auto build_one_pool = [&](int device_id) -> absl::StatusOr<HostPool> {
+    common::memory::PinnedBufferPool::Options pool_opts;
+    pool_opts.name = "h2d_nccl_broadcast_pipeline_baseline";
+    pool_opts.prefault = cfg.pinned_numa_prefault;
+    TC_ASSIGN_OR_RETURN(pool_opts.numa_node, resolve_pinned_numa_node_for_device(cfg, device_id));
+
+    auto pool = std::make_shared<common::memory::PinnedBufferPool>(
+        static_cast<size_t>(bb.total_bytes), bb.chunk_bytes, std::move(pool_opts));
+    const auto slabs = pool->list_slabs();
+    if (slabs.empty()) {
+      return absl::InternalError("h2d_nccl_broadcast_pipeline_baseline: no pinned slabs");
+    }
+    for (const auto& slab : slabs) {
+      std::memset(slab.base.get(), 0, slab.bytes);
+    }
+    const size_t chunk_bytes = pool->slice_bytes();
+    const uint8_t* host_base = reinterpret_cast<const uint8_t*>(slabs[0].base.get());
+    const size_t host_bytes = slabs[0].bytes;
+    if (host_bytes < chunk_bytes) {
+      return absl::InternalError("h2d_nccl_broadcast_pipeline_baseline: pinned host slab smaller than one chunk");
+    }
+    return HostPool{
+        .pool = std::move(pool),
+        .base = host_base,
+        .bytes = host_bytes,
+        .chunk_bytes = chunk_bytes,
+        .numa_node = pool_opts.numa_node,
+    };
+  };
+
+  HostPool host;
+  TC_ASSIGN_OR_RETURN(host, build_one_pool(root_device));
+
+  struct PerGpuCtx {
+    int device_id = -1;
+    std::unique_ptr<common::memory::GpuDeviceMemory> dst;
+  };
+
+  std::vector<PerGpuCtx> gpus(static_cast<size_t>(cfg.tp_world_size));
+  for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+    auto& ctx = gpus[static_cast<size_t>(rank)];
+    ctx.device_id = device_ids[static_cast<size_t>(rank)];
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(ctx.device_id));
+    ctx.dst = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(ctx.dst->allocate(static_cast<size_t>(bytes_per_gpu), ctx.device_id));
+  }
+
+  cudaStream_t h2d_stream = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device));
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&h2d_stream, cudaStreamNonBlocking));
+
+  const size_t chunk_bytes = host.chunk_bytes;
+  const size_t nchunks = static_cast<size_t>((bytes_per_gpu + static_cast<uint64_t>(chunk_bytes) - 1) / chunk_bytes);
+  std::vector<cudaEvent_t> chunk_ready(nchunks, nullptr);
+  for (size_t i = 0; i < nchunks; ++i) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&chunk_ready[i], cudaEventDisableTiming));
+  }
+
+  NcclClique clique;
+  TC_ASSIGN_OR_RETURN(
+      clique,
+      NcclClique::create(
+          NcclClique::Options{
+              .device_ids = device_ids,
+              .nccl_timeout_sec = cfg.nccl_timeout_sec,
+          }));
+
+  auto cleanup = [&]() {
+    for (auto& event : chunk_ready) {
+      if (event != nullptr) {
+        (void)tensorcast::cuda::event_destroy(event);
+        event = nullptr;
+      }
+    }
+    if (h2d_stream != nullptr) {
+      (void)tensorcast::cuda::set_device(root_device);
+      (void)tensorcast::cuda::stream_destroy(h2d_stream);
+      h2d_stream = nullptr;
+    }
+    for (auto& ctx : gpus) {
+      ctx.dst.reset();
+    }
+  };
+
+  auto run_one_iteration = [&](int iter_idx) -> absl::Status {
+    uint64_t copied = 0;
+    size_t chunk_idx = 0;
+    while (copied < bytes_per_gpu) {
+      const size_t bytes = static_cast<size_t>(std::min<uint64_t>(bytes_per_gpu - copied, chunk_bytes));
+      const uint64_t host_off =
+          (host.bytes == bytes) ? 0 : ((copied + static_cast<uint64_t>(iter_idx) * 4096ull) % (host.bytes - bytes));
+      void* root_ptr = static_cast<uint8_t*>(gpus[static_cast<size_t>(root_rank)].dst->get()) + copied;
+
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device));
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(root_ptr, host.base + host_off, bytes, cudaMemcpyHostToDevice, h2d_stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(chunk_ready[chunk_idx], h2d_stream));
+
+      TC_RETURN_IF_ERROR(clique.wait_stream_on_event(root_rank, chunk_ready[chunk_idx]));
+      TC_RETURN_IF_ERROR(clique.group_start());
+      for (int rank = 0; rank < cfg.tp_world_size; ++rank) {
+        void* recv_ptr = static_cast<uint8_t*>(gpus[static_cast<size_t>(rank)].dst->get()) + copied;
+        const void* send_ptr = (rank == root_rank) ? root_ptr : recv_ptr;
+        TC_RETURN_IF_ERROR(clique.broadcast_u8(rank, send_ptr, recv_ptr, bytes, root_rank));
+      }
+      TC_RETURN_IF_ERROR(clique.group_end());
+
+      copied += static_cast<uint64_t>(bytes);
+      ++chunk_idx;
+    }
+    TC_RETURN_IF_ERROR(clique.wait_all(
+        absl::StrCat("h2d_nccl_broadcast_pipeline_baseline bytes=", static_cast<uint64_t>(bytes_per_gpu))));
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(root_device));
+    return tensorcast::cuda::stream_synchronize(h2d_stream);
+  };
+
+  for (int iter = 0; iter < cfg.h2d_nccl_warmup; ++iter) {
+    TC_RETURN_IF_ERROR(run_one_iteration(iter));
+  }
+  TC_RETURN_IF_ERROR(clique.barrier());
+
+  const absl::Time total_t0 = absl::Now();
+  for (int iter = 0; iter < cfg.h2d_nccl_iters; ++iter) {
+    TC_RETURN_IF_ERROR(run_one_iteration(iter));
+  }
+  TC_RETURN_IF_ERROR(clique.barrier());
+  const double total_sec = seconds_since(total_t0);
+
+  const double delivered_gib = (static_cast<double>(bytes_per_gpu) * static_cast<double>(cfg.h2d_nccl_iters) *
+                                static_cast<double>(cfg.tp_world_size)) /
+      (1024.0 * 1024.0 * 1024.0);
+  const double avg_iter_us = (total_sec / static_cast<double>(cfg.h2d_nccl_iters)) * 1e6;
+
+  LOG(INFO) << std::format(
+      "h2d_nccl_broadcast_pipeline_baseline tp_world_size={} tp_devices={} root_rank={} root_device={} bytes_per_gpu={} chunk_bytes={} nchunks={} warmup={} iters={} total_sec={:.6f} avg_iter_us={:.3f} end_to_end_agg_GiB/s={:.3f} pinned=true bbuf_size_kb={} buffer_chunks={} pinned_numa_node={} pinned_numa_prefault={} root_host_pool=numa{}",
+      cfg.tp_world_size,
+      join_device_ids(device_ids),
+      root_rank,
+      root_device,
+      static_cast<uint64_t>(bytes_per_gpu),
+      static_cast<uint64_t>(chunk_bytes),
+      static_cast<uint64_t>(nchunks),
+      cfg.h2d_nccl_warmup,
+      cfg.h2d_nccl_iters,
+      total_sec,
+      avg_iter_us,
+      delivered_gib / std::max(1e-9, total_sec),
+      static_cast<int64_t>(cfg.bbuf_size_kb),
+      bb.chunks,
+      cfg.pinned_numa_node,
+      cfg.pinned_numa_prefault,
+      host.numa_node);
+
+  cleanup();
+  return absl::OkStatus();
+}
+
 class OdirectMultiFileSource final : public SeekableSource {
  public:
   explicit OdirectMultiFileSource(std::vector<std::filesystem::path> paths) : paths_(std::move(paths)) {}
@@ -5501,7 +5891,7 @@ ABSL_FLAG(
     std::string,
     mode,
     "loader",
-    "One of: loader, disk_baseline, disk_fragmentation, gpu_peer_baseline, safetensors_disk_baseline, safetensors_host_baseline, safetensors_hot_disk_baseline, safetensors_hot_host_baseline, safetensors_dram_mirror_host_baseline, materialize_d, materialized_disk_baseline, h2d_baseline, safetensors_o_direct_host_baseline, safetensors_o_direct_disk_baseline, nccl_baseline, nccl_launch_tax");
+    "One of: loader, disk_baseline, disk_fragmentation, gpu_peer_baseline, safetensors_disk_baseline, safetensors_host_baseline, safetensors_hot_disk_baseline, safetensors_hot_host_baseline, safetensors_dram_mirror_host_baseline, materialize_d, materialized_disk_baseline, h2d_baseline, h2d_nccl_broadcast_baseline, safetensors_o_direct_host_baseline, safetensors_o_direct_disk_baseline, nccl_baseline, nccl_launch_tax");
 
 ABSL_FLAG(
     std::string,
@@ -5645,6 +6035,8 @@ ABSL_FLAG(
     h2d_per_gpu_pinned_pool,
     false,
     "For h2d_baseline: allocate a separate pinned host pool per GPU (recommended with pinned_numa_node=-2).");
+ABSL_FLAG(int, h2d_nccl_warmup, 1, "Warmup iterations for h2d_nccl_broadcast_baseline.");
+ABSL_FLAG(int, h2d_nccl_iters, 3, "Timed iterations for h2d_nccl_broadcast_baseline.");
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
@@ -5720,6 +6112,8 @@ int main(int argc, char** argv) {
   cfg.gpu_peer_bytes = absl::GetFlag(FLAGS_gpu_peer_bytes);
   cfg.h2d_bench_bytes = absl::GetFlag(FLAGS_h2d_bench_bytes);
   cfg.h2d_per_gpu_pinned_pool = absl::GetFlag(FLAGS_h2d_per_gpu_pinned_pool);
+  cfg.h2d_nccl_warmup = absl::GetFlag(FLAGS_h2d_nccl_warmup);
+  cfg.h2d_nccl_iters = absl::GetFlag(FLAGS_h2d_nccl_iters);
 
   cfg.safetensors_dir = absl::GetFlag(FLAGS_safetensors_dir);
   cfg.load_plan_json_path = absl::GetFlag(FLAGS_load_plan_json_path);
@@ -5800,6 +6194,22 @@ int main(int argc, char** argv) {
   }
   if (cfg.mode == BenchMode::kH2dBaseline) {
     auto st = tensorcast::store::loader::run_h2d_baseline(cfg);
+    if (!st.ok()) {
+      LOG(ERROR) << st;
+      return 1;
+    }
+    return 0;
+  }
+  if (cfg.mode == BenchMode::kH2dNcclBroadcastBaseline) {
+    auto st = tensorcast::store::loader::run_h2d_nccl_broadcast_baseline(cfg);
+    if (!st.ok()) {
+      LOG(ERROR) << st;
+      return 1;
+    }
+    return 0;
+  }
+  if (cfg.mode == BenchMode::kH2dNcclBroadcastPipelineBaseline) {
+    auto st = tensorcast::store::loader::run_h2d_nccl_broadcast_pipeline_baseline(cfg);
     if (!st.ok()) {
       LOG(ERROR) << st;
       return 1;

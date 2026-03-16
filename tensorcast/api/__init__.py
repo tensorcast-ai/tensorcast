@@ -20,7 +20,13 @@ from tensorcast.api._indices import (
     calculate_tensor_device_offsets,
 )
 from tensorcast.api._register import RegisteredLease, RegistrationResult
-from tensorcast.api.context import CallContext, QosClass, SpanAttributeValue, context
+from tensorcast.api.context import (
+    CallContext,
+    CollectiveLoadGroup,
+    QosClass,
+    SpanAttributeValue,
+    context,
+)
 from tensorcast.api.operation import (
     Operation,
     OperationError,
@@ -30,6 +36,7 @@ from tensorcast.api.operation import (
     TimeoutErrorDetails,
 )
 from tensorcast.api.plan import (
+    ArtifactActionResult,
     Instance,
     Plan,
     PlanFailedError,
@@ -45,7 +52,10 @@ from tensorcast.api.store import (
     Artifact,
     ArtifactError,
     ArtifactFuture,
+    AssemblyAttemptRef,
     FallbackOptions,
+    PartialSealResult,
+    PublishedModelVersion,
     RegisteredArtifact,
     Store,
     StoreOptions,
@@ -83,18 +93,23 @@ __all__ = [
     "SealAssemblyResult",
     "ViewRegistrationKind",
     "ArtifactDescriptor",
+    "AssemblyAttemptRef",
     "Artifact",
     "CallContext",
+    "CollectiveLoadGroup",
     "Operation",
     "OperationError",
     "OperationState",
     "OperationStatus",
     "OperationTimeoutError",
     "QosClass",
+    "PartialSealResult",
+    "PublishedModelVersion",
     "SpanAttributeValue",
     "TimeoutErrorDetails",
     "context",
     "Instance",
+    "ArtifactActionResult",
     "Plan",
     "PlanFailedError",
     "PlanResult",

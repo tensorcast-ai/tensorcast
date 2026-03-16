@@ -5,6 +5,7 @@
 from .artifact_binding_repository import ArtifactBindingRepository
 from .artifact_disk_location_repository import ArtifactDiskLocationRepository
 from .artifact_layout_attachment_repository import ArtifactLayoutAttachmentRepository
+from .assembly_contribution_repository import AssemblyContributionRepository
 from .assembly_layout_binding_repository import AssemblyLayoutBindingRepository
 from .assembly_runtime_policy_repository import AssemblyRuntimePolicyRepository
 from .chunk_directory_repository import ChunkDirectoryRepository
@@ -23,6 +24,7 @@ from .placement_repository import (
 )
 from .proof_repository import ProofRepository
 from .replica_repository import ReplicaRepository
+from .shard_home_lease_repository import ShardHomeLeaseRepository
 from .transport_repository import TransportRepository
 from .view_coverage_repository import ViewCoverageRepository
 from .view_repository import ViewRepository
@@ -32,6 +34,7 @@ __all__ = [
     "ArtifactBindingRepository",
     "ArtifactDiskLocationRepository",
     "ArtifactLayoutAttachmentRepository",
+    "AssemblyContributionRepository",
     "AssemblyLayoutBindingRepository",
     "AssemblyRuntimePolicyRepository",
     "InstanceRepository",
@@ -46,6 +49,7 @@ __all__ = [
     "PendingTransportRequestRepository",
     "ProofRepository",
     "ReplicaRepository",
+    "ShardHomeLeaseRepository",
     "TransportRepository",
     "ViewCoverageRepository",
     "ViewRepository",

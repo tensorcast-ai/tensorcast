@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace tensorcast::daemon {
@@ -16,5 +18,11 @@ namespace tensorcast::daemon {
 //
 // For in-process/unit tests, the peer may be empty or "unknown"; treat those as local.
 bool is_loopback_grpc_peer(std::string_view peer);
+
+// Returns a normalized host:port endpoint when the peer encodes one; otherwise nullopt.
+[[nodiscard]] std::optional<std::string> grpc_peer_endpoint(std::string_view peer);
+
+// Returns true when the normalized gRPC peer endpoint matches the supplied host:port address.
+[[nodiscard]] bool grpc_peer_matches_address(std::string_view peer, std::string_view address);
 
 } // namespace tensorcast::daemon

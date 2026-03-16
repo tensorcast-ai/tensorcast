@@ -39,6 +39,7 @@ enum {
   TENSORCAST_READ_FAILED_OVERFLOW = 2,
   TENSORCAST_READ_FAILED_MEM_MISMATCH = 3,
   TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED = 4,
+  TENSORCAST_READ_FAILED_DIRECT_RDMA_REQUIRED = 5,
 };
 
 struct ProtoHeader {
@@ -87,6 +88,7 @@ struct ProtoReadRequest {
   int16_t rail_id;
   uint64_t offset;
   uint64_t bytes;
+  uint64_t request_id;
 };
 
 // Variable-length response supporting multiple segments.
@@ -96,13 +98,14 @@ struct ProtoReadResponseExHeader {
   uint8_t transport_type;
   uint8_t staged; // 1 if segments require RDMA_READ_DONE_EX to release staging credit
   char nic_name[kMaxDevName];
+  uint64_t request_offset; // original request offset for all windows belonging to the same read
+  uint64_t request_id;
   uint32_t num_segments;
   uint32_t window_seq;
   uint32_t credit_granted;
-  uint64_t request_offset; // Original ProtoReadRequest.offset for stable pending-request lookup
   uint8_t more_segments; // 1 when additional windows remain
+  uint8_t zero_copy; // 1 if this window uses direct GPU RDMA without staged payload buffers
   int16_t rail_id;
-  uint8_t reserved[5];
 };
 
 struct ProtoReadResponseExSeg {
@@ -115,6 +118,7 @@ struct ProtoReadResponseExSeg {
 struct ProtoReadFailed {
   char tensor_key[kMaxTensorNameLen];
   uint64_t offset;
+  uint64_t request_id;
   uint32_t reason;
 };
 
@@ -122,6 +126,8 @@ struct ProtoReadFailed {
 // Layout: [ProtoRdmaReadDoneExHeader][ProtoRdmaReadDoneExSeg[num_segments]]
 struct ProtoRdmaReadDoneExHeader {
   char tensor_key[kMaxTensorNameLen];
+  uint64_t request_offset;
+  uint64_t request_id;
   uint32_t num_segments;
   uint32_t window_seq;
   uint8_t final_window; // 1 if this ACK covers the last window

@@ -3,10 +3,12 @@
 #include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <new>
+#include <typeinfo>
 #include <utility>
 
 #include "absl/base/thread_annotations.h"
@@ -103,6 +105,23 @@ void record_histogram(
   } catch (...) {
     VLOG(2) << "metrics histogram tc_byte_range_amplification_ratio unavailable";
   }
+}
+
+const char* run_kind_to_cstr(ByteRangeRun::Kind kind) {
+  switch (kind) {
+    case ByteRangeRun::Kind::kPad:
+      return "pad";
+    case ByteRangeRun::Kind::kContiguous:
+      return "contiguous";
+    case ByteRangeRun::Kind::kStrided:
+      return "strided";
+  }
+  return "unknown";
+}
+
+uint64_t elapsed_us(std::chrono::steady_clock::time_point start) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 }
 
 } // namespace
@@ -256,21 +275,31 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read_base(
     uint64_t offset,
     uint8_t* dst,
     size_t bytes) {
+  const auto start = std::chrono::steady_clock::now();
   if (bytes == 0) {
+    VLOG(2) << "byte_range.read_base bytes=0 source_index=" << source_index << " offset=" << offset << " duration_us=0";
     return static_cast<size_t>(0);
   }
   if (source_index >= sources_.size()) {
+    VLOG(2) << "byte_range.read_base invalid_source source_index=" << source_index
+            << " source_count=" << sources_.size() << " offset=" << offset << " bytes=" << bytes;
     return absl::InvalidArgumentError("ByteRangeMappedSource source index out of range");
   }
   stats_.base_read_calls.fetch_add(1, std::memory_order_relaxed);
   auto read_or = sources_[source_index]->read_at(offset, dst, bytes);
   if (!read_or.ok()) {
+    VLOG(2) << "byte_range.read_base read_failed source_index=" << source_index << " offset=" << offset
+            << " bytes=" << bytes << " duration_us=" << elapsed_us(start) << " status=" << read_or.status();
     return read_or.status();
   }
   stats_.base_read_bytes.fetch_add(*read_or, std::memory_order_relaxed);
   if (*read_or != bytes) {
+    VLOG(2) << "byte_range.read_base short_read source_index=" << source_index << " offset=" << offset
+            << " requested=" << bytes << " got=" << *read_or << " duration_us=" << elapsed_us(start);
     return absl::DataLossError("short read while executing byte range program");
   }
+  VLOG(2) << "byte_range.read_base ok source_index=" << source_index << " offset=" << offset << " bytes=" << bytes
+          << " duration_us=" << elapsed_us(start);
   return *read_or;
 }
 
@@ -279,31 +308,76 @@ absl::StatusOr<size_t> ByteRangeMappedSource::copy_from_strided_rows(
     uint64_t run_offset,
     uint8_t* dst,
     size_t bytes) {
+  const auto start = std::chrono::steady_clock::now();
   if (bytes == 0) {
+    VLOG(2) << "byte_range.strided.row_copy bytes=0 source_index=" << run.source_index << " run_offset=" << run_offset
+            << " duration_us=0";
     return static_cast<size_t>(0);
   }
+  if (run.source_index >= sources_.size()) {
+    VLOG(2) << "byte_range.strided.row_copy invalid_source source_index=" << run.source_index
+            << " source_count=" << sources_.size() << " run_offset=" << run_offset << " bytes=" << bytes;
+    return absl::InvalidArgumentError("ByteRangeMappedSource source index out of range");
+  }
   if (run.row_len == 0) {
+    VLOG(2) << "byte_range.strided.row_copy invalid_row_len source_index=" << run.source_index
+            << " run_offset=" << run_offset << " bytes=" << bytes;
     return absl::InternalError("invalid strided run row length");
   }
+  const auto& source = sources_[run.source_index];
   const uint64_t first_row = run_offset / run.row_len;
   uint64_t row_offset = run_offset % run.row_len;
   uint64_t row = first_row;
   size_t remaining = bytes;
   uint8_t* out = dst;
+  uint64_t local_base_read_calls = 0;
+  uint64_t local_base_read_bytes = 0;
 
   while (remaining > 0 && row < run.rows) {
     const size_t available = static_cast<size_t>(run.row_len - row_offset);
     const size_t take = std::min(remaining, available);
     const uint64_t src_offset = run.src_base + row * run.stride + row_offset;
-    auto copied_or = read_base(run.source_index, src_offset, out, take);
+    ++local_base_read_calls;
+    auto copied_or = source->read_at(src_offset, out, take);
     if (!copied_or.ok()) {
+      if (local_base_read_calls != 0) {
+        stats_.base_read_calls.fetch_add(local_base_read_calls, std::memory_order_relaxed);
+      }
+      if (local_base_read_bytes != 0) {
+        stats_.base_read_bytes.fetch_add(local_base_read_bytes, std::memory_order_relaxed);
+      }
+      VLOG(2) << "byte_range.strided.row_copy read_failed source_index=" << run.source_index << " row=" << row
+              << " src_offset=" << src_offset << " bytes=" << take << " duration_us=" << elapsed_us(start)
+              << " status=" << copied_or.status();
       return copied_or.status();
     }
+    if (*copied_or != take) {
+      if (local_base_read_calls != 0) {
+        stats_.base_read_calls.fetch_add(local_base_read_calls, std::memory_order_relaxed);
+      }
+      if (local_base_read_bytes != 0) {
+        stats_.base_read_bytes.fetch_add(local_base_read_bytes, std::memory_order_relaxed);
+      }
+      VLOG(2) << "byte_range.strided.row_copy short_read source_index=" << run.source_index << " row=" << row
+              << " src_offset=" << src_offset << " requested=" << take << " got=" << *copied_or
+              << " duration_us=" << elapsed_us(start);
+      return absl::DataLossError("short read while executing strided row copy");
+    }
+    local_base_read_bytes += *copied_or;
     out += *copied_or;
     remaining -= *copied_or;
     row_offset = 0;
     ++row;
   }
+  if (local_base_read_calls != 0) {
+    stats_.base_read_calls.fetch_add(local_base_read_calls, std::memory_order_relaxed);
+  }
+  if (local_base_read_bytes != 0) {
+    stats_.base_read_bytes.fetch_add(local_base_read_bytes, std::memory_order_relaxed);
+  }
+  VLOG(2) << "byte_range.strided.row_copy done source_index=" << run.source_index << " first_row=" << first_row
+          << " bytes=" << (bytes - remaining) << " rows_touched=" << (row > first_row ? (row - first_row) : 0)
+          << " duration_us=" << elapsed_us(start);
   return bytes - remaining;
 }
 
@@ -312,62 +386,271 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
     const ByteRangeRun& run,
     uint64_t run_offset,
     uint8_t* dst,
-    size_t bytes) {
+    size_t bytes,
+    uint64_t* pack_us_total,
+    size_t* pack_bytes_total,
+    uint64_t* cache_lookup_us_total,
+    uint64_t* block_prepare_us_total,
+    uint64_t* block_load_us_total,
+    uint64_t* row_copy_us_total,
+    size_t* row_copy_bytes_total) {
+  const auto run_start = std::chrono::steady_clock::now();
+  uint64_t local_pack_us_total = 0;
+  size_t local_pack_bytes_total = 0;
+  uint64_t local_cache_lookup_us_total = 0;
+  uint64_t local_block_prepare_us_total = 0;
+  uint64_t local_block_load_us_total = 0;
+  uint64_t local_row_copy_us_total = 0;
+  size_t local_row_copy_bytes_total = 0;
+  uint64_t local_block_pick_us_total = 0;
+  uint64_t local_block_resize_us_total = 0;
+  uint64_t local_pack_memcpy_calls = 0;
+  size_t local_cache_hit_count = 0;
+  size_t local_cache_miss_count = 0;
+  size_t local_block_load_count = 0;
+  size_t local_block_reuse_count = 0;
+  size_t local_block_new_count = 0;
+  size_t local_block_bytes_total = 0;
+  auto flush_local_stats = [&]() {
+    if (pack_us_total != nullptr) {
+      *pack_us_total += local_pack_us_total;
+    }
+    if (pack_bytes_total != nullptr) {
+      *pack_bytes_total += local_pack_bytes_total;
+    }
+    if (cache_lookup_us_total != nullptr) {
+      *cache_lookup_us_total += local_cache_lookup_us_total;
+    }
+    if (block_prepare_us_total != nullptr) {
+      *block_prepare_us_total += local_block_prepare_us_total;
+    }
+    if (block_load_us_total != nullptr) {
+      *block_load_us_total += local_block_load_us_total;
+    }
+    if (row_copy_us_total != nullptr) {
+      *row_copy_us_total += local_row_copy_us_total;
+    }
+    if (row_copy_bytes_total != nullptr) {
+      *row_copy_bytes_total += local_row_copy_bytes_total;
+    }
+  };
+  VLOG(2) << "byte_range.strided.begin run_index=" << run_index << " source_index=" << run.source_index
+          << " run_offset=" << run_offset << " bytes=" << bytes << " row_len=" << run.row_len
+          << " stride=" << run.stride << " rows=" << run.rows;
   if (bytes == 0) {
+    VLOG(2) << "byte_range.strided.end run_index=" << run_index << " copied=0 duration_us=0";
+    flush_local_stats();
     return static_cast<size_t>(0);
   }
   if (!strided_cache_) {
-    return copy_from_strided_rows(run, run_offset, dst, bytes);
+    const auto row_copy_start = std::chrono::steady_clock::now();
+    auto copied_or = copy_from_strided_rows(run, run_offset, dst, bytes);
+    const uint64_t row_copy_us = elapsed_us(row_copy_start);
+    local_row_copy_us_total += row_copy_us;
+    if (copied_or.ok()) {
+      local_row_copy_bytes_total += *copied_or;
+    }
+    if (copied_or.ok()) {
+      VLOG(2) << "byte_range.strided.end run_index=" << run_index << " mode=no_cache copied=" << *copied_or
+              << " row_copy_us=" << row_copy_us << " duration_us=" << elapsed_us(run_start);
+    } else {
+      VLOG(2) << "byte_range.strided.end run_index=" << run_index << " mode=no_cache status=" << copied_or.status()
+              << " row_copy_us=" << row_copy_us << " duration_us=" << elapsed_us(run_start);
+    }
+    flush_local_stats();
+    return copied_or;
   }
   if (strided_disabled_ && strided_disabled_[run_index].load(std::memory_order_relaxed) != 0) {
-    return copy_from_strided_rows(run, run_offset, dst, bytes);
+    const auto row_copy_start = std::chrono::steady_clock::now();
+    auto copied_or = copy_from_strided_rows(run, run_offset, dst, bytes);
+    const uint64_t row_copy_us = elapsed_us(row_copy_start);
+    local_row_copy_us_total += row_copy_us;
+    if (copied_or.ok()) {
+      local_row_copy_bytes_total += *copied_or;
+    }
+    if (copied_or.ok()) {
+      VLOG(2) << "byte_range.strided.end run_index=" << run_index << " mode=disabled copied=" << *copied_or
+              << " row_copy_us=" << row_copy_us << " duration_us=" << elapsed_us(run_start);
+    } else {
+      VLOG(2) << "byte_range.strided.end run_index=" << run_index << " mode=disabled status=" << copied_or.status()
+              << " row_copy_us=" << row_copy_us << " duration_us=" << elapsed_us(run_start);
+    }
+    flush_local_stats();
+    return copied_or;
   }
   if (run.row_len == 0 || run.rows == 0) {
+    VLOG(2) << "byte_range.strided.invalid run_index=" << run_index << " row_len=" << run.row_len
+            << " rows=" << run.rows;
+    flush_local_stats();
     return absl::InternalError("invalid strided run");
+  }
+  const uint64_t first_row = run_offset / run.row_len;
+  const uint64_t last_offset_exclusive = run_offset + static_cast<uint64_t>(bytes);
+  const uint64_t last_row_exclusive = (last_offset_exclusive + run.row_len - 1) / run.row_len;
+  const uint64_t rows_touched = last_row_exclusive > first_row ? (last_row_exclusive - first_row) : 0;
+  auto& source = sources_[run.source_index];
+  const uint8_t* cpu_source_base_ptr = source->cpu_base_ptr();
+  VLOG(2) << "byte_range.strided.direct_gather_probe run_index=" << run_index << " source_index=" << run.source_index
+          << " source_type=" << typeid(*source).name()
+          << " has_cpu_base_ptr=" << (cpu_source_base_ptr != nullptr ? 1 : 0) << " row_len=" << run.row_len
+          << " stride=" << run.stride << " bytes=" << bytes << " rows_touched=" << rows_touched;
+  const bool force_mmap_direct_gather = false;
+  const bool threshold_direct_gather = run.stride > run.row_len &&
+      run.row_len >= options_.direct_gather_min_row_len_bytes && bytes >= options_.direct_gather_min_total_bytes &&
+      rows_touched <= options_.direct_gather_max_rows_touched && cpu_source_base_ptr != nullptr;
+  const bool direct_gather_candidate = force_mmap_direct_gather || threshold_direct_gather;
+  if (direct_gather_candidate) {
+    const auto gather_start = std::chrono::steady_clock::now();
+    const uint8_t* base_ptr = cpu_source_base_ptr;
+    size_t copied = 0;
+    uint64_t row = first_row;
+    uint64_t row_offset = run_offset % run.row_len;
+    uint8_t* out_ptr = dst;
+    uint64_t direct_gather_memcpy_calls = 0;
+    while (copied < bytes && row < run.rows) {
+      const size_t available = static_cast<size_t>(run.row_len - row_offset);
+      const size_t take = std::min(bytes - copied, available);
+      const uint64_t src_offset = run.src_base + row * run.stride + row_offset;
+      const uint64_t source_total = sources_[run.source_index]->total_bytes();
+      if (src_offset > source_total || static_cast<uint64_t>(take) > source_total - src_offset) {
+        const uint64_t gather_us = elapsed_us(gather_start);
+        VLOG(2) << "byte_range.strided.direct_gather_oob run_index=" << run_index
+                << " source_index=" << run.source_index << " src_offset=" << src_offset << " take=" << take
+                << " source_total=" << source_total << " copied=" << copied << " duration_us=" << gather_us;
+        flush_local_stats();
+        return absl::OutOfRangeError("direct gather source range out of bounds");
+      }
+      std::memcpy(out_ptr, base_ptr + src_offset, take);
+      ++direct_gather_memcpy_calls;
+      copied += take;
+      out_ptr += take;
+      row_offset = 0;
+      ++row;
+    }
+    const uint64_t gather_us = elapsed_us(gather_start);
+    local_row_copy_us_total += gather_us;
+    local_row_copy_bytes_total += copied;
+    if (copied != bytes) {
+      VLOG(2) << "byte_range.strided.direct_gather_short_copy run_index=" << run_index
+              << " source_index=" << run.source_index << " requested=" << bytes << " copied=" << copied
+              << " rows_touched=" << rows_touched << " duration_us=" << gather_us;
+      flush_local_stats();
+      return absl::DataLossError("direct gather short copy");
+    }
+    stats_.base_read_calls.fetch_add(direct_gather_memcpy_calls, std::memory_order_relaxed);
+    stats_.base_read_bytes.fetch_add(copied, std::memory_order_relaxed);
+    VLOG(2) << "byte_range.strided.direct_gather run_index=" << run_index << " source_index=" << run.source_index
+            << " forced=" << (force_mmap_direct_gather ? 1 : 0) << " rows_touched=" << rows_touched
+            << " bytes=" << copied << " memcpy_calls=" << direct_gather_memcpy_calls << " duration_us=" << gather_us;
+    flush_local_stats();
+    return copied;
   }
 
   auto load_block = [&](uint64_t row) -> absl::StatusOr<std::shared_ptr<const StridedBlock>> {
+    const auto cache_lookup_start = std::chrono::steady_clock::now();
     if (strided_cache_) {
       absl::MutexLock lock(&strided_cache_->mutex);
       const auto cached = strided_cache_->block;
       if (cached && cached->run_index == run_index && row >= cached->first_row &&
           row < cached->first_row + cached->rows) {
+        local_cache_lookup_us_total += elapsed_us(cache_lookup_start);
         stats_.cache_hits.fetch_add(1, std::memory_order_relaxed);
+        ++local_cache_hit_count;
+        VLOG(2) << "byte_range.strided.cache_hit run_index=" << run_index << " row=" << row
+                << " block_first_row=" << cached->first_row << " block_rows=" << cached->rows;
         return cached;
       }
     }
+    local_cache_lookup_us_total += elapsed_us(cache_lookup_start);
 
     stats_.cache_misses.fetch_add(1, std::memory_order_relaxed);
+    ++local_cache_miss_count;
     const uint64_t rows_per_block = std::max<uint64_t>(run.rows_per_block, 1);
     const uint64_t block_first_row = row - (row % rows_per_block);
     uint64_t block_rows = std::min(rows_per_block, run.rows - block_first_row);
 
     while (block_rows > 0) {
+      const auto block_prepare_start = std::chrono::steady_clock::now();
       const uint64_t block_bytes = (block_rows - 1) * run.stride + run.row_len;
       if (block_bytes > program_->strided_block_max_bytes) {
+        local_block_prepare_us_total += elapsed_us(block_prepare_start);
         block_rows /= 2;
         continue;
       }
-      auto block = std::make_shared<StridedBlock>();
+      std::shared_ptr<StridedBlock> block;
+      bool reused_block = false;
+      const auto block_pick_start = std::chrono::steady_clock::now();
+      if (strided_cache_) {
+        absl::MutexLock lock(&strided_cache_->mutex);
+        if (strided_cache_->block && strided_cache_->block.use_count() == 1) {
+          block = std::const_pointer_cast<StridedBlock>(strided_cache_->block);
+          strided_cache_->block.reset();
+          reused_block = true;
+        }
+      }
+      if (!block) {
+        block = std::make_shared<StridedBlock>();
+      }
+      local_block_pick_us_total += elapsed_us(block_pick_start);
+      if (reused_block) {
+        ++local_block_reuse_count;
+      } else {
+        ++local_block_new_count;
+      }
       block->run_index = run_index;
       block->first_row = block_first_row;
       block->rows = block_rows;
       block->src_begin = run.src_base + block_first_row * run.stride;
       try {
-        block->data.resize(static_cast<size_t>(block_bytes));
+        const auto block_resize_start = std::chrono::steady_clock::now();
+        const size_t target_bytes = static_cast<size_t>(block_bytes);
+        if (block->data.capacity() < target_bytes) {
+          block->data.reserve(target_bytes);
+        }
+        if (block->data.size() != target_bytes) {
+          block->data.resize(target_bytes);
+        }
+        local_block_resize_us_total += elapsed_us(block_resize_start);
       } catch (const std::bad_alloc&) {
+        local_block_prepare_us_total += elapsed_us(block_prepare_start);
+        VLOG(2) << "byte_range.strided.block_alloc_retry run_index=" << run_index
+                << " block_first_row=" << block_first_row << " block_rows=" << block_rows
+                << " block_bytes=" << block_bytes;
         block_rows /= 2;
         continue;
       }
+      local_block_prepare_us_total += elapsed_us(block_prepare_start);
+      const auto block_read_start = std::chrono::steady_clock::now();
       auto read_or = read_base(run.source_index, block->src_begin, block->data.data(), block->data.size());
+      const uint64_t block_read_us = elapsed_us(block_read_start);
+      local_block_load_us_total += block_read_us;
       if (!read_or.ok()) {
+        VLOG(2) << "byte_range.strided.cache_miss_read_failed run_index=" << run_index
+                << " block_first_row=" << block_first_row << " block_rows=" << block_rows
+                << " block_bytes=" << block->data.size() << " duration_us=" << block_read_us
+                << " status=" << read_or.status();
         return read_or.status();
       }
+      VLOG(2) << "byte_range.strided.cache_miss_loaded run_index=" << run_index
+              << " block_first_row=" << block_first_row << " block_rows=" << block_rows
+              << " block_bytes=" << block->data.size() << " duration_us=" << block_read_us;
+      ++local_block_load_count;
+      local_block_bytes_total += block->data.size();
+      const double load_mib = static_cast<double>(block->data.size()) / (1024.0 * 1024.0);
+      const double load_seconds = static_cast<double>(block_read_us) / 1e6;
+      const double throughput_mib_s = load_seconds > 0.0 ? (load_mib / load_seconds) : 0.0;
+      VLOG(2) << "byte_range.strided.block_summary run_index=" << run_index << " source_index=" << run.source_index
+              << " block_first_row=" << block_first_row << " block_rows=" << block_rows
+              << " block_bytes=" << block->data.size() << " reused_block=" << (reused_block ? 1 : 0)
+              << " block_pick_us=" << local_block_pick_us_total << " block_resize_us=" << local_block_resize_us_total
+              << " block_prepare_us=" << local_block_prepare_us_total << " block_load_us=" << block_read_us
+              << " block_load_throughput_mib_s=" << throughput_mib_s;
+      const std::shared_ptr<const StridedBlock> immutable_block = block;
       if (strided_cache_) {
         absl::MutexLock lock(&strided_cache_->mutex);
-        strided_cache_->block = block;
+        strided_cache_->block = immutable_block;
       }
-      return block;
+      return immutable_block;
     }
 
     return absl::ResourceExhaustedError("unable to allocate strided block buffer");
@@ -394,23 +677,41 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
           }
         }
         const size_t already_copied = bytes - remaining;
+        const auto fallback_start = std::chrono::steady_clock::now();
         auto fallback_or = copy_from_strided_rows(run, local_offset, out, remaining);
+        const uint64_t fallback_us = elapsed_us(fallback_start);
+        local_row_copy_us_total += fallback_us;
         if (!fallback_or.ok()) {
+          VLOG(2) << "byte_range.strided.fallback_failed run_index=" << run_index
+                  << " already_copied=" << already_copied << " remaining=" << remaining
+                  << " duration_us=" << fallback_us << " status=" << fallback_or.status();
+          flush_local_stats();
           return fallback_or.status();
         }
+        local_row_copy_bytes_total += *fallback_or;
+        VLOG(2) << "byte_range.strided.fallback_done run_index=" << run_index << " already_copied=" << already_copied
+                << " fallback_copied=" << *fallback_or << " duration_us=" << fallback_us;
+        flush_local_stats();
         return already_copied + *fallback_or;
       }
+      VLOG(2) << "byte_range.strided.block_load_failed run_index=" << run_index << " local_offset=" << local_offset
+              << " remaining=" << remaining << " status=" << block_or.status();
+      flush_local_stats();
       return block_or.status();
     }
     const auto& block = *block_or;
     const uint64_t block_end_row = block->first_row + block->rows;
     uint64_t active_row = row;
+    const auto pack_start = std::chrono::steady_clock::now();
+    size_t packed_bytes = 0;
     while (remaining > 0 && active_row < block_end_row) {
       const size_t available = static_cast<size_t>(run.row_len - row_offset);
       const size_t take = std::min(remaining, available);
       const uint64_t block_offset = (active_row - block->first_row) * run.stride + row_offset;
       std::memcpy(out, block->data.data() + block_offset, take);
+      ++local_pack_memcpy_calls;
       stats_.pack_bytes.fetch_add(take, std::memory_order_relaxed);
+      packed_bytes += take;
       out += take;
       remaining -= take;
       local_offset += take;
@@ -420,8 +721,27 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
         row_offset = 0;
       }
     }
+    VLOG(2) << "byte_range.strided.pack_block run_index=" << run_index << " block_first_row=" << block->first_row
+            << " block_rows=" << block->rows << " packed_bytes=" << packed_bytes
+            << " duration_us=" << elapsed_us(pack_start);
+    local_pack_us_total += elapsed_us(pack_start);
+    local_pack_bytes_total += packed_bytes;
   }
 
+  VLOG(2) << "byte_range.strided.run_summary run_index=" << run_index << " source_index=" << run.source_index
+          << " requested_bytes=" << bytes << " copied_bytes=" << bytes << " cache_hits=" << local_cache_hit_count
+          << " cache_misses=" << local_cache_miss_count << " blocks_loaded=" << local_block_load_count
+          << " blocks_reused=" << local_block_reuse_count << " blocks_new=" << local_block_new_count
+          << " block_bytes_total=" << local_block_bytes_total << " block_pick_us_total=" << local_block_pick_us_total
+          << " block_resize_us_total=" << local_block_resize_us_total
+          << " block_prepare_us_total=" << local_block_prepare_us_total
+          << " block_load_us_total=" << local_block_load_us_total << " pack_us_total=" << local_pack_us_total
+          << " pack_memcpy_calls=" << local_pack_memcpy_calls << " pack_bytes_total=" << local_pack_bytes_total
+          << " row_copy_us_total=" << local_row_copy_us_total << " total_us=" << elapsed_us(run_start);
+
+  VLOG(2) << "byte_range.strided.end run_index=" << run_index << " copied=" << bytes
+          << " duration_us=" << elapsed_us(run_start);
+  flush_local_stats();
   return bytes;
 }
 
@@ -435,7 +755,23 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read(void* dst, size_t max_bytes) 
 }
 
 absl::StatusOr<size_t> ByteRangeMappedSource::read_at(uint64_t offset, void* dst, size_t bytes) {
+  const auto read_start = std::chrono::steady_clock::now();
+  uint64_t pad_us_total = 0;
+  uint64_t contiguous_us_total = 0;
+  uint64_t strided_us_total = 0;
+  uint64_t strided_pack_us_total = 0;
+  uint64_t strided_cache_lookup_us_total = 0;
+  uint64_t strided_block_prepare_us_total = 0;
+  uint64_t strided_block_load_us_total = 0;
+  uint64_t strided_row_copy_us_total = 0;
+  size_t pad_bytes_total = 0;
+  size_t contiguous_bytes_total = 0;
+  size_t strided_bytes_total = 0;
+  size_t strided_pack_bytes_total = 0;
+  size_t strided_row_copy_bytes_total = 0;
   if (offset >= program_->total_bytes || bytes == 0) {
+    VLOG(2) << "byte_range.read_at trivial offset=" << offset << " bytes=" << bytes
+            << " total_bytes=" << program_->total_bytes << " copied=0 duration_us=0";
     return static_cast<size_t>(0);
   }
   const uint64_t remaining_bytes = program_->total_bytes - offset;
@@ -445,19 +781,30 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read_at(uint64_t offset, void* dst
   uint64_t cursor = offset;
 
   size_t run_index = find_run_index(offset);
+  VLOG(2) << "byte_range.read_at.begin offset=" << offset << " req_bytes=" << bytes << " to_copy=" << to_copy
+          << " run_index=" << run_index << " total_runs=" << program_->runs.size();
   while (run_index < program_->runs.size() && copied < to_copy) {
     const auto& run = program_->runs[run_index];
+    const auto run_start = std::chrono::steady_clock::now();
     if (cursor >= run.dst_end) {
+      VLOG(2) << "byte_range.read_at.skip run_index=" << run_index << " kind=" << run_kind_to_cstr(run.kind)
+              << " cursor=" << cursor << " dst_end=" << run.dst_end;
       ++run_index;
       continue;
     }
     if (cursor < run.dst_begin) {
+      VLOG(2) << "byte_range.read_at.uncovered_gap run_index=" << run_index << " cursor=" << cursor
+              << " dst_begin=" << run.dst_begin << " duration_us=" << elapsed_us(run_start);
       return absl::InternalError("byte range program contains uncovered gaps");
     }
     const uint64_t run_offset = cursor - run.dst_begin;
     const size_t available = static_cast<size_t>(run.dst_end - cursor);
     const size_t chunk = std::min(to_copy - copied, available);
+    VLOG(2) << "byte_range.read_at.run_begin run_index=" << run_index << " kind=" << run_kind_to_cstr(run.kind)
+            << " source_index=" << run.source_index << " run_offset=" << run_offset << " chunk=" << chunk
+            << " dst_begin=" << run.dst_begin << " dst_end=" << run.dst_end;
     absl::StatusOr<size_t> copied_or;
+    const auto kind_start = std::chrono::steady_clock::now();
     switch (run.kind) {
       case ByteRangeRun::Kind::kPad:
         std::memset(out + copied, 0, chunk);
@@ -467,22 +814,90 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read_at(uint64_t offset, void* dst
       case ByteRangeRun::Kind::kContiguous:
         copied_or = read_base(run.source_index, run.src_begin + run_offset, out + copied, chunk);
         break;
+      case ByteRangeRun::Kind::kStrided: {
+        uint64_t strided_pack_us = 0;
+        size_t strided_pack_bytes = 0;
+        uint64_t strided_cache_lookup_us = 0;
+        uint64_t strided_block_prepare_us = 0;
+        uint64_t strided_block_load_us = 0;
+        uint64_t strided_row_copy_us = 0;
+        size_t strided_row_copy_bytes = 0;
+        copied_or = fill_strided_run(
+            run_index,
+            run,
+            run_offset,
+            out + copied,
+            chunk,
+            &strided_pack_us,
+            &strided_pack_bytes,
+            &strided_cache_lookup_us,
+            &strided_block_prepare_us,
+            &strided_block_load_us,
+            &strided_row_copy_us,
+            &strided_row_copy_bytes);
+        strided_pack_us_total += strided_pack_us;
+        strided_pack_bytes_total += strided_pack_bytes;
+        strided_cache_lookup_us_total += strided_cache_lookup_us;
+        strided_block_prepare_us_total += strided_block_prepare_us;
+        strided_block_load_us_total += strided_block_load_us;
+        strided_row_copy_us_total += strided_row_copy_us;
+        strided_row_copy_bytes_total += strided_row_copy_bytes;
+        break;
+      }
+    }
+    const uint64_t kind_us = elapsed_us(kind_start);
+    switch (run.kind) {
+      case ByteRangeRun::Kind::kPad:
+        pad_us_total += kind_us;
+        break;
+      case ByteRangeRun::Kind::kContiguous:
+        contiguous_us_total += kind_us;
+        break;
       case ByteRangeRun::Kind::kStrided:
-        copied_or = fill_strided_run(run_index, run, run_offset, out + copied, chunk);
+        strided_us_total += kind_us;
         break;
     }
     if (!copied_or.ok()) {
+      VLOG(2) << "byte_range.read_at.run_failed run_index=" << run_index << " kind=" << run_kind_to_cstr(run.kind)
+              << " chunk=" << chunk << " duration_us=" << elapsed_us(run_start) << " status=" << copied_or.status();
       return copied_or.status();
+    }
+    VLOG(2) << "byte_range.read_at.run_end run_index=" << run_index << " kind=" << run_kind_to_cstr(run.kind)
+            << " copied_chunk=" << *copied_or << " duration_us=" << elapsed_us(run_start);
+    switch (run.kind) {
+      case ByteRangeRun::Kind::kPad:
+        pad_bytes_total += *copied_or;
+        break;
+      case ByteRangeRun::Kind::kContiguous:
+        contiguous_bytes_total += *copied_or;
+        break;
+      case ByteRangeRun::Kind::kStrided:
+        strided_bytes_total += *copied_or;
+        break;
     }
     copied += *copied_or;
     cursor += *copied_or;
     if (*copied_or == 0) {
+      VLOG(2) << "byte_range.read_at.stop_zero_progress run_index=" << run_index;
       break;
     }
     ++run_index;
   }
 
   stats_.output_bytes.fetch_add(copied, std::memory_order_relaxed);
+  VLOG(2) << "byte_range.read_at.end offset=" << offset << " req_bytes=" << bytes << " to_copy=" << to_copy
+          << " copied=" << copied << " duration_us=" << elapsed_us(read_start);
+  VLOG(2) << "byte_range.read_at.summary offset=" << offset << " req_bytes=" << bytes << " copied=" << copied
+          << " duration_us=" << elapsed_us(read_start) << " pad_us_total=" << pad_us_total
+          << " contiguous_us_total=" << contiguous_us_total << " strided_us_total=" << strided_us_total
+          << " strided_pack_us_total=" << strided_pack_us_total
+          << " strided_cache_lookup_us_total=" << strided_cache_lookup_us_total
+          << " strided_block_prepare_us_total=" << strided_block_prepare_us_total
+          << " strided_block_load_us_total=" << strided_block_load_us_total
+          << " strided_row_copy_us_total=" << strided_row_copy_us_total << " pad_bytes_total=" << pad_bytes_total
+          << " contiguous_bytes_total=" << contiguous_bytes_total << " strided_bytes_total=" << strided_bytes_total
+          << " strided_pack_bytes_total=" << strided_pack_bytes_total
+          << " strided_row_copy_bytes_total=" << strided_row_copy_bytes_total;
   return copied;
 }
 

@@ -20,12 +20,14 @@
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/unified_memory_authority.h"
 #include "core/store/runtime/context/runtime_context_events.h"
+#include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/metadata/metadata_types.h"
@@ -107,6 +109,17 @@ class StoreEngine {
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints = {});
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind = loading::MaterializationSource::kLocalReplica);
+
+  absl::StatusOr<runtime::ingestion::ArtifactLoweringResult> execute_artifact_lowering_plan(
+      runtime::ingestion::ArtifactLoweringPlan plan);
 
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
@@ -262,6 +275,17 @@ class StoreEngine {
     bool skipped{false};
   };
 
+  struct ReplicaBackingObservation {
+    loading::ReplicaKey key;
+    std::uint64_t size_bytes{0};
+    common::memory::MemoryLocation memory_location{common::memory::MemoryLocation::NONE};
+    bool cpu_memfd_available{false};
+    bool cuda_ipc_available{false};
+    runtime::ReplicaExportState remote_export_state{runtime::ReplicaExportState::kPresenceOnly};
+    std::uint64_t remote_export_generation{0};
+    bool remote_access_enabled{false};
+  };
+
   // Apply/upgrade stable-DRAM cache policy for an existing CPU replica.
   // Returns {admitted=true} when the replica is tracked (including upgrades),
   // {skipped=true} when admission was best-effort and could not be satisfied.
@@ -298,6 +322,10 @@ class StoreEngine {
   absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key);
   // Return total artifact size in bytes for the given replica.
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key);
+  [[nodiscard]] absl::StatusOr<ReplicaBackingObservation> inspect_replica_backing(const loading::ReplicaKey& key) const;
+  [[nodiscard]] absl::StatusOr<std::unique_ptr<IArtifactLoader>> open_local_replica_loader(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location = common::memory::MemoryLocation::CPU) const;
 
   void set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state);
   [[nodiscard]] ReplicaPublishState get_replica_publish_state(const loading::ReplicaKey& key) const;
@@ -438,7 +466,7 @@ class StoreEngine {
   std::unique_ptr<runtime::ReplicaPromotionManager> promotion_manager_;
   std::unique_ptr<runtime::metadata::MetadataGateway> metadata_gateway_;
   std::unique_ptr<runtime::IngestionRuntime> ingestion_runtime_;
-  static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
       const std::string& artifact_identifier,
       const loading::InlineBufferSource& source,
       const loading::ReplicaTarget& target,

@@ -1,0 +1,79 @@
+{
+  "communicator": {
+    "map8_half_swap": {
+      "case_wall_GBps": 0.0,
+      "case_wall_gbps": 0.0,
+      "data_plane_GBps": 154.21111834362338,
+      "data_plane_gbps": 1233.688946748987,
+      "lane_count": 8.0,
+      "per_lane_GBps": 19.276389792952923,
+      "per_lane_gbps": 154.21111834362338,
+      "total_bytes": 771550609408.0
+    },
+    "map8_id": {
+      "case_wall_GBps": 0.0,
+      "case_wall_gbps": 0.0,
+      "data_plane_GBps": 150.55581727771292,
+      "data_plane_gbps": 1204.4465382217033,
+      "lane_count": 8.0,
+      "per_lane_GBps": 18.819477159714115,
+      "per_lane_gbps": 150.55581727771292,
+      "total_bytes": 753296998400.0
+    },
+    "map8_target_bad_local": {
+      "case_wall_GBps": 0.0,
+      "case_wall_gbps": 0.0,
+      "data_plane_GBps": 83.61155361125873,
+      "data_plane_gbps": 668.8924288900698,
+      "lane_count": 8.0,
+      "per_lane_GBps": 10.451444201407341,
+      "per_lane_gbps": 83.61155361125873,
+      "total_bytes": 418490875904.0
+    },
+    "map8_within_swap": {
+      "case_wall_GBps": 0.0,
+      "case_wall_gbps": 0.0,
+      "data_plane_GBps": 153.93621079874237,
+      "data_plane_gbps": 1231.489686389939,
+      "lane_count": 8.0,
+      "per_lane_GBps": 19.242026349842796,
+      "per_lane_gbps": 153.93621079874237,
+      "total_bytes": 770141323264.0
+    },
+    "single_big_read": {
+      "case_wall_GBps": 20.2483,
+      "case_wall_gbps": 161.9864,
+      "data_plane_GBps": 20.2483,
+      "data_plane_gbps": 161.9864,
+      "per_lane_GBps": 20.2483,
+      "per_lane_gbps": 161.9864
+    },
+    "single_nic_probe_0496_0078": {
+      "case_wall_GBps": 20.5583,
+      "case_wall_gbps": 164.4664,
+      "data_plane_GBps": 20.5583,
+      "data_plane_gbps": 164.4664,
+      "per_lane_GBps": 20.5583,
+      "per_lane_gbps": 164.4664
+    }
+  },
+  "mooncake": {
+    "full8_raw_gbps": 1568.75,
+    "full8_te_best_gbps": 1482.64,
+    "map8_half_swap_gbps": 257.44,
+    "map8_identity_gbps": 281.76,
+    "map8_target_bad_local_gbps": 279.04,
+    "map8_within_swap_gbps": 330.88
+  },
+  "single_nic": {
+    "aligned_pair": "0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2",
+    "comm_best_known_GBps": 20.2483,
+    "comm_best_known_case": "/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json",
+    "comm_fresh_probe_GBps": 20.5583,
+    "comm_fresh_probe_case": "/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json",
+    "ib_read_aligned_GBps": 24.465,
+    "ib_write_aligned_GBps": 24.5,
+    "te_read_aligned_GBps": 24.44,
+    "te_write_aligned_GBps": 24.45
+  }
+}

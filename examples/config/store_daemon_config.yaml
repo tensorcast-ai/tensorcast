@@ -7,6 +7,17 @@ meta:
   # Cluster identity token to prevent split-brain when talking to Global Store.
   cluster_token: ""
 
+# Launcher-only environment variables for the daemon process.
+# Use this when the daemon binary needs additional runtime libraries or
+# transport-specific environment, but keep the values explicit in config.
+# Special case: envs.LD_LIBRARY_PATH is prepended ahead of the inherited shell
+# value and before TensorCast/PyTorch/CUDA library paths auto-discovered by
+# the CLI so config-specified compatibility/runtime libraries win resolution.
+envs:
+  # Example: prepend a compatibility CUDA directory without replacing the
+  # launcher's existing LD_LIBRARY_PATH augmentation.
+  # LD_LIBRARY_PATH: /data/cuda/compat:/data/cuda/cuda-12.8/lib64
+
 # gRPC server settings.
 server:
   # Control-plane listen socket for the gRPC API.
@@ -25,8 +36,10 @@ server:
   p2p_listen:
     # Bind host for P2P transfers; often set to the RDMA or high-bandwidth interface.
     host: 0.0.0.0
-    # P2P port; must be non-zero when high_availability.enabled is true.
-    port: 65090
+    # P2P port; set 0 to auto-pick a free port at launch time.
+    # When high_availability.enabled is true the launcher still resolves this
+    # to a concrete non-zero port before daemon startup.
+    port: 0
   # Optional default root for relative disk_path values.
   # When empty, disk materialization accepts absolute disk_path only.
   storage_path: "/data/models"

@@ -13,7 +13,7 @@
 
 namespace tensorcast::store::view {
 
-std::string build_view_spec_json(const loader::ViewSpec& spec) {
+std::string build_view_spec_json(const loader::ViewSpec& spec, absl::Span<const std::string> tensor_names) {
   nlohmann::json tensors = nlohmann::json::object();
   for (const auto& [tensor_name, ops] : spec.tensors) {
     nlohmann::json tensor_json;
@@ -40,10 +40,17 @@ std::string build_view_spec_json(const loader::ViewSpec& spec) {
   }
   nlohmann::json root;
   root["tensors"] = std::move(tensors);
+  if (!tensor_names.empty()) {
+    nlohmann::json names = nlohmann::json::array();
+    for (const auto& name : tensor_names) {
+      names.push_back(name);
+    }
+    root["tensor_names"] = std::move(names);
+  }
   return root.dump();
 }
 
-absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec_json) {
+absl::StatusOr<ParsedViewSelection> parse_view_selection_json(std::string_view view_spec_json) {
   if (view_spec_json.empty()) {
     return absl::InvalidArgumentError("view_spec_json must not be empty");
   }
@@ -61,7 +68,25 @@ absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec
     return absl::InvalidArgumentError("view_spec_json.tensors must be an object");
   }
 
-  loader::ViewSpec spec;
+  ParsedViewSelection parsed;
+  const auto tensor_names_it = root.find("tensor_names");
+  if (tensor_names_it != root.end()) {
+    if (!tensor_names_it->is_array()) {
+      return absl::InvalidArgumentError("view_spec_json.tensor_names must be an array");
+    }
+    absl::flat_hash_set<std::string> seen_names;
+    for (const auto& name_json : *tensor_names_it) {
+      if (!name_json.is_string()) {
+        return absl::InvalidArgumentError("view_spec_json.tensor_names entries must be strings");
+      }
+      const std::string name = name_json.get<std::string>();
+      if (!seen_names.insert(name).second) {
+        return absl::InvalidArgumentError("view_spec_json.tensor_names must not contain duplicates");
+      }
+      parsed.tensor_names.push_back(name);
+    }
+  }
+
   for (auto it = tensors_it->begin(); it != tensors_it->end(); ++it) {
     if (!it.value().is_object()) {
       return absl::InvalidArgumentError(absl::StrCat("view_spec_json tensor entry must be object for ", it.key()));
@@ -105,9 +130,17 @@ absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec
             absl::StrCat("view_spec_json op type unsupported for ", it.key(), ": ", type));
       }
     }
-    spec.tensors.emplace(it.key(), std::move(ops));
+    parsed.spec.tensors.emplace(it.key(), std::move(ops));
   }
-  return spec;
+  return parsed;
+}
+
+absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec_json) {
+  auto parsed_or = parse_view_selection_json(view_spec_json);
+  if (!parsed_or.ok()) {
+    return parsed_or.status();
+  }
+  return std::move(parsed_or->spec);
 }
 
 uint64_t align_up(uint64_t value, uint64_t align) {

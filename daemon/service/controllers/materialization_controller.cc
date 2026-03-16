@@ -22,6 +22,7 @@ MaterializationController::MaterializationController(Dep d)
               .engine = d.engine,
               .source_registry = d.disk_imports,
               .shutdown_signal = d.shutdown_signal,
+              .global_store_client = d.global_store_client,
               .storage_path = d.storage_path,
           }),
       replica_materialization_service_(
@@ -55,18 +56,37 @@ MaterializationController::MaterializationController(Dep d)
               .devices = d.devices,
               .regions = d.regions,
               .disk_imports = d.disk_imports,
+              .lifecycle = *d.lifecycle,
+              .lifecycle_kernel = *d.lifecycle_kernel,
               .shutdown_signal = d.shutdown_signal,
               .identity = d.identity,
+              .external_target_access_service = d.external_target_access_service,
               .global_store_client = d.global_store_client,
               .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
               .external_target_verification_enabled = d.external_target_verification_enabled,
               .storage_path = d.storage_path,
+          }),
+      owner_binding_service_(
+          OwnedBindingService::Dep{
+              .engine = d.engine,
+              .devices = d.devices,
+              .disk_imports = d.disk_imports,
+              .bindings = d.binding_registry,
+              .shutdown_signal = d.shutdown_signal,
+              .async_runtime = d.async_runtime,
+              .identity = d.identity,
+              .global_store_client = d.global_store_client,
+              .lifecycle = d.lifecycle,
+              .handle_leases = d.handle_leases,
+              .capability_tokens = d.capability_tokens,
+              .target_materialization_service = &target_materialization_service_,
+              .storage_path = d.storage_path,
           }) {}
 
-TargetWriteRegistry::Record MaterializationController::insert_target_write_for_testing(
-    TargetWriteRegistry::Record record) {
-  return target_materialization_service_.insert_target_write_for_testing(std::move(record));
+absl::StatusOr<TargetPublicationRegistry::Record> MaterializationController::insert_target_publication_for_testing(
+    TargetPublicationRegistry::Record record) {
+  return target_materialization_service_.insert_target_publication_for_testing(std::move(record));
 }
 
 grpc::Status MaterializationController::materialize_replica(
@@ -90,11 +110,93 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
   return target_materialization_service_.materialize_into_mapped_target(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::create_owned_binding(
+    RpcContext& rctx,
+    const v2::CreateOwnedBindingRequest& req,
+    v2::CreateOwnedBindingResponse& resp) {
+  return owner_binding_service_.create_owned_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::create_binding(
+    RpcContext& rctx,
+    const v2::CreateBindingRequest& req,
+    v2::CreateBindingResponse& resp) {
+  return owner_binding_service_.create_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::commit_binding_artifact(
+    RpcContext& rctx,
+    const v2::CommitBindingArtifactRequest& req,
+    v2::CommitBindingArtifactResponse& resp) {
+  return owner_binding_service_.commit_binding_artifact(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::begin_binding_update(
+    RpcContext& rctx,
+    const v2::BeginBindingUpdateRequest& req,
+    v2::BeginBindingUpdateResponse& resp) {
+  return owner_binding_service_.begin_binding_update(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::submit_binding_contribution(
+    RpcContext& rctx,
+    const v2::SubmitBindingContributionRequest& req,
+    v2::SubmitBindingContributionResponse& resp) {
+  return owner_binding_service_.submit_binding_contribution(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::seal_binding(
+    RpcContext& rctx,
+    const v2::SealBindingRequest& req,
+    v2::SealBindingResponse& resp) {
+  return owner_binding_service_.seal_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::refill_owned_binding(
+    RpcContext& rctx,
+    const v2::RefillOwnedBindingRequest& req,
+    v2::RefillOwnedBindingResponse& resp) {
+  return owner_binding_service_.refill_owned_binding(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::close_owned_binding(
+    RpcContext& rctx,
+    const v2::CloseOwnedBindingRequest& req,
+    v2::CloseOwnedBindingResponse& resp) {
+  return owner_binding_service_.close_owned_binding(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::publish_target_replica(
     RpcContext& rctx,
     const v2::PublishTargetReplicaRequest& req,
     v2::PublishTargetReplicaResponse& resp) {
   return target_materialization_service_.publish_target_replica(rctx, req, resp);
+}
+
+absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> MaterializationController::
+    inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now) {
+  return target_materialization_service_.inspect_target_publication_context_for_testing(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> MaterializationController::
+    build_target_publication_workflow_routed_request_for_testing(
+        const v2::PublishTargetReplicaRequest& req,
+        absl::Time now) const {
+  return target_materialization_service_.build_target_publication_workflow_routed_request_for_testing(req, now);
+}
+
+absl::StatusOr<RoutedAuthorityRequest> MaterializationController::
+    build_target_publication_workflow_continuation_request_for_testing(
+        const RoutedAuthorityRequest& routed_request,
+        const OwnerStageReply& workflow_gate_reply) const {
+  return target_materialization_service_.build_target_publication_workflow_continuation_request_for_testing(
+      routed_request, workflow_gate_reply);
+}
+
+absl::StatusOr<std::optional<OwnerStageReply>> MaterializationController::maybe_route_authority_stage(
+    const RoutedAuthorityRequest& routed_request,
+    absl::Time now) {
+  return target_materialization_service_.maybe_route_authority_stage(routed_request, now);
 }
 
 grpc::Status MaterializationController::import_artifact_from_path(
@@ -123,6 +225,13 @@ grpc::Status MaterializationController::seal_assembly(
     const v2::SealAssemblyRequest& req,
     v2::SealAssemblyResponse& resp) {
   return assembly_operation_service_.seal_assembly(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::start_assembly_attempt(
+    RpcContext& rctx,
+    const v2::StartAssemblyAttemptRequest& req,
+    v2::StartAssemblyAttemptResponse& resp) {
+  return assembly_operation_service_.start_assembly_attempt(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::start_seal_assembly(

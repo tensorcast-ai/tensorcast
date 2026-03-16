@@ -23,6 +23,7 @@ StagingWindow::StageFn MakeStageFunction(
     const transport::net_dev_t& dev,
     MrCache* mr_cache,
     std::string tensor_key,
+    std::string request_key,
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
     ::ibv_mr* direct_mr);
@@ -37,6 +38,7 @@ TEST_CASE("MakeStageFunction guards null stager", "[communicator][rdma]") {
       dev,
       /*mr_cache=*/nullptr,
       /*tensor_key=*/"missing_stager",
+      /*request_key=*/"missing_stager:0#1",
       /*staged_backend=*/v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED,
       /*use_direct=*/false,
       /*direct_mr=*/nullptr);

@@ -47,7 +47,9 @@ The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/stor
 - `MaterializeIntoTarget`: region-backed `get_into` into an existing CUDA region.
 - `ImportArtifactFromPath` / `ImportArtifactFromPathStream`: explicit local-only
   disk import that returns `artifact_id` + canonical index metadata for
-  reference-only registration.
+  reference-only registration of payload bytes. First import may also persist
+  metadata sidecars (`artifact_descriptor.json`, and safetensors
+  `tensor_index.json`) so later imports can skip full data hashing.
 - `ConfirmReplica` / `WaitReplicaVerification`: readiness + verification waits.
 - `GetServerConfig`: advertises `local_handle_socket_path` and `cpu_shared_memory_enabled` for lease-aware imports. When the socket path is unset in config, the daemon auto-selects
   `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to

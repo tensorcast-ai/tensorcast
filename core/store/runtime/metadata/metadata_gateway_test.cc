@@ -2,9 +2,11 @@
 
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
@@ -64,13 +66,25 @@ class RecordingPublisher final : public RegistrationPublisher {
     return absl::OkStatus();
   }
 
-  absl::Status update_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
+  absl::Status update_view_state(const tensorcast::store::components::ViewStateUpdate& update) override {
+    if (reject_view_hash_conflicts && !update.view_id.empty() && update.view_data_hash.has_value()) {
+      const std::string key = absl::StrCat(update.artifact_id, "::", update.view_id);
+      auto it = view_hashes.find(key);
+      if (it != view_hashes.end() && it->second != *update.view_data_hash) {
+        return absl::FailedPreconditionError("view_data_hash conflict for existing view registration");
+      }
+      view_hashes[key] = *update.view_data_hash;
+    }
     ++view_updates;
     return absl::OkStatus();
   }
 
+  bool reject_view_hash_conflicts{false};
   std::vector<RegistrationPublication> publications;
   int view_updates{0};
+
+ private:
+  std::unordered_map<std::string, std::string> view_hashes;
 };
 
 struct RegistrationBackendHarness {
@@ -129,6 +143,43 @@ ArtifactRegistration MakeRegistration(uint64_t total_bytes) {
   reg.encoding = "json";
   reg.enable_p2p = false;
   return reg;
+}
+
+ArtifactRegistration MakePieceRegistration(
+    std::string_view artifact_id,
+    std::string_view assembly_id,
+    std::string_view view_id) {
+  constexpr uint64_t kCanonicalElements = 8;
+  constexpr uint64_t kPieceElements = 4;
+
+  ArtifactRegistration reg = MakeRegistration(/*total_bytes=*/kPieceElements * sizeof(float));
+  reg.artifact_id = std::string(artifact_id);
+  reg.client_artifact_id = std::string(assembly_id);
+  reg.tensor_index_data = R"({"weights":[0,32,[8],[1],"torch.float32",0]})";
+  reg.total_size_bytes = kPieceElements * sizeof(float);
+
+  tensorcast::store::loader::ViewSpec spec;
+  tensorcast::store::loader::TensorViewOps ops;
+  ops.ops.push_back(
+      tensorcast::store::loader::ViewOp::Narrow(
+          tensorcast::store::loader::NarrowOp{.dim = 0, .start = 0, .length = kPieceElements}));
+  spec.tensors.emplace("weights", ops);
+
+  tensorcast::store::runtime::metadata::ViewRegistration view;
+  view.view_id = std::string(view_id);
+  view.spec = std::move(spec);
+  view.placement = tensorcast::store::runtime::metadata::ViewPlacement::kServer;
+  view.canonical_size_bytes = kCanonicalElements * sizeof(float);
+  view.registration_kind = tensorcast::store::runtime::metadata::ViewRegistrationKind::kPiece;
+  reg.view = std::move(view);
+  return reg;
+}
+
+std::array<std::byte, 16> MakePiecePayload(float base) {
+  std::array<float, 4> values{base + 0.0f, base + 1.0f, base + 2.0f, base + 3.0f};
+  std::array<std::byte, sizeof(values)> bytes{};
+  std::memcpy(bytes.data(), values.data(), bytes.size());
+  return bytes;
 }
 
 StoreEngineOptions MakeTestOptions() {
@@ -243,6 +294,17 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
 
   absl::Status unregister_worker(std::string_view, bool) override {
     return absl::UnimplementedError("unregister_worker not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_workers not used in tests");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
+    return absl::UnimplementedError("list_active_worker_identities not used in tests");
   }
 
   absl::StatusOr<std::string> register_replica(
@@ -458,6 +520,46 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("reconcile_worker_state not used in tests");
   }
 
+  absl::StatusOr<tensorcast::store::components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t,
+      std::string_view,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("acquire_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("keepalive_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ShardHomeLeaseKeepaliveOutcome>>
+  batch_keepalive_shard_home_leases(
+      const std::vector<tensorcast::store::components::ShardHomeLeaseKeepaliveInput>&,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_keepalive_shard_home_leases not used in tests");
+  }
+
+  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const tensorcast::store::components::RpcOptions&)
+      override {
+    return absl::UnimplementedError("release_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::ShardHomeRouteInfo> get_shard_home_lease(
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("get_shard_home_lease not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>&,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_get_shard_home_leases not used in tests");
+  }
+
   bool is_connected() const override {
     return connected;
   }
@@ -471,6 +573,10 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
 
   absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping(std::string_view) override {
     return absl::UnimplementedError("resolve_key_mapping not used in tests");
+  }
+
+  absl::Status upsert_artifact_metadata(const tensorcast::common::v1::ArtifactDescriptor&, std::string_view) override {
+    return absl::UnimplementedError("upsert_artifact_metadata not used in tests");
   }
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
@@ -594,6 +700,20 @@ TEST_CASE("RegistrationBackend commits publish to MetadataGateway", "[registrati
 
   auto commit_or = backend.commit(begin_or->registration_id);
   REQUIRE(commit_or.ok());
+  REQUIRE(commit_or->verified_content_descriptor.has_value());
+  REQUIRE(commit_or->verification_record.has_value());
+  CHECK(
+      commit_or->verified_content_descriptor->content_identity.semantic_layout_identity.kind ==
+      tensorcast::store::runtime::ingestion::SemanticLayoutKind::kCanonicalIndexDigest);
+  CHECK(
+      commit_or->verified_content_descriptor->content_identity.semantic_layout_identity.value ==
+      commit_or->index_multihash);
+  CHECK(commit_or->verified_content_descriptor->content_identity.logical_size_bytes == reg.total_size_bytes);
+  CHECK(commit_or->verified_content_descriptor->content_identity.digest_alg == "multihash");
+  CHECK(commit_or->verified_content_descriptor->content_identity.digest_bytes == commit_or->data_multihash);
+  CHECK(
+      commit_or->verification_record->verification_method ==
+      tensorcast::store::runtime::ingestion::VerificationMethod::kRegistrationCommit);
 
   REQUIRE_FALSE(harness.publisher.publications.empty());
   const auto& publication = harness.publisher.publications.back();
@@ -678,6 +798,78 @@ TEST_CASE("RegistrationBackend abort cleans pending mem_reg alias from ReplicaRe
   auto abort_status = backend.abort(begin_or->registration_id);
   REQUIRE(abort_status.ok());
   CHECK(harness.replica_registry->size() == 0);
+}
+
+TEST_CASE("RegistrationBackend piece retry reuses existing local replica", "[registration_backend][piece]") {
+  SKIP_IF_NO_CUDA();
+
+  RegistrationBackendHarness harness;
+  harness.publisher.reject_view_hash_conflicts = true;
+  auto backend = harness.make_backend();
+
+  const auto payload = MakePiecePayload(/*base=*/1.0f);
+
+  auto reg_one = MakePieceRegistration("temp-piece-one", "cgid:piece-retry", "view-piece");
+  auto begin_one = backend.begin(reg_one);
+  REQUIRE(begin_one.ok());
+  REQUIRE(backend.ingest_view_chunk(begin_one->registration_id, /*view_offset=*/0, absl::MakeConstSpan(payload)).ok());
+
+  auto commit_one = backend.commit(begin_one->registration_id);
+  REQUIRE(commit_one.ok());
+  REQUIRE(commit_one->view_data_multihash.has_value());
+  CHECK_FALSE(commit_one->existed);
+  CHECK(harness.publisher.publications.size() == 1);
+  CHECK(harness.publisher.view_updates == 1);
+
+  auto reg_two = MakePieceRegistration("temp-piece-two", "cgid:piece-retry", "view-piece");
+  auto begin_two = backend.begin(reg_two);
+  REQUIRE(begin_two.ok());
+  REQUIRE(backend.ingest_view_chunk(begin_two->registration_id, /*view_offset=*/0, absl::MakeConstSpan(payload)).ok());
+
+  auto commit_two = backend.commit(begin_two->registration_id);
+  REQUIRE(commit_two.ok());
+  REQUIRE(commit_two->view_data_multihash.has_value());
+  CHECK(commit_two->existed);
+  CHECK(*commit_two->view_data_multihash == *commit_one->view_data_multihash);
+  CHECK(harness.publisher.publications.size() == 1);
+  CHECK(harness.publisher.view_updates == 2);
+  CHECK(harness.replica_registry->find_by_artifact("cgid:piece-retry").size() == 1);
+}
+
+TEST_CASE("RegistrationBackend conflicting piece retry does not republish", "[registration_backend][piece]") {
+  SKIP_IF_NO_CUDA();
+
+  RegistrationBackendHarness harness;
+  harness.publisher.reject_view_hash_conflicts = true;
+  auto backend = harness.make_backend();
+
+  const auto payload = MakePiecePayload(/*base=*/1.0f);
+  const auto conflicting_payload = MakePiecePayload(/*base=*/11.0f);
+
+  auto reg_one = MakePieceRegistration("temp-piece-one", "cgid:piece-conflict", "view-piece");
+  auto begin_one = backend.begin(reg_one);
+  REQUIRE(begin_one.ok());
+  REQUIRE(backend.ingest_view_chunk(begin_one->registration_id, /*view_offset=*/0, absl::MakeConstSpan(payload)).ok());
+  REQUIRE(backend.commit(begin_one->registration_id).ok());
+  CHECK(harness.publisher.publications.size() == 1);
+  CHECK(harness.publisher.view_updates == 1);
+
+  auto reg_two = MakePieceRegistration("temp-piece-two", "cgid:piece-conflict", "view-piece");
+  auto begin_two = backend.begin(reg_two);
+  REQUIRE(begin_two.ok());
+  REQUIRE(
+      backend.ingest_view_chunk(begin_two->registration_id, /*view_offset=*/0, absl::MakeConstSpan(conflicting_payload))
+          .ok());
+
+  auto commit_two = backend.commit(begin_two->registration_id);
+  REQUIRE_FALSE(commit_two.ok());
+  CHECK(commit_two.status().code() == absl::StatusCode::kFailedPrecondition);
+  CHECK(harness.publisher.publications.size() == 1);
+  CHECK(harness.publisher.view_updates == 1);
+  CHECK(harness.replica_registry->find_by_artifact("cgid:piece-conflict").size() == 1);
+
+  REQUIRE(backend.abort(begin_two->registration_id).ok());
+  CHECK(harness.replica_registry->find_by_artifact("temp-piece-two").empty());
 }
 
 TEST_CASE(

@@ -36,18 +36,15 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
   const size_t size0 = 64 * 1024 * 1024; // 64 MB
   const size_t size1 = 128 * 1024 * 1024; // 128 MB
 
-  fs::path base = fs::temp_directory_path() / "gpu_auto_release_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  tensorcast::testing::TestTempDir base("gpu_auto_release_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
-  fs::path path0 = base / artifact_dir_name / p0;
-  fs::path path1 = base / artifact_dir_name / p1;
+  fs::path path0 = base.path() / artifact_dir_name / p0;
+  fs::path path1 = base.path() / artifact_dir_name / p1;
   REQUIRE(create_dummy_file(path0, size0, 'A'));
   REQUIRE(create_dummy_file(path1, size1, 'B'));
   // RFC-0007 metadata for standard partitions
-  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
   // Setup pinned pool
   const size_t pool_total = 512 * 1024 * 1024; // 512MB
@@ -60,7 +57,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
   SECTION("Load to CPU then GPU with auto-release enabled") {
     // Use new DiskSource
     DiskSource disk_src;
-    disk_src.path = base / artifact_dir_name;
+    disk_src.path = base.path() / artifact_dir_name;
 
     // Use aggregate initialization for ReplicaConfig
     // Set max_buffer_bytes to match the available pool size
@@ -126,9 +123,6 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
   }
 
   // Section for disabled auto-release removed - auto-release is now mandatory per RFC 0001
-
-  // Teardown
-  fs::remove_all(base);
 }
 
 TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu][multi]") {
@@ -146,16 +140,13 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
   const std::string artifact_dir_name = "multi_gpu_release_files";
   const size_t total_size = 256 * 1024 * 1024; // 256 MB
 
-  fs::path base = fs::temp_directory_path() / "multi_gpu_release_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  tensorcast::testing::TestTempDir base("multi_gpu_release_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
-  fs::path data_file_path = base / artifact_dir_name / "tensor.data";
+  fs::path data_file_path = base.path() / artifact_dir_name / "tensor.data";
   REQUIRE(create_dummy_file(data_file_path, total_size, 'M'));
   // RFC-0007: standard partition directories must include descriptor + index
-  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
   // Setup pinned pool
   const size_t pool_total = 1024 * 1024 * 1024; // 1GB
@@ -170,7 +161,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
     {
       // Use new DiskSource
       DiskSource disk_src;
-      disk_src.path = base / artifact_dir_name;
+      disk_src.path = base.path() / artifact_dir_name;
 
       // Use aggregate initialization for ReplicaConfig
       const size_t total_size = 256 * 1024 * 1024; // must match file above
@@ -208,7 +199,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
     {
       // Use new DiskSource
       DiskSource disk_src;
-      disk_src.path = base / artifact_dir_name;
+      disk_src.path = base.path() / artifact_dir_name;
 
       // Use aggregate initialization for ReplicaConfig
       const size_t total_size2 = 256 * 1024 * 1024;
@@ -244,9 +235,6 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
 
     LOG(INFO) << "Multi-GPU test passed: CPU memory released for both GPU loads (mandatory per RFC 0001)";
   }
-
-  // Cleanup
-  fs::remove_all(base);
 }
 
 TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[replica][gpu][release][boundary]") {
@@ -255,11 +243,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
   }
 
   const std::string artifact_dir_name = "small_artifact_files";
-  fs::path base = fs::temp_directory_path() / "small_artifact_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  tensorcast::testing::TestTempDir base("small_artifact_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
   // Setup pinned pool
   const size_t pool_total = 128 * 1024 * 1024; // 128MB
@@ -273,14 +258,14 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     const std::string artifact_id = "tiny_artifact";
     const size_t artifact_size = 512 * 1024; // 512KB - smaller than 1MB chunk
 
-    fs::path data_file_path = base / artifact_dir_name / "tensor.data_0";
+    fs::path data_file_path = base.path() / artifact_dir_name / "tensor.data_0";
     REQUIRE(create_dummy_file(data_file_path, artifact_size, 'T'));
-    REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+    REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
     // UMA is internal; no external CPU arena injection required.
     // Use new DiskSource
     DiskSource disk_src;
-    disk_src.path = base / artifact_dir_name;
+    disk_src.path = base.path() / artifact_dir_name;
 
     // Use aggregate initialization for ReplicaConfig
     // Set max_buffer_bytes to match the available pool size
@@ -321,13 +306,13 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     const std::string artifact_id = "one_chunk_artifact";
     const size_t artifact_size = 1024 * 1024; // Exactly 1MB
 
-    fs::path data_file_path2 = base / artifact_dir_name / "tensor.data_0";
+    fs::path data_file_path2 = base.path() / artifact_dir_name / "tensor.data_0";
     REQUIRE(create_dummy_file(data_file_path2, artifact_size, 'C'));
-    REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+    REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
     // Use new DiskSource
     DiskSource disk_src;
-    disk_src.path = base / artifact_dir_name;
+    disk_src.path = base.path() / artifact_dir_name;
 
     // Use aggregate initialization for ReplicaConfig
     // Set max_buffer_bytes to match the available pool size
@@ -367,14 +352,14 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     const std::string artifact_id = "slightly_over_chunk_artifact";
     const size_t artifact_size = 1024 * 1024 + 1024; // 1MB + 1KB
 
-    fs::path data_file_path3 = base / artifact_dir_name / "tensor.data_0";
+    fs::path data_file_path3 = base.path() / artifact_dir_name / "tensor.data_0";
     REQUIRE(create_dummy_file(data_file_path3, artifact_size, 'O'));
-    REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+    REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base.path() / artifact_dir_name).ok());
 
     // UMA is internal; CPU arena handling no longer needs manual injection.
     // Use new DiskSource
     DiskSource disk_src;
-    disk_src.path = base / artifact_dir_name;
+    disk_src.path = base.path() / artifact_dir_name;
 
     // Use aggregate initialization for ReplicaConfig
     // Set max_buffer_bytes to match the available pool size
@@ -409,7 +394,4 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
 
     LOG(INFO) << "Successfully verified CPU release for replica just over one chunk";
   }
-
-  // Cleanup
-  fs::remove_all(base);
 }

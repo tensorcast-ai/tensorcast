@@ -20,7 +20,6 @@ from tensorcast.cli_utils.paths import (
     clear_current_session_if_matches,
     get_current_session_id,
     runtime_lock_path,
-    runtime_root,
     runtime_state_path,
     session_paths,
 )
@@ -348,6 +347,8 @@ def _resolve_global_store(
     mode: Literal["connect", "start", "none"],
     address: str | None,
     config_path: Path | None,
+    listen_port: int | None,
+    metrics_port: int | None,
     allow_gs_fallback: bool,
     cluster_id: str | None,
     fate_share: bool = True,
@@ -439,33 +440,20 @@ def _resolve_global_store(
                 raise ServiceError(
                     f"Global Store cluster token mismatch; expected {cluster_id}"
                 )
-            if (
-                cluster_token_hint
-                and health.cluster_token
-                and health.cluster_token != cluster_token_hint
-            ):
-                raise ServiceError(
-                    "Global Store cluster token mismatch; expected recorded runtime cluster token"
-                )
-            return _ResolvedGlobalStore(
-                mode="start",
-                address=_dial_address_from_health(runtime_gs_address, health),
-                session_id=runtime_gs_session,
-                owner=False,
-                cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
+            existing_session = runtime_gs_session or "unknown"
+            existing_address = _dial_address_from_health(runtime_gs_address, health)
+            raise ServiceError(
+                "A local Global Store is already running for session "
+                f"{existing_session} at {existing_address}. "
+                "Stop it before using global_store_mode='start'."
             )
-
-    if cluster_token_hint and not allow_gs_fallback:
-        raise ServiceError(
-            "Found existing Global Store cluster token but no healthy instance is reachable. "
-            f"Clear {runtime_root()} if you intend to create a new cluster, or provide "
-            "a reachable --global-store-address."
-        )
 
     try:
         inst = global_store_manager.start_global_store(
             config_path=config_path,
-            cluster_token=cluster_id or cluster_token_hint,
+            cluster_token=cluster_id,
+            listen_port=listen_port,
+            metrics_port=metrics_port,
             fate_share=fate_share,
             to_console=to_console,
         )
@@ -479,7 +467,7 @@ def _resolve_global_store(
                 address=None,
                 session_id=None,
                 owner=False,
-                cluster_token=cluster_id or cluster_token_hint,
+                cluster_token=cluster_id,
             )
         raise
 
@@ -488,7 +476,7 @@ def _resolve_global_store(
         address=inst.address,
         session_id=inst.id,
         owner=True,
-        cluster_token=inst.cluster_token or cluster_id or cluster_token_hint,
+        cluster_token=inst.cluster_token or cluster_id,
     )
 
 
@@ -506,6 +494,9 @@ def start(
     restrict_to_localhost: bool = False,
     listen_host: str | None = None,
     listen_port: int | None = None,
+    p2p_listen_port: int | None = None,
+    global_store_listen_port: int | None = None,
+    global_store_metrics_port: int | None = None,
     blocking: bool = False,
     to_console: bool = True,
     allow_gs_fallback: bool = False,
@@ -526,6 +517,8 @@ def start(
         mode=global_store_mode,
         address=global_store_address,
         config_path=global_store_config,
+        listen_port=global_store_listen_port,
+        metrics_port=global_store_metrics_port,
         allow_gs_fallback=allow_gs_fallback,
         cluster_id=cluster_id,
         fate_share=fate_share,
@@ -576,6 +569,7 @@ def start(
         global_store=gs_state,
         listen_host=listen_host,
         listen_port=listen_port,
+        p2p_listen_port=p2p_listen_port,
         ha_endpoints=resolved_ha_endpoints or None,
         ha_enabled=resolved_gs.mode != "none",
         fate_share=fate_share,
@@ -598,7 +592,7 @@ def start(
                 fingerprint=None,
             )
 
-    return status(inst.id) or RuntimeSession(
+    return _build_runtime_session(inst.id) or RuntimeSession(
         session_id=inst.id,
         daemon_pid=None,
         daemon_address=None,

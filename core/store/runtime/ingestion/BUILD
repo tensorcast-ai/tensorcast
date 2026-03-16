@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
-load("//core:BUILD.bzl", "sc_cc_library")
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -12,6 +12,33 @@ sc_cc_library(
         "//core/store/runtime:ingestion_events",
         "//core/store/runtime/context:runtime_context_events",
         "@abseil-cpp//absl/functional:any_invocable",
+    ],
+)
+
+sc_header_only_library(
+    name = "artifact_truth",
+    hdrs = ["artifact_truth.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store:device_types",
+        "//core/store/materialization/contracts:loading_spec",
+        "@abseil-cpp//absl/hash",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+sc_header_only_library(
+    name = "artifact_lowering_plan",
+    hdrs = ["artifact_lowering_plan.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":artifact_truth",
+        "//core/common:selection_identity_lib",
+        "//core/store:device_types",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:loader",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -41,8 +68,10 @@ sc_cc_library(
     srcs = ["materialization_facade.cc"],
     hdrs = ["materialization_facade.h"],
     deps = [
+        ":artifact_lowering_plan",
         ":ingestion_event_hub",
         ":materialization_service",
+        "//core/common:artifact_hash_lib",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:device_types",
@@ -86,6 +115,7 @@ sc_cc_library(
     hdrs = ["ingestion_runtime.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":artifact_lowering_plan",
         ":materialization_facade",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:byte_range_map",

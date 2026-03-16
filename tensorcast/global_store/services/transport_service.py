@@ -40,7 +40,10 @@ from tensorcast.global_store.repositories import (
     TransportRepository,
 )
 from tensorcast.global_store.repositories.base import is_transient_tx_conflict
-from tensorcast.global_store.repositories.replica_repository import SourceBalanceWeights
+from tensorcast.global_store.repositories.replica_repository import (
+    GroupSourceSpreadPolicy,
+    SourceBalanceWeights,
+)
 from tensorcast.global_store.repositories.transport_repository import (
     TransportWindowRow,
 )
@@ -94,6 +97,17 @@ class TransportService:
             diffusion_bonus=float(policy.diffusion_bonus_weight),
         )
 
+    def _group_source_spread_policy(self) -> GroupSourceSpreadPolicy:
+        policy = self.config.transport_scheduler.group_dispatch
+        return GroupSourceSpreadPolicy(
+            spread_weight=float(policy.group_source_spread_weight),
+            soft_cap_ratio=float(policy.group_source_soft_cap_ratio),
+            min_candidates_for_enforce=max(
+                1,
+                int(policy.group_source_min_candidates_for_enforce),
+            ),
+        )
+
     @staticmethod
     def _normalize_request_id(request_id: str) -> str:
         normalized = request_id.strip()
@@ -119,9 +133,17 @@ class TransportService:
         requester_worker_id: str | None,
         scheduling_group: TransportSchedulingGroup | None,
     ) -> str:
+        group_kind = (
+            str(scheduling_group.group_kind).strip().lower()
+            if scheduling_group is not None
+            else ""
+        )
+        normalized_view_id = view_id or ""
+        if group_kind == "tp_version":
+            normalized_view_id = ""
         payload = {
             "artifact_id": artifact_id,
-            "view_id": view_id or "",
+            "view_id": normalized_view_id,
             "source_node_id": source_node_id,
             "source_address": source_address,
             "source_port": int(source_port),
@@ -171,16 +193,99 @@ class TransportService:
         transport.set_scheduling_group(scheduling_group)
         return transport
 
+    @staticmethod
+    def _is_terminal_failed_transport(transport: Transport) -> bool:
+        status = str(transport.status or "").strip().lower()
+        if status != "completed":
+            return False
+        return transport.completion_outcome in {
+            TransportCompletionOutcome.FAILED,
+            TransportCompletionOutcome.EXPIRED,
+            TransportCompletionOutcome.CANCELLED,
+        }
+
+    def _reconcile_request_replay_state(self, *, request_id: str, tx) -> None:
+        existing_transport = self.transport_repository.find_by_request_id(
+            request_id, cursor=tx
+        )
+        if existing_transport is not None and self._is_terminal_failed_transport(
+            existing_transport
+        ):
+            tx.execute(
+                """
+                UPDATE artifact_transports
+                SET request_id = NULL,
+                    request_fingerprint = NULL
+                WHERE request_id = ?
+                  AND status = 'completed'
+                  AND completion_outcome IN ('failed', 'expired', 'cancelled')
+                """,
+                [request_id],
+            )
+            tx.execute(
+                """
+                DELETE FROM pending_transport_requests
+                WHERE request_id = ?
+                  AND state <> 'enqueued'
+                """,
+                [request_id],
+            )
+            inc_transport_dispatch_event("request_recycle_terminal_failure")
+            return
+
+        pending = self.pending_transport_request_repository.find_by_request_id(
+            request_id, cursor=tx
+        )
+        if pending is None:
+            return
+        if pending.state == PendingTransportState.ENQUEUED:
+            return
+        if existing_transport is not None:
+            return
+        tx.execute(
+            """
+            DELETE FROM pending_transport_requests
+            WHERE request_id = ?
+              AND state <> 'enqueued'
+            """,
+            [request_id],
+        )
+        inc_transport_dispatch_event("request_recycle_stale_pending")
+
     def _resolve_existing_request(
         self,
         request_id: str,
         request_fingerprint: str | None,
     ) -> tuple[Replica, UUID] | None:
+        existing = self.transport_repository.find_by_request_id(request_id)
+        if existing is not None:
+            if self._is_terminal_failed_transport(existing):
+                return None
+            if (
+                existing.request_fingerprint is not None
+                and request_fingerprint is not None
+                and existing.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            replica = self.replica_repository.find_by_id(
+                existing.replica_id, existing.artifact_id
+            )
+            if replica is None:
+                logger.warning(
+                    "Found transport for request_id=%s but source replica is missing",
+                    request_id,
+                )
+                return None
+            return replica, existing.transport_id
+
         pending = self.pending_transport_request_repository.find_by_request_id(
             request_id
         )
         if (
             pending is not None
+            and pending.state == PendingTransportState.ENQUEUED
             and request_fingerprint is not None
             and pending.request_fingerprint
             and pending.request_fingerprint != request_fingerprint
@@ -188,27 +293,7 @@ class TransportService:
             raise ValidationError(
                 f"request_id={request_id} already used with different payload"
             )
-        existing = self.transport_repository.find_by_request_id(request_id)
-        if existing is None:
-            return None
-        if (
-            existing.request_fingerprint is not None
-            and request_fingerprint is not None
-            and existing.request_fingerprint != request_fingerprint
-        ):
-            raise ValidationError(
-                f"request_id={request_id} already used with different payload"
-            )
-        replica = self.replica_repository.find_by_id(
-            existing.replica_id, existing.artifact_id
-        )
-        if replica is None:
-            logger.warning(
-                "Found transport for request_id=%s but source replica is missing",
-                request_id,
-            )
-            return None
-        return replica, existing.transport_id
+        return None
 
     def request_transport(
         self,
@@ -317,7 +402,10 @@ class TransportService:
 
         try:
             with self.replica_repository.transaction() as tx:
-                self.pending_transport_request_repository.purge_malformed_rows(cursor=tx)
+                self.pending_transport_request_repository.purge_malformed_rows(
+                    cursor=tx
+                )
+                self._reconcile_request_replay_state(request_id=request_id, tx=tx)
                 existing_pending = (
                     self.pending_transport_request_repository.find_by_request_id(
                         request_id, cursor=tx
@@ -462,6 +550,9 @@ class TransportService:
             if transport is None:
                 inc_transport_dispatch_event("request_pending_missing")
                 return None, None, None
+            if self._is_terminal_failed_transport(transport):
+                inc_transport_dispatch_event("request_terminal_replay_blocked")
+                return None, None, PendingTransportState.EXPIRED
             if (
                 transport.request_fingerprint is not None
                 and transport.request_fingerprint != request_fingerprint
@@ -485,6 +576,9 @@ class TransportService:
             if transport is None:
                 inc_transport_dispatch_event("request_dispatched_missing_transport")
                 return None, None, None
+            if self._is_terminal_failed_transport(transport):
+                inc_transport_dispatch_event("request_terminal_replay_blocked")
+                return None, None, PendingTransportState.EXPIRED
 
             if (
                 transport.request_fingerprint is not None
@@ -522,8 +616,15 @@ class TransportService:
             return
         group = scheduling_group
         normalized_view_id = view_id or ""
+        normalized_group_kind = str(group.group_kind).strip().lower()
         group_epoch = int(group.epoch)
         group_total_parts = int(group.total_parts)
+        # tp_version groups are keyed by logical version, and key remap retries
+        # may transiently produce different artifact ids within the same epoch.
+        # Keep total_parts/part_id invariants strict, but do not fail the whole
+        # request path on artifact/view variance for tp_version.
+        enforce_view_consistency = normalized_group_kind != "tp_version"
+        enforce_artifact_consistency = normalized_group_kind != "tp_version"
         if group_total_parts <= 0:
             raise ValidationError(
                 "group contract violation: total_parts must be > 0 for "
@@ -545,8 +646,8 @@ class TransportService:
               AND state = 'enqueued'
               AND request_id <> ?
               AND (
-                artifact_id <> ?
-                OR COALESCE(requested_view_id, '') <> ?
+                (? = 1 AND artifact_id <> ?)
+                OR (? = 1 AND COALESCE(requested_view_id, '') <> ?)
                 OR COALESCE(group_total_parts, 0) <> ?
               )
             LIMIT 1
@@ -556,7 +657,9 @@ class TransportService:
                 group.group_id,
                 group_epoch,
                 request_id,
+                int(enforce_artifact_consistency),
                 artifact_id,
+                int(enforce_view_consistency),
                 normalized_view_id,
                 group_total_parts,
             ],
@@ -576,8 +679,8 @@ class TransportService:
               AND COALESCE(group_epoch, 0) = ?
               AND COALESCE(request_id, '') <> ?
               AND (
-                artifact_id <> ?
-                OR COALESCE(requested_view_id, '') <> ?
+                (? = 1 AND artifact_id <> ?)
+                OR (? = 1 AND COALESCE(requested_view_id, '') <> ?)
                 OR COALESCE(group_total_parts, 0) <> ?
               )
             LIMIT 1
@@ -587,7 +690,9 @@ class TransportService:
                 group.group_id,
                 group_epoch,
                 request_id,
+                int(enforce_artifact_consistency),
                 artifact_id,
+                int(enforce_view_consistency),
                 normalized_view_id,
                 group_total_parts,
             ],
@@ -751,10 +856,20 @@ class TransportService:
         )
 
         source_weights = self._source_balance_weights()
+        group_source_policy = self._group_source_spread_policy()
         dispatched = 0
         for pending_request in pending_sorted:
             if dispatched >= dispatch_limit:
                 break
+            group_source_counts: dict[str, int] = {}
+            group = pending_request.scheduling_group
+            if group is not None:
+                group_source_counts = self.transport_repository.get_group_source_counts(
+                    group_kind=group.group_kind,
+                    group_id=group.group_id,
+                    group_epoch=group.epoch,
+                    cursor=tx,
+                )
 
             selection = self.replica_repository.find_available_for_transport(
                 artifact_id=pending_request.artifact_id,
@@ -762,6 +877,8 @@ class TransportService:
                 heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 scheduler_mode="GROUP_DISPATCH",
                 source_balance_weights=source_weights,
+                group_source_counts=group_source_counts,
+                group_source_policy=group_source_policy,
                 cursor=tx,
             )
             if selection.replica is None:
@@ -869,7 +986,7 @@ class TransportService:
         except DatabaseError as exc:
             # Keep public contract stable for callers/tests.
             if isinstance(exc.__cause__, NotFoundError):
-                raise exc.__cause__
+                raise exc.__cause__ from exc
             raise
 
         if released:
@@ -993,8 +1110,7 @@ class TransportService:
                     transport.transport_id,
                     outcome=TransportCompletionOutcome.EXPIRED,
                     outcome_detail=(
-                        "cleanup_malformed_inflight "
-                        f"status={transport.status}"
+                        f"cleanup_malformed_inflight status={transport.status}"
                     ),
                 )
                 malformed_cleaned += 1
