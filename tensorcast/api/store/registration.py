@@ -28,6 +28,8 @@ from tensorcast.api._register import (
 )
 from tensorcast.api._register import (
     RegistrationResult,
+    ViewPlanChunk,
+    ViewPlanMetadata,
     ViewRegistrationContext,
     _compute_view_plan_metadata,
     _materialize_canonical_tensors,
@@ -58,6 +60,7 @@ from tensorcast.api.store.views import (
     TransformPlacement,
     ViewOrchestrator,
 )
+from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
@@ -375,6 +378,98 @@ class RegistrationPipeline:
             logger.warning("allow_partial is deprecated; use registration_kind='piece'")
         return resolved
 
+    @staticmethod
+    def _ordered_selection_entries(
+        canonical_index: CanonicalIndex,
+        tensor_names: Sequence[str],
+    ) -> tuple[object, ...]:
+        requested = tuple(str(name) for name in tensor_names)
+        if not requested:
+            return ()
+        requested_set = set(requested)
+        entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+        missing = sorted(requested_set - set(entry_by_name))
+        if missing:
+            raise ArtifactError(
+                f"View references unknown tensor(s): {', '.join(missing)}",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return tuple(
+            entry
+            for entry in canonical_index.entries
+            if str(entry.name) in requested_set
+        )
+
+    def _build_subset_piece_registration(
+        self,
+        *,
+        canonical_index_bytes: bytes,
+        canonical_index: CanonicalIndex,
+        tensor_names: Sequence[str],
+        view_spec_proto,
+        tensors: Mapping[str, torch.Tensor],
+    ) -> tuple[ViewRegistrationContext, dict[str, torch.Tensor]]:
+        ordered_entries = self._ordered_selection_entries(canonical_index, tensor_names)
+        if not ordered_entries:
+            raise ArtifactError(
+                "Piece registration requires at least one selected tensor",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if view_spec_proto is None:
+            raise ArtifactError(
+                "View spec missing for subset piece registration",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        selected_names = tuple(str(entry.name) for entry in ordered_entries)
+        write_chunks: tuple[ViewPlanChunk, ...] = ()
+        cursor = 0
+        write_chunk_items: list[ViewPlanChunk] = []
+        for entry in ordered_entries:
+            write_chunk_items.append(
+                ViewPlanChunk(
+                    canonical_offset=int(entry.segment_offset),
+                    view_offset=int(cursor),
+                    length=int(entry.size_bytes),
+                    segment_aligned=True,
+                )
+            )
+            cursor += int(entry.size_bytes)
+        write_chunks = tuple(write_chunk_items)
+        canonical_ranges = _merge_canonical_ranges(write_chunks)
+        view_index_json = compute_selected_index_bytes(
+            canonical_index_bytes=canonical_index_bytes,
+            view_spec=None,
+            tensor_names=selected_names,
+        )
+        view_options = store_daemon_pb2.ViewRegistrationOptions()
+        view_options.spec.CopyFrom(view_spec_proto)
+        view_options.placement = TransformPlacement.TRANSFORM_PLACEMENT_SERVER
+        view_options.canonical_size_bytes = canonical_index.total_size_bytes
+        view_options.registration_kind = store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+        view_options.tensor_names.extend(selected_names)
+        plan_metadata = ViewPlanMetadata(
+            view_size_bytes=sum(int(entry.size_bytes) for entry in ordered_entries),
+            view_index_json=view_index_json,
+            write_chunks=write_chunks,
+            inverse_requires_materialization=False,
+            inverse_tensors=(),
+        )
+        upload_tensors = {name: tensors[name] for name in selected_names}
+        view_ctx = ViewRegistrationContext(
+            canonical_index_bytes=canonical_index_bytes,
+            view_options=view_options,
+            placement=TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
+            plan=plan_metadata,
+            tensors=upload_tensors,
+            canonical_ranges=canonical_ranges,
+            registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
+        )
+        return view_ctx, upload_tensors
+
     def _build_view_registration(
         self,
         *,
@@ -384,7 +479,9 @@ class RegistrationPipeline:
         tensors: Mapping[str, torch.Tensor],
         placement_enum: TransformPlacement,
         registration_kind: store_daemon_pb2.ViewRegistrationKind,
+        selection_names: Sequence[str] | None = None,
     ) -> tuple[ViewRegistrationContext, dict[str, torch.Tensor]]:
+        resolved_selection_names = tuple(str(name) for name in (selection_names or ()))
         if build_result.is_identity:
             raise ArtifactError(
                 "View registration requires explicit view operations",
@@ -404,11 +501,33 @@ class RegistrationPipeline:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-        plan_metadata = _compute_view_plan_metadata(canonical_index_bytes, build_result)
-        canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
+        if (
+            registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+            and resolved_selection_names
+        ):
+            selected_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=build_result.proto,
+                tensor_names=resolved_selection_names,
+            )
+            selected_index = canonical_index_from_bytes(selected_index_bytes)
+            plan_metadata = ViewPlanMetadata(
+                view_size_bytes=int(selected_index.total_size_bytes),
+                view_index_json=selected_index_bytes,
+                write_chunks=(),
+                inverse_requires_materialization=False,
+                inverse_tensors=(),
+            )
+            canonical_ranges = ()
+        else:
+            plan_metadata = _compute_view_plan_metadata(
+                canonical_index_bytes, build_result
+            )
+            canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
         if (
             registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
             and not canonical_ranges
+            and not resolved_selection_names
         ):
             raise ArtifactError(
                 "Piece registration produced empty canonical coverage",
@@ -423,16 +542,26 @@ class RegistrationPipeline:
                 retryable=False,
             )
         view_options.spec.CopyFrom(build_result.proto)
+        if resolved_selection_names:
+            view_options.tensor_names.extend(resolved_selection_names)
         view_options.placement = placement_enum
         view_options.canonical_size_bytes = canonical_index.total_size_bytes
         view_options.registration_kind = registration_kind
-        for rng in canonical_ranges:
-            range_proto = view_options.ranges.add()
-            range_proto.offset = rng.offset
-            range_proto.length = rng.length
+        if registration_kind != store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
+            for rng in canonical_ranges:
+                range_proto = view_options.ranges.add()
+                range_proto.offset = rng.offset
+                range_proto.length = rng.length
         upload_tensors: dict[str, torch.Tensor]
         if placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_SERVER:
-            upload_tensors = dict(tensors)
+            if resolved_selection_names:
+                upload_tensors = {
+                    name: tensors[name]
+                    for name in resolved_selection_names
+                    if name in tensors
+                }
+            else:
+                upload_tensors = dict(tensors)
         elif placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_CLIENT:
             upload_tensors = _materialize_canonical_tensors(
                 canonical_index_bytes, build_result, tensors
@@ -602,11 +731,15 @@ class RegistrationPipeline:
                 retryable=False,
             )
         if view_registration is not None and plan is not PlanType.VRAM_COALESCED:
-            raise ArtifactError(
-                "View registration requires vram_coalesced plan",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
+            fake_cuda_enabled = (
+                os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
             )
+            if not (fake_cuda_enabled and plan is PlanType.DRAM_STABLE):
+                raise ArtifactError(
+                    "View registration requires vram_coalesced plan",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
         resolved_key = key
         options: RegisterArtifactOptions
         if options_override is not None:

@@ -7,7 +7,7 @@ import importlib
 import json
 import time
 import types
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 import pytest
 import torch
@@ -15,8 +15,9 @@ import torch
 import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api import context as tc_context
+from tensorcast.api._config import PlanType
 from tensorcast.api.store import ArtifactError, Store
-from tensorcast.api.store.binding import Binding
+from tensorcast.api.store.binding import Binding, BindingUpdateEpoch
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.common.v1 import common_pb2
@@ -57,7 +58,11 @@ class FakeBindingClient:
     def __init__(self, index_bytes: bytes) -> None:
         self._index_bytes = index_bytes
         self.materialize_calls: list[dict[str, Any]] = []
+        self.create_binding_calls: list[dict[str, Any]] = []
         self.create_calls: list[dict[str, Any]] = []
+        self.commit_calls: list[dict[str, Any]] = []
+        self.begin_update_calls: list[dict[str, Any]] = []
+        self.seal_calls: list[dict[str, Any]] = []
         self.refill_calls: list[dict[str, Any]] = []
         self.close_calls: list[str] = []
         self.publish_calls: list[dict[str, Any]] = []
@@ -66,11 +71,39 @@ class FakeBindingClient:
         self.unregister_calls: list[str] = []
         self.swap_key_calls: list[dict[str, Any]] = []
         self.keepalive_calls: list[tuple[str, int, int]] = []
+        self.submit_contribution_calls: list[dict[str, Any]] = []
+        self.refill_failures = 0
+        self.omit_current_value_on_seal = False
+        self.refill_error: ArtifactError | None = None
         self._token_counter = 0
         self._region_counter = 0
         self._key_state: dict[str, tuple[str, int]] = {}
         self._binding_counter = 0
         self._binding_selections: dict[str, common_pb2.ArtifactSelection] = {}
+        self._binding_layout_ids: dict[str, str] = {}
+        self._binding_generations: dict[str, int] = {}
+        self._binding_value_counter = 0
+
+    def _make_binding_value(
+        self,
+        *,
+        binding_id: str,
+        selection: common_pb2.ArtifactSelection | None,
+    ) -> store_daemon_pb2.BindingValue:
+        self._binding_value_counter += 1
+        generation = self._binding_generations.get(binding_id, 0) + 1
+        self._binding_generations[binding_id] = generation
+        value = store_daemon_pb2.BindingValue(
+            binding_id=binding_id,
+            binding_layout_id=self._binding_layout_ids.get(binding_id, ""),
+            binding_value_id=f"value-{self._binding_value_counter}",
+            seal_generation=generation,
+            is_artifact_backed=selection is not None,
+        )
+        if selection is not None:
+            value.source_artifact_id = str(selection.artifact_id)
+            value.selection.CopyFrom(selection)
+        return value
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         return self._index_bytes
@@ -109,9 +142,32 @@ class FakeBindingClient:
         self.materialize_calls.append(kwargs)
         self._token_counter += 1
         token = f"token-{self._token_counter}".encode("utf-8")
+        selection = common_pb2.ArtifactSelection()
+        selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
             target_write_token=token,
+            resolved_selection=selection,
+        )
+
+    def create_binding(self, **kwargs: Any) -> Any:
+        self.create_binding_calls.append(kwargs)
+        self._binding_counter += 1
+        binding_id = f"binding-{self._binding_counter}"
+        self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
+        current_value = None
+        if kwargs.get("initial_selection") is not None:
+            selection = common_pb2.ArtifactSelection()
+            selection.CopyFrom(kwargs["initial_selection"])
+            self._binding_selections[binding_id] = selection
+            current_value = self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            )
+        return types.SimpleNamespace(
+            binding_id=binding_id,
+            target_index_bytes=bytes(kwargs["target_index_bytes"]),
+            current_value=current_value,
         )
 
     def publish_target_replica(self, **kwargs: Any) -> Any:
@@ -123,6 +179,7 @@ class FakeBindingClient:
         self._token_counter += 1
         self._binding_counter += 1
         binding_id = f"binding-{self._binding_counter}"
+        self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["source_selection"])
         if kwargs.get("copy_plan") is not None and kwargs["copy_plan"].entries:
@@ -141,10 +198,51 @@ class FakeBindingClient:
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             resolved_selection=selection,
             target_write_token=f"token-{self._token_counter}".encode("utf-8"),
+            current_value=self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            ),
+        )
+
+    def commit_binding_artifact(self, **kwargs: Any) -> Any:
+        self.commit_calls.append(kwargs)
+        binding_id = str(kwargs["binding_id"])
+        selection = common_pb2.ArtifactSelection()
+        selection.CopyFrom(kwargs["selection"])
+        self._binding_selections[binding_id] = selection
+        return types.SimpleNamespace(
+            current_value=self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            )
+        )
+
+    def begin_binding_update(self, **kwargs: Any) -> Any:
+        self.begin_update_calls.append(kwargs)
+        return types.SimpleNamespace(update_epoch=f"bue:{kwargs['binding_id']}:1")
+
+    def seal_binding(self, **kwargs: Any) -> Any:
+        self.seal_calls.append(kwargs)
+        if self.omit_current_value_on_seal:
+            return types.SimpleNamespace()
+        return types.SimpleNamespace(
+            current_value=self._make_binding_value(
+                binding_id=str(kwargs["binding_id"]),
+                selection=None,
+            )
         )
 
     def refill_owned_binding(self, **kwargs: Any) -> Any:
         self.refill_calls.append(kwargs)
+        if self.refill_error is not None:
+            raise self.refill_error
+        if self.refill_failures > 0:
+            self.refill_failures -= 1
+            raise ArtifactError(
+                "refill failed after bytes changed",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
         self._token_counter += 1
         binding_id = str(kwargs["binding_id"])
         selection = common_pb2.ArtifactSelection()
@@ -155,6 +253,10 @@ class FakeBindingClient:
             artifact_id=str(selection.artifact_id),
             resolved_selection=selection,
             target_write_token=f"token-{self._token_counter}".encode("utf-8"),
+            current_value=self._make_binding_value(
+                binding_id=binding_id,
+                selection=selection,
+            ),
         )
 
     def close_owned_binding(self, *, binding_id: str, **_kwargs: Any) -> Any:
@@ -208,6 +310,16 @@ class FakeBindingClient:
         self._key_state[key] = (new_artifact_id, generation)
         return types.SimpleNamespace(
             ok=True, artifact_id=new_artifact_id, generation=generation
+        )
+
+    def submit_binding_contribution(self, **kwargs: Any) -> Any:
+        self.submit_contribution_calls.append(dict(kwargs))
+        return types.SimpleNamespace(
+            accepted=True,
+            already_exists=False,
+            lease_id="lease-contrib-1",
+            lease_generation=1,
+            state="accepted",
         )
 
 
@@ -293,6 +405,21 @@ def _setup_store(
         },
     )
     monkeypatch.setattr(
+        store_mod,
+        "restore_owned_binding_tensors",
+        lambda *, response, runtime, device_id: {
+            entry.name: torch.empty_strided(
+                size=tuple(int(v) for v in entry.shape),
+                stride=tuple(int(v) for v in entry.stride),
+                dtype=entry.dtype,
+                device=torch.device("cuda", int(device_id)),
+            )
+            for entry in canonical_index_from_bytes(
+                bytes(response.target_index_bytes)
+            ).entries
+        },
+    )
+    monkeypatch.setattr(
         owned_binding_slot_mod, "device_uuid_for", lambda device_id: "gpu-0"
     )
     return store, runtime, client
@@ -359,6 +486,372 @@ def test_binding_activation_cas(monkeypatch: pytest.MonkeyPatch) -> None:
     assert excinfo.value.status_code == "FAILED_PRECONDITION"
 
 
+def test_create_binding_layout_seeded_then_seal_local_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+    layout = binding.layout
+
+    created = store.create_binding(layout, ownership="daemon", device="cuda:0")
+
+    assert created.current_value is None
+    assert created.artifact_id is None
+    assert created.binding_layout_id == layout.binding_layout_id
+
+    update_epoch = created.begin_update()
+    assert update_epoch.binding_id == created.binding_id
+    sealed = created.seal_current(update_epoch=update_epoch)
+
+    assert sealed.is_artifact_backed is False
+    assert created.current_value is not None
+    assert created.artifact_id is None
+    with pytest.raises(ArtifactError) as excinfo:
+        created.publish_replica()
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert client.begin_update_calls
+    assert client.seal_calls
+
+
+def test_binding_begin_update_clears_current_value_and_seal_preserves_ptrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+    ptrs = {name: tensor.data_ptr() for name, tensor in binding.tensors.items()}
+
+    update_epoch = binding.begin_update()
+
+    assert binding.current_value is None
+    assert binding.artifact_id is None
+
+    sealed = binding.seal_current(update_epoch=update_epoch)
+
+    assert sealed.is_artifact_backed is False
+    assert binding.current_value is not None
+    assert binding.tensors["alpha"].data_ptr() == ptrs["alpha"]
+    assert binding.tensors["beta"].data_ptr() == ptrs["beta"]
+
+
+def test_binding_rejects_wrong_binding_update_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    binding = store.artifact(artifact_id="artifact-1").bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    correct_epoch = binding.begin_update()
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.seal_current(
+            update_epoch=BindingUpdateEpoch(
+                binding_id="binding-other",
+                update_epoch="bue:binding-other:1",
+            )
+        )
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+
+    sealed = binding.seal_current(update_epoch=correct_epoch)
+    assert sealed.binding_id == binding.binding_id
+
+
+def test_binding_failed_refill_clears_current_value_and_marks_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    binding = store.artifact(artifact_id="artifact-1").bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    client.refill_failures = 1
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.swap(store.artifact(artifact_id="artifact-2"))
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert binding.current_value is None
+    assert binding.artifact_id is None
+    assert binding.selection is None
+    assert binding._slot.dirty is True
+
+
+def test_binding_missing_seal_current_value_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    created = store.create_binding(layout, ownership="daemon", device="cuda:0")
+    update_epoch = created.begin_update()
+    client.omit_current_value_on_seal = True
+
+    with pytest.raises(ArtifactError) as excinfo:
+        created.seal_current(update_epoch=update_epoch)
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert created.current_value is None
+    assert created.artifact_id is None
+    assert created.selection is None
+    assert created._slot.dirty is True
+
+
+def test_daemon_owned_swap_precondition_failure_keeps_current_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    binding = store.artifact(artifact_id="artifact-1").bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    previous_value = binding.current_value
+    assert previous_value is not None
+    client.refill_error = ArtifactError(
+        "binding value has live assembly contributions: assembly-1",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.swap(store.artifact(artifact_id="artifact-2"))
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert binding.current_value is not None
+    assert binding.current_value.binding_value_id == previous_value.binding_value_id
+    assert binding._slot.dirty is False
+
+
+def test_create_client_binding_rejects_dtype_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    layout = (
+        store.artifact(artifact_id="artifact-1")
+        .bind(
+            device="cuda:0",
+            packing="byte_space",
+        )
+        .layout
+    )
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float16, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+
+    with pytest.raises(ArtifactError) as excinfo:
+        store.create_binding(
+            layout,
+            ownership="client",
+            target_tensors=target_tensors,
+        )
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+
+
+def test_create_client_binding_rejects_storage_contract_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    layout = (
+        store.artifact(artifact_id="artifact-1")
+        .bind(
+            device="cuda:0",
+            packing="byte_space",
+        )
+        .layout
+    )
+    base = torch.empty((9,), dtype=torch.float32, device="cuda:0")
+    target_tensors = {
+        "alpha": base[1:5],
+        "beta": base[5:9],
+    }
+
+    with pytest.raises(ArtifactError) as excinfo:
+        store.create_binding(
+            layout,
+            ownership="client",
+            target_tensors=target_tensors,
+        )
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+
+
+def test_sealed_binding_value_contributes_piece_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.view(slices={"alpha": (slice(1, 3),)}).bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    initial_selection = binding.selection
+    assert initial_selection is not None
+    expected_view_id = str(initial_selection.view_id)
+    captured: dict[str, object] = {}
+
+    def _fake_perform_registration(
+        tensors: Mapping[str, torch.Tensor], **kwargs: object
+    ) -> object:
+        del tensors
+        captured.update(kwargs)
+        view_registration = kwargs.get("view_registration")
+        canonical_ranges = (
+            tuple(view_registration.canonical_ranges)
+            if view_registration is not None
+            else ()
+        )
+        return types.SimpleNamespace(
+            registration_result=types.SimpleNamespace(
+                view_id=expected_view_id,
+                canonical_ranges=canonical_ranges,
+            )
+        )
+
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        _fake_perform_registration,
+    )
+    sealed = binding.seal_current(update_epoch=binding.begin_update())
+    attempt = store_mod.AssemblyAttemptRef(
+        assembly_id="cgid:assembly-piece",
+        layout_id="layout-piece",
+        contribution_contract_hash="bafkcontract-piece",
+        coordinator_operation_id="sealop-piece",
+        coordinator_generation=1,
+        expected_view_ids=(expected_view_id,),
+    )
+
+    result = sealed.contribute_to_assembly(attempt=attempt)
+
+    assert result.contribution_kind == "piece_partial"
+    assert result.view_id == expected_view_id
+    assert result.coverage_plan_hash.startswith("bcp1:")
+    assert captured["artifact_id"] == "cgid:assembly-piece"
+    assert captured["plan"] is PlanType.VRAM_COALESCED
+    submit_call = client.submit_contribution_calls[-1]
+    assert submit_call["assembly_id"] == "cgid:assembly-piece"
+    assert submit_call["view_id"] == expected_view_id
+    assert (
+        submit_call["contribution_kind"]
+        == store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
+    )
+
+
+def test_subset_binding_exposes_piece_view_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    binding = store.artifact(artifact_id="artifact-1").subset(["alpha"]).bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    selection = binding.selection
+    assert selection is not None
+    assert str(selection.view_id)
+    assert selection.HasField("view_spec")
+    assert tuple(str(name) for name in selection.tensor_names) == ("alpha",)
+
+    captured: dict[str, object] = {}
+
+    def _fake_perform_registration(
+        tensors: Mapping[str, torch.Tensor], **kwargs: object
+    ) -> object:
+        del tensors
+        captured.update(kwargs)
+        view_registration = kwargs.get("view_registration")
+        canonical_ranges = (
+            tuple(view_registration.canonical_ranges)
+            if view_registration is not None
+            else ()
+        )
+        return types.SimpleNamespace(
+            registration_result=types.SimpleNamespace(
+                view_id=str(selection.view_id),
+                canonical_ranges=canonical_ranges,
+            )
+        )
+
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        _fake_perform_registration,
+    )
+
+    sealed = binding.seal_current(update_epoch=binding.begin_update())
+    attempt = store_mod.AssemblyAttemptRef(
+        assembly_id="cgid:assembly-subset-piece",
+        layout_id="layout-subset-piece",
+        contribution_contract_hash="bafkcontract-subset-piece",
+        coordinator_operation_id="sealop-subset-piece",
+        coordinator_generation=1,
+        expected_view_ids=(str(selection.view_id),),
+    )
+
+    result = sealed.contribute_to_assembly(attempt=attempt)
+
+    assert result.contribution_kind == "piece_partial"
+    assert result.view_id == str(selection.view_id)
+    view_registration = captured["view_registration"]
+    assert view_registration is not None
+    assert "alpha" in view_registration.view_options.spec.tensors
+
+
+def test_sealed_binding_value_contributes_canonical_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    binding = store.artifact(artifact_id="artifact-1").bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_perform_registration(
+        tensors: Mapping[str, torch.Tensor], **kwargs: object
+    ) -> object:
+        del tensors
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            registration_result=types.SimpleNamespace(
+                view_id=None,
+                canonical_ranges=(),
+            )
+        )
+
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        _fake_perform_registration,
+    )
+    sealed = binding.seal_current(update_epoch=binding.begin_update())
+    attempt = store_mod.AssemblyAttemptRef(
+        assembly_id="cgid:assembly-canonical",
+        layout_id="layout-canonical",
+        contribution_contract_hash="bafkcontract-canonical",
+        coordinator_operation_id="sealop-canonical",
+        coordinator_generation=1,
+        expected_view_ids=(),
+    )
+
+    result = sealed.contribute_to_assembly(attempt=attempt)
+
+    assert result.contribution_kind == "canonical_full"
+    assert result.view_id is None
+    assert result.coverage_plan_hash.startswith("bcp1:")
+    assert captured["artifact_id"] == "cgid:assembly-canonical"
+    assert captured["plan"] is PlanType.VRAM_COALESCED
+    submit_call = client.submit_contribution_calls[-1]
+    assert "view_id" not in submit_call or submit_call["view_id"] is None
+    assert (
+        submit_call["contribution_kind"]
+        == store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
+    )
+
+
 class _FakeBindingRuntimeClient:
     def keep_alive_registered_artifact(
         self,
@@ -385,20 +878,102 @@ class _FakeBindingSlot:
     def __init__(self) -> None:
         self._runtime = _FakeBindingRuntime()
         self.tensors: dict[str, object] = {}
+        self.binding_id = "binding-1"
+        self.binding_layout_id = "layout-1"
+        self.layout = types.SimpleNamespace(binding_layout_id="layout-1")
         self.artifact_id = "artifact-1"
-        self.selection = types.SimpleNamespace()
+        self.selection = common_pb2.ArtifactSelection(artifact_id="artifact-1")
+        self.current_value_metadata = types.SimpleNamespace(
+            binding_id=self.binding_id,
+            binding_layout_id=self.binding_layout_id,
+            binding_value_id="value-1",
+            seal_generation=1,
+            source_artifact_id="artifact-1",
+            selection=self.selection,
+            is_artifact_backed=True,
+        )
         self.published_lease_id: str | None = None
         self.swap_calls: list[dict[str, object]] = []
 
     def swap(self, artifact: object, **kwargs: object) -> None:
         self.swap_calls.append(kwargs)
         self.artifact_id = str(artifact)
+        self.selection = common_pb2.ArtifactSelection(artifact_id=self.artifact_id)
+        self.current_value_metadata = types.SimpleNamespace(
+            binding_id=self.binding_id,
+            binding_layout_id=self.binding_layout_id,
+            binding_value_id="value-2",
+            seal_generation=2,
+            source_artifact_id=self.artifact_id,
+            selection=self.selection,
+            is_artifact_backed=True,
+        )
 
     def publish_replica(self, *, ttl_ms: int = 0, ctx: object | None = None) -> None:
         return None
 
     def close(self) -> None:
         return None
+
+
+class _FakeWaitEvent:
+    def __init__(self, state: dict[str, bool]) -> None:
+        self._state = state
+
+    def synchronize(self) -> None:
+        self._state["synced"] = True
+
+
+class _FakeWaitEventSlot(_FakeBindingSlot):
+    def __init__(self, state: dict[str, bool]) -> None:
+        super().__init__()
+        self._state = state
+
+    def begin_update(self, **_kwargs: object) -> object:
+        assert self._state["synced"] is True
+        return BindingUpdateEpoch(
+            binding_id=self.binding_id,
+            update_epoch=f"bue:{self.binding_id}:1",
+        )
+
+    def seal_current(self, **_kwargs: object) -> None:
+        assert self._state["synced"] is True
+        self.current_value_metadata = types.SimpleNamespace(
+            binding_id=self.binding_id,
+            binding_layout_id=self.binding_layout_id,
+            binding_value_id="value-local",
+            seal_generation=3,
+            source_artifact_id=None,
+            selection=None,
+            is_artifact_backed=False,
+        )
+        self.artifact_id = None
+        self.selection = None
+
+
+def test_binding_wait_events_are_synchronized_before_transitions() -> None:
+    state = {"synced": False}
+    slot = _FakeWaitEventSlot(state)
+    binding = Binding(slot)
+
+    epoch = binding.begin_update(wait_events=[_FakeWaitEvent(state)])
+
+    assert isinstance(epoch, BindingUpdateEpoch)
+    state["synced"] = False
+    sealed = binding.seal_current(
+        update_epoch=epoch,
+        wait_events=[_FakeWaitEvent(state)],
+    )
+    assert sealed.is_artifact_backed is False
+
+
+def test_binding_wait_events_reject_invalid_objects() -> None:
+    slot = _FakeWaitEventSlot({"synced": False})
+    binding = Binding(slot)
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.begin_update(wait_events=[object()])
+    assert excinfo.value.status_code == "INVALID_ARGUMENT"
 
 
 def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:

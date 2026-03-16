@@ -6,430 +6,598 @@ links:
 areas: ["sdk", "daemon", "core", "proto", "global_store"]
 related_code:
   - tensorcast/api/store/binding.py
+  - tensorcast/api/store/__init__.py
   - tensorcast/api/store/registration.py
   - tensorcast/api/_register.py
+  - tensorcast/types.py
   - proto/tensorcast/layout/v1/layout.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
+  - proto/tensorcast/global_store/v1/global_store.proto
   - tensorcast/schema.sql
   - daemon/service/controllers/assembly_operation_service.cc
+  - daemon/service/controllers/owned_binding_service.cc
   - daemon/service/controllers/registration_controller.cc
+  - daemon/state/session_lifecycle.cc
+  - core/store/components/global_store_client.h
+  - core/store/components/global_store_client.cc
   - core/store/runtime/metadata/registration_backend.cc
-  - core/store/runtime/ingestion/materialization_facade.cc
-  - core/store/materialization/dataplane/view/view_identity.h
+  - tensorcast/global_store/repositories/assembly_contribution_repository.py
+  - tensorcast/global_store/repositories/operation_repository.py
+  - tensorcast/global_store/rpc/assembly_contribution_rpc_handler.py
+  - tensorcast/global_store/rpc/operation_rpc_handler.py
   - tensorcast/global_store/services/view_state_service.py
-  - tensorcast/global_store/rpc/layout_binding_rpc_handler.py
-  - tensorcast/global_store/repositories/assembly_layout_binding_repository.py
-  - tensorcast/global_store/repositories/artifact_binding_repository.py
+  - tests/python/test_binding.py
+  - tests/python/test_assembly_attempt.py
   - tests/python/test_dense_piece_assembly_sealing_acceptance.py
-  - tests/python/test_dual_daemon_global_store_tp_view.py
-  - tests/python/global_store/test_operation_rpc.py
-  - tests/python/global_store/test_services.py
+  - tests/python/global_store/test_assembly_contribution_repository.py
+  - tests/python/global_store/test_assembly_contribution_rpc.py
+  - daemon/service/owned_binding_service_test.cc
+  - daemon/service/grpc_service_impl_start_seal_assembly_test.cc
+last_updated: 2026-03-16
 ---
 
 # Objective
 
-Implement distributed publish for binding-backed training by routing it onto the
-repository’s **existing** assembly and layout trunk instead of creating a second
-training-only assembly path.
+Re-baseline `0085` against the current implementation and land the remaining
+work needed for the design to be true in both semantics and tests.
 
-Target end state:
+The required end state is still the same:
 
-- `LayoutSpec` remains the single global layout contract root
-- `LayoutSpec.expected_view_ids` becomes the phase-1 expected contribution set
-- each attempt snapshots an explicit per-view contribution contract above that
-  expected-view root
-- deterministic `view_id` remains the contribution identity
-- `assembly_id` remains the concrete publish workspace
-- binding-backed contribution compiles down to the same view/piece registration
-  trunk already used by assembly today
-- contributor liveness and mutation fencing become explicit without splitting the
-  coordinator model
-- attempt completion returns a published model-version lineage
-  - sealed source artifact
-  - optional serving artifact
-  - immutable keys and manifest metadata
+- TensorCast keeps one assembly trunk.
+- TensorCast keeps one layout contract trunk.
+- binding-backed publish remains one frontend onto the existing
+  view-registration and seal path.
+- attempt completeness is rooted in `LayoutSpec.expected_view_ids`.
+- contributor liveness and binding mutation fencing are real correctness
+  properties, not advisory metadata.
+- attempt success means a real `PublishedModelVersion` lineage, not only a
+  sealed source artifact.
+
+This revision resets the implementation plan around the actual gaps found in
+code review instead of the more optimistic status captured in the prior draft.
 
 # Current State & Grounding
 
-The repository already contains most of the trunk this feature needs. The plan
-must deepen and connect those pieces rather than replace them.
+## Existing Trunk Pieces We Must Reuse
 
 - `proto/tensorcast/layout/v1/layout.proto`
-  - `LayoutSpec` is already immutable and content-addressed.
-  - It already carries `expected_view_ids`, overlap policy, and
-    `proof_schema_version`.
-  - This is the strongest signal that the current trunk already has a reusable
-    contract root.
-
-- `core/store/materialization/dataplane/view/view_identity.h`
-  - deterministic `view_id` is already computed from semantic `ViewSpec` plus
-    canonical index bytes
-  - this is the existing contribution identity plane; we should not invent a
-    second slot-id plane in phase 1
-
-- `core/store/runtime/metadata/registration_backend.cc`
-  - piece registration already computes:
-    - `ViewSpec` plan
-    - canonical coverage ranges
-    - `view_data_hash`
-    - proof digests
-  - it already distinguishes `CANONICAL` vs `PIECE`
-  - piece registration already requires `client_artifact_id (cgid)` for the
-    target assembly workspace
-
+  - `LayoutSpec` is already immutable, content-addressed, and already carries
+    `expected_view_ids`.
+- `daemon/service/controllers/registration_controller.cc`
+  - piece registration already computes `view_id`, coverage, proof material, and
+    view-state writes through the existing assembly path.
 - `tensorcast/global_store/services/view_state_service.py`
-  - already upserts per-view metadata
-  - already uses `replace_ranges(...)` for the same `(artifact_id, view_id)`
-  - already loads the active `LayoutSpec` through `assembly_layout_bindings`
-  - already enforces overlap/proof semantics against the current layout
-
-- `tensorcast/global_store/rpc/layout_binding_rpc_handler.py`
-  - `assembly_layout_bindings` already provide the versioned CAS root for
-    `assembly_id -> layout_id`
-  - handler already validates `layout.index_multihash` against the assembly’s
-    canonical index
-
+  - overlap and proof semantics already live here and already use the active
+    `assembly_layout_bindings` root.
 - `daemon/service/controllers/assembly_operation_service.cc`
-  - `StartSealAssembly` already runs as a durable `operation.proto` workflow
-  - it already snapshots `layout_id` and `assembly_layout_binding_version`
-  - today it snapshots current views and seals them, but it does not yet treat
-    `expected_view_ids` as the required completeness root
+  - `StartSealAssembly` already uses the durable `operation.proto` workflow and
+    already snapshots current assembly state before seal.
+- `tensorcast/api/store/binding.py`
+  - `SealedBindingValue.contribute_to_assembly(...)` already compiles binding
+    bytes onto the existing SDK registration APIs instead of inventing a second
+    publish path.
+- `docs/architecture/view-replicas-and-assembly.md`
+  - the architecture doc already establishes one assembly workspace and one
+    sealing path as the canonical trunk.
 
-- `daemon/service/grpc_service_impl_lip_piece_assembly_test.cc`
-  - existing tests already prove LIP-backed piece registration can participate in
-    assembly
-  - this is exactly the kind of trunk reuse we want for binding contributors
+## Existing Implementation That Is Useful But Incomplete
+
+- `Store.start_assembly_attempt(layout_id=...)` exists and returns
+  `AssemblyAttemptRef`.
+- `assembly_contributions` exists in `tensorcast/schema.sql`.
+- `SubmitBindingContribution` exists and persists contributor rows keyed by
+  `(assembly_id, view_id)`.
+- `Binding.begin_update(...)` already checks for accepted contributor rows and
+  fences mutation.
+- `wait_assembly_attempt(...)` already decodes a `SealAssemblyResult` into
+  `PublishedModelVersion`.
+
+These are useful foundations, but they do not yet prove the design goals.
+
+## Landed Since Re-Baselining
+
+- `wait_assembly_attempt(...)` now drives a still-open attempt onto the same
+  deterministic seal operation before waiting.
+  - the SDK no longer depends on an external manual `StartSealAssembly` step
+    for the normal attempt workflow
+- `StartSealAssembly(layout_id=...)` now behaves as a fail-closed attempt
+  transition.
+  - if an attempt snapshot is missing or malformed, sealing fails instead of
+    reconstructing a weaker contract
+- assembly-contribution mutation paths now use a durable live predicate based
+  on:
+  - row state
+  - `lease_expires_at`
+  - contributor worker or daemon identity still active in Global Store
+- durable row updates now use atomic CAS-style SQL predicates for:
+  - slot claim on `(assembly_id, view_id)`
+  - lease or state-scoped row transitions
+- seal and binding-mutation fencing now consume the same durable live
+  contributor predicate instead of lease-expiry-only checks
+
+## Remaining Gaps That Still Block Full Design Closure
+
+- `PublishedModelVersion` is still only partially populated.
+  - source artifact lineage exists
+  - serving lineage, immutable source or serving version keys, and manifest
+    completion semantics remain incomplete
+- same-slot replacement semantics are still unresolved.
+  - the current implementation keeps one-slot occupancy strict and does not yet
+    implement the design’s long-term replacement handoff
+- tests now prove the attempt wait path and durable live-contributor predicate,
+  but they still do not prove:
+  - liveness loss mid-attempt under real daemon crash or restart
+  - same-slot replacement semantics
+  - binding, `register_view`, and LIP piece parity
+  - full published model-version lineage including serving publication
+
+## Current Test Baseline
+
+Targeted suites currently pass and are still useful as a baseline:
+
+- `tests/python/test_binding.py`
+- `tests/python/test_assembly_attempt.py`
+- `tests/python/test_binding_state.py`
+- `tests/python/global_store/test_assembly_contribution_repository.py`
+- `tests/python/global_store/test_assembly_contribution_rpc.py`
+- `daemon:owned_binding_service_test`
+- `daemon:grpc_service_impl_start_seal_assembly_test`
+
+These validate SDK shape and repository plumbing, but they do not prove the
+core `0085` invariants. They should be treated as smoke tests, not acceptance
+proof.
+
+The historical dense-piece acceptance baseline is still the closest end-to-end
+trunk proof:
 
 - `tests/python/test_dense_piece_assembly_sealing_acceptance.py`
-  - current acceptance coverage already proves disjoint dense pieces can fill one
-    assembly workspace and seal successfully
-  - this is the closest existing end-to-end reality for phase-1 `PP` and `EP`
 
-- `tests/python/test_dual_daemon_global_store_tp_view.py`
-  - current TP-oriented coverage exists on the retrieval side through view
-    materialization
-  - it does not yet prove TP assembly semantics, so TP should stay explicitly
-    deferred in the publish plan
+That suite proves the existing assembly trunk can seal disjoint pieces, but it
+still does not prove that binding-backed contributors obey the same semantics.
 
-- `core/store/README.md`
-  - documents view registration and assembly sealing as existing StoreEngine
-    responsibilities
+# Plan Decisions To Lock Before Coding
 
-- `0084` local binding contract
-  - local binding now separates local sealed value from artifact promotion
-  - this makes `SealedBindingValue` the right frontend surface for compiling
-    local values onto the assembly trunk
+This execution plan makes the following implementation decisions explicit.
+They are intended to remove ambiguity from `0085`, not to change its direction.
 
-Current gaps that this plan must close:
+- `contribution_contract_hash` must be computed from an explicit
+  `ContributionContractSnapshot`.
+  - Hashing only `layout_id` plus `expected_view_ids` is non-compliant.
+- phase-1 contract snapshots must explicitly distinguish:
+  - binding-backed attempts that require durable live contributor occupancy
+  - direct piece-registration seal snapshots that only rely on the registered
+    current view set
+- `StartAssemblyAttempt` must materialize a real coordinator operation record,
+  or an equivalent durable coordinator fence, at attempt creation time.
+  - Returning only a deterministic future operation id is not sufficient for
+    submit-time fencing.
+- a contribution is considered live only when all of the following hold:
+  - the durable row is in `accepted`
+  - the row's liveness fence is still current
+  - the contributing daemon identity is still current enough for phase-1 seal
+    correctness
+- seal completeness must be checked against the live required contributor set,
+  not against accepted rows alone.
+- `StartSealAssembly` remains the sealing primitive.
+  - this plan does not create a second coordinator subsystem
+  - it transitions the already-created attempt coordinator into the running seal
+    phase
+- `wait_assembly_attempt(...)` reports success only when the attempt has reached
+  the design's full published-lineage success condition.
+  - source seal alone is not sufficient for final success when serving-side
+    publication is required
+- no new training-only slot plane or layout plane may be introduced.
+  - `view_id` stays the phase-1 contribution identity
+  - `layout_id` stays the global layout identity
 
-- no explicit daemon API to start a fresh assembly workspace from `layout_id`
-- no explicit per-attempt contribution-contract snapshot above
-  `LayoutSpec.expected_view_ids`
-- no binding-contributor path that compiles to the existing piece registration
-  helpers
-- no persisted contributor identity/liveness keyed by `(assembly_id, view_id)`
-- no integration with the daemon lease/guard/finalizer runtime from `0011`
-- no mutation fence from open assembly contribution back into
-  `Binding.begin_update(...)`
-- no seal completeness rule that compares the current live view set against
-  `LayoutSpec.expected_view_ids`
-- no authoritative publish result that links source assembly to serving-artifact
-  publication for downstream consumers such as vLLM
+# Non-Goals For This Execution Plan
 
-Baseline constraints this plan must respect:
-
-- SDK must not talk to Global Store directly.
-- `register_view`, LIP piece registration, and final `seal_assembly(...)` remain
-  the one true assembly trunk.
-- `view_id` remains the deterministic contribution identity plane.
-- Every published version must use a fresh `assembly_id`.
-- `LayoutSpec` must not absorb frontend topology ownership metadata.
-- serving-facing workflows ultimately publish serving artifacts, not only source
-  assembly artifacts.
-- Phase-1 `PP` and `EP` must compile to disjoint partial views on the current
-  trunk.
-- `TP` is not the primary publish target in phase 1.
+- Do not introduce a second assembly trunk for binding-backed training.
+- Do not widen `LayoutSpec` with frontend or topology ownership metadata.
+- Do not make the SDK talk to Global Store directly.
+- Do not treat `accepted` contributor rows as lease authority.
+- Do not add TP-aware publish as part of this phase-1 completion work.
+- Do not introduce a new durable top-level contract table unless the operation
+  snapshot form proves insufficient during implementation.
 
 # Phases & Milestones
 
-- [ ] Phase 1: Lock the one-trunk contract in code and docs
-  - [ ] Milestone 1: Explicitly define phase-1 completeness as
-    `LayoutSpec.expected_view_ids` satisfaction, not contributor count.
-  - [ ] Milestone 2: Explicitly define phase-1 slot identity as existing
-    deterministic `view_id`.
-  - [ ] Milestone 3: Define an explicit per-attempt contribution contract
-    snapshot above `expected_view_ids`.
-  - [ ] Milestone 4: Define binding contribution as one frontend onto the
-    existing piece/view registration trunk.
-  - [ ] Milestone 5: Define fresh `assembly_id` per publish attempt as the only
-    supported workspace lineage rule.
-  - [ ] Milestone 6: Define published result as a model-version lineage rather
-    than a bare artifact id.
-  - [ ] Milestone 7: Define phase-1 distributed scope explicitly as:
-    - `PP` and `EP` on disjoint partial views
-    - `TP` deferred from publish
+- [ ] Phase 1: Correct the attempt contract and coordinator fence
+  - [ ] Milestone 1: Represent an explicit `ContributionContractSnapshot` in the
+    attempt snapshot and compute `contribution_contract_hash` from that explicit
+    snapshot content.
+  - [ ] Milestone 2: Use one shared helper for contract-snapshot construction
+    and hashing so daemon controllers cannot drift.
+  - [ ] Milestone 3: Make `StartAssemblyAttempt` create the live coordinator
+    fence that later `SubmitBindingContribution` validates.
+  - [ ] Milestone 4: Make `SubmitBindingContribution` reject missing, stale, or
+    generation-mismatched coordinator fences.
+  - [ ] Milestone 5: Keep `StartSealAssembly` as the seal transition on that
+    same attempt fence instead of inventing a parallel coordinator path.
 
-- [ ] Phase 2: Add assembly-attempt bootstrap on top of existing layout binding
-  - [ ] Milestone 1: Add daemon RPCs to create a fresh `assembly_id` from
-    `layout_id` and return an attempt/coordinator reference.
-  - [ ] Milestone 2: Reuse `assembly_layout_bindings` CAS to bind the attempt to
-    the active `layout_id`.
-  - [ ] Milestone 3: Extend coordinator snapshot/state so `expected_view_ids`
-    from the active layout are part of the attempt’s explicit seal preconditions.
-  - [ ] Milestone 4: Snapshot the explicit contribution contract and expose a
-    stable `contribution_contract_hash`.
+- [ ] Phase 2: Make contributor liveness durable enough for seal correctness
+  - [ ] Milestone 1: Define the phase-1 durable liveness projection for
+    `assembly_contributions`.
+  - [ ] Milestone 2: Ensure contributor loss through PID exit, daemon loss, or
+    coordinator loss transitions rows to a visible non-live state.
+  - [ ] Milestone 3: Make seal compute completeness from the required live
+    contributor set, not accepted rows alone.
+  - [ ] Milestone 4: Keep binding mutation fencing tied to the same liveness
+    notion so `Binding.begin_update(...)` and overwrite paths fence exactly the
+    values still occupying live required slots.
 
-- [ ] Phase 3: Codify phase-1 projection mapping for `PP` and `EP`
-  - [ ] Milestone 1: Decide exactly how local `BindingContributionPlan` compiles
-    to existing `ViewSpec` and deterministic `view_id` on the current trunk.
-  - [ ] Milestone 2: Keep phase-1 output restricted to disjoint required views
-    that match current overlap rules.
-  - [ ] Milestone 3: Compute and persist required `expected_view_ids` once during
-    layout or contract generation; do not derive them ad hoc on every publish.
-  - [ ] Milestone 4: Avoid introducing a second projection or slot language in
-    phase 1 if current `ViewSpec` plus `view_id` is sufficient.
+- [ ] Phase 3: Finish the one-trunk implementation refactor
+  - [ ] Milestone 1: Extract shared view or piece commit helpers from
+    `registration_backend.cc`.
+  - [ ] Milestone 2: Route binding-backed contribution through the same helper
+    path used by existing piece registration for coverage, proof, hashing, and
+    view-state update.
+  - [ ] Milestone 3: Prove daemon-owned, client-owned, LIP-backed, and future
+    byte-in sources can all land on the same commit path without behavior drift.
 
-- [ ] Phase 4: Add persisted contributor identity and liveness on the same view
-  identity plane
-  - [ ] Milestone 1: Add `assembly_contributions` keyed by `(assembly_id, view_id)`.
-  - [ ] Milestone 2: Persist current occupant metadata:
-    - `binding_id`
-    - `binding_value_id`
-    - `coverage_plan_hash`
-    - contributor daemon identity
-    - coordinator generation
-    - lease identity and lease generation
-    - lease expiry or equivalent liveness fence
-  - [ ] Milestone 3: Project runtime `ContributionLease` state into
-    `assembly_contributions` instead of treating the row as the lease authority.
-  - [ ] Milestone 4: Add cleanup rules so success, abort, and contributor-loss
-    all produce a visible terminal state.
+- [ ] Phase 4: Codify phase-1 mapping and single-rank behavior
+  - [ ] Milestone 1: Decide and document the concrete phase-1 planner-to-view
+    mapping for `PP` and `EP`.
+  - [ ] Milestone 2: Ensure required `expected_view_ids` are computed once from
+    deterministic planner output and not re-derived ad hoc during publish.
+  - [ ] Milestone 3: Keep the single-rank case legal through
+    `canonical_full`, not through a full-coverage piece shortcut.
+  - [ ] Milestone 4: Keep TP explicitly deferred in both code and docs so the
+    phase-1 trunk does not silently over-promise.
 
-- [ ] Phase 5: Compile binding contributors onto the existing registration trunk
-  - [ ] Milestone 1: Factor shared view/piece commit helpers out of
-    `registration_backend.cc` so binding-backed contribution does not duplicate
-    coverage/proof/hash logic.
-  - [ ] Milestone 2: Add daemon controllers that translate `SealedBindingValue`
-    plus local contribution plan into the same logical registration flow used by
-    existing piece registration for disjoint phase-1 views.
-  - [ ] Milestone 3: Ensure daemon-owned, client-owned, LIP-backed, and future
-    byte-in sources can all hit the same commit path.
+- [ ] Phase 5: Complete published model-version semantics
+  - [ ] Milestone 1: Extend the daemon result path so
+    `PublishedModelVersion` contains real source lineage, optional serving
+    lineage, immutable keys, and manifest metadata.
+  - [ ] Milestone 2: Define when attempt success is allowed to report success
+    for serving-facing workflows.
+  - [ ] Milestone 3: Keep source seal and serving publication inside one
+    lineage rather than two unrelated success paths.
 
-- [ ] Phase 6: Add contributor liveness and binding mutation fencing
-  - [ ] Milestone 1: Implement `ContributionLease` on top of the `0011`
-    lease/guard/finalizer runtime.
-  - [ ] Milestone 2: Make `Binding.begin_update(...)` fail or wait while a live
-    `(binding_id, binding_value_id)` contribution row exists.
-  - [ ] Milestone 3: Reuse existing lifecycle concepts so contributor loss marks
-    the contribution stale or aborts the attempt.
-  - [ ] Milestone 4: Make coordinator seal reject stale or expired required view
-    contributors.
+- [ ] Phase 6: Prove parity with an acceptance matrix
+  - [ ] Milestone 1: Add missing negative tests for contract mismatch,
+    coordinator mismatch, liveness loss, and required-view incompleteness.
+  - [ ] Milestone 2: Add parity tests showing binding-backed contribution,
+    `register_view`, and LIP piece flows use the same trunk semantics.
+  - [ ] Milestone 3: Add planner-backed `PP`, `EP`, and single-rank
+    `canonical_full` acceptance coverage.
+  - [ ] Milestone 4: Re-run the full targeted Python and daemon C++ matrix and
+    update the docs only when the one-trunk behavior is proven.
 
-- [ ] Phase 7: Source seal, serving publication, and frontend parity tests
-  - [ ] Milestone 1: Make final seal compare the current live required view set
-    against `LayoutSpec.expected_view_ids`.
-  - [ ] Milestone 2: Return a `PublishedModelVersion` result that records source
-    lineage, optional serving lineage, and immutable keys.
-  - [ ] Milestone 3: Publish final source or serving keys only after successful
-    seal and required post-assembly stages.
-  - [ ] Milestone 4: Add parity coverage showing that binding, `register_view`,
-    and LIP piece flows all use the same trunk semantics.
+# Detailed Tasks
 
-# Tasks
+## Workstream A: Attempt Contract And Coordinator Fence
 
-- [ ] Extend `proto/tensorcast/daemon/v2/store_daemon.proto`
-  - add daemon RPCs for:
-    - starting an assembly attempt from `layout_id`
-    - submitting binding-backed contributions
-    - waiting on attempt result
-  - return attempt contract digest and published model-version lineage in result
-    protos
-  - keep `StartSealAssembly` as the seal primitive, not a second coordinator
-    system
+- [ ] Add an explicit phase-1 contribution-contract payload to
+  `proto/tensorcast/daemon/v2/store_daemon.proto`.
+  - Preferred shape:
+    - keep `AssemblyAttemptRef` lightweight
+    - carry the full snapshot in the coordinator operation snapshot
+    - add enough proto structure inside `SealAssemblySnapshot` or a sibling
+      message to serialize per-view contract semantics explicitly
+- [ ] Define the minimum phase-1 per-view contract contents.
+  - required `view_id`
+  - required contribution kind
+  - canonical contribution mapping source
+    - semantic `ViewSpec`
+    - or canonical-full sentinel
+  - planner or coverage digest
+  - any additional phase-1 flags needed to validate resubmission
+- [ ] Add one shared daemon helper for:
+  - constructing `ContributionContractSnapshot`
+  - computing `contribution_contract_hash`
+  - validating a submit request against the snapshot
+- [ ] Remove duplicated contract-hash construction logic from:
+  - `daemon/service/controllers/assembly_operation_service.cc`
+  - `daemon/service/controllers/owned_binding_service.cc`
+- [ ] Change `StartAssemblyAttempt` to create the live coordinator operation
+  record instead of returning only a future deterministic operation id.
+- [ ] Decide and document the operation state model for an attempt before seal.
+  - acceptable options:
+    - pending attempt state inside the same operation
+    - running attempt state before seal
+  - non-acceptable option:
+    - submit path trusting an operation id that does not yet exist
+- [ ] Make `SubmitBindingContribution` validate:
+  - operation exists
+  - operation kind matches the attempt
+  - lease or generation is current
+  - operation has not already transitioned to terminal failure or success
+- [ ] Make `StartSealAssembly` transition the same attempt operation to the seal
+  phase and reject mismatched attempt generations.
 
-- [ ] Extend `tensorcast/schema.sql`
-  - add `assembly_contributions`
-  - key it by `(assembly_id, view_id)`
-  - include contributor identity, coordinator generation, lease identity, and
-    liveness fields
-  - do not add a new phase-1 contract table if current `LayoutSpec` and
-    attempt snapshots are sufficient
+## Workstream B: Durable Liveness Projection
 
-- [ ] Add Global Store persistence and lookup for `assembly_contributions`
-  - repository for current occupant rows
-  - helper methods for completeness queries and cleanup
-  - no parallel slot-id plane
+- [ ] Define the phase-1 durable "live contribution" predicate.
+  - minimum inputs:
+    - `assembly_contributions.state`
+    - durable liveness fence such as `lease_expires_at`
+    - contributor daemon identity visibility
+  - the predicate must still work after a daemon crash where local finalizers do
+    not run
+- [ ] Decide how `lease_expires_at` is maintained.
+  - acceptable direction:
+    - explicit keepalive or refresh path tied to contribution lifetime
+    - or contributor-daemon liveness projection plus bounded-expiry rows
+  - non-acceptable direction:
+    - relying only on in-memory finalizers
+- [ ] Extend `assembly_contributions` repository helpers to query:
+  - required live contributors by assembly
+  - live rows for one `(binding_id, binding_value_id)`
+  - stale or expired rows that need transition
+- [ ] Extend `tensorcast/global_store/rpc/assembly_contribution_rpc_handler.py`
+  and `core/store/components/global_store_client.{h,cc}` as needed so the daemon
+  can update and query the durable liveness projection cleanly.
+- [ ] Integrate contributor daemon identity with existing GS liveness truth.
+  - `contributor_daemon_id` is already stored
+  - seal must not treat a row from a known-dead contributor as live
+- [ ] Keep graceful finalizers as an accelerator, not the sole authority.
+  - PID exit should still mark rows stale quickly
+  - coordinator abort should still mark rows aborted quickly
+  - success should still release rows quickly
 
-- [ ] Extend `daemon/service/controllers/assembly_operation_service.cc`
-  - create fresh assembly attempts
-  - snapshot `layout_id`, `assembly_layout_binding_version`, and
-    `expected_view_ids`
-  - snapshot the explicit contribution contract and compute
-    `contribution_contract_hash`
-  - compare current live view set against required expected view set before seal
-  - return a published model-version lineage, not only a sealed source artifact
+## Workstream C: Seal Correctness
 
-- [ ] Extend `daemon/service/controllers/registration_controller.cc`
-  - add a binding-backed frontend that routes onto the same logical piece/view
-    registration helper path
-  - do not duplicate coverage/proof/hash logic outside the existing registration
-    backend
+- [ ] Make seal evaluate completeness in this order:
+  - snapshot contract present and valid
+  - current registered view set matches the snapshot for required views
+  - required live contributor set satisfies the same required view ids
+  - only then attempt final source seal
+- [ ] Make seal reject:
+  - missing required current views
+  - missing required live contributors
+  - contract-hash mismatch between current attempt state and snapshot
+  - coordinator-generation mismatch
+- [ ] Keep current post-seal migration or reuse behavior aligned with the same
+  required-view set so post-seal optimizations do not bypass contract rules.
 
-- [ ] Refactor `core/store/runtime/metadata/registration_backend.cc`
-  - extract reusable helpers for:
-    - view plan computation
-    - coverage derivation
-    - view hashing
-    - proof digest generation
-    - Global Store view-state update
-  - keep one commit path for `register_view`-style and binding-backed
-    contributions
-  - ensure phase-1 disjoint partial-view contributions do not bypass current
-    overlap validation
+## Workstream D: Shared Registration Trunk
 
-- [ ] Extend `tensorcast/global_store/services/view_state_service.py`
-  - keep current overlap/proof enforcement as the one authority
-  - ensure same `(assembly_id, view_id)` replacement remains idempotent and
-    explicit
-  - do not add binding-specific assembly semantics here beyond contributor
-    bookkeeping hooks
+- [ ] Refactor `core/store/runtime/metadata/registration_backend.cc` so the
+  following steps have one shared implementation:
+  - view plan derivation
+  - canonical coverage derivation
+  - view hashing
+  - proof digest generation
+  - durable view-state update
+- [ ] Ensure binding-backed contribution remains a thin frontend wrapper over
+  the shared registration helper path.
+- [ ] Keep `tensorcast/global_store/services/view_state_service.py` as the only
+  authority for overlap and proof semantics.
+- [ ] Ensure same `(assembly_id, view_id)` replacement stays idempotent and
+  explicit on that one path.
+- [ ] Add parity tests that compare:
+  - existing piece registration
+  - binding-backed `piece_partial`
+  - future byte-in or other frontends when they land
 
-- [ ] Add binding mutation fence wiring
-  - integrate `ContributionLease` and `assembly_contributions` lookup with
-    binding state
-  - make `Binding.begin_update(...)` observe live contributor occupancy
-  - release fences only on success, failure, or abort
+## Workstream E: Phase-1 Mapping And Single-Rank Publish
 
-- [ ] Decide and codify phase-1 `PP` / `EP` projection mapping
-  - determine how one local binding’s tensor ownership maps onto required
-    disjoint `view_id`
-  - compute those required `view_id` once and store them in
-    `LayoutSpec.expected_view_ids`
-  - keep the mapping deterministic and planner-derived
-  - avoid encoding this per-update as ad-hoc runtime parameters
-  - define the degenerate single-rank case with a legal contribution kind such
-    as `canonical_full`, not a full-coverage piece shortcut
+- [ ] Write down the exact phase-1 mapping contract for planner output.
+  - how one local ownership plan maps to deterministic `ViewSpec`
+  - how those `ViewSpec` map to deterministic `view_id`
+  - where that mapping is stored and versioned
+- [ ] Add a concrete plan object or helper only if needed.
+  - avoid introducing a second identity plane
+  - avoid turning per-update publish into an ad hoc parameter soup
+- [ ] Add explicit `PP` acceptance coverage.
+  - one model split into deterministic disjoint stage or chunk views
+  - expected view ids fixed up front
+  - seal succeeds only after all required views arrive
+- [ ] Add explicit `EP` acceptance coverage.
+  - one model split into deterministic expert-group views
+  - same completeness and replacement semantics as `PP`
+- [ ] Add explicit single-rank `canonical_full` acceptance coverage.
+  - no required `expected_view_ids`
+  - no fake full-coverage piece shortcut
 
-- [ ] Integrate contributor liveness with `0011`
-  - add `ContributionLease` subject and finalizers to the daemon lifecycle
-    runtime
-  - persist lease projection into `assembly_contributions`
-  - keep row state and runtime lease state coherent under abort, PID exit, and
-    coordinator loss
+## Workstream F: Published Model-Version Lineage
 
-- [ ] Define published model-version output and source/serving lineage
-  - seal one source artifact per attempt
-  - optionally run source -> serving builder or publisher as part of the same
-    lineage
-  - return immutable keys and manifest metadata required by serving consumers
+- [ ] Extend `proto/tensorcast/daemon/v2/store_daemon.proto` and the SDK decode
+  path so `PublishedModelVersion` can carry:
+  - source artifact descriptor
+  - optional serving artifact descriptor
+  - immutable source version key
+  - immutable serving version key
+  - representation contract hash
+  - serving manifest reference
+- [ ] Define the success boundary in code.
+  - if only source seal is required, source seal may be final success
+  - if serving publication is configured, operation success must wait for
+    serving artifact and immutable serving publication
+- [ ] Update `tensorcast/api/store/__init__.py` so `wait_assembly_attempt(...)`
+  preserves the stronger success semantics and does not imply full publication
+  before the daemon has actually completed it.
 
-- [ ] Keep SDK control-path routing local-daemon only
-  - attempt creation
-  - contribution submission
-  - wait/result fetch
-  - no direct SDK Global Store contract logic
+## Workstream G: Documentation And Operator Guidance
+
+- [ ] Update `docs/designs/0085-distributed-binding-assembly-and-coordinator.md`
+  together with implementation so the design remains authoritative.
+- [ ] Update `tensorcast/api/store/README.md` when public behavior changes.
+- [ ] Update `docs/guides/steptron-vllm-binding-integration.md` only after the
+  serving-lineage success semantics are real.
+- [ ] Keep all status bullets and checkboxes truthful to the actual repo state.
 
 # Test / Rollout / Backout
 
-Acceptance checks against existing suites:
+## Required Acceptance Matrix
 
-- `source .venv/bin/activate && pytest tests/python/test_dense_piece_assembly_sealing_acceptance.py`
-- `source .venv/bin/activate && pytest tests/python/test_dual_daemon_global_store_tp_view.py`
-- `source .venv/bin/activate && pytest tests/python/global_store/test_operation_rpc.py`
-- `source .venv/bin/activate && pytest tests/python/global_store/test_services.py`
-- `bazel test //daemon:grpc_service_impl_publish_target_replica_test`
-- `bazel test //daemon:grpc_service_impl_retire_published_replica_test`
-- `bazel test //daemon:grpc_service_impl_lip_piece_assembly_test`
-- `bazel test //core/store:store_engine_test`
+Python acceptance and integration:
 
-New tests to add:
+- [ ] `source .venv/bin/activate && pytest tests/python/test_dense_piece_assembly_sealing_acceptance.py`
+- [ ] `source .venv/bin/activate && pytest tests/python/test_dual_daemon_global_store_tp_view.py`
+- [x] `source .venv/bin/activate && pytest tests/python/test_assembly_attempt.py`
+- [x] `source .venv/bin/activate && pytest tests/python/test_binding.py`
+- [x] `source .venv/bin/activate && pytest tests/python/global_store/test_assembly_contribution_repository.py`
+- [x] `source .venv/bin/activate && pytest tests/python/global_store/test_assembly_contribution_rpc.py`
+- [ ] `source .venv/bin/activate && pytest tests/python/global_store/test_operation_rpc.py`
+- [ ] `source .venv/bin/activate && pytest tests/python/global_store/test_services.py`
 
-- [ ] Python: fresh assembly attempt binds `layout_id` and exposes expected view set
-- [ ] Python: attempt creation snapshots the explicit contribution contract and
-  exposes `contribution_contract_hash`
-- [ ] Python: binding-backed contribution produces the same `view_id` identity as
-  the equivalent `register_view` path
-- [ ] Python: `PP`-style disjoint local chunks compile into distinct required
-  `view_id` and seal successfully
-- [ ] Python: `EP`-style disjoint expert subsets compile into distinct required
-  `view_id` and seal successfully
-- [ ] Python: same `(assembly_id, view_id)` contribution can be replaced
-  idempotently inside one attempt
-- [ ] Python: required `expected_view_ids` missing prevents final seal
-- [ ] Python: contributor liveness loss before seal aborts or stales the attempt
-- [ ] Python: `Binding.begin_update(...)` is blocked or rejected while its
-  current value occupies a live required `view_id`
-- [ ] Python: single-rank publish succeeds through a legal contribution kind
-  such as `canonical_full`
-- [ ] Python: successful attempt returns `PublishedModelVersion` with source
-  lineage and, when configured, serving lineage
-- [ ] Python: serving-facing publish does not report success before immutable
-  serving key or manifest publication
-- [ ] C++: coordinator completeness is checked by required expected view set
-- [ ] C++: `ContributionLease` finalizers update durable contributor state and
-  release mutation fences
-- [ ] C++: binding-backed contribution and existing piece registration share the
-  same view-state commit helper path
+New Python tests that must be added:
 
-Rollout order:
+- [ ] contract hash changes when per-view semantics change but `expected_view_ids`
+  do not
+- [ ] submit rejects stale or missing coordinator operation or generation
+- [ ] required `expected_view_ids` missing prevents final seal
+- [ ] same `(assembly_id, view_id)` contribution can be replaced idempotently
+  inside one attempt
+- [ ] contributor liveness loss before seal aborts or stales the attempt
+- [ ] `Binding.begin_update(...)` rejects or waits while its current value is
+  still a live required contributor
+- [ ] binding-backed `piece_partial` matches equivalent piece-registration slot
+  identity and replacement semantics
+- [ ] single-rank `canonical_full` publish succeeds through the legal
+  contribution kind
+- [ ] successful attempt returns full `PublishedModelVersion` lineage when
+  serving publication is configured
+- [ ] serving-facing publish does not report success before immutable serving
+  publication completes
 
-1. Lock the trunk semantics first in docs and proto comments.
-2. Codify the phase-1 `PP` / `EP` disjoint-view mapping second.
-3. Land assembly-attempt bootstrap and `assembly_contributions` persistence
-   third.
-4. Refactor shared registration helpers fourth so new frontends reuse them.
-5. Add binding-backed contribution fifth.
-6. Turn on mutation fencing and completeness enforcement sixth.
-7. Update the integration guide only after the one-trunk behavior is proven by
-   tests.
+C++ daemon and core tests:
 
-Backout plan:
+- [x] `bazel test //daemon:owned_binding_service_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`
+- [x] `bazel test //daemon:grpc_service_impl_start_seal_assembly_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`
+- [ ] `bazel test //daemon:grpc_service_impl_lip_piece_assembly_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`
+- [ ] `bazel test //core/store:store_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`
 
-- revert binding-backed contribution entry points first
-- leave `assembly_contributions` unused rather than trying to erase schema
-  history
-- preserve existing `register_view`, LIP piece registration, `seal_assembly(...)`,
-  `LayoutSpec`, and `StartSealAssembly` behavior intact
-- do not leave a partial path that publishes without expected-view completeness or
-  without releasing contributor fences
+New C++ tests that must be added:
+
+- [ ] coordinator completeness is checked by required live expected-view set
+- [ ] submit rejects stale coordinator generation
+- [ ] attempt contract hash uses explicit snapshot semantics rather than only
+  expected-view ids
+- [ ] contributor finalizers plus crash-recovery path both transition rows out of
+  the live set
+- [ ] binding-backed contribution and existing piece registration share the same
+  commit helper path
+
+## Rollout Order
+
+1. Land the doc and proto clarification first.
+2. Land coordinator and contract correctness next.
+3. Land durable liveness projection next.
+4. Land seal live-set correctness next.
+5. Land shared trunk refactor next.
+6. Land planner-backed `PP` or `EP` coverage and single-rank coverage next.
+7. Land full published-lineage success semantics last.
+8. Update guides only after the full acceptance matrix is green.
+
+## Backout Plan
+
+- If coordinator or liveness hardening regresses the branch, revert the new
+  contributor acceptance rules first and leave `assembly_contributions` schema
+  unused rather than deleting schema history.
+- Do not back out by introducing a training-only side path.
+- Preserve existing `register_view`, LIP piece registration, `LayoutSpec`,
+  `assembly_layout_bindings`, `artifact_bindings`, and `StartSealAssembly`
+  behavior as the stable fallback trunk.
+- Do not leave behind a partial state where publish can report success without
+  required-view completeness or without releasing contributor fences.
 
 # Risks & Tracking
 
-- Risk: the implementation accidentally creates a second assembly trunk just for
-  binding.
-  Mitigation: require binding-backed contribution to reuse extracted
-  registration/view-state commit helpers and existing `view_id` identity.
+- Risk: we accidentally bless the current weak contract hash as "good enough".
+  Mitigation: make explicit contract snapshotting a phase-1 blocker.
 
-- Risk: `expected_view_ids` remains advisory and never becomes a real
-  completeness gate.
-  Mitigation: make coordinator seal explicitly compare current live required view
-  set against `LayoutSpec.expected_view_ids`.
+- Risk: coordinator fencing remains an audit field instead of a real gate.
+  Mitigation: require attempt creation to materialize the live coordinator
+  operation that submit must verify.
 
-- Risk: contributor identity drifts away from the current view identity plane.
-  Mitigation: key persisted contributor rows by `(assembly_id, view_id)`.
+- Risk: contributor liveness still depends on graceful finalizers only.
+  Mitigation: require a durable liveness projection that survives daemon crash.
 
-- Risk: contributor liveness is still too local compared with a durable
-  coordinator.
-  Mitigation: persist liveness fence data in `assembly_contributions` and make
-  seal reject stale contributors.
+- Risk: seal continues to use accepted rows instead of live contributors.
+  Mitigation: define and test one authoritative live-set predicate.
 
-- Risk: future `register`, `put`, and byte-in frontends grow separate partial
-  assembly implementations.
-  Mitigation: treat this plan as the trunk contract for all partial contribution
-  frontends, not just training bindings.
+- Risk: shared trunk refactor slips and binding keeps a subtly different commit
+  path.
+  Mitigation: add parity tests and one shared helper extraction as a tracked
+  milestone.
 
-- Risk: phase-1 projection mapping for `PP` and `EP` drifts into one-off
-  frontend logic.
-  Mitigation: make the mapping planner-derived and compile it to existing
-  `ViewSpec` and `view_id`, with contract tests.
+- Risk: `PublishedModelVersion` success semantics stay too weak for serving.
+  Mitigation: make operation success depend on full configured lineage
+  completion.
 
-Owner checklist:
+# Owner Checklist
 
 - [ ] one assembly trunk remains in the system
 - [ ] one layout contract trunk remains in the system
-- [ ] `LayoutSpec.expected_view_ids` is the phase-1 completeness root
-- [ ] `view_id` is the phase-1 contribution identity
-- [ ] phase-1 `PP` and `EP` use disjoint partial views on the same trunk
-- [ ] binding-backed contribution reuses the existing registration/seal path
-- [ ] every publish uses a fresh `assembly_id`
+- [ ] `LayoutSpec.expected_view_ids` remains the phase-1 completeness root
+- [ ] `ContributionContractSnapshot` is explicit and authoritative
+- [ ] `view_id` remains the phase-1 contribution identity
+- [ ] submit validates a live coordinator generation
+- [ ] seal uses the required live contributor set, not accepted rows alone
+- [ ] binding mutation fences are coherent with the same live-set semantics
+- [ ] phase-1 `PP` and `EP` compile to disjoint views on the same trunk
+- [ ] single-rank publish uses `canonical_full`, not a full-coverage piece
+- [ ] `PublishedModelVersion` success semantics match real source or serving
+      publication completion
 - [ ] SDK never talks to Global Store directly
+
+# Re-Baselined Status (2026-03-16)
+
+What is genuinely landed and can be relied on:
+
+- assembly-attempt API surface exists
+- binding-backed contribution entrypoints exist
+- contributor rows exist in persistent schema
+- `wait_assembly_attempt(...)` now drives a still-open attempt onto the same
+  deterministic seal operation before waiting
+- `wait_assembly_attempt(...)` now passes the snapped coordinator generation
+  when it transitions a pending attempt into seal
+- `StartSealAssembly(layout_id=...)` now fails closed for missing or malformed
+  attempt snapshots instead of rebuilding a weaker contract
+- `StartSealAssembly(layout_id=...)` now rejects stale coordinator generations
+  before it reacquires the attempt fence
+- durable contributor liveness now depends on:
+  - accepted row state
+  - unexpired `lease_expires_at`
+  - contributor worker or daemon identity still active in Global Store
+- binding overwrite paths are fenced by that same durable live-contributor
+  predicate
+- view-slot occupancy updates for `assembly_contributions` now use atomic
+  claim/CAS-style SQL predicates
+- same-slot replacement on `(assembly_id, view_id)` is now allowed when the
+  replacement stays inside the same live coordinator fence
+- seal live-set completeness now evaluates the snapped contribution contract,
+  including `canonical_full`, instead of only the non-canonical
+  `expected_view_ids` subset
+- contribution-slot identity mapping now lives in the shared
+  `assembly_coordination_utils` helper instead of drifting between controllers
+- the seal result path now consumes `assembly_runtime_policies` to publish
+  immutable source and serving version keys plus serving manifest metadata when
+  policy is configured
+- fake-CUDA binding contribution now routes through the stable host upload path
+  instead of requiring driver-backed CUDA IPC for the contribution upload
+- `wait_assembly_attempt(...)` can now hand the attempt snapshot back into
+  `StartSealAssembly` when the coordinator record is missing or stale during the
+  wait-to-seal transition
+- canonical-full sealing now has a source-assembly fallback path that does not
+  require view rows when a local canonical replica already exists
+- subset-backed binding attempts now mint deterministic piece `view_id`
+  identity and submit piece registrations with explicit `tensor_names`
+  carried through the daemon or seal trunk
+- assembly-scoped same-view replacement now rewrites view leaf state instead of
+  failing on stale leaf-digest conflicts during a legal in-attempt replacement
+- dense-piece assembly remains the current end-to-end trunk baseline
+
+What must still be treated as open until this plan is executed:
+
+- full cross-frontend contribution-contract snapshot correctness
+- one-helper shared registration commit path
+- planner-backed `PP` and `EP` binding parity at final seal time
+- full source and serving published-lineage success semantics
+- binding-backed piece acceptance now gets through bind, contribution submit,
+  and durable slot replacement, but seal still fails to consume those piece
+  replicas in the daemon acceptance path
+  - direct GS transport requests against the contributed view replicas succeed
+    in local repro
+  - the remaining blocker is specifically the daemon seal path still reporting
+    `no available piece replicas for assembly_id=...`
+  - canonical-full binding publish now seals and publishes lineage, but the
+    follow-on sealed-artifact materialization path is still unstable in the
+    fake-CUDA acceptance environment
+  - the binding-backed acceptance cases in
+    `tests/python/test_dense_piece_assembly_sealing_acceptance.py` are still
+    not final acceptance proof until that seal-time piece-replica gap is
+    closed

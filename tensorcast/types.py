@@ -169,6 +169,51 @@ class SealAssemblyResult(BaseModel):
     already_sealed: bool = False
 
 
+class AssemblyAttemptRef(BaseModel):
+    """Fresh assembly workspace reference rooted in a layout contract."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assembly_id: str
+    layout_id: str
+    contribution_contract_hash: str
+    coordinator_operation_id: str
+    coordinator_generation: int
+    expected_view_ids: tuple[str, ...] = ()
+    contribution_contract_proto: bytes | None = None
+
+
+class PartialSealResult(BaseModel):
+    """Accepted assembly contribution rooted in one open attempt."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assembly_id: str
+    binding_id: str
+    binding_value_id: str
+    contribution_kind: Literal["piece_partial", "canonical_full"]
+    view_id: str | None = None
+    coverage_plan_hash: str
+    accepted: bool = True
+    already_exists: bool = False
+
+
+class PublishedModelVersion(BaseModel):
+    """Published model-version lineage for an assembly attempt."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assembly_id: str
+    source_artifact_id: str
+    source_descriptor: ArtifactDescriptor
+    serving_artifact_id: str | None = None
+    serving_descriptor: ArtifactDescriptor | None = None
+    source_version_key: str | None = None
+    serving_version_key: str | None = None
+    representation_contract_hash: str | None = None
+    serving_manifest_ref: str | None = None
+
+
 # ------------------------------ Plan models --------------------------------
 
 
@@ -334,8 +379,11 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "AssemblyAttemptRef",
+    "PartialSealResult",
     "CanonicalRange",
     "CommitResult",
+    "PublishedModelVersion",
     "ViewRegistrationKind",
     "SealAssemblyResult",
     "PlanBase",

@@ -46,6 +46,7 @@ from tensorcast.proto.daemon.v2 import (
 from tensorcast.types import (
     ArtifactDescriptor,
     ArtifactIdKind,
+    AssemblyAttemptRef,
     BeginRegisterArtifactResult,
     CanonicalRange,
     CoalescedHandshake,
@@ -985,6 +986,7 @@ class DaemonCtl:
         target_layout: store_daemon_pb2.TargetLayout,
         target_index_bytes: bytes,
         device_uuid: str,
+        binding_layout_id: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
@@ -1002,6 +1004,8 @@ class DaemonCtl:
             raise ValueError("device_uuid is required")
         if not target_index_bytes:
             raise ValueError("target_index_bytes is required")
+        if not binding_layout_id:
+            raise ValueError("binding_layout_id is required")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/CreateOwnedBinding") as span:
             if preference is not None:
@@ -1021,6 +1025,7 @@ class DaemonCtl:
                 target_layout=target_layout,
                 target_index_bytes=bytes(target_index_bytes),
                 device_uuid=device_uuid,
+                binding_layout_id=str(binding_layout_id),
                 pid=pid_value,
                 preference=preference_value,
             )
@@ -1054,6 +1059,170 @@ class DaemonCtl:
                     ) from e
                 raise RuntimeError(
                     _grpc_message(e, fallback="CreateOwnedBinding RPC failed")
+                ) from e
+        return response
+
+    def create_binding(
+        self,
+        *,
+        ownership: store_daemon_pb2.BindingOwnership,
+        target_layout: store_daemon_pb2.TargetLayout,
+        target_index_bytes: bytes,
+        device_uuid: str,
+        binding_layout_id: str,
+        initial_selection: common_pb2.ArtifactSelection | None = None,
+        source_artifact_id: str | None = None,
+        target_write_token: bytes | None = None,
+        copy_plan: store_daemon_pb2.CopyPlan | None = None,
+        dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
+        pid: int | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.CreateBindingResponse:
+        if ownership == store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_UNSPECIFIED:
+            raise ValueError("ownership is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        if not target_index_bytes:
+            raise ValueError("target_index_bytes is required")
+        if not binding_layout_id:
+            raise ValueError("binding_layout_id is required")
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/CreateBinding") as span:
+            request = store_daemon_pb2.CreateBindingRequest(
+                ownership=ownership,
+                target_layout=target_layout,
+                target_index_bytes=bytes(target_index_bytes),
+                device_uuid=device_uuid,
+                binding_layout_id=str(binding_layout_id),
+                pid=pid_value,
+            )
+            if initial_selection is not None:
+                request.initial_selection.CopyFrom(initial_selection)
+            if source_artifact_id:
+                request.source_artifact_id = str(source_artifact_id)
+            if target_write_token:
+                request.target_write_token = bytes(target_write_token)
+            if copy_plan is not None:
+                request.copy_plan.CopyFrom(copy_plan)
+            if dst_specs is not None:
+                for spec in dst_specs:
+                    request.dst_tensors.add().CopyFrom(spec)
+            try:
+                response: store_daemon_pb2.CreateBindingResponse = self._unary_call(
+                    self.stub_v2.CreateBinding,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CreateBinding RPC failed")
+                ) from e
+        return response
+
+    def commit_binding_artifact(
+        self,
+        *,
+        binding_id: str,
+        selection: common_pb2.ArtifactSelection,
+        source_artifact_id: str | None = None,
+        target_write_token: bytes | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.CommitBindingArtifactResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not isinstance(selection, common_pb2.ArtifactSelection):
+            raise ValueError("selection is required")
+        with self._client_span("Client/CommitBindingArtifact") as span:
+            request = store_daemon_pb2.CommitBindingArtifactRequest(
+                binding_id=str(binding_id),
+                selection=selection,
+            )
+            if source_artifact_id:
+                request.source_artifact_id = str(source_artifact_id)
+            if target_write_token:
+                request.target_write_token = bytes(target_write_token)
+            try:
+                response: store_daemon_pb2.CommitBindingArtifactResponse = (
+                    self._unary_call(
+                        self.stub_v2.CommitBindingArtifact,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CommitBindingArtifact RPC failed")
+                ) from e
+        return response
+
+    def begin_binding_update(
+        self,
+        *,
+        binding_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.BeginBindingUpdateResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        with self._client_span("Client/BeginBindingUpdate") as span:
+            request = store_daemon_pb2.BeginBindingUpdateRequest(
+                binding_id=str(binding_id)
+            )
+            try:
+                response: store_daemon_pb2.BeginBindingUpdateResponse = (
+                    self._unary_call(
+                        self.stub_v2.BeginBindingUpdate,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BeginBindingUpdate RPC failed")
+                ) from e
+        return response
+
+    def seal_binding(
+        self,
+        *,
+        binding_id: str,
+        update_epoch: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.SealBindingResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not update_epoch:
+            raise ValueError("update_epoch is required")
+        with self._client_span("Client/SealBinding") as span:
+            request = store_daemon_pb2.SealBindingRequest(
+                binding_id=str(binding_id),
+                update_epoch=str(update_epoch),
+            )
+            try:
+                response: store_daemon_pb2.SealBindingResponse = self._unary_call(
+                    self.stub_v2.SealBinding,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="SealBinding RPC failed")
                 ) from e
         return response
 
@@ -2865,6 +3034,77 @@ class DaemonCtl:
             )
             return resp.tensor_index_data
 
+    def start_assembly_attempt(
+        self,
+        *,
+        layout_id: str,
+        timeout_s: float = 30.0,
+    ) -> AssemblyAttemptRef:
+        if not layout_id:
+            raise ValueError("layout_id is required")
+        req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
+        with self._client_span("Client/StartAssemblyAttempt") as span:
+            resp = self._unary_call(
+                self.stub.StartAssemblyAttempt,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+        attempt = resp.attempt
+        return AssemblyAttemptRef(
+            assembly_id=str(attempt.assembly_id),
+            layout_id=str(attempt.layout_id),
+            contribution_contract_hash=str(attempt.contribution_contract_hash),
+            coordinator_operation_id=str(attempt.coordinator_operation_id),
+            coordinator_generation=int(attempt.coordinator_generation),
+            expected_view_ids=tuple(
+                str(view_id) for view_id in attempt.expected_view_ids
+            ),
+            contribution_contract_proto=(
+                attempt.contribution_contract.SerializeToString()
+                if attempt.HasField("contribution_contract")
+                else None
+            ),
+        )
+
+    def submit_binding_contribution(
+        self,
+        *,
+        assembly_id: str,
+        layout_id: str,
+        contribution_contract_hash: str,
+        binding_id: str,
+        binding_value_id: str,
+        coverage_plan_hash: str,
+        contribution_kind: store_daemon_pb2.BindingContributionKind,
+        coordinator_operation_id: str,
+        coordinator_generation: int,
+        view_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.SubmitBindingContributionResponse:
+        req = store_daemon_pb2.SubmitBindingContributionRequest(
+            assembly_id=str(assembly_id),
+            layout_id=str(layout_id),
+            contribution_contract_hash=str(contribution_contract_hash),
+            binding_id=str(binding_id),
+            binding_value_id=str(binding_value_id),
+            coverage_plan_hash=str(coverage_plan_hash),
+            contribution_kind=contribution_kind,
+            coordinator_operation_id=str(coordinator_operation_id),
+            coordinator_generation=int(coordinator_generation),
+        )
+        if view_id:
+            req.view_id = str(view_id)
+        with self._client_span("Client/SubmitBindingContribution") as span:
+            return self._unary_call(
+                self.stub.SubmitBindingContribution,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+
     def seal_assembly(
         self,
         assembly_id: str,
@@ -2930,6 +3170,8 @@ class DaemonCtl:
         *,
         assembly_id: str,
         layout_id: str | None = None,
+        expected_coordinator_generation: int | None = None,
+        attempt_snapshot: store_daemon_pb2.SealAssemblySnapshot | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartSealAssemblyResponse:
         if not assembly_id:
@@ -2938,6 +3180,10 @@ class DaemonCtl:
             assembly_id=assembly_id,
             layout_id=str(layout_id) if layout_id else "",
         )
+        if expected_coordinator_generation is not None:
+            req.expected_coordinator_generation = int(expected_coordinator_generation)
+        if attempt_snapshot is not None:
+            req.attempt_snapshot.CopyFrom(attempt_snapshot)
         with self._client_span("Client/StartSealAssembly") as span:
             resp = self._unary_call(
                 self.stub.StartSealAssembly,

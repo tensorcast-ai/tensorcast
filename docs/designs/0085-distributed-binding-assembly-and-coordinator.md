@@ -3,7 +3,7 @@ slug: distributed-binding-assembly-and-coordinator
 title: Distributed Binding Assembly on the Existing Assembly and Layout Trunk
 status: proposed
 created: 2026-03-14
-last_updated: 2026-03-14
+last_updated: 2026-03-15
 areas: ["sdk", "daemon", "core", "proto", "global_store"]
 related_code:
   - tensorcast/api/store/binding.py
@@ -257,6 +257,9 @@ The system also needs explicit, per-view semantic inputs:
   - `piece_partial`
   - `canonical_full`
   - future range or transform kinds
+- whether this attempt requires durable live contributor occupancy rows
+  - binding-backed distributed attempts do
+  - direct piece-registration seal snapshots do not
 - planner-derived coverage semantics
 - a stable digest of that contribution plan
 
@@ -265,6 +268,10 @@ Therefore this design makes the following rule normative:
 - phase 1 completeness is rooted in `LayoutSpec.expected_view_ids`
 - phase 1 attempt creation must also snapshot an explicit
   `ContributionContractSnapshot`
+- `contribution_contract_hash` must digest that explicit snapshot content
+  rather than only `layout_id` plus `expected_view_ids`
+- submit and seal must validate against the same snapped contract; they must
+  not silently recompute a weaker substitute contract on the side
 
 The long-term extension point is:
 
@@ -525,6 +532,9 @@ Important surface rules:
   `Binding`
 - attempt creation snapshots the explicit contribution contract and exposes its
   digest through `contribution_contract_hash`
+- `wait_assembly_attempt(...)` must drive a still-open attempt onto that same
+  deterministic coordinator operation before it waits; callers do not start a
+  second unrelated seal workflow
 - attempt completion returns a **published model version** result, not a bare
   source artifact
 
@@ -548,6 +558,17 @@ Responsibilities:
 - publish immutable version keys and manifest metadata only after all required
   stages succeed
 - release contribution leases and close the attempt
+
+Phase-1 implementation note:
+
+- the open-attempt to seal transition may be initiated by
+  `wait_assembly_attempt(...)`
+- that transition must target the same deterministic `operation_id` created by
+  `start_assembly_attempt(...)`
+- when `StartSealAssembly` is invoked for an existing attempt (for example via
+  `layout_id`-qualified wait flow), it must fail closed if the snapped attempt
+  contract is missing or malformed; it must not silently reconstruct a weaker
+  contract
 
 ## Contribution Flow
 
@@ -604,6 +625,8 @@ Rules:
   complete until the serving artifact and immutable serving key exist
 - `wait_assembly_attempt(...)` returns the full published lineage so callers do
   not have to infer it from unrelated side effects
+- when serving publication is configured, source seal alone must not be exposed
+  as final attempt success
 
 # Consistency Model
 
@@ -617,6 +640,11 @@ That means:
 - stale contributors must be rejected against that coordinator generation
 - the coordinator must snapshot the bound `layout_id`, contribution contract,
   and current view set before seal
+- attempt creation must materialize or acquire that coordinator fence before
+  contributors can be accepted against it
+- durable contributor rows may record `coordinator_operation_id` and
+  `coordinator_generation`, but those fields are audit and replay data; the
+  live coordinator fence remains authoritative at submit time
 
 ## One Contributor Identity Plane
 
@@ -646,6 +674,9 @@ Therefore:
 - the runtime fence is a `ContributionLease`
 - `assembly_contributions` stores the durable current occupant projection
 - the durable row is not itself the lease authority
+- phase-1 seal correctness depends on the durable row carrying enough liveness
+  projection to distinguish an accepted-and-live contributor from an
+  accepted-but-stale contributor after crash or coordinator loss
 
 `ContributionLease` follows the same lifecycle model:
 
@@ -661,6 +692,15 @@ Therefore:
   - mark durable row `released`, `stale`, or `aborted`
   - release mutation fences on `(binding_id, binding_value_id)`
   - notify the coordinator when required contributors are lost
+
+Phase-1 live contributor rule:
+
+- a required contributor counts toward completeness only when:
+  - its durable row is `accepted`
+  - its projected liveness fence is still current
+  - its contributing daemon identity is still current enough for seal
+- an `accepted` row without a current liveness fence must be treated as
+  non-live at seal time
 
 This keeps contribution cleanup coherent with the rest of the daemon instead of
 building a second lifecycle subsystem beside it.
@@ -852,15 +892,21 @@ Phase-1 acceptance requires:
 - `LayoutSpec` remains the global canonical contract root
 - `LayoutSpec.expected_view_ids` becomes the phase-1 expected contribution set
 - attempt creation snapshots an explicit per-view contribution contract
+- `contribution_contract_hash` is derived from that explicit contract snapshot,
+  not from `expected_view_ids` alone
 - binding-backed contribution compiles down to the same view or piece
   registration path used by other frontends
 - completeness is checked by required `view_id`
 - partial replacement of the same `view_id` inside one `assembly_id` works as an
   open-attempt slot replacement on the same identity plane
 - every publish attempt uses a fresh `assembly_id`
+- submit validates a live coordinator generation before accepting a
+  contribution
 - contributor liveness loss prevents false successful seal
 - contributor liveness and mutation fencing are implemented through the existing
   lease/guard/finalizer lifecycle model
+- seal completeness is computed from the required live contributor set rather
+  than from accepted rows alone
 - publish completion returns a `PublishedModelVersion` lineage rather than only
   a source artifact id
 - serving-facing workflows publish immutable serving keys or manifests before the

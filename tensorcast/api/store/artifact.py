@@ -32,6 +32,7 @@ from tensorcast.api.operation import (
     PollingOperation,
 )
 from tensorcast.api.store.binding import Binding
+from tensorcast.api.store.binding_state import parse_binding_value_or_raise
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
@@ -52,6 +53,8 @@ from tensorcast.api.store.materialization import (
     _build_source_policy,
 )
 from tensorcast.api.store.owned_binding_layout import (
+    BindingLayout,
+    build_binding_layout,
     build_mapped_tensor_spec,
     build_owned_layout,
 )
@@ -114,6 +117,62 @@ class ArtifactDescriptor:
     tensor_metas: Mapping[str, TensorMeta]
     total_bytes: int
     generation: int | None
+
+
+def _ordered_subset_entry_names(
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> tuple[str, ...]:
+    requested = tuple(str(name) for name in tensor_names)
+    if not requested:
+        return ()
+    requested_set = set(requested)
+    ordered = tuple(
+        str(entry.name)
+        for entry in canonical_index.entries
+        if str(entry.name) in requested_set
+    )
+    if len(ordered) != len(requested_set):
+        known = {str(entry.name) for entry in canonical_index.entries}
+        unknown = sorted(requested_set - known)
+        raise ArtifactError(
+            f"View references unknown tensor(s): {', '.join(unknown)}",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    return ordered
+
+
+def _build_subset_view_spec_proto(
+    *,
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> common_pb2.ViewSpec | None:
+    ordered_names = _ordered_subset_entry_names(canonical_index, tensor_names)
+    if not ordered_names:
+        return None
+    entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+    proto = common_pb2.ViewSpec()
+    for name in ordered_names:
+        entry = entry_by_name[name]
+        if not entry.shape:
+            raise ArtifactError(
+                "subset view identity requires tensors with at least one dimension",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        dim0 = int(entry.shape[0])
+        if dim0 <= 0:
+            raise ArtifactError(
+                "subset view identity requires non-empty leading dimensions",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        op = proto.tensors[name].ops.add()
+        op.narrow.dim = 0
+        op.narrow.start = 0
+        op.narrow.length = dim0
+    return proto
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +417,61 @@ def _build_transport_operation_id(
         return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}rid={request_id}"
 
     return base_operation_id
+
+
+def _register_client_binding(
+    *,
+    runtime: "StoreRuntimeContext",
+    device_id: int,
+    region_layout,
+    canonical_index_bytes: bytes,
+    selection: common_pb2.ArtifactSelection | None,
+    source_artifact_id: str | None,
+    target_write_token: bytes | None,
+    ctx: CallContext | None,
+) -> tuple[str, BindingLayout, object | None]:
+    binding_layout = build_binding_layout(
+        target_layout=region_layout.layout,
+        target_index_bytes=bytes(
+            region_layout.view_index_bytes or canonical_index_bytes
+        ),
+    )
+    timeout_s = _ctx_timeout_s(ctx)
+    response = runtime.ensure_client().create_binding(
+        ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_CLIENT,
+        target_layout=binding_layout.target_layout,
+        target_index_bytes=binding_layout.target_index_bytes,
+        device_uuid=device_uuid_for(device_id),
+        binding_layout_id=binding_layout.binding_layout_id,
+        initial_selection=selection,
+        source_artifact_id=source_artifact_id,
+        target_write_token=target_write_token,
+        timeout_s=timeout_s if timeout_s is not None else 60.0,
+    )
+    try:
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="CreateBinding",
+            expected_binding_id=str(response.binding_id),
+            expected_binding_layout_id=binding_layout.binding_layout_id,
+        )
+    except ArtifactError:
+        with contextlib.suppress(Exception):
+            runtime.ensure_client().close_owned_binding(
+                binding_id=str(response.binding_id)
+            )
+        raise
+    if metadata is None:
+        raise ArtifactError(
+            "CreateBinding returned empty current_value for artifact-backed binding",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    return (
+        str(response.binding_id),
+        binding_layout,
+        metadata,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1172,6 +1286,21 @@ class Artifact:
             )
             raise
 
+        binding_id, binding_layout, current_value_metadata = _register_client_binding(
+            runtime=runtime,
+            device_id=device_id,
+            region_layout=region_layout,
+            canonical_index_bytes=canonical_index_bytes,
+            selection=(
+                response.resolved_selection
+                if hasattr(response, "resolved_selection")
+                else None
+            ),
+            source_artifact_id=self._ensure_identified(),
+            target_write_token=getattr(response, "target_write_token", None),
+            ctx=ctx,
+        )
+
         slot = InplaceSlot(
             store=store,
             runtime=runtime,
@@ -1179,12 +1308,15 @@ class Artifact:
             tensors=target_tensors,
             device=first_tensor.device,
             device_id=device_id,
-            region_id=None,
-            region_layout=region_layout,
+            layout=binding_layout,
+            binding_id=binding_id,
+            region_ids=region_layout.region_ids,
+            selection_names=region_layout.selection_names,
+            view_id=region_layout.view_id,
+            view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             fallback=self._fallback,
-            artifact_id=self._ensure_identified(),
-            canonical_index_bytes=canonical_index_bytes,
+            current_value_metadata=current_value_metadata,
             target_write_token=getattr(response, "target_write_token", None),
         )
         return Binding(slot, publish=publish, ctx=ctx)
@@ -1451,6 +1583,21 @@ class Artifact:
             )
             raise
 
+        binding_id, binding_layout, current_value_metadata = _register_client_binding(
+            runtime=runtime,
+            device_id=device_id,
+            region_layout=region_layout,
+            canonical_index_bytes=canonical_index_bytes,
+            selection=(
+                response.resolved_selection
+                if hasattr(response, "resolved_selection")
+                else None
+            ),
+            source_artifact_id=self._ensure_identified(),
+            target_write_token=getattr(response, "target_write_token", None),
+            ctx=ctx,
+        )
+
         slot = InplaceSlot(
             store=store,
             runtime=runtime,
@@ -1458,12 +1605,15 @@ class Artifact:
             tensors=target_tensors,
             device=first_tensor.device,
             device_id=device_id,
-            region_id=None,
-            region_layout=region_layout,
+            layout=binding_layout,
+            binding_id=binding_id,
+            region_ids=region_layout.region_ids,
+            selection_names=region_layout.selection_names,
+            view_id=region_layout.view_id,
+            view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             fallback=self._fallback,
-            artifact_id=self._ensure_identified(),
-            canonical_index_bytes=canonical_index_bytes,
+            current_value_metadata=current_value_metadata,
             target_write_token=getattr(response, "target_write_token", None),
             copy_plan=copy_plan,
         )
@@ -1524,6 +1674,9 @@ class Artifact:
                 index_kind=index_kind,
                 logical_layout_hash=logical_layout_hash,
                 view_id=view_id or None,
+                ordered_names=tuple(source_selection.tensor_names)
+                if source_selection.tensor_names
+                else None,
             )
         else:
             if mode != "byte_space":
@@ -1617,6 +1770,7 @@ class Artifact:
                 target_layout=owner_layout.target_layout,
                 target_index_bytes=owner_layout.target_index_bytes,
                 device_uuid=device_uuid_for(device_id),
+                binding_layout_id=owner_layout.binding_layout_id,
                 preference=preference,
                 source_policy=source_policy,
                 copy_plan=copy_plan_proto,
@@ -1663,17 +1817,42 @@ class Artifact:
                 )
             raise
 
+        try:
+            current_value_metadata = parse_binding_value_or_raise(
+                response.current_value if hasattr(response, "current_value") else None,
+                rpc_name="CreateOwnedBinding",
+                expected_binding_id=str(response.binding_id),
+                expected_binding_layout_id=owner_layout.binding_layout_id,
+            )
+        except ArtifactError:
+            with contextlib.suppress(Exception):
+                runtime.ensure_client().close_owned_binding(
+                    binding_id=str(response.binding_id)
+                )
+            raise
+
         slot = OwnedBindingSlot(
             store=store,
             runtime=runtime,
             tensors=tensors,
+            layout=owner_layout,
             binding_id=str(response.binding_id),
-            selection=response.resolved_selection,
+            current_value_metadata=current_value_metadata,
             device=device,
             device_id=device_id,
             fallback=self._fallback,
             target_write_token=getattr(response, "target_write_token", None),
         )
+        if slot.current_value_metadata is None:
+            with contextlib.suppress(Exception):
+                runtime.ensure_client().close_owned_binding(
+                    binding_id=str(response.binding_id)
+                )
+            raise ArtifactError(
+                "CreateOwnedBinding returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
         return Binding(slot, publish=publish, ctx=ctx)
 
     def _build_owner_source_selection(
@@ -1693,6 +1872,12 @@ class Artifact:
             view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
             if view_metadata is not None and view_metadata.tensor_names:
                 selection_names = tuple(view_metadata.tensor_names)
+
+        if view_spec_proto is None and selection_names:
+            view_spec_proto = _build_subset_view_spec_proto(
+                canonical_index=self._ensure_metadata(),
+                tensor_names=selection_names,
+            )
 
         has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
         layout_index_bytes: bytes | None = None
@@ -2270,6 +2455,12 @@ class Artifact:
         if view_metadata is not None and view_metadata.tensor_names:
             selection_names = tuple(view_metadata.tensor_names)
 
+        if view_spec_proto is None and selection_names:
+            view_spec_proto = _build_subset_view_spec_proto(
+                canonical_index=self._ensure_metadata(),
+                tensor_names=selection_names,
+            )
+
         canonical_index_bytes = self._canonical_index_bytes
         if canonical_index_bytes is None and runtime is not None:
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
@@ -2573,10 +2764,19 @@ class Artifact:
             if (
                 require_view_id
                 and not view_id
-                and self._view_spec is not None
-                and not self._view_spec.is_identity
+                and (
+                    (self._view_spec is not None and not self._view_spec.is_identity)
+                    or cache.tensor_names
+                )
             ):
-                view_proto = self._view_spec.proto
+                view_proto = (
+                    self._view_spec.proto
+                    if self._view_spec is not None and not self._view_spec.is_identity
+                    else _build_subset_view_spec_proto(
+                        canonical_index=canonical_index,
+                        tensor_names=cache.tensor_names,
+                    )
+                )
                 if view_proto is None:
                     raise ArtifactError(
                         "View spec proto missing while computing view_id",

@@ -83,6 +83,13 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
 - Pass `canonical_index_bytes` to bootstrap a new assembly without needing
   Global Store state. `register_view(..., registration_kind="piece")` is
   equivalent, while `allow_partial` is deprecated.
+- `Store.start_assembly_attempt(layout_id=...)` creates a fresh assembly
+  workspace bound to a `LayoutSpec` and returns an `AssemblyAttemptRef`
+  containing the expected `view_id` set and a deterministic
+  `contribution_contract_hash`.
+- `Store.wait_assembly_attempt(attempt)` drives a still-open attempt onto that
+  same deterministic seal operation, then waits for it and decodes the source
+  publish lineage into a `PublishedModelVersion`.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
@@ -105,9 +112,26 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
   executes the same traced copy plan (`CopyPlanEntry`/`Range`) against
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
+- `Store.create_binding(layout, ownership=\"daemon\", device=\"cuda:0\")` creates a
+  layout-seeded binding before any artifact is installed. The binding starts with
+  `current_value is None` and becomes mutable via `begin_update(...)`.
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you
   still want routable replicas after a successful apply.
+- `binding.current_value` is the authoritative sealed value handle for the local
+  binding. `binding.artifact_id` / `binding.selection` are convenience mirrors
+  and become `None` when the current value is absent or local-only.
+- `binding.begin_update(...)` retires any published replica, clears the current
+  sealed value, and returns a `BindingUpdateEpoch`.
+- `binding.seal_current(update_epoch=...)` closes the mutable window and produces
+  a local-only `SealedBindingValue`. Local seal does not mint a routable
+  artifact id; publish/key activation remain valid only for artifact-backed
+  current values created by bind/swap flows.
+- `sealed_value.contribute_to_assembly(attempt=...)` compiles the sealed binding
+  onto the existing assembly trunk:
+  piece/view-backed bindings reuse the same piece registration path, while
+  full-canonical bindings reuse canonical registration when the attempt
+  contract has no required `expected_view_ids`.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
   enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can

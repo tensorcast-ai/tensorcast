@@ -987,6 +987,9 @@ class _CoalescedUploader:
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, CoalescedHandshake):
             raise TensorCastError("Unexpected handshake type for coalesced plan")
+        fake_cuda_enabled = (
+            os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
+        )
         cuda_handle = handshake.daemon_ipc_handle
         base_ptr = get_cuda_memory_ptr(ctx.device_id, cuda_handle)
         dest_state_dict = restore_tensors(
@@ -1003,9 +1006,16 @@ class _CoalescedUploader:
             dst = dest_state_dict[name]
             local = src
             if not local.is_cuda:
-                local = local.to(torch.device("cuda", ctx.device_id), non_blocking=True)
+                if fake_cuda_enabled:
+                    local = local.contiguous()
+                else:
+                    local = local.to(
+                        torch.device("cuda", ctx.device_id), non_blocking=True
+                    )
             else:
-                if (local.device.index or 0) != int(ctx.device_id):
+                if fake_cuda_enabled:
+                    local = local.detach()
+                elif (local.device.index or 0) != int(ctx.device_id):
                     raise DeviceMismatch(
                         f"Tensor '{name}' device mismatch: expected cuda:{ctx.device_id}, got {local.device}"
                     )
@@ -1018,7 +1028,8 @@ class _CoalescedUploader:
             dst.copy_(local, non_blocking=True)
         if cancel_event and cancel_event.is_set():
             raise CancelledError
-        torch.cuda.synchronize(ctx.device_id)
+        if not fake_cuda_enabled:
+            torch.cuda.synchronize(ctx.device_id)
         return dest_state_dict
 
 
@@ -1615,7 +1626,11 @@ def _register_artifact_core(
             "vram_leased plan requires CUDA tensors (device_id must be inferred)"
         )
     if view is not None and plan_type is not PlanType.VRAM_COALESCED:
-        raise InvalidPlan("View registration requires vram_coalesced plan")
+        fake_cuda_enabled = (
+            os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
+        )
+        if not (fake_cuda_enabled and plan_type is PlanType.DRAM_STABLE):
+            raise InvalidPlan("View registration requires vram_coalesced plan")
 
     span_names = {
         PlanType.DRAM_STABLE: "Client/RegisterArtifact.StableDram",
