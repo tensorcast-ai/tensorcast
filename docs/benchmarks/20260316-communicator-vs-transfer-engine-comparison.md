@@ -20,39 +20,50 @@ apples-to-apples.
 
 ## 2. Generated Figures
 
-### 2.1 Single-NIC Aligned Reference
+### 2.1 Single-NIC Large-Block Sweep
 
 ![Single-NIC Reference](./image/communicator_vs_te_single_nic_reference_20260316.svg)
 
 What it is for:
 
-1. show the strongest currently aligned single-NIC reference on one matched
-   physical `GPU <-> NIC` pair
-2. keep raw verbs, Mooncake TE, and communicator on one visual axis
+1. focus the main single-NIC figure on large single-request reads that are
+   closer to weight-region loading than the earlier `1 MiB x 16 x 8` stress
+   case
+2. keep raw IB verbs results visible as horizontal references instead of
+   giving the aligned-peak comparison its own dominant panel
+3. show whether communicator and Mooncake TE converge once the logical request
+   becomes large enough
 
 What it is **not**:
 
-1. not a strict same-workload communicator vs Mooncake benchmark
-2. the Mooncake and raw verbs bars are matched on one aligned physical pair
-3. the communicator bars are reference points with explicit caveats
+1. not a strict same-host-pair apples-to-apples sweep across every point
+2. the `64 MiB` point comes from the earlier `0496 -> 0078` aligned pair
+3. the `256 MiB` / `1 GiB` / `4 GiB` points come from a later
+   `0496 -> 0550` aligned pair after the `0078` worker stopped scheduling
+   reliably
 
 Use it to answer:
 
-1. does Mooncake's reported `~24.4 GB/s` single-NIC GDR result make sense
-   against raw verbs?
-2. where does communicator currently sit relative to that aligned single-NIC
-   reference?
+1. if a single logical `read_tensor()` is already very large, does
+   communicator still lag TE?
+2. how close do both frameworks get to the raw single-NIC verbs references?
 
 Current reading:
 
-1. aligned raw verbs on `0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2` are about
-   `24.46 ~ 24.50 GB/s`
-2. aligned Mooncake TE on the same physical pair reaches
-   `24.44 ~ 24.45 GB/s`
-3. communicator best-known strict-direct single-big-read remains
-   `20.25 GB/s`
-4. a fresh communicator aligned single-NIC probe on
-   `0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1` was `20.56 GB/s`
+1. raw aligned IB verbs references remain about `24.46 ~ 24.50 GB/s`
+2. at `32 MiB`, communicator is still clearly below TE:
+   - communicator: `18.56 GB/s`
+   - TE: `22.49 GB/s`
+3. at `64 MiB`, communicator is still below TE:
+   - communicator: `20.56 GB/s`
+   - TE: `22.75 GB/s`
+4. once the logical request reaches `256 MiB+`, communicator and TE are in the
+   same single-NIC class:
+   - `256 MiB`: communicator `23.17 GB/s`, TE `23.02 GB/s`
+   - `1 GiB`: communicator `23.96 GB/s`, TE `23.69 GB/s`
+   - `4 GiB`: communicator `24.15 GB/s`, TE `23.88 GB/s`
+5. this supports the interpretation that the earlier large gap is dominated by
+   many-small-request control granularity, not by the large direct-RDMA path
 
 ### 2.2 Full-8 Framework Throughput Reference
 
@@ -119,15 +130,17 @@ For communicator-generated data, prefer the explicit `bw_GBps` / `bw_GBps_*`
 fields when present. Older result files still carry the legacy field name
 `bw_gbps`, which represents the same decimal `GB/s` quantity.
 
-### 4.1 Single-NIC Aligned Reference
+### 4.1 Single-NIC Large-Block Sweep
 
-This chart intentionally uses the strongest currently aligned single-NIC
-comparison we have:
+This chart intentionally centers the large single-request sweep:
 
-1. raw verbs `ib_write_bw` / `ib_read_bw`
-2. Mooncake TE `read` / `write`
-3. communicator best-known strict-direct single-big-read
-4. communicator fresh same-pair probe
+1. bars:
+   - communicator vs Mooncake TE at `32 MiB`, `64 MiB`, `256 MiB`, `1 GiB`,
+     and `4 GiB`
+   - all are single logical requests with `threads=1`, `batch_size=1`
+2. reference lines:
+   - raw verbs aligned `ib_read_bw`
+   - raw verbs aligned `ib_write_bw`
 
 Aligned pair used for raw verbs and Mooncake:
 
@@ -139,10 +152,16 @@ Values used:
 
 1. `ib_write_bw`: `196.00 Gbps` = `24.50 GB/s`
 2. `ib_read_bw`: `195.72 Gbps` = `24.46 GB/s`
-3. Mooncake TE write: `24.45 GB/s`
-4. Mooncake TE read: `24.44 GB/s`
-5. communicator best-known strict-direct read: `20.25 GB/s`
-6. communicator fresh aligned `0496 -> 0078` probe: `20.56 GB/s`
+3. communicator `32 MiB`: `18.56 GB/s`
+4. Mooncake TE `32 MiB`: `22.49 GB/s`
+5. communicator `64 MiB`: `20.56 GB/s`
+6. Mooncake TE `64 MiB`: `22.75 GB/s`
+7. communicator `256 MiB`: `23.17 GB/s`
+8. communicator `1 GiB`: `23.96 GB/s`
+9. communicator `4 GiB`: `24.15 GB/s`
+10. Mooncake TE `256 MiB`: `23.02 GB/s`
+11. Mooncake TE `1 GiB`: `23.69 GB/s`
+12. Mooncake TE `4 GiB`: `23.88 GB/s`
 
 Evidence:
 
@@ -152,6 +171,16 @@ Evidence:
 4. [/data/tc/single-nic-compare-20260316-161728/te_read_mlx5_2.json](/data/tc/single-nic-compare-20260316-161728/te_read_mlx5_2.json)
 5. [/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json](/data/tc/comm-tune-0360-0496-bigread-t1-qp4-latfix-attempt1-025158/result.json)
 6. [/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json](/data/tc/single-nic-compare-20260316-161728/comm_initiator_run_aligned_mlx5_1.json)
+7. [/data/tc/large-single-compare2-20260316-200526/summary.json](/data/tc/large-single-compare2-20260316-200526/summary.json)
+8. [/data/tc/large-single-32m-20260316-202602/summary.json](/data/tc/large-single-32m-20260316-202602/summary.json)
+
+Important metric clarification:
+
+1. `32 MiB`, `64 MiB`, `256 MiB`, `1 GiB`, and `4 GiB` here are the single
+   logical read request sizes
+2. they are not single RDMA READ WR sizes
+3. communicator still splits one large request into multiple windows / segments
+   before posting the actual RDMA operations
 
 ### 4.2 Communicator Full-8 Aggregate
 
@@ -218,12 +247,14 @@ These caveats must remain attached to the figures.
 
 ### 5.1 Single-NIC Caveat
 
-1. raw verbs and Mooncake TE bars in the single-NIC chart are physically
-   aligned on the same `GPU2 <-> mlx5_2` pair
-2. communicator best-known single-big-read is still from a different host pair
-3. communicator fresh same-pair probe is now aligned on a different good local
-   pair (`GPU1 <-> mlx5_1`), so the chart should be read as "same host pair,
-   aligned single-NIC references", not "identical GPU ordinal on every bar"
+1. the raw verbs reference lines come from the earlier aligned
+   `0496 GPU2/mlx5_2 -> 0078 GPU2/mlx5_2` pair
+2. the `32 MiB` bar comes from `0496 GPU0/mlx5_7 -> 0078 GPU0/mlx5_4`
+3. the `64 MiB` communicator and TE bars come from an earlier aligned
+   `0496 GPU1/mlx5_1 -> 0078 GPU1/mlx5_1` run set
+4. the `256 MiB` / `1 GiB` / `4 GiB` sweep uses another aligned H800 pair
+   (`0496 GPU0/mlx5_2 -> 0550 GPU0/mlx5_5`) because the `0078` worker was not
+   schedulable in a stable way during this rerun window
 
 ### 5.2 Operation Direction
 
