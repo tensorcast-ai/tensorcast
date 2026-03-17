@@ -67,26 +67,60 @@ class _GlobalClient:
         self.error: operation_pb2.OperationError | None = None
         self.kind = "seal_assembly"
         self.target_artifact_id = "assembly-1"
+        self.authority_scope_kind = ""
+        self.authority_scope_id = ""
+        self.attachment_kind = ""
+        self.recovery_class = ""
+        self.fencing_digest = ""
+        self.last_get_ref: operation_pb2.OperationRef | None = None
+        self.last_wait_ref: operation_pb2.OperationRef | None = None
 
-    def get_operation(self, operation_id: str, *, timeout_s: float = 10.0):
+    def get_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_s: float = 10.0,
+    ):
         del timeout_s
+        self.last_get_ref = operation_pb2.OperationRef()
+        if operation_ref is not None:
+            self.last_get_ref.CopyFrom(operation_ref)
         resp = operation_pb2.GetOperationResponse()
         resp.ref.operation_id = operation_id
         resp.ref.kind = self.kind
         resp.ref.target_artifact_id = self.target_artifact_id
+        resp.ref.authority_scope_kind = self.authority_scope_kind
+        resp.ref.authority_scope_id = self.authority_scope_id
+        resp.ref.attachment_kind = self.attachment_kind
+        resp.ref.recovery_class = self.recovery_class
+        resp.ref.fencing_digest = self.fencing_digest
         resp.status.state = self.get_state
         if self.error is not None:
             resp.status.error.CopyFrom(self.error)
         return resp
 
     def wait_operation(
-        self, operation_id: str, *, timeout_ms: int, timeout_s: float
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_ms: int,
+        timeout_s: float,
     ):
         del timeout_ms, timeout_s
+        self.last_wait_ref = operation_pb2.OperationRef()
+        if operation_ref is not None:
+            self.last_wait_ref.CopyFrom(operation_ref)
         resp = operation_pb2.GetOperationResponse()
         resp.ref.operation_id = operation_id
         resp.ref.kind = self.kind
         resp.ref.target_artifact_id = self.target_artifact_id
+        resp.ref.authority_scope_kind = self.authority_scope_kind
+        resp.ref.authority_scope_id = self.authority_scope_id
+        resp.ref.attachment_kind = self.attachment_kind
+        resp.ref.recovery_class = self.recovery_class
+        resp.ref.fencing_digest = self.fencing_digest
         resp.status.state = self.wait_state
         if self.error is not None:
             resp.status.error.CopyFrom(self.error)
@@ -197,6 +231,11 @@ def test_daemon_global_store_operation_retains_explicit_operation_ref() -> None:
         operation_id="op-6",
         kind="seal_assembly",
         target_artifact_id="assembly-6",
+        authority_scope_kind="workflow_owner",
+        authority_scope_id="workflow-6",
+        attachment_kind="target_publication",
+        recovery_class="ephemeral_process_local",
+        fencing_digest="digest-6",
     )
     op = DaemonGlobalStoreOperation(
         operation_id="op-6",
@@ -219,6 +258,14 @@ def test_daemon_global_store_operation_retains_explicit_operation_ref() -> None:
     descriptor = op._operation_ref
     assert descriptor.kind == "seal_assembly"
     assert descriptor.target_artifact_id == "assembly-6"
+    assert descriptor.authority_scope_kind == "workflow_owner"
+    assert descriptor.authority_scope_id == "workflow-6"
+    assert descriptor.attachment_kind == "target_publication"
+    assert descriptor.recovery_class == "ephemeral_process_local"
+    assert descriptor.fencing_digest == "digest-6"
+    assert client.last_get_ref is not None
+    assert client.last_get_ref.authority_scope_id == "workflow-6"
+    assert client.last_get_ref.attachment_kind == "target_publication"
 
 
 def test_daemon_global_store_operation_refreshes_operation_ref_from_backend() -> None:
@@ -226,6 +273,11 @@ def test_daemon_global_store_operation_refreshes_operation_ref_from_backend() ->
     client.get_state = operation_pb2.OPERATION_STATE_FAILED
     client.kind = "seal_assembly"
     client.target_artifact_id = "assembly-7"
+    client.authority_scope_kind = "workflow_owner"
+    client.authority_scope_id = "workflow-7"
+    client.attachment_kind = "target_publication"
+    client.recovery_class = "ephemeral_process_local"
+    client.fencing_digest = "digest-7"
     client.error = operation_pb2.OperationError(
         status_code="FAILED_PRECONDITION",
         message="owner unavailable",
@@ -251,3 +303,38 @@ def test_daemon_global_store_operation_refreshes_operation_ref_from_backend() ->
     assert descriptor.operation_id == "op-7"
     assert descriptor.kind == "seal_assembly"
     assert descriptor.target_artifact_id == "assembly-7"
+    assert descriptor.authority_scope_kind == "workflow_owner"
+    assert descriptor.authority_scope_id == "workflow-7"
+    assert descriptor.attachment_kind == "target_publication"
+    assert descriptor.recovery_class == "ephemeral_process_local"
+    assert descriptor.fencing_digest == "digest-7"
+    assert client.last_get_ref is not None
+    assert client.last_get_ref.operation_id == "op-7"
+
+
+def test_daemon_global_store_operation_cancel_still_uses_operation_ref() -> None:
+    client = _GlobalClient()
+    client.get_state = operation_pb2.OPERATION_STATE_RUNNING
+    runtime = _Runtime(client)
+    operation_ref = operation_pb2.OperationRef(
+        operation_id="op-8",
+        kind="publish_target_replica",
+        target_artifact_id="artifact-8",
+        authority_scope_kind="workflow_owner",
+        authority_scope_id="workflow-8",
+        attachment_kind="target_publication",
+        recovery_class="ephemeral_process_local",
+    )
+    op = DaemonGlobalStoreOperation(
+        operation_id="op-8",
+        runtime_ref=weakref.ref(runtime),
+        ctx=None,
+        context={},
+        result_factory=lambda _: "unreachable",
+        operation_ref=operation_ref,
+    )
+
+    assert op.cancel() is False
+    assert client.last_get_ref is not None
+    assert client.last_get_ref.authority_scope_id == "workflow-8"
+    assert client.last_get_ref.attachment_kind == "target_publication"

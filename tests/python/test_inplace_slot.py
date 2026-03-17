@@ -19,6 +19,7 @@ from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import VramRegionHandle
 
 artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
@@ -63,9 +64,12 @@ class FakeSlotClient:
         self.refill_calls: list[dict[str, Any]] = []
         self.close_calls: list[str] = []
         self.publish_calls: list[dict[str, Any]] = []
+        self.start_publish_calls: list[dict[str, Any]] = []
         self.retire_calls: list[dict[str, Any]] = []
         self.register_calls: list[dict[str, Any]] = []
         self.unregister_calls: list[str] = []
+        self.last_get_operation_ref: operation_pb2.OperationRef | None = None
+        self.last_wait_operation_ref: operation_pb2.OperationRef | None = None
         self.publish_failures = 0
         self.materialize_failures = 0
         self.omit_commit_current_value = False
@@ -180,6 +184,57 @@ class FakeSlotClient:
                 retryable=True,
             )
         return types.SimpleNamespace(lease_id="lease-1", replica_id="replica-1")
+
+    def start_publish_target_replica(self, **kwargs: Any) -> Any:
+        self.start_publish_calls.append(kwargs)
+        operation_id = str(kwargs.get("operation_id") or "publish-op-1")
+        operation = operation_pb2.OperationRef(
+            operation_id=operation_id,
+            kind="publish_target_replica",
+            target_artifact_id="artifact-1",
+            authority_scope_kind="workflow_owner",
+            authority_scope_id="publication-1",
+            attachment_kind="target_publication",
+            recovery_class="ephemeral_process_local",
+        )
+        return types.SimpleNamespace(operation=operation)
+
+    def get_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_s: float = 10.0,
+    ) -> operation_pb2.GetOperationResponse:
+        del timeout_s
+        self.last_get_operation_ref = operation_pb2.OperationRef()
+        if operation_ref is not None:
+            self.last_get_operation_ref.CopyFrom(operation_ref)
+        response = operation_pb2.GetOperationResponse()
+        response.ref.CopyFrom(operation_ref or operation_pb2.OperationRef())
+        if not response.ref.operation_id:
+            response.ref.operation_id = operation_id
+        response.status.state = operation_pb2.OPERATION_STATE_SUCCESS
+        payload = store_daemon_pb2.PublishTargetReplicaResponse(
+            lease_id="lease-1",
+            replica_id="replica-1",
+        )
+        response.status.result.Pack(payload)
+        return response
+
+    def wait_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_ms: int,
+        timeout_s: float,
+    ) -> operation_pb2.GetOperationResponse:
+        del timeout_ms, timeout_s
+        self.last_wait_operation_ref = operation_pb2.OperationRef()
+        if operation_ref is not None:
+            self.last_wait_operation_ref.CopyFrom(operation_ref)
+        return self.get_operation(operation_id, operation_ref=operation_ref)
 
     def retire_published_replica(self, **kwargs: Any) -> Any:
         self.retire_calls.append(kwargs)
@@ -419,6 +474,38 @@ def test_publish_failure_keeps_binding_clean_and_retry(
     binding.publish_replica()
     assert binding._slot.published_lease_id == "lease-1"
     assert len(client.publish_calls) == 2
+
+
+def test_binding_publish_operation_uses_operation_ref_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+
+    op = binding._slot.publish_replica_operation()
+    status = op.status()
+
+    assert status.state == "success"
+    assert len(client.start_publish_calls) == 1
+    assert client.last_get_operation_ref is not None
+    assert client.last_get_operation_ref.kind == "publish_target_replica"
+    assert client.last_get_operation_ref.authority_scope_kind == "workflow_owner"
+    assert client.last_get_operation_ref.attachment_kind == "target_publication"
+
+    assert op.wait() is None
+    assert binding._slot.published_lease_id == "lease-1"
+    assert binding._slot.published_replica_id == "replica-1"
 
 
 def test_bind_into_failed_materialize_clears_current_value_and_marks_dirty(

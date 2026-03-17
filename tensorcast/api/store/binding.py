@@ -18,6 +18,7 @@ import torch
 from tensorcast.api._config import PlanType
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
+from tensorcast.api.operation import Operation, OperationStatus, PollingOperation
 from tensorcast.api.store.binding_state import clone_selection
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
@@ -81,7 +82,7 @@ def _read_context_tag_int(
     if value is None:
         return default
     try:
-        return int(value)
+        return int(str(value))
     except (TypeError, ValueError):
         return default
 
@@ -424,6 +425,12 @@ class SealedBindingValue:
         binding = self._require_current_binding()
         binding.publish_replica(ctx=ctx)
 
+    def publish_replica_operation(
+        self, *, ctx: CallContext | None = None
+    ) -> "Operation[SealedBindingValue]":
+        binding = self._require_current_binding()
+        return binding.publish_replica_operation(ctx=ctx)
+
     def activate_key(
         self,
         key: str,
@@ -571,7 +578,7 @@ class SealedBindingValue:
             assembly_id=attempt.assembly_id,
             binding_id=self.binding_id,
             binding_value_id=self.binding_value_id,
-            contribution_kind=contribution_kind,  # type: ignore[arg-type]
+            contribution_kind=contribution_kind,
             view_id=contributed_view_id,
             coverage_plan_hash=coverage_plan_hash,
             accepted=bool(getattr(response, "accepted", False)),
@@ -782,6 +789,39 @@ class Binding:
                 retryable=False,
             )
         return current_value
+
+    def publish_replica_operation(
+        self,
+        *,
+        ctx: CallContext | None = None,
+    ) -> "Operation[SealedBindingValue]":
+        slot_op = self._slot.publish_replica_operation(
+            ttl_ms=self._publish_ttl_ms,
+            ctx=ctx,
+        )
+
+        def _status() -> OperationStatus:
+            return slot_op.status()
+
+        def _result() -> SealedBindingValue:
+            _ = slot_op.wait()
+            self._start_keepalive()
+            current_value = self.current_value
+            if current_value is None:
+                raise ArtifactError(
+                    "publish_replica_operation() requires a current sealed value",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            return current_value
+
+        return PollingOperation(
+            operation_id=slot_op.operation_id,
+            status_fn=_status,
+            result_fn=_result,
+            cancel_fn=slot_op.cancel,
+            ctx=ctx,
+        )
 
     def _start_keepalive(self) -> None:
         lease_id = self._slot.published_lease_id

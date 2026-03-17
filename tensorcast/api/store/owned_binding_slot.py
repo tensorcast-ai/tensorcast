@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import uuid
+import weakref
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping
 
@@ -12,6 +14,12 @@ from tensorcast._c_ext import get_cuda_memory_ptr, restore_tensors
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import _tensor_payload_from_proto
 from tensorcast.api.context import CallContext
+from tensorcast.api.operation import (
+    DaemonGlobalStoreOperation,
+    Operation,
+    OperationStatus,
+    PollingOperation,
+)
 from tensorcast.api.store.binding_state import (
     BindingValueMetadata,
     clone_selection,
@@ -297,6 +305,113 @@ class OwnedBindingSlot:
             str(resp.replica_id)
             if hasattr(resp, "replica_id") and resp.replica_id
             else None
+        )
+
+    def publish_replica_operation(
+        self,
+        *,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        ctx: CallContext | None = None,
+    ) -> Operation[None]:
+        self._ensure_open()
+        if self._dirty:
+            raise ArtifactError(
+                "Binding contents are dirty; materialize again before publishing",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if self._published_lease_id is not None:
+            return PollingOperation(
+                operation_id=self._published_lease_id,
+                status_fn=lambda: OperationStatus(
+                    state="success",
+                    message="publish already completed",
+                ),
+                result_fn=lambda: None,
+                ctx=ctx,
+            )
+        if self._selection is None or self.artifact_id is None:
+            raise ArtifactError(
+                "publish_replica requires an artifact-backed current value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        selection_names = tuple(str(name) for name in self._selection.tensor_names)
+        if not _selection_publishable(
+            selection_names=selection_names,
+            view_subset_hash=bytes(self._selection.view_subset_hash or b""),
+            view_id=_normalize_view_id(self._selection.view_id),
+        ):
+            raise ArtifactError(
+                "Binding selection is not publishable (packed or subset)",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if not self._target_publication_token:
+            raise ArtifactError(
+                "target_publication_token missing; daemon publish not available",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        timeout_s = _ctx_timeout_s(ctx)
+        operation_id = uuid.uuid4().hex
+        client = self._runtime.ensure_client()
+        try:
+            start_resp = client.start_publish_target_replica(
+                target_publication_token=self._target_publication_token,
+                byte_space=self.byte_space,
+                ttl_ms=ttl_ms,
+                owner_pid=owner_pid,
+                operation_id=operation_id,
+                timeout_s=timeout_s if timeout_s is not None else 10.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+
+        operation_ref = (
+            start_resp.operation if hasattr(start_resp, "operation") else None
+        )
+        resolved_operation_id = (
+            str(getattr(operation_ref, "operation_id", "") or "") or operation_id
+        )
+
+        def _decode(resp) -> None:
+            payload = store_daemon_pb2.PublishTargetReplicaResponse()
+            if not resp.status.result.Unpack(payload):
+                raise ArtifactError(
+                    "Unexpected publish target replica result type",
+                    status_code="INTERNAL",
+                    retryable=False,
+                )
+            lease_id = str(payload.lease_id or "")
+            if not lease_id:
+                raise ArtifactError(
+                    "Publish target replica operation returned empty lease_id",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            self._published_lease_id = lease_id
+            self._published_replica_id = (
+                str(payload.replica_id) if payload.replica_id else None
+            )
+            return None
+
+        return DaemonGlobalStoreOperation(
+            operation_id=resolved_operation_id,
+            runtime_ref=weakref.ref(self._runtime),
+            ctx=ctx,
+            context={
+                "artifact_id": self.artifact_id or "",
+                "binding_id": self._binding_id,
+            },
+            result_factory=_decode,
+            operation_ref=operation_ref,
         )
 
     def retire(

@@ -22,6 +22,7 @@ from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import VramRegionHandle
 
 artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
@@ -66,12 +67,14 @@ class FakeBindingClient:
         self.refill_calls: list[dict[str, Any]] = []
         self.close_calls: list[str] = []
         self.publish_calls: list[dict[str, Any]] = []
+        self.start_publish_calls: list[dict[str, Any]] = []
         self.retire_calls: list[dict[str, Any]] = []
         self.register_calls: list[dict[str, Any]] = []
         self.unregister_calls: list[str] = []
         self.swap_key_calls: list[dict[str, Any]] = []
         self.keepalive_calls: list[tuple[str, int, int]] = []
         self.submit_contribution_calls: list[dict[str, Any]] = []
+        self.last_get_operation_ref: operation_pb2.OperationRef | None = None
         self.refill_failures = 0
         self.omit_current_value_on_seal = False
         self.refill_error: ArtifactError | None = None
@@ -173,6 +176,54 @@ class FakeBindingClient:
     def publish_target_replica(self, **kwargs: Any) -> Any:
         self.publish_calls.append(kwargs)
         return types.SimpleNamespace(lease_id="lease-1", replica_id="replica-1")
+
+    def start_publish_target_replica(self, **kwargs: Any) -> Any:
+        self.start_publish_calls.append(kwargs)
+        operation_id = str(kwargs.get("operation_id") or "binding-publish-op")
+        operation = operation_pb2.OperationRef(
+            operation_id=operation_id,
+            kind="publish_target_replica",
+            target_artifact_id="artifact-1",
+            authority_scope_kind="workflow_owner",
+            authority_scope_id="binding-workflow",
+            attachment_kind="target_publication",
+            recovery_class="ephemeral_process_local",
+        )
+        return types.SimpleNamespace(operation=operation)
+
+    def get_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_s: float = 10.0,
+    ) -> operation_pb2.GetOperationResponse:
+        del timeout_s
+        self.last_get_operation_ref = operation_pb2.OperationRef()
+        if operation_ref is not None:
+            self.last_get_operation_ref.CopyFrom(operation_ref)
+        response = operation_pb2.GetOperationResponse()
+        response.ref.CopyFrom(operation_ref or operation_pb2.OperationRef())
+        if not response.ref.operation_id:
+            response.ref.operation_id = operation_id
+        response.status.state = operation_pb2.OPERATION_STATE_SUCCESS
+        payload = store_daemon_pb2.PublishTargetReplicaResponse(
+            lease_id="lease-1",
+            replica_id="replica-1",
+        )
+        response.status.result.Pack(payload)
+        return response
+
+    def wait_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_ms: int,
+        timeout_s: float,
+    ) -> operation_pb2.GetOperationResponse:
+        del timeout_ms, timeout_s
+        return self.get_operation(operation_id, operation_ref=operation_ref)
 
     def create_owned_binding(self, **kwargs: Any) -> Any:
         self.create_calls.append(kwargs)
@@ -533,6 +584,29 @@ def test_binding_begin_update_clears_current_value_and_seal_preserves_ptrs(
     assert binding.current_value is not None
     assert binding.tensors["alpha"].data_ptr() == ptrs["alpha"]
     assert binding.tensors["beta"].data_ptr() == ptrs["beta"]
+
+
+def test_binding_publish_replica_operation_returns_current_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+
+    op = binding.publish_replica_operation()
+    status = op.status()
+
+    assert status.state == "success"
+    assert len(client.start_publish_calls) == 1
+    assert client.last_get_operation_ref is not None
+    assert client.last_get_operation_ref.kind == "publish_target_replica"
+    assert client.last_get_operation_ref.authority_scope_kind == "workflow_owner"
+    assert client.last_get_operation_ref.attachment_kind == "target_publication"
+
+    sealed = op.wait()
+    assert sealed.is_current is True
+    assert sealed.is_published is True
+    assert binding._slot.published_lease_id == "lease-1"
 
 
 def test_binding_rejects_wrong_binding_update_epoch(
