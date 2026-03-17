@@ -1,7 +1,7 @@
 ---
 slug: 0056-programmable-framework-adv
 title: Plan - Programmable Framework Advanced Runtime, Ingress, and Signals
-status: proposed
+status: in_progress
 areas: ["sdk", "daemon", "global_store", "proto", "integrations", "docs"]
 created: 2026-03-04
 last_updated: 2026-03-17
@@ -10,10 +10,17 @@ related_code:
   - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0055-programmable-framework.md
+  - tensorcast/api/plan/artifact_set.py
   - tensorcast/runtime.py
+  - tensorcast/api/runtime.py
+  - tensorcast/api/signals.py
   - tensorcast/api/plan/plan.py
   - tensorcast/node_agent/executor.py
   - tensorcast/engine_adapter/adapter.py
+  - daemon/service/grpc_service_impl.h
+  - daemon/service/grpc_service_impl_execute_plan.cc
+  - daemon/service/controllers/status_controller.h
+  - daemon/service/grpc_service_impl_execute_plan_test.cc
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/plan/v1/plan.proto
   - proto/tensorcast/node_agent/v1/node_agent.proto
@@ -26,10 +33,10 @@ links:
 
 Deliver the advanced programmable framework layer on top of `0055` while keeping it thin:
 
+- framework-owned `ArtifactSetRef` substrate for high-cardinality artifact sets,
 - daemon-run plan ingress without semantic drift from the local runner,
 - front-door convergence over one execution spine rather than another execution substrate,
 - daemon-served signals and directory snapshots with explicit staleness bounds,
-- generic set-level orchestration for high-cardinality artifact sets,
 - and strict separation between framework core and engine integration concerns.
 
 This plan explicitly does not turn `0056` into:
@@ -43,16 +50,21 @@ This plan explicitly does not turn `0056` into:
 
 - `0055` already defines plan and `PlanSpec` semantics, local `Plan.run()`, and canonical instance actions in today's
   code.
-- `proto/tensorcast/plan/v1/plan.proto` already provides canonical worker and instance targets plus canonical action
-  names; it does not yet carry a typed governance sub-object, set carrier, or cluster-scoped target.
-- `proto/tensorcast/node_agent/v1/node_agent.proto` already exposes `ExecutePlanRequest(plan, dry_run)` and canonical
-  artifact action results, so the repository already has a real instance-scoped execution front door.
+- `proto/tensorcast/plan/v1/plan.proto` now carries canonical worker and instance targets, typed
+  `GovernanceContext`, framework-owned `ArtifactSetRef` and `PrefetchSetAction`, and a reserved cluster-scoped target
+  slot (`TARGET_TYPE_CLUSTER` plus `cluster_action`).
+- `proto/tensorcast/node_agent/v1/node_agent.proto` already exposes `ExecutePlanRequest(plan, dry_run)` plus canonical
+  artifact and artifact-set results, so the repository already has a real instance-scoped execution front door.
+- `proto/tensorcast/daemon/v2/store_daemon.proto` now carries `ExecutePlanRequest(plan, execution_class, dry_run)` and
+  a terminal-result envelope, and the C++ Store Daemon now serves the first local-only `terminal_only` ingress slice
+  for worker-targeted execution.
 - `0078` and `0087` already define the artifact-selection and artifact-profile baseline that `0056` must reuse.
 - `0090`, `0093`, and `0094` already define routed truth, backing truth, and lifecycle-backed serving capability for
   high-cardinality artifacts.
-- `0100` is the active owner of distributed public continuation, but its first end-to-end non-terminal public
-  projection is still not fully closed.
-- `0102` now owns engine manifest production, engine request context, and alias policy.
+- `0096` and `0100` already close the first landed publish `attach_existing -> Operation[T]` path for
+  target-backed publish; `0056` must reuse that substrate rather than reopen it.
+- `0102` now owns engine manifest production, engine request context, alias policy, and the bridge from engine-side
+  manifest carriers into `ArtifactSetRef`.
 - `tensorcast/common/selection_identity.py` already defines the canonical `SelectionIdentity`; `0056` must reuse it
   rather than invent a second item-identity type.
 - current code already exposes:
@@ -62,93 +74,163 @@ This plan explicitly does not turn `0056` into:
 - current concrete gap:
   - `tensorcast/api/plan/plan.py` still leaves local instance-step execution unclosed, so the real missing work is
     convergence on one execution spine rather than another semantic layer.
-  - `ManifestResult` still carries `artifact_ids/layout_id/key_set_digest_hex`, not canonical item identities rooted in
-    `(artifact_id, logical_layout_hash, selection_hash)`.
-  - `plan.proto` still has only worker and instance targets, so the future cluster-workflow seam exists in design but
-    not yet in IR transport shape.
+  - runtime ingress now executes local worker-targeted plans through the real daemon RPC, but the daemon-local
+    bridge to NodeAgent or an in-process Instance Agent boundary is still not implemented.
+  - `TensorCastSignals.get_worker_status()` now consumes daemon-served `as_of_ms`, `staleness_ms`, `cache_epoch`, and
+    `freshness_state`, but watch-backed degraded freshness evidence and directory-cache correctness are still pending.
+  - typed governance transport is implemented for `PlanSpec`, but no canonical non-plan RPC propagation vocabulary has
+    landed yet.
+  - `ManifestResult` is still an engine-side result carrier, not a framework-owned `ArtifactSetRef`; `0056` must not
+    derive canonical set identity from it directly.
+  - the future cluster-workflow seam now exists in IR transport shape, but there is still no builder or daemon
+    execution surface that owns cluster workflow semantics.
+
+# Status Update
+
+- [x] Scope and ownership boundaries are now frozen in the `0056` design and plan.
+- [x] `ArtifactSetRef` contract, digest or cardinality rules, carrier forms, resolution contract, and the
+      no-raw-`ManifestResult` rule are now explicit in docs.
+- [x] Proto, SDK, runtime, and NodeAgent transport now carry `ArtifactSetRef`, `PrefetchSetAction`, and
+      `ArtifactSetResult` for framework-owned set orchestration.
+- [x] `prefetch_many` now lowers to bounded inline `ArtifactSetRef` (`MAX_INLINE_ARTIFACT_SET_ITEMS=1024`), and
+      `prefetch_set` reports per-item partial results while holding the worker readiness floor at
+      `local_replica_ready`.
+- [x] `manifest_backed` owner-provided resolution and explicit `0102` bridge transport now land additively through
+      `ManifestArtifactSetBridge`, `ManifestResult`, `PrefetchSetAction`, and NodeAgent result transport.
+- [x] Typed governance transport now lands in `CallContext.governance` and `PlanSpec.governance`.
+- [x] Runtime front-door wiring now lands through `tensorcast.connect(...)`, active-runtime `tensorcast.plan(ctx)`,
+      and daemon-client `ExecutePlan` request-envelope submission with declared execution class.
+- [x] The IR now reserves an explicit cluster-scoped transport slot (`TARGET_TYPE_CLUSTER` plus opaque
+      `cluster_action`) without importing workflow semantics into `0056`.
+- [x] Runtime-backed signals now expose a direct daemon `GetWorkerStatus` snapshot surface for the connected daemon.
+- [x] The broader daemon-execution slice remains scope-locked in docs as `local-only` plus `terminal_only`; the first
+      worker-targeted sub-slice is now implemented, while the daemon-local instance bridge is still pending.
+- [x] Real daemon-side `ExecutePlan` serving now lands for the first `local-only` plus `terminal_only` slice behind
+      `gateway_ingress_enabled`, returning terminal result envelopes and failing closed on remote worker, instance, and
+      cluster targets.
+- [x] Signal freshness metadata is now daemon-served for `GetWorkerStatus`: the daemon stamps `as_of_ms`,
+      `staleness_ms`, `cache_epoch`, and `freshness_state`, and the SDK consumes them with mixed-version fallback.
+- [x] First-slice ingress verification now covers real daemon serving, remote-target fail-closed behavior, and
+      `ArtifactSetRef` digest mismatch fail-closed behavior through daemon-side C++ tests.
+- [ ] Governance transport is only complete for `PlanSpec`; non-plan RPC metadata propagation remains pending.
+- [ ] Daemon-side instance bridging and watch-backed signals-serving controllers are still pending.
+
+# Execution Order
+
+- [x] Stage 1: land `0056` scope lock and `ArtifactSetRef` substrate contract first.
+- [x] Stage 2: hand bridge closeout to `0102` Phase 0-2 before `0056` runtime or ingress code consumes engine-side
+      high-cardinality outputs.
+- [ ] Stage 3: return to `0056` for daemon-side ingress execution, set orchestration completion, and mixed local or
+      ingress consistency.
+- [ ] Stage 4: execute `0103` Phase 1-3 after the set substrate and bridge semantics are stable.
+- [ ] Stage 5: evaluate `0103` Phase 4 coordinated-slot follow-up only if the earlier phases still leave a real gap.
 
 # Phases and Milestones
 
-- [ ] Phase 0: Scope lock and vocabulary cleanup
-  - [ ] Milestone 0.1: keep `0056` limited to runtime, ingress, signals, generic set-level orchestration, and front-door convergence.
-  - [ ] Milestone 0.2: freeze canonical instance action vocabulary around `manifest/publish/hydrate/evict_local`.
-  - [ ] Milestone 0.3: keep NodeAgent or the existing Instance Agent boundary as the unique instance-scoped execution
+- [x] Phase 0: Scope lock and substrate boundaries
+  - [x] Milestone 0.1: keep `0056` limited to runtime, ingress, signals, `ArtifactSetRef`-backed set orchestration,
+        and front-door convergence.
+  - [x] Milestone 0.2: freeze canonical instance action vocabulary around `manifest/publish/hydrate/evict_local`.
+  - [x] Milestone 0.3: keep NodeAgent or the existing Instance Agent boundary as the unique instance-scoped execution
         host in this phase; do not standardize a second public runtime-hosting API.
-  - [ ] Milestone 0.4: keep `mint_target` in the engine-adapter boundary and keep `materialize_into` out of required
+  - [x] Milestone 0.4: keep `mint_target` in the engine-adapter boundary and keep `materialize_into` out of required
         `0056` canonical action vocabulary for this phase.
-  - [ ] Milestone 0.5: make `0102` the only owner of engine manifest production, request-context rules, and
+  - [x] Milestone 0.5: make `0102` the only owner of engine manifest production, request-context rules, and
         compatibility aliases.
-  - [ ] Milestone 0.6: record the current `ManifestResult` projection gap explicitly and prevent `0056` implementations
-        from inventing ad hoc local recomputation of canonical item identities.
-  - [ ] Milestone 0.7: record the current local instance-step execution gap explicitly so ingress work converges on one
+  - [x] Milestone 0.6: freeze `ArtifactSetRef` as framework-owned substrate and prevent `0056` implementations from
+        inventing ad hoc local recomputation from `ManifestResult`.
+  - [x] Milestone 0.7: record the current local instance-step execution gap explicitly so ingress work converges on one
         spine instead of creating a second execution model.
 
-- [ ] Phase 1: Runtime and terminal ingress
-  - [ ] Milestone 1.1: land process runtime (`connect/runtime`) and gateway ingress as front-door adapters over one
+- [x] Phase 1: `ArtifactSetRef` substrate contract
+  - [x] Milestone 1.1: define `ArtifactSetRef` wire and SDK model in plan and runtime surfaces as the only
+        framework-owned set contract.
+  - [x] Milestone 1.2: define stable set digest and exact cardinality semantics over canonical `SelectionIdentity`.
+  - [x] Milestone 1.3: make `inline` and `manifest_backed` the first dependency-ready carrier forms and remove vague
+        set-carrier wording from `0056`.
+  - [x] Milestone 1.4: define inline and manifest-backed resolution rules that verify digest and count and fail closed
+        on mismatch.
+  - [x] Milestone 1.5: add worker `prefetch_set` as the normative generic surface with per-item partial-result
+        reporting.
+  - [x] Milestone 1.6: keep `prefetch_many` as bounded SDK sugar that lowers to inline `ArtifactSetRef`.
+  - [x] Milestone 1.7: state explicitly that `0056` does not derive canonical set identity from raw `ManifestResult`.
+
+- [x] Phase 2: Bridge dependency handoff to `0102`
+  - [x] Milestone 2.1: make `0102` the only owner of the `ManifestResult -> ArtifactSetRef` bridge form and its
+        versioned metadata.
+  - [x] Milestone 2.2: block `0056` runtime or ingress implementation from consuming engine-side high-cardinality
+        output until it receives explicit bridge output rather than raw `ManifestResult`.
+  - [x] Milestone 2.3: identify additive `plan.proto` and `node_agent.proto` transport changes required to preserve the
+        bridge output end to end.
+
+- [ ] Phase 3: Set orchestration and ingress or runtime closeout
+  - [x] Milestone 3.1: transport `ArtifactSetRef` through runtime, daemon ingress request transport, and worker
+        execution without set
+        identity drift.
+  - [x] Milestone 3.2: land process runtime (`connect/runtime`) and gateway ingress client adapters over one
         execution spine.
-  - [ ] Milestone 1.2: use an explicit ingress request envelope and declared public execution class rather than raw
+  - [x] Milestone 3.3: use an explicit ingress request envelope and declared public execution class rather than raw
         `PlanSpec` plus server-side heuristics.
-  - [ ] Milestone 1.3: add daemon ingress `ExecutePlan` with the same deterministic step fingerprint rules as local
-        execution.
-  - [ ] Milestone 1.4: keep ingress in the terminal-only execution class until a dependency-ready plan-level public
-        continuation projection is available.
-  - [ ] Milestone 1.5: do not add plan-private attach, wait, status, or replay surfaces.
-  - [ ] Milestone 1.6: make admission depend on declared execution class and dependency readiness, not on runtime
-        completion estimates.
-
-- [ ] Phase 2: Signals and low-cardinality directory cache
-  - [ ] Milestone 2.1: daemon-served worker and instance listing with `as_of_ms`, `staleness_ms`, and bounded-current
-        vs degraded freshness state.
-  - [ ] Milestone 2.2: GS watch streams and daemon-side cache controllers for low-cardinality routing data only.
-  - [ ] Milestone 2.3: expose SDK `TensorCastSignals` as a daemon-backed read surface.
-  - [ ] Milestone 2.4: expose `cache_epoch` or equivalent freshness evidence publicly, while keeping replay cursors such
-        as resume tokens implementation-internal.
-  - [ ] Milestone 2.5: define the watch correctness floor (`initial snapshot barrier`, cache epoch, resume token, and
-        staleness-breach fail-closed behavior) and test it explicitly.
-  - [ ] Milestone 2.6: define one canonical governance transport shape for plan execution and one canonical metadata
-        vocabulary for non-plan RPC propagation.
-
-- [ ] Phase 3: Set-level orchestration for high cardinality
-  - [ ] Milestone 3.1: define neutral `ArtifactSetRef` and stable set digest semantics in plan and SDK surfaces.
-  - [ ] Milestone 3.2: reuse `SelectionIdentity` as the canonical per-item identity and avoid introducing a second
-        semantic item-identity type in SDK or proto.
-  - [ ] Milestone 3.3: add worker `prefetch_set` semantics and per-item partial-result reporting.
-  - [ ] Milestone 3.4: keep `prefetch_many` as SDK sugar over inline small sets rather than the primary scalable
-        abstraction.
-  - [ ] Milestone 3.5: make inline and manifest-backed references the first dependency-ready carrier forms for large
-        sets; defer more opaque carriers until their owner and resolution contract are ready.
-  - [ ] Milestone 3.6: ensure referenced set resolution verifies digest and count against the resolved item set and
-        fails closed on mismatch.
-  - [ ] Milestone 3.7: keep Global Store out of per-item and per-set hot truth for this path.
-  - [ ] Milestone 3.8: define the `prefetch_set` readiness floor explicitly as `local_replica_ready` unless and until a
+  - [x] Milestone 3.4: add daemon-side ingress `ExecutePlan` execution with the same deterministic step fingerprint
+        rules as local execution for the first worker-targeted `ArtifactSetRef` flows.
+  - [x] Milestone 3.5: define the `prefetch_set` readiness floor explicitly as `local_replica_ready` unless and until a
         stronger readiness selector is added to the action contract.
-  - [ ] Milestone 3.9: reserve a cluster-scoped transport slot in the IR so future cluster-workflow owners do not have
-        to encode workflow semantics as worker-only DAG glue.
+  - [x] Milestone 3.6: prove at least one end-to-end high-cardinality flow that runs through `ArtifactSetRef` rather
+        than raw manifest outputs.
+  - [x] Milestone 3.7: keep ingress in the terminal-only execution class until a dependency-ready plan-level public
+        continuation projection is available.
+  - [x] Milestone 3.8: do not add plan-private attach, wait, status, or replay surfaces.
+  - [x] Milestone 3.9: make admission depend on declared execution class and dependency readiness, not on runtime
+        completion estimates.
+  - [x] Milestone 3.10: reserve a cluster-scoped transport slot in the IR so future cluster-workflow owners do not
+        have to encode workflow semantics as worker-only DAG glue.
+  - [x] Milestone 3.11: scope the first daemon-side execution slice to `local-only` plus `terminal_only` with
+        explicit fail-closed behavior for remote worker targets, non-local instance targets, and cluster targets.
 
-- [ ] Phase 4: Integration alignment and rollout safety
-  - [ ] Milestone 4.1: align `ManifestResult` and other `0102` engine-side carriers with neutral set references without
-        introducing business-specific framework nouns.
-  - [ ] Milestone 4.2: verify mixed-version compatibility between local runner and ingress mode.
-  - [ ] Milestone 4.3: verify no engine-specific nouns, plan-private continuation surfaces, or second instance-hosting
+- [ ] Phase 4: Signals and low-cardinality directory cache
+  - [ ] Milestone 4.1: daemon-served worker and instance listing with `as_of_ms`, `staleness_ms`, and bounded-current
+        vs degraded freshness state.
+  - [ ] Milestone 4.2: GS watch streams and daemon-side cache controllers for low-cardinality routing data only.
+  - [x] Milestone 4.3: expose SDK `TensorCastSignals` as a daemon-backed read surface for connected-worker status.
+  - [x] Milestone 4.4: expose `cache_epoch` or equivalent freshness evidence publicly, while keeping replay cursors such
+        as resume tokens implementation-internal.
+  - [ ] Milestone 4.5: define the watch correctness floor (`initial snapshot barrier`, cache epoch, resume token, and
+        staleness-breach fail-closed behavior) and test it explicitly.
+  - [x] Milestone 4.6: define one canonical governance transport shape for plan execution.
+  - [ ] Milestone 4.7: define one canonical metadata vocabulary for non-plan RPC propagation.
+
+- [ ] Phase 5: Rollout safety and verification
+  - [ ] Milestone 5.1: verify mixed-version compatibility between local runner and ingress mode.
+  - [ ] Milestone 5.2: verify no engine-specific nouns, plan-private continuation surfaces, or second instance-hosting
         API leaked into framework proto, metrics, or docs.
+  - [ ] Milestone 5.3: keep Global Store out of per-item and per-set hot truth for this path.
 
 # Tasks
 
 - SDK and runtime:
-  - implement runtime handle and plan submission plumbing on top of one daemon endpoint.
-  - ensure local fallback and ingress mode use the same step fingerprinting inputs, canonical action names, and
-    execution-class contract.
+  - define `ArtifactSetRef` in SDK and plan-building surfaces before adding execution-path convenience wrappers.
+  - add `prefetch_set` over `ArtifactSetRef` and keep inline small-set sugar explicitly bounded.
+  - [x] implement runtime handle and plan submission plumbing on top of one daemon endpoint.
+  - [x] ensure plan building and ingress request transport use the same step fingerprinting inputs, canonical action
+    names, `ArtifactSetRef` identity rules, and execution-class contract.
   - keep runtime as a front-door adapter; do not add a second instance-hosting lifecycle or config path.
-  - add neutral set-reference helpers and keep inline small-set sugar explicitly bounded.
-  - reject plans that require non-terminal public continuation before side effects start when only terminal-only ingress
+  - [x] reject plans that require non-terminal public continuation before side effects start when only terminal-only ingress
     is available.
 
 - Daemon:
-  - add ingress controller, signals controller, and directory cache controller.
+  - preserve `ArtifactSetRef` through ingress and worker execution rather than reconstructing it from integration-local
+    outputs.
+  - [x] add daemon ingress RPC transport (`ExecutePlanRequest`) with declared execution class.
+  - [x] override and serve `StoreDaemonService.ExecutePlan` in the C++ daemon instead of relying on the generated
+        default `UNIMPLEMENTED` path.
+  - [ ] add one typed daemon-local bridge to NodeAgent or the in-process Instance Agent boundary under unified config.
+  - [ ] add ingress controller, signals controller, and directory cache controller.
   - keep ingress execution terminal-only until a dependency-ready plan-level public continuation closes in `0096` and
     `0100`.
-  - route instance steps through the existing daemon-local NodeAgent or Instance Agent boundary only.
-  - use an explicit ingress request envelope with declared execution class rather than server-side time heuristics.
+  - [ ] route instance steps through the existing daemon-local NodeAgent or Instance Agent boundary only.
+  - [x] fail closed on remote worker targets, non-local instance targets, and cluster targets in the first daemon-side
+        `ExecutePlan` implementation.
+  - [x] use an explicit ingress request envelope with declared execution class rather than server-side time heuristics.
   - expose watch-backed cache epochs or equivalent freshness evidence in signals-serving code paths.
   - fail closed on directory or routing decisions when watch freshness exceeds configured bounds.
 
@@ -158,19 +240,20 @@ This plan explicitly does not turn `0056` into:
 
 - Plan and proto:
   - preserve canonical instance actions `manifest/publish/hydrate/evict_local`.
-  - keep `PlanSpec` as the canonical IR and add only the minimal ingress envelope required to declare public execution
+  - [x] keep `PlanSpec` as the canonical IR and add only the minimal ingress envelope required to declare public execution
     class.
-  - introduce neutral set-level worker batch carriers instead of business-specific batch vocabulary.
+  - introduce `ArtifactSetRef` and `PrefetchSetAction` as the framework-owned set contract instead of vague or
+    business-specific batch vocabulary.
   - reuse `SelectionIdentity` semantics for per-item identity; if a wire message is needed, make it a field-for-field
     projection only.
-  - add typed governance transport for plan execution instead of relying on free-form tags alone.
-  - reserve a cluster-scoped transport slot without importing workflow-owned semantics into `0056`.
+  - [x] add typed governance transport for plan execution instead of relying on free-form tags alone.
+  - [x] reserve a cluster-scoped transport slot without importing workflow-owned semantics into `0056`.
   - do not add `MintTargetAction` as required framework core surface in this phase.
   - do not add plan-private continuation or attachment carriers.
 
 - Integration:
   - keep engine manifest production and request-context semantics in `0102`.
-  - map engine-side manifest carriers to neutral set references without pushing engine nouns into framework core.
+  - consume only `ArtifactSetRef` or another explicit `0102` bridge output in framework code.
   - close the concrete `ManifestResult` projection gap through `0102` rather than local runner or gateway-only
     recomputation.
 
@@ -183,18 +266,43 @@ This plan explicitly does not turn `0056` into:
 Tests:
 
 - Python:
-  - `source .venv/bin/activate && pytest tests/python/test_plan.py`
-  - `source .venv/bin/activate && pytest tests/python/test_runtime.py`
+  - `source .venv/bin/activate && pytest tests/python/api/test_plan_spec.py`
+  - `source .venv/bin/activate && pytest tests/python/api/test_runtime.py`
+  - `source .venv/bin/activate && pytest tests/python/node_agent/test_plan_execution.py`
 - C++:
-  - `bazel test //daemon:session_lifecycle_test`
-  - `bazel test //daemon:grpc_service_impl_registration_test`
+  - `bazel test //daemon:grpc_service_impl_status_test`
+  - `bazel test //daemon:grpc_service_impl_execute_plan_test`
+  - `bazel test //daemon:grpc_service_impl_startup_gate_test`
 - Proto:
   - `bash tools/build_proto_python.sh`
   - `bazel test //proto/... --test_output=errors`
 
-Additional acceptance checks:
+Latest validation:
+
+- Passed: `source .venv/bin/activate && bash tools/build_proto_python.sh raw`
+- Passed: `source .venv/bin/activate && pytest tests/python/api/test_runtime.py`
+- Passed: `source .venv/bin/activate && pytest tests/python/api/test_plan_spec.py tests/python/node_agent/test_plan_execution.py`
+- Passed: `bazel test //daemon:grpc_service_impl_status_test //daemon:grpc_service_impl_execute_plan_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`
+- Blocked by pre-existing repo failures: `bazel test //proto/... --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`
+  currently fails in `//proto/tensorcast/daemon/v2:daemon_proto_lint` on existing RPC naming violations unrelated to
+  this change (`ImportArtifactFromPathStream`, `StartPublishTargetReplica`, `MaterializeIntoMappedTarget`).
+
+Completed acceptance checks in this slice:
+
+- real daemon no longer returns the generated default `UNIMPLEMENTED` for `StoreDaemonService.ExecutePlan`,
+- first daemon-side `ExecutePlan` implementation rejects remote worker targets before dispatch,
+- first daemon-side `ExecutePlan` implementation rejects instance targets that are not daemon-local,
+- first daemon-side `ExecutePlan` implementation rejects `TARGET_TYPE_CLUSTER` rather than executing workflow-owned
+  semantics privately,
+- signal snapshot freshness fields for `GetWorkerStatus` now come from daemon-side evidence rather than SDK-local
+  wall-clock synthesis,
+- referenced set carriers fail closed when resolved items do not match advertised digest or count,
+- no plan-private attach or status surfaces were introduced in this slice.
+
+Remaining acceptance checks:
 
 - compare deterministic fingerprints between local and ingress execution for identical plans,
+- verify proto, SDK, and design all express the same framework-owned `ArtifactSetRef` contract,
 - verify `prefetch_many` lowers to the same set identity as explicit `ArtifactSetRef`,
 - verify `prefetch_set(device=\"dram\")` does not silently claim `local_stable_ready` in one execution mode but not the
   other,
@@ -203,9 +311,10 @@ Additional acceptance checks:
 - verify watch interruption beyond budget causes routing and directory reads to fail closed,
 - verify signal snapshots expose bounded-current vs degraded or stale freshness evidence consistently,
 - verify large-set paths do not depend on Global Store per-item truth,
-- verify referenced set carriers fail closed when resolved items do not match advertised digest or count,
 - verify `SelectionIdentity` remains the single canonical semantic item identity across SDK, plan, and daemon work,
-- verify no plan-private attach or status surfaces were introduced.
+- verify `0056` does not derive canonical set identity directly from `ManifestResult`,
+- verify at least one high-cardinality end-to-end flow runs through `ArtifactSetRef`,
+- verify mixed local-run vs daemon-ingress outcomes stay aligned for worker-targeted `prefetch_set` success cases.
 
 Rollout:
 
@@ -230,8 +339,11 @@ Backout:
   - tracking: review `ArtifactSetRef` usage and explicitly reject per-item GS ownership in `0056` work.
 - Risk: implementers silently bridge the current `ManifestResult` gap inside `0056`, causing local and ingress identity
   drift.
-  - tracking: require any bridge from engine manifest carriers to canonical item identities to be explicit and owned by
+  - tracking: require any bridge from engine manifest carriers to `ArtifactSetRef` to be explicit and owned by
     `0102`.
+- Risk: `ArtifactSetRef` remains a doc-only abstraction and never becomes the actual proto or SDK contract.
+  - tracking: require plan proto, runtime builder, and acceptance checks to name the same `ArtifactSetRef` fields and
+    carrier forms.
 - Risk: runtime convenience grows into a second instance-hosting surface with its own config or lifecycle semantics.
   - tracking: keep NodeAgent or the existing Instance Agent boundary as the only instance-scoped execution host in this
     phase.
@@ -239,3 +351,13 @@ Backout:
   - tracking: review canonical names in plan proto, NodeAgent, metrics, and design docs.
 - Risk: implementers add a temporary plan-private continuation surface for convenience.
   - tracking: require any non-terminal public continuation to reference `0096` and `0100` explicitly.
+- Risk: the plan document overstates ingress or signals completion because client-envelope progress is mistaken for real
+  daemon serving.
+  - tracking: require every future `[x]` against ingress or signals to cite a concrete server-side entrypoint and a
+    real daemon-side test, not only proto or fake-client coverage.
+
+# Progress Log
+
+| Date | Stage | Status | Notes |
+| --- | --- | --- | --- |
+| 2026-03-17 | Phase 3 / 4 slice | Completed | Landed real daemon `ExecutePlan` serving for the first `gateway_ingress_enabled` `local-only` `terminal_only` worker-target slice; added daemon-served `GetWorkerStatus` freshness metadata (`as_of_ms`, `staleness_ms`, `cache_epoch`, `freshness_state`); updated SDK fallback handling and synced status in this plan. Evidence: `pytest tests/python/api/test_runtime.py`, `pytest tests/python/api/test_plan_spec.py tests/python/node_agent/test_plan_execution.py`, `bazel test //daemon:grpc_service_impl_status_test //daemon:grpc_service_impl_execute_plan_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error`. |

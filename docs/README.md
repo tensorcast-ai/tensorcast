@@ -16,6 +16,7 @@ Understand how TensorCast works:
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[Binding Unified Model](designs/0084-binding-unified-model-and-contract.md)** - Canonical binding semantics, lifecycle, mapped binding, and publishability
+- **[Volatile Publication Subjects](designs/0103-volatile-publication-subjects-and-multi-replica-semantics.md)** - Publication-subject model for target-memory publish, modes, and multi-replica behavior
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
 - **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
 - **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics

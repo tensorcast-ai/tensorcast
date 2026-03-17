@@ -1,7 +1,7 @@
 ---
 slug: 0056-programmable-framework-adv
 title: Programmable Framework Advanced Runtime, Daemon Ingress, and Signals (Design)
-description: Thin runtime and ingress layer on top of 0055: single-daemon process runtime, daemon-served low-cardinality signals, terminal-only plan ingress, and generic set-level orchestration without redefining artifact profile, authority, lifecycle, workflow, or engine integration semantics.
+description: Thin runtime and ingress layer on top of 0055: single-daemon process runtime, daemon-served low-cardinality signals, terminal-only plan ingress, and `ArtifactSetRef`-backed set-level orchestration without redefining artifact profile, authority, lifecycle, workflow, or engine integration semantics.
 status: draft
 areas:
   - sdk
@@ -67,7 +67,7 @@ It owns only the framework layer above that substrate:
 - one process runtime handle bound to one daemon endpoint,
 - daemon ingress for the same `PlanSpec` semantics as the local runner,
 - daemon-served low-cardinality signals and directory snapshots,
-- and generic set-level orchestration carriers for high-cardinality artifact sets.
+- and a framework-owned `ArtifactSetRef` contract for high-cardinality artifact sets.
 
 The long-term convergence rule is:
 
@@ -135,21 +135,22 @@ The long-term ownership split is:
 | artifact-first `PlanSpec`, local runner semantics, `Operation[T]` | `0055` |
 | front-door convergence over the existing `PlanSpec -> daemon/node-agent` execution spine | `0056` |
 | selection contract and artifact value model | `0078` and `0087` |
-| generic set digest, set reference, and worker batch orchestration over normalized selection identities | `0056` |
+| generic set digest, `ArtifactSetRef`, and worker batch orchestration over normalized selection identities | `0056` |
 | routed existence and visibility truth | `0090` |
 | backing truth and `ResolvedSourceCapability` | `0093` |
 | lifecycle capability mint and redeem semantics | `0094` |
 | workflow replay, currentness, fencing, wait, and status semantics | `0096` |
 | distributed request or reply algebra and public continuation | `0100` |
-| engine manifest production, engine request context, and domain aliases | `0102` |
+| engine manifest production, engine request context, domain aliases, and engine projection bridge into `ArtifactSetRef` | `0102` |
 
 Normative rules:
 
 1. `0056` may route to or compose with deeper layers, but it must not redefine them.
 2. Any byte-moving distributed success path still converges on `ResolvedSourceCapability` and shared lowering.
-3. `0056` may own generic set carriers, but it must not own profile-specific set semantics or engine request inspection.
-4. `ManifestResult` is the current concrete engine-side high-cardinality set carrier today; `0102` owns the mapping
-   between engine manifest production and `0056` generic set orchestration.
+3. `0056` may own `ArtifactSetRef` and generic set orchestration, but it must not own profile-specific set semantics or
+   engine request inspection.
+4. `ManifestResult` is the current concrete engine-side high-cardinality result carrier today; `0102` owns the mapping
+   between engine manifest production and `0056` `ArtifactSetRef` orchestration.
 
 # Layering Contract
 
@@ -158,10 +159,10 @@ The repository needs one explicit stack for programmable execution:
 | Layer | Canonical object | Owner |
 | --- | --- | --- |
 | value and truth | `Artifact`, `ArtifactSelection`, `ResolvedSourceCapability` | `0055`, `0078`, `0087`, `0090`, `0093` |
-| set reference | neutral set digest and set ref over normalized selection identities | `0056` |
+| set reference | `ArtifactSetRef` over normalized selection identities | `0056` |
 | orchestration IR | `PlanSpec` and canonical action vocabulary | `0055` plus `0056` |
 | runtime and ingress | `Runtime`, daemon ingress, daemon-served signals | `0056` |
-| engine integration | engine manifest production, aliases, target capability helpers | `0102` |
+| engine integration | engine manifest production, aliases, target capability helpers, engine projection bridge | `0102` |
 
 This layer split is the core consistency rule for long-term evolution:
 
@@ -248,7 +249,7 @@ Goals
 - Keep the Python SDK a lightweight boundary: callers connect to one daemon and do not call Global Store directly.
 - Preserve one `PlanSpec` execution semantics across caller-local execution and daemon ingress execution.
 - Provide daemon-served `TensorCastSignals` with explicit staleness metadata.
-- Model scalable high-cardinality orchestration through neutral set references and order-insensitive set digests.
+- Model scalable high-cardinality orchestration through `ArtifactSetRef` and order-insensitive set digests.
 - Keep canonical instance orchestration aligned around `manifest/publish/hydrate/evict_local`.
 - Keep target-capability minting and resolution at the instance-bound engine adapter boundary.
 - Allow `prefetch_many` as convenience only when it lowers to the same generic set abstraction.
@@ -262,6 +263,8 @@ Non-Goals
 - Move engine request tables, target-capability minting, or request-context persistence into framework core.
 - Require truly high-cardinality callers to enumerate all items inline on the hot path.
 - Replace TensorCast's existing dataplane or introduce a second distributed execution substrate.
+- Derive canonical framework set identity directly from engine-local result carriers such as `ManifestResult` without an
+  explicit bridge owned by `0102`.
 
 # Architecture
 
@@ -328,7 +331,7 @@ Key rule:
   - low-cardinality worker and instance registry,
   - watch streams and other slow-path metadata inputs required by daemon caches,
   - not a per-request caller dependency.
-- **Artifact set carrier**
+- **Artifact set reference**
   - names an order-insensitive set of normalized selection identities for orchestration,
   - is a control-plane reference only,
   - does not replace `Artifact` or `ArtifactSelection` as the value layer.
@@ -410,6 +413,46 @@ Normative rules:
    the caller-visible request has ended,
 6. `0056` must not invent `PlanHandle`, `AttachPlan`, `GetPlanStatus`, or another plan-private continuation family,
 7. plan targets are stable identities (`daemon_id`, `instance_id`), not caller-supplied addresses.
+
+## Next implementation slice: local-only terminal ingress
+
+The next dependency-ready daemon-execution closeout is intentionally narrower than
+the long-term topology above.
+
+Initial ingress execution scope:
+
+- declared execution class must be `terminal_only`,
+- worker-scoped execution may target the ingress daemon only,
+- instance-scoped execution may target only instances hosted behind the ingress
+  daemon's own local NodeAgent or in-process Instance Agent boundary,
+- cluster-scoped transport remains reserved in the IR but is not executable in
+  this slice,
+- and cross-daemon plan-fragment dispatch remains a follow-up after the local
+  bridge is stable.
+
+Required bridge rule:
+
+- the daemon must use one daemon-local typed bridge to the existing
+  instance-scoped execution host,
+- that bridge is configuration-owned under `0004`,
+- and it must not be inferred from caller-supplied addresses or hidden ambient
+  process discovery.
+
+Normative rules:
+
+1. the first daemon-side `ExecutePlan` implementation should fail closed on
+   `public_continuation_required`,
+2. the first daemon-side `ExecutePlan` implementation should fail closed on
+   worker targets that do not resolve to the ingress daemon,
+3. the first daemon-side `ExecutePlan` implementation should fail closed on
+   instance targets that do not resolve to a daemon-local instance execution
+   host,
+4. the first daemon-side `ExecutePlan` implementation should fail closed on
+   `TARGET_TYPE_CLUSTER` rather than smuggling workflow semantics through
+   gateway-private handling,
+5. local-only ingress is a phase boundary, not a second semantic contract; it
+   still reuses the same `PlanSpec`, `ArtifactSetRef`, governance transport, and
+   admission-class rules.
 
 ## Ingress admission classifier
 
@@ -582,40 +625,94 @@ Normative rules:
 4. if proto or RPC surfaces need a dedicated wire message for set items, it must be a field-for-field projection of
    `SelectionIdentity`, not a second semantic type.
 
-## Generic set carrier
+## `ArtifactSetRef` contract
 
 ```python
 @dataclass(frozen=True, slots=True)
 class ArtifactSetRef:
     set_digest_hex: str
     item_count: int
+    carrier_form: str
     inline_items: Sequence["ArtifactSelection"] | None = None
-    manifest_artifact_id: str | None = None
-    opaque_ref: str | None = None
-    ref_kind: str | None = None
+    manifest_selection: "ArtifactSelection" | None = None
 ```
 
 Normative rules:
 
-1. exactly one carrier form is active for a given `ArtifactSetRef`,
-2. `set_digest_hex` identifies the semantic set, not any transport chunking or execution window,
-3. `ArtifactSetRef` is a control-plane reference only and does not replace per-item artifact identity,
-4. inline item lists are for small caller-enumerated sets only,
-5. referenced forms are the primary path for truly high-cardinality sets,
-6. a referenced set may be represented by:
-   - an artifact-backed manifest,
-   - an authority-owned opaque set handle,
-   - or another explicit neutral carrier owned by the appropriate layer,
-7. `ref_kind` or an equivalent typed discriminator must make the referenced carrier form explicit,
-8. referenced carriers must define their own owner, expiry or currentness, and resolution contract in the owning
-   layer; `0056` must not smuggle those semantics in as implicit framework behavior,
-9. resolving a referenced carrier must deterministically yield the same deduplicated `SelectionIdentity` set whose
-   `set_digest_hex` and `item_count` are carried in the ref; any mismatch must fail closed,
-10. the current dependency-ready carrier forms for `0056` are inline sets and manifest-backed references; more opaque
-    carriers remain follow-up work until their owner and resolution contract are dependency-ready,
-11. Global Store must not become a per-item or per-set hot truth table for this abstraction.
+1. `ArtifactSetRef` is the only framework-owned generic set contract in this phase.
+2. exactly one carrier form is active for a given `ArtifactSetRef`.
+3. `carrier_form` is a typed discriminator whose dependency-ready values are `inline` and `manifest_backed`.
+4. `set_digest_hex` identifies the semantic set, not any transport chunking, batch partitioning, or execution window.
+5. `item_count` is the exact cardinality of the deduplicated canonical item set represented by the ref.
+6. `ArtifactSetRef` is a control-plane reference only and does not replace per-item artifact identity.
+7. `0056` owns the `ArtifactSetRef` contract itself:
+    - field semantics,
+    - transport shape,
+    - set-digest identity rules,
+    - and fail-closed resolution rules.
+8. `0056` does not own engine manifest production or engine-local projection logic; those remain in `0102`.
 
-## Worker batch orchestration
+## `ArtifactSetRef` digest and cardinality
+
+Set identity is rooted in canonical per-item identity, not transport-local enumeration.
+
+Normative rules:
+
+1. `set_digest_hex` must be computed over the deduplicated, order-insensitive set of normalized `SelectionIdentity`
+   values represented by the ref.
+2. `item_count` must equal the number of canonical `SelectionIdentity` values that participate in
+   `set_digest_hex`.
+3. inline item ordering, manifest serialization ordering, and worker chunking are not part of set identity.
+4. `artifact_id` alone is never sufficient to define framework set identity.
+5. if two refs advertise the same `set_digest_hex` and `item_count`, they are claiming the same canonical item set and
+   must resolve accordingly or fail closed.
+
+## `ArtifactSetRef` carrier forms
+
+The first dependency-ready carrier forms are intentionally narrow.
+
+### Inline carrier
+
+- `carrier_form="inline"`
+- `inline_items` is populated
+- `manifest_selection` is unset
+
+Rules:
+
+1. inline sets are for small caller-enumerated inputs only.
+2. inline transport must preserve the exact caller-selected `ArtifactSelection` values used to derive the canonical
+   `SelectionIdentity` set.
+3. `prefetch_many`, if exposed, lowers only to this form.
+
+### Manifest-backed carrier
+
+- `carrier_form="manifest_backed"`
+- `manifest_selection` is populated
+- `inline_items` is unset
+
+Rules:
+
+1. manifest-backed is the first dependency-ready referenced form for truly high-cardinality sets.
+2. `manifest_selection` identifies an artifact-backed manifest whose owning layer defines schema, owner, expiry or
+   currentness, and resolution authority.
+3. `0056` does not define manifest content schema or engine-local annotations.
+4. more opaque referenced forms remain follow-up work until their owner and resolution contract are dependency-ready.
+5. Global Store must not become a per-item or per-set hot truth table for this abstraction.
+
+## `ArtifactSetRef` resolution contract
+
+Normative rules:
+
+1. resolving either carrier form must deterministically yield the same deduplicated `SelectionIdentity` set claimed by
+   `set_digest_hex` and `item_count`.
+2. manifest-backed resolution must fail closed on unresolved manifest content, unsupported manifest schema, digest
+   mismatch, or item-count mismatch.
+3. runtime partitioning or worker chunking may happen below `ArtifactSetRef` without changing public set identity.
+4. local runner and ingress must apply the same digest and resolution rules.
+5. framework code must consume `ArtifactSetRef` as the set contract; it must not silently invent a second referenced
+   form in one execution path only.
+
+## Worker set orchestration surface
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -650,12 +747,14 @@ class WorkerStepBuilder:
 Normative rules:
 
 1. `prefetch_set` is the normative scalable worker-layer batch action,
-2. `prefetch_many`, if exposed, is SDK sugar that lowers to an inline `ArtifactSetRef`,
-3. `prefetch_many` must be documented and implemented as non-scalable convenience rather than as the primary
+2. `prefetch_set` takes `ArtifactSetRef` directly so proto, SDK, runtime, and design all speak the same framework set
+   contract,
+3. `prefetch_many`, if exposed, is SDK sugar that lowers to an inline `ArtifactSetRef`,
+4. `prefetch_many` must be documented and implemented as non-scalable convenience rather than as the primary
    high-cardinality abstraction,
-4. results are per-item and must preserve partial information,
-5. runtime partitioning or chunking may happen below the set ref without changing public set identity,
+5. results are per-item and must preserve partial information,
 6. profile-specific miss, visibility, or fencing rules are delegated to the owning profile and authority layers.
+7. runtime partitioning or chunking may happen below the set ref without changing public set identity.
 
 ## Scope-aware readiness model
 
@@ -700,66 +799,19 @@ Normative rules:
 3. gateway and local runner implementations must share the same readiness floor; one implementation must not upgrade
    `prefetch_set` to `local_stable_ready` while the other treats it as replica-only warmup.
 
-## Manifest projection contract
+## Engine manifest boundary
 
-`0056` owns the generic projection contract from a concrete high-cardinality carrier into a neutral set reference.
-`0102` owns how a given engine or integration satisfies that contract.
-
-Minimum projection requirements:
-
-1. the projection must yield canonical item identities, not only a list of `artifact_id`s,
-2. `artifact_ids` alone are insufficient whenever different selections or representations may share the same
-   `artifact_id`,
-3. `layout_id` is a companion hint by default and does not participate in generic set identity unless the owning
-   integration explicitly defines it as part of the canonical item identity,
-4. projected set digest must be computed from the normalized item identities that the framework will later use for
-   retries, results, and worker batching.
-
-## Current concrete mapping
-
-Current engine integrations already expose a concrete high-cardinality set carrier:
-
-- `ManifestResult`
-
-with stable fields such as:
-
-- `artifact_ids`
-- `layout_id`
-- `key_set_digest_hex`
-
-Rules:
-
-1. `ManifestResult` is the current concrete engine-side carrier for instance-owned high-cardinality sets,
-2. `0056` owns the generic projection contract while `0102` owns mapping engine manifest production to that contract,
-3. `0056` must not hard-code `engine_request_id`, KV-specific nouns, or engine-private request semantics into the
-   generic set carrier,
-4. the framework should consume neutral set references even when a concrete integration currently produces them through
-   `ManifestResult`.
-
-## Current manifest projection gap
-
-Today `ManifestResult` is still a convenience carrier, not a complete generic set projection:
-
-- it carries `artifact_ids`,
-- it carries `layout_id`,
-- and it carries an order-insensitive digest over those `artifact_id`s,
-- but it does not yet carry canonical item identities equivalent to:
-  - `artifact_id`,
-  - `logical_layout_hash`,
-  - `selection_hash`.
-
-This gap matters because `0056` generic set orchestration is defined over normalized item identities, not over
-`artifact_id` alone.
+Current engine integrations already expose `ManifestResult`, but `0056` treats that as an integration-side carrier only.
 
 Normative rules:
 
-1. `0056` must not pretend that today's `ManifestResult` already satisfies the generic set projection contract.
-2. until `0102` extends its concrete engine-side carriers with canonical item identities or an equivalent manifest form,
-   `ManifestResult` remains a convenience integration carrier rather than a sufficient framework-proof set carrier.
-3. gateway ingress, local runner, and worker batch execution must not silently derive incompatible item identities from
-   `ManifestResult` by using ad hoc local recomputation.
-4. any temporary bridge from `ManifestResult` to `ArtifactSetRef` must be explicit, versioned, and owned by `0102`, not
-   improvised inside `0056`.
+1. `0056` does not define the `ManifestResult -> ArtifactSetRef` bridge form.
+2. `0056` runtime, ingress, gateway, and worker code must consume `ArtifactSetRef` or another explicit bridge output
+   owned by `0102`.
+3. `0056` must not derive canonical framework set identity directly from raw `ManifestResult`, `artifact_ids`,
+   `key_set_digest_hex`, or `engine_request_id`.
+4. any explicit bridge from engine manifests into `ArtifactSetRef` must be versioned and fail closed, but that bridge
+   contract is owned by `0102`, not by `0056`.
 
 ## Cluster workflow extension seam
 
@@ -876,6 +928,8 @@ Normative rules:
 All cluster-wide framework invariants introduced by `0056` must be typed config from `0004`, including:
 
 - gateway ingress enablement,
+- daemon-local instance-host bridge configuration needed for `ExecutePlan`
+  closeout,
 - watch and cache staleness budgets,
 - worker and instance registry discovery behavior,
 - role and capability advertisement needed for low-cardinality routing,
@@ -900,8 +954,15 @@ Framework-owned additive changes:
 - `proto/tensorcast/plan/v1/plan.proto`
   - keep canonical instance actions `manifest/publish/hydrate/evict_local`,
   - add a typed governance sub-object for plan execution rather than relying on free-form `tags` alone,
-  - add neutral set carriers such as `ArtifactSetRef` and worker `PrefetchSetAction` if and when they land,
-  - if a dedicated wire carrier for set items is needed, make it a field-for-field projection of `SelectionIdentity`,
+  - add `ArtifactSetRef` as the framework-owned set wire contract with:
+    - `set_digest_hex`,
+    - `item_count`,
+    - `carrier_form`,
+    - `inline_items`,
+    - and `manifest_selection`,
+  - add worker `PrefetchSetAction` over `ArtifactSetRef`,
+  - if a dedicated wire carrier for canonical set items is needed, make it a field-for-field projection of
+    `SelectionIdentity`,
   - reserve an explicit cluster-scoped transport slot if cluster-workflow owners need one, while keeping workflow
     semantics outside `0056`,
   - do not require `MintTargetAction` in framework core,
@@ -976,7 +1037,7 @@ They must not be introduced as new Global Store per-item or per-set hot tables i
 - `connect(...)` is the primary process entrypoint for advanced control-plane use.
 - `Plan.run()` in local and daemon-ingress modes uses the same canonical action names and the same deterministic
   fingerprint rules.
-- `0056` owns only runtime, ingress, signals, and generic set carriers.
+- `0056` owns only runtime, ingress, signals, and the `ArtifactSetRef` contract.
 - canonical instance orchestration remains aligned around `manifest/publish/hydrate/evict_local`.
 - external callers can operate through one daemon endpoint and do not call Global Store directly.
 - NodeAgent or the existing Instance Agent boundary remains the unique instance-scoped execution host in this phase.
@@ -987,8 +1048,10 @@ They must not be introduced as new Global Store per-item or per-set hot tables i
   heuristics.
 - high-cardinality framework orchestration does not require Global Store per-item hot truth.
 - referenced set carriers fail closed if their resolved item set does not match the advertised digest and count.
+- proto, SDK, runtime, and design all express the same framework-owned `ArtifactSetRef` contract rather than vague
+  set-carrier wording.
 - worker and instance readiness remain scope-owned rather than flattened into one repository-wide readiness enum.
-- `prefetch_many`, if exposed, is explicitly a convenience helper over the generic set carrier rather than the primary
-  scalable abstraction.
-- `ManifestResult` remains the current concrete engine-side set carrier, while mapping it into generic framework set
-  orchestration stays neutral and non-business-specific.
+- `prefetch_many`, if exposed, is explicitly a convenience helper over the `ArtifactSetRef` contract rather than the
+  primary scalable abstraction.
+- `ManifestResult` remains an integration-side carrier only, while any bridge into framework set orchestration is owned
+  by `0102`.

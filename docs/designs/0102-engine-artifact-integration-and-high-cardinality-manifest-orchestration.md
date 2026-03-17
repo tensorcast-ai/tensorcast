@@ -25,6 +25,7 @@ related_docs:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
 links:
+  plan: ../plans/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
   dependencies:
     - ./0055-programmable-framework.md
     - ./0056-programmable-framework-adv.md
@@ -57,8 +58,8 @@ The canonical integration model is therefore:
 
 - TensorCast core stays artifact-first and engine-agnostic,
 - engine integrations project runtime state into canonical artifact actions on the existing execution spine,
-- and high-cardinality orchestration is expressed through neutral manifest-oriented integration carriers that lower into
-  framework-owned generic set carriers rather than business-specific framework types.
+- and high-cardinality orchestration is expressed through engine-side projection carriers that lower into
+  framework-owned `ArtifactSetRef` carriers rather than business-specific framework types.
 
 Current code already points in this direction:
 
@@ -68,10 +69,10 @@ Current code already points in this direction:
 
 Long-term convergence rule:
 
-- `0056` owns the programmable front door and generic set carrier,
+- `0056` owns the programmable front door and `ArtifactSetRef`,
 - NodeAgent or the in-process Instance Agent boundary remains the unique instance-scoped execution host in this phase,
 - and `0102` owns only engine-side projection into that spine, including the explicit bridge from engine manifests into
-  `0056` generic set orchestration.
+  `0056` `ArtifactSetRef` orchestration.
 
 `0102` is therefore not:
 
@@ -115,7 +116,8 @@ Goals
 - Keep TensorCast framework core KV-semantics-free.
 - Define a stable engine-integration layer that maps engine-owned runtime state into canonical artifact actions.
 - Make high-cardinality orchestration manifest-first rather than business-name-first.
-- Keep framework set identity rooted in canonical `SelectionIdentity` rather than integration-local digests or aliases.
+- Keep framework set identity rooted in canonical `SelectionIdentity` and `0056` `ArtifactSetRef` rather than
+  integration-local digests or aliases.
 - Preserve the two-layer integration split:
   - engine storage-backend plugin to TensorCast data plane,
   - and instance-bound orchestration adapter to TensorCast plan/runtime.
@@ -130,7 +132,8 @@ Non-Goals
 - Redefine the framework-level plan IR from `0055` and `0056`.
 - Introduce a second object model beside `Artifact`, `ArtifactSelection`, `SealedByteArtifact`, and canonical action
   results.
-- Introduce a second set-identity model beside framework-owned set identity over normalized `SelectionIdentity`.
+- Introduce a second set-identity or set-carrier model beside `0056`-owned `ArtifactSetRef` over normalized
+  `SelectionIdentity`.
 - Introduce a second instance-scoped execution host beside NodeAgent or the existing Instance Agent boundary.
 - Introduce an integration-private continuation or attach protocol outside `Operation[T]` and the `0100` public family.
 
@@ -140,8 +143,8 @@ Non-Goals
 
 Repository rule:
 
-- `0056` owns front-door convergence and generic set transport,
-- `0102` owns engine-side projection into canonical actions and set carriers,
+- `0056` owns front-door convergence and `ArtifactSetRef` transport,
+- `0102` owns engine-side projection into canonical actions and the bridge into `ArtifactSetRef`,
 - and deeper owner layers still own truth, lifecycle, workflow, and continuation.
 
 The intended stack is:
@@ -224,7 +227,7 @@ Normative rules:
 2. metrics, audit logs, and idempotency fingerprints must use the canonical action names above,
 3. integration-specific aliases must not become the canonical framework vocabulary.
 
-## Frozen projection, not repeated rescan
+## Frozen projection bridge, not repeated rescan
 
 Long-term convergence for high-cardinality instance actions is:
 
@@ -240,7 +243,7 @@ That is current compatibility plumbing, not the long-term semantic identity cont
 Normative rules:
 
 1. if a workflow needs stable cross-step set identity, the integration must supply an explicit projection form or a
-   manifest-backed set reference rather than relying on repeated rescans by `engine_request_id`,
+   manifest-backed bridge to `0056` `ArtifactSetRef` rather than relying on repeated rescans by `engine_request_id`,
 2. projection forms owned by `0102` are integration-side carriers only; replay, attach, currentness, and status remain
    owned by `0096` and `0100`,
 3. until a dependency-ready projection form exists, cross-instance migration remains terminal action composition over the
@@ -273,11 +276,11 @@ Artifact identity remains:
 - `ArtifactSelection` for what was selected,
 - `SelectionIdentity` for canonical per-item identity when high-cardinality sets are projected into framework-generic
   orchestration,
-- and framework-owned set digests over resolved `SelectionIdentity` when the bridge into `0056` generic set
+- and `0056`-owned `ArtifactSetRef` digests over resolved `SelectionIdentity` when the bridge into generic set
   orchestration is closed.
 
 Manifest digests may still appear as integration-side carrier metadata or checksums, but they must not silently become a
-second framework set-identity model beside the `0056` generic set carrier.
+second framework set-identity model beside `0056` `ArtifactSetRef`.
 
 ## Sealed byte artifacts are the publication unit
 
@@ -310,25 +313,25 @@ Its essential semantics are:
 Normative rules:
 
 1. NodeAgent and SDK plan results may preserve neutral manifest-oriented carriers as structured integration output,
-2. framework-generic set orchestration must still lower through the `0056` generic set carrier over canonical
+2. framework-generic set orchestration must still lower through `0056` `ArtifactSetRef` over canonical
    `SelectionIdentity`,
 3. future generalization should extend or rename neutral manifest carriers rather than introducing business-specific
    framework result types,
 4. set ordering is never part of framework idempotency or identity,
-5. manifest-oriented carriers in `0102` are integration-owned projections that must lower into the generic set carrier
+5. manifest-oriented carriers in `0102` are integration-owned projections that must lower into `ArtifactSetRef`
    contract owned by `0056`; they are not a second framework set model.
 
-## Current projection gap and closeout rule
+## Current projection gap and bridge closeout rule
 
 Current code reality is narrower than the long-term target:
 
 - `ManifestResult` currently carries `artifact_ids`, `layout_id`, and `key_set_digest_hex`,
 - but it does not yet carry canonical per-item identities equivalent to `SelectionIdentity`,
-- so it is not yet sufficient, by itself, to prove the generic set contract required by `0056`.
+- so it is not yet sufficient, by itself, to produce a framework-owned `ArtifactSetRef`.
 
 Normative rules:
 
-1. `0102` owns the bridge from today's `ManifestResult` to future generic set orchestration,
+1. `0102` owns the bridge from today's `ManifestResult` to `0056` `ArtifactSetRef`,
 2. that bridge must be explicit and versioned; local runner, gateway ingress, and worker code must not improvise their
    own derivation rules,
 3. the first dependency-ready bridge should be manifest-backed:
@@ -338,10 +341,58 @@ Normative rules:
    - the owner of the manifest-backed reference, its expiry or currentness rules, and its resolution authority must be
      explicit,
    - digest mismatch, item-count mismatch, schema-version mismatch, or unresolved reference must fail closed,
-4. `key_set_digest_hex` from today's `ManifestResult` must not be treated as the framework-owned generic set identity
-   unless and until the bridge defines it as the exact same digest over the resolved canonical item set,
+4. `key_set_digest_hex` from today's `ManifestResult` must not be treated as framework-owned `ArtifactSetRef`
+   identity unless and until the bridge defines it as the exact same digest over the resolved canonical item set,
 5. if a future engine needs a more opaque set handle, its owner, expiry or currentness, and resolution semantics must
    still be made explicit before it becomes a dependency-ready carrier.
+
+## Bridge to `ArtifactSetRef`
+
+This design owns the engine-side projection bridge.
+
+`0102` does not own:
+
+- the `ArtifactSetRef` schema,
+- generic set digest definition,
+- or generic set transport through framework ingress and runtime surfaces.
+
+Those remain in `0056`.
+
+`0102` does own:
+
+- how an engine manifest result is produced,
+- how engine-local annotations are preserved,
+- and how that result is lowered into `ArtifactSetRef` without leaking engine-local nouns into framework core.
+
+Repository rule:
+
+- framework code consumes `ArtifactSetRef` or another explicit bridge output,
+- it does not consume raw `ManifestResult` as if it were already the framework set carrier.
+
+First dependency-ready bridge shape:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ManifestArtifactSetBridge:
+    bridge_schema: str
+    bridge_version: int
+    artifact_set_ref: "ArtifactSetRef"
+```
+
+Bridge rules:
+
+1. `ManifestArtifactSetBridge` is integration-owned metadata that points framework consumers at the
+   framework-owned `artifact_set_ref`.
+2. `bridge_schema` and `bridge_version` version the projection contract independently from engine-local naming or helper
+   aliases.
+3. `artifact_set_ref` is the only set contract consumed by `0056` code paths; raw `artifact_ids`,
+   `key_set_digest_hex`, and `engine_request_id` remain compatibility or observability fields only.
+4. the first dependency-ready bridge should emit `artifact_set_ref` in `manifest_backed` form so high-cardinality
+   execution can consume one stable set reference rather than locally expanding raw manifest output.
+5. if the bridge is missing, unsupported, inconsistent with the referenced manifest, or inconsistent with the
+   advertised `ArtifactSetRef`, the consuming path must fail closed.
+6. additive transport through plan or NodeAgent surfaces may preserve both `ManifestResult` and
+   `ManifestArtifactSetBridge`, but framework code must key set orchestration off the explicit bridge output.
 
 ## Why manifest-first is the right abstraction
 
@@ -441,6 +492,7 @@ Classes and structs use `PascalCase`:
 
 - `EngineArtifactAdapter`
 - `ManifestResult`
+- `ManifestArtifactSetBridge`
 - `PublishResult`
 - `HydrateResult`
 - `BatchResult`
@@ -473,7 +525,8 @@ This design does not introduce new `schema.sql` ownership.
 Proto and SDK additions that follow from this design should remain generic:
 
 - canonical artifact action names,
-- canonical manifest-oriented result carriers that lower into framework-owned generic set carriers,
+- additive bridge carriers or fields that preserve `ManifestArtifactSetBridge` alongside manifest-oriented results,
+- canonical manifest-oriented result carriers that lower into framework-owned `ArtifactSetRef`,
 - and integration-layer helper APIs that lower to those canonical surfaces.
 
 # Trade-offs and Risks
@@ -498,10 +551,12 @@ Proto and SDK additions that follow from this design should remain generic:
   orchestration.
 - `ManifestResult` or a future neutral successor remains the current integration-side high-cardinality carrier, while
   lowering into framework-generic set orchestration remains explicit and versioned.
+- framework code can consume an explicit bridge output such as `ManifestArtifactSetBridge` without locally deriving set
+  identity from raw `ManifestResult`.
 - manifest-backed set references define explicit schema version, owner, expiry or currentness contract, and fail-closed
   resolution behavior before they are treated as dependency-ready carriers.
-- `key_set_digest_hex` does not silently become a second framework set-identity model beside the `0056` generic set
-  carrier.
+- `key_set_digest_hex` does not silently become a second framework set-identity model beside the `0056`
+  `ArtifactSetRef` contract.
 - in this phase, `0102` instance-action closeout remains terminal-only unless and until a dependency-ready `0096` and
   `0100` public continuation path is explicitly adopted.
 - Compatibility aliases such as `kvcache_*` remain helper vocabulary only and do not become required framework proto or
