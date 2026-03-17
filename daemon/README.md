@@ -97,7 +97,13 @@ flowchart TB
 - Byte-artifact batch ingress: `BatchExists` and `BatchTouchTtl` are ingress RPCs and require `gateway_ingress_enabled=true` for non-local callers. `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` stay local-only and reuse the same validated caller-region boundary as region-backed materialization. Large remote payloads move over signed `payload_ref` transport via `FetchPayloadRefChunk`; `BatchGetIntoRegion` no longer exposes `preference` or `source_policy`.
 - Disk fallbacks are daemon-owned: `ImportArtifactFromPathRequest.verify_checksums` controls import-time descriptor/index consistency checks, and disk materialization flows apply read-only source mutation policy for imported sources.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`, `SealAssembly`.
-- Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated). `GetDetailedStatus.communication_info` reports cumulative P2P transfer counters (`total_transfers`, `total_bytes_transferred`, `total_transfer_errors`) sourced from daemon-side ingestion metrics.
+- Plan ingress: `ExecutePlan` now serves the first `gateway_ingress_enabled`-gated `terminal_only` slice for local
+  worker-targeted plans and returns a terminal `node_agent.v1.ExecutePlanResponse` envelope. The first slice fails
+  closed on remote worker targets, instance targets, cluster targets, and non-terminal execution classes.
+- Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated). `GetWorkerStatus`
+  now carries daemon-side freshness metadata (`as_of_ms`, `staleness_ms`, `cache_epoch`, `freshness_state`), and
+  `GetDetailedStatus.communication_info` reports cumulative P2P transfer counters (`total_transfers`,
+  `total_bytes_transferred`, `total_transfer_errors`) sourced from daemon-side ingestion metrics.
 - Transport: `LockTransportChunks`, `UnlockTransportChunks`.
 - In-memory registration: `BeginRegisterArtifact`, `FeedRegisterArtifactStream`, `KeepAliveRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `RevokeRegisteredArtifact`.
 - Local stable tier: `CommitRegisteredArtifact` can synchronously satisfy `stable_dram(scope=local)` based on the resolved `StorePolicy` and returns `local_stable_tier` (`READY`/`DEGRADED`/`SKIPPED`). `must` failures fail the RPC; `should` failures degrade. Metrics: `tc_local_stable_tier_total{op,status,requirement}`, `tc_local_stable_tier_seconds{op,status}`. See `../docs/architecture/api/registration-flow.md#local-stable-tier`.

@@ -4,10 +4,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
 
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "core/store/store_engine.h"
 #include "daemon/app/startup_coordinator.h"
 #include "daemon/service/controllers/status_assembler.h"
@@ -51,6 +54,8 @@ class StatusController {
   }
 
   grpc::Status get_worker_status(RpcContext& rctx, v2::GetWorkerStatusResponse& resp) const {
+    const int64_t as_of_ms = absl::ToUnixMillis(absl::Now());
+    const uint64_t cache_epoch = worker_status_cache_epoch_.fetch_add(1, std::memory_order_relaxed) + 1;
     resp.set_is_registered(d_.identity.is_registered());
     resp.set_is_healthy(true);
     resp.set_is_shutting_down(d_.shutdown_signal.is_shutting_down());
@@ -59,6 +64,10 @@ class StatusController {
     resp.set_uptime_seconds(uptime().count());
     resp.set_worker_id(d_.identity.is_registered() ? d_.identity.worker_id() : "");
     resp.set_daemon_id(d_.identity.daemon_id());
+    resp.set_as_of_ms(as_of_ms);
+    resp.set_staleness_ms(0);
+    resp.set_cache_epoch(cache_epoch);
+    resp.set_freshness_state("current");
     // Optional metrics for status snapshots
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -117,6 +126,7 @@ class StatusController {
 
  private:
   Dep d_;
+  mutable std::atomic<uint64_t> worker_status_cache_epoch_{0};
 
   v2::DaemonStartupPhase startup_phase_proto() const {
     if (!d_.startup_coordinator) {

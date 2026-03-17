@@ -22,6 +22,7 @@
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
+#include "daemon/state/worker_identity_store.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -32,6 +33,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   struct Options {
     bool allow_high_card_attrs{false};
     bool use_cursor_pagination{false};
+    bool gateway_ingress_enabled{false};
     std::filesystem::path storage_path;
   };
 
@@ -42,6 +44,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     RegistrationController& registration_controller;
     TransportController& transport_controller;
     StatusController& status_controller;
+    WorkerIdentityStore& identity_store;
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
@@ -56,6 +59,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   };
 
   StoreDaemonServiceImpl(Deps deps, Options opts);
+
+  grpc::Status ExecutePlan(grpc::ServerContext* ctx, const v2::ExecutePlanRequest* req, v2::ExecutePlanResponse* resp)
+      override;
 
   grpc::Status MaterializeReplica(
       grpc::ServerContext* ctx,
@@ -386,6 +392,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   RegistrationController* registration_controller_;
   TransportController* transport_controller_;
   StatusController* status_controller_;
+  WorkerIdentityStore* identity_store_;
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;

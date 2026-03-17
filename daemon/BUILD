@@ -91,6 +91,7 @@ sc_cc_library(
     srcs = [
         "service/artifact_retire_utils.cc",
         "service/grpc_service_impl.cc",
+        "service/grpc_service_impl_execute_plan.cc",
         "service/grpc_service_impl_rpc_delegates.cc",
     ],
     hdrs = [
@@ -146,6 +147,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:source_hash",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/node_agent/v1:node_agent_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/random:random",
@@ -2434,6 +2436,19 @@ cc_test(
         "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_execute_plan_test",
+    srcs = ["service/grpc_service_impl_execute_plan_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/node_agent/v1:node_agent_cc",
         "@catch2//:catch2_main",
     ],
 )

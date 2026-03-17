@@ -265,6 +265,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .registration_controller = *registration_controller,
       .transport_controller = *transport_controller,
       .status_controller = *status_controller,
+      .identity_store = kernel->worker_identity_store(),
       .region_registry = kernel->region_registry(),
       .lip_manager = kernel->lip_manager(),
       .global_store_client = global_store_client,
@@ -280,6 +281,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = options.allow_high_card_attrs,
       .use_cursor_pagination = options.use_cursor_pagination,
+      .gateway_ingress_enabled = options.gateway_ingress_enabled,
       .storage_path = options.storage_path,
   };
   auto service = std::make_unique<StoreDaemonServiceImpl>(sdeps, svc_opts);

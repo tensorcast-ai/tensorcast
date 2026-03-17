@@ -366,6 +366,7 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       registration_controller_(&deps.registration_controller),
       transport_controller_(&deps.transport_controller),
       status_controller_(&deps.status_controller),
+      identity_store_(&deps.identity_store),
       region_registry_(&deps.region_registry),
       lip_manager_(&deps.lip_manager),
       global_store_client_(std::move(deps.global_store_client)),

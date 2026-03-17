@@ -307,6 +307,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .registration_controller = *app->registration_controller_,
       .transport_controller = *app->transport_controller_,
       .status_controller = *app->status_controller_,
+      .identity_store = app->kernel_->worker_identity_store(),
       .region_registry = app->kernel_->region_registry(),
       .lip_manager = app->kernel_->lip_manager(),
       .global_store_client = app->options_.global_store_client,
@@ -322,6 +323,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = app->options_.daemon_options.allow_high_card_attrs,
       .use_cursor_pagination = app->options_.daemon_options.use_cursor_pagination,
+      .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
   };
   app->service_ = std::make_unique<StoreDaemonServiceImpl>(sdeps, svc_opts);
