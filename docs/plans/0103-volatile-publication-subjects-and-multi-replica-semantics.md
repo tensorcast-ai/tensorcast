@@ -16,16 +16,18 @@ move same-subject non-reuse onto existing `0094` carriers, and avoid turning `01
 
 # Current State & Grounding
 
-- `TargetPublicationRegistry` already tracks per-target currentness via `latest_by_target_`, but its key is still an
-  implementation-shaped precursor rather than an explicit publication-subject contract.
+- `TargetPublicationRegistry` now tracks subject currentness via explicit `PublicationSubjectKey` and
+  `PublicationInstanceId` carriers, with `latest_by_subject_` and per-record `subject_generation`.
   - [target_publication_registry.h](/data/workspace/tensorcast-1/daemon/state/target_publication_registry.h)
   - [target_publication_registry.cc](/data/workspace/tensorcast-1/daemon/state/target_publication_registry.cc)
-- Current `publication_key` still mixes stable target-domain identity and owner-local fencing facts such as `owner_pid`,
-  which is acceptable as a bridge but not as the long-term semantic model.
+- Stable publication subject identity is now separated from owner-local observations:
+  - `PublicationSubjectKey` excludes `owner_pid`
+  - `owner_pid` remains an ingress-local admission check and generation bump trigger
   - [target_publish_service.cc](/data/workspace/tensorcast-1/daemon/service/controllers/target_publish_service.cc)
-- Current workflow and lifecycle projections already exist, but are not yet aligned:
-  - `WorkflowCompanionRef.currentness_key` mirrors `publication_key`
-  - `publication_target` lifecycle minting still fixes `subject_generation = 1`
+- Workflow and lifecycle projections are now aligned for dependency-ready `local_ephemeral` semantics:
+  - `WorkflowCompanionRef.currentness_key` lowers from `PublicationSubjectKey`
+  - `publication_target` lifecycle minting projects per-subject `subject_generation`
+  - public continuation stays publication-instance scoped
   - [target_publish_service.cc](/data/workspace/tensorcast-1/daemon/service/controllers/target_publish_service.cc)
 - `0094` already owns the runtime carriers that should express same-subject rebinding:
   - `subject_id`
@@ -63,53 +65,58 @@ move same-subject non-reuse onto existing `0094` carriers, and avoid turning `01
 - [x] Plan sequencing is narrowed so `0103` follows `0056` substrate, `0102` bridge closeout, and `0104` rollout
       layering.
 - [x] Phase 1-3 are the dependency-ready closeout path for target publication only.
-- [ ] Publication currentness, lifecycle-generation projection, idempotency, and fail-closed hardening are still pending
-      implementation work.
+- [x] Publication currentness, lifecycle-generation projection, instance-scoped operation identity, idempotency keying,
+      and fail-closed owner-replacement handling are implemented in the daemon.
+- [x] Added daemon coverage for:
+  - same-artifact different-subject independence
+  - same-generation terminal replay reuse
+  - owner-replacement generation bump and fail-closed continuation admission
+- [x] Bazel daemon target verification passed alongside the local daemon build and Python plan suites.
 
 # Execution Position
 
 - [ ] Stage 1: start only after `0056` set substrate and `0102` bridge semantics are stable enough that target-
       publication terminology cleanup is no longer blocking them.
-- [ ] Stage 2: execute only Phase 1-3 as the main closeout path.
+- [x] Stage 2: execute only Phase 1-3 as the main closeout path.
 - [ ] Stage 3: treat any future coordinated-slot work as a separate low-cardinality design follow-up rather than part
       of this plan.
 
 # Phases & Milestones
 
-- [ ] Phase 1: Current-reality object-model closeout
-  - [ ] Milestone 1.1: land `0103` as target-publication currentness binding over existing kernels rather than as a new
+- [x] Phase 1: Current-reality object-model closeout
+  - [x] Milestone 1.1: land `0103` as target-publication currentness binding over existing kernels rather than as a new
         semantic kernel.
-  - [ ] Milestone 1.2: document the landed publish currentness, generation, instance, and continuation crosswalk without
+  - [x] Milestone 1.2: document the landed publish currentness, generation, instance, and continuation crosswalk without
         reopening the first `attach_existing -> Operation[T]` closeout.
-  - [ ] Milestone 1.3: document that `0103` does not retake repository-wide ownership of bare `publish`.
-  - [ ] Milestone 1.4: reconcile current `publication_key`, `currentness_key`, `publication_id`, `subject_id`,
+  - [x] Milestone 1.3: document that `0103` does not retake repository-wide ownership of bare `publish`.
+  - [x] Milestone 1.4: reconcile current `publication_key`, `currentness_key`, `publication_id`, `subject_id`,
         `subject_generation`, and `OperationRef` terminology in docs and internal type naming.
-  - [ ] Milestone 1.5: add `0103` cross-linking to `0094`, `0102`, `0104`, and `0087`.
+  - [x] Milestone 1.5: add `0103` cross-linking to `0094`, `0102`, `0104`, and `0087`.
 
-- [ ] Phase 2: Publication currentness and lifecycle projection extraction
-  - [ ] Milestone 2.1: define explicit internal `PublicationSubjectKey` and `PublicationInstanceId` types plus one
+- [x] Phase 2: Publication currentness and lifecycle projection extraction
+  - [x] Milestone 2.1: define explicit internal `PublicationSubjectKey` and `PublicationInstanceId` types plus one
         canonical cross-layer projection table.
-  - [ ] Milestone 2.2: keep `PublicationOwnerFence` as a logical same-subject relation carried by
+  - [x] Milestone 2.2: keep `PublicationOwnerFence` as a logical same-subject relation carried by
         `subject_generation` and optional `fencing_context`, not as a standalone parallel carrier.
-  - [ ] Milestone 2.3: keep current landed path explicitly in `local_ephemeral` mode with current-instance semantics.
-  - [ ] Milestone 2.4: factor implementation-shaped names toward currentness, generation, and instance semantics
+  - [x] Milestone 2.3: keep current landed path explicitly in `local_ephemeral` mode with current-instance semantics.
+  - [x] Milestone 2.4: factor implementation-shaped names toward currentness, generation, and instance semantics
         without regressing current owner-local fail-closed behavior.
-  - [ ] Milestone 2.5: keep richer history and coordinated-slot semantics explicitly out of dependency-ready scope.
+  - [x] Milestone 2.5: keep richer history and coordinated-slot semantics explicitly out of dependency-ready scope.
 
-- [ ] Phase 3: Correctness alignment for `local_ephemeral` target publication
-  - [ ] Milestone 3.1: make current-instance attach behavior depend on currentness key plus `subject_generation` plus
+- [x] Phase 3: Correctness alignment for `local_ephemeral` target publication
+  - [x] Milestone 3.1: make current-instance attach behavior depend on currentness key plus `subject_generation` plus
         instance relation rather than artifact id.
-  - [ ] Milestone 3.2: make stale-current and wrong-subject rejection depend on publication currentness and publication
+  - [x] Milestone 3.2: make stale-current and wrong-subject rejection depend on publication currentness and publication
         instance semantics.
-  - [ ] Milestone 3.3: harden owner-loss fail-closed behavior through generation-aware rebinding without weakening
+  - [x] Milestone 3.3: harden owner-loss fail-closed behavior through generation-aware rebinding without weakening
         owner-local observations.
-  - [ ] Milestone 3.4: preserve the current `attach_existing -> Operation[T]` public surface and keep `OperationRef`
+  - [x] Milestone 3.4: preserve the current `attach_existing -> Operation[T]` public surface and keep `OperationRef`
         instance-scoped.
-  - [ ] Milestone 3.5: align idempotency with stable target-domain identity plus binding generation and existing
+  - [x] Milestone 3.5: align idempotency with stable target-domain identity plus binding generation and existing
         `ReplicaKey`-grounded publish-context patterns.
-  - [ ] Milestone 3.6: keep `owner_pid` and similar facts as local observations only and avoid introducing a second
+  - [x] Milestone 3.6: keep `owner_pid` and similar facts as local observations only and avoid introducing a second
         publication-private fence dialect.
-  - [ ] Milestone 3.7: keep non-current historical replay and richer reusable-terminal semantics explicitly out of
+  - [x] Milestone 3.7: keep non-current historical replay and richer reusable-terminal semantics explicitly out of
         dependency-ready scope unless bounded-history substrate lands.
 
 # Tasks
@@ -151,6 +158,12 @@ move same-subject non-reuse onto existing `0094` carriers, and avoid turning `01
   - `bazel test //daemon:grpc_service_impl_publish_target_replica_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
   - `bazel test //daemon:grpc_service_impl_operation_rpc_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
   - `pytest tests/python/api/test_operation_semantics.py tests/python/test_binding.py tests/python/test_inplace_slot.py`
+- Latest verification snapshot:
+  - `source .venv/bin/activate && BUILD_CORE=1 BUILD_EXTENSION=0 python -vvv setup.py build_ext` completed
+  - `bazel build //daemon:target_publication_registry_lib //daemon:target_publish_service_lib //daemon:target_materialization_service_lib //daemon:owned_binding_service_lib` completed
+  - `bazel test //daemon:grpc_service_impl_publish_target_replica_test --test_env=TENSORCAST_CUDA_BACKEND=fake` passed
+  - `bazel test //daemon:grpc_service_impl_operation_rpc_test --test_env=TENSORCAST_CUDA_BACKEND=fake` passed
+  - `source .venv/bin/activate && pytest tests/python/api/test_operation_semantics.py tests/python/test_binding.py tests/python/test_inplace_slot.py` passed (`13 passed, 23 skipped`)
 - Rollout:
   - land current-reality documentation changes first
   - then land internal currentness, generation, and instance model refactors without changing public API names

@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/target_publish_service.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -82,6 +83,18 @@ struct TargetPublicationCredentialInspection {
   FrontDoorCredentialContext front_door_context;
 };
 
+enum class PublicationSubjectMatchResult : std::uint8_t {
+  kCurrentInstance = 0,
+  kStaleCurrent = 1,
+  kOwnerLost = 2,
+  kUnavailable = 3,
+};
+
+struct PublicationSubjectEvaluation {
+  PublicationSubjectMatchResult match_result{PublicationSubjectMatchResult::kUnavailable};
+  std::optional<TargetPublicationRegistry::Record> current_record;
+};
+
 WorkflowBindingProjection publication_workflow_binding_projection(const TargetPublicationRegistry::Record& record);
 
 absl::StatusOr<tensorcast::common::v1::ByteSpaceRef> normalize_byte_space(
@@ -105,44 +118,12 @@ absl::StatusOr<tensorcast::common::v1::ByteSpaceRef> normalize_byte_space(
   }
 }
 
-std::string build_publication_key(
-    const tensorcast::common::v1::ArtifactSelection& selection,
-    const tensorcast::common::v1::ByteSpaceRef& byte_space,
-    std::string_view target_layout_hash,
-    int owner_pid,
-    std::string_view device_uuid) {
-  std::string key = absl::StrCat(
-      selection.artifact_id(),
-      "|",
-      selection.view_id(),
-      "|",
-      selection.logical_layout_hash(),
-      "|",
-      selection.selection_hash(),
-      "|",
-      selection.view_subset_hash(),
-      "|",
-      static_cast<int>(byte_space.kind()),
-      "|",
-      byte_space.id(),
-      "|",
-      target_layout_hash,
-      "|",
-      owner_pid,
-      "|",
-      device_uuid);
-  for (const auto& name : selection.tensor_names()) {
-    absl::StrAppend(&key, "|t:", name);
-  }
-  return key;
-}
-
 std::string publication_capability_id(std::string_view publication_id) {
   return absl::StrCat("publication:", publication_id);
 }
 
 std::string publication_subject_id(const TargetPublicationRegistry::Record& record) {
-  return absl::StrCat("publication-target:", record.publication_key);
+  return absl::StrCat("publication-target:", record.publication_subject_key.value);
 }
 
 LocalObservationSet build_target_publication_local_observations(const v2::PublishTargetReplicaRequest& req) {
@@ -196,10 +177,7 @@ FrontDoorCredentialContext build_target_publication_front_door_context(
                       .binding_space = LifecycleBindingSpace::kPublication,
                       .binding_key_kind = BindingKeyKind::kPublicationId,
                       .binding_key = scope.publication_id(),
-                      .epochs =
-                          LifecycleEpochs{
-                              .subject_generation = 1,
-                          },
+                      .epochs = LifecycleEpochs{},
                   },
               .front_door_kind = LifecycleFrontDoorKind::kTargetPublicationToken,
               .credential_expires_at = absl::FromUnixMillis(static_cast<std::int64_t>(envelope.expires_at_ms())),
@@ -214,6 +192,18 @@ FrontDoorCredentialContext build_target_publication_front_door_context(
       .forwardable_evidence = std::move(forwardable_evidence),
       .local_observations = std::move(local_observations),
   };
+}
+
+void bind_record_to_target_publication_front_door_context(
+    const TargetPublicationRegistry::Record& record,
+    FrontDoorCredentialContext* front_door_context) {
+  if (front_door_context == nullptr) {
+    return;
+  }
+  front_door_context->parsed_credential.address.binding_key = record.publication_id.value;
+  front_door_context->parsed_credential.address.epochs.subject_generation =
+      record.subject_generation == 0 ? 1 : record.subject_generation;
+  front_door_context->parsed_credential.constraint_claims.operation_id = record.request_operation_id;
 }
 
 PortableParsedCredential derive_target_publication_portable_credential(
@@ -245,6 +235,14 @@ std::string target_publication_root_request_id(std::string_view publication_id) 
   return absl::StrCat("target-publication:", publication_id);
 }
 
+std::string publication_request_idempotency_key(const TargetPublicationRegistry::Record& record) {
+  if (record.request_operation_id.empty()) {
+    return {};
+  }
+  return absl::StrCat(
+      record.publication_subject_key.value, "|g:", record.subject_generation, "|req:", record.request_operation_id);
+}
+
 std::string owner_id_for_operation(const WorkerIdentityStore& identity) {
   auto daemon_id = identity.daemon_id();
   if (!daemon_id.empty()) {
@@ -258,10 +256,7 @@ std::string owner_id_for_operation(const WorkerIdentityStore& identity) {
 }
 
 std::string publish_operation_id(const TargetPublicationRegistry::Record& record) {
-  if (!record.operation_id.empty()) {
-    return record.operation_id;
-  }
-  return absl::StrCat("publish-target:", record.publication_id);
+  return absl::StrCat("publish-target:", record.publication_id.value);
 }
 
 std::optional<std::string> fencing_digest_for_workflow_ref(const WorkflowCompanionRef& workflow_ref) {
@@ -278,7 +273,7 @@ operation::OperationRef build_publish_operation_ref(const TargetPublicationRegis
   operation_ref.set_kind(std::string(kPublishOperationKind));
   operation_ref.set_target_artifact_id(record.selection.artifact_id());
   operation_ref.set_authority_scope_kind(std::string(kPublishAuthorityScopeKind));
-  operation_ref.set_authority_scope_id(record.publication_id);
+  operation_ref.set_authority_scope_id(record.publication_id.value);
   operation_ref.set_attachment_kind(std::string(kPublishAttachmentKind));
   operation_ref.set_recovery_class(std::string(kPublishRecoveryClass));
   const auto workflow_ref = record.workflow_binding_projection.value_or(publication_workflow_binding_projection(record))
@@ -569,9 +564,9 @@ absl::Status validate_target_publication_scope_against_record(
     const TargetPublicationRegistry::Record& record,
     const tensorcast::common::v1::TargetPublicationScope& scope,
     const tensorcast::common::v1::ByteSpaceRef& normalized_byte_space) {
-  const std::string publication_key = build_publication_key(
-      scope.selection(), normalized_byte_space, scope.target_layout_hash(), scope.owner_pid(), scope.device_uuid());
-  if (record.publication_key != publication_key) {
+  const PublicationSubjectKey publication_subject_key = build_publication_subject_key(
+      scope.selection(), normalized_byte_space, scope.target_layout_hash(), scope.device_uuid());
+  if (record.publication_subject_key != publication_subject_key) {
     return absl::FailedPreconditionError("publication target mismatch for target_publication_token");
   }
   if (record.device_uuid != scope.device_uuid()) {
@@ -587,7 +582,7 @@ absl::Status validate_target_publication_scope_against_record(
       record.byte_space.id() != normalized_byte_space.id()) {
     return absl::FailedPreconditionError("byte_space mismatch for target_publication_token");
   }
-  if (!scope.operation_id().empty() && record.operation_id != scope.operation_id()) {
+  if (!scope.operation_id().empty() && record.request_operation_id != scope.operation_id()) {
     return absl::FailedPreconditionError("stored operation_id mismatch for target_publication_token");
   }
   if (record.selection.artifact_id() != scope.selection().artifact_id() ||
@@ -643,10 +638,11 @@ WorkflowBindingProjection publication_workflow_binding_projection(const TargetPu
       .resolved_workflow_ref =
           WorkflowCompanionRef{
               .owner_kind = WorkflowOwnerKind::kPublication,
-              .workflow_id = record.publication_id,
-              .currentness_key = record.publication_key,
-              .operation_id =
-                  record.operation_id.empty() ? std::nullopt : std::optional<std::string>(record.operation_id),
+              .workflow_id = record.publication_id.value,
+              .currentness_key = record.publication_subject_key.value,
+              .operation_id = record.request_operation_id.empty()
+                  ? std::nullopt
+                  : std::optional<std::string>(record.request_operation_id),
               .fencing_context = std::nullopt,
           },
   };
@@ -656,9 +652,9 @@ WorkflowIssueContext publication_workflow_issue_context(const TargetPublicationR
   return WorkflowIssueContext{
       .family = "publish",
       .requested_workflow_ref = publication_workflow_binding_projection(record).resolved_workflow_ref,
-      .currentness_key = record.publication_key,
+      .currentness_key = record.publication_subject_key.value,
       .request_operation_id =
-          record.operation_id.empty() ? std::nullopt : std::optional<std::string>(record.operation_id),
+          record.request_operation_id.empty() ? std::nullopt : std::optional<std::string>(record.request_operation_id),
   };
 }
 
@@ -677,7 +673,7 @@ std::shared_ptr<AuthorityAttachmentRef> publication_attachment_ref(const TargetP
   return std::make_shared<AuthorityAttachmentRef>(AuthorityAttachmentRef{
       .authority_ref = authority_ref,
       .attachment_kind = "target_publication",
-      .attachment_id = record.publication_id,
+      .attachment_id = record.publication_id.value,
       .fencing_context = authority_ref.fencing_context,
   });
 }
@@ -685,10 +681,10 @@ std::shared_ptr<AuthorityAttachmentRef> publication_attachment_ref(const TargetP
 WorkflowOutcomeProjection publication_replay_outcome_projection(const TargetPublicationRegistry::Record& record) {
   return WorkflowOutcomeProjection{
       .projection_kind = WorkflowOutcomeProjectionKind::kExistingCapability,
-      .owner_workflow_id = record.publication_id,
+      .owner_workflow_id = record.publication_id.value,
       .attachment_ref = publication_attachment_ref(record),
       .existing_capability_id = record.capability_id.empty()
-          ? std::optional<std::string>(publication_capability_id(record.publication_id))
+          ? std::optional<std::string>(publication_capability_id(record.publication_id.value))
           : std::optional<std::string>(record.capability_id),
   };
 }
@@ -746,7 +742,34 @@ WorkflowRedemptionContext publication_workflow_redemption_context(
           : std::nullopt,
       .lifecycle_fencing_context = admitted.capability.epochs.fencing_context,
       .request_operation_id =
-          record.operation_id.empty() ? std::nullopt : std::optional<std::string>(record.operation_id),
+          record.request_operation_id.empty() ? std::nullopt : std::optional<std::string>(record.request_operation_id),
+  };
+}
+
+PublicationSubjectEvaluation evaluate_publication_subject(
+    const TargetPublicationRegistry& target_publication_registry,
+    const TargetPublicationRegistry::Record& record,
+    absl::Time now) {
+  auto current_record_opt = target_publication_registry.lookup_current_for_subject(
+      record.publication_subject_key.value, now, /*require_not_expired=*/true);
+  if (!current_record_opt.has_value()) {
+    return PublicationSubjectEvaluation{.match_result = PublicationSubjectMatchResult::kUnavailable};
+  }
+  if (current_record_opt->publication_id == record.publication_id) {
+    return PublicationSubjectEvaluation{
+        .match_result = PublicationSubjectMatchResult::kCurrentInstance,
+        .current_record = std::move(current_record_opt),
+    };
+  }
+  if (current_record_opt->subject_generation > record.subject_generation) {
+    return PublicationSubjectEvaluation{
+        .match_result = PublicationSubjectMatchResult::kOwnerLost,
+        .current_record = std::move(current_record_opt),
+    };
+  }
+  return PublicationSubjectEvaluation{
+      .match_result = PublicationSubjectMatchResult::kStaleCurrent,
+      .current_record = std::move(current_record_opt),
   };
 }
 
@@ -805,14 +828,20 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
     uint32_t ttl_ms) {
   auto record = std::move(publish_context.record);
   populate_publication_workflow_state(&record);
-  if (!target_publication_registry->is_current_for_target(
-          record.publication_key, publish_context.scope.publication_id())) {
-    return absl::FailedPreconditionError("target_publication_token is stale for target");
-  }
   auto scope_record_status = validate_target_publication_scope_against_record(
       record, publish_context.scope, publish_context.normalized_byte_space);
   if (!scope_record_status.ok()) {
     return scope_record_status;
+  }
+  const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry, record, absl::Now());
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
+    return absl::UnavailableError("publish workflow owner lost");
+  }
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
+    return absl::UnavailableError("target_publication workflow state unavailable");
+  }
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
+    return absl::FailedPreconditionError("target_publication_token is stale for target");
   }
 
   const auto device =
@@ -951,7 +980,7 @@ absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember
   auto lease_or = d_.lifecycle.create_retention_lease(
       ttl,
       std::vector<std::function<absl::Status()>>{
-          [this, publication_id = record.publication_id]() -> absl::Status {
+          [this, publication_id = record.publication_id.value]() -> absl::Status {
             target_publication_registry_->erase(publication_id);
             return d_.lifecycle_kernel.release_capability(publication_capability_id(publication_id));
           },
@@ -959,17 +988,18 @@ absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember
   if (!lease_or.ok()) {
     return lease_or.status();
   }
-  record.capability_id = publication_capability_id(record.publication_id);
+  record.capability_id = publication_capability_id(record.publication_id.value);
   record.lease_id = *lease_or;
+  record = target_publication_registry_->insert(std::move(record));
 
   LifecycleSubjectRecord subject;
   subject.subject_id = publication_subject_id(record);
-  subject.epochs.subject_generation = 1;
+  subject.epochs.subject_generation = record.subject_generation == 0 ? 1 : record.subject_generation;
   subject.subject_kind = LifecycleSubjectKind::kPublicationTarget;
   subject.created_at = now;
   subject.last_observed_at = now;
   subject.artifact_id = record.selection.artifact_id();
-  subject.semantic_ref_id = record.publication_id;
+  subject.semantic_ref_id = record.publication_id.value;
   subject.workflow_companion = record.workflow_binding_projection->resolved_workflow_ref;
   auto capability_or = d_.lifecycle_kernel.mint_capability(
       MintCapabilityRequest{
@@ -980,7 +1010,7 @@ absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember
                   .family = LifecycleCapabilityFamily::kPublish,
                   .binding_space = LifecycleBindingSpace::kPublication,
                   .binding_key_kind = BindingKeyKind::kPublicationId,
-                  .binding_key = record.publication_id,
+                  .binding_key = record.publication_id.value,
                   .epochs = subject.epochs,
               },
           .front_door_kind = LifecycleFrontDoorKind::kTargetPublicationToken,
@@ -992,16 +1022,17 @@ absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember
           .constraint_claims =
               ConstraintClaims{
                   .artifact_id = record.selection.artifact_id(),
-                  .operation_id = record.operation_id,
+                  .operation_id = record.request_operation_id,
               },
           .workflow_companion = record.workflow_binding_projection->resolved_workflow_ref,
           .workflow_gate = WorkflowGateKind::kRequired,
       });
   if (!capability_or.ok()) {
+    target_publication_registry_->erase(record.publication_id.value);
     d_.lifecycle.release_lease(*lease_or);
     return capability_or.status();
   }
-  return target_publication_registry_->insert(std::move(record));
+  return record;
 }
 
 absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> TargetPublishService::
@@ -1022,6 +1053,7 @@ absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> TargetPu
   if (!record_opt.has_value()) {
     return absl::NotFoundError("target_publication_token is no longer valid");
   }
+  bind_record_to_target_publication_front_door_context(*record_opt, &inspection_or->front_door_context);
 
   return TargetPublicationFrontDoorContext{
       .record = std::move(*record_opt),
@@ -1052,6 +1084,12 @@ absl::StatusOr<RoutedAuthorityRequest> TargetPublishService::build_target_public
   if (!evidence_validation_status.ok()) {
     return evidence_validation_status.status();
   }
+  auto record_opt =
+      target_publication_registry_->lookup(inspection_or->scope.publication_id(), now, /*require_not_expired=*/true);
+  if (!record_opt.has_value()) {
+    return absl::NotFoundError("target_publication_token is no longer valid");
+  }
+  bind_record_to_target_publication_front_door_context(*record_opt, &inspection_or->front_door_context);
   const auto authority_ref = publication_routed_workflow_authority_ref(inspection_or->envelope.issuer_daemon_id());
   const auto portable_credential = derive_target_publication_portable_credential(inspection_or->front_door_context);
   const std::string root_request_id = target_publication_root_request_id(inspection_or->scope.publication_id());
@@ -1081,8 +1119,8 @@ absl::StatusOr<RoutedAuthorityRequest> TargetPublishService::build_target_public
               .hop_budget_remaining = 1,
           },
   };
-  if (!inspection_or->scope.operation_id().empty()) {
-    routed_request.request_metadata.idempotency_key = inspection_or->scope.operation_id();
+  if (const std::string idempotency_key = publication_request_idempotency_key(*record_opt); !idempotency_key.empty()) {
+    routed_request.request_metadata.idempotency_key = idempotency_key;
   }
   auto validation_status = routed_authority_wire::validate_routed_authority_request_shape(routed_request);
   if (!validation_status.ok()) {
@@ -1161,30 +1199,22 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
     if (!inspection_or.ok()) {
       return inspection_or.status();
     }
-    const auto portable_credential = derive_target_publication_portable_credential(inspection_or->front_door_context);
-    if (portable_credential != routed_request.portable_credential) {
-      return absl::FailedPreconditionError("target_publication portable credential mismatches workflow-owner state");
-    }
     auto record_opt =
         target_publication_registry_->lookup(inspection_or->scope.publication_id(), now, /*require_not_expired=*/true);
     if (!record_opt.has_value()) {
       return std::optional<OwnerStageReply>(publication_terminal_reply(
           expected_workflow_authority,
           kPublishWorkflowGateStageRef,
-          "failed_precondition",
+          "unavailable",
           "publish_workflow_state_missing",
           "target_publication workflow state unavailable"));
     }
     auto record = std::move(*record_opt);
     populate_publication_workflow_state(&record);
-    if (!target_publication_registry_->is_current_for_target(
-            record.publication_key, inspection_or->scope.publication_id())) {
-      return std::optional<OwnerStageReply>(publication_terminal_reply(
-          expected_workflow_authority,
-          kPublishWorkflowGateStageRef,
-          "failed_precondition",
-          "publish_stale_current",
-          "publish currentness rejected"));
+    bind_record_to_target_publication_front_door_context(record, &inspection_or->front_door_context);
+    const auto portable_credential = derive_target_publication_portable_credential(inspection_or->front_door_context);
+    if (portable_credential != routed_request.portable_credential) {
+      return absl::FailedPreconditionError("target_publication portable credential mismatches workflow-owner state");
     }
     auto scope_record_status = validate_target_publication_scope_against_record(
         record, inspection_or->scope, inspection_or->normalized_byte_space);
@@ -1195,6 +1225,31 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
           "failed_precondition",
           std::string(scope_record_status.message()),
           std::string(scope_record_status.message())));
+    }
+    const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, now);
+    if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_workflow_authority,
+          kPublishWorkflowGateStageRef,
+          "unavailable",
+          "publish_owner_lost",
+          "publish owner lost"));
+    }
+    if (subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_workflow_authority,
+          kPublishWorkflowGateStageRef,
+          "unavailable",
+          "publish_workflow_state_missing",
+          "target_publication workflow state unavailable"));
+    }
+    if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_workflow_authority,
+          kPublishWorkflowGateStageRef,
+          "failed_precondition",
+          "publish_stale_current",
+          "publish currentness rejected"));
     }
     const auto operation_ref = build_publish_operation_ref(record);
     if (d_.global_store_client != nullptr && d_.global_store_client->is_connected()) {
@@ -1296,10 +1351,6 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
     if (!inspection_or.ok()) {
       return inspection_or.status();
     }
-    const auto portable_credential = derive_target_publication_portable_credential(inspection_or->front_door_context);
-    if (portable_credential != routed_request.portable_credential) {
-      return absl::FailedPreconditionError("target_publication portable credential mismatches issuer-validated state");
-    }
     auto workflow_gate_status = validate_publish_workflow_gate_claims(
         routed_request, publication_routed_workflow_authority_ref(d_.identity.daemon_id()), expected_issuer_authority);
     if (!workflow_gate_status.ok()) {
@@ -1311,20 +1362,16 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
       return std::optional<OwnerStageReply>(publication_terminal_reply(
           expected_issuer_authority,
           kPublishIssuerValidateStageRef,
-          "failed_precondition",
+          "unavailable",
           "publish_workflow_state_missing",
           "target_publication workflow state unavailable"));
     }
     auto record = std::move(*record_opt);
     populate_publication_workflow_state(&record);
-    if (!target_publication_registry_->is_current_for_target(
-            record.publication_key, inspection_or->scope.publication_id())) {
-      return std::optional<OwnerStageReply>(publication_terminal_reply(
-          expected_issuer_authority,
-          kPublishIssuerValidateStageRef,
-          "failed_precondition",
-          "publish_stale_current",
-          "publish currentness rejected"));
+    bind_record_to_target_publication_front_door_context(record, &inspection_or->front_door_context);
+    const auto portable_credential = derive_target_publication_portable_credential(inspection_or->front_door_context);
+    if (portable_credential != routed_request.portable_credential) {
+      return absl::FailedPreconditionError("target_publication portable credential mismatches issuer-validated state");
     }
     auto scope_record_status = validate_target_publication_scope_against_record(
         record, inspection_or->scope, inspection_or->normalized_byte_space);
@@ -1335,6 +1382,31 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
           "failed_precondition",
           std::string(scope_record_status.message()),
           std::string(scope_record_status.message())));
+    }
+    const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, now);
+    if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_issuer_authority,
+          kPublishIssuerValidateStageRef,
+          "unavailable",
+          "publish_owner_lost",
+          "publish owner lost"));
+    }
+    if (subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_issuer_authority,
+          kPublishIssuerValidateStageRef,
+          "unavailable",
+          "publish_workflow_state_missing",
+          "target_publication workflow state unavailable"));
+    }
+    if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_issuer_authority,
+          kPublishIssuerValidateStageRef,
+          "failed_precondition",
+          "publish_stale_current",
+          "publish currentness rejected"));
     }
     OwnerStageReply reply = publication_terminal_reply(
         expected_issuer_authority,
@@ -1394,17 +1466,23 @@ grpc::Status TargetPublishService::publish_target_replica(
   span->SetAttribute("tc.workflow.family", workflow_redemption_context.family);
   span->SetAttribute("tc.workflow.owner_kind", static_cast<int>(workflow_redemption_context.workflow_ref.owner_kind));
   span->SetAttribute("tc.workflow.recovery_class", static_cast<int>(record.workflow_recovery_class));
-  if (!target_publication_registry_->is_current_for_target(
-          record.publication_key, publish_context.scope.publication_id())) {
-    const auto stale_current =
-        publication_gate_decision(record, WorkflowDecisionClass::kStaleCurrent, "publish currentness rejected");
-    span->SetAttribute("tc.workflow.decision_class", static_cast<int>(stale_current.decision_class));
-    return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
-  }
   auto scope_record_status = validate_target_publication_scope_against_record(
       record, publish_context.scope, publish_context.normalized_byte_space);
   if (!scope_record_status.ok()) {
     return to_grpc_status(scope_record_status);
+  }
+  const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, absl::Now());
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
+    return {StatusCode::UNAVAILABLE, "publish workflow owner lost"};
+  }
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
+    return {StatusCode::UNAVAILABLE, "target_publication workflow state unavailable"};
+  }
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
+    const auto stale_current =
+        publication_gate_decision(record, WorkflowDecisionClass::kStaleCurrent, "publish currentness rejected");
+    span->SetAttribute("tc.workflow.decision_class", static_cast<int>(stale_current.decision_class));
+    return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
   }
 
   publish_context.record = record;
@@ -1437,10 +1515,14 @@ grpc::Status TargetPublishService::start_publish_target_replica(
   auto publish_context = std::move(*publish_context_or);
   auto record = std::move(publish_context.record);
   populate_publication_workflow_state(&record);
-  if (record.operation_id.empty() && req.has_operation_id() && !req.operation_id().empty()) {
-    record.operation_id = req.operation_id();
+  if (record.request_operation_id.empty() && req.has_operation_id() && !req.operation_id().empty()) {
+    record.request_operation_id = req.operation_id();
+    record.workflow_binding_projection.reset();
+    record.replay_outcome_projection.reset();
+    populate_publication_workflow_state(&record);
     record = target_publication_registry_->insert(std::move(record));
   }
+  bind_record_to_target_publication_front_door_context(record, &publish_context.front_door_context);
   publish_context.record = record;
   const auto operation_ref = build_publish_operation_ref(record);
   if (rctx.allow_high_card_attrs()) {
@@ -1466,8 +1548,28 @@ grpc::Status TargetPublishService::start_publish_target_replica(
   span->SetAttribute("tc.workflow.family", workflow_redemption_context.family);
   span->SetAttribute("tc.workflow.owner_kind", static_cast<int>(workflow_redemption_context.workflow_ref.owner_kind));
   span->SetAttribute("tc.workflow.recovery_class", static_cast<int>(record.workflow_recovery_class));
-  if (!target_publication_registry_->is_current_for_target(
-          record.publication_key, publish_context.scope.publication_id())) {
+  auto scope_record_status = validate_target_publication_scope_against_record(
+      record, publish_context.scope, publish_context.normalized_byte_space);
+  if (!scope_record_status.ok()) {
+    auto release_status = d_.lifecycle_kernel.release_use_guard(admitted_or->use_guard);
+    LOG_IF(WARNING, !release_status.ok())
+        << "publish_target_replica: failed to release lifecycle use guard after scope reject: " << release_status;
+    return to_grpc_status(scope_record_status);
+  }
+  const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, absl::Now());
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost ||
+      subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
+    auto release_status = d_.lifecycle_kernel.release_use_guard(admitted_or->use_guard);
+    LOG_IF(WARNING, !release_status.ok())
+        << "publish_target_replica: failed to release lifecycle use guard after owner-loss reject: " << release_status;
+    return {
+        StatusCode::UNAVAILABLE,
+        subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost
+            ? "publish workflow owner lost"
+            : "target_publication workflow state unavailable",
+    };
+  }
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
     auto release_status = d_.lifecycle_kernel.release_use_guard(admitted_or->use_guard);
     LOG_IF(WARNING, !release_status.ok())
         << "publish_target_replica: failed to release lifecycle use guard after stale-current reject: "
@@ -1476,14 +1578,6 @@ grpc::Status TargetPublishService::start_publish_target_replica(
         publication_gate_decision(record, WorkflowDecisionClass::kStaleCurrent, "publish currentness rejected");
     span->SetAttribute("tc.workflow.decision_class", static_cast<int>(stale_current.decision_class));
     return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
-  }
-  auto scope_record_status = validate_target_publication_scope_against_record(
-      record, publish_context.scope, publish_context.normalized_byte_space);
-  if (!scope_record_status.ok()) {
-    auto release_status = d_.lifecycle_kernel.release_use_guard(admitted_or->use_guard);
-    LOG_IF(WARNING, !release_status.ok())
-        << "publish_target_replica: failed to release lifecycle use guard after scope reject: " << release_status;
-    return to_grpc_status(scope_record_status);
   }
 
   resp.mutable_operation()->CopyFrom(operation_ref);
@@ -1624,7 +1718,12 @@ absl::Status TargetPublishService::admit_public_operation(const operation::Opera
       record.selection.artifact_id() != operation_ref.target_artifact_id()) {
     return absl::FailedPreconditionError("publish operation target_artifact_id mismatch");
   }
-  if (!target_publication_registry_->is_current_for_target(record.publication_key, record.publication_id)) {
+  const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, now);
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost ||
+      subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
+    return absl::UnavailableError("publish workflow owner lost");
+  }
+  if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
     return absl::FailedPreconditionError("publish operation attachment is stale");
   }
   return absl::OkStatus();

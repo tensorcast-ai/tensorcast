@@ -242,38 +242,6 @@ tensorcast::common::v1::ByteSpaceRef byte_space_from_selection(
   return byte_space;
 }
 
-std::string build_publication_key(
-    const tensorcast::common::v1::ArtifactSelection& selection,
-    const tensorcast::common::v1::ByteSpaceRef& byte_space,
-    std::string_view target_layout_hash,
-    int owner_pid,
-    std::string_view device_uuid) {
-  std::string key = absl::StrCat(
-      selection.artifact_id(),
-      "|",
-      selection.view_id(),
-      "|",
-      selection.logical_layout_hash(),
-      "|",
-      selection.selection_hash(),
-      "|",
-      selection.view_subset_hash(),
-      "|",
-      static_cast<int>(byte_space.kind()),
-      "|",
-      byte_space.id(),
-      "|",
-      target_layout_hash,
-      "|",
-      owner_pid,
-      "|",
-      device_uuid);
-  for (const auto& name : selection.tensor_names()) {
-    absl::StrAppend(&key, "|t:", name);
-  }
-  return key;
-}
-
 tensorcast::common::v1::ArtifactSelection build_mapped_bound_selection(
     std::string_view artifact_id,
     const v2::TargetLayout& layout,
@@ -355,8 +323,9 @@ absl::StatusOr<std::string> maybe_mint_target_publication_token(
   }
 
   TargetPublicationRegistry::Record record;
-  record.publication_id = publication_id;
-  record.publication_key = build_publication_key(current_selection, byte_space, layout_hash, owner_pid, device_uuid);
+  record.publication_id = PublicationInstanceId{.value = publication_id};
+  record.publication_subject_key =
+      build_publication_subject_key(current_selection, byte_space, layout_hash, device_uuid);
   record.target_layout_hash = layout_hash;
   record.selection = current_selection;
   record.byte_space = byte_space;
@@ -364,7 +333,7 @@ absl::StatusOr<std::string> maybe_mint_target_publication_token(
   record.index_key_hex = std::move(index_key_hex);
   record.device_uuid = std::string(device_uuid);
   record.owner_pid = owner_pid;
-  record.operation_id = std::string(operation_id);
+  record.request_operation_id = std::string(operation_id);
   record.expires_at = expires_at;
   record.segments = std::move(publish_segments);
   record.storages = std::move(publish_storages);

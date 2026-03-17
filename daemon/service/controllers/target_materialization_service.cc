@@ -77,38 +77,6 @@ std::string mint_publication_id() {
   return absl::BytesToHexString(raw);
 }
 
-std::string build_publication_key(
-    const tensorcast::common::v1::ArtifactSelection& selection,
-    const tensorcast::common::v1::ByteSpaceRef& byte_space,
-    std::string_view target_layout_hash,
-    int owner_pid,
-    std::string_view device_uuid) {
-  std::string key = absl::StrCat(
-      selection.artifact_id(),
-      "|",
-      selection.view_id(),
-      "|",
-      selection.logical_layout_hash(),
-      "|",
-      selection.selection_hash(),
-      "|",
-      selection.view_subset_hash(),
-      "|",
-      static_cast<int>(byte_space.kind()),
-      "|",
-      byte_space.id(),
-      "|",
-      target_layout_hash,
-      "|",
-      owner_pid,
-      "|",
-      device_uuid);
-  for (const auto& name : selection.tensor_names()) {
-    absl::StrAppend(&key, "|t:", name);
-  }
-  return key;
-}
-
 std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
   std::string buffer;
   buffer.reserve(512);
@@ -806,9 +774,9 @@ grpc::Status TargetMaterializationService::materialize_into_target(
             expires_at_ms);
         if (token_or.ok()) {
           TargetPublicationRegistry::Record record;
-          record.publication_id = publication_id;
-          record.publication_key =
-              build_publication_key(resolved_selection, byte_space, layout_hash, req.pid(), req.device_uuid());
+          record.publication_id = PublicationInstanceId{.value = publication_id};
+          record.publication_subject_key =
+              build_publication_subject_key(resolved_selection, byte_space, layout_hash, req.device_uuid());
           record.target_layout_hash = layout_hash;
           record.selection = resolved_selection;
           record.byte_space = byte_space;
@@ -817,7 +785,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
           record.device_uuid = req.device_uuid();
           record.owner_pid = req.pid();
           if (req.has_operation_id()) {
-            record.operation_id = req.operation_id();
+            record.request_operation_id = req.operation_id();
           }
           record.expires_at = expires_at;
           record.segments = std::move(publish_segments);
@@ -1094,9 +1062,9 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
             expires_at_ms);
         if (token_or.ok()) {
           TargetPublicationRegistry::Record record;
-          record.publication_id = publication_id;
-          record.publication_key =
-              build_publication_key(resolved_selection, byte_space, layout_hash, req.pid(), req.device_uuid());
+          record.publication_id = PublicationInstanceId{.value = publication_id};
+          record.publication_subject_key =
+              build_publication_subject_key(resolved_selection, byte_space, layout_hash, req.device_uuid());
           record.target_layout_hash = layout_hash;
           record.selection = resolved_selection;
           record.byte_space = byte_space;
@@ -1105,7 +1073,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
           record.device_uuid = req.device_uuid();
           record.owner_pid = req.pid();
           if (req.has_operation_id()) {
-            record.operation_id = req.operation_id();
+            record.request_operation_id = req.operation_id();
           }
           record.expires_at = expires_at;
           record.segments = std::move(publish_segments);

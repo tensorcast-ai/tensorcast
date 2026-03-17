@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
@@ -17,6 +18,34 @@
 
 namespace tensorcast::daemon {
 
+struct PublicationSubjectKey {
+  std::string value;
+
+  bool operator==(const PublicationSubjectKey&) const = default;
+};
+
+template <typename H>
+H AbslHashValue(H h, const PublicationSubjectKey& key) {
+  return H::combine(std::move(h), key.value);
+}
+
+struct PublicationInstanceId {
+  std::string value;
+
+  bool operator==(const PublicationInstanceId&) const = default;
+};
+
+template <typename H>
+H AbslHashValue(H h, const PublicationInstanceId& id) {
+  return H::combine(std::move(h), id.value);
+}
+
+[[nodiscard]] PublicationSubjectKey build_publication_subject_key(
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const tensorcast::common::v1::ByteSpaceRef& byte_space,
+    std::string_view target_layout_hash,
+    std::string_view device_uuid);
+
 class TargetPublicationRegistry {
  public:
   struct Options {
@@ -25,8 +54,9 @@ class TargetPublicationRegistry {
   };
 
   struct Record {
-    std::string publication_id;
-    std::string publication_key;
+    PublicationInstanceId publication_id;
+    PublicationSubjectKey publication_subject_key;
+    std::uint64_t subject_generation{0};
     std::string target_layout_hash;
     tensorcast::common::v1::ArtifactSelection selection;
     tensorcast::common::v1::ByteSpaceRef byte_space;
@@ -34,7 +64,7 @@ class TargetPublicationRegistry {
     std::string index_key_hex;
     std::string device_uuid;
     int owner_pid{0};
-    std::string operation_id;
+    std::string request_operation_id;
     absl::Time expires_at{absl::InfinitePast()};
     std::string capability_id;
     std::uint64_t lease_id{0};
@@ -50,17 +80,24 @@ class TargetPublicationRegistry {
   [[nodiscard]] Record insert(Record record);
   [[nodiscard]] std::optional<Record> lookup(std::string_view publication_id, absl::Time now, bool require_not_expired)
       const;
-  [[nodiscard]] bool is_current_for_target(std::string_view publication_key, std::string_view publication_id) const;
+  [[nodiscard]] std::optional<Record> lookup_current_for_subject(
+      std::string_view publication_subject_key,
+      absl::Time now,
+      bool require_not_expired) const;
+  [[nodiscard]] bool is_current_for_subject(std::string_view publication_subject_key, std::string_view publication_id)
+      const;
   void erase(std::string_view publication_id);
   void prune(absl::Time now);
 
  private:
+  [[nodiscard]] std::uint64_t assign_subject_generation_locked(const Record& record) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void prune_locked(absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   Options opts_;
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, Record> records_ ABSL_GUARDED_BY(mu_);
-  absl::flat_hash_map<std::string, std::string> latest_by_target_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, std::string> latest_by_subject_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon
