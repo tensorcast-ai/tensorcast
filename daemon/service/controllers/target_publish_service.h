@@ -5,8 +5,12 @@
 #include <memory>
 #include <optional>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/service/rpc_context.h"
@@ -15,10 +19,12 @@
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/routed_authority_protocol.h"
 #include "daemon/state/session_lifecycle.h"
+#include "daemon/state/shutdown_signal.h"
 #include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/common/v1/capability_token.pb.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
+#include "tensorcast/operation/v1/operation.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -30,6 +36,8 @@ class TargetPublishService {
     WorkerIdentityStore& identity;
     SessionLifecycleManager& lifecycle;
     LifecycleKernel& lifecycle_kernel;
+    common::AsyncRuntime& async_runtime;
+    ShutdownSignal& shutdown_signal;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
@@ -65,15 +73,30 @@ class TargetPublishService {
       const RoutedAuthorityRequest& routed_request,
       absl::Time now);
 
+  grpc::Status start_publish_target_replica(
+      RpcContext& rctx,
+      const v2::PublishTargetReplicaRequest& req,
+      v2::StartPublishTargetReplicaResponse& resp);
+
   grpc::Status publish_target_replica(
       RpcContext& rctx,
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
+  [[nodiscard]] absl::Status admit_public_operation(
+      const tensorcast::operation::v1::OperationRef& operation_ref,
+      absl::Time now) const;
+
  private:
+  struct PublishOperationTracker {
+    absl::Mutex mu;
+    absl::flat_hash_set<std::string> active_operations ABSL_GUARDED_BY(mu);
+  };
+
   Dep d_;
   common::CapabilityTokenManager* capability_tokens_{nullptr};
   std::shared_ptr<TargetPublicationRegistry> target_publication_registry_;
+  std::shared_ptr<PublishOperationTracker> publish_operation_tracker_;
 };
 
 } // namespace tensorcast::daemon

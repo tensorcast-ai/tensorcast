@@ -509,6 +509,17 @@ Status StoreDaemonServiceImpl::PublishTargetReplica(
   return materialization_controller_->publish_target_replica(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::StartPublishTargetReplica(
+    grpc::ServerContext* ctx,
+    const v2::PublishTargetReplicaRequest* req,
+    v2::StartPublishTargetReplicaResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"StartPublishTargetReplica", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->start_publish_target_replica(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::UnlockTransportChunks(
     grpc::ServerContext* ctx,
     const v2::UnlockTransportChunksRequest* req,

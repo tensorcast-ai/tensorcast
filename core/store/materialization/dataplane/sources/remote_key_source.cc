@@ -20,9 +20,14 @@ namespace tensorcast::store::loader {
 namespace {
 
 bool can_use_routed_read(const RemoteKeySource::Options& options, bool routed_path_enabled) {
-  return routed_path_enabled && options.routing_context != nullptr &&
-      !options.local_endpoint_id.empty() && !options.remote_endpoint_id.empty();
+  return routed_path_enabled && options.routing_context != nullptr && !options.local_endpoint_id.empty() &&
+      !options.remote_endpoint_id.empty();
 }
+
+struct ReadAttempt {
+  communicator::transport::future_read_result_t future;
+  bool used_routed = false;
+};
 
 communicator::transport::future_read_result_t read_direct(
     const RemoteKeySource::Options& options,
@@ -33,14 +38,7 @@ communicator::transport::future_read_result_t read_direct(
     int dev_type,
     int dev_id) {
   auto future = options.comm_engine->read_tensor(
-      key,
-      local_addr,
-      bytes,
-      dev_type,
-      dev_id,
-      options.ip,
-      options.port,
-      remote_offset);
+      key, local_addr, bytes, dev_type, dev_id, options.ip, options.port, remote_offset);
   return future;
 }
 
@@ -73,7 +71,13 @@ absl::StatusOr<communicator::transport::future_read_result_t> read_routed(
   }
 }
 
-communicator::transport::future_read_result_t read_with_strict_fallback(
+void log_routed_fallback(const RemoteKeySource::Options& options, const absl::Status& status) {
+  LOG(WARNING) << "Routed read failed for src_endpoint=" << options.local_endpoint_id
+               << " dst_endpoint=" << options.remote_endpoint_id << ", fallback to direct ip/port " << options.ip << ":"
+               << options.port << " reason=" << status;
+}
+
+ReadAttempt begin_read_with_strict_fallback(
     const RemoteKeySource::Options& options,
     const std::string& key,
     uint64_t local_addr,
@@ -85,15 +89,16 @@ communicator::transport::future_read_result_t read_with_strict_fallback(
   if (can_use_routed_read(options, *routed_path_enabled)) {
     auto routed_future_or = read_routed(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
     if (routed_future_or.ok()) {
-      return std::move(*routed_future_or);
+      return ReadAttempt{.future = std::move(*routed_future_or), .used_routed = true};
     }
     *routed_path_enabled = false;
-    LOG(WARNING) << "Routed read failed for src_endpoint=" << options.local_endpoint_id
-                 << " dst_endpoint=" << options.remote_endpoint_id << ", fallback to direct ip/port " << options.ip
-                 << ":" << options.port << " reason=" << routed_future_or.status();
+    log_routed_fallback(options, routed_future_or.status());
   }
 
-  return read_direct(options, key, local_addr, bytes, remote_offset, dev_type, dev_id);
+  return ReadAttempt{
+      .future = read_direct(options, key, local_addr, bytes, remote_offset, dev_type, dev_id),
+      .used_routed = false,
+  };
 }
 
 constexpr uint64_t kSlowQueueCostUs = 1'000'000; // 1s
@@ -220,6 +225,32 @@ absl::StatusOr<communicator::transport::read_result_t> RemoteKeySource::await_re
   }
 }
 
+absl::StatusOr<communicator::transport::read_result_t> RemoteKeySource::read_with_strict_fallback(
+    const std::string& key,
+    uint64_t local_addr,
+    size_t bytes,
+    uint64_t remote_offset,
+    int dev_type,
+    int dev_id) {
+  auto attempt = begin_read_with_strict_fallback(
+      options_, key, local_addr, static_cast<uint64_t>(bytes), remote_offset, dev_type, dev_id, &routed_path_enabled_);
+  auto result_or = await_read_result(attempt.future, key, remote_offset, bytes);
+  if (!attempt.used_routed) {
+    return result_or;
+  }
+  if (result_or.ok() && result_or->status.ok()) {
+    return result_or;
+  }
+
+  routed_path_enabled_ = false;
+  const absl::Status routed_status = result_or.ok() ? result_or->status : result_or.status();
+  log_routed_fallback(options_, routed_status);
+
+  auto direct_future =
+      read_direct(options_, key, local_addr, static_cast<uint64_t>(bytes), remote_offset, dev_type, dev_id);
+  return await_read_result(direct_future, key, remote_offset, bytes);
+}
+
 absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
   if (total_bytes_read_ >= options_.total_size) {
     return 0; // EOF
@@ -250,16 +281,13 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto future = read_with_strict_fallback(
-        options_,
+    auto result_or = read_with_strict_fallback(
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
-        static_cast<uint64_t>(to_read),
+        to_read,
         static_cast<uint64_t>(current_key_offset_),
         communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
-        -1,
-        &routed_path_enabled_);
-    auto result_or = await_read_result(future, key, current_key_offset_, to_read);
+        -1);
     if (!result_or.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", std::string(result_or.status().message())}});
@@ -362,16 +390,13 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto future = read_with_strict_fallback(
-        options_,
+    auto result_or = read_with_strict_fallback(
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
-        static_cast<uint64_t>(to_read),
+        to_read,
         static_cast<uint64_t>(key_offset),
         communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
-        -1,
-        &routed_path_enabled_);
-    auto result_or = await_read_result(future, key, key_offset, to_read);
+        -1);
     if (!result_or.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", std::string(result_or.status().message())}});
@@ -473,16 +498,8 @@ absl::StatusOr<size_t> RemoteKeySource::read_into_at(
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(step));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    auto future = read_with_strict_fallback(
-        options_,
-        key,
-        local_addr,
-        static_cast<uint64_t>(step),
-        static_cast<uint64_t>(key_offset),
-        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
-        -1,
-        &routed_path_enabled_);
-    auto result_or = await_read_result(future, key, key_offset, step);
+    auto result_or = read_with_strict_fallback(
+        key, local_addr, step, static_cast<uint64_t>(key_offset), communicator::base::COMMUNICATE_ENGINE_DEV_CPU, -1);
     if (!result_or.ok()) {
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("recv_error", {{"message", std::string(result_or.status().message())}});

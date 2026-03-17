@@ -2833,6 +2833,59 @@ class DaemonCtl:
                 ) from e
         return resp
 
+    def start_publish_target_replica(
+        self,
+        *,
+        target_publication_token: bytes,
+        byte_space: common_pb2.ByteSpaceRef,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.StartPublishTargetReplicaResponse:
+        if not target_publication_token:
+            raise ValueError("target_publication_token is required")
+        if byte_space is None:
+            raise ValueError("byte_space is required")
+        req = store_daemon_pb2.PublishTargetReplicaRequest(
+            target_publication_token=bytes(target_publication_token),
+            byte_space=byte_space,
+        )
+        if ttl_ms is not None:
+            req.ttl_ms = int(ttl_ms)
+        if owner_pid is not None:
+            req.owner_pid = int(owner_pid)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/StartPublishTargetReplica") as span:
+            try:
+                return self._unary_call(
+                    self.stub.StartPublishTargetReplica,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:
+                code = e.code()
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
+                if code == grpc.StatusCode.FAILED_PRECONDITION:
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="failed precondition")
+                    ) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    "StartPublishTargetReplica failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
+
     def retire_published_replica(
         self,
         *,
@@ -3452,13 +3505,19 @@ class DaemonCtl:
         return resp
 
     def get_operation(
-        self, operation_id: str, *, timeout_s: float = 10.0
+        self,
+        operation_id: str,
+        *,
+        operation_ref: "operation_pb2.OperationRef | None" = None,
+        timeout_s: float = 10.0,
     ) -> "operation_pb2.GetOperationResponse":
         if not operation_id:
             raise ValueError("operation_id is required")
         from tensorcast.proto.operation.v1 import operation_pb2
 
         req = operation_pb2.GetOperationRequest(operation_id=operation_id)
+        if operation_ref is not None:
+            req.ref.CopyFrom(operation_ref)
         with self._client_span("Client/GetOperation") as span:
             return self._unary_call(
                 self.stub.GetOperation,
@@ -3472,6 +3531,7 @@ class DaemonCtl:
         self,
         operation_id: str,
         *,
+        operation_ref: "operation_pb2.OperationRef | None" = None,
         timeout_ms: int,
         timeout_s: float,
     ) -> "operation_pb2.GetOperationResponse":
@@ -3485,6 +3545,8 @@ class DaemonCtl:
             operation_id=operation_id,
             timeout_ms=int(timeout_ms),
         )
+        if operation_ref is not None:
+            req.ref.CopyFrom(operation_ref)
         with self._client_span("Client/WaitOperation") as span:
             resp = self._unary_call(
                 self.stub.WaitOperation,

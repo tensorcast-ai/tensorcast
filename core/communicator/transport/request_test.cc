@@ -101,8 +101,8 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
   std::vector<std::tuple<uint32_t, std::vector<uint64_t>, bool>> acks;
   std::atomic<int> progress_events{0};
   std::atomic<int> completion_true_count{0};
-  uint64_t last_done = 0;
-  uint64_t total = 0;
+  std::atomic<uint64_t> max_done{0};
+  std::atomic<uint64_t> observed_total{0};
 
   req.set_ack_sender([&](uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
     std::lock_guard<std::mutex> lock(ack_mu);
@@ -110,8 +110,10 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
   });
   req.set_progress_callbacks(
       [&](uint64_t done, uint64_t total_bytes) {
-        last_done = done;
-        total = total_bytes;
+        observed_total.store(total_bytes, std::memory_order_relaxed);
+        uint64_t current = max_done.load(std::memory_order_relaxed);
+        while (done > current && !max_done.compare_exchange_weak(current, done, std::memory_order_relaxed)) {
+        }
         progress_events.fetch_add(1);
       },
       [&](const absl::Status& status) {
@@ -144,8 +146,8 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
 
   REQUIRE(done_true_count.load() == 1);
   REQUIRE(progress_events.load() == 8);
-  REQUIRE(last_done == 512);
-  REQUIRE(total == 2048);
+  REQUIRE(max_done.load(std::memory_order_relaxed) == 512);
+  REQUIRE(observed_total.load(std::memory_order_relaxed) == 2048);
 
   {
     std::lock_guard<std::mutex> lock(ack_mu);

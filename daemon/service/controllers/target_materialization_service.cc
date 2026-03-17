@@ -445,6 +445,8 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
               .identity = d_.identity,
               .lifecycle = d_.lifecycle,
               .lifecycle_kernel = d_.lifecycle_kernel,
+              .async_runtime = d_.async_runtime,
+              .shutdown_signal = d_.shutdown_signal,
               .global_store_client = d_.global_store_client,
               .capability_tokens = d_.capability_tokens,
               .max_concurrency = d_.max_concurrency,
@@ -1142,9 +1144,25 @@ grpc::Status TargetMaterializationService::publish_target_replica(
   return target_publish_service_.publish_target_replica(rctx, req, resp);
 }
 
+grpc::Status TargetMaterializationService::start_publish_target_replica(
+    RpcContext& rctx,
+    const v2::PublishTargetReplicaRequest& req,
+    v2::StartPublishTargetReplicaResponse& resp) {
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  return target_publish_service_.start_publish_target_replica(rctx, req, resp);
+}
+
 absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::remember_target_publication(
     TargetPublicationRegistry::Record record) {
   return target_publish_service_.remember_target_publication(std::move(record));
+}
+
+absl::Status TargetMaterializationService::admit_public_operation(
+    const tensorcast::operation::v1::OperationRef& operation_ref,
+    absl::Time now) const {
+  return target_publish_service_.admit_public_operation(operation_ref, now);
 }
 
 } // namespace tensorcast::daemon

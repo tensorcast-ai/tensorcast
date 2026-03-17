@@ -162,6 +162,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::PublishTargetReplicaRequest* req,
       v2::PublishTargetReplicaResponse* resp) override;
 
+  grpc::Status StartPublishTargetReplica(
+      grpc::ServerContext* ctx,
+      const v2::PublishTargetReplicaRequest* req,
+      v2::StartPublishTargetReplicaResponse* resp) override;
+
   grpc::Status RetirePublishedReplica(
       grpc::ServerContext* ctx,
       const v2::RetirePublishedReplicaRequest* req,

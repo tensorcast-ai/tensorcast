@@ -247,6 +247,18 @@ ingestion::VerificationRecord build_registration_verification_record(std::string
   };
 }
 
+void maybe_attach_registration_verification(
+    RegistrationCommitResult& result,
+    std::string_view index_multihash,
+    std::string_view data_multihash) {
+  if (result.id_kind != common::ArtifactIdKind::kMi2 || index_multihash.empty() || data_multihash.empty()) {
+    return;
+  }
+  result.verified_content_descriptor =
+      build_registration_verified_content_descriptor(index_multihash, data_multihash, result.size_bytes);
+  result.verification_record = build_registration_verification_record(index_multihash);
+}
+
 absl::Status zero_view_padding(
     const loader::ViewWritePlan& write_plan,
     uint64_t view_size_bytes,
@@ -1259,9 +1271,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.schema_version = entry->schema_version;
     result.encoding = entry->encoding;
     result.id_kind = entry->id_kind;
-    result.verified_content_descriptor =
-        build_registration_verified_content_descriptor(index_multihash, data_multihash, entry->size_bytes);
-    result.verification_record = build_registration_verification_record(index_multihash);
+    maybe_attach_registration_verification(result, index_multihash, data_multihash);
     record_commit_latency(*entry, "existed");
     return result;
   }
@@ -1697,6 +1707,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
     result.canonical_ranges = entry->view_state->options.canonical_ranges;
     result.registration_kind = entry->view_state->options.registration_kind;
+    maybe_attach_registration_verification(result, index_multihash, data_multihash);
     record_commit_latency(*entry, "existed");
     return result;
   }
@@ -1741,6 +1752,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.canonical_ranges = entry->view_state->options.canonical_ranges;
     result.registration_kind = entry->view_state->options.registration_kind;
   }
+  maybe_attach_registration_verification(result, index_multihash, data_multihash);
 
   if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
     auto reg_info_or =

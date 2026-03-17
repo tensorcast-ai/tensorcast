@@ -124,6 +124,11 @@ class MaterializationController {
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
+  grpc::Status start_publish_target_replica(
+      RpcContext& rctx,
+      const v2::PublishTargetReplicaRequest& req,
+      v2::StartPublishTargetReplicaResponse& resp);
+
   [[nodiscard]] absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext>
   inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now);
 
@@ -188,6 +193,8 @@ class MaterializationController {
       TargetPublicationRegistry::Record record);
 
  private:
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
+  ShutdownSignal* shutdown_signal_{nullptr};
   AssemblyOperationService assembly_operation_service_;
   DiskArtifactService disk_artifact_service_;
   ReplicaMaterializationService replica_materialization_service_;

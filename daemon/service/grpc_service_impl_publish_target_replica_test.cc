@@ -25,6 +25,7 @@
 #include "grpcpp/server_context.h"
 #include "tensorcast/common/v1/capability_token.pb.h"
 #include "tensorcast/common/v1/common.pb.h"
+#include "tensorcast/operation/v1/operation.pb.h"
 
 namespace {
 
@@ -153,6 +154,25 @@ tensorcast::daemon::TargetPublicationRegistry::Record make_record_from_scope(
   record.device_uuid = scope.device_uuid();
   record.owner_pid = scope.owner_pid();
   record.expires_at = absl::Now() + absl::Minutes(5);
+  return record;
+}
+
+tensorcast::daemon::TargetPublicationRegistry::Record make_publishable_record_from_scope(
+    const tensorcast::common::v1::TargetPublicationScope& scope) {
+  auto record = make_record_from_scope(scope);
+  tensorcast::daemon::RegisterStorageMeta storage;
+  storage.storage_id = "storage-0";
+  storage.device_id = kDeviceId;
+  storage.handle_bytes = "fake-cuda-ipc-handle";
+  storage.storage_length = 16;
+  record.storages.push_back(storage);
+  record.segments.push_back(
+      tensorcast::daemon::LeaseSegMeta{
+          .storage_id = storage.storage_id,
+          .storage_offset = 0,
+          .artifact_offset = 0,
+          .length = 16,
+      });
   return record;
 }
 
@@ -524,7 +544,7 @@ TEST_CASE(
   scope.set_operation_id("op-publish-route");
   const std::string token = mint_token(*tokens, "daemon-test", scope);
 
-  auto record = make_record_from_scope(scope);
+  auto record = make_publishable_record_from_scope(scope);
   record.operation_id = scope.operation_id();
   auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
   REQUIRE(inserted_or.ok());
@@ -598,7 +618,7 @@ TEST_CASE(
   scope.set_operation_id("op-publish-route-issuer");
   const std::string token = mint_token(*tokens, "daemon-test", scope);
 
-  auto record = make_record_from_scope(scope);
+  auto record = make_publishable_record_from_scope(scope);
   record.operation_id = scope.operation_id();
   auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
   REQUIRE(inserted_or.ok());
@@ -670,7 +690,7 @@ TEST_CASE(
   auto stale_scope = make_scope("write-9-stale", "artifact-9", "gpu-0", owner_pid, true);
   stale_scope.set_operation_id("op-publish-route-stale");
   const std::string stale_token = mint_token(*tokens, "daemon-test", stale_scope);
-  auto stale_record = make_record_from_scope(stale_scope);
+  auto stale_record = make_publishable_record_from_scope(stale_scope);
   stale_record.operation_id = stale_scope.operation_id();
   auto inserted_stale_or =
       harness->materialization_controller().insert_target_publication_for_testing(std::move(stale_record));
@@ -708,4 +728,251 @@ TEST_CASE(
   REQUIRE(route_resp.owner_stage_reply().has_terminal_projection());
   CHECK(route_resp.owner_stage_reply().terminal_projection().status_code() == "failed_precondition");
   CHECK(route_resp.owner_stage_reply().terminal_projection().family_payload() == "publish_stale_current");
+}
+
+TEST_CASE(
+    "StartPublishTargetReplica projects publish continuation into OperationRef and WaitOperation",
+    "[daemon][publish][operation]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness = make_harness(engine, gs);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = getpid();
+  auto scope = make_scope("write-10", "artifact-10", "gpu-0", owner_pid, true);
+  scope.set_operation_id("op-publish-operation");
+  const std::string token = mint_token(*tokens, "daemon-test", scope);
+
+  auto record = make_publishable_record_from_scope(scope);
+  record.operation_id = scope.operation_id();
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
+
+  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
+  req.set_target_publication_token(token);
+  req.mutable_byte_space()->CopyFrom(scope.byte_space());
+  req.set_owner_pid(owner_pid);
+  req.set_operation_id(scope.operation_id());
+
+  grpc::ServerContext start_ctx;
+  tensorcast::daemon::v2::StartPublishTargetReplicaResponse start_resp;
+  REQUIRE(harness->service().StartPublishTargetReplica(&start_ctx, &req, &start_resp).ok());
+  REQUIRE(start_resp.has_operation());
+  absl::SleepFor(absl::Milliseconds(20));
+  CHECK(start_resp.operation().operation_id() == scope.operation_id());
+  CHECK(start_resp.operation().kind() == "publish_target_replica");
+  CHECK(start_resp.operation().target_artifact_id() == scope.selection().artifact_id());
+  CHECK(start_resp.operation().authority_scope_kind() == "workflow_owner");
+  CHECK(start_resp.operation().authority_scope_id() == scope.publication_id());
+  CHECK(start_resp.operation().attachment_kind() == "target_publication");
+  CHECK(start_resp.operation().recovery_class() == "ephemeral_process_local");
+
+  auto& stored_operation = gs->operations[start_resp.operation().operation_id()];
+  stored_operation.mutable_ref()->CopyFrom(start_resp.operation());
+  stored_operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_SUCCESS);
+  stored_operation.mutable_status()->set_message("publish complete");
+  tensorcast::daemon::v2::PublishTargetReplicaResponse stored_result;
+  stored_result.set_lease_id(scope.publication_id());
+  stored_result.set_replica_id("memory_replica");
+  stored_operation.mutable_status()->mutable_result()->PackFrom(stored_result);
+
+  tensorcast::daemon::v2::WaitOperationRequest wait_req;
+  wait_req.set_operation_id(start_resp.operation().operation_id());
+  wait_req.mutable_ref()->CopyFrom(start_resp.operation());
+  wait_req.set_timeout_ms(5000);
+
+  grpc::ServerContext wait_ctx;
+  tensorcast::daemon::v2::WaitOperationResponse wait_resp;
+  REQUIRE(harness->service().WaitOperation(&wait_ctx, &wait_req, &wait_resp).ok());
+  CHECK(wait_resp.operation().status().state() == tensorcast::operation::v1::OPERATION_STATE_SUCCESS);
+
+  tensorcast::daemon::v2::PublishTargetReplicaResponse result;
+  REQUIRE(wait_resp.operation().status().has_result());
+  REQUIRE(wait_resp.operation().status().result().UnpackTo(&result));
+  CHECK(result.lease_id() == scope.publication_id());
+  CHECK(result.replica_id() == "memory_replica");
+}
+
+TEST_CASE(
+    "RouteAuthorityStage returns attach_existing while publish operation is still running",
+    "[daemon][publish][route][operation]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  gs->register_memory_replica_delay = absl::Milliseconds(200);
+  auto harness = make_harness(engine, gs);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = getpid();
+  auto scope = make_scope("write-11", "artifact-11", "gpu-0", owner_pid, true);
+  scope.set_operation_id("op-publish-attach");
+  const std::string token = mint_token(*tokens, "daemon-test", scope);
+
+  auto record = make_record_from_scope(scope);
+  record.operation_id = scope.operation_id();
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
+
+  tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
+  publish_req.set_target_publication_token(token);
+  publish_req.mutable_byte_space()->CopyFrom(scope.byte_space());
+  publish_req.set_owner_pid(owner_pid);
+  publish_req.set_operation_id(scope.operation_id());
+
+  grpc::ServerContext start_ctx;
+  tensorcast::daemon::v2::StartPublishTargetReplicaResponse start_resp;
+  REQUIRE(harness->service().StartPublishTargetReplica(&start_ctx, &publish_req, &start_resp).ok());
+  REQUIRE(start_resp.has_operation());
+  absl::SleepFor(absl::Milliseconds(20));
+
+  auto& stored_operation = gs->operations[start_resp.operation().operation_id()];
+  stored_operation.mutable_ref()->CopyFrom(start_resp.operation());
+  stored_operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_RUNNING);
+  stored_operation.mutable_status()->set_message("publish running");
+
+  auto routed_request_or =
+      harness->materialization_controller().build_target_publication_workflow_routed_request_for_testing(
+          publish_req, absl::Now());
+  REQUIRE(routed_request_or.ok());
+
+  tensorcast::daemon::v2::RouteAuthorityStageRequest route_req;
+  tensorcast::daemon::routed_authority_wire::populate_proto_routed_authority_request(
+      *routed_request_or, route_req.mutable_routed_request());
+
+  grpc::ServerContext route_ctx;
+  tensorcast::daemon::v2::RouteAuthorityStageResponse route_resp;
+  REQUIRE(harness->service().RouteAuthorityStage(&route_ctx, &route_req, &route_resp).ok());
+  REQUIRE(route_resp.status() == tensorcast::daemon::v2::BATCH_ITEM_STATUS_OK);
+  REQUIRE(route_resp.has_owner_stage_reply());
+  CHECK(
+      route_resp.owner_stage_reply().reply_kind() ==
+      tensorcast::daemon::v2::ROUTED_OWNER_STAGE_REPLY_KIND_ATTACH_EXISTING);
+  REQUIRE(route_resp.owner_stage_reply().has_attachment_ref());
+  CHECK(route_resp.owner_stage_reply().attachment_ref().attachment_kind() == "target_publication");
+  CHECK(route_resp.owner_stage_reply().attachment_ref().attachment_id() == scope.publication_id());
+
+  tensorcast::daemon::v2::PublishTargetReplicaResponse stored_result;
+  stored_result.set_lease_id(scope.publication_id());
+  stored_result.set_replica_id("memory_replica");
+  stored_operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_SUCCESS);
+  stored_operation.mutable_status()->mutable_result()->PackFrom(stored_result);
+
+  tensorcast::daemon::v2::WaitOperationRequest wait_req;
+  wait_req.set_operation_id(start_resp.operation().operation_id());
+  wait_req.mutable_ref()->CopyFrom(start_resp.operation());
+  wait_req.set_timeout_ms(5000);
+  grpc::ServerContext wait_ctx;
+  tensorcast::daemon::v2::WaitOperationResponse wait_resp;
+  REQUIRE(harness->service().WaitOperation(&wait_ctx, &wait_req, &wait_resp).ok());
+  CHECK(wait_resp.operation().status().state() == tensorcast::operation::v1::OPERATION_STATE_SUCCESS);
+}
+
+TEST_CASE("GetOperation fails closed when publish owner state is lost", "[daemon][publish][operation][owner_loss]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  gs->register_memory_replica_delay = absl::Milliseconds(200);
+  auto harness = make_harness(engine, gs);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = getpid();
+  auto scope = make_scope("write-12", "artifact-12", "gpu-0", owner_pid, true);
+  scope.set_operation_id("op-publish-owner-loss");
+  const std::string token = mint_token(*tokens, "daemon-test", scope);
+
+  auto record = make_record_from_scope(scope);
+  record.operation_id = scope.operation_id();
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
+
+  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
+  req.set_target_publication_token(token);
+  req.mutable_byte_space()->CopyFrom(scope.byte_space());
+  req.set_owner_pid(owner_pid);
+  req.set_operation_id(scope.operation_id());
+
+  grpc::ServerContext start_ctx;
+  tensorcast::daemon::v2::StartPublishTargetReplicaResponse start_resp;
+  REQUIRE(harness->service().StartPublishTargetReplica(&start_ctx, &req, &start_resp).ok());
+  REQUIRE(start_resp.has_operation());
+
+  auto& stored_operation = gs->operations[start_resp.operation().operation_id()];
+  stored_operation.mutable_ref()->CopyFrom(start_resp.operation());
+  stored_operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_RUNNING);
+
+  harness->kernel().lifecycle_manager().release_lease(inserted_or->lease_id);
+  absl::SleepFor(absl::Milliseconds(20));
+
+  tensorcast::operation::v1::GetOperationRequest get_req;
+  get_req.set_operation_id(start_resp.operation().operation_id());
+  get_req.mutable_ref()->CopyFrom(start_resp.operation());
+  tensorcast::operation::v1::GetOperationResponse get_resp;
+  grpc::ServerContext get_ctx;
+  const auto status = harness->service().GetOperation(&get_ctx, &get_req, &get_resp);
+  CHECK(status.error_code() == grpc::StatusCode::UNAVAILABLE);
+}
+
+TEST_CASE(
+    "GetOperation fails closed on stale or mismatched publish continuation metadata",
+    "[daemon][publish][operation][fencing]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness = make_harness(engine, gs);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = getpid();
+  auto stale_scope = make_scope("write-13-stale", "artifact-13", "gpu-0", owner_pid, true);
+  stale_scope.set_operation_id("op-publish-stale-attach");
+  const std::string token = mint_token(*tokens, "daemon-test", stale_scope);
+
+  auto stale_record = make_record_from_scope(stale_scope);
+  stale_record.operation_id = stale_scope.operation_id();
+  auto inserted_stale_or =
+      harness->materialization_controller().insert_target_publication_for_testing(std::move(stale_record));
+  REQUIRE(inserted_stale_or.ok());
+
+  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
+  req.set_target_publication_token(token);
+  req.mutable_byte_space()->CopyFrom(stale_scope.byte_space());
+  req.set_owner_pid(owner_pid);
+  req.set_operation_id(stale_scope.operation_id());
+
+  grpc::ServerContext start_ctx;
+  tensorcast::daemon::v2::StartPublishTargetReplicaResponse start_resp;
+  REQUIRE(harness->service().StartPublishTargetReplica(&start_ctx, &req, &start_resp).ok());
+  REQUIRE(start_resp.has_operation());
+
+  auto& stored_operation = gs->operations[start_resp.operation().operation_id()];
+  stored_operation.mutable_ref()->CopyFrom(start_resp.operation());
+  stored_operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_RUNNING);
+
+  auto current_scope = stale_scope;
+  current_scope.set_publication_id("write-13-current");
+  current_scope.set_operation_id("op-publish-current-attach");
+  auto current_record = make_record_from_scope(current_scope);
+  current_record.operation_id = current_scope.operation_id();
+  auto inserted_current_or =
+      harness->materialization_controller().insert_target_publication_for_testing(std::move(current_record));
+  REQUIRE(inserted_current_or.ok());
+
+  tensorcast::operation::v1::GetOperationRequest stale_get_req;
+  stale_get_req.set_operation_id(start_resp.operation().operation_id());
+  stale_get_req.mutable_ref()->CopyFrom(start_resp.operation());
+  tensorcast::operation::v1::GetOperationResponse stale_get_resp;
+  grpc::ServerContext stale_get_ctx;
+  const auto stale_status = harness->service().GetOperation(&stale_get_ctx, &stale_get_req, &stale_get_resp);
+  CHECK(stale_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+
+  auto& stored_operation_ref = gs->operations[start_resp.operation().operation_id()];
+  stored_operation_ref.mutable_ref()->set_attachment_kind("wrong_attachment");
+
+  tensorcast::operation::v1::GetOperationRequest wrong_get_req;
+  wrong_get_req.set_operation_id(start_resp.operation().operation_id());
+  wrong_get_req.mutable_ref()->CopyFrom(start_resp.operation());
+  tensorcast::operation::v1::GetOperationResponse wrong_get_resp;
+  grpc::ServerContext wrong_get_ctx;
+  const auto wrong_status = harness->service().GetOperation(&wrong_get_ctx, &wrong_get_req, &wrong_get_resp);
+  CHECK(wrong_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
 }

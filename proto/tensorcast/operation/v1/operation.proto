@@ -9,6 +9,15 @@ message OperationRef {
   string operation_id = 1;
   string kind = 2;
   string target_artifact_id = 3;
+  string authority_scope_kind = 4;
+  string authority_scope_id = 5;
+  string attachment_kind = 6;
+  string recovery_class = 7;
+  string fencing_digest = 8;
+}
+
+message OperationContinuationMetadata {
+  OperationRef ref = 1;
 }
 
 enum OperationState {
@@ -82,6 +91,7 @@ message ReleaseOperationLeaseResponse {
 
 message GetOperationRequest {
   string operation_id = 1;
+  OperationRef ref = 2;
 }
 
 message GetOperationResponse {

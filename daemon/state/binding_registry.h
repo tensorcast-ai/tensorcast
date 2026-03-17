@@ -41,9 +41,6 @@ class BindingRegistry {
     std::string target_layout_hash;
     std::string current_artifact_id;
     std::string target_publication_token;
-    std::string binding_layout_id;
-    v2::BindingOwnership ownership{v2::BINDING_OWNERSHIP_UNSPECIFIED};
-    v2::BindingState state{v2::BINDING_STATE_UNSPECIFIED};
     std::string current_binding_value_id;
     uint64_t seal_generation{0};
     uint64_t update_epoch_counter{0};

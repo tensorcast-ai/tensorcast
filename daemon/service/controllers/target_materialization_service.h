@@ -8,6 +8,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
+#include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
@@ -24,6 +25,7 @@
 #include "daemon/state/target_publication_registry.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
+#include "tensorcast/operation/v1/operation.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -38,6 +40,7 @@ class TargetMaterializationService {
     SessionLifecycleManager& lifecycle;
     LifecycleKernel& lifecycle_kernel;
     ShutdownSignal& shutdown_signal;
+    common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
     ExternalTargetAccessService& external_target_access_service;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
@@ -64,6 +67,11 @@ class TargetMaterializationService {
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
+  grpc::Status start_publish_target_replica(
+      RpcContext& rctx,
+      const v2::PublishTargetReplicaRequest& req,
+      v2::StartPublishTargetReplicaResponse& resp);
+
   [[nodiscard]] absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext>
   inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now);
 
@@ -85,6 +93,10 @@ class TargetMaterializationService {
 
   [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> insert_target_publication_for_testing(
       TargetPublicationRegistry::Record record);
+
+  [[nodiscard]] absl::Status admit_public_operation(
+      const tensorcast::operation::v1::OperationRef& operation_ref,
+      absl::Time now) const;
 
  private:
   Dep d_;

@@ -63,6 +63,7 @@ service StoreDaemonService {
   rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+  rpc StartPublishTargetReplica(PublishTargetReplicaRequest) returns (StartPublishTargetReplicaResponse) {}
   rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
   rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
   rpc BatchExists(BatchExistsRequest) returns (BatchExistsResponse) {}
@@ -1559,6 +1560,10 @@ message PublishTargetReplicaResponse {
   string replica_id = 2;
 }
 
+message StartPublishTargetReplicaResponse {
+  tensorcast.operation.v1.OperationRef operation = 1;
+}
+
 message RetirePublishedReplicaRequest {
   optional string lease_id = 1;
   string artifact_id = 2;
@@ -1888,6 +1893,7 @@ message SealAssemblySnapshot {
 message WaitOperationRequest {
   string operation_id = 1;
   uint64 timeout_ms = 2;
+  tensorcast.operation.v1.OperationRef ref = 3;
 }
 
 message WaitOperationResponse {

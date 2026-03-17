@@ -66,6 +66,13 @@ class RemoteKeySource : public SeekableSource {
       std::string_view key,
       uint64_t remote_offset,
       size_t bytes);
+  absl::StatusOr<communicator::transport::read_result_t> read_with_strict_fallback(
+      const std::string& key,
+      uint64_t local_addr,
+      size_t bytes,
+      uint64_t remote_offset,
+      int dev_type,
+      int dev_id);
   void abort_timed_out_channel(std::string_view key, uint64_t remote_offset, size_t bytes) const;
   std::chrono::milliseconds remaining_request_budget() const;
 

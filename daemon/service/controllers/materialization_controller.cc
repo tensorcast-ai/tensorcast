@@ -2,12 +2,62 @@
 
 #include "daemon/service/controllers/materialization_controller.h"
 
+#include <algorithm>
 #include <utility>
+
+#include "absl/time/time.h"
+#include "daemon/util/status_utils.h"
 
 namespace tensorcast::daemon {
 
+using status_utils::to_grpc_status;
+
+namespace {
+
+void merge_operation_ref_metadata(
+    const tensorcast::operation::v1::OperationRef& source,
+    tensorcast::operation::v1::OperationRef* target) {
+  if (target == nullptr) {
+    return;
+  }
+  if (target->operation_id().empty() && !source.operation_id().empty()) {
+    target->set_operation_id(source.operation_id());
+  }
+  if (target->kind().empty() && !source.kind().empty()) {
+    target->set_kind(source.kind());
+  }
+  if (target->target_artifact_id().empty() && !source.target_artifact_id().empty()) {
+    target->set_target_artifact_id(source.target_artifact_id());
+  }
+  if (target->authority_scope_kind().empty() && !source.authority_scope_kind().empty()) {
+    target->set_authority_scope_kind(source.authority_scope_kind());
+  }
+  if (target->authority_scope_id().empty() && !source.authority_scope_id().empty()) {
+    target->set_authority_scope_id(source.authority_scope_id());
+  }
+  if (target->attachment_kind().empty() && !source.attachment_kind().empty()) {
+    target->set_attachment_kind(source.attachment_kind());
+  }
+  if (target->recovery_class().empty() && !source.recovery_class().empty()) {
+    target->set_recovery_class(source.recovery_class());
+  }
+  if (target->fencing_digest().empty() && !source.fencing_digest().empty()) {
+    target->set_fencing_digest(source.fencing_digest());
+  }
+}
+
+bool operation_state_is_terminal(tensorcast::operation::v1::OperationState state) {
+  using State = tensorcast::operation::v1::OperationState;
+  return state == State::OPERATION_STATE_SUCCESS || state == State::OPERATION_STATE_FAILED ||
+      state == State::OPERATION_STATE_CANCELLED;
+}
+
+} // namespace
+
 MaterializationController::MaterializationController(Dep d)
-    : assembly_operation_service_(
+    : global_store_client_(d.global_store_client),
+      shutdown_signal_(&d.shutdown_signal),
+      assembly_operation_service_(
           AssemblyOperationService::Dep{
               .engine = d.engine,
               .devices = d.devices,
@@ -59,6 +109,7 @@ MaterializationController::MaterializationController(Dep d)
               .lifecycle = *d.lifecycle,
               .lifecycle_kernel = *d.lifecycle_kernel,
               .shutdown_signal = d.shutdown_signal,
+              .async_runtime = d.async_runtime,
               .identity = d.identity,
               .external_target_access_service = d.external_target_access_service,
               .global_store_client = d.global_store_client,
@@ -173,6 +224,13 @@ grpc::Status MaterializationController::publish_target_replica(
   return target_materialization_service_.publish_target_replica(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::start_publish_target_replica(
+    RpcContext& rctx,
+    const v2::PublishTargetReplicaRequest& req,
+    v2::StartPublishTargetReplicaResponse& resp) {
+  return target_materialization_service_.start_publish_target_replica(rctx, req, resp);
+}
+
 absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> MaterializationController::
     inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now) {
   return target_materialization_service_.inspect_target_publication_context_for_testing(req, now);
@@ -245,14 +303,99 @@ grpc::Status MaterializationController::get_operation(
     RpcContext& rctx,
     const tensorcast::operation::v1::GetOperationRequest& req,
     tensorcast::operation::v1::GetOperationResponse& resp) {
-  return assembly_operation_service_.get_operation(rctx, req, resp);
+  auto& span = rctx.span();
+  span->SetAttribute("tc.operation.id", req.operation_id());
+
+  if (req.operation_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "operation_id is required"};
+  }
+  if (shutdown_signal_ != nullptr && shutdown_signal_->is_shutting_down()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+
+  auto op_or = global_store_client_->get_operation(req);
+  if (!op_or.ok()) {
+    return to_grpc_status(op_or.status());
+  }
+  if (req.has_ref()) {
+    merge_operation_ref_metadata(req.ref(), op_or->mutable_ref());
+  }
+  auto admit_status = target_materialization_service_.admit_public_operation(op_or->ref(), absl::Now());
+  if (!admit_status.ok()) {
+    return to_grpc_status(admit_status);
+  }
+  resp = std::move(*op_or);
+  rctx.mark_success();
+  return grpc::Status::OK;
 }
 
 grpc::Status MaterializationController::wait_operation(
     RpcContext& rctx,
     const v2::WaitOperationRequest& req,
     v2::WaitOperationResponse& resp) {
-  return assembly_operation_service_.wait_operation(rctx, req, resp);
+  auto& span = rctx.span();
+  span->SetAttribute("tc.operation.id", req.operation_id());
+
+  if (req.operation_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "operation_id is required"};
+  }
+  if (shutdown_signal_ != nullptr && shutdown_signal_->is_shutting_down()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+
+  const uint64_t timeout_ms = req.timeout_ms();
+  const absl::Time start = absl::Now();
+  const absl::Time deadline = timeout_ms > 0 ? start + absl::Milliseconds(timeout_ms) : absl::InfiniteFuture();
+  absl::Duration sleep = absl::Milliseconds(50);
+
+  tensorcast::operation::v1::GetOperationRequest get_req;
+  get_req.set_operation_id(req.operation_id());
+  if (req.has_ref()) {
+    get_req.mutable_ref()->CopyFrom(req.ref());
+  }
+
+  while (absl::Now() < deadline) {
+    auto op_or = global_store_client_->get_operation(get_req);
+    if (!op_or.ok()) {
+      return to_grpc_status(op_or.status());
+    }
+    if (req.has_ref()) {
+      merge_operation_ref_metadata(req.ref(), op_or->mutable_ref());
+    }
+    auto admit_status = target_materialization_service_.admit_public_operation(op_or->ref(), absl::Now());
+    if (!admit_status.ok()) {
+      return to_grpc_status(admit_status);
+    }
+    const auto state = op_or->status().state();
+    resp.mutable_operation()->Swap(&(*op_or));
+    if (operation_state_is_terminal(state)) {
+      rctx.mark_success();
+      return grpc::Status::OK;
+    }
+    absl::SleepFor(sleep);
+    sleep = std::min(sleep * 12 / 10, absl::Milliseconds(500));
+  }
+
+  auto op_or = global_store_client_->get_operation(get_req);
+  if (!op_or.ok()) {
+    return to_grpc_status(op_or.status());
+  }
+  if (req.has_ref()) {
+    merge_operation_ref_metadata(req.ref(), op_or->mutable_ref());
+  }
+  auto admit_status = target_materialization_service_.admit_public_operation(op_or->ref(), absl::Now());
+  if (!admit_status.ok()) {
+    return to_grpc_status(admit_status);
+  }
+  resp.mutable_operation()->Swap(&(*op_or));
+  rctx.mark_success();
+  return grpc::Status::OK;
 }
 
 grpc::Status MaterializationController::confirm(
