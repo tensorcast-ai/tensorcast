@@ -1,10 +1,10 @@
 ---
 slug: workflow-companion-admission-and-fencing
 title: Workflow Semantic Plane for Gate, Observation, Replay, and Fencing
-status: proposed
+status: implemented
 areas: ["daemon", "sdk", "docs", "tests"]
 created: 2026-03-09
-last_updated: 2026-03-16
+last_updated: 2026-03-17
 related_code:
   - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
@@ -15,6 +15,7 @@ related_code:
   - daemon/service/controllers/target_publish_service.cc
   - daemon/state/target_publication_registry.h
   - daemon/state/target_publication_registry.cc
+  - proto/tensorcast/operation/v1/operation.proto
   - tensorcast/api/operation.py
 links:
   plan: ../plans/0096-workflow-companion-admission-and-fencing.md
@@ -28,139 +29,133 @@ links:
 
 # Summary
 
-`0100` now owns the full distributed-authority substrate:
+`0100` owns the distributed-authority substrate:
 
-- front-door credential context and routed-safe credential projection,
-- routable authority identity,
-- internal owner-stage return,
-- transport-derived peer identity, authority binding, delegated disclosure, and handoff continuity,
-- issuer-routed lifecycle validation and fail-closed handoff,
-- and public continuation surface rules.
+- routed request and owner-reply shape,
+- shared distributed trust and reply admissibility,
+- canonical path-family ownership,
+- and public continuation rules.
 
-`0093` now defines the authority-to-dataplane bridge:
+`0093` owns the authority-to-dataplane bridge:
 
 - `ResolvedSourceCapability` is the shared result shape used when a validated path is ready to lower into shared
   execution.
 
-`0094` still defines the local lifecycle baseline:
+`0094` owns the local lifecycle baseline:
 
 - lifecycle state holds bounded runtime promises,
 - `WorkflowCompanionRef` is the lifecycle-facing pointer to workflow state,
 - and `LifecycleUseGuard` marks bounded active use.
 
-With those boundaries established, `0096` is now intentionally semantic-only.
-It owns the workflow plane itself:
+With those boundaries established, `0096` remains intentionally semantic-only.
+It owns:
 
-- issue-time gate,
-- redemption-time gate,
-- observation,
-- completion,
-- recovery classes,
-- structured workflow-owned outcomes,
-- and `0055` operation-style replay, wait, cancel, and status as workflow-semantic owner behavior rather than a
-  separate top-level authority plane.
+- workflow gate,
+- workflow observation,
+- workflow completion,
+- workflow recovery honesty,
+- and the mapping from workflow-owned answers into the `0100` owner-reply algebra.
 
-`0096` does not own:
+This rewrite narrows the active closeout goal:
 
-- routing to a non-local workflow owner,
-- hop authentication,
-- public continuation surface rules,
-- the source-capability bridge into shared lowering,
-- activation timing relative to long waits,
-- or routed path-family composition.
-
-Those belong to `0100` and `0093`.
+- `publish` is the first workflow owner that must close end to end,
+- `0055` operation semantics and `0060` queue semantics remain calibration constraints,
+- and no additional workflow owner should be activated until `publish` is fully projected through `Operation[T]`.
 
 # Implementation Status
 
-Proposed follow-up design.
+Implemented publish-first closeout on top of `0100`.
 
-Current code now has the first local semantic-convergence baseline:
+Current code now provides:
 
 - shared local workflow-semantic carrier structs live in `lifecycle_kernel.h`,
-- `TargetPublicationRegistry` keeps replay and currentness outside lifecycle state while storing explicit local
-  workflow binding and replay projections,
+- `TargetPublicationRegistry` keeps replay and currentness outside lifecycle state,
 - `TargetPublishService` binds lifecycle capabilities through `WorkflowBindingProjection -> WorkflowCompanionRef`,
-- caller-visible long-lived continuation still relies on explicit public operation surfaces,
-- and `target_publication` now also has its first routed workflow-owner path on the canonical `0100`
-  `RouteAuthorityStage` seam:
-  `workflow_gate -> continue_with_authority(workflow_to_issuer) -> issuer_validate`.
+- `publish` replay now closes through `attach_existing -> Operation[T]`,
+- daemon operation observation fails closed on publish owner loss and stale attachment,
+- and `publish` remains the first grounded workflow owner with a routed sample path through `0100`.
 
-This document remains proposed because public continuation projection, queue mapping, and richer non-local workflow
-owners are still incomplete, even though the grounding `publish` owner now has a first distributed route.
+# Dependency Readiness
 
-Current code provides one concrete local workflow owner and two calibration constraints:
+`0096` now distinguishes semantic readiness from dependency readiness.
 
-- `publish` already separates lifecycle admission from current-for-target checks,
-- `publish` now declares its local workflow recovery class explicitly as `ephemeral_process_local`,
-- `TargetPublicationRegistry` already stores replay and currentness outside lifecycle state,
-- `0055` already proves that replay, wait, status, and cancel semantics may require attachable outcomes,
-- `0060` already proves that queue blocking and leader fencing are workflow semantics, not lifecycle semantics.
+| Workflow owner or family | Semantic shape | Dependency readiness |
+| --- | --- | --- |
+| `publish` gate and currentness semantics | defined | ready |
+| `publish` replay to immediate terminal reuse | defined | ready |
+| `publish` replay to `attach_existing -> Operation[T]` | defined | ready |
+| `publish` observation to `retry_later` | declared | not dependency-ready |
+| `0055` operation plane as calibration | defined | calibration only |
+| `0060` queue workflows as calibration | defined | calibration only |
+
+Repository rule:
+
+- child designs may depend on `publish` semantic gate, terminal mapping, and the first `attach_existing -> Operation[T]`
+  closeout today,
+- but they must not treat declared `wait_not_ready` continuation as dependency-ready.
 
 # Problem Statement
 
 ## 1. The repository still needs one workflow-semantic contract
 
-The current architecture already knows that replay, currentness, wait, join, cancel, and status are not lifecycle state.
-What it still lacks is one shared contract for how those answers are expressed.
+The architecture already knows that replay, currentness, wait, join, cancel, and status are not lifecycle state.
+What it still lacks is one dependency-ready contract for how a real workflow owner projects those answers.
 
-## 2. Persisted lifecycle-facing workflow binding is not the same as distributed workflow ownership
+## 2. `WorkflowCompanionRef` is persisted binding, not distributed attach identity
 
 `WorkflowCompanionRef` is the accepted lifecycle-facing binding carrier.
 It is enough to persist which workflow state a capability refers to.
 
-It is not, by itself, the long-term route or attach handle for non-local workflow ownership.
-That distinction must now stay explicit.
+It is not, by itself:
 
-## 3. Attach-target identity matters for replay and status reuse
+- a distributed route handle,
+- a public attach contract,
+- or a substitute for the `0100` continuation surface.
 
-Current code already proves that some existing outcomes are attach-target scoped.
-For example:
+## 3. `publish` is grounded, but not yet closed end to end
 
-- daemon-owned operations attach through a daemon runtime,
-- GS-backed operations attach through daemon RPCs that proxy to Global Store.
+Current code already proves:
 
-Therefore a workflow replay result cannot rely on bare `operation_id` when attach semantics depend on authority target.
+- `publish` separates current-for-target from lifecycle admission,
+- replay and currentness live in `TargetPublicationRegistry`,
+- and the local workflow recovery class is `ephemeral_process_local`.
 
-## 4. Recovery honesty is part of the workflow contract
+But the repository still lacks one full path that proves:
 
-`0092` already requires any state that changes future outcomes to declare its recovery boundary honestly.
-Workflow currentness, replay, wait, and fencing are exactly that kind of state.
+- a workflow replay hit can become `attach_existing`,
+- ingress can project that to `Operation[T]`,
+- and owner loss is surfaced honestly.
 
 # Goals / Non-Goals
 
 ## Goals
 
 - Define one shared workflow-semantic contract.
-- Separate workflow gate, observation, and completion.
-- Reuse `WorkflowCompanionRef` and `FencingContext` from `0094`.
-- Reuse `AuthorityAttachmentRef` from `0100` for attachable outcomes.
-- Map workflow-owned outcomes into `0100` owner-stage outcomes without redefining path-family order.
-- Keep persisted lifecycle-facing workflow binding representable in the current `0094` surface.
-- Make workflow recovery class and owner-loss behavior explicit.
-- Support `publish` as the first landed owner without overfitting the protocol to it.
-- Keep `0055` and `0060` as calibration constraints from the start.
+- Keep `0096` semantic-only and keep routing or public continuation rules in `0100`.
+- Close `publish` as the first workflow owner end to end.
+- Make workflow recovery class and owner-loss mapping explicit.
+- Keep `WorkflowCompanionRef` as the only persisted lifecycle-facing workflow binding in this phase.
+- Keep `0055` operation semantics and `0060` queue semantics representable as calibration constraints.
 
 ## Non-Goals
 
-- Define workflow-owner routing.
-- Define daemon-hop auth or relay trust.
-- Define lifecycle activation timing or long-wait admission windows.
-- Replace `0055` or `0060` with a second workflow framework.
+- Define workflow-owner routing, hop auth, or public continuation rules. `0100` owns those.
 - Move workflow truth into lifecycle tables.
+- Activate additional workflow owners before `publish` is closed.
+- Turn `0055` operation semantics or `0060` queue semantics into the first closeout owner in this phase.
 - Split operation-style replay, wait, cancel, or status into a second top-level authority plane.
 
 # Architecture & Interfaces
 
-## 1. Workflow Boundary
+## 1. Workflow boundary
 
 Workflow semantic state answers questions such as:
 
 - is this request current,
 - is this a replay or join,
 - is this caller fenced,
-- should the caller wait,
-- what existing outcome should be reused,
+- should an existing outcome be reused,
+- should a caller attach to an existing outcome,
 - what status should be surfaced,
 - what terminal semantic result should be recorded.
 
@@ -168,364 +163,144 @@ Lifecycle state answers a different question:
 
 - does a bounded runtime promise currently exist and may it be activated or used.
 
-```mermaid
-flowchart LR
-  A["lifecycle state"] --> B["0096 workflow gate"]
-  B --> C["family realization"]
-  D["0096 workflow observation"] --> E["caller-facing reuse or wait or status"]
-  C --> F["0096 workflow completion"]
-```
-
 Boundary rules:
 
-1. Workflow truth remains outside lifecycle ownership.
-2. `WorkflowCompanionRef` remains the lifecycle-facing binding carrier, not the workflow truth owner.
-3. `0096` defines semantic result classes, not route resolution, hop security, or activation order.
-4. `0100` owns path families, wait boundaries, and ingress-mediated composition; `0096` only defines the workflow-owned
-   answer space.
-5. `0093` owns `ResolvedSourceCapability`; workflow semantics may allow or deny later source-capability mint or return,
-   but do not define that bridge.
+1. workflow truth remains outside lifecycle ownership,
+2. `WorkflowCompanionRef` remains the lifecycle-facing binding carrier, not the workflow truth owner,
+3. `0096` defines workflow-owned answer space,
+4. `0100` owns path families, distributed routing, and public continuation rules,
+5. `0093` owns `ResolvedSourceCapability` as the bridge into shared lowering.
 
-## 2. Recovery Classes and Ownership
+## 2. First-owner policy
 
-Every workflow semantic owner must declare a `WorkflowRecoveryClass`.
+`publish` is the first workflow owner that must close end to end.
 
-Required values:
+Repository rule:
 
-| `WorkflowRecoveryClass` | Meaning | Required interpretation |
+- no additional workflow owner should be activated on a new public continuation path until `publish` is closed and
+  tested,
+- `0055` operation semantics and `0060` queue semantics remain calibration constraints used to validate contract
+  generality, not to expand implementation scope in this phase.
+
+## 3. Publish semantic contract
+
+### 3.1 Current grounded semantic state
+
+Current grounded publish workflow state is:
+
+| Semantic state | Current owner | Recovery class |
 | --- | --- | --- |
-| `ephemeral_process_local` | semantic state is lost with the owning process or daemon | the feature must fail honestly after that loss |
-| `local_recoverable` | semantic state is recovered on restart from owner-local durable state | restart on the same authority may preserve semantics |
-| `replicated_authority` | semantic state survives failover through an explicit replicated authority | the owning design must define reconciliation and fencing |
-
-Required declaration per workflow semantic owner:
-
-1. owner identity
-2. fenced principal when applicable
-3. recovery class
-4. failure mapping after owner loss or restart
-
-Current grounding:
-
-| Workflow semantic state | Current owner | Recovery class today |
-| --- | --- | --- |
-| publish current-for-target | `TargetPublicationRegistry.latest_by_target_` | `ephemeral_process_local` |
-| publish replay by `publication_id` | `TargetPublicationRegistry.records_` | `ephemeral_process_local` |
-| `0055` operation replay or wait or status | operation plane | owner-defined |
-| `0060` queue fencing or blocking | queue workflow owner | owner-defined |
-
-## 3. Shared Baseline from `0094` and `0100`
-
-Shared objects:
-
-- `WorkflowCompanionRef`
-- `FencingContext`
-- `ResolvedSourceCapability`
-- `AuthorityAttachmentRef`
-- `OwnerStageReply`
-
-Required interpretation:
-
-- `WorkflowCompanionRef` is the only persisted lifecycle-facing workflow reference in this phase,
-- `ResolvedSourceCapability` is the shared bridge used when a workflow-approved path later lowers into shared execution,
-- any attachable replay or status outcome must use `AuthorityAttachmentRef`,
-- bare `workflow_id` or bare `operation_id` is insufficient when the caller must attach to an existing authority-scoped
-  outcome,
-- `AuthorityAttachmentRef` is daemon-consumed attach identity and does not authorize SDK direct endpoint attachment,
-- when a non-local workflow owner returns control to ingress daemon for a later wait, retry, or attach path, it does so
-  through `OwnerStageReply` from `0100`,
-- activation timing remains outside `0096`.
-
-## 4. Gate Objects
-
-### 4.1 `WorkflowIssueContext`
-
-`WorkflowIssueContext` is the issue-time semantic input before capability mint.
-
-Required fields:
-
-- `family`
-- optional `adapter_kind`
-- optional `requested_workflow_ref`
-- request-local semantic claims required by the workflow owner
-
-Critical rule:
-
-- issue-time workflow admission must not require fabricated lifecycle identifiers before lifecycle mint.
-
-### 4.2 `WorkflowBindingProjection`
-
-`WorkflowBindingProjection` is the workflow-owned result that may be persisted into lifecycle-facing state.
-
-Required fields:
-
-- `resolved_workflow_ref`
-
-Required rules:
-
-1. Persisted workflow binding must stay representable as `WorkflowCompanionRef`.
-2. Owner-specific workflow metadata that does not fit that surface must remain in workflow-owned state.
-3. Workflow binding projection is not a distributed route or attach handle by itself.
-
-### 4.3 `WorkflowRedemptionContext`
-
-`WorkflowRedemptionContext` is the semantic input after whatever `0100`-declared path-family-local preparation step has
-produced the local context required by the workflow contract.
-
-That preparation may follow lifecycle-owner precheck or activation, or it may precede later lifecycle adoption, depending
-on the declared `0100` path family.
-
-Required fields:
-
-- `family`
-- optional `adapter_kind`
-- `workflow_ref`
-- optional `capability_id`
-- optional `subject_id`
-- optional `binding_id`
-- optional `lifecycle_fencing_context`
-- request-local semantic claims needed by the workflow owner
-
-### 4.4 `WorkflowGateDecision`
-
-`WorkflowGateDecision` standardizes workflow-owned gate result classes.
-
-Required fields:
-
-- `decision_class`
-- `resolved_workflow_ref`
-- optional `binding_projection`
-- optional `outcome_projection`
-- optional `diagnostics`
-
-Required result classes:
-
-- `admit`
-- `replay`
-- `stale_current`
-- `fenced`
-- `cancelled`
-- `failed_precondition`
+| current-for-target | `TargetPublicationRegistry.latest_by_target_` | `ephemeral_process_local` |
+| replay by `publication_id` | `TargetPublicationRegistry.records_` | `ephemeral_process_local` |
 
 Critical rules:
 
-1. `WorkflowGateDecision` is a semantic gate result only.
-2. Wait and status remain observation results.
-3. If a replay result requires the caller to attach to an existing outcome, `outcome_projection` must carry
-   `AuthorityAttachmentRef`.
-4. `WorkflowGateDecision` does not itself define `ResolvedSourceCapability`; it authorizes, rejects, or redirects the
-   later path that may mint or return that bridge.
-5. `WorkflowGateDecision` does not itself define distributed stage order; it maps into `0100` path families and owner
-   replies.
+1. current-for-target remains workflow truth, not lifecycle truth,
+2. replay remains workflow truth, not lifecycle truth,
+3. because recovery is `ephemeral_process_local`, owner loss must fail honestly rather than pretending attachability
+   survives restart or failover.
 
-## 5. Observation Objects
+### 3.2 Publish outcome classes
 
-### 5.1 `WorkflowObservationQuery`
+The first closeout phase standardizes these publish-owned semantic outcomes:
 
-`WorkflowObservationQuery` is the semantic input for replay lookup, join lookup, wait, status, or currentness.
+| Outcome | Meaning |
+| --- | --- |
+| `admit_new` | no reusable publish outcome exists and the request is allowed to proceed |
+| `replay_terminal` | a reusable terminal outcome already exists |
+| `replay_attachable` | an attachable existing outcome exists |
+| `stale_current` | request is not current for the target |
+| `fenced` | caller is semantically fenced |
+| `cancelled` | workflow owner marks the operation cancelled |
+| `owner_lost` | previously attachable publish-owned state was lost according to recovery class |
+| `wait_not_ready` | workflow has a non-terminal observation but no attachable existing outcome yet |
 
-Required fields:
+## 4. Publish mapping to `0100`
 
-- `workflow_ref`
-- `observation_kind`
-- optional `adapter_kind`
-- optional `capability_id`
-- optional `subject_id`
-- optional `binding_id`
-- optional `wait_deadline`
-- request-local semantic claims needed by the owner
+### 4.1 Canonical mapping table
 
-Required `observation_kind` values:
+| Publish workflow outcome | `0100` owner reply | Public projection | Readiness |
+| --- | --- | --- | --- |
+| `admit_new` | `continue_with_authority` on `gate, continue, then adopt` | later immediate lowering result after issuer adoption | ready |
+| `replay_terminal` | `terminal` | immediate reused result | ready |
+| `replay_attachable` | `attach_existing` | `Operation[T]` | first closeout target |
+| `stale_current` | `terminal` | immediate semantic reject | ready |
+| `fenced` | `terminal` | immediate semantic reject | ready |
+| `cancelled` | `terminal` | immediate semantic reject | ready |
+| `wait_not_ready` | `retry_later` | `Operation[T]` or another explicit public family | declared but not dependency-ready |
 
-- `replay_lookup`
-- `join_lookup`
-- `status`
-- `wait`
-- `currentness`
+Rules:
 
-### 5.2 `WorkflowOutcomeProjection`
+1. `publish` does not define repository-wide path-family order; it reuses `0100`,
+2. `replay_attachable` is the first workflow-owned non-terminal public closeout target,
+3. `wait_not_ready` remains out of dependency-ready scope until the first attach path is closed,
+4. `publish` must not expose `AuthorityAttachmentRef` directly to callers.
 
-`WorkflowOutcomeProjection` is the structured existing-outcome carrier.
+### 4.2 Owner-loss mapping
 
-Required fields:
+Because the current publish workflow recovery class is `ephemeral_process_local`, owner loss is mapped as follows:
 
-- `projection_kind`
-- `owner_workflow_id`
-- optional `attachment_ref`
-- optional `existing_capability_id`
-- optional status projection
-- optional current-winner hint
-- optional family-defined payload
+- if a caller is attached to an existing publish-owned outcome and the owner loses that state, later observation must
+  fail closed with `UNAVAILABLE` or another explicit owner-loss error,
+- the system must not treat owner loss as if replay or currentness were still provable,
+- a fresh root request after owner loss may re-evaluate semantic state from scratch and may no longer observe a replay
+  hit.
 
-Required `projection_kind` values:
+This is stricter than optimistic reattach.
+That strictness is required for honest recovery semantics.
 
-- `existing_capability`
-- `existing_operation`
-- `status_snapshot`
-- `current_winner_hint`
-- `family_defined`
+## 5. Calibration constraints
 
-Critical rules:
-
-1. Any attachable outcome must carry `attachment_ref`.
-2. Bare `existing_operation_id` is not a sufficient long-term replay projection when attach semantics depend on owner
-   authority.
-3. The projection must be sufficient for caller-facing reuse without an undocumented side table contract.
-
-### 5.3 `WorkflowObservationResult`
-
-`WorkflowObservationResult` is the carrier for workflow-owned observation answers.
-
-Required fields:
-
-- `observation_kind`
-- `resolved_workflow_ref`
-- optional `outcome_projection`
-- optional `ready`
-- optional `diagnostics`
-
-Required rules:
-
-1. Wait semantics belong here, not in gate decisions.
-2. Observation may block or return not-ready according to the owning workflow contract.
-3. Observation does not mutate lifecycle truth by itself.
-4. Observation does not itself lower into shared dataplane execution.
-
-### 5.4 `WorkflowCompletionContext`
-
-`WorkflowCompletionContext` is the semantic write-back carrier after realization or terminal failure.
-
-Required fields:
-
-- `family`
-- optional `adapter_kind`
-- `workflow_ref`
-- `completion_class`
-- optional `capability_id`
-- optional `subject_id`
-- optional semantic completion facts required by the owner
-
-Typical `completion_class` values:
-
-- `completed`
-- `failed`
-- `cancelled`
-- `released_without_realization`
-
-## 6. Shared Workflow Protocol Stages
-
-### 6.1 Issue-time gate
-
-Used when semantic admission is required before mint.
-
-Examples:
-
-- publish admission,
-- operation replay or join decision before mint,
-- queue-owned authority checks before issuing a daemon-scoped capability.
-
-Required rule:
-
-- issue-time workflow results that later matter during redemption must be persisted through `WorkflowBindingProjection`.
-
-### 6.2 Redemption-time gate
-
-Used when a previously minted capability still needs workflow currentness, replay, or fencing checks.
-
-Examples:
-
-- publish current-for-target,
-- queue leader-epoch checks,
-- operation-scoped cancellation or replay checks.
-
-Required rule:
-
-- if a redemption path has already activated lifecycle use, any non-`admit` workflow result must release or avoid
-  retaining that active use according to `0100`.
-- if a later step will move bytes, `0093` owns the bridge into `ResolvedSourceCapability` and `0100` owns when ingress
-  lowering begins.
-
-Canonical mapping to `0100` in this phase:
-
-- `admit`
-  - maps to `OwnerStageReply(continue_with_authority)` only when the declared `0100` family is
-    `gate, continue, then adopt`
-- `replay`
-  - maps to `OwnerStageReply(attach_existing)`
-- `stale_current`, `fenced`, `cancelled`, `failed_precondition`
-  - map to `OwnerStageReply(terminal)`
-
-### 6.3 Observation
-
-Used when the caller needs workflow-owned replay, join, wait, status, or currentness information.
-
-Required rule:
-
-- workflow observation must not be down-converted into lifecycle not-found or expiry.
-- wait and not-ready observation outcomes map through `OwnerStageReply(retry_later)` or `attach_existing` only when the
-  declared `0100` family and recovery class permit that projection honestly.
-
-### 6.4 Completion
-
-Used when realization or terminal failure must update workflow-owned state.
-
-Required rule:
-
-- workflow completion remains owner-specific semantic state, not lifecycle state.
-
-## 7. Family Mappings
-
-### 7.1 `publish`
-
-`publish` is the first intended concrete owner.
-
-Current grounded behavior:
-
-- lifecycle admission is local,
-- current-for-target and replay remain in `TargetPublicationRegistry`,
-- current publish semantic state is explicitly `ephemeral_process_local`.
-
-### 7.2 `0055` operation plane
+### 5.1 `0055` operation plane
 
 Long-term interpretation:
 
 - semantic replay, join, wait, cancel, and status remain operation-owned,
-- attachable existing-operation outcomes must use `AuthorityAttachmentRef`,
-- caller-visible long-lived reattach should surface as `Operation[T]` by default, with `AuthorityAttachmentRef`
-  remaining
-  the daemon-consumed attach identity underneath,
-- paths that do not move bytes stop at attachment or observation results rather than fabricating a source-capability
-  bridge,
-- lifecycle state may point at operation-owned workflow state, but must not replace it.
+- attachable existing-operation outcomes must use the `0100` continuation surface rather than a workflow-private
+  routing model,
+- bare `operation_id` is still not sufficient for distributed attach without public-safe continuation metadata.
 
-### 7.3 `0060` queue workflows
+### 5.2 `0060` queue workflows
 
 Long-term interpretation:
 
 - queue fencing, visibility, and blocking remain workflow-owned,
-- queue blocking is not a workflow gate result class,
-- queue outcomes must not be down-converted into lifecycle expiry or not-found.
+- queue semantics validate the contract but are not the first closeout target in this phase.
 
-### 7.4 `serve`, `export`, `placement`, `retention`
+# Proto and SDK Implications
 
-Ordinary flows may omit workflow ownership entirely unless a higher-level workflow attaches one.
+This design does not create a new public continuation family.
+
+It depends on `0100` to provide:
+
+- a public-safe continuation descriptor carried by `OperationRef` or an equivalent public surface,
+- and `Operation[T]` as the caller-visible continuation shape.
+
+This design requires:
+
+- workflow-owned outcomes to map into `0100` owner replies,
+- and `publish` to use that public continuation contract without introducing a family-private attach surface.
+
+No persistent schema changes are required by this design itself.
 
 # Error Model
 
-Required semantic split:
-
-- replay hit
-  - workflow replay result with structured `WorkflowOutcomeProjection`
+- replay hit with attachable existing outcome
+  - workflow-owned `replay_attachable`
+  - maps to `attach_existing`
+- replay hit with terminal reusable outcome
+  - workflow-owned `replay_terminal`
+  - maps to `terminal`
 - stale current
-  - workflow-owned stale or failed-precondition result
+  - workflow-owned semantic reject
 - fenced
-  - workflow-owned fenced result
+  - workflow-owned semantic reject
 - cancelled
-  - workflow-owned cancelled result
+  - workflow-owned semantic reject
+- owner loss for `ephemeral_process_local` attached publish state
+  - explicit owner-loss error such as `UNAVAILABLE`
 - wait not ready
   - workflow observation result, not lifecycle expiry
-- owner loss
-  - according to `WorkflowRecoveryClass`, not lifecycle expiry by default
 
 # Observability
 
@@ -534,19 +309,11 @@ Minimum required dimensions:
 - `family`
 - `workflow_owner_kind`
 - `workflow_recovery_class`
-- `workflow_stage`
-  - `issue_gate`
-  - `redeem_gate`
-  - `observe`
-  - `completion`
 - `workflow_decision_class`
-- `workflow_observation_kind`
 - `workflow_projection_kind`
 - `workflow_attachment_kind`
 
 # Naming Compliance
-
-Planned interface names introduced or clarified by this phase:
 
 | Interface | Language | Rule | Result |
 | --- | --- | --- | --- |
@@ -555,52 +322,37 @@ Planned interface names introduced or clarified by this phase:
 | `WorkflowBindingProjection` | C++ struct | `PascalCase` | pass |
 | `WorkflowRedemptionContext` | C++ struct | `PascalCase` | pass |
 | `WorkflowGateDecision` | C++ struct | `PascalCase` | pass |
-| `WorkflowObservationQuery` | C++ struct | `PascalCase` | pass |
-| `WorkflowOutcomeProjection` | C++ struct | `PascalCase` | pass |
 | `WorkflowObservationResult` | C++ struct | `PascalCase` | pass |
-| `WorkflowCompletionContext` | C++ struct | `PascalCase` | pass |
-
-# Schema Changes
-
-No persistent schema changes are required in this design itself.
-
-Future implementation may require additive workflow-RPC or SDK payload fields for:
-
-- `AuthorityAttachmentRef`,
-- structured replay projections,
-- and explicit workflow-owner diagnostics.
+| `WorkflowOutcomeProjection` | C++ struct | `PascalCase` | pass |
 
 # Trade-offs & Risks
 
-- Narrowing `0096` makes it less self-sufficient than the previous version.
-  That is intentional because route and activation concerns do not belong in the workflow-semantic contract itself.
-- Requiring `AuthorityAttachmentRef` for attachable outcomes adds another carrier.
-  That cost is justified because current code already proves attach-target identity matters.
-- Keeping `WorkflowCompanionRef` as the only persisted lifecycle-facing workflow binding is stricter than allowing
-  arbitrary metadata.
-  That strictness preserves the current accepted `0094` surface.
+- Narrowing active scope to `publish` makes `0096` less broad in the short term.
+  That is intentional because the repository now needs one dependency-ready workflow owner more than it needs more
+  partially specified owner families.
+- Keeping `wait_not_ready` outside the first closeout slows breadth, but it prevents `attach_existing` and
+  `retry_later` from drifting simultaneously.
+- Honest owner-loss behavior for `ephemeral_process_local` state is stricter than optimistic attach reuse.
+  That strictness is correct.
 
 # Compatibility & Acceptance Criteria
 
 Acceptance criteria:
 
-- `0096` depends on `0100` for attachable outcome handles instead of inventing private replay routing
-- `0096` maps workflow-owned outcomes into `0100` owner-stage outcomes instead of defining repository-wide path order
-- any future non-local workflow routing consumes `0100` distributed-authority semantics instead of defining workflow-private trust policy
-- `WorkflowCompanionRef` remains the only persisted lifecycle-facing workflow binding in this phase
-- workflow replay, join, wait, status, and currentness remain outside lifecycle state
-- attachable existing outcomes require `AuthorityAttachmentRef`
-- operation-style replay, wait, cancel, and status remain within the workflow-semantic plane instead of becoming a new
-  top-level authority plane
-- workflow owner loss is mapped through `WorkflowRecoveryClass`
-- `publish` remains the first landed owner without becoming the protocol's shape center
-- `0055` and `0060` remain representable without forcing one storage backend or one route backend
+- `0096` remains semantic-only and depends on `0100` for public continuation rules,
+- `publish` is the first fully closed workflow owner,
+- `publish` replay to `attach_existing -> Operation[T]` is landed end to end,
+- `WorkflowCompanionRef` remains the only persisted lifecycle-facing workflow binding,
+- workflow replay, wait, status, and currentness remain outside lifecycle state,
+- owner-loss behavior is explicit and consistent with `WorkflowRecoveryClass`,
+- `0055` operation semantics and `0060` queue semantics remain representable without becoming the first implementation
+  target,
+- no workflow-private public continuation model appears beside `Operation[T]`.
 
 # References
 
-- `0100` for front-door context, distributed authority routing, trust semantics, attach refs, owner-stage reply,
-  path-family composition, and public continuation surfaces.
-- `0093` for `ResolvedSourceCapability` and the authority-to-dataplane bridge.
+- `0100` for distributed routing, path-family ownership, attach refs, owner-reply algebra, and public continuation.
+- `0093` for `ResolvedSourceCapability`.
 - `0094` for lifecycle-facing workflow binding and active-use boundaries.
-- `0055` for operation replay, wait, status, and attach-target semantics.
+- `0055` for `Operation[T]` as the public continuation surface.
 - `0060` for queue fencing and blocking semantics.

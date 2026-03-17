@@ -64,6 +64,10 @@ The unified model is:
 caller-owned region access, payload transport, and publication capabilities in separate modules with explicit trust
 boundaries.
 
+Engine-oriented alias policy and manifest-oriented integration guidance live in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`; `0087` remains
+authoritative for the artifact value model and routed byte-artifact runtime itself.
+
 # Current Implementation Snapshot
 
 As of 2026-03-08, the live implementation matches this design:

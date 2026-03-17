@@ -71,8 +71,10 @@ Instead, programmability is expressed by **composing existing Artifact primitive
 
 This document prioritizes **What/Why** (semantics and rationale) and defines contracts/invariants that must hold from Phase-0.
 
-Planned advanced extensions (daemon-run plan execution from a single entry daemon, process runtime unification,
-signals, and engine-agnostic KV-cache integration) are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Planned advanced extensions for runtime, daemon ingress, and signals are specified in
+`docs/designs/0056-programmable-framework-adv.md`.
+Engine-specific manifest-oriented integration guidance is specified in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`.
 
 ---
 
@@ -175,7 +177,10 @@ vs what was true **before 0055** (historical motivation). This avoids ambiguity 
      - `Artifact.prefetch(...)`, `Artifact.tensor_dict_into(...)`
      - `Artifact.pin_device_residency(...)` (new)
      - `CallContext` (new) and `Plan` (new, advanced)
-   - Domain-specific data (e.g., weights, byte artifacts (paged KV motivating case), checkpoints) is expressed as artifacts using stable key/view conventions; higher-level helper APIs are layered on top (see `docs/designs/0056-programmable-framework-adv.md`).
+   - Domain-specific data (e.g., weights, byte artifacts (paged KV motivating case), checkpoints) is expressed as
+     artifacts using stable key/view conventions; higher-level helper APIs are layered on top (see
+     `docs/designs/0056-programmable-framework-adv.md` and
+     `docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`).
 
 3. **Unified operation semantics (Phase-0: sync-only)**
    - Prefetch, persistence, and device residency pinning expose a unified `Operation[T]` interface with
@@ -1119,9 +1124,10 @@ Each engine instance exposes:
 - `mint_target(name, tensors, *, layout_hash=None, ttl_ms=None) -> TargetSpec`
 - `resolve_targets(spec: TargetSpec) -> Mapping[str, torch.Tensor]`
 
-Applications may layer domain-specific helpers (e.g., “mint targets for weights/cache”) on top of the base engine adapter,
-but those helpers are not part of the implemented core surface. Planned signals and engine-integration extensions are
-specified in `docs/designs/0056-programmable-framework-adv.md`.
+Applications may layer domain-specific helpers (e.g., “mint targets for weights/cache”) on top of the base engine
+adapter, but those helpers are not part of the implemented core surface. Planned signals are specified in
+`docs/designs/0056-programmable-framework-adv.md`. Planned engine-integration extensions are specified in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`.
 
 This preserves the “process context boundary”: no cross-process raw tensor pointers.
 
@@ -1185,7 +1191,9 @@ class InstanceStepBuilder:
 
 The Engine Adapter owns the plugin registry and rejects unknown `spec.name` or incompatible `layout_hash`.
 
-Signals and engine integration extensions (including LLM KV-cache orchestration) are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Signals are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Engine integration extensions are specified in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`.
 
 ---
 

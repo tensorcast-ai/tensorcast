@@ -197,7 +197,7 @@ Risks & mitigations
 # References
 
 - Identity (mi2): [0007 Content‑Addressed Artifact ID](./0007-content-addressed-artifact-id.md)
-- Byte artifact profile authority/routing: [0056 Programmable Framework Advanced Design](./0056-programmable-framework-adv.md)
+- Byte artifact profile runtime and authority: [0087 Unified Artifact Runtime and Routed Byte Artifact Architecture](./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md), [0090 Routed Existence Semantics and Single Authority Truth](./0090-existence-semantics-and-single-authority-truth.md)
 - Unified byte artifact runtime contract: [0087 Unified Artifact Runtime and Routed Byte Artifact Architecture](./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
 - Session API: [api-design](../architecture/api/api-design.md#store-and-entry-points)
 - Views: [Artifact Views and Retrieval](../architecture/artifact-views-and-retrieval.md)

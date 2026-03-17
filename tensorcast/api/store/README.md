@@ -118,6 +118,9 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you
   still want routable replicas after a successful apply.
+- `binding.publish_replica_operation(ctx=...)` exposes the same publish path as
+  `Operation[T]`, so callers can attach, wait, and inspect status through the
+  unified public continuation surface.
 - `binding.current_value` is the authoritative sealed value handle for the local
   binding. `binding.artifact_id` / `binding.selection` are convenience mirrors
   and become `None` when the current value is absent or local-only.

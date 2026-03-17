@@ -1,419 +1,343 @@
 ---
 slug: 0056-programmable-framework-adv
-title: Programmable Framework (Advanced Runtime + LLM Integration) (Design)
-description: Planned extensions on top of 0055 to unify phased plan execution (local runner + optional daemon ingress), a unified process runtime, signals, and engine-agnostic byte artifact orchestration (paged KV motivating case) for LLM applications.
+title: Programmable Framework Advanced Runtime, Daemon Ingress, and Signals (Design)
+description: Thin runtime and ingress layer on top of 0055: single-daemon process runtime, daemon-served low-cardinality signals, terminal-only plan ingress, and generic set-level orchestration without redefining artifact profile, authority, lifecycle, workflow, or engine integration semantics.
 status: draft
 areas:
   - sdk
   - daemon
   - global_store
   - proto
-  - integrations
+  - docs
 created: 2026-02-04
-last_updated: 2026-03-05
+last_updated: 2026-03-17
 related_code:
   - tensorcast/api/plan/plan.py
   - tensorcast/node_agent/executor.py
+  - tensorcast/engine_adapter/adapter.py
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/plan/v1/plan.proto
   - proto/tensorcast/node_agent/v1/node_agent.proto
   - proto/tensorcast/global_store/v1/global_store.proto
 related_docs:
   - docs/designs/0055-programmable-framework.md
+  - docs/designs/0078-selection-first-artifact-retrieval.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
-  - docs/designs/0017-client-generated-artifact-id.md
-  - docs/designs/0039-artifact-first-sdk.md
+  - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
+  - docs/designs/0090-existence-semantics-and-single-authority-truth.md
+  - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
+  - docs/designs/0094-unified-lifecycle-kernel-and-capability-families.md
+  - docs/designs/0096-workflow-companion-admission-and-fencing.md
+  - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
+  - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0004-unified-runtime-config.md
-  - docs/distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework.md
-  - docs/distributed-coordination-series/02-mode-switching-workload-playbook-and-governance.md
 links:
   plan: ../plans/0056-programmable-framework-adv.md
   predecessors:
     - ./0055-programmable-framework.md
   dependencies:
     - ./0055-programmable-framework.md
+    - ./0078-selection-first-artifact-retrieval.md
     - ./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
-    - ./0017-client-generated-artifact-id.md
-    - ./0001-docs-system-design.md
+    - ./0092-artifact-profiles-shared-dataplane-and-truth-layering.md
+    - ./0090-existence-semantics-and-single-authority-truth.md
+    - ./0093-backing-identity-and-retained-backing-ownership.md
+    - ./0094-unified-lifecycle-kernel-and-capability-families.md
+    - ./0096-workflow-companion-admission-and-fencing.md
+    - ./0100-distributed-authority-handoff-security-and-public-surfaces.md
+    - ./0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
     - ./0004-unified-runtime-config.md
   schema: ../../schema.sql
 ---
 
 # Summary
 
-`docs/designs/0055-programmable-framework.md` defines and implements the core **artifact-first programmable primitives**
-(`CallContext`, `Operation[T]`, `Plan` + caller-local `PlanExecutor` (`Plan.run()`), Instance Agent + Engine Adapter execution boundary).
+`docs/designs/0055-programmable-framework.md` already defines the artifact-first programmable substrate:
 
-This design (`0056`) specifies **planned** extensions required by external applications (especially LLM apps) that want
-to **actively manage runtime tensors** as part of application logic (e.g., request routing/rebalancing/migration in a
-ToT scheduler), under common production constraints:
+- `CallContext`
+- `Operation[T]`
+- `Plan` and `PlanSpec`
+- caller-local `PlanExecutor`
+- the Instance Agent / Engine Adapter boundary
 
-- the scheduler/app process may only be able to connect to **one** TensorCast entrypoint (cannot directly reach every
-  daemon/agent),
-- the **Global Store** must not be a hot-path bottleneck at cluster scale,
-- the Python SDK should remain a lightweight boundary layer; orchestration logic belongs inside TensorCast daemons.
+This design intentionally stays thinner than earlier `0056` drafts.
+It owns only the framework layer above that substrate:
 
-Planned extensions:
+- one process runtime handle bound to one daemon endpoint,
+- daemon ingress for the same `PlanSpec` semantics as the local runner,
+- daemon-served low-cardinality signals and directory snapshots,
+- and generic set-level orchestration carriers for high-cardinality artifact sets.
 
-- **Phased Plan execution unification**:
-  - current baseline (as of 2026-02-10): `Plan.run()` is SDK-local (caller-local PlanExecutor) and instance fragments
-    are executed via the target instance’s **Instance Agent** boundary (Engine Adapter; legacy code/proto name:
-    `node_agent`),
-- planned extension: add daemon ingress `ExecutePlan` (the `gateway_ingress` role) to run PlanExecutor inside Store Daemons, without
-    creating a second execution semantics.
-- **Unified process runtime**: all caller processes use one `Runtime`/`ProcessContext` object returned by
-  `tensorcast.connect(...)` (no separate `init_app(...)`).
-- **Daemon-served Signals**: `TensorCastSignals` is served by daemons with explicit staleness budgets; Global Store is
-  consulted via daemon caches / watch streams, not per caller request.
-- **Engine-agnostic KV orchestration control flow**: instance actions, routing, and lease/fencing integration for KV
-  cache operations. The KV data model, batch IO primitives, and open/sealed lifecycle are specified in
-  `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`.
+The long-term convergence rule is:
 
-This design intentionally keeps TensorCast core **KV-semantics-free**: TensorCast stores/moves blobs; inference engines
-remain the source of truth for request→token→KV-key mapping.
+- `0056` is the programmable front door,
+- not a second semantic owner beside `0087`, `0093`, `0094`, `0096`, `0100`, or `0102`,
+- and not a second instance-hosting or continuation system beside today's NodeAgent and `Operation[T]` families.
 
-Consistency and migration guardrails (required):
+Current repo reality already supports that direction:
 
-- **Single execution semantics**: PlanExecutor is the canonical `PlanSpec` executor (0055: caller-local; 0056:
-  daemon-run). Instance-scoped actions execute via the local Instance Agent boundary; worker-scoped actions execute in
-  Store Daemons. Gateway ingress MUST NOT introduce a parallel execution plane with diverging retry/idempotency
-  semantics.
-- **Gateway is a role, not a new service type**: any Store Daemon may serve ingress; no separate gateway registry entity.
-- **Contract reuse over implementation reuse**: directory/cache behavior SHOULD reuse `CapabilityDirectory` semantics
-  (freshness, invalidation, fallback), but daemon implementations remain native (no cross-language runtime coupling).
-- **LaneContext must close the loop**: lane/policy metadata MUST propagate consistently across plan and non-plan hot-path
-  RPCs (materialize/prefetch/KV), with auditable logs and retry stability.
-- **De-hotization cannot weaken correctness**: when moving source/routing decisions local, preserve claim/reservation and
-  fencing-equivalent invariants; do not trade away overload safety.
+- `PlanSpec` is the canonical orchestration IR,
+- canonical instance actions already exist in `plan.proto` and `node_agent.proto`,
+- NodeAgent already exposes `ExecutePlan`,
+- and `SelectionIdentity` already exists as the canonical per-item identity.
 
----
+The remaining problem is therefore front-door convergence, not invention of another execution substrate.
 
-# Goals / Non‑Goals
+`0056` does not own:
+
+- artifact value semantics, `ArtifactSelection`, or `byte_artifact` profile rules,
+- routed truth, backing truth, lifecycle truth, workflow truth, or public continuation algebra,
+- engine-local request inspection, target-capability minting, or engine-private aliases,
+- or any profile-specific or business-specific high-cardinality set semantics.
+
+The key long-term rule is:
+
+- the value unit remains `Artifact`,
+- the scalable control unit for high cardinality becomes a neutral set reference,
+- and engine or application aliases stay outside framework core.
+
+That split keeps the repository converged around:
+
+- one artifact object model,
+- one truth and lifecycle layering,
+- one shared dataplane,
+- one distributed public continuation model,
+- and zero business-specific control dialects in the framework core.
+
+# Problem Statement
+
+External applications increasingly need to:
+
+- connect to exactly one TensorCast endpoint because of network policy,
+- execute plans across many daemons and instances,
+- observe low-cardinality cluster signals with bounded staleness,
+- and orchestrate high-cardinality artifact sets without direct coupling to Global Store or engine-private RPCs.
+
+The wrong way to solve that problem is to turn the framework into:
+
+- an engine-specific API surface that hard-codes KV or LLM nouns into the core,
+- a second distributed continuation protocol beside `0096` and `0100`,
+- a second instance-hosting model beside the existing NodeAgent or Instance Agent boundary,
+- a control plane that expands every high-cardinality set into caller-enumerated item lists on the hot path,
+- or a design that pushes high-cardinality per-item truth back into Global Store.
+
+`0056` exists to solve the entrypoint and orchestration transport problem without breaking the deeper repository
+invariants from `0055`, `0087`, `0090`, `0093`, `0094`, `0096`, `0100`, and `0102`.
+
+# Ownership Boundary
+
+The long-term ownership split is:
+
+| Concern | Owning design |
+| --- | --- |
+| `Runtime`, `connect(...)`, daemon ingress, daemon-served signals | `0056` |
+| artifact-first `PlanSpec`, local runner semantics, `Operation[T]` | `0055` |
+| front-door convergence over the existing `PlanSpec -> daemon/node-agent` execution spine | `0056` |
+| selection contract and artifact value model | `0078` and `0087` |
+| generic set digest, set reference, and worker batch orchestration over normalized selection identities | `0056` |
+| routed existence and visibility truth | `0090` |
+| backing truth and `ResolvedSourceCapability` | `0093` |
+| lifecycle capability mint and redeem semantics | `0094` |
+| workflow replay, currentness, fencing, wait, and status semantics | `0096` |
+| distributed request or reply algebra and public continuation | `0100` |
+| engine manifest production, engine request context, and domain aliases | `0102` |
+
+Normative rules:
+
+1. `0056` may route to or compose with deeper layers, but it must not redefine them.
+2. Any byte-moving distributed success path still converges on `ResolvedSourceCapability` and shared lowering.
+3. `0056` may own generic set carriers, but it must not own profile-specific set semantics or engine request inspection.
+4. `ManifestResult` is the current concrete engine-side high-cardinality set carrier today; `0102` owns the mapping
+   between engine manifest production and `0056` generic set orchestration.
+
+# Layering Contract
+
+The repository needs one explicit stack for programmable execution:
+
+| Layer | Canonical object | Owner |
+| --- | --- | --- |
+| value and truth | `Artifact`, `ArtifactSelection`, `ResolvedSourceCapability` | `0055`, `0078`, `0087`, `0090`, `0093` |
+| set reference | neutral set digest and set ref over normalized selection identities | `0056` |
+| orchestration IR | `PlanSpec` and canonical action vocabulary | `0055` plus `0056` |
+| runtime and ingress | `Runtime`, daemon ingress, daemon-served signals | `0056` |
+| engine integration | engine manifest production, aliases, target capability helpers | `0102` |
+
+This layer split is the core consistency rule for long-term evolution:
+
+- values stay artifact-first,
+- high-cardinality control becomes set-first,
+- runtime stays a thin transport and orchestration layer,
+- and integrations remain the place where engine-private concepts are translated into canonical framework actions.
+
+## Front-door convergence
+
+Repository rule:
+
+- all programmable entrypoints must lower into one execution spine,
+- and that spine must reuse the canonical `PlanSpec` plus canonical action vocabulary already present in the repo.
+
+The intended spine is:
+
+```text
+Runtime / tensorcast.plan / gateway ingress
+  -> PlanSpec
+  -> worker execution on Store Daemons
+  -> instance execution on NodeAgent / Instance Agent
+  -> deeper owner layers for truth, lifecycle, workflow, and continuation
+```
+
+Normative rules:
+
+1. gateway ingress is a front-door adapter over this spine, not a second plan semantic owner,
+2. NodeAgent or the in-process Instance Agent boundary remains the unique instance-scoped execution host in this phase,
+3. `0056` may add transport envelopes around `PlanSpec`, but it must not fork the action vocabulary or execution model,
+4. if a future convenience helper bootstraps local instance hosting, it must preserve the same NodeAgent-owned config,
+   registration, and execution semantics rather than creating a second host model.
+
+# Extension Placement Rules
+
+When adding a new scenario, the first question is not "how do we make `0056` support it?"
+The first question is "which repository layer actually owns the new concern?"
+
+## Decision table
+
+| New concern | Owning design layer |
+| --- | --- |
+| new caller entrypoint, runtime handle, daemon ingress, signals, generic runtime routing | `0056` |
+| new generic set digest, set ref, or worker batch orchestration over normalized selection identities | `0056` |
+| new artifact value model, selection shape, artifact profile, or write mode | `0078` and `0087` |
+| new routed existence or visibility truth rule | `0090` |
+| new backing truth or source-capability bridge rule | `0093` |
+| new lifecycle mint, redeem, or protection rule | `0094` |
+| new workflow replay, attach, wait, or status rule | `0096` |
+| new distributed continuation or public attach rule | `0100` |
+| new engine-specific manifest production, request-context rule, alias helper, or target helper | `0102` |
+| new cluster-wide config invariant or operator-facing knob | `0004` |
+
+## Practical rules
+
+1. If a scenario can be expressed with canonical instance actions `manifest/publish/hydrate/evict_local`, it should not
+   add a new framework instance action family.
+2. If a proposed API name contains `kvcache`, `weights`, `checkpoint`, `radix`, or an engine name, it is presumed to be
+   outside `0056`.
+3. If the real scaling problem is high cardinality, the primary control abstraction should be a neutral set reference,
+   not a larger caller-enumerated item list.
+4. If the scenario requires attach, replay, wait, cancel, or status beyond a single request lifetime, it belongs to
+   `0096` and `0100`, not to a plan-private sub-protocol inside `0056`.
+5. Global Store may hold only low-cardinality routing and registration data for `0056`; it must not become a
+   high-cardinality per-item or per-set hot path.
+
+## Review gate
+
+Every future extension proposed against `0056` should answer these questions explicitly:
+
+1. Is the new concept generic across artifact domains, or is it engine-specific?
+2. Is the control unit an item or a set, and why?
+3. Does the change affect transport or orchestration only, or does it change truth, lifecycle, workflow, or public
+   continuation semantics?
+4. If `0056` grows because of this change, what deeper layer is it intentionally not redefining?
+
+If those answers are unclear, the change should not land in `0056` yet.
+
+# Goals / Non-Goals
 
 Goals
 
-- Support **external apps** (e.g., ToT schedulers) that can only reach a **single daemon entrypoint**, while still being
-  able to execute cluster-wide plans and query cluster signals.
-- Keep the Python SDK a clean boundary: caller processes connect to exactly **one** daemon and do not call Global Store
-  directly.
-- Push control-plane execution down to Store Daemons so the system scales without a single centralized controller.
-- Avoid creating parallel execution planes (`SDK-local PlanExecutor` vs `daemon PlanExecutor`) with diverging
-  retry/idempotency semantics.
-- Minimize Global Store load by globally registering only long-lived entities (**Worker / Instance**) and by using
-  watch/stream + caching inside daemons.
-- Define an instance-local **Instance Agent / Engine Adapter** boundary so instance steps can safely touch engine
-  internals without exposing PID/IPC handles to remote callers.
-- Define a cacheable **Signals** surface (`TensorCastSignals`, `ExecutionSignals`) with explicit staleness semantics for
-  control loops.
-- Define an engine‑agnostic **KV cache orchestration control contract** compatible with SGLang HiCache/Mooncake.
-  Data semantics (object model, open/sealed states, batch IO and identity encoding) are delegated to
-  `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`.
+- Support external applications that can reach only one Store Daemon endpoint.
+- Keep the Python SDK a lightweight boundary: callers connect to one daemon and do not call Global Store directly.
+- Preserve one `PlanSpec` execution semantics across caller-local execution and daemon ingress execution.
+- Provide daemon-served `TensorCastSignals` with explicit staleness metadata.
+- Model scalable high-cardinality orchestration through neutral set references and order-insensitive set digests.
+- Keep canonical instance orchestration aligned around `manifest/publish/hydrate/evict_local`.
+- Keep target-capability minting and resolution at the instance-bound engine adapter boundary.
+- Allow `prefetch_many` as convenience only when it lowers to the same generic set abstraction.
 
-Non‑Goals
+Non-Goals
 
-- A Ray‑like distributed Python runtime (plans dispatch fixed actions, not arbitrary code).
-- Full durability semantics for KV cache (KV blobs are a cache; correctness must not depend on backend retention).
-- A global reference counting system for KV blob eviction (start with TTL/LRU + best‑effort delete semantics).
-- Baking token→KV mapping semantics into TensorCast core (engines remain the source of truth; TensorCast stores/moves
-  blobs).
-- Replacing TensorCast’s existing data plane; this design only adds control‑plane services and step types on top of 0055.
-
----
-
-# Scope Boundary with 0087 (required)
-
-`0056` and `0087` are intentionally layered:
-
-- `0056` owns control-plane semantics:
-  - daemon ingress execution model,
-  - signals and directory caching,
-  - byte artifact routing with shard leases and fencing,
-  - instance-agent orchestration boundaries.
-- `0087` owns byte artifact and weight data semantics:
-  - unified `Artifact` + `Binding` + mapping model,
-  - blob `open` -> `sealed` lifecycle,
-  - batch external-target IO primitives and VRAM-first fast paths,
-  - CGID field encoding constraints and helper contracts.
-
-When sections overlap, `0087` is normative for byte artifact data-path behavior and `0056` is normative for distributed
-control-plane behavior.
-
----
+- Define shard-home routing, byte-artifact leases, or `HomeBatch*` RPC semantics.
+- Define capability minting, redemption, issuer handoff, or lifecycle truth.
+- Define workflow replay, attach, or status semantics outside `0096` and `0100`.
+- Introduce plan-private `attach`, `wait`, `cancel`, or `status` families for daemon ingress.
+- Move engine request tables, target-capability minting, or request-context persistence into framework core.
+- Require truly high-cardinality callers to enumerate all items inline on the hot path.
+- Replace TensorCast's existing dataplane or introduce a second distributed execution substrate.
 
 # Architecture
 
-## Runtime Topology (Planned)
+## Runtime topology
 
 ```mermaid
 flowchart LR
-  subgraph APPNET["App network (single egress)"]
-    APP["LLM App (e.g., ToT Scheduler)"]
-    SDK["TensorCast Python SDK<br/>(Runtime)"]
-    APP --> SDK
-    GWADDR["Gateway address<br/>(VIP/LB/DNS)"]
+  subgraph APP["Caller process"]
+    USER["Application"]
+    RT["Runtime"]
+    USER --> RT
   end
 
-  subgraph CLUSTER["TensorCast cluster (internal network)"]
-    GS["Global Store<br/>(long-lived registry + shard-home leases)"]
+  subgraph CLUSTER["TensorCast cluster"]
+    GS["Global Store<br>low-cardinality registry and watches"]
 
-    subgraph GW["Gateway daemon (gateway_ingress role)"]
-      DG["Store Daemon (gateway_ingress role)<br/>(PlanExecutor + Signals cache)"]
+    subgraph GW["Gateway daemon role"]
+      DG["Store Daemon<br>Runtime ingress + signals cache"]
     end
 
-    subgraph WKA["Worker Node A"]
-      DA["Store Daemon A (Worker)<br/>(PlanExecutor)"]
-      subgraph PROCA["Instance A process"]
-        IA["Inference Instance A<br/>(e.g., SGLang)"]
-        IAA["Instance Agent (in-process)<br/>(Engine Adapter boundary)"]
-        IAA <--> |engine adapter hooks| IA
-      end
-      DA <--> |"instance steps (RPC)"| IAA
+    subgraph WA["Worker A"]
+      DA["Store Daemon A"]
+      IAA["Instance Agent A<br>in-process with engine"]
+      DA <--> IAA
     end
 
-    subgraph WKB["Worker Node B"]
-      DB["Store Daemon B (Worker)<br/>(PlanExecutor)"]
-      subgraph PROCB["Instance B process"]
-        IB["Inference Instance B<br/>(e.g., SGLang)"]
-        IAB["Instance Agent (in-process)<br/>(Engine Adapter boundary)"]
-        IAB <--> |engine adapter hooks| IB
-      end
-      DB <--> |"instance steps (RPC)"| IAB
+    subgraph WB["Worker B"]
+      DB["Store Daemon B"]
+      IAB["Instance Agent B<br>in-process with engine"]
+      DB <--> IAB
     end
 
-    DG <--> |dispatch plan fragments| DA
-    DG <--> |dispatch plan fragments| DB
-
-    DG <--> |watch/cache| GS
-    DA <--> |watch/cache| GS
-    DB <--> |watch/cache| GS
-
-    DA <--> |RDMA/MTCP P2P data plane| DB
+    DG <--> DA
+    DG <--> DB
+    DA <--> DB
+    DG <--> GS
+    DA <--> GS
+    DB <--> GS
   end
 
-  SDK --> |"gRPC (only egress)"| GWADDR
-  GWADDR --> DG
+  RT --> DG
 ```
 
-## Component Responsibilities
+Key rule:
 
-- **Store Daemon (Worker process)** (existing; extended in 0056): owns TensorCast data plane (replicas, tiers, P2P
-  copies, placement pins) and additionally hosts control-plane services:
-  - PlanExecutor (the `gateway_ingress` role provides ingress `ExecutePlan`; all daemons execute per-target plan fragments),
-  - `TensorCastSignals` (cached signals/directory; bounded staleness),
-  - daemon↔daemon dispatch and RPC invocation of Instance Agents for instance-scoped actions.
-- **Global Store** (existing): durable coordination + registries and persistence metadata.
-  - 0056 goal: keep it off the hot path by registering only long-lived entities and using watch/stream updates to
-    populate daemon caches.
-  - KV integration note (planned): Global Store does **not** track high-cardinality KV blobs; it only serves as the
-    low-cardinality **shard lease authority** (fencing tokens) and long-lived membership/registry.
-- **Instance Agent** (planned): instance-local execution boundary that:
-  - executes instance-scoped plan actions (targets, transforms, KV adapter),
-  - hosts engine adapters safely (in-process with the inference instance),
-  - is callable by Store Daemons via RPC (not exposed to external app networks).
-- **Inference Instance** (external): an inference engine process (e.g., SGLang).
-- **Runtime (Python SDK)** (planned): a lightweight handle used by any caller process. It connects to exactly one Store
-  Daemon and does not call Global Store directly.
+- moving the entrypoint into a daemon is a relocation of orchestration transport, not a new semantic layer.
 
-Remote-safety rules (unchanged from 0055; reiterated):
+## Component responsibilities
 
-- Any action requiring PID/IPC/region references MUST run via the Engine Adapter on the target instance.
-- External apps must not directly call PID/IPC-binding RPCs; they submit plans to daemons, and the target daemon
-  invokes the target Instance Agent via instance-agent RPC for instance-scoped steps.
-- Daemon-owned cache-warm actions that must be retry-safe and PID-independent run in `NO_LEASE`.
+- **Runtime**
+  - process-local handle bound to one daemon address,
+  - exposes `store()`, `signals()`, and `plan(ctx)`,
+  - lowers programmable requests onto the canonical execution spine.
+- **Store Daemon**
+  - executes worker-scoped actions,
+  - accepts optional ingress `ExecutePlan`,
+  - caches low-cardinality directory and signals state from watches,
+  - routes instance actions to the target daemon and local NodeAgent or Instance Agent boundary.
+- **NodeAgent / Instance Agent**
+  - the unique instance-scoped execution boundary in this phase,
+  - hosts engine adapters safely,
+  - is not exposed directly to caller networks.
+- **Global Store**
+  - low-cardinality worker and instance registry,
+  - watch streams and other slow-path metadata inputs required by daemon caches,
+  - not a per-request caller dependency.
+- **Artifact set carrier**
+  - names an order-insensitive set of normalized selection identities for orchestration,
+  - is a control-plane reference only,
+  - does not replace `Artifact` or `ArtifactSelection` as the value layer.
 
----
+# Runtime Model
 
-# Terminology (planned; abstract vs process)
-
-0056 uses several terms that are easy to conflate. This section explicitly separates:
-
-- **abstract targets / registry entities** (what `PlanSpec` targets, what Global Store records), from
-- **concrete runtime entities** (actual OS processes that run on nodes).
-
-## Node
-
-- **Node (abstract / physical host)**: a machine (physical or VM) in the cluster. A node can run multiple processes:
-  Store Daemon(s), inference instance(s), and optionally sidecars.
-- A node is **not** a `Plan` target in this design; plan targets are Workers (Store Daemons) and Instances (engines).
-
-## Daemon / Store Daemon
-
-- **Daemon (concrete process)**: a long-lived TensorCast service process. In this document, “daemon” means **Store
-  Daemon** unless explicitly qualified (e.g., “Global Store server”).
-- **Store Daemon (concrete process)**:
-  - owns TensorCast data plane (replicas, tiers, P2P copies, placement pins),
-  - runs control-plane endpoints required by 0056 (daemon-served signals/directory, and optional ingress
-    `ExecutePlan`),
-  - maintains a directory/signal cache backed by Global Store watch streams.
-- A Store Daemon is identified by a stable **`daemon_id`** (HA-safe). Network addresses are routing attributes only.
-
-## Placement / tier
-
-- **Placement (abstract concept)**: where bytes should be resident from the daemon’s perspective. Placement is a tier
-  (HOST_DRAM vs GPU_VRAM) and optionally a device instance (GPU ordinal).
-- **API layer** (public): for user ergonomics, APIs continue to accept `device="cuda:N"` / `N` and `device="dram"` /
-  `"cpu"` / `-1`.
-- **Semantic layer** (required): device inputs MUST canonicalize to a Placement:
-  - `Placement(kind="GPU_VRAM", device_id=N)` for `"cuda:N"` / `N`.
-  - `Placement(kind="HOST_DRAM")` for `"dram"` / `"cpu"` / `-1`.
-- **Wire layer** (compatibility): until a first-class `Placement` message is introduced on all RPCs, HOST_DRAM is
-  encoded as `device_id = -1` and GPU_VRAM as `device_id = N` (existing wire field). `device_id` is therefore a
-  **compatibility encoding**, not a “GPU ordinal” in the abstract model.
-
-## Worker
-
-- **Worker (abstract target + registry entity)**: the logical “worker” that a plan targets for daemon-owned actions.
-  A Worker corresponds 1:1 to a Store Daemon process at any point in time.
-- Global Store records Workers so other daemons can resolve `daemon_id -> routing` and dispatch plan fragments without
-  callers needing direct connectivity to every daemon.
-- In code/IR, “worker step” means “execute on the target Store Daemon (by `daemon_id`)”.
-
-## Gateway daemon
-
-- **Gateway daemon (`gateway_ingress` role; concrete process)**: the single Store Daemon endpoint that a caller process can reach (by
-  network policy). The gateway daemon:
-  - accepts `ExecutePlan(PlanSpec)` from the caller,
-  - schedules the DAG and dispatches subplans to other Store Daemons (instance steps execute via the target daemon’s
-    Instance Agent RPC boundary),
-  - aggregates results into a `PlanResult` and serves it via an `Operation[PlanResult]` (status/wait/cancel).
-- “Gateway” is a **role**, not a separate service type or registry entity. Any Store Daemon can be configured with the
-  `gateway_ingress` role.
-
-## PlanExecutor
-
-- **PlanExecutor (abstract component)**: the only component that interprets a `PlanSpec` DAG, schedules/dispatches steps,
-  and aggregates a `PlanResult`.
-  - **0055 (implemented)**: PlanExecutor runs in the caller process as the SDK-local runner (`Plan.run()`).
-    - Worker-only plans can be executed from any process that can reach the target Store Daemons.
-    - Plans containing instance-scoped steps require reachability to the target instance’s Instance Agent boundary.
-  - **0056 (planned)**: PlanExecutor runs inside Store Daemons.
-    - The `gateway_ingress` role provides external ingress (`ExecutePlan`).
-    - Non-gateway daemons execute per-target plan fragments and invoke Instance Agents via RPC for instance steps.
-
-## Home shard / home daemon (planned)
-
-- **Home shard (abstract partition)**: a fixed partition of byte artifact key space used for routing/ownership
-  (e.g., 4096 or 16384 shards). Sharding is by byte artifact identity (CGID), not by request.
-- **Home daemon (dynamic responsibility; concrete process)**: the Store Daemon that currently holds the lease for a
-  shard. Only `shard_home_eligible` daemons may acquire shard-home leases and become home. The home daemon is the authoritative
-  place for:
-  - `PUT_IF_ABSENT_JOIN` enforcement (immutability invariants),
-  - existence truth for byte artifacts (for the current lease generation),
-  - and shard-scoped TTL / resource governance decisions.
-- **Fencing token (`lease_generation`)**: a monotonically increasing generation number attached to the shard lease. All
-  shard-scoped byte artifact operations must be fenced by the current `lease_generation` to prevent split-brain under partitions
-  and failover.
-
-## Instance
-
-- **Instance (concrete process + registry entity)**: an inference engine process (e.g., an SGLang serving instance).
-  It is not a TensorCast daemon.
-- An Instance exists so plans can target **engine-local** actions (target mint/resolve, transforms, KV
-  flush/prefetch/evict_local, execution signals).
-- Instances are registered/heartbeated as long-lived entities so Store Daemons can route instance steps by stable
-  **`instance_id`**.
-
-## Instance Agent (engine integration boundary)
-
-Instance Agent is the **inference-engine integration boundary**. In the current TensorCast codebase, the legacy
-proto/package label is `node_agent`, but the semantics are per-instance and in-process.
-
-- **Instance Agent (in-process component; not a separate service)**: the instance-local execution boundary that runs
-  instance-scoped plan steps on behalf of Store Daemons.
-  - It hosts an Engine Adapter (and optionally an `EngineKvCacheAdapter`) to safely touch engine internals.
-  - It MUST run **in-process with the inference instance** (same OS process). It must not be a sidecar because it
-    needs direct access to engine state that should not be re-exported across a separate process boundary.
-  - It is invoked by Store Daemons via **instance-agent RPC** (gRPC; typically over TCP and optionally over a Unix
-    domain socket when co-located).
-    - Co-location (daemon and instance on the same node) is recommended for performance, but not required.
-    - It MUST NOT be exposed to external app networks; only Store Daemons should be able to call it.
-
----
-
-# Daemon Roles (planned)
-
-0056 uses “roles” as **composable capability flags** attached to Store Daemons (Workers). Roles are an operational policy
-surface used for routing and capacity partitioning; they must not introduce new service types or change Plan/Artifact
-semantics.
-
-## Goals
-
-- Allow deploying a **gateway pool** (ingress) distinct from general workers, without changing APIs.
-- Allow constraining **shard home** eligibility to a subset of daemons (e.g., DRAM-heavy nodes), without involving
-  Global Store in the byte artifact hot path.
-- Keep roles **low-cardinality** and **update-on-change** so Global Store remains scalable.
-
-## Role model
-
-- Roles are **worker attributes** (attached to the Worker/daemon_id record), advertised by Store Daemons and cached by
-  other daemons via watch streams. External callers query roles via daemon-served `TensorCastSignals`, not by calling
-  Global Store directly.
-- Roles are **not stable identity**. They MUST NOT participate in deterministic operation/step identities or artifact
-  identities.
-- Roles are **composable**: a daemon can hold multiple roles simultaneously.
-- Separate:
-  - **Static roles / capabilities** (configuration-driven; advertised in the worker registry), from
-  - **Dynamic responsibilities** (lease-derived or registry-derived; not “configured”).
-
-## Static roles (capabilities)
-
-- `gateway_ingress`:
-  - Indicates a Store Daemon is eligible to accept external Runtime connections (e.g., behind a VIP/LB/DNS).
-  - A gateway daemon MUST implement `StoreDaemonService.ExecutePlan` ingress and daemon-served signals.
-  - Non-gateway daemons MAY still execute plan fragments dispatched by other daemons (mesh), but SHOULD reject direct
-    external ingress by policy.
-- `shard_home_eligible`:
-  - Indicates a Store Daemon is eligible to acquire shard-home leases and act as a shard home (authoritative
-    PutIfAbsent/Exists/Get for the current `lease_generation`).
-  - Daemons without this role MUST NOT acquire shard-home leases.
-
-## Dynamic responsibilities (derived)
-
-- **Shard home**: for a given shard_id, the current holder `{holder_daemon_id, lease_generation}` from the shard-home lease
-  record. A daemon is “home” for a shard only while it holds the active lease (fenced); this is not a static role.
-- **Instance host**: derived from the instance registry mapping `instance_id -> daemon_id`. A daemon “hosts” an instance
-  when it is the current routing target for that instance’s steps.
-
-## Discovery and enforcement
-
-- Discovery:
-  - `TensorCastSignals.list_workers()` SHOULD include role flags and allow filtering by required roles (e.g.,
-    `required_roles=["gateway_ingress"]`).
-  - Store Daemons cache roles via Global Store watch streams and MUST NOT query Global Store per plan execution.
-- Enforcement (required):
-  - A daemon without `gateway_ingress` SHOULD reject external ingress (`ExecutePlan` from the app network) even though it
-    can still participate in daemon↔daemon dispatch.
-  - A daemon without `shard_home_eligible` MUST fail requests to acquire shard-home leases and MUST NOT serve as shard home.
-
-## Examples (role composition)
-
-- **Gateway pool**: `{gateway_ingress}` (often small; placed behind LB/VIP/DNS).
-- **Shard-home pool**: `{shard_home_eligible}` (DRAM-heavy nodes; eligible to hold shard-home leases).
-- **Combined**: `{gateway_ingress, shard_home_eligible}` (small clusters/dev; fewer moving parts).
-- **General workers**: `{}` (implicit Store Daemon; not gateway ingress; not shard-home eligible).
-
----
-
-# Planned Public API Additions
-
-This section defines only the **new** surfaces required beyond 0055.
-
-## Runtime / ProcessContext (unified)
-
-All caller processes use the same entrypoint and the same object:
-
-- `Runtime` is a lightweight RPC client bound to exactly one Store Daemon endpoint.
-- It provides access to:
-  - the 0055 Store/data-plane API,
-  - phased plan execution (current local runner, optional ingress later),
-  - daemon-served signals/directory queries.
-- It is **not** globally scheduled/registered (only Workers/Instances are registered). It is an API boundary
-  handle for a caller process.
+## Public API
 
 ```python
-class RuntimeError(Exception): ...
-
 class Runtime:
     daemon_address: str
     daemon_id: str
@@ -424,308 +348,468 @@ class Runtime:
     def close(self) -> None: ...
 
 def connect(*, daemon_address: str) -> Runtime: ...
-def runtime() -> Runtime: ...  # returns the active Runtime created by connect(...)
-
-class InstanceRegistrationError(Exception): ...
-
-class InstanceRegistrationHandle:
-    instance_id: str
-    instance_agent_endpoint: str  # instance-agent RPC endpoint (TCP/UDS); routing attribute, not identity
-
-    def close(self) -> None: ...
-
-class Runtime:
-    def serve_instance(
-        self,
-        *,
-        instance_id: str,
-        engine: str,
-        engine_adapter: "EngineAdapter",
-        labels: Mapping[str, str] | None = None,
-    ) -> InstanceRegistrationHandle: ...
-```
-
-Semantics (planned):
-
-- `connect(...)` creates a lightweight process-local handle bound to a single Store Daemon endpoint.
-- `Runtime.serve_instance(...)` is called inside an inference engine process. It binds an engine adapter to the
-  instance-local execution boundary (Instance Agent) and registers a long-lived `Instance` with the connected Store
-  Daemon. The Store Daemon is responsible for publishing/heartbeating `Instance` routing information into Global Store,
-  including:
-  - the HA-safe `daemon_id` routing target for instance steps (`instance_id -> daemon_id`), and
-  - an `instance_agent_endpoint` routing attribute used by Store Daemons to invoke instance actions via
-    instance-agent RPC.
-
-### Initialization UX (planned)
-
-The 0055 `tensorcast.init(mode=...)` is primarily a data-plane initializer. 0056 adds phased plan execution and signals
-that must be usable from network-restricted apps (single entrypoint), so the recommended UX is:
-
-- **one** primary entrypoint: `tensorcast.connect(...) → Runtime`
-- optional dev tooling: `tensorcast.init(mode="create")` / `launch_local_store(...)`
-- no separate `init_app(...)` surface
-
-This maps the older 4-mode mental model into a single connect + optional instance registration:
-
-| Legacy intent | Planned usage | Typical caller |
-| --- | --- | --- |
-| connect to a daemon (data plane) | `tc.connect(daemon_address=...)` | Any caller process |
-| create a local daemon (dev) | `tc.init(mode="create", ...)` (or alias) | Local tooling |
-| connect for “app control plane” | `tc.connect(daemon_address=...)` | Scheduler/router (ToT) |
-| run an “agent” with engine adapter | `tc.connect(...).serve_instance(...)` | Inference engine process |
-
-`Plan` construction routing (planned):
-
-- `runtime.plan(ctx)` builds a plan bound to the unified execution semantics:
-  - current baseline: SDK-local PlanExecutor (`Plan.run()`) + Instance Agent execution boundary,
-  - optional ingress phase: daemon `ExecutePlan` as entrypoint with identical semantics.
-- For simplicity, module-level `tensorcast.plan(ctx)` SHOULD:
-  - delegate to `runtime().plan(ctx)` when an active `Runtime` exists (local runner or ingress, depending on rollout), and
-  - otherwise build a locally-executed plan per 0055 (useful for tests and in-cluster debugging).
-- `tensorcast.local_plan(ctx)` (planned) forces the 0055 local-run behavior even when a `Runtime` exists.
-
-Recommended usage patterns (planned):
-
-- **ToT scheduler / router**: `rt = tc.connect(entry_daemon)` then use `rt.signals()` + `rt.plan(ctx).run()`.
-- **Inference engine process (SGLang)**: `rt = tc.connect(local_daemon)` then `rt.serve_instance(...)` (engine adapter);
-  the engine’s HiCache storage backend uses the 0055 Store client against the co-located daemon.
-- **Offline tooling**: `rt = tc.connect(daemon)` and use `Artifact.prefetch/into` or daemon-run plans.
-
-## Phased Plan execution (planned)
-
-Current baseline (as of 2026-02-10):
-
-- In 0055/current code, `Plan.run()` executes in the caller process.
-- Instance fragments execute via the target instance’s Instance Agent boundary (in-process Engine Adapter; legacy
-  code/proto name: `node_agent`).
-- Direct-dispatch from arbitrary caller processes to remote instances is deployment-dependent (reachability, endpoint
-  discovery). 0056 removes this requirement for external apps by routing instance steps through Store Daemons (by
-  `instance_id -> daemon_id`) and invoking Instance Agents via instance-agent RPC.
-
-Planned migration sequence for external apps that cannot directly reach every daemon/agent:
-
-1. SDK serializes `Plan` -> `PlanSpec`.
-2. Plan submission uses one of two equivalent ingress shapes:
-   - preferred once available: SDK calls `StoreDaemonService.ExecutePlan(PlanSpec)` on a gateway daemon and receives
-     `Operation[PlanResult]`,
-   - transitional/current path: SDK local runner dispatches using the same deterministic step/operation identities in
-     deployments where callers can directly reach required execution endpoints.
-3. Dispatch semantics are shared:
-   - worker steps -> target Store Daemon(s),
-   - instance steps -> target Store Daemon -> instance-agent RPC -> Instance Agent / Engine Adapter boundary.
-4. Completion is exposed as `Operation[PlanResult]` semantics with at-least-once-safe retries and idempotent joins.
-
-Plan operation semantics (planned):
-
-- `Plan.run()` in the Python SDK MAY remain a sync/blocking API by internally calling `op.result(...)` on the returned
-  `Operation[PlanResult]`.
-- The plan operation record is daemon-scoped and best-effort (it is not a durable workflow state machine in Global
-  Store). Gateway restart may therefore require resubmission; correctness is preserved by step-level idempotency joins.
-- Re-attach / retry SHOULD be possible by resubmitting the same PlanSpec with the same `ctx.idempotency_key` and
-  stable plan/step identities (gateway-independent). A dedicated “attach by plan operation id” API is a possible
-  future extension.
-
-This makes the scheduler/app’s connectivity requirement explicit: it only needs reachability to **one** daemon.
-
-Target resolution note (planned):
-
-- Callers SHOULD target steps by stable identities (`daemon_id`, `instance_id`) and MUST NOT assume reachability to
-  `daemon_address` or any instance-local endpoint.
-- The gateway daemon SHOULD treat any addresses in `PlanSpec` as hints and re-resolve routing via its directory cache
-  (backed by Global Store watches).
-
-Gateway deployment & failover note (planned):
-
-- The “single reachable daemon” constraint is a **network policy** constraint, not a scalability goal. Production
-  deployments SHOULD expose **multiple** Store Daemons as eligible gateway entrypoints behind a VIP/LB (or provide a
-  list of entry addresses) to avoid a single hot spot.
-- `Runtime.connect(...)` SHOULD tolerate reconnecting to a different gateway daemon (e.g., LB failover). Therefore:
-  - daemon-run plan execution MUST be **gateway-independent** and safe under at-least-once retries across gateways,
-  - deterministic step/operation ids MUST NOT include the gateway daemon identity; they are derived from stable step
-    identity + target identity (`daemon_id` / `instance_id`) and `ctx.idempotency_key`,
-  - target daemons MUST join repeated submissions on the same `ReplicaKey` / operation id and fail fast on mismatched
-    reuse (per 0055 contracts).
-
-Deterministic PlanSpec encoding (planned; required for daemon-run execution)
-
-Daemon-run plan execution relies on at-least-once retries, gateway failover, and daemon↔daemon re-dispatch. Therefore,
-the IR must be reproducible from stable inputs:
-
-- `PlanSpec.plan_id` MUST be deterministic when `ctx.idempotency_key` is provided (0055 already does this).
-- `PlanSpec.steps[*].step_id` SHOULD be derived deterministically (UUIDv5) from a **step fingerprint** rather than from
-  builder insertion order.
-  - Step fingerprint inputs (required):
-    - action name,
-    - stable target identity (`daemon_id` / `instance_id`),
-    - selection identity (`artifact_id`, `logical_layout_hash`, `selection_hash`) where applicable,
-    - placement (semantic placement; canonicalized),
-    - action-specific stable args (excluding `deadline_ms`, `qos`, `tags`).
-  - Set-like inputs MUST be canonicalized (sorted/unique) before hashing (e.g., subset `tensor_names`, batch
-    selections).
-- `depends_on` lists MUST be encoded in a canonical order (e.g., sorted by `step_id`) so equivalent DAGs serialize to
-  equivalent PlanSpecs.
-
-Planned refinement: define a single cross-language “step fingerprint v1” string format (domain-separated, UTF‑8,
-lowercase hex for digests) and use it consistently for step_id derivation, daemon-side dedup/join, and auditing.
-
-Planned: TargetSpec / capability minting in daemon-run plans
-
-In 0055, remote `into(...)` / `transform_into(...)` flows require a `TargetSpec` capability minted by the engine adapter
-on the target instance. In 0056, external apps cannot directly reach inference instances/instance agents, so callers
-must not be expected to mint `TargetSpec` out-of-band.
-
-Planned solution (recommended):
-
-- Add an instance-scoped plan action `mint_target(...) -> TargetSpec` executed by the Instance Agent (in-process).
-- The minted `TargetSpec` is returned as a plan step output and can be:
-  - consumed by later steps via step-output references (if supported), or
-  - returned to the caller and used as an explicit input to a follow-up plan (two-plan pattern).
-- Plan executors (gateway/daemons) MUST treat `TargetSpec` as an opaque capability and MUST NOT mint/forge it.
-
-Planned: explicit `materialize_into(...)` instance action
-
-In 0055, `Artifact.tensor_dict_into(...)` is the primary “read into caller-owned buffers” surface, and plans can
-orchestrate remote reads by invoking the engine adapter on the target instance with a `TargetSpec`.
-
-However, using `transform_into(...)` (often an identity transform) to represent “into” is ambiguous for auditing and
-plan reasoning. In 0056, add a distinct instance action:
-
-- `materialize_into(src_selection, target: TargetSpec, device=..., options=...) -> None`
-  - executes on the Instance Agent (in-process) and writes into the engine-owned/caller-owned buffers described by
-    `TargetSpec`,
-  - does not create a new artifact (it is a materialization side effect on an existing target),
-  - preserves the 0055 boundary: only the engine adapter can mint/resolve `TargetSpec`; daemons/gateways treat it as an
-    opaque capability.
-
-## Batch worker actions: `prefetch_many` (planned)
-
-LLM KV backends (e.g., SGLang+Mooncake) are **page-fragmented**: a single request can correspond to tens/hundreds of KV
-blobs. Expressing migration/prewarm as “one plan step per blob” is control-plane expensive.
-
-To keep `Plan` practical, add a batch worker action:
-
-```python
-@dataclass(frozen=True, slots=True)
-class PrefetchManyItem:
-    """
-    Canonical identity for a single batch item.
-
-    Must uniquely identify an Artifact *selection* (not just an artifact_id), so results can be mapped back to inputs
-    even when views/subsets are present.
-    """
-
-    artifact_id: str
-    logical_layout_hash: bytes
-    selection_hash: bytes
-
-@dataclass(frozen=True, slots=True)
-class BatchItemFailure:
-    item: PrefetchManyItem
-    status: OperationStatus
-
-@dataclass(frozen=True, slots=True)
-class PrefetchManyResult:
-    succeeded: tuple[PrefetchManyItem, ...]
-    missing: tuple[PrefetchManyItem, ...]
-    failures: tuple[BatchItemFailure, ...]
-
-class WorkerStepBuilder:
-    def prefetch_many(
-        self,
-        arts: Sequence["Artifact"],
-        *,
-        device: str | int,  # "cuda:0"/0, or daemon-owned DRAM placement ("cpu"/"dram"/-1)
-        depends_on: Sequence[PlanStepRef[Any]] | None = None,
-    ) -> PlanStepRef[PrefetchManyResult]: ...
+def runtime() -> Runtime: ...
 ```
 
 Semantics:
 
-- batch materializes the provided selections to daemon-owned residency on the target Worker.
-- DRAM placement is allowed under `NO_LEASE` (prefetch does not export CPU handles); see 0055 `Artifact.prefetch`.
-- Byte artifact note (required): for `cgid:byte_artifact~...` selections, any daemon-owned cached copy MUST be fenced by the
-  current shard `lease_generation` (epoch-scoped cache). A cached blob from an older generation MUST be treated as
-  absent (miss) and re-fetched (see `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`).
-- action result must be **per-item** so the app can decide proceed/retry/abort without losing partial information.
-- result classification (required):
-  - `missing`: the selection does not exist in its authoritative namespace resolver (e.g., registry-backed `NOT_FOUND`,
-    or byte artifact home-shard miss).
-  - `failures`: any non-`NOT_FOUND` failure (transport, deadline, permission, precondition, etc.).
-- step-level status (required):
-  - the plan step MUST fail only for systemic errors that prevent producing a meaningful `PrefetchManyResult`
-    (e.g., invalid arguments, permission errors, internal daemon errors, transport failure to the target worker).
-  - per-item `NOT_FOUND` / miss and per-item failures MUST be surfaced in the returned `PrefetchManyResult` and MUST
-    NOT, by themselves, hard-fail the plan step (KV is cache; callers can degrade to recompute/prefill).
-  - callers MUST inspect `PrefetchManyResult` to decide proceed/retry/abort; `PlanResult.ok` alone is insufficient for
-    cache-hit decisions in batch actions.
-- placement model (required):
-  - the public `device=...` input is an API alias for a semantic Placement tier (HOST_DRAM vs GPU_VRAM).
-  - HOST_DRAM has no “device ordinal” in the model; it is encoded as `device_id = -1` on the wire for compatibility.
-- device canonicalization (required):
-  - `"cpu"` / `"dram"` / `-1` MUST canonicalize to `device_id = -1` (daemon-owned host DRAM tier).
-  - `"cuda:N"` / `N` MUST canonicalize to `device_id = N`.
-  - idempotency MUST use the canonicalized `device_id`, not the user’s input string.
-- canonicalization (required):
-  - `arts` is treated as an order-insensitive **set** of selections; duplicates MUST be removed.
-  - digest bytes in selection identity MUST use lowercase hex when embedded into fingerprints (0055 canonical encoding).
-  - the batch idempotency fingerprint MUST be computed from a canonical ordering of item fingerprints, not from user
-    input order.
-    - recommended ordering key: `(artifact_id, logical_layout_hash.hex(), selection_hash.hex())` (lexicographic over
-      the UTF-8 strings).
-- idempotency (required):
-  - per-item identity follows 0055 selection identity: `(artifact_id, logical_layout_hash, selection_hash)` plus
-    action-scoped inputs (target `daemon_id`, placement, lease mode).
-  - the batch step’s stable fingerprint MUST be order-insensitive (e.g., `batch_digest = sha256(sorted(item_fingerprints))`).
+- `connect(...)` creates one lightweight runtime handle bound to one daemon endpoint.
+- `runtime().plan(ctx)` is the primary programmable entrypoint when an active runtime exists.
+- `tensorcast.plan(ctx)` should delegate to the active runtime when present and otherwise preserve `0055` local-run
+  behavior for tests and in-cluster debugging.
+- `tensorcast.init(mode="create")` remains local tooling and daemon lifecycle convenience; it is not a second control
+  plane.
+- runtime configuration remains under the unified config model from `0004`; `0056` must not introduce ad hoc runtime
+  flags or environment-variable control paths.
 
-## Planned: Idempotent placement pins
+## Instance hosting boundary
 
-In 0055, placement pins are capability-based and **not idempotent**: retrying `CreatePlacementLease` on an unknown
-outcome may create multiple pins. This is acceptable for best-effort local usage, but it is unsafe for daemon-run
-at-least-once plan execution (the gateway daemon may retry steps on unknown outcomes).
+Current phase rule:
 
-Planned extension:
+- `0056` does not standardize a second public instance-hosting API.
+- instance-scoped execution remains hosted by NodeAgent or the in-process Instance Agent boundary configured through the
+  existing process model from `0004`.
+- if a future convenience helper is added at the runtime layer, it must be a bootstrap adapter for that same host model,
+  not a new execution boundary.
 
-- Add an optional `operation_id` (UUID string) to `CreatePlacementLeaseRequest`.
-- When `operation_id` is provided:
-  - the daemon MUST treat it as the join key: duplicate submissions MUST return the same logical `PlacementPin`
-    outcome and MUST NOT create multiple pins.
-  - if the same `operation_id` is reused but resolves to a different pin target (different `ReplicaKey` / device), the
-    daemon MUST fail fast with `FAILED_PRECONDITION`.
-- TTL semantics:
-  - `ttl_ms` MUST NOT participate in operation identity.
-  - `CreatePlacementLease` SHOULD behave like “create-or-extend” (monotonic): expiry can only be extended (max), never
-    shortened.
-  - `PlacementPin.renew(...)` remains the explicit surface for extending TTL once a token is available.
-- SDK/daemon derivation:
-  - when `ctx.idempotency_key` is provided, the daemon plan executor SHOULD derive `operation_id` deterministically
-    using the same canonical encoding rules as 0055 (stable daemon/selection identity + placement) so retries are safe.
+Normative rules:
 
-## Signals (Control-Loop Inputs)
+1. the NodeAgent or Instance Agent boundary remains the unique instance-scoped execution host in this phase,
+2. callers never address instance hosts directly,
+3. instance routing remains `instance_id -> daemon_id`, with daemon-local transport resolution behind that mapping,
+4. `TargetSpec` minting and resolution remain engine-adapter responsibilities outside `0056`; framework code may carry
+   `TargetSpec`, but it does not own target-capability mint semantics,
+5. `0056` must not introduce a second config surface, registration flow, or heartbeat contract for instance hosting.
 
-Signals are low-cardinality, cacheable inputs for scheduling policies.
+# Plan Execution
 
-In 0056, caller processes query signals via the connected Store Daemon (`Runtime.signals()`); the daemon maintains a
-cache populated from Global Store watch streams and worker/instance updates so the Global Store is not queried on every
-call.
+## One execution semantics
 
-Directory note (planned):
+Current baseline from `0055`:
 
-- In the daemon-run / single-entrypoint world, `TensorCastSignals` also serves as the **directory** surface
-  (`list_workers`, `list_instances`, capabilities, routing hints). External apps SHOULD NOT use any direct
-  Global-Store-backed “capability directory” client APIs; those become internal/legacy implementation details behind
-  the daemon cache.
+- `Plan.run()` executes in the caller process,
+- worker steps execute against Store Daemons,
+- instance steps execute through the Instance Agent boundary.
 
-TensorCast distinguishes:
+Planned extension from `0056`:
 
-- **TensorCastSignals**: TensorCast-owned signals sourced from Global Store + Store Daemons (health/capacity/residency).
-- **ExecutionSignals**: engine-owned signals sourced from inference engines (queueing/inflight/latency); advisory only.
+- `StoreDaemonService.ExecutePlan(ExecutePlanRequest)` may execute the same `PlanSpec` through a daemon ingress role,
+- non-gateway daemons may still execute plan fragments dispatched by another daemon,
+- instance steps still resolve to `target daemon -> local NodeAgent or Instance Agent`.
 
-Snapshot semantics (required):
+Normative rules:
 
-- all snapshots include `as_of_ms` and `staleness_ms`,
-- policies enforce staleness budgets by QoS (e.g., realtime ≤ 250ms).
+1. gateway ingress is a daemon role, not a new service kind,
+2. `ExecutePlan` must not introduce a second retry or idempotency model,
+3. `ExecutePlan` may return an inline terminal result only when the declared ingress class is `terminal_only` and every
+   step is dependency-ready for terminal projection under that class,
+4. if execution may outlive the RPC budget, must continue after caller disconnect, or requires later attach, wait,
+   replay, or status, the public continuation must be `Operation[PlanResult]` or another explicit family surface owned
+   by `0096` and `0100`,
+5. ingress must not hide asynchronous continuation behind request-scoped success while privately continuing work after
+   the caller-visible request has ended,
+6. `0056` must not invent `PlanHandle`, `AttachPlan`, `GetPlanStatus`, or another plan-private continuation family,
+7. plan targets are stable identities (`daemon_id`, `instance_id`), not caller-supplied addresses.
 
-Recommended representation:
+## Ingress admission classifier
+
+The ingress role needs one framework-owned classifier before any side-effecting execution starts.
+
+Recommended admission classes:
+
+- `terminal_only`
+- `public_continuation_required`
+
+`terminal_only` means:
+
+- every step in the submitted plan is dependency-ready for terminal public projection under the declared ingress
+  surface,
+- no non-terminal public continuation is required after the request ends,
+- and the gateway can either complete the work inline or return a terminal result within the same declared request
+  class.
+
+`public_continuation_required` means:
+
+- at least one step may require a non-terminal public continuation surface after request end,
+- or the requested ingress class explicitly allows non-terminal continuation that the current public request envelope does
+  not yet carry,
+- or the deeper owning layer marks the requested path as not dependency-ready for terminal-only ingress.
+
+Normative rules:
+
+1. ingress must classify a submitted plan before dispatching any side-effecting work.
+2. classification must depend only on declared action semantics, stable plan structure, and dependency readiness exposed
+   by the owning layers; it must not depend on load heuristics or predicted wall-clock completion.
+3. plans classified as `public_continuation_required` must fail fast until the public continuation family from `0096`
+   and `0100` is explicitly carried by the ingress surface.
+4. request deadlines may cause terminal failure, but they must not silently change a plan from one admission class to
+   the other.
+5. ingress must not partially execute a plan, discover that it exceeded the terminal-only class, and then continue
+   behind caller-visible success or request-scoped failure.
+6. the admission classifier is framework-owned transport policy; it must not redefine workflow or continuation
+   semantics owned elsewhere.
+
+## Deterministic fingerprints
+
+Daemon-run execution must be gateway-independent and safe under at-least-once retries.
+
+Required step fingerprint inputs:
+
+- canonical action name,
+- stable target identity,
+- either item identity or set identity,
+- semantic placement,
+- action-specific stable arguments.
+
+Required item identity:
+
+- `(artifact_id, logical_layout_hash, selection_hash)` from `0055` and `0078`.
+
+Required set identity:
+
+- `set_digest_hex` over sorted and deduplicated item identities.
+
+Required canonicalization rules:
+
+- set digests must use sorted and deduplicated item identities before hashing,
+- byte-artifact items must still include `artifact_id` because their profile hashes are fixed constants,
+- execution windows or partitions may add stable chunk identifiers for progress accounting, but they must not redefine
+  the underlying set identity,
+- `depends_on` lists must be encoded in canonical order,
+- deadline, qos, tags, and other observation metadata must not affect semantic step identity.
+
+## Canonical instance actions
+
+Framework-level canonical instance action vocabulary remains:
+
+- `manifest`
+- `publish`
+- `hydrate`
+- `evict_local`
+
+Rules:
+
+1. the canonical names above are the normative instance orchestration vocabulary,
+2. existing `transform_into` and `transform_register` surfaces from `0055` remain valid implementation surfaces and
+   compatibility helpers, but `0056` does not expand them into a second repository-wide integration vocabulary,
+3. `mint_target` belongs to the engine-adapter capability boundary, not to required framework plan action vocabulary,
+4. `materialize_into` remains a possible follow-up audit surface, but it is not part of required `0056` canonical
+   instance vocabulary in this phase,
+5. integration-specific aliases are outside framework core and are owned by `0102`.
+
+# Governance Context Propagation
+
+`0056` does not own lane or coordination-policy semantics, but it does own their transport, auditability, and stable
+retry boundary.
+
+Minimum governance context carried through `Runtime`, `PlanSpec`, and daemon ingress:
+
+- `lane`
+- `policy_version`
+- `staleness_budget`
+- any other low-cardinality coordination hints required by the owning governance layer
+
+Normative rules:
+
+1. the semantic definition of lane and policy remains outside `0056`,
+2. `0056` owns end-to-end propagation of those values across runtime, ingress, daemon dispatch, and non-plan control
+   RPC boundaries,
+3. the same idempotency domain must not silently change lane or policy identity during retries,
+4. governance metadata is auditable and transport-visible, but it must not alter canonical item identity, set identity,
+   or plan step identity unless a deeper owning layer explicitly defines that behavior.
+
+## Governance wire form
+
+Propagation needs one canonical wire contract, not only free-form tags.
+
+Recommended transport shape:
+
+- a typed governance sub-object in `PlanSpec` for plan execution,
+- and canonical metadata keys for non-plan control RPCs until equivalent typed request fields exist.
+
+Minimum governance fields:
+
+- `lane`
+- `policy_version`
+- `staleness_budget`
+
+Normative rules:
+
+1. `tags` alone are too weak as the long-term canonical wire contract for governance context.
+2. `0056` should define one typed governance transport shape for plan execution, even if non-plan RPCs temporarily use
+   metadata-based propagation.
+3. non-plan propagation must use one canonical metadata vocabulary across SDK, gateway daemon, and worker daemon
+   rather than per-call ad hoc keys.
+4. governance metadata is audit-visible and retry-stable, but it must not silently alter item identity, set identity,
+   or deterministic step identity unless a deeper owning layer explicitly requires that behavior.
+
+# High-Cardinality Set Model
+
+High-cardinality orchestration needs a generic control abstraction that scales.
+That abstraction is not "many `Artifact` arguments".
+It is a neutral set reference over normalized selection identities.
+
+## Value unit and control unit
+
+Long-term repository rule:
+
+- `Artifact` remains the value unit,
+- `ArtifactSelection` remains the item selector contract,
+- and high-cardinality orchestration uses a neutral set reference as the control unit.
+
+The set reference is not a second data object model.
+It is a control-plane handle to an order-insensitive set of normalized item identities derived from
+`ArtifactSelection`.
+
+## Item identity
+
+The normative item identity for generic set orchestration is `SelectionIdentity` from `0055`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class SelectionIdentity:
+    artifact_id: str
+    logical_layout_hash: bytes
+    selection_hash: bytes
+```
+
+Normative rules:
+
+1. generic set orchestration must not collapse item identity to `artifact_id` alone,
+2. `ArtifactSelection` is the caller-facing selector input, but normalized `SelectionIdentity` is the canonical item
+   identity used by set digests, results, and stable retries,
+3. convenience fields such as `artifact_id` may appear in results, but they must not be the only returned identity,
+4. if proto or RPC surfaces need a dedicated wire message for set items, it must be a field-for-field projection of
+   `SelectionIdentity`, not a second semantic type.
+
+## Generic set carrier
+
+```python
+@dataclass(frozen=True, slots=True)
+class ArtifactSetRef:
+    set_digest_hex: str
+    item_count: int
+    inline_items: Sequence["ArtifactSelection"] | None = None
+    manifest_artifact_id: str | None = None
+    opaque_ref: str | None = None
+    ref_kind: str | None = None
+```
+
+Normative rules:
+
+1. exactly one carrier form is active for a given `ArtifactSetRef`,
+2. `set_digest_hex` identifies the semantic set, not any transport chunking or execution window,
+3. `ArtifactSetRef` is a control-plane reference only and does not replace per-item artifact identity,
+4. inline item lists are for small caller-enumerated sets only,
+5. referenced forms are the primary path for truly high-cardinality sets,
+6. a referenced set may be represented by:
+   - an artifact-backed manifest,
+   - an authority-owned opaque set handle,
+   - or another explicit neutral carrier owned by the appropriate layer,
+7. `ref_kind` or an equivalent typed discriminator must make the referenced carrier form explicit,
+8. referenced carriers must define their own owner, expiry or currentness, and resolution contract in the owning
+   layer; `0056` must not smuggle those semantics in as implicit framework behavior,
+9. resolving a referenced carrier must deterministically yield the same deduplicated `SelectionIdentity` set whose
+   `set_digest_hex` and `item_count` are carried in the ref; any mismatch must fail closed,
+10. the current dependency-ready carrier forms for `0056` are inline sets and manifest-backed references; more opaque
+    carriers remain follow-up work until their owner and resolution contract are dependency-ready,
+11. Global Store must not become a per-item or per-set hot truth table for this abstraction.
+
+## Worker batch orchestration
+
+```python
+@dataclass(frozen=True, slots=True)
+class ArtifactSetItemResult:
+    item_identity: "SelectionIdentity"
+    artifact_id: str | None = None
+    status: "OperationStatus"
+
+@dataclass(frozen=True, slots=True)
+class ArtifactSetResult:
+    set_digest_hex: str
+    outcomes: Sequence[ArtifactSetItemResult]
+
+class WorkerStepBuilder:
+    def prefetch_set(
+        self,
+        art_set: ArtifactSetRef,
+        *,
+        device: str | int,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[ArtifactSetResult]: ...
+
+    def prefetch_many(
+        self,
+        arts: Sequence["Artifact"],
+        *,
+        device: str | int,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[ArtifactSetResult]: ...
+```
+
+Normative rules:
+
+1. `prefetch_set` is the normative scalable worker-layer batch action,
+2. `prefetch_many`, if exposed, is SDK sugar that lowers to an inline `ArtifactSetRef`,
+3. `prefetch_many` must be documented and implemented as non-scalable convenience rather than as the primary
+   high-cardinality abstraction,
+4. results are per-item and must preserve partial information,
+5. runtime partitioning or chunking may happen below the set ref without changing public set identity,
+6. profile-specific miss, visibility, or fencing rules are delegated to the owning profile and authority layers.
+
+## Scope-aware readiness model
+
+Readiness in programmable orchestration is scope-owned, not one flat repository-wide enum.
+
+Worker-layer readiness:
+
+- `local_replica_ready`
+- `local_stable_ready`
+
+Instance-layer realization:
+
+- `instance_hydrated`
+
+Cluster progression:
+
+- activation barriers, rollout progress, or cluster-scoped ready sets are workflow-owned and remain outside `0056`.
+
+Normative rules:
+
+1. worker actions report worker-local readiness only,
+2. instance actions report instance-local realization only,
+3. `prefetch_set` must not be interpreted as a cluster publication barrier or an instance-hydration guarantee,
+4. if a worker action needs to promise stronger worker-local readiness than `local_replica_ready`, that stronger
+   readiness kind must be explicit in the action contract or owning placement policy rather than inferred from
+   `device="dram"` alone.
+
+## `prefetch_set` readiness floor
+
+To keep ingress and local execution behavior aligned, `prefetch_set` needs one explicit minimum contract.
+
+Phase intent:
+
+- in this phase, `prefetch_set` should be treated as guaranteeing `local_replica_ready` only,
+- and any stronger worker-local readiness must be introduced explicitly rather than inferred from placement aliases.
+
+Normative rules:
+
+1. `prefetch_set(device="dram")` must not, by default, be interpreted as `local_stable_ready`.
+2. if future phases need worker-local stable admission as part of the action contract, they should add an explicit
+   readiness selector or equivalent placement-contract field rather than overloading the existing `device` input.
+3. gateway and local runner implementations must share the same readiness floor; one implementation must not upgrade
+   `prefetch_set` to `local_stable_ready` while the other treats it as replica-only warmup.
+
+## Manifest projection contract
+
+`0056` owns the generic projection contract from a concrete high-cardinality carrier into a neutral set reference.
+`0102` owns how a given engine or integration satisfies that contract.
+
+Minimum projection requirements:
+
+1. the projection must yield canonical item identities, not only a list of `artifact_id`s,
+2. `artifact_ids` alone are insufficient whenever different selections or representations may share the same
+   `artifact_id`,
+3. `layout_id` is a companion hint by default and does not participate in generic set identity unless the owning
+   integration explicitly defines it as part of the canonical item identity,
+4. projected set digest must be computed from the normalized item identities that the framework will later use for
+   retries, results, and worker batching.
+
+## Current concrete mapping
+
+Current engine integrations already expose a concrete high-cardinality set carrier:
+
+- `ManifestResult`
+
+with stable fields such as:
+
+- `artifact_ids`
+- `layout_id`
+- `key_set_digest_hex`
+
+Rules:
+
+1. `ManifestResult` is the current concrete engine-side carrier for instance-owned high-cardinality sets,
+2. `0056` owns the generic projection contract while `0102` owns mapping engine manifest production to that contract,
+3. `0056` must not hard-code `engine_request_id`, KV-specific nouns, or engine-private request semantics into the
+   generic set carrier,
+4. the framework should consume neutral set references even when a concrete integration currently produces them through
+   `ManifestResult`.
+
+## Current manifest projection gap
+
+Today `ManifestResult` is still a convenience carrier, not a complete generic set projection:
+
+- it carries `artifact_ids`,
+- it carries `layout_id`,
+- and it carries an order-insensitive digest over those `artifact_id`s,
+- but it does not yet carry canonical item identities equivalent to:
+  - `artifact_id`,
+  - `logical_layout_hash`,
+  - `selection_hash`.
+
+This gap matters because `0056` generic set orchestration is defined over normalized item identities, not over
+`artifact_id` alone.
+
+Normative rules:
+
+1. `0056` must not pretend that today's `ManifestResult` already satisfies the generic set projection contract.
+2. until `0102` extends its concrete engine-side carriers with canonical item identities or an equivalent manifest form,
+   `ManifestResult` remains a convenience integration carrier rather than a sufficient framework-proof set carrier.
+3. gateway ingress, local runner, and worker batch execution must not silently derive incompatible item identities from
+   `ManifestResult` by using ad hoc local recomputation.
+4. any temporary bridge from `ManifestResult` to `ArtifactSetRef` must be explicit, versioned, and owned by `0102`, not
+   improvised inside `0056`.
+
+## Cluster workflow extension seam
+
+Some scenarios will need cluster-scoped artifact workflows such as distribute, activate, or retire.
+`0056` does not own those workflow semantics.
+
+What `0056` must provide is only:
+
+- a transport slot for workflow-owned cluster actions,
+- compatibility between runtime or ingress and the canonical `PlanSpec` execution substrate,
+- and a guarantee that worker-set and instance actions do not exhaust the only available extension seam.
+
+Normative rules:
+
+1. cluster workflow truth, barriers, and continuation remain outside `0056`,
+2. `0056` must not force future owners to encode cluster workflow semantics as ad hoc SDK DAG glue over
+   `prefetch_set`,
+3. reserving this extension seam does not grant `0056` ownership of cluster workflow state.
+
+## Transport-slot reservation for future cluster actions
+
+Preserving an extension seam in prose is not enough.
+The framework should also reserve an execution slot so future cluster-workflow owners do not need to smuggle
+cluster-scoped semantics through worker-only actions.
+
+Recommended direction:
+
+- reserve a distinct cluster-scoped target or action envelope in the plan IR,
+- allow that envelope to carry an opaque workflow-owned reference,
+- and keep all barrier, continuation, and workflow-truth semantics outside `0056`.
+
+Normative rules:
+
+1. `0056` should reserve an explicit cluster-scoped transport slot rather than relying on `prefetch_set` as the only
+   future composition primitive.
+2. that slot must carry only transport and dispatch structure:
+   - stable target scope,
+   - opaque workflow action reference,
+   - deterministic fingerprint inputs.
+3. that slot must not define:
+   - workflow-owned state,
+   - workflow barriers,
+   - workflow replay or attach semantics,
+   - or cluster truth.
+4. if the plan IR cannot yet carry a cluster-scoped target or action envelope, the design must treat that as a known
+   follow-up gap rather than as "already reserved by convention."
+
+# Signals and Directory
+
+Signals are daemon-served, low-cardinality, bounded-staleness control-loop inputs.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -733,866 +817,178 @@ class SignalSnapshot(Generic[T]):
     value: T
     as_of_ms: int
     staleness_ms: int
-```
+    cache_epoch: int | None = None
+    freshness_state: str = "unknown"
 
-Minimal `TensorCastSignals` (planned):
-
-```python
 @dataclass(frozen=True, slots=True)
-class WorkerStatus:
-    status: str
-    accepting_new_requests: bool
-    mem_pool_total_size: int | None = None
-    mem_pool_available_size: int | None = None
+class WorkerCapacitySnapshot:
+    stable_total_bytes: int | None = None
+    stable_used_bytes: int | None = None
+    preemptible_total_bytes: int | None = None
+    preemptible_marked_bytes: int | None = None
+    control_plane_inflight: int | None = None
 
 class TensorCastSignals:
-    def list_workers(
-        self, *, include_unavailable: bool = False, ctx: CallContext | None = None
-    ) -> SignalSnapshot[list[Worker]]: ...
-
-    def get_worker_status(
-        self, worker: Worker, *, ctx: CallContext | None = None
-    ) -> SignalSnapshot[WorkerStatus]: ...
-
-    def list_instances(
-        self,
-        *,
-        include_unavailable: bool = False,
-        required_capability_flags: int = 0,
-        labels: Mapping[str, str] | None = None,
-        ctx: CallContext | None = None,
-    ) -> SignalSnapshot[list[Instance]]: ...
+    def list_workers(...) -> SignalSnapshot[list[Worker]]: ...
+    def get_worker_status(...) -> SignalSnapshot[WorkerStatus]: ...
+    def get_worker_capacity(...) -> SignalSnapshot[WorkerCapacitySnapshot]: ...
+    def list_instances(...) -> SignalSnapshot[list[Instance]]: ...
 ```
 
-`ExecutionSignals` is provided via adapters (`ExecutionSignalsAdapter`) keyed by `Instance.engine`.
+Normative rules:
 
----
+1. external callers query signals through the connected daemon, not Global Store,
+2. signals and directory data must come from daemon caches backed by watches or equivalent bounded-staleness inputs,
+3. low-cardinality worker capability bits and routing hints are part of the directory surface, not a new truth layer,
+4. worker capacity and memory-tier snapshots are advisory only, bounded-staleness, and must not be treated as
+   reservation or truth guarantees,
+5. public signal snapshots must expose enough freshness evidence to distinguish bounded-current from degraded or stale
+   answers,
+6. adapter-owned execution signals are advisory only and must not replace TensorCast truth or lifecycle state.
 
-# Cache Blob Integration (LLM KV motivating case; SGLang/Mooncake)
+## Watch correctness contract
 
-Refactor note (2026-03-04):
+Bounded-staleness caches still need a correctness floor.
 
-- This section is now integration-oriented and control-plane-oriented.
-- Normative byte artifact requirements (sealing boundary, `PUT_IF_ABSENT_JOIN` invariants, batch IO primitives, CGID
-  helper contracts, and unified weight/cache object model) are defined in
-  `docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`.
+Minimum watch contract for daemon-served directory and signal caches:
 
-## Key idea
+- initial snapshot barrier,
+- monotonic cache epoch or equivalent version,
+- resume token or equivalent replay cursor,
+- fail-closed behavior when freshness cannot be re-established within the configured budget.
 
-TensorCast integrates with inference engines’ KV caches by treating KV cache as:
+Normative rules:
 
-- deterministic **engine-defined keys** (prefix-hash keys), mapping to
-- **opaque byte-payload bytes** stored as **byte artifacts** (no paged-attention semantics in TensorCast core).
+1. daemon caches must not treat "watch connected once" as sufficient proof of currentness.
+2. every cache snapshot served through `TensorCastSignals` must be traceable to:
+   - a completed initial snapshot,
+   - a monotonic cache epoch or version,
+   - and either a current watch stream or an explicit degraded or stale state.
+3. `as_of_ms`, `staleness_ms`, and bounded-current vs degraded or stale state are part of the public framework
+   contract; replay cursors such as resume tokens remain implementation detail unless and until a stronger public cache
+   protocol is required.
+4. if watch continuity is lost and freshness cannot be restored within the configured staleness budget, routing and
+   directory decisions that require bounded-current evidence must fail closed rather than continue on silent stale
+   guesses.
 
-This matches SGLang+Mooncake integration: Mooncake does not understand RadixAttention; it stores/transfers blobs by key.
-TensorCast’s integration follows the same rule, but uses TensorCast’s data plane for movement and daemon-owned tiers for
-residency.
+# Configuration and Discovery
 
-## Byte artifact identity: CGID (cross-instance, non content-addressed)
+All cluster-wide framework invariants introduced by `0056` must be typed config from `0004`, including:
 
-LLM KV blobs (and other high-cardinality byte artifacts) should use **Client-Generated Artifact IDs** (CGID) so multiple
-instances can converge on a stable key without content hashing:
-
-```
-cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>
-```
-
-This aligns with `docs/designs/0017-client-generated-artifact-id.md`.
+- gateway ingress enablement,
+- watch and cache staleness budgets,
+- worker and instance registry discovery behavior,
+- role and capability advertisement needed for low-cardinality routing,
+- governance-context propagation and audit requirements,
+- and any cluster-visible inline-set limits or set-reference fanout policies.
 
 Rules:
 
-- `<engine_key_enc>` is opaque to TensorCast; it must be collision-safe across engine/model/layout.
-- IDs are immutable (within a shard lease generation): same CGID must refer to identical bytes under
-  `PUT_IF_ABSENT_JOIN` enforcement (see conflict-write rules below).
-
-Field encoding (required):
-
-- CGID fields are separated by `~`. Every field MUST be:
-  - UTF‑8 text,
-  - delimiter-safe (MUST NOT contain `~`, `|`, or newlines),
-  - and byte-for-byte stable across languages (no normalization such as lowercasing, trimming, or Unicode
-    normalization like NFC/NFKC).
-- `<namespace>`, `<engine>`, `<layout_id>` SHOULD be URL-safe tokens matching `[A-Za-z0-9._-]+` (recommended to keep ids
-  readable and parseable).
-- `model_id` often contains `/` and other invalid characters, so `<model_id_enc>` SHOULD be an encoding (see below).
-- `<engine_key_enc>` is opaque and may originate from engine/backend keys that contain arbitrary characters. Therefore:
-  - if the raw engine key is not delimiter-safe, it MUST be encoded.
-  - recommended encoding: Base64URL without padding, prefixed with `b64u.`:
-    - `engine_key_enc = "b64u." + base64url_nopad(raw_engine_key_utf8_bytes)`
-    - decoding MUST recover the exact original bytes.
-  - `engine_key_enc` MUST satisfy CGID suffix grammar (`[-._~A-Za-z0-9]`) from
-    `tensorcast/common/identity.py`; encodings that introduce `:` are invalid.
-  - the same `b64u.` encoding profile SHOULD be used for `model_id_enc` when needed:
-    - `model_id_enc = "b64u." + base64url_nopad(model_id_utf8_bytes)`
-
-Rationale: shard hashing, namespace auth, and routing rely on stable parsing and canonical string bytes; delimiter-safe
-field encoding prevents cross-language ambiguity and authorization bypasses.
-
-### Example encoding profile: SGLang HiCache (recommended)
-
-SGLang’s HiCache interface uses a **base per-page hash** `H` (a chained SHA256 hex string). Backends such as
-`MooncakeStore` expand each page key into **blob-level object keys** (e.g., K/V parts and rank suffixes).
-
-For TensorCast CGIDs, the recommended `engine_key_enc` is the **blob-level expanded key** (so each physical blob is one
-artifact):
-
-- MHA models (K/V split): `engine_key_enc = f"{H}_{suffix}_k"` and `engine_key_enc = f"{H}_{suffix}_v"`.
-- MLA models (often merged/only K): `engine_key_enc = f"{H}_{suffix}_k"`.
-
-`suffix` MUST follow the engine/backend’s own disambiguation scheme (e.g., TP/PP rank suffixing used by SGLang’s
-`MooncakeStore`) so multiple ranks and multiple instances converge on the same blob identity when they are compatible.
-
-## SGLang + Mooncake blob granularity (ground truth)
-
-SGLang’s KV blobs are **page-level and highly fragmented**:
-
-- page size defaults to 16 tokens (configurable),
-- each page has its own deterministic hash key (the backend key),
-- common MHA models store K and V as separate blobs per page,
-- each blob contains **all layers** (page_first layout) for IO efficiency.
-
-Implication: a single request often maps to **dozens to hundreds** of blobs, so orchestration must be **batch-first**.
-
-## SGLang keying + IO contract (code reality; feasibility notes)
-
-SGLang’s HiCache integration with storage backends (Mooncake being one) is intentionally **KV-semantics-free** and is
-based on deterministic page keys and batch IO. The following code points define the actual contract:
-
-- **Key derivation (token-only, deterministic)**:
-  - `sglang/python/sglang/srt/mem_cache/hicache_storage.py:get_hash_str(...)` computes a chained SHA256 hex string over
-    page-aligned token ids (`prior_hash` seeds the chain).
-  - `sglang/python/sglang/srt/mem_cache/radix_cache.py:compute_node_hash_values(...)` uses the same chained hashing to
-    compute
-    per-page `hash_value` lists stored on radix nodes.
-- **Prefetch probes consecutive hits**:
-  - `sglang/python/sglang/srt/managers/cache_controller.py:HiCacheController._storage_hit_query(...)` computes the
-    page-hash chain
-    for a request and calls `HiCacheStorage.batch_exists(...)`.
-  - `HiCacheStorage.batch_exists(...)` returns **the number of consecutive existing pages from the start**, enabling
-    prefix reuse without the backend understanding token semantics.
-- **`req_id` is progress identity, not cache identity**:
-  - `sglang/python/sglang/srt/mem_cache/hiradix_cache.py:prefetch_from_storage(req_id, ...)` issues a prefetch
-    operation tagged by `req_id` and records it in `ongoing_prefetch` only to track progress/termination.
-  - The actual storage keys are page hashes (`hash_value`), not `req_id`.
-- **Write/backup uses host staging + batch put**:
-  - `sglang/python/sglang/srt/mem_cache/hiradix_cache.py:write_backup_storage(...)` calls
-    `HiCacheController.write_storage(host_indices, token_ids, hash_value, prefix_keys)`.
-  - `sglang/python/sglang/srt/mem_cache/storage/mooncake_store/mooncake_store.py:batch_set_v1(...)` implements a
-    PutIfAbsent-like behavior by checking existence and only writing missing pages (per-page granularity; K/V blobs are
-    separate in MHA).
-  - `sglang/python/sglang/srt/mem_cache/storage/mooncake_store/mooncake_store.py:batch_get_v1(...)` /
-    `batch_set_v1(...)` use the host KV pool’s page metadata (pointers + sizes) to support a zero-copy “get_into /
-    put_from” interface.
-
-Implications for 0056 KV orchestration (this design):
-
-- `engine_request_id` is feasible for SGLang and maps to `Req.rid`. It is required to locate request context (token ids,
-  committed KV length, KV index ownership), but it is **not** part of KV blob identity.
-- `kvcache_key_set(engine_request_id)` is implementable as a read-only inspection: compute the request’s page keys from
-  engine state (page-aligned) and map them to deterministic `cgid:byte_artifact~...` byte artifact identities.
-- `kvcache_flush(engine_request_id, ...)` is the publish barrier: for pages that are still only on-device, it must force
-  backend visibility via the engine storage backend, using batch-first publish paths. Direct region/VRAM export paths
-  are preferred when available; device→host staging is a fallback compatibility path. (SGLang provides
-  `HiCacheController.write(...)` + `HiCacheController.write_storage(...)`; see also
-  `sglang/python/sglang/srt/disaggregation/decode_kvcache_offload_manager.py` for one compatibility flow.)
-- `kvcache_prefetch(engine_request_id, ...)` necessarily requires **local request context** on the target instance for
-  engines like SGLang (token ids are required to make the imported pages usable by token-keyed prefix caches). It cannot
-  be specified as a pure `key_set`-only operation without additional engine support.
-
-## Byte artifact schema (transport contract)
-
-Even though payload is opaque, TensorCast needs a stable tensor schema:
-
-- each byte artifact contains exactly one tensor named `payload`,
-- `payload.dtype == uint8` and `payload.shape == [byte_length]`.
-
-### Selection identity for byte artifacts (required; see `0087`)
-
-0055 defines selection identity as `(artifact_id, logical_layout_hash, selection_hash)` and uses it for deterministic
-operation ids and batch actions. Byte artifacts must support these identities **without** any Global Store (GS)
-catalog lookup.
-
-For `artifact_id` in the `cgid:byte_artifact~...` namespace:
-
-- byte artifacts support only the **canonical view** and the **full selection** (no view/subset variants).
-- The `artifact_id` is fully resolved/self-describing: selection identity derivation MUST NOT require any GS registry
-  lookup.
-- API restrictions (required):
-  - `Artifact.view(...)` / view specs MUST be rejected for byte artifacts (`FAILED_PRECONDITION` or SDK `ValueError`).
-  - subset selection MUST be rejected:
-    - `tensor_names` MUST be either omitted/None (full selection) or exactly `("payload",)` where applicable.
-    - `tensor_dict_into(...)` targets MUST contain exactly one tensor named `"payload"` for byte artifacts.
-  - resolved selection shape MUST be canonicalized to:
-    - `view_id == ""`,
-    - no `view_spec`,
-    - `tensor_names` omitted (optional `("payload",)` input normalized away),
-    - empty `view_subset_hash`.
-- `logical_layout_hash` and `selection_hash` are fixed, deterministic digests:
-  - `logical_layout_hash = sha256(utf8("tensorcast.byte_artifact.layout.v1\\n")).digest()`
-  - `selection_hash = sha256(utf8("tensorcast.byte_artifact.selection.v1\\n")).digest()`
-- `byte_length` and payload digests are **home-enforced invariants** and MUST NOT be required to derive selection
-  identity (they are verified by `PUT_IF_ABSENT_JOIN`).
-- daemon MUST enforce/cache this profile branch directly (without requiring canonical index or selected-index json
-  materialization) and return normalized resolved selection.
-
-## Correctness invariants (required)
-
-### Immutability + conflict writes
-
-Writes to `cgid:byte_artifact~...` MUST be **PUT_IF_ABSENT_JOIN** (never overwrite):
-
-- first write establishes invariants (`layout_id` + `byte_length` + payload digest),
-- re-writes must match; mismatch fails fast with `FAILED_PRECONDITION`.
-
-### Digest contract (required)
-
-To make join enforceable across languages (Python/C++/Rust), byte artifact writes MUST carry an explicit digest contract:
-
-- `payload_digest_alg = "sha256"`.
-- `payload_digest_hex = sha256(blob_bytes).hexdigest()` (lowercase hex).
-- Byte artifact put/flush actions MUST provide, per blob:
-  - `byte_length`,
-  - `payload_digest_alg`,
-  - `payload_digest_hex`.
-- The home daemon MUST persist the first-writer invariants for a `cgid:byte_artifact~...` blob and enforce join on
-  subsequent writes using at least `(layout_id, byte_length, payload_digest_alg, payload_digest_hex)`, scoped to the
-  current shard `lease_generation` (epoch-scoped cache).
-
-### TTL semantics
-
-- TTL updates must be monotonic-increasing (`expires_at = max(expires_at, now + ttl_ms)`).
-- Forced deletion is separate and best-effort; it must not break concurrent readers.
-
-### Eviction split
-
-- **Local eviction** (engine safety): reclaim engine-local KV state without touching shared blobs.
-- **Backend retention** (resource governance): TTL/LRU ensures the shared backend remains bounded.
-
----
-
-## Byte artifact storage + routing (planned): GS-not-hot-path home shards with leases and fencing
-
-This section defines how TensorCast can serve HiCache-style LLM KV blobs (as byte artifacts) at cluster scale
-**without** putting per-blob metadata into Global Store (GS), while still enforcing the correctness floor:
-
-- no incorrect hits (never return wrong bytes for a key),
-- no split-brain “first-writer” acceptance under partitions/failover.
-
-### Contract: cache is cache (performance only)
-
-- Byte artifacts are a cache: hits improve latency; misses MUST fall back to recompute/prefill in the engine/app.
-- A daemon crash invalidates any byte artifacts it owned: after crash/restart, previously cached blobs MUST be treated as
-  absent (miss), even if some bytes remain on local disk.
-
-### Byte artifacts do not enter the Global Store artifact registry
-
-- Byte artifacts use `artifact_id = cgid:byte_artifact~...` as **self-describing cache keys**.
-- Global Store MUST NOT maintain per-blob catalog/GC/indexing for byte artifacts (high cardinality).
-- Global Store’s byte artifact responsibilities are limited to **shard lease authority** (low cardinality, strong consistency).
-- This is a namespace-scoped override to generic `cgid:` behavior in `0017`:
-  - the override applies to `cgid:byte_artifact~...` only,
-  - other `cgid:` namespaces can continue to use normal GS artifact/replica catalogs.
-
-### Artifact model note (required)
-
-Byte artifacts are still **Artifacts** (tensor dicts) with a fixed schema (`payload:uint8[byte_length]`). The
-difference is
-**authority and routing**, not object model:
-
-- Registry-backed artifacts use Global Store (GS) as the authoritative catalog/index.
-- Byte artifacts (`cgid:byte_artifact~...`) use the **home shard** (for the current `lease_generation`) as the
-  authoritative catalog/index for:
-  - existence truth,
-  - `PUT_IF_ABSENT_JOIN` invariants,
-  - TTL/resource governance.
-
-The `HomeBatch*` RPCs are an internal, batch-first routed implementation of standard artifact operations
-(`exists/get/put_if_absent/touch_ttl`) for this high-cardinality, epoch-scoped namespace. They are **not** a parallel
-data-object abstraction.
-
-Implementation note (planned):
-
-- Store Daemons effectively act as a **namespace router** for artifact ids:
-  - registry-backed artifacts resolve/route via GS-backed catalogs and existing StoreEngine paths,
-  - `cgid:byte_artifact~...` artifacts resolve/route via shard leases and byte artifact homes (`HomeBatch*`).
-  Callers keep using `Artifact` handles uniformly; routing is a daemon-internal concern.
-
-### Sharding: `shard_id = hash64(artifact_id) % S`
-
-- Choose a fixed shard count `S` (recommended default: `S = 4096`; configurable). Larger `S` increases shard-lease
-  tracking overhead and Global Store lease write QPS (see lease parameters).
-- Derive a stable shard id from blob identity:
-  - `shard_id = hash64(utf8(artifact_id)) % S`
-  - `hash64` MUST be a specified, cross-language stable function (recommended: take the first 8 bytes of `sha256` over
-    UTF‑8 bytes and interpret as little-endian `uint64`).
-
-### Shard leases in Global Store (fencing token)
-
-Global Store stores one low-cardinality lease record per shard:
-
-```
-ShardHomeLease {
-  shard_id
-  holder_daemon_id
-  lease_generation   # fencing token (monotonic)
-  expires_at_ms
-}
-```
-
-Lease interface (planned; minimal):
-
-- `AcquireShardHomeLease(shard_id) -> ShardHomeLease`
-- `KeepaliveShardHomeLease(shard_id, lease_generation) -> ok`
-- `ReleaseShardHomeLease(shard_id, lease_generation) -> ok` (optional)
-
-### Ownership strategy (recommended)
-
-To avoid lease thrash and hotspots during membership churn, daemons SHOULD use a stable expected-owner strategy and
-only the expected owner should attempt shard acquisition.
-
-Recommended minimal strategy: **Rendezvous hashing (HRW)** over the current set of byte artifact-capable daemons.
-
-- Candidate set: daemons with a byte artifact capability flag (derived from daemon membership signals; cached via GS watches).
-- Expected owners: for each `shard_id`, compute a stable **top‑k** ordering by HRW score
-  (`ranked_daemons = sort_by(HRW(shard_id, daemon_id), desc)`), with `k >= 2` (recommended: `k = 3`).
-- Acquisition rule:
-  - only daemons in the shard’s top‑k set are eligible to acquire (others MUST NOT compete).
-  - rank‑1 SHOULD attempt `Acquire` when the shard lease is missing/expired/unavailable.
-  - rank‑2/3 MAY attempt `Acquire` after lease expiry when rank‑1 is unavailable (minimal rule: rely on lease expiry;
-    optional enhancement: also consult daemon health/membership signals to avoid waiting for expiry).
-
-This yields stable shard placement (small changes on membership updates) while still using GS leases as the fencing
-authority.
-
-### Lease parameters (recommended)
-
-Suggested defaults (illustrative; tune per deployment):
-
-- `lease_ttl_ms = 30_000`
-- `keepalive_interval_ms = 5_000` to `10_000` (≈ ttl/6 to ttl/3)
-- `lease_watch_staleness_budget_ms = 500` (routing cache staleness bound)
-
-Scalability note: GS write QPS for leases is approximately `S / keepalive_interval_ms` and is independent of the number
-of caller processes.
-
-Configuration source rule (required):
-
-- Byte artifact routing invariants (`S`, `hash64` algorithm/version, `inline_threshold_bytes`, lease policy, retention
-  defaults/limits) MUST come from unified runtime config (`0004`) and be consistent cluster-wide.
-- Rolling incompatible values MUST be treated as cache-epoch cutover (invalidate to miss), not mixed-semantics serving.
-
-### Fail-closed ownership rule (required)
-
-- If a home daemon cannot keep its lease alive (GS unreachable / keepalive fails), it MUST immediately become
-  **NOT_OWNER** for that shard and fail closed:
-  - MUST NOT accept `PUT_IF_ABSENT_JOIN` writes,
-  - MUST NOT claim authoritative exists/hit results.
-- This intentionally prefers “miss / unavailable” over any risk of split-brain acceptance.
-
-### Home daemon responsibilities (required)
-
-For shards it currently owns (valid lease), the home daemon is the authority for:
-
-1. **First-writer invariants** (`PUT_IF_ABSENT_JOIN`)
-   - For each byte artifact `artifact_id`, store the first-writer invariants (epoch-scoped):
-
-     ```
-     PutIfAbsentInvariant {
-       layout_id
-       byte_length
-       payload_digest_alg  # sha256
-       payload_digest_hex  # lowercase hex
-     }
-     ```
-
-   - Put semantics:
-     - first write: store invariants + bytes
-     - rewrites:
-       - invariants match → join/success (idempotent)
-       - invariants mismatch → `FAILED_PRECONDITION` (fail fast; prevents silent corruption)
-
-2. **Authoritative exists/get** for the current lease generation
-   - Exists truth is defined by the home’s current `{shard_id, lease_generation}` map.
-   - `Get` returns bytes only for keys that exist in the current generation’s map.
-
-### Fencing on every byte artifact operation (required)
-
-All shard-scoped byte artifact RPCs executed at the home MUST be fenced by `{shard_id, lease_generation}`:
-
-- if request’s `lease_generation` does not match the home’s current generation:
-  - return `FAILED_PRECONDITION` (optionally include redirect info: new `holder_daemon_id`, new generation),
-  - MUST NOT execute the operation.
-
-### Epoch-scoped storage: “daemon crash ⇒ cache disappears”
-
-To satisfy cache semantics, home storage is scoped by `{shard_id, lease_generation}`:
-
-- The home daemon MUST NOT serve byte artifact bytes written under an old `lease_generation`.
-- When generation changes (failover), the shard’s visible cache set becomes empty (global cache invalidation for that
-  shard).
-
-Two valid implementation profiles (planned; pick one per deployment):
-
-- **A. In-memory (default)**: store cache entries in daemon memory only. Crash naturally implies miss.
-- **B. Local disk by generation**: store under paths like `kv_cache/shard=17/gen=102/...` but only read current
-  generation; old generations are best-effort GC’d asynchronously.
-
-### Epoch-scoped caching for all replicas (required)
-
-Epoch scoping applies to **any** cached copy of byte artifact bytes, not just the home’s authoritative map.
-
-Rule (required):
-
-- Any daemon-owned byte artifact replica (home store + any non-home caches created by `prefetch`/`prefetch_many`) MUST be
-  keyed by `(artifact_id, shard_id, lease_generation)`.
-- Once a daemon observes a newer `lease_generation` for a shard, any cached blob bytes for older generations MUST be
-  treated as absent (miss) and MUST NOT be served as hits.
-
-Acceptable enforcement strategies (planned):
-
-- **Lazy fencing**: before serving a local KV hit, consult the daemon’s lease cache and require
-  `cached_generation == current_generation`; otherwise treat as miss and re-fetch via the home.
-- **Proactive invalidation**: when the daemon’s lease watch observes a generation change, drop all cached blob replicas
-  for the old `(shard_id, lease_generation)` bucket (coarse invalidation is fine; KV is cache).
-  - Implementation note: this can be realized by extending the daemon’s internal replica keying for the
-    `cgid:byte_artifact~...` namespace with `lease_generation`, or by storing blob replicas in a dedicated generation-keyed
-    cache separate from registry-backed artifacts. The choice is internal as long as the rule holds.
-
-### Byte artifact request path (single-entry caller; daemon-run routing)
-
-- Caller connects to one gateway daemon (potentially via a VIP/LB/DNS).
-- The gateway (and all daemons) maintain:
-  - a directory cache for `daemon_id -> routing` and `instance_id -> daemon_id`,
-  - a lease cache for `ShardHomeLease` (populated via GS watch streams; bounded staleness).
-- For any byte artifact operation, the receiving daemon:
-  - computes `shard_id` from `artifact_id`,
-  - resolves the current `{holder_daemon_id, lease_generation}`,
-  - forwards the shard-scoped batch to the home daemon,
-  - handles `FAILED_PRECONDITION` redirects by refreshing lease cache and retrying once (or returning miss).
-- If lease freshness cannot be proven within `lease_watch_staleness_budget_ms` (or refresh is unavailable), routing MUST
-  fail open to per-item `miss`/`unavailable`; the daemon MUST NOT claim authoritative hits from local guesses.
-
-Authorization note (planned):
-
-- The home daemon MUST enforce namespace-level authorization for KV operations based on the namespace embedded in
-  `cgid:byte_artifact~<namespace>~...` (once namespaces/ACLs are enabled), so routing does not become an authorization
-  bypass.
-
-### Suggested minimal byte artifact RPC set (planned)
-
-Layering boundary (required):
-
-- External-target region RPCs (`batch_get_into_region`, `batch_put_if_absent_from_region`) are front-door APIs between
-  caller/instance-agent and local daemon only, and remain loopback/UDS safety-bound.
-- Home-scoped shard authority RPCs below are daemon-to-daemon only; they do not and cannot directly write into
-  caller-owned CUDA regions.
-
-Between daemons (home-scoped, fenced):
-
-- `HomeBatchExists(shard_id, lease_generation, keys_in_prefix_order[]) -> {hit_len, per_key_status?}`  
-  `hit_len` is the number of **consecutive existing keys from the start** (HiCache fast-path). `per_key_status` is
-  optional debug detail and SHOULD be omittable for efficiency.
-- `HomeBatchGet(shard_id, lease_generation, keys[]) -> {per_key {status, payload_ref}}`
-- `HomeBatchPutIfAbsent(shard_id, lease_generation, items[]) -> per_item_status`
-  - item includes: `artifact_id, layout_id, byte_length, digest_alg, digest_hex, payload` where `payload` is
-    either:
-    - `inline_bytes` (small blobs only), or
-    - `payload_ref` (preferred; reuse TensorCast data plane; home pulls/receives bytes out-of-band).
-- `ByteArtifactTouchTtl(shard_id, lease_generation, keys[], ttl_ms)` (optional; monotonic extend)
-
-Note: a daemon MAY expose a proxy-friendly front-door that accepts mixed-shard key lists (for local engine backends),
-but the home boundary MUST be fenced and shard-scoped.
-
-Payload transport note (required):
-
-- Byte artifacts can be large (page-first, all layers). RPCs MUST avoid inlining large payloads in gRPC messages.
-- For `byte_length > inline_threshold_bytes` (recommended default: 1 MiB; configurable), payloads MUST be carried via
-  TensorCast’s data plane using a transfer handle (represented as `payload_ref` here).
-  - `HomeBatchGet` MUST return `payload_ref` (not inline bytes) above the threshold.
-  - `HomeBatchPutIfAbsent` MUST accept `payload_ref` above the threshold (not inline bytes).
-- Inlining small blobs (`inline_bytes`) is acceptable below the threshold.
-
-### Recommended integration layering (SGLang motivating case)
-
-For inference engines that already expose a HiCache-style “storage backend” abstraction (SGLang), the most feasible and
-engine-agnostic integration is a **two-layer split**:
-
-1. **Storage backend plugin (engine → TensorCast data plane)**  
-   Implement the engine’s storage backend interface using TensorCast, so the engine continues to:
-   - own KV layout and staging (device↔host pools),
-   - own token→page-key mapping (prefix-hash chaining),
-   - and treat the backend as a pure key→bytes store.
-
-2. **Instance Agent KV adapter (app/daemon plan executor → engine)**  
-   Implement `EngineKvCacheAdapter` as a thin orchestration surface that:
-   - forces a publish barrier (`kvcache_flush`) when the app wants explicit migration,
-   - triggers engine-side warm/rehydrate (`kvcache_prefetch`) when a request context exists on the destination,
-   - and returns `KvKeySet` containing deterministic CGID blob identities for plan orchestration.
-
-This keeps TensorCast core KV-semantics-free while still allowing explicit app-driven KV movement.
-
-### Reentrancy and deadlock avoidance (required)
-
-Some integration paths create a re-entrant call chain:
-
-Store Daemon (executing an instance step) → instance-agent RPC to Instance Agent → engine adapter → engine storage backend
-plugin → TensorCast KV front-door (often the same local Store Daemon, then routed to shard home).
-
-Requirement (required):
-
-- When executing instance-scoped steps, the Store Daemon MUST remain re-entrant to KV RPCs originating from the local
-  instance process.
-- The plan executor MUST NOT hold locks that would block servicing local KV front-door calls, and MUST have dedicated
-  execution capacity (thread pool / async executor) so a re-entrant call cannot self-deadlock or starve.
-- Resource isolation (recommended):
-  - gRPC request handling for KV front-door RPCs SHOULD be isolated from plan execution (separate thread pools/queues)
-    so a busy plan executor cannot starve re-entrant KV calls.
-  - plan execution SHOULD run outside gRPC handler threads (avoid “execute plan inside RPC thread” designs).
-  - instance-step execution SHOULD have a per-instance concurrency cap (e.g., configurable `max_inflight_instance_steps`)
-    to prevent an engine from self-DoS’ing via excessive concurrent flush/prefetch operations.
-  - engine adapters SHOULD avoid holding engine-global locks across outbound KV backend calls to prevent lock inversion
-    with the daemon’s own request handling.
-
----
-
-# Instance Agent KV Adapter (planned)
-
-TensorCast core does not (and must not) implement request→token→KV mapping. The Instance Agent hosts an engine-specific
-adapter that can expose that mapping at the level of **cache keys**.
-
-Minimal interface:
-
-```python
-@dataclass(frozen=True, slots=True)
-class KvBlobRef:
-    engine_key_enc: str
-    artifact_id: str            # recommended: "cgid:byte_artifact~..."
-    # Hints vs invariants:
-    # - size_bytes_estimate: optional planning hint (may be absent/approximate).
-    # - byte_length + payload_digest_*: required invariants for put/flush JoinIfMatch enforcement.
-    size_bytes_estimate: int | None = None
-    byte_length: int | None = None
-    payload_digest_alg: str | None = None   # required on put/flush (e.g., "sha256")
-    payload_digest_hex: str | None = None   # required on put/flush (lowercase hex)
-
-@dataclass(frozen=True, slots=True)
-class KvBlobFailure:
-    artifact_id: str
-    status_code: str
-    message: str
-    retryable: bool
-
-@dataclass(frozen=True, slots=True)
-class KvBatchResult:
-    total: int
-    succeeded: int
-    missing_artifact_ids: tuple[str, ...] = ()
-    failures: tuple[KvBlobFailure, ...] = ()
-
-@dataclass(frozen=True, slots=True)
-class KvKeySet:
-    engine_request_id: str
-    namespace: str
-    engine: str
-    model_id_enc: str
-    layout_id: str
-    key_set_digest: str | None = None  # sha256 hex over canonical blob set; order-insensitive
-    blobs: tuple[KvBlobRef, ...]  # engine order (e.g., prefix order); MUST NOT be used for idempotency
-    hit_len: int | None = None
-    total_bytes_estimate: int | None = None
-
-@dataclass(frozen=True, slots=True)
-class KvFlushResult:
-    key_set: KvKeySet
-    put: KvBatchResult
-
-@dataclass(frozen=True, slots=True)
-class KvPrefetchResult:
-    key_set: KvKeySet
-    get: KvBatchResult
-
-class EngineKvCacheAdapter:
-    def kv_key_set(self, engine_request_id: str) -> KvKeySet: ...
-    def kv_flush(
-        self,
-        engine_request_id: str,
-        *,
-        key_set: KvKeySet | None = None,
-        ttl_ms: int | None = None,
-        ctx: CallContext | None = None,
-    ) -> KvFlushResult: ...
-    def kv_prefetch(
-        self,
-        engine_request_id: str,
-        *,
-        key_set: KvKeySet | None = None,
-        ctx: CallContext | None = None,
-    ) -> KvPrefetchResult: ...
-    def kv_evict_local(
-        self,
-        *,
-        engine_request_id: str | None = None,
-        key_set: KvKeySet | None = None,
-        ctx: CallContext | None = None,
-    ) -> KvBatchResult: ...
-```
-
-Naming note (required):
-
-- `CallContext.request_id` is a TensorCast trace/request correlation id.
-- `engine_request_id` is the inference-engine-defined stable request identity used for KV ownership/migration and may
-  intentionally survive cross-instance reassignment.
-
-Canonicalization note (required):
-
-- `KvKeySet.key_set_digest` is the canonical, order-insensitive identity for the **set of blobs** in the key set.
-  Recommended computation:
-  - `key_set_digest_alg = "sha256"` and `key_set_digest_hex` is lowercase hex.
-  - input bytes are UTF-8 with domain separation:
-    - prefix: `"tensorcast.byte_artifact.keyset.v1\\n"`
-    - then `layout_id + "\\n" + "\\n".join(sorted(unique(artifact_id)))`
-- `KvKeySet.blobs` ordering (e.g., prefix order) is an engine convenience only and MUST NOT participate in idempotency
-  fingerprints. `hit_len` and size estimates are hints and MUST NOT participate in fingerprints.
-
-## Planned `InstanceStepBuilder.kvcache_*` semantics
-
-`kvcache_*` is an LLM-facing alias layer. Core IR semantics should be neutral artifact actions (see `0087`):
-
-- `kvcache_key_set` -> `manifest`
-- `kvcache_flush` -> `publish`
-- `kvcache_prefetch` -> `hydrate`
-- `kvcache_evict_local` -> `evict_local`
-
-The daemon and plan engine should execute canonical neutral artifact actions; alias names are preserved for API
-ergonomics. Idempotency fingerprints, metrics, and audit/event action labels MUST use canonical
-`manifest/publish/hydrate/evict_local` names; `kvcache_*` should be retained only as an alias tag/metadata dimension.
-
-These are **instance-scoped** plan steps executed by the Instance Agent (invoked by the target Store Daemon).
-
-- `kvcache_key_set(engine_request_id) -> KvKeySet`
-  - **Purpose**: read-only inspection of the engine-defined key set for the request (page keys + sizing hints).
-  - **Side effects**: none (MUST NOT write to backend; MUST NOT mutate engine state).
-  - **Use cases**: admission checks (size/memory), debugging/observability.
-- `kvcache_flush(engine_request_id, ttl_ms=..., key_set=None) -> KvFlushResult`
-  - **Purpose**: correctness publish barrier for migration/prefix reuse across instances.
-  - **Correctness note**: KV blobs remain an opportunistic cache; apps/engines MUST tolerate backend misses (fallback to
-    recompute/prefill). `flush/prefetch` improve hit rate/latency and provide observability, but do not turn KV into a
-    durability contract.
-  - MUST snapshot the request KV state and obtain a canonical `KvKeySet` for that snapshot:
-    - if `key_set` is provided, treat it as the intended snapshot,
-    - otherwise compute it (equivalent to `kvcache_key_set`, but bound to the flush barrier).
-  - MUST attempt to ensure backend visibility for every blob in the key set (batch-first):
-    - batch existence check,
-    - write only missing blobs using `PUT_IF_ABSENT_JOIN` (never overwrite; mismatch fails fast).
-  - MUST apply retention intent using monotonic TTL if `ttl_ms` is provided.
-  - MUST return:
-    - `KvFlushResult.key_set` (the exact key set the flush operated on),
-    - `KvFlushResult.put` (per-blob outcomes).
-  - Step status vs per-blob outcomes (required):
-    - backend misses/unavailability MUST be represented in `KvFlushResult.put` (e.g., as failures/missing), not as a
-      hard plan-step failure, so callers can degrade to recompute/prefill.
-    - invariant mismatches (JoinIfMatch failure) MUST fail fast with `FAILED_PRECONDITION` (do not “paper over”).
-  - Rationale: a standalone `kvcache_key_set` cannot guarantee backend existence nor apply TTL, and it can race with
-    request advancement; flush returns a barrier-consistent key set that subsequent warm steps can rely on.
-- `kvcache_prefetch(engine_request_id, key_set=None) -> KvPrefetchResult`
-  - **Purpose**: target-side engine warm/rehydrate so KV becomes usable for decoding.
-  - `engine_request_id` MUST refer to a request context that exists on the target instance at execution time (the
-    adapter may need access to token ids / KV ownership metadata). If the request context does not exist, the step MUST
-    fail (e.g., `NOT_FOUND` / `FAILED_PRECONDITION`) and MUST NOT be a silent no-op.
-  - If `key_set` is provided, the adapter SHOULD treat it as the intended snapshot/hint for prefetch (and use it for
-    observability and per-blob results), and MUST validate that it matches the target instance’s current request
-    snapshot before rehydrating (SGLang feasibility: recompute `key_set_digest` from local token ids; mismatch →
-    `FAILED_PRECONDITION`).
-  - If `key_set` is omitted, the adapter MAY compute the key set from engine state and backend existence checks
-    (engine-specific), but it MUST still fail if no request context exists.
-  - MUST return per-blob outcomes in `KvPrefetchResult.get`.
-  - Step status vs per-blob outcomes (required):
-    - per-blob misses (`NOT_FOUND`) are normal cache behavior and MUST be represented in `KvPrefetchResult.get` as
-      `missing_artifact_ids` (or per-blob statuses), not as a hard plan-step failure.
-    - the step MUST still fail for precondition violations (no request context; snapshot mismatch when `key_set` is
-      provided).
-- `kvcache_evict_local(engine_request_id=None, key_set=None) -> KvBatchResult`
-  - **Purpose**: reclaim engine-local memory/state (OOM safety / footprint control).
-  - **Scope**: engine-local only; MUST NOT delete shared backend blobs.
-
-## Why `on_worker().prefetch(...)` and `on_instance().kvcache_prefetch(...)` are different
-
-- `on_worker(...).prefetch/prefetch_many`: warms the **TensorCast data plane** (daemon-owned DRAM/VRAM residency of KV
-  blob bytes); engine-agnostic.
-- `on_instance(...).kvcache_prefetch`: warms the **engine execution plane** (rehydrate engine internal KV structures);
-  engine-specific.
-
-Applications may do either or both depending on latency/complexity trade-offs.
-
----
-
-# Function Call Flow (planned) — KV pre-warm migration
-
-Scenario:
-
-- Instance A already computed prefix `["User", ":", "Hello"]` and has KV state.
-- Instance B needs to decode `["User", ":", "Hello", "World"]` and wants to reuse the prefix KV before taking over.
-
-Planned call flow (control plane + node-local boundaries):
-
-0. **Precondition (engine-specific; outside TensorCast)**:
-   - The app ensures the target instance has a request context for `engine_request_id` (e.g., request has been created
-     / staged / paused on the destination), so an instance-scoped `kvcache_prefetch(engine_request_id=...)` can access
-     token ids and engine-local KV state.
-1. **App issues plans** (flush first, then warm):
-   - `rt = tc.connect(daemon_address=...)  # the single reachable entry daemon`
-   - `ctx = tc.context(request_id=..., qos=..., deadline_ms=...)`
-   - `plan1 = rt.plan(ctx)`
-   - `flush_ref = plan1.on_instance(inst_a).kvcache_flush(engine_request_id="rid-123", ttl_ms=60_000)`
-   - `flush_res = plan1.run(...)` → `flush_out = flush_res.step(flush_ref).value  # KvFlushResult`
-   - `key_set = flush_out.key_set`
-   - `plan2 = rt.plan(ctx)`
-   - `plan2.on_worker(worker_b).prefetch_many([...], device="dram")` (optional; batch)
-   - `plan2.on_instance(inst_b).kvcache_prefetch(engine_request_id="rid-123", key_set=key_set)`
-   - `plan2.run(...)`
-2. **Plan.run submission (planned ingress, with transitional fallback)**:
-   - preferred when ingress is available: `Plan.run()` -> `StoreDaemonService.ExecutePlan(PlanSpec)` (gateway daemon),
-   - transitional/current path: SDK local runner dispatches equivalent fragments using the same deterministic ids when
-     the caller has direct reachability.
-3. **Gateway/runner dispatches instance step (flush)**:
-   - gateway/runner -> target daemon dispatch path (subplan for `inst_a`’s daemon),
-   - target daemon PlanExecutor -> instance-agent RPC -> Instance Agent executes `plan_fragment_for_inst_a`
-   - Instance Agent calls `EngineKvCacheAdapter.kv_flush(...)`
-   - Adapter enumerates per-page keys (SGLang page hashes) and writes missing `cgid:byte_artifact~...` blobs to backend
-     using batch put (`PUT_IF_ABSENT_JOIN`).
-4. **Gateway/runner dispatches worker step (prefetch_many)** (optional):
-   - gateway/runner -> target daemon dispatch path (subplan for Worker B)
-   - Store Daemon B prefetches the listed CGID selections into daemon-owned DRAM tier.
-5. **Gateway/runner dispatches instance step (kvcache_prefetch)**:
-   - gateway/runner -> target daemon dispatch path (subplan for `inst_b`’s daemon)
-   - target daemon PlanExecutor -> instance-agent RPC -> Instance Agent executes `plan_fragment_for_inst_b`
-   - Instance Agent calls `EngineKvCacheAdapter.kv_prefetch(engine_request_id=..., key_set=...)`
-   - Adapter batch-reads blobs (possibly hitting local daemon DRAM if prefetch_many ran) and rehydrates engine-local KV.
-6. **App reassigns request**:
-   - after the plan completes successfully, the scheduler routes the decode continuation to Instance B.
-
-Note: if daemon-run plans support step-output references, this can be expressed as a single plan; otherwise a
-two-plan sequence (flush → warm) is the simplest correct shape.
-
-SGLang note (practical integration):
-
-Two integration modes (recommended):
-
-- **Mode A (strong migration; explicit warm)**:
-  - the scheduler pre-creates/stages a request context on the destination instance (same `engine_request_id`),
-  - runs `kvcache_flush(...)` → `prefetch_many(...)` (optional) → `kvcache_prefetch(...)`,
-  - then continues decode on the destination.
-- **Mode B (weak migration; bytes-only warm)**:
-  - the scheduler runs `kvcache_flush(...)` + `prefetch_many(...)` but omits `kvcache_prefetch(...)`,
-  - the engine’s normal enqueue path performs its own prefetch/rehydrate when it receives the request
-    (SGLang’s scheduler calls a prefetch hook when adding a request to the waiting queue).
-  - misses fall back to recompute/prefill (correctness preserved).
-
----
-
-# Planned Proto & Schema Changes (high level)
-
-This section is illustrative and intentionally separated from 0055.
-
-- Extend `proto/tensorcast/daemon/v2/store_daemon.proto` in phases:
-  - required first: `GetSignals/ListWorkers/ListInstances/...` (daemon-served signals/directory; bounded staleness),
-  - optional ingress phase: `ExecutePlan(PlanSpec) -> Operation[PlanResult]` (the `gateway_ingress` role only; execution semantics
-    remain aligned with the 0055 PlanSpec semantics (PlanExecutor) + Instance Agent boundary + daemon action handlers),
-  - optional: `ExecutePlanFragment` (or reuse `ExecutePlan`) for daemon<->daemon dispatch of per-target subplans.
-- Add LaneContext/policy propagation plumbing for plan and non-plan hot paths:
-  - short term: metadata + audit fields (no proto bloat on every request),
-  - long term: explicit wire fields where interoperability/observability requires stronger contracts.
-- Extend `proto/tensorcast/daemon/v2/store_daemon.proto` with byte artifact shard/data-plane RPCs (planned):
-  - home-scoped, fenced: `HomeBatchExists/HomeBatchGet/HomeBatchPutIfAbsent/HomeBatchTouchTtl`
-  - shard lease caches + redirect semantics (`FAILED_PRECONDITION` with updated `{holder_daemon_id, lease_generation}`).
-- Extend `proto/tensorcast/plan/v1/plan.proto` with:
-  - `PrefetchManyAction` (batch prefetch),
-  - `MintTargetAction` (instance-scoped capability minting for remote `into/transform_into`),
-  - `MaterializeIntoAction` (instance-scoped remote `into(...)`),
-  - generic instance actions (`manifest`, `publish`, `hydrate`, `evict_local`) with optional
-    `kvcache_*` aliases in SDK-facing APIs,
-  - Optional: step-output references (to express flush→warm in a single daemon-run plan).
-- Extend `proto/tensorcast/global_store/v1/global_store.proto` + `schema.sql` with shard-lease coordination (planned):
-  - `ShardHomeLease` records (`shard_id`, `holder_daemon_id`, `lease_generation`, `expires_at_ms`)
-  - `AcquireShardHomeLease/KeepaliveShardHomeLease/ReleaseShardHomeLease`
-  - watch stream for shard lease updates for daemon caches.
-- For GS de-hotization paths (routing/source selection), any new local-first dispatch contract MUST preserve
-  claim/reservation/fencing-equivalent safety; avoid regressions relative to current GS atomic coordination semantics.
-- Extend `proto/tensorcast/node_agent/v1/node_agent.proto` / implementation (legacy label; Instance Agent boundary) to
-  execute the new instance actions.
-- Extend `proto/tensorcast/global_store/v1/global_store.proto` + `schema.sql` for scalable registries:
-  - store only long-lived entities (workers, instances) and routable endpoints (update-on-change),
-  - workers:
-    - include a bounded role/capability bitset (e.g., `gateway_ingress`, `shard_home_eligible`) used for routing and
-      partitioning (see “Daemon Roles”),
-    - add watch/stream APIs so Store Daemons can maintain directory/signal caches without per-call Global Store queries,
-  - instances:
-    - require `RegisterInstance` to persist an HA-safe `daemon_id` (NOT NULL) so routing is `instance_id -> daemon_id`
-      (authoritative) rather than `instance_id -> worker_id` (hint),
-    - persist an `instance_agent_endpoint` routing attribute used by Store Daemons for instance-agent RPC (not a stable
-      identity; may change under HA/restart).
-
----
-
-# Code Map
-
-Suggested code locations for implementing the planned features in this design:
-
-- Unified runtime / SDK:
-  - `tensorcast/api/runtime.py` (new; `Runtime`, `connect`, `runtime`)
-  - `tensorcast/startup.py` (existing; add UX aliases for `connect(...)` if desired)
-  - `tensorcast/__init__.py` and `tensorcast/api/__init__.py` (export `connect`, `runtime`)
-  - `tensorcast/api/plan/plan.py` (phase 1 keep the 0055 local PlanExecutor runner; add optional ingress path via daemon
-    `ExecutePlan` without changing execution semantics)
-  - `tensorcast/api/context.py` + `tensorcast/api/store/*` (align lane/policy metadata propagation across non-plan RPCs)
-- Signals (SDK surface + daemon-served signals):
-  - `tensorcast/api/signals.py` (new; `TensorCastSignals`, `ExecutionSignals`, `SignalSnapshot`)
-- Store Daemon control plane (distributed “controller”):
-  - `proto/tensorcast/daemon/v2/store_daemon.proto` (signals/directory RPCs first; optional ingress `ExecutePlan`)
-  - `daemon/service/controllers/plan_executor_controller.cc` (new; DAG scheduling + dispatch)
-  - `daemon/service/controllers/signals_controller.cc` (new; caching + staleness budgets)
-  - `daemon/service/controllers/directory_cache_controller.cc` (new; instance/worker directory caches)
-  - `daemon/service/mesh/daemon_mesh_client.*` (new; daemon↔daemon dispatch)
-  - `daemon/ha/global_store_watch_client.*` (new; watch/stream updates for caches)
-  - `core/store/materialization/control/materialize_orchestrator.*` + GS transport coordination points (preserve
-    claim/reservation/fencing-equivalent safety while de-hotizing source selection)
-- Placement modeling (semantic tier vs wire encoding):
-  - `tensorcast/types.py` (add `Placement` type; map `device` inputs to placement)
-  - `proto/tensorcast/common/v1/common.proto` (optional future: add explicit `Placement` message; keep `device_id=-1`
-    encoding for HOST_DRAM compatibility)
-- Instance Agent boundary (node_agent):
-  - `tensorcast/node_agent/executor.py` (extend to execute new instance actions: byte artifact orchestration, signals)
-  - `proto/tensorcast/node_agent/v1/node_agent.proto` (extend if adding step-level dispatch; or reuse `ExecutePlan`)
-  - `proto/tensorcast/config/v1/node_agent_config.proto` (instance-agent RPC endpoint configuration (TCP/UDS); should not be reachable from external app networks)
-- Plan and action IR (batch + cache steps):
-  - `proto/tensorcast/plan/v1/plan.proto` (add `PrefetchManyAction`, generic
-    `manifest/publish/hydrate/evict_local` actions, and optional `kvcache_*` alias fields)
-  - `tensorcast/api/plan/plan.py` (add `WorkerStepBuilder.prefetch_many`, `InstanceStepBuilder.materialize_into`,
-    canonical `InstanceStepBuilder.manifest/publish/hydrate/evict_local`, and `InstanceStepBuilder.kvcache_*` aliases)
-  - `tensorcast/api/plan/targets.py` and `tensorcast/api/plan/transforms.py` (byte artifact layout ids / transform hooks as needed)
-- Global Store (registry + watches for daemon caches):
-  - `proto/tensorcast/global_store/v1/global_store.proto` (add `WatchWorkers/WatchInstances` streams)
-  - `proto/tensorcast/global_store/v1/global_store.proto` (add worker role flags/capabilities; add `instance_agent_endpoint` routing attribute on `Instance`)
-  - `proto/tensorcast/global_store/v1/global_store.proto` (add shard-home lease RPCs + watch stream)
-  - `tensorcast/global_store/services/worker_service.py`
-  - `tensorcast/global_store/repositories/worker_repository.py`
-  - `tensorcast/global_store/services/instance_service.py`
-  - `tensorcast/global_store/repositories/instance_repository.py`
-  - `tensorcast/global_store/models/shard_home_lease.py` (new; `ShardHomeLease`)
-  - `tensorcast/global_store/repositories/shard_home_lease_repository.py` (new; lease acquire/keepalive)
-  - `tensorcast/global_store/services/shard_home_lease_service.py` (new; fencing + monotonic generation)
-  - `schema.sql` (planned: add worker role flags/capabilities + `instance_agent_endpoint` routing attribute)
-  - `schema.sql` (new `shard_home_leases` table)
-- Byte artifact service (home shards + fencing; GS-not-hot-path):
-  - `daemon/service/controllers/byte_artifact_shard_controller.cc` (new; home-scoped exists/get/put + invariants)
-  - `daemon/state/byte_artifact_shard_store.*` (new; `{shard_id, lease_generation}` scoped maps + TTL)
-  - `daemon/state/cache_shard_lease_manager.*` (new; keepalive/fail-closed ownership transitions)
-  - `daemon/service/mesh/byte_artifact_router_client.*` (new; proxy routing to shard homes; handles redirects)
-- Engine KV integration (engine-owned adapter layer; TensorCast core remains KV-semantics-free):
-  - `tensorcast/engine_adapter/kvcache_adapter.py` (new; `EngineKvCacheAdapter` interface + typed results)
-  - `tensorcast/integrations/llm/` (new; engine-specific adapters such as SGLang HiCache implementation)
-
-- External integration (SGLang HiCache; in the SGLang source tree):
-  - `sglang/python/sglang/srt/mem_cache/storage/backend_factory.py` (register a `tensorcast` storage backend)
-  - `sglang/python/sglang/srt/mem_cache/storage/tensorcast_store/tensorcast_store.py` (new; implement `HiCacheStorage` via TensorCast)
-  - `sglang/python/sglang/srt/mem_cache/hiradix_cache.py` and `sglang/python/sglang/srt/managers/cache_controller.py` (integration points referenced by the adapter semantics)
+1. `0056` must not introduce ad hoc environment variables or hidden flag precedence,
+2. rolling incompatible control-plane values must have an explicit cutover strategy; mixed semantics are not acceptable,
+3. high-cardinality set transport must not rely on hidden size heuristics that silently change semantics between nodes.
+
+# Proto and Schema Changes
+
+Framework-owned additive changes:
+
+- `proto/tensorcast/daemon/v2/store_daemon.proto`
+  - `ExecutePlan(ExecutePlanRequest)` ingress for terminal-only execution with an explicit request envelope,
+  - that envelope should carry the submitted `PlanSpec` plus the declared public execution class,
+  - daemon-served worker and instance listing or signal RPCs,
+  - no hidden daemon-private continuation protocol beyond the `0096` and `0100` owned family.
+- `proto/tensorcast/plan/v1/plan.proto`
+  - keep canonical instance actions `manifest/publish/hydrate/evict_local`,
+  - add a typed governance sub-object for plan execution rather than relying on free-form `tags` alone,
+  - add neutral set carriers such as `ArtifactSetRef` and worker `PrefetchSetAction` if and when they land,
+  - if a dedicated wire carrier for set items is needed, make it a field-for-field projection of `SelectionIdentity`,
+  - reserve an explicit cluster-scoped transport slot if cluster-workflow owners need one, while keeping workflow
+    semantics outside `0056`,
+  - do not require `MintTargetAction` in framework core,
+  - do not add plan-private continuation carriers.
+- `proto/tensorcast/node_agent/v1/node_agent.proto`
+  - generic instance action execution only,
+  - canonical instance actions stay aligned with `manifest/publish/hydrate/evict_local`.
+- `proto/tensorcast/global_store/v1/global_store.proto` and `schema.sql`
+  - only low-cardinality worker and instance routing attributes, capability bits, and watch support needed by daemon
+    caches,
+  - no per-item high-cardinality truth tables and no per-set membership hot path for framework orchestration.
+
+Out of scope for `0056`:
+
+- shard-home lease schemas,
+- `HomeBatch*` authority RPCs,
+- lifecycle, issuer-handoff, or workflow continuation state,
+- engine manifest tables or engine request-context persistence.
+
+# Naming Compliance
+
+The interfaces introduced or retained by this design follow repository naming rules.
+
+Classes and structs use `PascalCase`:
+
+- `Runtime`
+- `TensorCastSignals`
+- `SignalSnapshot`
+- `SelectionIdentity`
+- `ArtifactSetRef`
+- `ArtifactSetResult`
+- `ArtifactSetItemResult`
+- `WorkerStatus`
+- `WorkerCapacitySnapshot`
+
+Functions and methods use `snake_case`:
+
+- `connect`
+- `runtime`
+- `list_workers`
+- `get_worker_status`
+- `list_instances`
+- `prefetch_set`
+- `prefetch_many`
+
+Constants and enum values use `ALL_CAPS`:
+
+- `HOST_DRAM`
+- `GPU_VRAM`
+
+# Schema Changes
+
+This framework rewrite does not introduce a new persistent schema family of its own.
+
+If durable set references are needed, they must be expressed either as artifact-backed manifests or as authority-owned
+opaque refs in the owning layer.
+They must not be introduced as new Global Store per-item or per-set hot tables inside `0056`.
+
+# Trade-offs and Risks
+
+- Keeping the framework thin makes some domain integrations less ergonomic unless they provide helper aliases.
+- Generic set references add an indirection layer, but that indirection is required to scale beyond caller-enumerated
+  lists.
+- Immediate-only daemon ingress is less feature-rich than a full long-lived continuation model, but it avoids creating
+  a second public protocol before `0096` and `0100` are complete.
+- Signals can be overused as truth if staleness and authority boundaries are not kept explicit.
+- Referenced set implementations can drift into engine-private semantics unless `0102` ownership is enforced
+  consistently.
+
+# Compatibility and Acceptance Criteria
+
+- `connect(...)` is the primary process entrypoint for advanced control-plane use.
+- `Plan.run()` in local and daemon-ingress modes uses the same canonical action names and the same deterministic
+  fingerprint rules.
+- `0056` owns only runtime, ingress, signals, and generic set carriers.
+- canonical instance orchestration remains aligned around `manifest/publish/hydrate/evict_local`.
+- external callers can operate through one daemon endpoint and do not call Global Store directly.
+- NodeAgent or the existing Instance Agent boundary remains the unique instance-scoped execution host in this phase.
+- item and set identity are rooted in normalized `SelectionIdentity`, not `artifact_id` alone.
+- no plan-private attach, wait, replay, or status family is introduced by `0056`.
+- any execution that outlives the request lifetime uses a public continuation owned by `0096` and `0100`.
+- ingress admission is based on declared public execution class and dependency readiness, not runtime completion
+  heuristics.
+- high-cardinality framework orchestration does not require Global Store per-item hot truth.
+- referenced set carriers fail closed if their resolved item set does not match the advertised digest and count.
+- worker and instance readiness remain scope-owned rather than flattened into one repository-wide readiness enum.
+- `prefetch_many`, if exposed, is explicitly a convenience helper over the generic set carrier rather than the primary
+  scalable abstraction.
+- `ManifestResult` remains the current concrete engine-side set carrier, while mapping it into generic framework set
+  orchestration stays neutral and non-business-specific.
