@@ -6,11 +6,13 @@ import pytest
 
 from tensorcast.api.errors import ArtifactError
 from tensorcast.engine_adapter.kvcache_adapter import (
+    MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA,
     ManifestResult,
     compute_key_set_digest_hex,
     open_byte_artifact,
     seal_byte_artifact,
 )
+from tensorcast.proto.common.v1 import common_pb2
 
 
 def test_byte_artifact_open_to_seal_enforces_invariants() -> None:
@@ -68,6 +70,56 @@ def test_manifest_result_helper_uses_key_set_digest() -> None:
     )
     assert result.key_set_digest_alg == "sha256"
     assert len(result.key_set_digest_hex) == 64
+
+
+def test_manifest_result_from_artifact_selections_emits_explicit_bridge() -> None:
+    manifest_selection = common_pb2.ArtifactSelection(
+        artifact_id="engine-manifest:rid-1",
+        logical_layout_hash=b"manifest-logical",
+        selection_hash=b"manifest-selection",
+    )
+    item_a = common_pb2.ArtifactSelection(
+        artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azA",
+        logical_layout_hash=b"logical-a",
+        selection_hash=b"selection-a",
+    )
+    item_b = common_pb2.ArtifactSelection(
+        artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+        logical_layout_hash=b"logical-b",
+        selection_hash=b"selection-b",
+    )
+
+    result = ManifestResult.from_artifact_selections(
+        engine_request_id="rid-1",
+        layout_id="layout-v1",
+        manifest_selection=manifest_selection,
+        artifact_selections=(item_b, item_a, item_b),
+    )
+
+    bridge = result.require_artifact_set_bridge()
+    assert bridge.bridge_schema == MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA
+    assert bridge.bridge_version == 1
+    assert bridge.artifact_set_ref.carrier_form == "manifest_backed"
+    assert bridge.artifact_set_ref.item_count == 2
+    assert bridge.artifact_set_ref.manifest_selection == manifest_selection
+    assert len(bridge.resolved_items) == 2
+    assert bridge.resolved_items[0].artifact_id == item_a.artifact_id
+    assert bridge.resolved_items[1].artifact_id == item_b.artifact_id
+    assert result.require_artifact_set_ref() == bridge.artifact_set_ref
+    assert result.key_set_digest_hex != bridge.artifact_set_ref.set_digest_hex
+
+
+def test_manifest_result_require_bridge_fails_closed_when_missing() -> None:
+    result = ManifestResult.from_artifact_ids(
+        engine_request_id="rid-1",
+        layout_id="layout-v1",
+        artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+    )
+
+    with pytest.raises(
+        ArtifactError, match="does not carry an explicit ManifestArtifactSetBridge"
+    ):
+        result.require_artifact_set_bridge()
 
 
 def test_seal_byte_artifact_direct_helper_matches_open_seal() -> None:

@@ -3,6 +3,7 @@ syntax = "proto3";
 package tensorcast.node_agent.v1;
 
 import "google/protobuf/timestamp.proto";
+import "tensorcast/common/v1/common.proto";
 import "tensorcast/plan/v1/plan.proto";
 
 service NodeAgentService {
@@ -33,6 +34,7 @@ message ArtifactManifestResult {
   repeated string artifact_ids = 3;
   string key_set_digest_alg = 4;
   string key_set_digest_hex = 5;
+  tensorcast.plan.v1.ManifestArtifactSetBridge manifest_bridge = 6;
 }
 
 message ArtifactPublishResult {
@@ -51,6 +53,17 @@ message ArtifactBatchResult {
   repeated ArtifactBatchOutcome outcomes = 2;
 }
 
+message ArtifactSetItemResult {
+  tensorcast.common.v1.SelectionIdentity item_identity = 1;
+  optional string artifact_id = 2;
+  OperationStatus status = 3;
+}
+
+message ArtifactSetResult {
+  string set_digest_hex = 1;
+  repeated ArtifactSetItemResult outcomes = 2;
+}
+
 message ArtifactActionResult {
   oneof result {
     ArtifactManifestResult manifest = 1;
@@ -66,6 +79,7 @@ message StepResult {
   string action = 3;
   OperationStatus status = 4;
   ArtifactActionResult artifact_result = 5;
+  ArtifactSetResult artifact_set_result = 6;
 }
 
 enum OperationState {

@@ -23,6 +23,7 @@ from tensorcast.api._register import RegisteredLease, RegistrationResult
 from tensorcast.api.context import (
     CallContext,
     CollectiveLoadGroup,
+    GovernanceContext,
     QosClass,
     SpanAttributeValue,
     context,
@@ -48,6 +49,8 @@ from tensorcast.api.plan import (
     Worker,
     plan,
 )
+from tensorcast.api.runtime import Runtime, connect, runtime
+from tensorcast.api.signals import SignalSnapshot, TensorCastSignals, WorkerStatus
 from tensorcast.api.store import (
     Artifact,
     ArtifactError,
@@ -97,6 +100,7 @@ __all__ = [
     "Artifact",
     "CallContext",
     "CollectiveLoadGroup",
+    "GovernanceContext",
     "Operation",
     "OperationError",
     "OperationState",
@@ -119,4 +123,10 @@ __all__ = [
     "TransformSpec",
     "Worker",
     "plan",
+    "Runtime",
+    "SignalSnapshot",
+    "TensorCastSignals",
+    "WorkerStatus",
+    "connect",
+    "runtime",
 ]

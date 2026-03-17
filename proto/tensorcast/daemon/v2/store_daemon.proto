@@ -5,8 +5,10 @@ package tensorcast.daemon.v2;
 import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
 import "tensorcast/operation/v1/operation.proto";
+import "tensorcast/plan/v1/plan.proto";
 
 service StoreDaemonService {
+  rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
@@ -114,6 +116,24 @@ service StoreDaemonService {
   rpc StartPersistence(StartPersistenceRequest) returns (StartPersistenceResponse) {}
   rpc QueryPersistenceStatus(QueryPersistenceStatusRequest) returns (QueryPersistenceStatusResponse) {}
   rpc WaitPersistenceStatus(WaitPersistenceStatusRequest) returns (WaitPersistenceStatusResponse) {}
+}
+
+enum PlanExecutionClass {
+  PLAN_EXECUTION_CLASS_UNSPECIFIED = 0;
+  PLAN_EXECUTION_CLASS_TERMINAL_ONLY = 1;
+  PLAN_EXECUTION_CLASS_PUBLIC_CONTINUATION_REQUIRED = 2;
+}
+
+message ExecutePlanRequest {
+  tensorcast.plan.v1.PlanSpec plan = 1;
+  PlanExecutionClass execution_class = 2;
+  bool dry_run = 3;
+}
+
+message ExecutePlanResponse {
+  string request_id = 1;
+  bool ok = 2;
+  bytes terminal_result = 3;
 }
 
 message GetServerConfigRequest {}
@@ -1109,6 +1129,10 @@ message GetWorkerStatusResponse {
   int64 uptime_seconds = 6; // 运行时间（秒）
   string worker_id = 7; // Worker ID（如已注册）
   string daemon_id = 8; // Stable daemon identity (from daemon config)
+  int64 as_of_ms = 9; // Server-side snapshot timestamp in epoch milliseconds
+  uint64 staleness_ms = 10; // Freshness budget already consumed for this snapshot
+  uint64 cache_epoch = 11; // Monotonic daemon-side freshness evidence for snapshots
+  string freshness_state = 12; // current | degraded | stale
 }
 
 // ----------------------------------------------------------------------

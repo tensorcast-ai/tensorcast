@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import weakref
+
 import pytest
 import torch
 
 import tensorcast.node_agent.executor as executor_mod
 from tensorcast.api._errors import DeviceMismatch
+from tensorcast.api.context import CallContext
+from tensorcast.api.plan import ArtifactSetRef, Plan, Worker
+from tensorcast.api.store.artifact import Artifact
+from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
     EngineAdapter,
     HydrateResult,
+    ManifestArtifactSetBridge,
     ManifestResult,
     PublishResult,
 )
@@ -27,9 +34,17 @@ class _DaemonStub:
         self.materialize_timeout_s: float | None = None
         self.placement_timeout_s: float | None = None
         self.release_timeout_s: float | None = None
+        self.materialized_artifact_ids: list[str] = []
+        self.wait_for_completion_values: list[bool] = []
 
     def materialize_by_artifact_id_v2(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.materialize_timeout_s = kwargs.get("timeout_s")
+        selection = kwargs.get("selection")
+        if selection is not None:
+            self.materialized_artifact_ids.append(str(selection.artifact_id))
+        self.wait_for_completion_values.append(
+            bool(kwargs.get("wait_for_completion", True))
+        )
         return None
 
     def create_placement_lease(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -51,6 +66,10 @@ def _selection() -> common_pb2.ArtifactSelection:
         logical_layout_hash=b"logical",
         selection_hash=b"selection",
     )
+
+
+def _canonical_index_bytes() -> bytes:
+    return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
 
 
 def test_node_agent_executes_instance_transform_into() -> None:
@@ -208,6 +227,166 @@ def test_node_agent_prefetch_reports_device_mismatch_without_raising(
     assert "device map unavailable" in step_result.status.message
 
 
+def test_node_agent_executes_prefetch_set_from_plan_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _DaemonStub()
+    monkeypatch.setattr(executor_mod, "device_uuid_for", lambda _device_id: "gpu-0")
+
+    class _StoreStub:
+        closed = False
+        _runtime = None
+
+    canonical_bytes = _canonical_index_bytes()
+    store = _StoreStub()
+    artifacts = [
+        Artifact(
+            store_ref=weakref.ref(store),
+            artifact_id=f"mi2:set:{index:04d}",
+            canonical_index_bytes=canonical_bytes,
+            canonical_index=canonical_index_from_bytes(canonical_bytes),
+        )
+        for index in range(300)
+    ]
+    plan = Plan(CallContext(request_id="req-prefetch-set", idempotency_key="idem-set"))
+    worker = Worker(
+        worker_id="worker-1",
+        daemon_address="127.0.0.1:50051",
+        daemon_id="daemon-1",
+    )
+    plan.on_worker(worker).prefetch_many(artifacts, device=0)
+    spec = plan.to_spec()
+
+    assert spec.steps[0].action.WhichOneof("kind") == "prefetch_set"
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    result = executor.execute_plan(spec)
+
+    assert result.ok is True
+    step_result = result.steps["step-0001"]
+    assert step_result.status.state == "success"
+    assert step_result.artifact_set_result is not None
+    assert len(step_result.artifact_set_result.outcomes) == 300
+    assert all(
+        outcome.status is not None and outcome.status.state == "success"
+        for outcome in step_result.artifact_set_result.outcomes
+    )
+    assert daemon.materialized_artifact_ids == [
+        f"mi2:set:{index:04d}" for index in range(300)
+    ]
+    assert daemon.wait_for_completion_values
+    assert all(daemon.wait_for_completion_values)
+
+
+def test_node_agent_executes_manifest_backed_prefetch_set_with_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _DaemonStub()
+    monkeypatch.setattr(executor_mod, "device_uuid_for", lambda _device_id: "gpu-0")
+    manifest_result = ManifestResult.from_artifact_selections(
+        engine_request_id="rid-bridge",
+        layout_id="layout-v1",
+        manifest_selection=common_pb2.ArtifactSelection(
+            artifact_id="engine-manifest:rid-bridge",
+            logical_layout_hash=b"manifest-logical",
+            selection_hash=b"manifest-selection",
+        ),
+        artifact_selections=tuple(
+            common_pb2.ArtifactSelection(
+                artifact_id=f"mi2:bridge:{index:02d}",
+                logical_layout_hash=f"logical-{index:02d}".encode("utf-8"),
+                selection_hash=f"selection-{index:02d}".encode("utf-8"),
+            )
+            for index in range(8)
+        ),
+    )
+    plan = Plan(CallContext(request_id="req-manifest-prefetch", idempotency_key="idem"))
+    worker = Worker(
+        worker_id="worker-1",
+        daemon_address="127.0.0.1:50051",
+        daemon_id="daemon-1",
+    )
+    plan.on_worker(worker).prefetch_manifest_result(manifest_result, device=0)
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    result = executor.execute_plan(plan.to_spec())
+
+    assert result.ok is True
+    step_result = result.steps["step-0001"]
+    assert step_result.status.state == "success"
+    assert step_result.artifact_set_result is not None
+    assert len(step_result.artifact_set_result.outcomes) == 8
+    assert daemon.materialized_artifact_ids == [
+        f"mi2:bridge:{index:02d}" for index in range(8)
+    ]
+
+
+def test_node_agent_prefetch_set_fails_closed_on_unsupported_manifest_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _DaemonStub()
+    monkeypatch.setattr(executor_mod, "device_uuid_for", lambda _device_id: "gpu-0")
+    manifest_result = ManifestResult.from_artifact_selections(
+        engine_request_id="rid-bridge",
+        layout_id="layout-v1",
+        manifest_selection=common_pb2.ArtifactSelection(
+            artifact_id="engine-manifest:rid-bridge",
+            logical_layout_hash=b"manifest-logical",
+            selection_hash=b"manifest-selection",
+        ),
+        artifact_selections=(
+            common_pb2.ArtifactSelection(
+                artifact_id="mi2:bridge:a",
+                logical_layout_hash=b"logical-a",
+                selection_hash=b"selection-a",
+            ),
+        ),
+    )
+    bridge = manifest_result.require_artifact_set_bridge()
+    unsupported_bridge = ManifestArtifactSetBridge(
+        bridge_schema="tensorcast.unsupported_bridge",
+        bridge_version=bridge.bridge_version,
+        artifact_set_ref=bridge.artifact_set_ref,
+        resolved_items=bridge.resolved_items,
+    )
+    plan = Plan(CallContext(request_id="req-manifest-prefetch", idempotency_key="idem"))
+    worker = Worker(
+        worker_id="worker-1",
+        daemon_address="127.0.0.1:50051",
+        daemon_id="daemon-1",
+    )
+    plan.on_worker(worker).prefetch_set(
+        bridge.artifact_set_ref,
+        device=0,
+        manifest_bridge=unsupported_bridge,
+    )
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    result = executor.execute_plan(plan.to_spec())
+
+    assert result.ok is False
+    assert result.steps["step-0001"].status.state == "failed"
+    assert "unsupported" in str(result.steps["step-0001"].status.message)
+
+
 def test_node_agent_executes_artifact_actions() -> None:
     observed: dict[str, list[str]] = {
         "manifest": [],
@@ -333,18 +512,40 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
     )
 
     def _manifest(rid: str, _ctx):  # noqa: ANN001
-        return ManifestResult.from_artifact_ids(
+        return ManifestResult.from_artifact_selections(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+            manifest_selection=common_pb2.ArtifactSelection(
+                artifact_id=f"engine-manifest:{rid}",
+                logical_layout_hash=b"manifest-logical",
+                selection_hash=b"manifest-selection",
+            ),
+            artifact_selections=(
+                common_pb2.ArtifactSelection(
+                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                    logical_layout_hash=b"logical-a",
+                    selection_hash=b"selection-a",
+                ),
+            ),
         )
 
     def _publish(rid: str, ttl_ms: int | None, _sealed, _ctx):  # noqa: ANN001
         _ = ttl_ms
-        manifest = ManifestResult.from_artifact_ids(
+        manifest = ManifestResult.from_artifact_selections(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+            manifest_selection=common_pb2.ArtifactSelection(
+                artifact_id=f"engine-manifest:{rid}",
+                logical_layout_hash=b"manifest-logical",
+                selection_hash=b"manifest-selection",
+            ),
+            artifact_selections=(
+                common_pb2.ArtifactSelection(
+                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                    logical_layout_hash=b"logical-a",
+                    selection_hash=b"selection-a",
+                ),
+            ),
         )
         return PublishResult(
             manifest=manifest,
@@ -383,20 +584,82 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
     )
     servicer = NodeAgentServicer(executor)
     response = servicer.ExecutePlan(
-        node_agent_pb2.ExecutePlanRequest(plan=spec), None  # type: ignore[arg-type]
+        node_agent_pb2.ExecutePlanRequest(plan=spec),
+        None,  # type: ignore[arg-type]
     )
 
     assert response.ok is True
     assert response.steps[0].HasField("artifact_result")
     assert response.steps[0].artifact_result.manifest.engine_request_id == "rid-123"
+    assert response.steps[0].artifact_result.manifest.HasField("manifest_bridge")
     assert response.steps[1].HasField("artifact_result")
     assert response.steps[1].artifact_result.publish.manifest.layout_id == "layout-v1"
+    assert response.steps[1].artifact_result.publish.manifest.HasField(
+        "manifest_bridge"
+    )
     assert (
         response.steps[1].artifact_result.publish.put_outcomes[0].message == "created"
     )
 
 
-def test_node_agent_publish_actions_share_idempotency_key() -> None:
+def test_node_agent_servicer_serializes_artifact_set_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _DaemonStub()
+    monkeypatch.setattr(executor_mod, "device_uuid_for", lambda _device_id: "gpu-0")
+    spec = plan_pb2.PlanSpec(plan_id="plan-node-agent-set-proto")
+    spec.context.request_id = "req-node-agent-set-proto"
+    step = spec.steps.add()
+    step.step_id = "s1"
+    step.target.target_type = plan_pb2.TARGET_TYPE_WORKER
+    step.target.target_id = "daemon-1"
+    action = step.action.prefetch_set
+    action.device_id = 0
+    artifact_set = ArtifactSetRef.inline(
+        (
+            common_pb2.ArtifactSelection(
+                artifact_id="mi2:set:a",
+                logical_layout_hash=b"logical-a",
+                selection_hash=b"selection-a",
+            ),
+            common_pb2.ArtifactSelection(
+                artifact_id="mi2:set:b",
+                logical_layout_hash=b"logical-b",
+                selection_hash=b"selection-b",
+            ),
+        )
+    )
+    action.artifact_set.CopyFrom(artifact_set.to_proto())
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    servicer = NodeAgentServicer(executor)
+    response = servicer.ExecutePlan(
+        node_agent_pb2.ExecutePlanRequest(plan=spec),
+        None,  # type: ignore[arg-type]
+    )
+
+    assert response.ok is True
+    assert response.steps[0].HasField("artifact_set_result")
+    assert (
+        response.steps[0].artifact_set_result.set_digest_hex
+        == artifact_set.set_digest_hex
+    )
+    assert len(response.steps[0].artifact_set_result.outcomes) == 2
+    assert (
+        response.steps[0].artifact_set_result.outcomes[0].status.state
+        == node_agent_pb2.OPERATION_STATE_SUCCESS
+    )
+
+
+def test_node_agent_publish_actions_share_idempotency_key_without_request_identity() -> (
+    None
+):
     adapter = EngineAdapter(
         instance_id="inst-1", engine="test", register_identity_transform=False
     )
@@ -431,7 +694,7 @@ def test_node_agent_publish_actions_share_idempotency_key() -> None:
     second_step.step_id = "s1"
     second_step.target.target_type = plan_pb2.TARGET_TYPE_INSTANCE
     second_step.target.target_id = "inst-1"
-    second_step.action.publish.engine_request_id = "rid-123"
+    second_step.action.publish.engine_request_id = "rid-456"
     second_step.action.publish.ttl_ms = 123
 
     executor = NodeAgentExecutor(

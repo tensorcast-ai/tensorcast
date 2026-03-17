@@ -19,6 +19,15 @@ class CollectiveLoadGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class GovernanceContext:
+    """Typed low-cardinality governance hints propagated with a plan."""
+
+    lane: str | None = None
+    policy_version: int | None = None
+    staleness_budget_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CallContext:
     """Pure per-call container for deadlines, idempotency, and execution hints."""
 
@@ -28,6 +37,7 @@ class CallContext:
     idempotency_key: str | None = None
     tags: Mapping[str, SpanAttributeValue] | None = None
     collective: CollectiveLoadGroup | None = None
+    governance: GovernanceContext | None = None
 
 
 def context(
@@ -38,6 +48,7 @@ def context(
     idempotency_key: str | None = None,
     tags: Mapping[str, SpanAttributeValue] | None = None,
     collective: CollectiveLoadGroup | None = None,
+    governance: GovernanceContext | None = None,
 ) -> CallContext:
     return CallContext(
         request_id=request_id,
@@ -46,12 +57,14 @@ def context(
         idempotency_key=idempotency_key,
         tags=tags,
         collective=collective,
+        governance=governance,
     )
 
 
 __all__ = [
     "CallContext",
     "CollectiveLoadGroup",
+    "GovernanceContext",
     "QosClass",
     "SpanAttributeValue",
     "context",

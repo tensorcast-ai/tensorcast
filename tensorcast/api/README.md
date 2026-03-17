@@ -68,9 +68,16 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
   Prefetch defaults to `NO_LEASE` and does not export handles to the caller; handle-exporting APIs remain PID/lease-bound.
 - `ctx.deadline_ms` is enforced end-to-end: materialization retries and polling operations clamp their budgets to the
   remaining deadline, and worker/agent RPCs inherit the same timeout budget.
+- `CallContext.governance=GovernanceContext(...)` carries typed low-cardinality governance transport for programmable
+  plans (`lane`, `policy_version`, `staleness_budget_ms`) without overloading free-form tags.
 - `tensorcast.plan(ctx)` builds a programmable orchestration plan. Plan steps target stable worker identities
   (`daemon_id`) and return `PlanStepRef` handles; `Plan.run()` executes with bounded concurrency and returns a
   `PlanResult` that aggregates per-step `OperationStatus`.
+- `tensorcast.connect(daemon_address=...)` binds one process runtime to one daemon ingress endpoint. When an active
+  runtime exists, `tensorcast.plan(ctx)` submits through that daemon using the same `PlanSpec`; without one, it keeps
+  the local `Plan.run()` behavior for tests and in-cluster debugging.
+- `runtime.signals().get_worker_status()` provides a daemon-backed low-cardinality snapshot for the connected worker
+  with explicit snapshot metadata (`SignalSnapshot`).
 
 ## Materialization v2 (descriptor streaming)
 

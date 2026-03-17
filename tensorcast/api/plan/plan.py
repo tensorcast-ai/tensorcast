@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar
 
 from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID
+from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
 from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import (
@@ -20,6 +21,14 @@ from tensorcast.api.operation import (
     OperationError,
     OperationStatus,
     OperationTimeoutError,
+)
+from tensorcast.api.plan.artifact_set import (
+    ArtifactSetItemResult,
+    ArtifactSetRef,
+    ArtifactSetResult,
+    resolve_artifact_set_ref,
+    selection_identity_from_proto,
+    summarize_artifact_set_outcomes,
 )
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
@@ -34,6 +43,7 @@ from tensorcast.engine_adapter.kvcache_adapter import (
     BatchOutcome,
     BatchResult,
     HydrateResult,
+    ManifestArtifactSetBridge,
     ManifestResult,
     PublishResult,
 )
@@ -46,6 +56,14 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
+PlanExecutionClass = str
+
+_TERMINAL_ONLY_EXECUTION_CLASS = "terminal_only"
+_PUBLIC_CONTINUATION_REQUIRED_EXECUTION_CLASS = "public_continuation_required"
+_SUPPORTED_EXECUTION_CLASSES = {
+    _TERMINAL_ONLY_EXECUTION_CLASS,
+    _PUBLIC_CONTINUATION_REQUIRED_EXECUTION_CLASS,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +99,7 @@ class PlanStepResult:
     status: OperationStatus
     value: Any | None = None
     artifact_result: ArtifactActionResult | None = None
+    artifact_set_result: ArtifactSetResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +122,19 @@ class PlanResult:
                 if step.HasField("artifact_result")
                 else None
             )
+            artifact_set_result = (
+                _artifact_set_result_from_proto(step.artifact_set_result)
+                if step.HasField("artifact_set_result")
+                else None
+            )
             steps[str(step.step_id)] = PlanStepResult(
                 step_id=str(step.step_id),
                 target_id=str(step.target_id),
                 action=str(step.action),
                 status=_operation_status_from_node_agent_proto(step.status),
-                value=None,
+                value=artifact_set_result,
                 artifact_result=artifact_result,
+                artifact_set_result=artifact_set_result,
             )
         return cls(
             ok=bool(response.ok),
@@ -144,6 +169,14 @@ class _ArtifactSelection:
 @dataclass(frozen=True, slots=True)
 class _PrefetchAction:
     artifact: Artifact
+    device: str | int
+    device_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PrefetchSetAction:
+    artifact_set: ArtifactSetRef
+    manifest_bridge: ManifestArtifactSetBridge | None
     device: str | int
     device_id: int
 
@@ -198,6 +231,7 @@ class _EvictLocalAction:
 
 _PlanAction = (
     _PrefetchAction
+    | _PrefetchSetAction
     | _PinAction
     | _UnpinAction
     | _TransformIntoAction
@@ -225,6 +259,7 @@ def _derive_action_idempotency_key(
     selection: _ArtifactSelection,
     device_id: int | None,
     ttl_ms: int | None,
+    extra: str | None = None,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(base_key.encode("utf-8"))
@@ -242,6 +277,9 @@ def _derive_action_idempotency_key(
     digest.update(selection.logical_layout_hash)
     digest.update(b"|selection=")
     digest.update(selection.selection_hash)
+    if extra:
+        digest.update(b"|extra=")
+        digest.update(extra.encode("utf-8"))
     return f"tc.plan.action.v1:{digest.hexdigest()}"
 
 
@@ -282,6 +320,11 @@ def _manifest_result_from_proto(
         artifact_ids=tuple(str(item) for item in result.artifact_ids),
         key_set_digest_alg=str(result.key_set_digest_alg),
         key_set_digest_hex=str(result.key_set_digest_hex),
+        artifact_set_bridge=(
+            ManifestArtifactSetBridge.from_proto(result.manifest_bridge)
+            if result.HasField("manifest_bridge")
+            else None
+        ),
     )
 
 
@@ -324,6 +367,24 @@ def _artifact_result_from_proto(
             ),
         )
     return None
+
+
+def _artifact_set_result_from_proto(
+    result: node_agent_pb2.ArtifactSetResult,
+) -> ArtifactSetResult:
+    return ArtifactSetResult(
+        set_digest_hex=str(result.set_digest_hex),
+        outcomes=tuple(
+            ArtifactSetItemResult(
+                item_identity=selection_identity_from_proto(item.item_identity),
+                artifact_id=(
+                    str(item.artifact_id) if item.HasField("artifact_id") else None
+                ),
+                status=_operation_status_from_node_agent_proto(item.status),
+            )
+            for item in result.outcomes
+        ),
+    )
 
 
 def _operation_status_from_node_agent_proto(
@@ -500,6 +561,70 @@ def _clone_artifact_for_store(artifact: Artifact, store: "Store") -> Artifact:
     return clone
 
 
+def _artifact_from_selection_proto(
+    *,
+    store: "Store",
+    selection: common_pb2.ArtifactSelection,
+) -> Artifact:
+    view_spec = (
+        _view_spec_from_proto(selection.view_spec)
+        if selection.HasField("view_spec")
+        else None
+    )
+    artifact = Artifact(
+        store_ref=weakref.ref(store),
+        artifact_id=str(selection.artifact_id),
+        view_spec=view_spec,
+    )
+    if selection.tensor_names:
+        artifact = artifact.subset(list(selection.tensor_names))
+    return artifact
+
+
+def _view_spec_from_proto(
+    view_spec: common_pb2.ViewSpec,
+) -> ViewSpecBuildResult | None:
+    if view_spec is None or not view_spec.tensors:
+        return None
+    tensor_ops: dict[str, tuple[NarrowOp | TransposeOp, ...]] = {}
+    for name, ops in view_spec.tensors.items():
+        converted = []
+        for op in ops.ops:
+            if op.HasField("narrow"):
+                converted.append(
+                    NarrowOp(
+                        dim=int(op.narrow.dim),
+                        start=int(op.narrow.start),
+                        length=int(op.narrow.length),
+                    )
+                )
+            elif op.HasField("transpose"):
+                converted.append(
+                    TransposeOp(
+                        dim0=int(op.transpose.dim0),
+                        dim1=int(op.transpose.dim1),
+                    )
+                )
+        tensor_ops[str(name)] = tuple(converted)
+    return ViewSpecBuildResult(proto=view_spec, tensor_ops=tensor_ops)
+
+
+def _selection_from_proto(
+    selection: common_pb2.ArtifactSelection,
+) -> _ArtifactSelection:
+    return _ArtifactSelection(
+        artifact_id=str(selection.artifact_id),
+        view_id=str(selection.view_id),
+        logical_layout_hash=bytes(selection.logical_layout_hash),
+        selection_hash=bytes(selection.selection_hash),
+        view_subset_hash=(
+            bytes(selection.view_subset_hash) if selection.view_subset_hash else None
+        ),
+        view_spec=selection.view_spec if selection.HasField("view_spec") else None,
+        tensor_names=tuple(selection.tensor_names) if selection.tensor_names else None,
+    )
+
+
 def _status_from_exception(exc: Exception) -> OperationStatus:
     now_ms = int(time.time() * 1000)
     if isinstance(exc, OperationTimeoutError):
@@ -558,6 +683,71 @@ class WorkerStepBuilder:
             action=_PrefetchAction(
                 artifact=art, device=device_input, device_id=device_id
             ),
+            depends_on=depends_on,
+        )
+
+    def prefetch_set(
+        self,
+        art_set: ArtifactSetRef,
+        *,
+        device: str | int,
+        manifest_bridge: ManifestArtifactSetBridge | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[ArtifactSetResult]:
+        device_id = _resolve_device_id(device=device, allow_cpu=True)
+        if (
+            manifest_bridge is not None
+            and manifest_bridge.artifact_set_ref.to_proto().SerializeToString(
+                deterministic=True
+            )
+            != art_set.to_proto().SerializeToString(deterministic=True)
+        ):
+            raise ArtifactError(
+                "ManifestArtifactSetBridge.artifact_set_ref must match prefetch_set ArtifactSetRef",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return self._plan._add_step(
+            target=self._worker,
+            action=_PrefetchSetAction(
+                artifact_set=art_set,
+                manifest_bridge=manifest_bridge,
+                device=device,
+                device_id=device_id,
+            ),
+            depends_on=depends_on,
+        )
+
+    def prefetch_many(
+        self,
+        arts: Sequence[Artifact],
+        *,
+        device: str | int,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[ArtifactSetResult]:
+        artifact_set = ArtifactSetRef.inline(
+            tuple(
+                self._plan._selection_proto_for_artifact(artifact) for artifact in arts
+            )
+        )
+        return self.prefetch_set(
+            artifact_set,
+            device=device,
+            depends_on=depends_on,
+        )
+
+    def prefetch_manifest_result(
+        self,
+        manifest_result: ManifestResult,
+        *,
+        device: str | int,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[ArtifactSetResult]:
+        manifest_bridge = manifest_result.require_artifact_set_bridge()
+        return self.prefetch_set(
+            manifest_bridge.artifact_set_ref,
+            device=device,
+            manifest_bridge=manifest_bridge,
             depends_on=depends_on,
         )
 
@@ -805,8 +995,22 @@ class InstanceStepBuilder:
 
 
 class Plan:
-    def __init__(self, ctx: CallContext) -> None:
+    def __init__(
+        self,
+        ctx: CallContext,
+        *,
+        runtime: Any | None = None,
+        execution_class: PlanExecutionClass = _TERMINAL_ONLY_EXECUTION_CLASS,
+    ) -> None:
+        if execution_class not in _SUPPORTED_EXECUTION_CLASSES:
+            raise ArtifactError(
+                "execution_class must be 'terminal_only' or 'public_continuation_required'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
         self._ctx = ctx
+        self._runtime = runtime
+        self._execution_class = execution_class
         self._request_id = ctx.request_id or uuid.uuid4().hex
         if ctx.idempotency_key:
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.plan.v1")
@@ -866,6 +1070,13 @@ class Plan:
         self._selection_cache[key] = selection
         return selection
 
+    def _selection_proto_for_artifact(
+        self, artifact: Artifact
+    ) -> common_pb2.ArtifactSelection:
+        proto = common_pb2.ArtifactSelection()
+        _fill_selection_proto(self._selection_for_artifact(artifact), proto)
+        return proto
+
     def _call_context_proto(self) -> plan_pb2.CallContext:
         qos = self._ctx.qos
         qos_value = plan_pb2.QOS_CLASS_INTERACTIVE
@@ -884,9 +1095,25 @@ class Plan:
             proto.tags.update({str(k): str(v) for k, v in self._ctx.tags.items()})
         return proto
 
+    def _governance_proto(self) -> plan_pb2.GovernanceContext | None:
+        governance = self._ctx.governance
+        if governance is None:
+            return None
+        proto = plan_pb2.GovernanceContext()
+        if governance.lane:
+            proto.lane = str(governance.lane)
+        if governance.policy_version is not None:
+            proto.policy_version = int(governance.policy_version)
+        if governance.staleness_budget_ms is not None:
+            proto.staleness_budget_ms = int(governance.staleness_budget_ms)
+        return proto
+
     def to_spec(self) -> plan_pb2.PlanSpec:
         spec = plan_pb2.PlanSpec(plan_id=self._plan_id)
         spec.context.CopyFrom(self._call_context_proto())
+        governance = self._governance_proto()
+        if governance is not None:
+            spec.governance.CopyFrom(governance)
         for step in self._steps:
             step_msg = spec.steps.add()
             step_msg.step_id = step.step_id
@@ -902,6 +1129,16 @@ class Plan:
                 prefetch_action = step_msg.action.prefetch
                 _fill_selection_proto(selection, prefetch_action.selection)
                 prefetch_action.device_id = int(step.action.device_id)
+            elif isinstance(step.action, _PrefetchSetAction):
+                prefetch_set_action = step_msg.action.prefetch_set
+                prefetch_set_action.artifact_set.CopyFrom(
+                    step.action.artifact_set.to_proto()
+                )
+                prefetch_set_action.device_id = int(step.action.device_id)
+                if step.action.manifest_bridge is not None:
+                    prefetch_set_action.manifest_bridge.CopyFrom(
+                        step.action.manifest_bridge.to_proto()
+                    )
             elif isinstance(step.action, _PinAction):
                 selection = self._selection_for_artifact(step.action.artifact)
                 pin_action = step_msg.action.pin_device_residency
@@ -929,7 +1166,7 @@ class Plan:
                 transform_register_action.out_key = str(step.action.out_key)
                 if step.action.policy is not None:
                     transform_register_action.policy.CopyFrom(
-                        step.action.policy.to_proto()
+                        _store_policy_to_plan_proto(step.action.policy)
                     )
             elif isinstance(step.action, _ManifestAction):
                 manifest_action = step_msg.action.manifest
@@ -971,6 +1208,7 @@ class Plan:
         selection: _ArtifactSelection,
         device_id: int | None,
         ttl_ms: int | None,
+        extra: str | None = None,
     ) -> CallContext:
         if not self._ctx.idempotency_key:
             return self._ctx
@@ -981,6 +1219,7 @@ class Plan:
             selection=selection,
             device_id=device_id,
             ttl_ms=ttl_ms,
+            extra=extra,
         )
         return CallContext(
             request_id=self._request_id,
@@ -1041,6 +1280,60 @@ class Plan:
                     action="prefetch",
                     status=status,
                     value=prefetch_value,
+                )
+            if isinstance(step.action, _PrefetchSetAction):
+                resolved_items = resolve_artifact_set_ref(
+                    step.action.artifact_set,
+                    manifest_resolver=(
+                        step.action.manifest_bridge.resolve_artifact_set
+                        if step.action.manifest_bridge is not None
+                        else None
+                    ),
+                )
+                outcomes: list[ArtifactSetItemResult] = []
+                for index, item in enumerate(resolved_items):
+                    selection = _selection_from_proto(item.selection)
+                    ctx = self._action_context(
+                        action="prefetch_set",
+                        target_id=target_id,
+                        selection=selection,
+                        device_id=step.action.device_id,
+                        ttl_ms=None,
+                        extra=step.action.artifact_set.set_digest_hex,
+                    )
+                    bound = _artifact_from_selection_proto(
+                        store=store,
+                        selection=item.selection,
+                    )
+                    prefetch_op = bound.prefetch(device=step.action.device, ctx=ctx)
+                    with op_lock:
+                        op_registry[f"{step.step_id}:{index}"] = prefetch_op
+                    try:
+                        prefetch_op.wait()
+                        item_status = prefetch_op.status()
+                    except Exception as exc:  # noqa: BLE001
+                        item_status = _status_from_exception(exc)
+                    outcomes.append(
+                        ArtifactSetItemResult(
+                            item_identity=item.item_identity,
+                            artifact_id=item.item_identity.artifact_id,
+                            status=item_status,
+                        )
+                    )
+                artifact_set_result = ArtifactSetResult(
+                    set_digest_hex=step.action.artifact_set.set_digest_hex,
+                    outcomes=tuple(outcomes),
+                )
+                return PlanStepResult(
+                    step_id=step.step_id,
+                    target_id=target_id,
+                    action="prefetch_set",
+                    status=summarize_artifact_set_outcomes(
+                        action_name="prefetch_set",
+                        outcomes=artifact_set_result.outcomes,
+                    ),
+                    value=artifact_set_result,
+                    artifact_set_result=artifact_set_result,
                 )
             if isinstance(step.action, _PinAction):
                 selection = self._selection_for_artifact(step.action.artifact)
@@ -1123,6 +1416,14 @@ class Plan:
         concurrency: int = 16,
         raise_on_error: bool = True,
     ) -> PlanResult:
+        if self._runtime is not None:
+            result = self._runtime.execute_plan(
+                self.to_spec(),
+                execution_class=self._execution_class,
+            )
+            if raise_on_error and not result.ok:
+                raise PlanFailedError(result)
+            return result
         if concurrency <= 0:
             raise ArtifactError(
                 "concurrency must be positive",
@@ -1251,9 +1552,77 @@ def _fill_selection_proto(
         target.tensor_names.extend(selection.tensor_names)
 
 
+def _store_policy_to_plan_proto(policy: StorePolicy) -> plan_pb2.StorePolicy:
+    from tensorcast.api._config import (
+        OverflowPolicy,
+        PolicyLayout,
+        PolicyScope,
+        PolicyTier,
+        RetentionPolicy,
+        StorePolicyProfile,
+    )
+
+    profile_map = {
+        StorePolicyProfile.CACHE: plan_pb2.POLICY_PROFILE_CACHE,
+        StorePolicyProfile.DURABLE: plan_pb2.POLICY_PROFILE_DURABLE,
+        StorePolicyProfile.HA: plan_pb2.POLICY_PROFILE_HA,
+        StorePolicyProfile.COLD: plan_pb2.POLICY_PROFILE_COLD,
+        StorePolicyProfile.PINNED: plan_pb2.POLICY_PROFILE_PINNED,
+        StorePolicyProfile.WARM: plan_pb2.POLICY_PROFILE_WARM,
+    }
+    tier_map = {
+        PolicyTier.STABLE_DRAM: plan_pb2.POLICY_TIER_STABLE_DRAM,
+        PolicyTier.SHARED_DISK: plan_pb2.POLICY_TIER_SHARED_DISK,
+    }
+    scope_map = {
+        PolicyScope.LOCAL: plan_pb2.POLICY_SCOPE_LOCAL,
+        PolicyScope.REMOTE: plan_pb2.POLICY_SCOPE_REMOTE,
+        PolicyScope.ANY: plan_pb2.POLICY_SCOPE_ANY,
+    }
+    retention_map = {
+        RetentionPolicy.BEST_EFFORT: plan_pb2.RETENTION_POLICY_BEST_EFFORT,
+        RetentionPolicy.TTL: plan_pb2.RETENTION_POLICY_TTL,
+        RetentionPolicy.PINNED: plan_pb2.RETENTION_POLICY_PINNED,
+    }
+    overflow_map = {
+        OverflowPolicy.EVICT: plan_pb2.OVERFLOW_POLICY_EVICT,
+        OverflowPolicy.SPILL: plan_pb2.OVERFLOW_POLICY_SPILL,
+        OverflowPolicy.REJECT: plan_pb2.OVERFLOW_POLICY_REJECT,
+    }
+    layout_map = {
+        PolicyLayout.AUTO: plan_pb2.POLICY_LAYOUT_AUTO,
+        PolicyLayout.UNSHARDED: plan_pb2.POLICY_LAYOUT_UNSHARDED,
+        PolicyLayout.SHARDED: plan_pb2.POLICY_LAYOUT_SHARDED,
+    }
+
+    def _tier_proto(spec) -> plan_pb2.TierSpec:  # noqa: ANN001
+        message = plan_pb2.TierSpec(
+            tier=tier_map[spec.tier],
+            scope=scope_map[spec.scope],
+            min_replicas=int(spec.min_replicas),
+            retention_policy=retention_map[spec.retention_policy],
+        )
+        if spec.retention_ttl_ms is not None:
+            message.retention_ttl_ms = int(spec.retention_ttl_ms)
+        return message
+
+    message = plan_pb2.StorePolicy(
+        overflow_policy=overflow_map[policy.overflow_policy],
+        layout=layout_map[policy.layout],
+    )
+    if policy.profile is not None:
+        message.profile = profile_map[policy.profile]
+    message.must.extend(_tier_proto(spec) for spec in policy.must)
+    message.should.extend(_tier_proto(spec) for spec in policy.should)
+    message.may.extend(_tier_proto(spec) for spec in policy.may)
+    return message
+
+
 def _action_name(action: _PlanAction) -> str:
     if isinstance(action, _PrefetchAction):
         return "prefetch"
+    if isinstance(action, _PrefetchSetAction):
+        return "prefetch_set"
     if isinstance(action, _PinAction):
         return "pin_device_residency"
     if isinstance(action, _UnpinAction):
@@ -1299,6 +1668,11 @@ def _cancelled_result(step: _PlanStep, message: str) -> PlanStepResult:
 
 
 def plan(ctx: CallContext) -> Plan:
+    from tensorcast.api.runtime import get_active_runtime
+
+    active_runtime = get_active_runtime()
+    if active_runtime is not None:
+        return active_runtime.plan(ctx)
     return Plan(ctx)
 
 
@@ -1310,6 +1684,7 @@ __all__ = [
     "PlanResult",
     "PlanStepRef",
     "PlanStepResult",
+    "PlanExecutionClass",
     "Worker",
     "plan",
 ]

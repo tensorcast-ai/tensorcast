@@ -3,7 +3,6 @@ syntax = "proto3";
 package tensorcast.plan.v1;
 
 import "tensorcast/common/v1/common.proto";
-import "tensorcast/daemon/v2/store_daemon.proto";
 
 message CallContext {
   string request_id = 1;
@@ -11,6 +10,12 @@ message CallContext {
   optional uint64 deadline_ms = 3;
   string idempotency_key = 4;
   map<string, string> tags = 5;
+}
+
+message GovernanceContext {
+  string lane = 1;
+  optional uint64 policy_version = 2;
+  optional uint64 staleness_budget_ms = 3;
 }
 
 enum QosClass {
@@ -24,6 +29,68 @@ enum TargetType {
   TARGET_TYPE_UNSPECIFIED = 0;
   TARGET_TYPE_WORKER = 1;
   TARGET_TYPE_INSTANCE = 2;
+  TARGET_TYPE_CLUSTER = 3;
+}
+
+enum PolicyProfile {
+  POLICY_PROFILE_UNSPECIFIED = 0;
+  POLICY_PROFILE_CACHE = 1;
+  POLICY_PROFILE_DURABLE = 2;
+  POLICY_PROFILE_HA = 3;
+  POLICY_PROFILE_COLD = 4;
+  POLICY_PROFILE_PINNED = 5;
+  POLICY_PROFILE_WARM = 6;
+}
+
+enum PolicyTier {
+  POLICY_TIER_UNSPECIFIED = 0;
+  POLICY_TIER_STABLE_DRAM = 1;
+  POLICY_TIER_SHARED_DISK = 2;
+}
+
+enum PolicyScope {
+  POLICY_SCOPE_UNSPECIFIED = 0;
+  POLICY_SCOPE_LOCAL = 1;
+  POLICY_SCOPE_REMOTE = 2;
+  POLICY_SCOPE_ANY = 3;
+}
+
+enum RetentionPolicy {
+  RETENTION_POLICY_UNSPECIFIED = 0;
+  RETENTION_POLICY_BEST_EFFORT = 1;
+  RETENTION_POLICY_TTL = 2;
+  RETENTION_POLICY_PINNED = 3;
+}
+
+enum OverflowPolicy {
+  OVERFLOW_POLICY_UNSPECIFIED = 0;
+  OVERFLOW_POLICY_EVICT = 1;
+  OVERFLOW_POLICY_SPILL = 2;
+  OVERFLOW_POLICY_REJECT = 3;
+}
+
+enum PolicyLayout {
+  POLICY_LAYOUT_UNSPECIFIED = 0;
+  POLICY_LAYOUT_AUTO = 1;
+  POLICY_LAYOUT_UNSHARDED = 2;
+  POLICY_LAYOUT_SHARDED = 3;
+}
+
+message TierSpec {
+  PolicyTier tier = 1;
+  PolicyScope scope = 2;
+  uint32 min_replicas = 3;
+  RetentionPolicy retention_policy = 4;
+  optional uint64 retention_ttl_ms = 5;
+}
+
+message StorePolicy {
+  PolicyProfile profile = 1;
+  repeated TierSpec must = 2;
+  repeated TierSpec should = 3;
+  repeated TierSpec may = 4;
+  OverflowPolicy overflow_policy = 5;
+  PolicyLayout layout = 6;
 }
 
 message TargetRef {
@@ -34,6 +101,27 @@ message TargetRef {
 message PrefetchAction {
   tensorcast.common.v1.ArtifactSelection selection = 1;
   int32 device_id = 2;
+}
+
+message ArtifactSetRef {
+  string set_digest_hex = 1;
+  uint64 item_count = 2;
+  string carrier_form = 3;
+  repeated tensorcast.common.v1.ArtifactSelection inline_items = 4;
+  tensorcast.common.v1.ArtifactSelection manifest_selection = 5;
+}
+
+message ManifestArtifactSetBridge {
+  string bridge_schema = 1;
+  uint32 bridge_version = 2;
+  ArtifactSetRef artifact_set_ref = 3;
+  repeated tensorcast.common.v1.ArtifactSelection resolved_items = 4;
+}
+
+message PrefetchSetAction {
+  ArtifactSetRef artifact_set = 1;
+  int32 device_id = 2;
+  ManifestArtifactSetBridge manifest_bridge = 3;
 }
 
 message PinDeviceResidencyAction {
@@ -80,7 +168,7 @@ message TransformRegisterAction {
   tensorcast.common.v1.ArtifactSelection selection = 1;
   TransformSpec spec = 2;
   string out_key = 3;
-  tensorcast.daemon.v2.StorePolicy policy = 4;
+  StorePolicy policy = 4;
 }
 
 message ManifestAction {
@@ -100,6 +188,11 @@ message EvictLocalAction {
   optional string engine_request_id = 1;
 }
 
+message ClusterActionRef {
+  string action_ref = 1;
+  bytes opaque_payload = 2;
+}
+
 message PlanAction {
   oneof kind {
     PrefetchAction prefetch = 1;
@@ -111,6 +204,8 @@ message PlanAction {
     PublishAction publish = 7;
     HydrateAction hydrate = 8;
     EvictLocalAction evict_local = 9;
+    PrefetchSetAction prefetch_set = 10;
+    ClusterActionRef cluster_action = 11;
   }
 }
 
@@ -125,4 +220,5 @@ message PlanSpec {
   string plan_id = 1;
   CallContext context = 2;
   repeated PlanStep steps = 3;
+  GovernanceContext governance = 4;
 }

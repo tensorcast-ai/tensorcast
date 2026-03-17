@@ -6,6 +6,10 @@ import grpc
 from google.protobuf import timestamp_pb2
 
 from tensorcast.api.operation import OperationStatus
+from tensorcast.api.plan.artifact_set import (
+    ArtifactSetResult,
+    selection_identity_to_proto,
+)
 from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
@@ -65,13 +69,16 @@ def _batch_outcome_to_proto(
 def _manifest_result_to_proto(
     result: ManifestResult,
 ) -> node_agent_pb2.ArtifactManifestResult:
-    return node_agent_pb2.ArtifactManifestResult(
+    message = node_agent_pb2.ArtifactManifestResult(
         engine_request_id=str(result.engine_request_id),
         layout_id=str(result.layout_id),
         artifact_ids=[str(item) for item in result.artifact_ids],
         key_set_digest_alg=str(result.key_set_digest_alg),
         key_set_digest_hex=str(result.key_set_digest_hex),
     )
+    if result.artifact_set_bridge is not None:
+        message.manifest_bridge.CopyFrom(result.artifact_set_bridge.to_proto())
+    return message
 
 
 def _artifact_result_to_proto(
@@ -108,6 +115,20 @@ def _artifact_result_to_proto(
     return message
 
 
+def _artifact_set_result_to_proto(
+    result: ArtifactSetResult,
+) -> node_agent_pb2.ArtifactSetResult:
+    message = node_agent_pb2.ArtifactSetResult(set_digest_hex=result.set_digest_hex)
+    for outcome in result.outcomes:
+        entry = message.outcomes.add()
+        entry.item_identity.CopyFrom(selection_identity_to_proto(outcome.item_identity))
+        if outcome.artifact_id is not None:
+            entry.artifact_id = str(outcome.artifact_id)
+        if outcome.status is not None:
+            entry.status.CopyFrom(_status_to_proto(outcome.status))
+    return message
+
+
 class NodeAgentServicer(node_agent_pb2_grpc.NodeAgentServiceServicer):
     def __init__(self, executor: NodeAgentExecutor) -> None:
         self._executor = executor
@@ -132,6 +153,10 @@ class NodeAgentServicer(node_agent_pb2_grpc.NodeAgentServiceServicer):
             if step.artifact_result is not None:
                 entry.artifact_result.CopyFrom(
                     _artifact_result_to_proto(step.artifact_result)
+                )
+            if step.artifact_set_result is not None:
+                entry.artifact_set_result.CopyFrom(
+                    _artifact_set_result_to_proto(step.artifact_set_result)
                 )
         return response
 

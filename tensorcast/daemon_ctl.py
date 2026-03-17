@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     import torch
 
     from tensorcast.api._config import StorePolicy
+    from tensorcast.proto.node_agent.v1 import node_agent_pb2
     from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.error_reporting import debug_errors_enabled
 from tensorcast.logger import init_logger
@@ -43,6 +44,7 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
 )
+from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
     ArtifactIdKind,
@@ -2170,6 +2172,49 @@ class DaemonCtl:
                     local_handle_socket_path=local_handle_socket_path,
                     cpu_shared_memory_enabled=cpu_shared_memory_enabled,
                 )
+
+    def execute_plan(
+        self,
+        *,
+        plan: Any,
+        execution_class: str = "terminal_only",
+        dry_run: bool = False,
+        timeout_s: float = 30.0,
+    ) -> "node_agent_pb2.ExecutePlanResponse":
+        execution_class_value = {
+            "terminal_only": store_daemon_pb2.PLAN_EXECUTION_CLASS_TERMINAL_ONLY,
+            "public_continuation_required": (
+                store_daemon_pb2.PLAN_EXECUTION_CLASS_PUBLIC_CONTINUATION_REQUIRED
+            ),
+        }.get(str(execution_class))
+        if execution_class_value is None:
+            raise ValueError(
+                "execution_class must be 'terminal_only' or 'public_continuation_required'"
+            )
+        request = store_daemon_pb2.ExecutePlanRequest(
+            execution_class=execution_class_value,
+            dry_run=bool(dry_run),
+        )
+        request.plan.CopyFrom(plan)
+        with self._client_span("Client/ExecutePlan") as span:
+            response: store_daemon_pb2.ExecutePlanResponse = self._unary_call(
+                self.stub.ExecutePlan,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+        if not response.terminal_result:
+            return node_agent_pb2.ExecutePlanResponse(
+                request_id=str(response.request_id),
+                ok=bool(response.ok),
+            )
+        terminal = node_agent_pb2.ExecutePlanResponse()
+        terminal.ParseFromString(response.terminal_result)
+        if not terminal.request_id:
+            terminal.request_id = str(response.request_id)
+        terminal.ok = bool(response.ok)
+        return terminal
 
     def get_worker_status(self) -> store_daemon_pb2.GetWorkerStatusResponse:
         with self._client_span("Client/GetWorkerStatus") as span:
