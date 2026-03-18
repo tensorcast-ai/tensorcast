@@ -365,12 +365,18 @@ class FakeBindingClient:
 
     def submit_binding_contribution(self, **kwargs: Any) -> Any:
         self.submit_contribution_calls.append(dict(kwargs))
+        slot_id = (
+            str(kwargs.get("view_id"))
+            if kwargs.get("view_id")
+            else "__canonical_full__"
+        )
         return types.SimpleNamespace(
             accepted=True,
             already_exists=False,
             lease_id="lease-contrib-1",
             lease_generation=1,
             state="accepted",
+            slot_id=slot_id,
         )
 
 
@@ -478,42 +484,28 @@ def _setup_store(
 
 def _build_attempt_ref(
     *,
-    assembly_id: str,
+    workspace_assembly_id: str,
     layout_id: str,
-    contribution_contract_hash: str,
-    attempt_spec_hash: str,
-    required_slots: list[store_daemon_pb2.ContributionSlot],
+    attempt_intent_digest: str,
 ) -> store_mod.AssemblyAttemptRef:
-    spec = store_daemon_pb2.AssemblyAttemptSpec(
-        assembly_id=assembly_id,
-        layout_id=layout_id,
-        contribution_contract_hash=contribution_contract_hash,
-        attempt_spec_hash=attempt_spec_hash,
-        closeout_policy=store_daemon_pb2.CloseoutPolicySnapshot(
-            closeout_policy_hash="bafkcloseout"
-        ),
-    )
-    spec.contribution_contract.layout_id = layout_id
-    spec.contribution_contract.require_live_contributions_until_readiness_cut = True
-    spec.contribution_contract.required_slots.extend(required_slots)
+    attempt_id = f"{workspace_assembly_id}:attempt"
     operation_ref = operation_pb2.OperationRef(
-        operation_id=f"{assembly_id}:op",
+        operation_id=f"{attempt_id}:op",
         kind="assembly_attempt",
-        target_artifact_id=assembly_id,
+        target_artifact_id=workspace_assembly_id,
         authority_scope_kind="assembly_attempt",
-        authority_scope_id=assembly_id,
+        authority_scope_id=attempt_id,
         attachment_kind="assembly_attempt",
         recovery_class="cluster_durable",
-        fencing_digest=attempt_spec_hash,
+        fencing_digest=attempt_intent_digest,
     )
     return store_mod.AssemblyAttemptRef(
-        assembly_id=assembly_id,
+        attempt_id=attempt_id,
+        workspace_assembly_id=workspace_assembly_id,
         layout_id=layout_id,
-        attempt_spec_hash=attempt_spec_hash,
-        contribution_contract_hash=contribution_contract_hash,
+        attempt_intent_digest=attempt_intent_digest,
         coordinator_operation=operation_ref,
         coordinator_generation=1,
-        attempt_spec_proto=spec.SerializeToString(),
     )
 
 
@@ -832,18 +824,9 @@ def test_sealed_binding_value_contributes_piece_partial(
     )
     sealed = binding.seal_current(update_epoch=binding.begin_update())
     attempt = _build_attempt_ref(
-        assembly_id="cgid:assembly-piece",
+        workspace_assembly_id="cgid:assembly-piece",
         layout_id="layout-piece",
-        contribution_contract_hash="bafkcontract-piece",
-        attempt_spec_hash="bafkattempt-piece",
-        required_slots=[
-            store_daemon_pb2.ContributionSlot(
-                slot_key=expected_view_id,
-                structural_view_id=expected_view_id,
-                contribution_kind=store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL,
-                coverage_semantics="phase1_layout_expected_view",
-            )
-        ],
+        attempt_intent_digest="bafkattempt-piece",
     )
 
     result = sealed.contribute_to_assembly(attempt=attempt)
@@ -854,7 +837,8 @@ def test_sealed_binding_value_contributes_piece_partial(
     assert captured["artifact_id"] == "cgid:assembly-piece"
     assert captured["plan"] is PlanType.VRAM_COALESCED
     submit_call = client.submit_contribution_calls[-1]
-    assert submit_call["assembly_id"] == "cgid:assembly-piece"
+    assert submit_call["attempt_id"] == "cgid:assembly-piece:attempt"
+    assert submit_call["workspace_assembly_id"] == "cgid:assembly-piece"
     assert submit_call["view_id"] == expected_view_id
     assert (
         submit_call["contribution_kind"]
@@ -904,18 +888,9 @@ def test_subset_binding_exposes_piece_view_identity(
 
     sealed = binding.seal_current(update_epoch=binding.begin_update())
     attempt = _build_attempt_ref(
-        assembly_id="cgid:assembly-subset-piece",
+        workspace_assembly_id="cgid:assembly-subset-piece",
         layout_id="layout-subset-piece",
-        contribution_contract_hash="bafkcontract-subset-piece",
-        attempt_spec_hash="bafkattempt-subset-piece",
-        required_slots=[
-            store_daemon_pb2.ContributionSlot(
-                slot_key=str(selection.view_id),
-                structural_view_id=str(selection.view_id),
-                contribution_kind=store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL,
-                coverage_semantics="phase1_layout_expected_view",
-            )
-        ],
+        attempt_intent_digest="bafkattempt-subset-piece",
     )
 
     result = sealed.contribute_to_assembly(attempt=attempt)
@@ -956,17 +931,9 @@ def test_sealed_binding_value_contributes_canonical_full(
     )
     sealed = binding.seal_current(update_epoch=binding.begin_update())
     attempt = _build_attempt_ref(
-        assembly_id="cgid:assembly-canonical",
+        workspace_assembly_id="cgid:assembly-canonical",
         layout_id="layout-canonical",
-        contribution_contract_hash="bafkcontract-canonical",
-        attempt_spec_hash="bafkattempt-canonical",
-        required_slots=[
-            store_daemon_pb2.ContributionSlot(
-                slot_key="__canonical_full__",
-                contribution_kind=store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL,
-                coverage_semantics="phase1_canonical_full",
-            )
-        ],
+        attempt_intent_digest="bafkattempt-canonical",
     )
 
     result = sealed.contribute_to_assembly(attempt=attempt)
@@ -977,6 +944,8 @@ def test_sealed_binding_value_contributes_canonical_full(
     assert captured["artifact_id"] == "cgid:assembly-canonical"
     assert captured["plan"] is PlanType.VRAM_COALESCED
     submit_call = client.submit_contribution_calls[-1]
+    assert submit_call["attempt_id"] == "cgid:assembly-canonical:attempt"
+    assert submit_call["workspace_assembly_id"] == "cgid:assembly-canonical"
     assert "view_id" not in submit_call or submit_call["view_id"] is None
     assert (
         submit_call["contribution_kind"]

@@ -1222,10 +1222,13 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
   loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .view_id = view_id, .device = dev_key, .replica = 0};
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
+  const bool allow_cgid_view_replacement =
+      entry->view_state != nullptr && entry->id_kind == common::ArtifactIdKind::kCgid;
   bool reuse_existing = false;
   bool mi2_inserted_new = false;
   bool stable_cache_admitted = false;
   bool key_already_exists = false;
+  std::optional<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>> replaced_existing_replica;
   if (allow_idempotent) {
     if (auto existing_or = replica_registry_->find(mi2_key); existing_or.ok()) {
       reuse_existing = true;
@@ -1238,6 +1241,23 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       key_already_exists = true;
       if (allow_idempotent) {
         reuse_existing = true;
+      } else if (allow_cgid_view_replacement) {
+        replaced_existing_replica = replica_registry_->erase(mi2_key);
+        if (!replaced_existing_replica.has_value()) {
+          return absl::FailedPreconditionError("existing replica disappeared during cgid view replacement");
+        }
+        emplace_status =
+            replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry->replica});
+        if (!emplace_status.ok()) {
+          auto restore_status = replica_registry_->emplace(
+              replaced_existing_replica->first, gsl::not_null{replaced_existing_replica->second});
+          if (!restore_status.ok()) {
+            LOG(WARNING) << "failed to restore prior replica after replacement emplace failure for " << mi2_key << ": "
+                         << restore_status;
+          }
+          return emplace_status;
+        }
+        mi2_inserted_new = true;
       } else {
         VLOG(1) << "mi2 mapping already present for artifact_id=" << entry->artifact_id;
       }
@@ -1319,6 +1339,13 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     auto removed = replica_registry_->erase(mi2_key);
     if (!removed.has_value()) {
       VLOG(1) << "registration rollback: committed key already absent " << mi2_key;
+    }
+    if (replaced_existing_replica.has_value()) {
+      auto restore_status = replica_registry_->emplace(
+          replaced_existing_replica->first, gsl::not_null{replaced_existing_replica->second});
+      if (!restore_status.ok()) {
+        LOG(WARNING) << "registration rollback restore failed for " << mi2_key << ": " << restore_status;
+      }
     }
     release_replica_memory(entry->replica, committed_location);
   });

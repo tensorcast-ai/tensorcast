@@ -1172,7 +1172,7 @@ int main(int argc, char** argv) {
     grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{.private_key = key, .cert_chain = cert};
     ssl_opts.pem_key_cert_pairs.push_back(pkcp);
     creds = grpc::SslServerCredentials(ssl_opts);
-    daemon_opts.inter_daemon_grpc_security = DaemonOptions::InterDaemonGrpcSecurity{
+    daemon_opts.inter_daemon_grpc_security = tensorcast::daemon::DaemonOptions::InterDaemonGrpcSecurity{
         .tls_enabled = true,
         .mutual_auth_enabled = !ca.empty(),
         .cert_chain_pem = cert,

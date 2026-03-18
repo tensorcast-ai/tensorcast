@@ -5,6 +5,7 @@
 namespace tensorcast::daemon {
 
 using ::grpc::Status;
+using ::grpc::StatusCode;
 
 Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
@@ -114,6 +115,20 @@ Status StoreDaemonServiceImpl::StartAssemblyAttempt(
   }
   RpcContext rctx{"StartAssemblyAttempt", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->start_assembly_attempt(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::SealAssemblyAttempt(
+    grpc::ServerContext* ctx,
+    const v2::SealAssemblyAttemptRequest* req,
+    v2::SealAssemblyAttemptResponse* resp) {
+  if (materialization_controller_ == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "materialization controller unavailable"};
+  }
+  if (ctx == nullptr || req == nullptr || resp == nullptr) {
+    return {StatusCode::INVALID_ARGUMENT, "invalid RPC arguments"};
+  }
+  RpcContext rctx{"SealAssemblyAttempt", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->seal_assembly_attempt(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::RefillOwnedBinding(

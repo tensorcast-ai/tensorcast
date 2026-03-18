@@ -11,6 +11,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_split.h"
 #include "absl/time/clock.h"
 #include "core/store/materialization/control/replica_registration_helper.h"
 
@@ -31,6 +32,29 @@ absl::StatusOr<std::string> canonical_artifact_id(
     return std::string(artifact_id_override);
   }
   return key.artifact_id;
+}
+
+std::optional<common::v1::ArtifactDescriptor> descriptor_for_artifact(
+    std::string_view artifact_id,
+    std::string_view schema_version,
+    std::string_view encoding,
+    uint64_t size_bytes) {
+  if (!absl::StartsWith(artifact_id, "mi2:")) {
+    return std::nullopt;
+  }
+  const std::vector<std::string_view> parts = absl::StrSplit(artifact_id, ':');
+  if (parts.size() != 3) {
+    return std::nullopt;
+  }
+  common::v1::ArtifactDescriptor desc;
+  desc.set_artifact_id(std::string(artifact_id));
+  desc.set_index_multihash(std::string(parts[1]));
+  desc.set_data_multihash(std::string(parts[2]));
+  desc.set_schema_version(std::string(schema_version));
+  desc.set_encoding(std::string(encoding));
+  desc.set_total_size(size_bytes);
+  desc.set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+  return desc;
 }
 
 class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
@@ -235,6 +259,66 @@ absl::Status MetadataGateway::register_replica(
 
   const common::memory::MemoryLocation loc =
       (key.device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
+
+  if (key.device.type == DeviceType::GPU) {
+    auto transport_state = replica_runtime_->get_transport_state(key);
+    if (transport_state.export_state != runtime::ReplicaExportState::kExportable ||
+        transport_state.remote_memory_keys.empty() || transport_state.buffer_sizes.empty()) {
+      auto export_or = replica_runtime_->enable_remote_replica_access(key, loc);
+      if (export_or.ok()) {
+        if (promotion_manager_ != nullptr) {
+          auto record_status = promotion_manager_->record_export_registration(key, *export_or, std::nullopt);
+          if (!record_status.ok()) {
+            LOG(WARNING) << "record_export_registration failed for " << key << ": " << record_status;
+          }
+        } else {
+          runtime::ReplicaTransportState next;
+          next.export_state = runtime::ReplicaExportState::kExportable;
+          next.export_generation = 1;
+          next.remote_memory_keys = export_or->remote_memory_keys;
+          next.buffer_sizes.reserve(export_or->buffer_sizes.size());
+          for (const auto size : export_or->buffer_sizes) {
+            next.buffer_sizes.push_back(static_cast<uint64_t>(size));
+          }
+          replica_runtime_->update_transport_state(key, next);
+        }
+        transport_state = replica_runtime_->get_transport_state(key);
+      } else {
+        LOG(WARNING) << "enable_remote_replica_access failed for " << key << ": " << export_or.status();
+      }
+    }
+
+    if (transport_state.export_state == runtime::ReplicaExportState::kExportable &&
+        !transport_state.remote_memory_keys.empty() && !transport_state.buffer_sizes.empty()) {
+      auto descriptor = descriptor_for_artifact(artifact_id, /*schema_version=*/"v3", /*encoding=*/"json", *size_or);
+      auto verification_json = transport_state.verification_json.empty()
+          ? std::optional<std::string>()
+          : std::optional<std::string>(transport_state.verification_json);
+      auto register_or = client->register_memory_replica_idempotent(
+          artifact_id,
+          worker_id(),
+          key.device,
+          *size_or,
+          /*tensor_index_key=*/"",
+          transport_state.remote_memory_keys,
+          transport_state.buffer_sizes,
+          /*tensor_index_data=*/std::nullopt,
+          /*encoding=*/"json",
+          /*schema_version=*/"v3",
+          max_concurrency_,
+          verification_json,
+          key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
+          descriptor,
+          publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
+      register_status = register_or.ok() ? absl::OkStatus() : register_or.status();
+      if (register_or.ok()) {
+        replica_runtime_->set_replica_global_id(key, *register_or);
+        replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
+        return absl::OkStatus();
+      }
+      return register_status;
+    }
+  }
 
   auto register_or = materialization::control::ReplicaRegistrationHelper::register_local_replica(
       gsl::not_null<components::IGlobalStoreClient*>{client.get()},

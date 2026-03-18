@@ -14,7 +14,6 @@ from tensorcast.global_store.exceptions import DatabaseError, ValidationError
 from tensorcast.global_store.repositories.operation_repository import (
     OperationRepository,
 )
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 
 
@@ -92,29 +91,6 @@ class OperationRpcHandler:
         metadata = operation_pb2.OperationContinuationMetadata()
         if snapshot.Unpack(metadata):
             self._merge_ref(ref, metadata.ref)
-            return
-
-        attempt_snapshot = store_daemon_pb2.AssemblyAttemptOperationSnapshot()
-        if not snapshot.Unpack(attempt_snapshot):
-            return
-        if not attempt_snapshot.HasField("spec"):
-            return
-
-        spec = attempt_snapshot.spec
-        if not ref.kind:
-            ref.kind = "assembly_attempt"
-        if not ref.target_artifact_id and spec.assembly_id:
-            ref.target_artifact_id = str(spec.assembly_id)
-        if not ref.authority_scope_kind:
-            ref.authority_scope_kind = "assembly_attempt"
-        if not ref.authority_scope_id and spec.assembly_id:
-            ref.authority_scope_id = str(spec.assembly_id)
-        if not ref.attachment_kind:
-            ref.attachment_kind = "assembly_attempt"
-        if not ref.recovery_class:
-            ref.recovery_class = "cluster_durable"
-        if not ref.fencing_digest and spec.attempt_spec_hash:
-            ref.fencing_digest = str(spec.attempt_spec_hash)
 
     def acquire_operation_lease(
         self,

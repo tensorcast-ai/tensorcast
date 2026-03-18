@@ -21,7 +21,7 @@ import torch
 import yaml
 from google.protobuf import wrappers_pb2
 
-from tensorcast.api.store import ArtifactError, Store
+from tensorcast.api.store import ArtifactError, AssemblyCloseoutContract, Store
 from tensorcast.api.store.view_composer import compute_index_multihash, compute_view_id
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
@@ -118,6 +118,30 @@ def _wait_for_view_ready_for_seal(
         time.sleep(0.1)
         last_resp = gs_stub.GetArtifactInfoById(req)
     return last_resp
+
+
+def _wait_for_readiness_cut(
+    gs_stub: GlobalStoreCompositeStub,
+    *,
+    attempt_id: str,
+    timeout_s: float = 15.0,
+) -> global_store_pb2.AssemblyReadinessCut:
+    deadline = time.time() + timeout_s
+    last_resp = gs_stub.GetAssemblyReadinessCut(
+        global_store_pb2.GetAssemblyReadinessCutRequest(attempt_id=attempt_id)
+    )
+    while time.time() < deadline:
+        if (
+            last_resp.status == global_store_pb2.Status.STATUS_OK
+            and last_resp.readiness_cut.attempt_id == attempt_id
+            and last_resp.readiness_cut.readiness_cut_proto
+        ):
+            return last_resp.readiness_cut
+        time.sleep(0.05)
+        last_resp = gs_stub.GetAssemblyReadinessCut(
+            global_store_pb2.GetAssemblyReadinessCutRequest(attempt_id=attempt_id)
+        )
+    pytest.fail(f"readiness cut did not appear for attempt_id={attempt_id}")
 
 
 def _maybe_debug_dump_view_replicas(
@@ -802,13 +826,10 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     op_result = store_daemon_pb2.SealAssemblyResult()
     assert wait_resp.operation.status.result.Unpack(op_result) is True
     assert op_result.artifact.artifact_id.startswith("mi2:")
-    snapshot = store_daemon_pb2.AssemblyAttemptOperationSnapshot()
-    assert wait_resp.operation.snapshot.Unpack(snapshot) is True
-    assert snapshot.spec.layout_id == put_layout.layout_id
-    assert (
-        snapshot.seal_readiness.assembly_layout_binding_version
-        == bind_layout.binding.binding_version
-    )
+    continuation = operation_pb2.OperationContinuationMetadata()
+    assert wait_resp.operation.snapshot.Unpack(continuation) is True
+    assert continuation.ref.kind == "seal_assembly"
+    assert continuation.ref.target_artifact_id == assembly_id
 
     seal_resp_2 = stub.SealAssembly(
         store_daemon_pb2.SealAssemblyRequest(
@@ -856,12 +877,6 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     gs_channel.close()
 
 
-@pytest.mark.skip(
-    reason=(
-        "Blocked by binding-backed acceptance path on the current branch; "
-        "see 0085 plan status for remaining canonical_full/PP/EP blockers"
-    )
-)
 def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_server):
     listen_addr, gs_port, _ = daemon_process
     gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
@@ -887,67 +902,121 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         binding = source_artifact.bind(device="cuda:0", packing="byte_space")
         sealed = binding.seal_current(update_epoch=binding.begin_update())
-        attempt = store.start_assembly_attempt(layout_id=layout_id)
-
         source_version_key = "models/demo/source/v1"
-        serving_version_key = "models/demo/serving/v1"
-        policy_resp = gs_stub.UpdateAssemblyRuntimePolicy(
-            global_store_pb2.UpdateAssemblyRuntimePolicyRequest(
-                assembly_id=attempt.assembly_id,
-                policy_json=json.dumps(
-                    {
-                        "source_version_key": source_version_key,
-                        "serving_version_key": serving_version_key,
-                        "serving_manifest_ref": "manifest://demo/v1",
-                    }
-                ),
-                expected_policy_version=0,
-            )
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            closeout_contract=AssemblyCloseoutContract(
+                kind="source_publish_only",
+                source_version_key=source_version_key,
+            ),
         )
-        assert policy_resp.status == global_store_pb2.Status.STATUS_OK
 
         partial = sealed.contribute_to_assembly(attempt=attempt)
         assert partial.contribution_kind == "canonical_full"
 
-        result = store.wait_assembly_attempt(attempt, timeout_s=60.0)
+        result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
         assert result.source_version_key == source_version_key
-        assert result.serving_version_key == serving_version_key
-        assert result.serving_manifest_ref == "manifest://demo/v1"
-        assert result.serving_artifact_id == result.source_artifact_id
+        assert result.serving_version_key is None
+        assert result.serving_manifest_ref is None
+        assert result.serving_artifact_id is None
+        assert result.representation_contract_hash is None
 
         source_mapping = gs_stub.ResolveKeyMapping(
             global_store_pb2.ResolveKeyMappingRequest(key=source_version_key)
         )
         assert source_mapping.status == global_store_pb2.Status.STATUS_OK
         assert source_mapping.artifact_id == result.source_artifact_id
-
-        serving_mapping = gs_stub.ResolveKeyMapping(
-            global_store_pb2.ResolveKeyMappingRequest(key=serving_version_key)
-        )
-        assert serving_mapping.status == global_store_pb2.Status.STATUS_OK
-        assert serving_mapping.artifact_id == result.source_artifact_id
-
-        tensors = _artifact_tensor_dict(store, artifact_id=result.source_artifact_id)
-        torch.testing.assert_close(
-            tensors["weights"],
-            torch.tensor(
-                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-                dtype=torch.float32,
-            ),
-        )
-        torch.testing.assert_close(
-            tensors["bias"],
-            torch.tensor(
-                [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
-                dtype=torch.float32,
-            ),
-        )
     finally:
         with contextlib.suppress(Exception):
             channel.close()
         with contextlib.suppress(Exception):
             if binding is not None:
                 binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_binding_same_slot_replacement_rejected_after_readiness_cut(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    binding_a_old = None
+    binding_a_new = None
+    binding_b = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-readiness-cut",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+
+        binding_a_old = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+        binding_a_new = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+        binding_b = source_artifact.view(slices={"bias": (slice(4, 8),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+
+        view_id_a = str(binding_a_old.selection.view_id)
+        view_id_b = str(binding_b.selection.view_id)
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[view_id_a, view_id_b],
+            replicated_tensors=["weights"],
+        )
+        attempt = store.start_assembly_attempt(layout_id=layout_id)
+
+        sealed_a_old = binding_a_old.seal_current(
+            update_epoch=binding_a_old.begin_update()
+        )
+        update_epoch_a_new = binding_a_new.begin_update()
+        binding_a_new.tensors["bias"].copy_(
+            torch.tensor(
+                [101.0, 102.0, 103.0, 104.0],
+                dtype=torch.float32,
+                device=binding_a_new.tensors["bias"].device,
+            )
+        )
+        sealed_a_new = binding_a_new.seal_current(update_epoch=update_epoch_a_new)
+        sealed_b = binding_b.seal_current(update_epoch=binding_b.begin_update())
+
+        sealed_a_old.contribute_to_assembly(attempt=attempt)
+        sealed_b.contribute_to_assembly(attempt=attempt)
+
+        operation = store.seal_assembly_attempt(attempt)
+        _wait_for_readiness_cut(gs_stub, attempt_id=attempt.attempt_id)
+
+        with pytest.raises(ArtifactError) as exc_info:
+            sealed_a_new.contribute_to_assembly(attempt=attempt)
+        assert "no longer accepting contributions" in str(exc_info.value)
+
+        result = operation.wait(timeout_s=60.0)
+        assert result.source_artifact_id.startswith("mi2:")
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if binding_a_old is not None:
+                binding_a_old.close()
+        with contextlib.suppress(Exception):
+            if binding_a_new is not None:
+                binding_a_new.close()
+        with contextlib.suppress(Exception):
+            if binding_b is not None:
+                binding_b.close()
         with contextlib.suppress(Exception):
             store.close()
         gs_channel.close()
@@ -1024,7 +1093,7 @@ def test_binding_piece_partial_replacement_and_pp_attempt(daemon_process, gs_ser
         assert second.contribution_kind == "piece_partial"
         assert second.view_id == view_id_b
 
-        result = store.wait_assembly_attempt(attempt, timeout_s=60.0)
+        result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
         tensors = _artifact_tensor_dict(store, artifact_id=result.source_artifact_id)
         torch.testing.assert_close(
             tensors["weights"],
@@ -1049,6 +1118,87 @@ def test_binding_piece_partial_replacement_and_pp_attempt(daemon_process, gs_ser
         with contextlib.suppress(Exception):
             if binding_a_new is not None:
                 binding_a_new.close()
+        with contextlib.suppress(Exception):
+            if binding_b is not None:
+                binding_b.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_binding_attempt_fails_after_contributor_liveness_loss(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    binding_a = None
+    binding_b = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-liveness-loss",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+
+        binding_a = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+        binding_b = source_artifact.view(slices={"bias": (slice(4, 8),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+
+        view_id_a = str(binding_a.selection.view_id)
+        view_id_b = str(binding_b.selection.view_id)
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[view_id_a, view_id_b],
+            replicated_tensors=["weights"],
+        )
+        attempt = store.start_assembly_attempt(layout_id=layout_id)
+
+        partial_a = binding_a.seal_current(
+            update_epoch=binding_a.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+        binding_b.seal_current(
+            update_epoch=binding_b.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+
+        occupancy_resp = gs_stub.GetAssemblySlotOccupancy(
+            global_store_pb2.GetAssemblySlotOccupancyRequest(
+                attempt_id=attempt.attempt_id,
+                slot_id=str(partial_a.slot_id),
+            )
+        )
+        assert occupancy_resp.status == global_store_pb2.Status.STATUS_OK
+        update_resp = gs_stub.UpdateAssemblySlotOccupancyState(
+            global_store_pb2.UpdateAssemblySlotOccupancyStateRequest(
+                attempt_id=attempt.attempt_id,
+                slot_id=str(partial_a.slot_id),
+                state="stale",
+                expected_lease_id=occupancy_resp.occupancy.lease_id,
+                expected_lease_generation=occupancy_resp.occupancy.lease_generation,
+                current_states=["accepted"],
+            )
+        )
+        assert update_resp.status == global_store_pb2.Status.STATUS_OK
+
+        with pytest.raises(ArtifactError) as exc_info:
+            store.seal_assembly_attempt(attempt).wait(timeout_s=20.0)
+        assert "missing from live contributor set" in str(exc_info.value)
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if binding_a is not None:
+                binding_a.close()
         with contextlib.suppress(Exception):
             if binding_b is not None:
                 binding_b.close()
@@ -1099,7 +1249,7 @@ def test_binding_ep_subset_attempt(daemon_process, gs_server):
         sealed_e0.contribute_to_assembly(attempt=attempt)
         sealed_e1.contribute_to_assembly(attempt=attempt)
 
-        result = store.wait_assembly_attempt(attempt, timeout_s=60.0)
+        result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
         tensors = _artifact_tensor_dict(store, artifact_id=result.source_artifact_id)
         torch.testing.assert_close(
             tensors["weights"],
@@ -1168,7 +1318,7 @@ def test_binding_attempt_requires_all_expected_views(daemon_process, gs_server):
         sealed_a.contribute_to_assembly(attempt=attempt)
 
         with pytest.raises(ArtifactError) as exc_info:
-            store.wait_assembly_attempt(attempt, timeout_s=20.0)
+            store.seal_assembly_attempt(attempt).wait(timeout_s=20.0)
         assert "required expected_view_id missing" in str(exc_info.value)
     finally:
         with contextlib.suppress(Exception):

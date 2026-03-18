@@ -54,9 +54,10 @@ def test_piece_schema_columns_present(db_connection) -> None:
     assert "artifact_bindings" in tables
     assert "layout_specs" in tables
     assert "assembly_layout_bindings" in tables
-    assert "assembly_contributions" in tables
+    assert "assembly_attempts" in tables
+    assert "assembly_readiness_cuts" in tables
+    assert "assembly_slot_occupancies" in tables
     assert "artifact_layout_attachments" in tables
-    assert "assembly_runtime_policies" in tables
     assert "operations" in tables
     assert "assembly_proof_commitments" in tables
     assert "tensor_proof_commitments" in tables
@@ -74,10 +75,27 @@ def test_piece_schema_columns_present(db_connection) -> None:
     binding_columns = _column_names(db_connection, "artifact_bindings")
     assert {"from_artifact_id", "to_artifact_id", "kind"}.issubset(binding_columns)
 
-    contribution_columns = _column_names(db_connection, "assembly_contributions")
+    attempt_columns = _column_names(db_connection, "assembly_attempts")
     assert {
-        "assembly_id",
-        "view_id",
+        "attempt_id",
+        "workspace_assembly_id",
+        "layout_id",
+        "attempt_intent_digest",
+        "coordinator_operation_id",
+        "attempt_record_proto",
+    }.issubset(attempt_columns)
+
+    readiness_cut_columns = _column_names(db_connection, "assembly_readiness_cuts")
+    assert {
+        "attempt_id",
+        "readiness_cut_proto",
+    }.issubset(readiness_cut_columns)
+
+    slot_columns = _column_names(db_connection, "assembly_slot_occupancies")
+    assert {
+        "attempt_id",
+        "slot_id",
+        "structural_view_id",
         "binding_id",
         "binding_value_id",
         "coverage_plan_hash",
@@ -88,7 +106,7 @@ def test_piece_schema_columns_present(db_connection) -> None:
         "lease_generation",
         "lease_expires_at",
         "state",
-    }.issubset(contribution_columns)
+    }.issubset(slot_columns)
 
 
 def test_persistence_tables_accept_inserts(db_connection) -> None:

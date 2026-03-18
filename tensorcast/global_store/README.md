@@ -347,8 +347,10 @@ The canonical schema lives in `/schema.sql`. Key tables:
 | `leaves` | Merkle leaf digests for integrity verification | Cold |
 | `layout_specs` | Immutable, content-addressed layout declarations (v2) | Cold |
 | `assembly_layout_bindings` | Versioned `assembly_id → layout_id` pointer (v2) | Warm |
+| `assembly_attempts` | Immutable per-attempt truth keyed by `attempt_id` | Warm |
+| `assembly_readiness_cuts` | Durable readiness evidence captured before seal | Warm |
+| `assembly_slot_occupancies` | Durable `(attempt_id, slot_id)` occupancy state | Warm |
 | `artifact_layout_attachments` | Immutable `mi2_id → layout_id` attachments (v2) | Cold |
-| `assembly_runtime_policies` | Mutable per-assembly operational knobs (v2) | Warm |
 | `operations` | Unified operation status + coordinator leases (v2) | Warm |
 | `assembly_proof_commitments` | Assembly-scoped proof commitments (v2) | Warm |
 | `tensor_proof_commitments` | MI2-scoped proof commitments (v2) | Cold |

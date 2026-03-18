@@ -28,30 +28,27 @@ std::string contribution_structural_view_id(
     v2::BindingContributionKind contribution_kind,
     std::string_view structural_view_id);
 
-v2::ContributionContractSnapshot build_phase1_contribution_contract(
-    std::string_view layout_id,
-    const google::protobuf::RepeatedPtrField<std::string>& expected_view_ids,
-    bool require_live_contributions_until_readiness_cut);
+v2::AssemblyRequirementSetRef build_phase1_requirement_set(
+    const google::protobuf::RepeatedPtrField<std::string>& expected_view_ids);
 
-v2::ContributionContractSnapshot canonicalize_contribution_contract(const v2::ContributionContractSnapshot& snapshot);
+v2::AssemblyRequirementSetRef canonicalize_requirement_set(const v2::AssemblyRequirementSetRef& requirements);
 
-std::string compute_contribution_contract_hash(const v2::ContributionContractSnapshot& snapshot);
+std::string compute_requirement_set_digest(const v2::AssemblyRequirementSetRef& requirements);
 
-v2::CloseoutPolicySnapshot canonicalize_closeout_policy_snapshot(const v2::CloseoutPolicySnapshot& snapshot);
+v2::AssemblyReadinessPolicy canonicalize_readiness_policy(const v2::AssemblyReadinessPolicy& policy);
 
-std::string compute_closeout_policy_hash(const v2::CloseoutPolicySnapshot& snapshot);
+v2::AssemblyCloseoutContract canonicalize_closeout_contract(const v2::AssemblyCloseoutContract& contract);
 
-v2::AssemblyAttemptSpec canonicalize_attempt_spec(const v2::AssemblyAttemptSpec& spec);
+std::string compute_closeout_contract_digest(const v2::AssemblyCloseoutContract& contract);
 
-std::string compute_attempt_spec_hash(const v2::AssemblyAttemptSpec& spec);
+absl::Status validate_dependency_ready_closeout_contract(const v2::AssemblyCloseoutContract& contract);
+
+v2::AssemblyAttemptIntent canonicalize_attempt_intent(const v2::AssemblyAttemptIntent& intent);
+
+std::string compute_attempt_intent_digest(const v2::AssemblyAttemptIntent& intent);
 
 absl::StatusOr<absl::flat_hash_set<std::string>> list_active_contributor_identities(
     const std::shared_ptr<store::components::IGlobalStoreClient>& client);
-
-bool assembly_contribution_is_live(
-    const store::components::AssemblyContributionInfo& contribution,
-    absl::Time now = absl::Now(),
-    const absl::flat_hash_set<std::string>* active_contributor_identities = nullptr);
 
 bool operation_lease_is_live(
     const tensorcast::operation::v1::GetOperationResponse& operation,
@@ -59,14 +56,20 @@ bool operation_lease_is_live(
 
 bool operation_allows_contributions(const tensorcast::operation::v1::GetOperationResponse& operation);
 
-absl::Status validate_contribution_contract_entry(
-    const v2::ContributionContractSnapshot& snapshot,
+bool slot_occupancy_is_live(
+    const store::components::AssemblySlotOccupancyInfo& occupancy,
+    absl::Time now = absl::Now(),
+    const absl::flat_hash_set<std::string>* active_contributor_identities = nullptr);
+
+absl::Status validate_binding_requirement_entry(
+    const v2::AssemblyRequirementSetRef& requirements,
     v2::BindingContributionKind contribution_kind,
     std::string_view structural_view_id);
 
-absl::Status validate_live_required_contributions(
-    const v2::ContributionContractSnapshot& snapshot,
-    absl::Span<const store::components::AssemblyContributionInfo> contributions,
+absl::Status validate_live_required_slot_occupancies(
+    const v2::AssemblyRequirementSetRef& requirements,
+    const v2::AssemblyReadinessPolicy& readiness_policy,
+    absl::Span<const store::components::AssemblySlotOccupancyInfo> occupancies,
     const absl::flat_hash_set<std::string>& active_contributor_identities,
     absl::Time now = absl::Now());
 

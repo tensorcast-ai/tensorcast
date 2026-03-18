@@ -17,8 +17,14 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
     ArtifactQueryRpcHandler,
 )
-from tensorcast.global_store.rpc.assembly_contribution_rpc_handler import (
-    AssemblyContributionRpcHandler,
+from tensorcast.global_store.rpc.assembly_attempt_rpc_handler import (
+    AssemblyAttemptRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_readiness_cut_rpc_handler import (
+    AssemblyReadinessCutRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
+    AssemblySlotOccupancyRpcHandler,
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
@@ -26,9 +32,6 @@ from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
     LayoutBindingRpcHandler,
-)
-from tensorcast.global_store.rpc.layout_runtime_policy_rpc_handler import (
-    LayoutRuntimePolicyRpcHandler,
 )
 from tensorcast.global_store.rpc.layout_spec_rpc_handler import LayoutSpecRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
@@ -58,9 +61,10 @@ class AssemblyViewRpcServicerMixin:
     artifact_query_rpc_handler: ArtifactQueryRpcHandler
     view_proof_rpc_handler: ViewProofRpcHandler
     layout_spec_rpc_handler: LayoutSpecRpcHandler
+    assembly_attempt_rpc_handler: AssemblyAttemptRpcHandler
     layout_binding_rpc_handler: LayoutBindingRpcHandler
-    layout_runtime_policy_rpc_handler: LayoutRuntimePolicyRpcHandler
-    assembly_contribution_rpc_handler: AssemblyContributionRpcHandler
+    assembly_readiness_cut_rpc_handler: AssemblyReadinessCutRpcHandler
+    assembly_slot_occupancy_rpc_handler: AssemblySlotOccupancyRpcHandler
 
     def GetArtifactInfoById(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.artifact_query_rpc_handler.get_artifact_info_by_id(request, context)
@@ -107,6 +111,56 @@ class AssemblyViewRpcServicerMixin:
             request, context
         )
 
+    def GetAssemblyAttempt(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.assembly_attempt_rpc_handler.get_assembly_attempt(request, context)
+
+    def UpsertAssemblyAttempt(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.assembly_attempt_rpc_handler.upsert_assembly_attempt(
+            request, context
+        )
+
+    def GetAssemblyReadinessCut(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_readiness_cut_rpc_handler.get_assembly_readiness_cut(
+            request, context
+        )
+
+    def UpsertAssemblyReadinessCut(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_readiness_cut_rpc_handler.upsert_assembly_readiness_cut(
+            request, context
+        )
+
+    def GetAssemblySlotOccupancy(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.get_assembly_slot_occupancy(
+            request, context
+        )
+
+    def UpsertAssemblySlotOccupancy(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.upsert_assembly_slot_occupancy(
+            request, context
+        )
+
+    def ListAssemblySlotOccupancies(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.list_assembly_slot_occupancies(
+            request, context
+        )
+
+    def UpdateAssemblySlotOccupancyState(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.update_assembly_slot_occupancy_state(
+            request, context
+        )
+
     def AttachLayoutToArtifact(
         self, request: Any, context: grpc.ServicerContext
     ) -> Any:
@@ -116,50 +170,6 @@ class AssemblyViewRpcServicerMixin:
 
     def ListArtifactLayouts(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.layout_binding_rpc_handler.list_artifact_layouts(request, context)
-
-    def GetAssemblyRuntimePolicy(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.layout_runtime_policy_rpc_handler.get_assembly_runtime_policy(
-            request, context
-        )
-
-    def UpdateAssemblyRuntimePolicy(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.layout_runtime_policy_rpc_handler.update_assembly_runtime_policy(
-            request, context
-        )
-
-    def GetAssemblyContribution(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.assembly_contribution_rpc_handler.get_assembly_contribution(
-            request, context
-        )
-
-    def UpsertAssemblyContribution(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.assembly_contribution_rpc_handler.upsert_assembly_contribution(
-            request, context
-        )
-
-    def ListAssemblyContributions(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.assembly_contribution_rpc_handler.list_assembly_contributions(
-            request, context
-        )
-
-    def UpdateAssemblyContributionState(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return (
-            self.assembly_contribution_rpc_handler.update_assembly_contribution_state(
-                request, context
-            )
-        )
 
 
 class WorkflowOrchestrationRpcServicerMixin:

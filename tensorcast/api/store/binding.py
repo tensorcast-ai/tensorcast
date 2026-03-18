@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from tensorcast.api._config import PlanType
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
 from tensorcast.api.operation import Operation, OperationStatus, PollingOperation
@@ -23,6 +22,7 @@ from tensorcast.api.store.binding_state import clone_selection
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
 from tensorcast.api.store.owned_binding_slot import OwnedBindingSlot
+from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.types import ArtifactError
 from tensorcast.api.store.views import TransformPlacement
 from tensorcast.proto.common.v1 import common_pb2
@@ -230,33 +230,6 @@ def _slot_contribution_tensor_names(
     return ()
 
 
-def _view_spec_is_subset_identity(
-    view_spec: common_pb2.ViewSpec,
-    canonical_index,
-    tensor_names: tuple[str, ...],
-) -> bool:
-    if not tensor_names:
-        return False
-    entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
-    if set(view_spec.tensors.keys()) != set(tensor_names):
-        return False
-    for name in tensor_names:
-        entry = entry_by_name.get(str(name))
-        ops = view_spec.tensors.get(str(name))
-        if entry is None or ops is None or len(ops.ops) != 1 or not entry.shape:
-            return False
-        op = ops.ops[0]
-        if not op.HasField("narrow"):
-            return False
-        if (
-            int(op.narrow.dim) != 0
-            or int(op.narrow.start) != 0
-            or int(op.narrow.length) != int(entry.shape[0])
-        ):
-            return False
-    return True
-
-
 def _compute_coverage_plan_hash(
     *,
     contribution_kind: str,
@@ -274,10 +247,6 @@ def _compute_coverage_plan_hash(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return f"bcp1:{digest}"
-
-
-def _binding_contribution_plan() -> PlanType:
-    return PlanType.VRAM_COALESCED
 
 
 def _prepare_contribution_tensors(
@@ -461,19 +430,10 @@ class SealedBindingValue:
         slot = binding._slot
         store = slot._store
         pipeline = store._registration
-        attempt_spec = attempt.decode_attempt_spec()
-        contribution_contract = attempt_spec.contribution_contract
-        requires_piece_slots = any(
-            int(required_slot.contribution_kind)
-            == store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
-            for required_slot in contribution_contract.required_slots
-        )
 
         view_spec = _slot_contribution_view_spec(slot)
         selection_names = _slot_contribution_tensor_names(slot)
-        contribution_kind: str
-        contributed_view_id: str | None
-
+        prepared_tensors = _prepare_contribution_tensors(binding.tensors)
         if view_spec is not None:
             source_artifact_id = _slot_contribution_source_artifact_id(slot)
             if not source_artifact_id:
@@ -493,97 +453,60 @@ class SealedBindingValue:
                     binding, source_artifact_id
                 )
             canonical_index = canonical_index_from_bytes(canonical_index_bytes)
-            if selection_names and _view_spec_is_subset_identity(
-                view_spec,
-                canonical_index,
-                selection_names,
-            ):
-                view_ctx, upload_tensors = pipeline._build_subset_piece_registration(
-                    canonical_index_bytes=canonical_index_bytes,
-                    canonical_index=canonical_index,
-                    tensor_names=selection_names,
-                    view_spec_proto=view_spec,
-                    tensors=binding.tensors,
-                )
-            else:
-                build_result = _build_view_result_from_proto(view_spec)
-                piece_selection_names = (
-                    tuple(build_result.tensor_ops.keys())
-                    if build_result.tensor_ops
-                    else selection_names
-                )
-                view_ctx, upload_tensors = pipeline._build_view_registration(
-                    canonical_index_bytes=canonical_index_bytes,
-                    canonical_index=canonical_index,
-                    build_result=build_result,
-                    tensors=binding.tensors,
-                    placement_enum=TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
-                    registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
-                    selection_names=piece_selection_names,
-                )
-            registered = pipeline._perform_registration(
-                _prepare_contribution_tensors(upload_tensors),
-                artifact_id=attempt.assembly_id,
-                key=None,
-                plan=_binding_contribution_plan(),
-                view_registration=view_ctx,
+            committed = pipeline.commit_structural_contribution(
+                prepared_tensors,
+                assembly_id=attempt.workspace_assembly_id,
+                canonical_index_bytes=canonical_index_bytes,
+                canonical_index=canonical_index,
+                build_result=_build_view_result_from_proto(view_spec),
+                placement_enum=TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
+                selection_names=selection_names,
             )
-            contribution_kind = "piece_partial"
-            reg_result = registered.registration_result
-            if reg_result is None or not reg_result.view_id:
-                raise ArtifactError(
-                    "piece contribution registration did not return a view_id",
-                    status_code="DATA_LOSS",
-                    retryable=False,
-                )
-            contributed_view_id = str(reg_result.view_id)
+            contribution_kind = committed.contribution_kind
+            contributed_view_id = committed.view_id
             coverage_plan_hash = _compute_coverage_plan_hash(
                 contribution_kind=contribution_kind,
                 binding=binding,
                 view_id=contributed_view_id,
-                canonical_ranges=tuple(reg_result.canonical_ranges),
+                canonical_ranges=committed.canonical_ranges,
             )
             submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
         else:
-            if requires_piece_slots:
-                raise ArtifactError(
-                    "binding does not expose a piece contribution view_spec for this layout contract",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=False,
-                )
-            pipeline._perform_registration(
-                _prepare_contribution_tensors(binding.tensors),
-                artifact_id=attempt.assembly_id,
-                key=None,
-                plan=_binding_contribution_plan(),
+            committed = pipeline.commit_structural_contribution(
+                prepared_tensors,
+                assembly_id=attempt.workspace_assembly_id,
             )
-            contribution_kind = "canonical_full"
-            contributed_view_id = None
+            contribution_kind = committed.contribution_kind
+            contributed_view_id = committed.view_id
             coverage_plan_hash = _compute_coverage_plan_hash(
                 contribution_kind=contribution_kind,
                 binding=binding,
                 view_id=_CANONICAL_FULL_CONTRIBUTION_VIEW_ID,
-                canonical_ranges=(),
+                canonical_ranges=committed.canonical_ranges,
             )
             submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
 
         timeout_s = _ctx_timeout_s(ctx)
-        response = binding._runtime.ensure_client().submit_binding_contribution(
-            assembly_id=attempt.assembly_id,
-            layout_id=attempt.layout_id,
-            contribution_contract_hash=attempt.contribution_contract_hash,
-            binding_id=self.binding_id,
-            binding_value_id=self.binding_value_id,
-            coverage_plan_hash=coverage_plan_hash,
-            contribution_kind=submit_kind,
-            coordinator_operation_id=attempt.coordinator_operation_id,
-            coordinator_generation=attempt.coordinator_generation,
-            attempt_spec_hash=attempt.attempt_spec_hash,
-            view_id=contributed_view_id,
-            timeout_s=timeout_s if timeout_s is not None else 30.0,
-        )
+        try:
+            response = binding._runtime.ensure_client().submit_binding_contribution(
+                attempt_id=attempt.attempt_id,
+                workspace_assembly_id=attempt.workspace_assembly_id,
+                binding_id=self.binding_id,
+                binding_value_id=self.binding_value_id,
+                coverage_plan_hash=coverage_plan_hash,
+                contribution_kind=submit_kind,
+                coordinator_operation_id=attempt.coordinator_operation_id,
+                coordinator_generation=attempt.coordinator_generation,
+                attempt_intent_digest=attempt.attempt_intent_digest,
+                view_id=contributed_view_id,
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise_mapped_registration_error(exc)
         return PartialSealResult(
-            assembly_id=attempt.assembly_id,
+            attempt_id=attempt.attempt_id,
+            workspace_assembly_id=attempt.workspace_assembly_id,
+            slot_id=str(getattr(response, "slot_id", "") or "") or None,
             binding_id=self.binding_id,
             binding_value_id=self.binding_value_id,
             contribution_kind=contribution_kind,

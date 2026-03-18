@@ -52,9 +52,10 @@ from tensorcast.global_store.repositories import (
     ArtifactLayoutAttachmentRepository,
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
-    AssemblyContributionRepository,
+    AssemblyAttemptRepository,
     AssemblyLayoutBindingRepository,
-    AssemblyRuntimePolicyRepository,
+    AssemblyReadinessCutRepository,
+    AssemblySlotOccupancyRepository,
     ChunkDirectoryRepository,
     ClusterInfoRepository,
     InstanceRepository,
@@ -90,8 +91,14 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
     ArtifactQueryRpcHandler,
 )
-from tensorcast.global_store.rpc.assembly_contribution_rpc_handler import (
-    AssemblyContributionRpcHandler,
+from tensorcast.global_store.rpc.assembly_attempt_rpc_handler import (
+    AssemblyAttemptRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_readiness_cut_rpc_handler import (
+    AssemblyReadinessCutRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
+    AssemblySlotOccupancyRpcHandler,
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
@@ -99,9 +106,6 @@ from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
     LayoutBindingRpcHandler,
-)
-from tensorcast.global_store.rpc.layout_runtime_policy_rpc_handler import (
-    LayoutRuntimePolicyRpcHandler,
 )
 from tensorcast.global_store.rpc.layout_spec_rpc_handler import LayoutSpecRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
@@ -242,16 +246,17 @@ class GlobalStoreServicer(
             self.connection
         )
         self.layout_spec_repository = LayoutSpecRepository(self.connection)
-        self.assembly_contribution_repository = AssemblyContributionRepository(
+        self.assembly_attempt_repository = AssemblyAttemptRepository(self.connection)
+        self.assembly_layout_binding_repository = AssemblyLayoutBindingRepository(
             self.connection
         )
-        self.assembly_layout_binding_repository = AssemblyLayoutBindingRepository(
+        self.assembly_readiness_cut_repository = AssemblyReadinessCutRepository(
             self.connection
         )
         self.artifact_layout_attachment_repository = ArtifactLayoutAttachmentRepository(
             self.connection
         )
-        self.assembly_runtime_policy_repository = AssemblyRuntimePolicyRepository(
+        self.assembly_slot_occupancy_repository = AssemblySlotOccupancyRepository(
             self.connection
         )
         self.proof_repository = ProofRepository(self.connection)
@@ -327,6 +332,11 @@ class GlobalStoreServicer(
             sha256_digest_to_multibase=sha256_digest_to_multibase,
             logger=logger,
         )
+        self.assembly_attempt_rpc_handler = AssemblyAttemptRpcHandler(
+            assembly_attempt_repository=self.assembly_attempt_repository,
+            datetime_to_timestamp=datetime_to_timestamp,
+            logger=logger,
+        )
         self.layout_binding_rpc_handler = LayoutBindingRpcHandler(
             connection=self.connection,
             artifact_repository=self.artifacts_repo,
@@ -337,14 +347,13 @@ class GlobalStoreServicer(
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
-        self.layout_runtime_policy_rpc_handler = LayoutRuntimePolicyRpcHandler(
-            assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
+        self.assembly_readiness_cut_rpc_handler = AssemblyReadinessCutRpcHandler(
+            assembly_readiness_cut_repository=self.assembly_readiness_cut_repository,
             datetime_to_timestamp=datetime_to_timestamp,
-            coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
-        self.assembly_contribution_rpc_handler = AssemblyContributionRpcHandler(
-            assembly_contribution_repository=self.assembly_contribution_repository,
+        self.assembly_slot_occupancy_rpc_handler = AssemblySlotOccupancyRpcHandler(
+            assembly_slot_occupancy_repository=self.assembly_slot_occupancy_repository,
             datetime_to_timestamp=datetime_to_timestamp,
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,

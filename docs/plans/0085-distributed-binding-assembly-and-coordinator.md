@@ -21,16 +21,15 @@ related_code:
   - core/store/components/global_store_client.h
   - core/store/components/global_store_client.cc
   - core/store/runtime/metadata/registration_backend.cc
-  - tensorcast/global_store/repositories/assembly_contribution_repository.py
+  - tensorcast/global_store/repositories/assembly_slot_occupancy_repository.py
   - tensorcast/global_store/repositories/operation_repository.py
-  - tensorcast/global_store/rpc/assembly_contribution_rpc_handler.py
   - tensorcast/global_store/rpc/operation_rpc_handler.py
   - tensorcast/global_store/services/view_state_service.py
   - tests/python/test_binding.py
   - tests/python/test_assembly_attempt.py
   - tests/python/test_dense_piece_assembly_sealing_acceptance.py
-  - tests/python/global_store/test_assembly_contribution_repository.py
-  - tests/python/global_store/test_assembly_contribution_rpc.py
+  - tests/python/global_store/test_schema_persistence.py
+  - tests/python/global_store/test_assembly_slot_occupancy_rpc.py
   - daemon/service/owned_binding_service_test.cc
   - daemon/service/grpc_service_impl_start_seal_assembly_test.cc
 last_updated: 2026-03-18
@@ -66,7 +65,7 @@ Those are owned by the `0105` plan.
 
 - `Store.start_assembly_attempt(...)` exists.
 - `SubmitBindingContribution` exists.
-- `assembly_contributions` exists as durable occupancy projection.
+- `assembly_slot_occupancies` exists as the durable occupancy projection.
 - binding mutation paths already consult live-contribution state.
 - `wait_assembly_attempt(...)` already decodes a `SealAssemblyResult` into
   `PublishedModelVersion`.
@@ -156,9 +155,9 @@ preserve it.
 - [ ] Phase 2: Extract one shared structural commit helper
   - [ ] Milestone 1: Refactor registration code so structural commit logic for
     deterministic identity, coverage, proof, and durable state is centralized.
-  - [ ] Milestone 2: Make binding-backed contribution and direct piece
+  - [x] Milestone 2: Make binding-backed contribution and direct piece
     registration both lower onto that one helper path.
-  - [ ] Milestone 3: Keep `canonical_full` on the canonical structural path
+  - [x] Milestone 3: Keep `canonical_full` on the canonical structural path
     without forking publish semantics.
 
 - [ ] Phase 3: Close phase-1 contract-family mapping
@@ -184,7 +183,7 @@ preserve it.
 - [ ] Phase 5: Prove one-trunk parity with an acceptance matrix
   - [ ] Milestone 1: Add parity tests for direct piece registration,
     binding-backed `piece_partial`, and `canonical_full`.
-  - [ ] Milestone 2: Add same-slot replacement and liveness-loss coverage under
+  - [x] Milestone 2: Add same-slot replacement and liveness-loss coverage under
     the readiness-cut model.
   - [ ] Milestone 3: Add planner-backed `PP`, `EP`, and single-rank acceptance
     coverage.
@@ -201,7 +200,7 @@ preserve it.
   - canonical coverage derivation
   - proof digest generation
   - durable `view_state_service` update
-- [ ] Keep binding-backed contribution as a thin frontend wrapper over that
+- [x] Keep binding-backed contribution as a thin frontend wrapper over that
   helper path.
 - [ ] Keep `view_state_service.py` as the sole authority for overlap and proof
   semantics.
@@ -213,7 +212,7 @@ preserve it.
 - [ ] Ensure planner or frontend-owned contract input canonicalizes before
   attempt creation rather than being rebuilt at publish or seal time.
 - [ ] Keep `PP` and `EP` as disjoint-slot families on the same trunk.
-- [ ] Keep single-rank publish legal through `canonical_full`, not through a
+- [x] Keep single-rank publish legal through `canonical_full`, not through a
   full-coverage piece shortcut.
 
 ## Workstream C: Published Lineage
@@ -228,7 +227,7 @@ preserve it.
 
 - [ ] Add cross-frontend parity tests before claiming the one-trunk refactor is
   complete.
-- [ ] Add readiness-cut-aware replacement and liveness-loss tests.
+- [x] Add readiness-cut-aware replacement and liveness-loss tests.
 - [ ] Update `tensorcast/api/store/README.md` only when the implemented public
   behavior changes.
 - [ ] Update `docs/guides/steptron-vllm-binding-integration.md` only after
@@ -241,10 +240,12 @@ preserve it.
 Python acceptance and integration:
 
 - [ ] `source .venv/bin/activate && pytest tests/python/test_dense_piece_assembly_sealing_acceptance.py`
+  - blocker: the rebuilt branch still has unrelated direct-piece/materialization
+    regressions in the full file; targeted binding-attempt coverage is green
 - [ ] `source .venv/bin/activate && pytest tests/python/test_assembly_attempt.py`
 - [ ] `source .venv/bin/activate && pytest tests/python/test_binding.py`
-- [ ] `source .venv/bin/activate && pytest tests/python/global_store/test_assembly_contribution_repository.py`
-- [ ] `source .venv/bin/activate && pytest tests/python/global_store/test_assembly_contribution_rpc.py`
+- [ ] `source .venv/bin/activate && pytest tests/python/global_store/test_schema_persistence.py`
+- [ ] `source .venv/bin/activate && pytest tests/python/global_store/test_assembly_slot_occupancy_rpc.py`
 
 Daemon and core tests:
 
@@ -256,10 +257,10 @@ New tests that must exist before closure:
 
 - [ ] binding-backed `piece_partial` and direct piece registration share the
   same structural semantics
-- [ ] `canonical_full` publish succeeds on the canonical structural path
-- [ ] same-slot replacement is legal only while the attempt is open and before
+- [x] `canonical_full` publish succeeds on the canonical structural path
+- [x] same-slot replacement is legal only while the attempt is open and before
   the readiness cut
-- [ ] contributor liveness loss before the readiness cut prevents successful
+- [x] contributor liveness loss before the readiness cut prevents successful
   seal
 - [ ] `PP`, `EP`, and single-rank contract families all seal through the same
   trunk

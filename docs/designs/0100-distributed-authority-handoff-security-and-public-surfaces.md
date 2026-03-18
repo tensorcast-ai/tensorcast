@@ -4,7 +4,7 @@ title: Unified Distributed Authority Routing, Security, and Public Continuation
 status: implemented
 areas: ["daemon", "sdk", "proto", "docs", "tests"]
 created: 2026-03-10
-last_updated: 2026-03-17
+last_updated: 2026-03-18
 related_code:
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
@@ -102,7 +102,10 @@ Repository rule:
 
 - child designs may depend on `0100` for immediate lowering paths and the first `attach_existing -> Operation[T]`
   continuation today,
-- but they must not depend on `retry_later` public continuation until that closeout path and tests are complete.
+- but they must not depend on `retry_later` public continuation until that closeout path and tests are complete,
+- and they may reuse `attach_existing` only when the child owner keeps public
+  observation side-effect-free and binds continuation scope to durable owner
+  truth rather than to a mutable workspace alias.
 
 # Problem Statement
 
@@ -247,6 +250,31 @@ Repository rule:
 - `attach_existing` is the first closeout target,
 - `retry_later` is declared but remains non-ready for dependency use until the first `attach_existing` path is closed and
   hardened.
+
+### 2.4 Follow-on child-owner rule
+
+After the first `attach_existing` path is closed, later child owners may reuse
+that continuation contract only if they preserve the same public-safety
+discipline.
+
+Required rules:
+
+1. `authority_scope_id` must name durable semantic owner truth,
+2. `target_artifact_id` may name a mutable workspace or structural target, but
+   it must not replace the durable authority scope,
+3. any transition that creates the attachable outcome must be explicit and
+   owner-scoped,
+4. public `wait/status/cancel` must observe an existing outcome rather than
+   advance workflow state,
+5. a child owner must not smuggle `retry_later` semantics into `attach_existing`
+   or into bare observation calls.
+
+Assembly-attempt consequence:
+
+- continuation scope should be the durable `attempt_id`,
+- structural workspace identity may appear separately as the target artifact id,
+- and `wait_assembly_attempt(...)` must not double as the API that initiates
+  sealing.
 
 ## 3. Owner reply to public projection mapping
 

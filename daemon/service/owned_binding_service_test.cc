@@ -76,20 +76,20 @@ v2::TargetLayout make_target_layout() {
 
 class BindingContributionGuardClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
-  std::vector<tensorcast::store::components::AssemblyContributionInfo> accepted_rows;
+  std::vector<tensorcast::store::components::AssemblySlotOccupancyInfo> accepted_rows;
   std::vector<std::string> active_identities;
 
   absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
     return active_identities;
   }
 
-  absl::StatusOr<std::vector<tensorcast::store::components::AssemblyContributionInfo>> list_assembly_contributions(
+  absl::StatusOr<std::vector<tensorcast::store::components::AssemblySlotOccupancyInfo>> list_assembly_slot_occupancies(
       std::optional<std::string_view>,
       std::optional<std::string_view>,
       std::optional<std::string_view> binding_id,
       std::optional<std::string_view> binding_value_id,
       const std::vector<std::string>& states) override {
-    std::vector<tensorcast::store::components::AssemblyContributionInfo> out;
+    std::vector<tensorcast::store::components::AssemblySlotOccupancyInfo> out;
     for (const auto& row : accepted_rows) {
       if (binding_id.has_value() && row.binding_id != *binding_id) {
         continue;
@@ -206,9 +206,10 @@ grpc::Status run_refill_owned_binding(
 }
 
 void seed_live_contribution(Fixture& fix) {
-  tensorcast::store::components::AssemblyContributionInfo row;
-  row.assembly_id = "assembly-1";
-  row.view_id = "view-a";
+  tensorcast::store::components::AssemblySlotOccupancyInfo row;
+  row.attempt_id = "attempt-1";
+  row.slot_id = "view-a";
+  row.structural_view_id = std::string("view-a");
   row.binding_id = "binding-1";
   row.binding_value_id = "value-1";
   row.contributor_daemon_id = "daemon-1";
@@ -219,9 +220,10 @@ void seed_live_contribution(Fixture& fix) {
 }
 
 void seed_expired_contribution(Fixture& fix) {
-  tensorcast::store::components::AssemblyContributionInfo row;
-  row.assembly_id = "assembly-1";
-  row.view_id = "view-a";
+  tensorcast::store::components::AssemblySlotOccupancyInfo row;
+  row.attempt_id = "attempt-1";
+  row.slot_id = "view-a";
+  row.structural_view_id = std::string("view-a");
   row.binding_id = "binding-1";
   row.binding_value_id = "value-1";
   row.contributor_daemon_id = "daemon-1";

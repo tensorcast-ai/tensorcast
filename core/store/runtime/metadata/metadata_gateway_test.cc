@@ -426,11 +426,6 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("check_proof_commitments_match not used in tests");
   }
 
-  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
-      std::string_view) override {
-    return absl::UnimplementedError("get_assembly_runtime_policy not used in tests");
-  }
-
   absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
       const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
     return absl::UnimplementedError("acquire_operation_lease not used in tests");

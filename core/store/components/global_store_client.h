@@ -213,9 +213,28 @@ struct ViewInfo {
   std::vector<CanonicalRange> canonical_ranges;
 };
 
-struct AssemblyContributionInfo {
-  std::string assembly_id;
-  std::string view_id;
+struct AssemblyAttemptRecordInfo {
+  std::string attempt_id;
+  std::string workspace_assembly_id;
+  std::string layout_id;
+  std::string attempt_intent_digest;
+  std::string coordinator_operation_id;
+  std::string attempt_record_proto;
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+};
+
+struct AssemblyReadinessCutInfo {
+  std::string attempt_id;
+  std::string readiness_cut_proto;
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+};
+
+struct AssemblySlotOccupancyInfo {
+  std::string attempt_id;
+  std::string slot_id;
+  std::optional<std::string> structural_view_id;
   std::string binding_id;
   std::string binding_value_id;
   std::string coverage_plan_hash;
@@ -698,48 +717,77 @@ class IGlobalStoreClient {
     return absl::UnimplementedError("UpdateAssemblyLayoutBinding not available");
   }
 
-  virtual absl::StatusOr<AssemblyContributionInfo> get_assembly_contribution(
-      std::string_view assembly_id,
-      std::string_view view_id) {
-    return absl::UnimplementedError("GetAssemblyContribution not available");
+  virtual absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt(std::string_view attempt_id) {
+    (void)attempt_id;
+    return absl::UnimplementedError("GetAssemblyAttempt not available");
   }
 
-  virtual absl::StatusOr<AssemblyContributionInfo> upsert_assembly_contribution(
-      const AssemblyContributionInfo& contribution) {
-    (void)contribution;
-    return absl::UnimplementedError("UpsertAssemblyContribution not available");
+  virtual absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt_by_workspace(
+      std::string_view workspace_assembly_id) {
+    (void)workspace_assembly_id;
+    return absl::UnimplementedError("GetAssemblyAttemptByWorkspace not available");
   }
 
-  virtual absl::StatusOr<std::vector<AssemblyContributionInfo>> list_assembly_contributions(
-      std::optional<std::string_view> assembly_id = std::nullopt,
-      std::optional<std::string_view> view_id = std::nullopt,
+  virtual absl::StatusOr<AssemblyAttemptRecordInfo> upsert_assembly_attempt(const AssemblyAttemptRecordInfo& attempt) {
+    (void)attempt;
+    return absl::UnimplementedError("UpsertAssemblyAttempt not available");
+  }
+
+  virtual absl::StatusOr<AssemblyReadinessCutInfo> get_assembly_readiness_cut(std::string_view attempt_id) {
+    (void)attempt_id;
+    return absl::UnimplementedError("GetAssemblyReadinessCut not available");
+  }
+
+  virtual absl::StatusOr<AssemblyReadinessCutInfo> upsert_assembly_readiness_cut(
+      const AssemblyReadinessCutInfo& readiness_cut) {
+    (void)readiness_cut;
+    return absl::UnimplementedError("UpsertAssemblyReadinessCut not available");
+  }
+
+  virtual absl::StatusOr<AssemblySlotOccupancyInfo> get_assembly_slot_occupancy(
+      std::string_view attempt_id,
+      std::string_view slot_id) {
+    (void)attempt_id;
+    (void)slot_id;
+    return absl::UnimplementedError("GetAssemblySlotOccupancy not available");
+  }
+
+  virtual absl::StatusOr<AssemblySlotOccupancyInfo> upsert_assembly_slot_occupancy(
+      const AssemblySlotOccupancyInfo& occupancy) {
+    (void)occupancy;
+    return absl::UnimplementedError("UpsertAssemblySlotOccupancy not available");
+  }
+
+  virtual absl::StatusOr<std::vector<AssemblySlotOccupancyInfo>> list_assembly_slot_occupancies(
+      std::optional<std::string_view> attempt_id = std::nullopt,
+      std::optional<std::string_view> slot_id = std::nullopt,
       std::optional<std::string_view> binding_id = std::nullopt,
       std::optional<std::string_view> binding_value_id = std::nullopt,
       const std::vector<std::string>& states = {}) {
-    (void)assembly_id;
-    (void)view_id;
+    (void)attempt_id;
+    (void)slot_id;
     (void)binding_id;
     (void)binding_value_id;
     (void)states;
-    return absl::UnimplementedError("ListAssemblyContributions not available");
+    return absl::UnimplementedError("ListAssemblySlotOccupancies not available");
   }
 
-  virtual absl::StatusOr<AssemblyContributionInfo> update_assembly_contribution_state(
-      std::string_view assembly_id,
-      std::string_view view_id,
+  virtual absl::StatusOr<AssemblySlotOccupancyInfo> update_assembly_slot_occupancy_state(
+      std::string_view attempt_id,
+      std::string_view slot_id,
       std::string_view state,
       std::optional<std::string_view> expected_lease_id = std::nullopt,
       std::optional<uint64_t> expected_lease_generation = std::nullopt,
       std::optional<absl::Time> lease_expires_at = std::nullopt,
       const std::vector<std::string>& current_states = {}) {
-    (void)assembly_id;
-    (void)view_id;
+    (void)attempt_id;
+    (void)slot_id;
     (void)state;
     (void)expected_lease_id;
     (void)expected_lease_generation;
     (void)lease_expires_at;
     (void)current_states;
-    return absl::UnimplementedError("UpdateAssemblyContributionState not available");
+    return absl::UnimplementedError("UpdateAssemblySlotOccupancyState not available");
   }
 
   virtual absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) = 0;
@@ -749,9 +797,6 @@ class IGlobalStoreClient {
       const global_store::WriteTensorProofCommitmentsRequest& request) = 0;
   virtual absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
       const global_store::CheckProofCommitmentsMatchRequest& request) = 0;
-
-  virtual absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
-      std::string_view assembly_id) = 0;
 
   // ========== Unified Operations ==========
   virtual absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
@@ -1072,20 +1117,27 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view assembly_id,
       std::string_view layout_id,
       uint64_t expected_binding_version) override;
-  absl::StatusOr<AssemblyContributionInfo> get_assembly_contribution(
-      std::string_view assembly_id,
-      std::string_view view_id) override;
-  absl::StatusOr<AssemblyContributionInfo> upsert_assembly_contribution(
-      const AssemblyContributionInfo& contribution) override;
-  absl::StatusOr<std::vector<AssemblyContributionInfo>> list_assembly_contributions(
-      std::optional<std::string_view> assembly_id = std::nullopt,
-      std::optional<std::string_view> view_id = std::nullopt,
+  absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt(std::string_view attempt_id) override;
+  absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt_by_workspace(
+      std::string_view workspace_assembly_id) override;
+  absl::StatusOr<AssemblyAttemptRecordInfo> upsert_assembly_attempt(const AssemblyAttemptRecordInfo& attempt) override;
+  absl::StatusOr<AssemblyReadinessCutInfo> get_assembly_readiness_cut(std::string_view attempt_id) override;
+  absl::StatusOr<AssemblyReadinessCutInfo> upsert_assembly_readiness_cut(
+      const AssemblyReadinessCutInfo& readiness_cut) override;
+  absl::StatusOr<AssemblySlotOccupancyInfo> get_assembly_slot_occupancy(
+      std::string_view attempt_id,
+      std::string_view slot_id) override;
+  absl::StatusOr<AssemblySlotOccupancyInfo> upsert_assembly_slot_occupancy(
+      const AssemblySlotOccupancyInfo& occupancy) override;
+  absl::StatusOr<std::vector<AssemblySlotOccupancyInfo>> list_assembly_slot_occupancies(
+      std::optional<std::string_view> attempt_id = std::nullopt,
+      std::optional<std::string_view> slot_id = std::nullopt,
       std::optional<std::string_view> binding_id = std::nullopt,
       std::optional<std::string_view> binding_value_id = std::nullopt,
       const std::vector<std::string>& states = {}) override;
-  absl::StatusOr<AssemblyContributionInfo> update_assembly_contribution_state(
-      std::string_view assembly_id,
-      std::string_view view_id,
+  absl::StatusOr<AssemblySlotOccupancyInfo> update_assembly_slot_occupancy_state(
+      std::string_view attempt_id,
+      std::string_view slot_id,
       std::string_view state,
       std::optional<std::string_view> expected_lease_id = std::nullopt,
       std::optional<uint64_t> expected_lease_generation = std::nullopt,
@@ -1098,8 +1150,6 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const global_store::WriteTensorProofCommitmentsRequest& request) override;
   absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
       const global_store::CheckProofCommitmentsMatchRequest& request) override;
-  absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
-      std::string_view assembly_id) override;
 
   absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
       const operation::AcquireOperationLeaseRequest& request) override;

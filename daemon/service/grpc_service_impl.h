@@ -110,6 +110,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::StartAssemblyAttemptRequest* req,
       v2::StartAssemblyAttemptResponse* resp) override;
+  grpc::Status SealAssemblyAttempt(
+      grpc::ServerContext* ctx,
+      const v2::SealAssemblyAttemptRequest* req,
+      v2::SealAssemblyAttemptResponse* resp) override;
 
   grpc::Status RefillOwnedBinding(
       grpc::ServerContext* ctx,

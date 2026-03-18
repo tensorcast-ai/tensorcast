@@ -183,45 +183,82 @@ _CONTRIBUTION_KIND_FROM_PROTO: dict[int, ContributionKind] = {
 }
 
 
-class CloseoutPolicySnapshot(BaseModel):
+AssemblyTargetKind = Literal["structural_view", "canonical_layout"]
+AssemblyContributorLivenessMode = Literal[
+    "require_live_until_cut",
+    "allow_durable_occupancy",
+]
+AssemblyCloseoutKind = Literal[
+    "source_publish_only",
+    "representation_publish",
+    "rollout_gated_publish",
+]
+
+_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[AssemblyTargetKind, int] = {
+    "structural_view": int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW),
+    "canonical_layout": int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT),
+}
+_ASSEMBLY_TARGET_KIND_FROM_PROTO: dict[int, AssemblyTargetKind] = {
+    int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW): "structural_view",
+    int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT): "canonical_layout",
+}
+_ASSEMBLY_LIVENESS_MODE_TO_PROTO: dict[AssemblyContributorLivenessMode, int] = {
+    "require_live_until_cut": int(
+        store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT
+    ),
+    "allow_durable_occupancy": int(
+        store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
+    ),
+}
+_ASSEMBLY_LIVENESS_MODE_FROM_PROTO: dict[int, AssemblyContributorLivenessMode] = {
+    int(
+        store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT
+    ): "require_live_until_cut",
+    int(
+        store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
+    ): "allow_durable_occupancy",
+}
+_ASSEMBLY_CLOSEOUT_KIND_TO_PROTO: dict[AssemblyCloseoutKind, int] = {
+    "source_publish_only": int(
+        store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY
+    ),
+    "representation_publish": int(
+        store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH
+    ),
+    "rollout_gated_publish": int(
+        store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH
+    ),
+}
+_ASSEMBLY_CLOSEOUT_KIND_FROM_PROTO: dict[int, AssemblyCloseoutKind] = {
+    int(store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY): (
+        "source_publish_only"
+    ),
+    int(store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH): (
+        "representation_publish"
+    ),
+    int(store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH): (
+        "rollout_gated_publish"
+    ),
+}
+
+
+class AssemblyTargetRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    policy_json: str = ""
-    source_policy_version: int = 0
-    closeout_policy_hash: str = ""
-
-    def to_proto(self) -> store_daemon_pb2.CloseoutPolicySnapshot:
-        return store_daemon_pb2.CloseoutPolicySnapshot(
-            policy_json=str(self.policy_json),
-            source_policy_version=int(self.source_policy_version),
-            closeout_policy_hash=str(self.closeout_policy_hash),
-        )
-
-    @classmethod
-    def from_proto(
-        cls,
-        proto: store_daemon_pb2.CloseoutPolicySnapshot,
-    ) -> "CloseoutPolicySnapshot":
-        return cls(
-            policy_json=str(proto.policy_json),
-            source_policy_version=int(proto.source_policy_version),
-            closeout_policy_hash=str(proto.closeout_policy_hash),
-        )
-
-
-class ContributionSlot(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    slot_key: str
+    kind: AssemblyTargetKind
     structural_view_id: str | None = None
-    contribution_kind: ContributionKind
-    coverage_semantics: str
 
-    def to_proto(self) -> store_daemon_pb2.ContributionSlot:
-        proto = store_daemon_pb2.ContributionSlot(
-            slot_key=str(self.slot_key),
-            contribution_kind=_CONTRIBUTION_KIND_TO_PROTO[self.contribution_kind],
-            coverage_semantics=str(self.coverage_semantics),
+    @model_validator(mode="after")
+    def _validate_target(self) -> "AssemblyTargetRef":
+        if self.kind == "structural_view" and not self.structural_view_id:
+            raise ValueError("structural_view targets require structural_view_id")
+        if self.kind == "canonical_layout" and self.structural_view_id:
+            raise ValueError("canonical_layout targets must not set structural_view_id")
+        return self
+
+    def to_proto(self) -> store_daemon_pb2.AssemblyTargetRef:
+        proto = store_daemon_pb2.AssemblyTargetRef(
+            kind=_ASSEMBLY_TARGET_KIND_TO_PROTO[self.kind]
         )
         if self.structural_view_id:
             proto.structural_view_id = str(self.structural_view_id)
@@ -229,88 +266,169 @@ class ContributionSlot(BaseModel):
 
     @classmethod
     def from_proto(
-        cls,
-        proto: store_daemon_pb2.ContributionSlot,
-    ) -> "ContributionSlot":
+        cls, proto: store_daemon_pb2.AssemblyTargetRef
+    ) -> "AssemblyTargetRef":
         return cls(
-            slot_key=str(proto.slot_key),
+            kind=_ASSEMBLY_TARGET_KIND_FROM_PROTO[int(proto.kind)],
             structural_view_id=str(proto.structural_view_id or "") or None,
-            contribution_kind=_CONTRIBUTION_KIND_FROM_PROTO[
-                int(proto.contribution_kind)
-            ],
-            coverage_semantics=str(proto.coverage_semantics),
         )
 
 
-class ContributionContractSnapshot(BaseModel):
+class AssemblyRequirement(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    layout_id: str
-    required_slots: tuple[ContributionSlot, ...] = ()
-    require_live_contributions_until_readiness_cut: bool = True
+    slot_id: str
+    target: AssemblyTargetRef
+    coverage_contract: str
 
-    def to_proto(self) -> store_daemon_pb2.ContributionContractSnapshot:
-        proto = store_daemon_pb2.ContributionContractSnapshot(
-            layout_id=str(self.layout_id),
-            require_live_contributions_until_readiness_cut=bool(
-                self.require_live_contributions_until_readiness_cut
-            ),
+    def to_proto(self) -> store_daemon_pb2.AssemblyRequirement:
+        proto = store_daemon_pb2.AssemblyRequirement(
+            slot_id=str(self.slot_id),
+            coverage_contract=str(self.coverage_contract),
         )
-        proto.required_slots.extend(slot.to_proto() for slot in self.required_slots)
+        proto.target.CopyFrom(self.target.to_proto())
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: store_daemon_pb2.AssemblyRequirement
+    ) -> "AssemblyRequirement":
+        return cls(
+            slot_id=str(proto.slot_id),
+            target=AssemblyTargetRef.from_proto(proto.target),
+            coverage_contract=str(proto.coverage_contract),
+        )
+
+
+class AssemblyRequirementSetRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    requirements_digest: str = ""
+    requirement_count: int = 0
+    carrier_form: str = "inline"
+    inline_requirements: tuple[AssemblyRequirement, ...] = ()
+
+    def to_proto(self) -> store_daemon_pb2.AssemblyRequirementSetRef:
+        proto = store_daemon_pb2.AssemblyRequirementSetRef(
+            requirements_digest=str(self.requirements_digest),
+            requirement_count=int(
+                self.requirement_count
+                if self.requirement_count > 0
+                else len(self.inline_requirements)
+            ),
+            carrier_form=str(self.carrier_form),
+        )
+        proto.inline_requirements.extend(
+            requirement.to_proto() for requirement in self.inline_requirements
+        )
         return proto
 
     @classmethod
     def from_proto(
         cls,
-        proto: store_daemon_pb2.ContributionContractSnapshot,
-    ) -> "ContributionContractSnapshot":
+        proto: store_daemon_pb2.AssemblyRequirementSetRef,
+    ) -> "AssemblyRequirementSetRef":
         return cls(
-            layout_id=str(proto.layout_id),
-            required_slots=tuple(
-                ContributionSlot.from_proto(slot) for slot in proto.required_slots
-            ),
-            require_live_contributions_until_readiness_cut=bool(
-                proto.require_live_contributions_until_readiness_cut
+            requirements_digest=str(proto.requirements_digest),
+            requirement_count=int(proto.requirement_count),
+            carrier_form=str(proto.carrier_form or "inline"),
+            inline_requirements=tuple(
+                AssemblyRequirement.from_proto(requirement)
+                for requirement in proto.inline_requirements
             ),
         )
 
 
+class AssemblyReadinessPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    contributor_liveness_mode: AssemblyContributorLivenessMode = (
+        "require_live_until_cut"
+    )
+
+    def to_proto(self) -> store_daemon_pb2.AssemblyReadinessPolicy:
+        return store_daemon_pb2.AssemblyReadinessPolicy(
+            contributor_liveness_mode=_ASSEMBLY_LIVENESS_MODE_TO_PROTO[
+                self.contributor_liveness_mode
+            ]
+        )
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.AssemblyReadinessPolicy,
+    ) -> "AssemblyReadinessPolicy":
+        if int(proto.contributor_liveness_mode) == int(
+            store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_UNSPECIFIED
+        ):
+            return cls()
+        return cls(
+            contributor_liveness_mode=_ASSEMBLY_LIVENESS_MODE_FROM_PROTO[
+                int(proto.contributor_liveness_mode)
+            ]
+        )
+
+
+class AssemblyCloseoutContract(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: AssemblyCloseoutKind = "source_publish_only"
+    closeout_contract_digest: str = ""
+    source_version_key: str | None = None
+    serving_version_key: str | None = None
+    serving_artifact_id: str | None = None
+    serving_manifest_ref: str | None = None
+
+    def to_proto(self) -> store_daemon_pb2.AssemblyCloseoutContract:
+        proto = store_daemon_pb2.AssemblyCloseoutContract(
+            kind=_ASSEMBLY_CLOSEOUT_KIND_TO_PROTO[self.kind],
+            closeout_contract_digest=str(self.closeout_contract_digest),
+        )
+        if self.source_version_key:
+            proto.source_version_key = str(self.source_version_key)
+        if self.serving_version_key:
+            proto.serving_version_key = str(self.serving_version_key)
+        if self.serving_artifact_id:
+            proto.serving_artifact_id = str(self.serving_artifact_id)
+        if self.serving_manifest_ref:
+            proto.serving_manifest_ref = str(self.serving_manifest_ref)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.AssemblyCloseoutContract,
+    ) -> "AssemblyCloseoutContract":
+        kind = "source_publish_only"
+        if int(proto.kind) != int(store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED):
+            kind = _ASSEMBLY_CLOSEOUT_KIND_FROM_PROTO[int(proto.kind)]
+        return cls(
+            kind=kind,
+            closeout_contract_digest=str(proto.closeout_contract_digest),
+            source_version_key=str(proto.source_version_key or "") or None,
+            serving_version_key=str(proto.serving_version_key or "") or None,
+            serving_artifact_id=str(proto.serving_artifact_id or "") or None,
+            serving_manifest_ref=str(proto.serving_manifest_ref or "") or None,
+        )
+
+
 class AssemblyAttemptRef(BaseModel):
-    """Fresh assembly workspace reference rooted in a layout contract."""
+    """Durable assembly-attempt reference."""
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    assembly_id: str
+    attempt_id: str
+    workspace_assembly_id: str
     layout_id: str
-    attempt_spec_hash: str
-    contribution_contract_hash: str
+    attempt_intent_digest: str
+    coordinator_generation: int = 0
     coordinator_operation: operation_pb2.OperationRef = Field(
         default_factory=operation_pb2.OperationRef
     )
-    coordinator_generation: int
-    attempt_spec_proto: bytes
 
     @property
     def coordinator_operation_id(self) -> str:
         return str(self.coordinator_operation.operation_id or "")
-
-    def decode_attempt_spec(self) -> store_daemon_pb2.AssemblyAttemptSpec:
-        if not self.attempt_spec_proto:
-            raise ValueError("attempt_spec_proto is empty")
-        spec = store_daemon_pb2.AssemblyAttemptSpec()
-        spec.ParseFromString(self.attempt_spec_proto)
-        if (
-            self.attempt_spec_hash
-            and spec.attempt_spec_hash
-            and (str(spec.attempt_spec_hash) != str(self.attempt_spec_hash))
-        ):
-            raise ValueError("attempt_spec_hash does not match attempt_spec_proto")
-        return spec
-
-    def decode_contribution_contract(
-        self,
-    ) -> store_daemon_pb2.ContributionContractSnapshot:
-        return self.decode_attempt_spec().contribution_contract
 
 
 class PartialSealResult(BaseModel):
@@ -318,7 +436,9 @@ class PartialSealResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    assembly_id: str
+    attempt_id: str
+    workspace_assembly_id: str
+    slot_id: str | None = None
     binding_id: str
     binding_value_id: str
     contribution_kind: Literal["piece_partial", "canonical_full"]
@@ -509,7 +629,12 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "AssemblyCloseoutContract",
     "AssemblyAttemptRef",
+    "AssemblyReadinessPolicy",
+    "AssemblyRequirement",
+    "AssemblyRequirementSetRef",
+    "AssemblyTargetRef",
     "PartialSealResult",
     "CanonicalRange",
     "CommitResult",

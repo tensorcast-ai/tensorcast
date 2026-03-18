@@ -51,12 +51,13 @@ from tensorcast.types import (
     ArtifactDescriptor,
     ArtifactIdKind,
     AssemblyAttemptRef,
+    AssemblyCloseoutContract,
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
     BeginRegisterArtifactResult,
     CanonicalRange,
-    CloseoutPolicySnapshot,
     CoalescedHandshake,
     CommitResult,
-    ContributionContractSnapshot,
     DeregisterArtifactOutcome,
     LeaseHandshake,
     LeaseSegment,
@@ -3403,17 +3404,20 @@ class DaemonCtl:
         self,
         *,
         layout_id: str,
-        contribution_contract: ContributionContractSnapshot | None = None,
-        closeout_policy: CloseoutPolicySnapshot | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        closeout_contract: AssemblyCloseoutContract | None = None,
         timeout_s: float = 30.0,
     ) -> AssemblyAttemptRef:
         if not layout_id:
             raise ValueError("layout_id is required")
         req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
-        if contribution_contract is not None:
-            req.contribution_contract.CopyFrom(contribution_contract.to_proto())
-        if closeout_policy is not None:
-            req.closeout_policy.CopyFrom(closeout_policy.to_proto())
+        if requirements is not None:
+            req.requirements.CopyFrom(requirements.to_proto())
+        if readiness_policy is not None:
+            req.readiness_policy.CopyFrom(readiness_policy.to_proto())
+        if closeout_contract is not None:
+            req.closeout_contract.CopyFrom(closeout_contract.to_proto())
         with self._client_span("Client/StartAssemblyAttempt") as span:
             resp = self._unary_call(
                 self.stub.StartAssemblyAttempt,
@@ -3428,47 +3432,40 @@ class DaemonCtl:
             coordinator_operation.CopyFrom(attempt.coordinator_operation)
         elif attempt.coordinator_operation_id:
             coordinator_operation.operation_id = str(attempt.coordinator_operation_id)
-        attempt_spec_proto = b""
-        if attempt.HasField("attempt_spec"):
-            attempt_spec_proto = attempt.attempt_spec.SerializeToString()
         return AssemblyAttemptRef(
-            assembly_id=str(attempt.assembly_id),
+            attempt_id=str(attempt.attempt_id or ""),
+            workspace_assembly_id=str(attempt.workspace_assembly_id),
             layout_id=str(attempt.layout_id),
-            attempt_spec_hash=(
-                str(attempt.attempt_spec_hash)
-                or str(attempt.attempt_spec.attempt_spec_hash or "")
-            ),
-            contribution_contract_hash=str(attempt.contribution_contract_hash),
-            coordinator_operation=coordinator_operation,
+            attempt_intent_digest=str(attempt.attempt_intent_digest),
             coordinator_generation=int(attempt.coordinator_generation),
-            attempt_spec_proto=attempt_spec_proto,
+            coordinator_operation=coordinator_operation,
         )
 
     def submit_binding_contribution(
         self,
         *,
-        assembly_id: str,
-        layout_id: str,
-        contribution_contract_hash: str,
+        attempt_id: str,
+        workspace_assembly_id: str,
         binding_id: str,
         binding_value_id: str,
         coverage_plan_hash: str,
         contribution_kind: store_daemon_pb2.BindingContributionKind,
         coordinator_operation_id: str,
         coordinator_generation: int,
+        attempt_intent_digest: str = "",
         view_id: str | None = None,
         timeout_s: float = 30.0,
     ) -> store_daemon_pb2.SubmitBindingContributionResponse:
         req = store_daemon_pb2.SubmitBindingContributionRequest(
-            assembly_id=str(assembly_id),
-            layout_id=str(layout_id),
-            contribution_contract_hash=str(contribution_contract_hash),
+            attempt_id=str(attempt_id),
+            workspace_assembly_id=str(workspace_assembly_id),
             binding_id=str(binding_id),
             binding_value_id=str(binding_value_id),
             coverage_plan_hash=str(coverage_plan_hash),
             contribution_kind=contribution_kind,
             coordinator_operation_id=str(coordinator_operation_id),
             coordinator_generation=int(coordinator_generation),
+            attempt_intent_digest=str(attempt_intent_digest),
         )
         if view_id:
             req.view_id = str(view_id)
@@ -3479,6 +3476,24 @@ class DaemonCtl:
                 timeout=timeout_s,
                 span=span,
                 retries=1,
+            )
+
+    def seal_assembly_attempt(
+        self,
+        *,
+        attempt_id: str,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.SealAssemblyAttemptResponse:
+        if not attempt_id:
+            raise ValueError("attempt_id is required")
+        req = store_daemon_pb2.SealAssemblyAttemptRequest(attempt_id=attempt_id)
+        with self._client_span("Client/SealAssemblyAttempt") as span:
+            return self._unary_call(
+                self.stub.SealAssemblyAttempt,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
             )
 
     def seal_assembly(
@@ -3546,8 +3561,6 @@ class DaemonCtl:
         *,
         assembly_id: str,
         layout_id: str | None = None,
-        expected_coordinator_generation: int | None = None,
-        attempt_spec: store_daemon_pb2.AssemblyAttemptSpec | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartSealAssemblyResponse:
         if not assembly_id:
@@ -3556,10 +3569,6 @@ class DaemonCtl:
             assembly_id=assembly_id,
             layout_id=str(layout_id) if layout_id else "",
         )
-        if expected_coordinator_generation is not None:
-            req.expected_coordinator_generation = int(expected_coordinator_generation)
-        if attempt_spec is not None:
-            req.attempt_spec.CopyFrom(attempt_spec)
         with self._client_span("Client/StartSealAssembly") as span:
             resp = self._unary_call(
                 self.stub.StartSealAssembly,

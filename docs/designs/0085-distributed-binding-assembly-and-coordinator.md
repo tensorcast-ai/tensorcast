@@ -43,52 +43,22 @@ links:
 
 # Summary
 
-Define distributed publish for binding-backed training by reusing the
-repository's existing assembly and layout trunk.
+Define distributed binding-backed publish by reusing the repository's existing
+assembly and layout trunk.
 
-`0085` now has one job only:
+`0085` is the parent thesis only.
+It is not the executable attempt-carrier specification.
 
-- define the parent thesis for the assembly-attempt domain,
-- lock the repository-wide invariants that must remain true,
-- and define how binding-backed publish fits onto the existing structural trunk.
-
-`0085` no longer tries to be the executable carrier specification for the
-attempt domain.
-That executable responsibility now belongs to `0105`.
-
-The long-term rule set is:
-
-- TensorCast has one structural assembly trunk.
-- TensorCast does not have one universal identity plane for all attempt
-  semantics.
-- Frontend-specific planner or topology languages must canonicalize into one
-  explicit attempt contract before attempt creation completes.
-- Distributed binding publish is one frontend onto the existing structural
-  trunk, not a second assembly implementation.
-
-# Status Update
-
-`0085` is the parent design for:
+Its job is to lock the repository-wide invariants that must remain true:
 
 - one structural assembly trunk,
-- one layout contract trunk,
-- one frontend-agnostic structural commit path,
-- and the semantic separation between structural truth, attempt truth,
-  liveness, workflow fencing, and closeout truth.
+- one frontend-agnostic attempt domain above that trunk,
+- one workflow and closeout line above immutable attempt truth,
+- and one binding frontend that lowers onto the same trunk instead of inventing
+  a second publish implementation.
 
-`0105` is the active child design for:
-
-- `AssemblyAttemptSpec`,
-- `AssemblyAttemptRuntime`,
-- `SealReadinessSnapshot`,
-- `slot_key`,
-- snapshotted closeout-policy authority,
-- and the public continuation contract for assembly attempts.
-
-Normative ownership split:
-
-- `0085` owns the parent invariants and the one-trunk integration model.
-- `0105` owns the executable carrier model and the hard cut at the join points.
+`0105` owns the executable attempt model.
+`0085` owns the parent-level rules that child designs must not violate.
 
 # Goals / Non-Goals
 
@@ -98,119 +68,116 @@ Normative ownership split:
 - Keep `LayoutSpec` as the canonical structural layout and overlap or proof
   contract.
 - Reuse the existing structural assembly substrate:
-  - `assembly_id`
   - `LayoutSpec`
-  - `assembly_layout_bindings`
-  - `ViewSpec` and deterministic `view_id`
+  - one assembly workspace trunk
+  - deterministic `view_id`
   - coverage and proof persistence
   - `artifact_bindings`
-  - `StartSealAssembly`
+  - the existing structural seal substrate
 - Keep binding-backed contribution as one frontend onto the existing structural
   registration and seal path.
-- Keep the semantic kernels separated so the same question never has two
-  competing authority roots.
-- Preserve a clean extension path for `PP`, `EP`, `canonical_full`, future
-  byte-in frontends, and later richer contract families.
+- Keep semantic kernels separated so the same question never has two competing
+  authority roots.
+- Preserve a clean extension path for planners, future frontend families, and
+  richer closeout scopes without creating a second assembly implementation.
 - Keep SDK control-path operations daemon-mediated only.
-- Keep final success defined by published lineage, not by source seal alone.
 
 ## Non-Goals
 
 - Redefine the local binding contract from `0084`.
 - Redefine repository-wide distributed continuation rules from `0100`.
 - Redefine lifecycle semantics from `0011` or `0094`.
-- Widen `LayoutSpec` with frontend topology or ownership metadata.
+- Widen `LayoutSpec` with frontend topology, workflow, or closeout metadata.
 - Introduce a second persistent assembly implementation.
-- Introduce a training-only layout plane.
-- Promise `TP > 1` assembly semantics in phase 1.
+- Promise `TP > 1` assembly semantics in this phase.
 
 # Problem Statement
 
 The repository already contains the structural substrate we want:
 
-- `LayoutSpec` is content-addressed and layout-scoped.
-- `ViewSpec` canonically maps to deterministic `view_id`.
-- view registration already persists structural facts through
-  `view_state_service`.
-- `assembly_id` already names an unsealed structural workspace.
-- `artifact_bindings` already make `assembly_id -> mi2` the post-seal authority.
+- `LayoutSpec` is content-addressed and layout-scoped,
+- `ViewSpec` canonically maps to deterministic `view_id`,
+- structural registration persists facts through `view_state_service`,
+- the structural seal path already exists,
+- and `artifact_bindings` already make sealed lineage authoritative.
 
 The historical inconsistency was not the trunk.
 It was the join points around the trunk.
 
 Previous drafts and partial implementations blurred:
 
-1. immutable attempt truth and mutable seal-time truth,
-2. structural projection identity and required-slot identity,
-3. durable occupancy projection and lifecycle authority,
-4. source seal completion and final published success,
-5. public continuation metadata and bare internal workflow ids,
-6. layout-scoped structural hints and attempt-contract authority,
-7. pre-attempt policy scope and post-start workspace identity.
+1. requirement truth and binding-local lowering shape,
+2. requirement identity and readiness policy,
+3. attempt identity and structural workspace identity,
+4. durable attempt truth and workflow snapshots,
+5. workflow observation and workflow transition,
+6. source seal completion and final published success,
+7. public continuation metadata and bare internal ids.
 
 That blurring is the real design bug.
 
 # Repository Alignment
 
-`0085` must now be read under four repository-wide rules that are already owned
+`0085` must be read under four repository-wide rules that are already owned
 elsewhere.
 
 ## One authority root per question
 
-`0090` established the repository rule that different questions must have
-different authority roots.
-Assembly attempts must follow the same rule.
+`0092` and `0090` established the repository rule that different questions must
+have different authority roots.
 
 For this domain:
 
 - structural layout truth belongs to `LayoutSpec`,
-- structural projection truth belongs to `ViewSpec` plus `view_id`,
-- attempt contract truth belongs to the immutable attempt spec,
+- structural target truth belongs to `ViewSpec` plus deterministic `view_id`,
+- requirement truth belongs to the canonical requirement kernel,
+- readiness-policy truth belongs to a separate readiness-policy kernel,
+- closeout-contract truth belongs to a separate closeout-contract kernel,
+- immutable per-attempt truth belongs to an immutable attempt record,
 - workflow currentness belongs to the coordinator operation runtime,
-- live occupancy belongs to the durable slot projection plus lifecycle-backed
+- live occupancy belongs to durable slot occupancy plus lifecycle-backed
   liveness,
-- closeout truth belongs to the final attempt result.
+- closeout result truth belongs to the final published lineage.
 
-No row, proto, or helper may silently answer more than one of those questions
-by accident.
+No row, proto, or helper may silently answer more than one of those questions by
+accident.
 
 ## Lifecycle is not workflow truth
 
-`0094` and `0011` established that lifecycle protects a bounded runtime promise.
+`0094` and `0011` established that lifecycle protects bounded runtime promises.
 It does not own workflow truth.
 
 Therefore:
 
 - leases and keepalives may protect live contributions,
 - finalizers may accelerate cleanup,
-- but lifecycle state does not replace attempt contract truth,
-- and lifecycle state does not replace coordinator workflow truth.
+- but lifecycle state does not replace requirement truth,
+- does not replace readiness policy,
+- and does not replace coordinator workflow truth.
 
 ## Workflow semantics stay above lifecycle
 
-`0096` established that replay, currentness, fencing, wait, and completion are
+`0096` established that replay, wait, currentness, fencing, and completion are
 workflow semantics.
-Assembly attempts must follow the same split.
 
 Therefore:
 
 - mutation fences may be derived from live slot occupancy,
-- but whether an attempt is still open, sealing, failed, or complete is a
-  workflow question,
-- and whether final success may be reported is a closeout-workflow question.
+- explicit transition APIs advance attempt workflow,
+- observation APIs report workflow state,
+- and `wait` must not become an implicit transition helper.
 
 ## Public continuation follows `0100`
 
 `0100` established that public continuation must converge on `Operation[T]` or
 another explicit public family surface.
-Bare internal attachment carriers and bare string ids are not enough.
 
 Therefore:
 
 - assembly attempts may not define a private continuation dialect,
-- public reentry must carry enough metadata for honest recovery,
-- and child designs must not weaken the repository's continuation contract just
-  because the attempt path started life as a local daemon workflow.
+- public reentry must carry durable attempt scope,
+- and child designs must not weaken the continuation contract merely because the
+  attempt path began life as a local daemon workflow.
 
 # Architectural Thesis
 
@@ -221,23 +188,26 @@ They answer different questions.
 
 | Design | Owns | Must not own |
 | --- | --- | --- |
-| `0085` | one-trunk thesis, semantic kernel separation, frontend-agnostic structural lowering, parent invariants, high-level success model | concrete public carriers, operation snapshot shape, public continuation payloads, exact slot-key or proto fields |
-| `0105` | immutable attempt spec, runtime projection, readiness cut, public slot identity, continuation metadata, closeout-policy hard cut | second structural trunk, alternative layout root, alternate lifecycle system |
+| `0085` | one-trunk thesis, semantic-kernel separation, frontend-agnostic lowering rules, parent invariants, high-level success model | concrete proto carriers, public continuation payloads, exact runtime or durable-row schema |
+| `0105` | executable attempt carriers, public attempt surface, durable attempt-row direction, readiness-cut shape, continuation metadata | second structural trunk, alternative layout root, alternate lifecycle system |
 
 ## One Structural Trunk, Multiple Semantic Kernels
 
-The design should be read through the following table.
+The parent design should be read through the following table.
 
 | Semantic kernel | Carrier family | Authoritative question answered |
 | --- | --- | --- |
 | Structural layout kernel | `LayoutSpec` | what canonical structure must final bytes satisfy |
-| Structural projection kernel | `ViewSpec` plus deterministic `view_id` | which structural projection is being registered |
-| Attempt contract kernel | immutable attempt spec | which required slots must be satisfied for this attempt |
+| Structural target kernel | `ViewSpec` plus deterministic `view_id` | which structural projection is being addressed |
+| Requirement kernel | canonical requirement-set contract | which requirements must be satisfied for this attempt |
+| Readiness-policy kernel | explicit readiness-policy contract | what liveness facts must still hold at transition time |
+| Closeout-contract kernel | typed closeout contract | what success boundary must final closeout satisfy |
+| Attempt instance kernel | immutable attempt record | which immutable attempt instance exists |
 | Workflow fence kernel | coordinator operation runtime | who is currently allowed to accept contributions and transition to seal |
-| Occupancy kernel | `assembly_contributions` plus lifecycle-backed liveness | which contributor currently occupies one required slot |
-| Mutation-fence kernel | live occupancies that point at `(binding_id, binding_value_id)` | may this local binding value become mutable again |
-| Assembly workspace kernel | `assembly_id` | where unsealed structural bytes are accumulated |
-| Closeout kernel | `PublishedModelVersion` lineage | what externally visible result did the attempt produce |
+| Occupancy kernel | durable slot occupancy plus lifecycle-backed liveness | which contributor currently occupies one required slot |
+| Mutation-fence kernel | live occupancies pointing at contributor-value identity | may this local sealed value become mutable again |
+| Assembly workspace kernel | structural workspace id | where unsealed structural bytes are accumulated |
+| Closeout result kernel | `PublishedModelVersion` lineage | what externally visible result did the attempt produce |
 
 No kernel replaces another.
 
@@ -249,70 +219,33 @@ It continues to own:
 - canonical index binding,
 - overlap policy,
 - proof policy,
-- and optional layout-scoped expected piece projections.
+- and reusable structural target semantics.
 
 It must not absorb:
 
-- local binding identity,
-- contributor liveness state,
-- attempt-specific workflow state,
-- or serving closeout policy for one specific attempt.
+- binding identity,
+- slot occupancy,
+- attempt workflow state,
+- or attempt closeout policy.
 
-`ViewSpec` plus deterministic `view_id` remain the reusable structural
-projection identity.
-They answer the structural question only.
-
-## Attempt Contract Kernel
+## Requirement Kernel
 
 The authoritative attempt root is not `LayoutSpec.expected_view_ids`.
-It is the immutable attempt specification defined by `0105`.
-
-Within that immutable attempt spec, the contract kernel remains the explicit
-`ContributionContractSnapshot`.
+It is the frontend-agnostic requirement kernel that `0105` defines.
 
 Parent-level rules:
 
-- attempt completeness is checked against explicit required entries,
-- frontend-specific planner or topology state must canonicalize once into those
-  explicit required entries before attempt creation completes,
-- `LayoutSpec.expected_view_ids` is only the layout-scoped seed for the
-  disjoint `piece_partial` family,
-- `canonical_full` is a legal contract family member and must not be disguised
-  as a full-coverage piece,
-- and no controller may rebuild a weaker substitute contract from layout hints
+- attempt completeness is checked against explicit canonical requirements,
+- frontend-specific planner or binding state must canonicalize once into that
+  requirement kernel before attempt creation completes,
+- `LayoutSpec.expected_view_ids` may seed one frontend bridge but must not remain
+  canonical attempt truth after the attempt exists,
+- `canonical_full`-style semantics prove that not every requirement is naturally
+  a structural `view_id`,
+- no controller may rebuild a weaker substitute requirement set from layout hints
   after the attempt exists.
 
-## Attempt Entry Boundary
-
-The attempt domain is contract-first at its entry boundary.
-
-Parent-level rules:
-
-- a frontend may present either explicit required-slot data or a
-  frontend-specific template that canonicalizes to it,
-- `layout_id` alone is acceptable only as a phase-1 shorthand for the
-  layout-seeded `piece_partial` family,
-- once the attempt exists, the canonical contract is the only authoritative
-  required-slot answer.
-
-## Slot, Occupancy, And Contributor Identity
-
-The design must distinguish at least three related but non-equal identities:
-
-1. structural projection identity
-   - usually `view_id`
-   - answers which structural bytes exist
-2. required-slot identity
-   - answers which attempt-contract entry must be satisfied
-3. contributor-value identity
-   - `(binding_id, binding_value_id)`
-   - answers which sealed local value currently occupies one required slot
-
-Phase 1 may still reuse existing carriers, but only as an explicit alias.
-No design or implementation may describe those identities as one universal
-plane.
-
-## Binding Contribution Reuses The Structural Registration Trunk
+## Binding Frontend Reuses The Structural Registration Trunk
 
 `SealedBindingValue` from `0084` becomes one frontend onto the existing
 structural registration trunk.
@@ -323,62 +256,64 @@ It must not bypass:
 - coverage validation,
 - overlap and proof checks,
 - `view_state_service`,
-- or the existing assembly seal flow.
+- or the existing structural seal substrate.
 
-The lowering rules are:
+The binding bridge may still use binding-local carriers such as:
 
-- `piece_partial` lowers onto the structural piece or view commit path,
-- `canonical_full` lowers onto the canonical structural registration path,
-- both use the same trunk-level validation and sealing semantics,
-- neither creates a second publish path.
+- contribution kind,
+- coverage-plan hash,
+- or binding-local slot metadata.
+
+But parent rule:
+
+- those bridge-local carriers are not the canonical attempt kernel.
+- and frontend code must not own the final structural lowering for one
+  attempt-scoped contribution.
 
 This is how "one trunk" should be interpreted.
-The shared trunk is the structural commit and seal substrate, not one
-overloaded submit carrier.
+The shared trunk is the structural commit and seal substrate, not one overloaded
+submit carrier.
 
 ## Workflow, Readiness, And Closeout Boundary
 
 Parent-level ordering rule:
 
-1. one fresh `assembly_id` names one attempt workspace,
+1. one immutable attempt record is created before contributors are accepted,
 2. contributors may submit only while the attempt is open,
-3. the system must capture one readiness cut before structural seal begins,
-4. structural seal consumes that readiness cut,
-5. closeout consumes the seal result and produces final published lineage.
+3. explicit transition APIs advance the attempt from open to sealing,
+4. the system captures one readiness cut before structural seal begins,
+5. structural seal consumes that captured cut,
+6. closeout consumes the seal result and produces final published lineage.
 
 That ordering is required even though the concrete runtime and snapshot carriers
 are owned by `0105`.
 
-## Pre-Attempt Policy Source Boundary
+## Pre-Attempt Closeout Profile Boundary
 
-Mutable closeout-policy configuration is a pre-attempt input, not attempt
-truth.
+Mutable closeout-profile configuration, if it exists at all, is a pre-attempt
+input, not attempt truth.
 
 Parent-level rules:
 
-- mutable policy sources must be keyed by a pre-attempt scope visible before the
-  attempt workspace exists,
-- post-start `assembly_id` may identify the frozen attempt snapshot but must not
-  remain the sole mutable lookup key for pre-attempt policy resolution,
-- once the attempt exists, the snapshotted closeout policy is authoritative.
+- mutable profile sources must be keyed by a pre-attempt scope visible before the
+  attempt exists,
+- post-start workspace identity must not remain the sole lookup key for
+  pre-attempt closeout semantics,
+- once the attempt exists, the snapped closeout contract is authoritative.
 
 ## Parent-Level Public Surface Direction
 
-`0085` no longer defines concrete public carriers.
-That is now owned by `0105`.
+`0085` does not define concrete public carriers.
+That is owned by `0105`.
 
 The parent-level API direction remains:
 
 - callers use an explicit assembly-attempt surface,
 - binding-backed contribution stays on `SealedBindingValue`,
-- wait returns a published lineage result rather than a bare source artifact,
-- and public continuation must align with `0100`.
-
-## Naming Compliance
-
-`0085` no longer introduces executable API carriers of its own.
-Concrete naming compliance for public and proto-facing attempt carriers now
-lives in `0105`.
+- attempt transition is explicit,
+- wait and status are observation only,
+- final success returns published lineage rather than a bare source artifact,
+- and public continuation aligns with `0100`.
 
 # Consistency Model
 
@@ -391,16 +326,20 @@ Assembly attempts must keep the following split explicit:
 
 - structural authority
   - `LayoutSpec`
-  - `views`
+  - structural targets
   - coverage and proof persistence
+- requirement authority
+  - canonical requirement kernel
+- readiness authority
+  - readiness-policy contract
 - attempt authority
-  - immutable attempt spec
+  - immutable attempt record
 - workflow authority
   - coordinator operation runtime
 - occupancy authority
-  - durable slot projection plus lifecycle-backed liveness
+  - durable slot occupancy plus lifecycle-backed liveness
 - closeout authority
-  - final published lineage
+  - typed closeout contract plus final published lineage result
 
 ## Seal Correctness Is A Conjunction
 
@@ -409,8 +348,8 @@ The attempt may progress only when all relevant kernels agree:
 
 - `structural_ready`
 - `workflow_current`
-- `occupancy_live` when the contract requires live contributors
-- `closeout_policy_satisfied` before final success is reported
+- `occupancy_live` when readiness policy requires live contributors
+- `closeout_contract_satisfied` before final success is reported
 
 This conjunction is the deepest parent invariant in the design.
 
@@ -423,7 +362,8 @@ Therefore:
 
 - mutation fencing is keyed by contributor-value identity,
 - it is derived from live slot occupancy,
-- and it must remain coherent with the same liveness model used by seal.
+- and it must remain coherent with the same liveness model used by readiness
+  transition and seal.
 
 ## Recovery Boundary
 
@@ -437,24 +377,22 @@ Parent-level rule:
   rather than on post-cut mutations,
 - terminal closeout may still fail,
 - but later contributor loss or policy edits must not retroactively change the
-  semantic contents of the already-captured readiness cut.
+  semantic contents of the already-captured cut.
 
-# Invariants and Error Model
+# Invariants And Error Model
 
 ## Invariants
 
 - one structural assembly trunk remains in the system,
-- one layout contract trunk remains in the system,
 - `LayoutSpec` remains the single structural layout root,
-- `LayoutSpec.expected_view_ids` remains only the layout-scoped seed for the
-  disjoint `piece_partial` family,
-- the attempt boundary remains contract-first even if a phase-1 layout-seeded
-  shorthand remains,
+- binding publish remains one frontend onto that trunk,
+- the attempt boundary remains contract-first,
+- requirement identity, readiness policy, closeout contract, attempt identity,
+  workspace identity, and contributor identity remain distinct,
 - one immutable attempt root exists per attempt,
-- slot identity, structural identity, and contributor identity remain distinct,
-- one publish attempt uses one fresh `assembly_id`,
-- mutable closeout-policy lookup uses pre-attempt scope and is snapshotted
-  before contributors are accepted,
+- one publish attempt uses one structural workspace,
+- mutable pre-attempt closeout configuration is resolved before contributors are
+  accepted,
 - only `SealedBindingValue` may contribute binding-backed bytes,
 - a live contributor may not reopen for mutation,
 - final success means published lineage completion, not source seal alone,
@@ -467,9 +405,9 @@ Parent-level error expectations:
 - `INVALID_ARGUMENT`
   - malformed layout or contribution mapping
   - malformed continuation payload
-  - invalid closeout policy input
+  - invalid readiness or closeout input
 - `FAILED_PRECONDITION`
-  - attempt contract mismatch
+  - requirement mismatch
   - slot already occupied by another live contributor
   - binding no longer has the current sealed value
   - required readiness facts are missing
@@ -485,84 +423,85 @@ Parent-level error expectations:
 
 The concrete public and proto-facing mapping is owned by `0105`.
 
-# Schema Changes
-
-`0085` still reuses the existing structural and occupancy tables.
+# Schema Direction
 
 Parent-level schema rules:
 
-- `layout_specs`, `assembly_layout_bindings`, `views`,
-  `view_coverage_ranges`, `artifact_bindings`, and `operations` remain the
-  structural and workflow substrate,
-- `assembly_contributions` remains the durable occupancy projection,
-- phase-1 carrier reuse is acceptable only if code and docs remain explicit
-  about any storage alias,
-- and the next evolution step is a first-class slot representation, not a
-  second assembly trunk.
+- structural tables remain the structural substrate,
+- workflow rows remain workflow substrate,
+- slot occupancy must converge on a first-class slot model rather than on a
+  `view_id` alias,
+- immutable attempt truth must converge on first-class durable attempt rows
+  rather than on workflow snapshots,
+- and the next evolution step is a first-class attempt domain, not a second
+  assembly trunk.
 
-# Alternatives and Rationale
+# Alternatives And Rationale
 
-## Collapse The Attempt Contract Into `LayoutSpec.expected_view_ids`
+## Collapse Attempt Truth Into Binding-Shaped Contract
 
 Rejected.
 
 Reasons:
 
-- `expected_view_ids` is only the layout-scoped seed for one contract family,
-- `canonical_full` and later richer families require explicit attempt-level
-  entry semantics,
-- and completeness must be checked against the immutable attempt contract, not
-  against a weaker reconstruction.
+- binding publish is only one frontend,
+- future frontends need the same canonical attempt kernel,
+- and a strong-consistency domain must not make one bridge enum the
+  authoritative attempt truth.
 
-## Treat Structural Identity, Slot Identity, And Contributor Identity As One Plane
+## Collapse Attempt Truth Into `LayoutSpec.expected_view_ids`
+
+Rejected.
+
+Reasons:
+
+- layout hints are structural bridge input, not canonical requirement truth,
+- richer requirement families need explicit attempt-level semantics,
+- completeness must be checked against immutable attempt truth, not a weaker
+  reconstruction.
+
+## Treat Structural Identity, Requirement Identity, And Contributor Identity As One Plane
 
 Rejected.
 
 Reasons:
 
 - they answer different questions,
-- `canonical_full` proves not every slot is naturally a structural view,
-- and mutation fencing is already keyed by contributor-value identity in
-  `0084`.
+- not every requirement is naturally a structural view,
+- and mutation fencing is already keyed by contributor-value identity in `0084`.
 
-## Create A Second Persistent Assembly Implementation
-
-Rejected.
-
-Reasons:
-
-- the repository already has a viable structural assembly trunk,
-- the real problem is semantic overloading at the join points,
-- and a second assembly implementation would hide that problem rather than fix
-  it.
-
-## Let Source Seal Alone Define Final Success
+## Let Workflow Snapshots Replace Durable Attempt Truth
 
 Rejected.
 
 Reasons:
 
-- serving-facing workflows may require additional closeout stages,
-- immutable version keys and manifest facts are part of the externally visible
-  result,
-- and callers should not infer success from side effects outside the attempt
-  result.
+- workflow is a projection, not semantic truth storage,
+- public continuation must project durable truth honestly,
+- and a strong-consistency domain cannot keep its only immutable root inside a
+  workflow snapshot blob.
 
-# Trade-offs and Risks
+## Let `wait` Perform Transition
 
-- **More named objects**
-  - The domain becomes more explicit, but the explicit split is less risky than
-    continuing to overload one carrier.
-- **Phase-1 storage alias risk**
-  - Reusing old columns as temporary slot carriers keeps migration cost down,
-    but the alias must stay explicit or drift returns quickly.
+Rejected.
+
+Reasons:
+
+- `0096` already separates observation from transition,
+- hidden transition inside `wait` creates a private workflow dialect,
+- and it makes public continuation semantics dishonest.
+
+# Trade-offs And Risks
+
+- **More named domain objects**
+  - The domain becomes more explicit.
+  - That is less risky than continuing to overload one carrier.
 - **Hard-cut discipline**
   - The parent-child split only works if `0085` stops restating executable
     carriers and `0105` becomes the sole source of truth for those carriers.
-- **Readiness-cut rigor**
-  - If implementations continue to reread mutable policy or post-cut occupancy
-    during seal, the design becomes inconsistent again even if the prose is
-    correct.
+- **Schema cost**
+  - Strong-consistency attempt semantics require more durable structure.
+  - That is an intentional cost of making the domain honest.
 
 # Compatibility & Acceptance Criteria
 
@@ -571,23 +510,19 @@ Parent-level acceptance requires:
 - distributed publish is implemented on the existing structural assembly and
   layout trunk,
 - `0105` is the sole executable carrier specification for the attempt domain,
-- `ContributionContractSnapshot` is explicit and authoritative for attempt
-  completeness,
-- attempt creation lowers one canonical contract before the attempt domain
-  begins,
-- `canonical_full` is modeled as a legal contract family member rather than as
-  a fake full-coverage piece,
+- canonical requirement truth is frontend-agnostic,
+- readiness policy is separate from requirement identity,
+- closeout contract is separate from workflow state,
 - binding-backed contribution, direct `register_view`, and future frontends all
   lower onto the same structural commit and seal substrate,
-- mutable closeout-policy configuration is resolved on pre-attempt scope and
-  snapshotted before contributors are accepted,
-- slot identity, structural identity, and contributor identity are no longer
-  described or implemented as one plane,
-- seal consumes a captured readiness cut rather than post-cut ambient state,
+- mutable pre-attempt closeout configuration is resolved before contributors are
+  accepted,
+- attempt transition is explicit,
+- observation is side-effect-free,
 - public continuation aligns with `0100`,
 - published success means the required lineage and closeout facts exist,
-- future `PP`, `EP`, single-rank `canonical_full`, and later frontends can all
-  reuse the same trunk without creating separate assembly implementations.
+- future frontend families can all reuse the same trunk without creating
+  separate assembly implementations.
 
 # References
 
@@ -598,6 +533,7 @@ Parent-level acceptance requires:
 - `docs/designs/0011-unified-session-lifecycle-leases.md`
 - `docs/designs/0055-programmable-framework.md`
 - `docs/designs/0090-existence-semantics-and-single-authority-truth.md`
+- `docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md`
 - `docs/designs/0094-unified-lifecycle-kernel-and-capability-families.md`
 - `docs/designs/0096-workflow-companion-admission-and-fencing.md`
 - `docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md`

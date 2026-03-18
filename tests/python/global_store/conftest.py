@@ -15,8 +15,10 @@ from tensorcast.global_store.db_utils import init_db
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.repositories import (
-    AssemblyContributionRepository,
+    AssemblyAttemptRepository,
     AssemblyLayoutBindingRepository,
+    AssemblyReadinessCutRepository,
+    AssemblySlotOccupancyRepository,
     InstanceRepository,
     LayoutSpecRepository,
     LeafRepository,
@@ -205,8 +207,10 @@ def repositories(db_connection):
         "worker": WorkerRepository(db_connection),
         "instance": InstanceRepository(db_connection),
         "layout_spec": LayoutSpecRepository(db_connection),
-        "assembly_contribution": AssemblyContributionRepository(db_connection),
+        "assembly_attempt": AssemblyAttemptRepository(db_connection),
         "assembly_layout_binding": AssemblyLayoutBindingRepository(db_connection),
+        "assembly_readiness_cut": AssemblyReadinessCutRepository(db_connection),
+        "assembly_slot_occupancy": AssemblySlotOccupancyRepository(db_connection),
         "proof": ProofRepository(db_connection),
     }
 

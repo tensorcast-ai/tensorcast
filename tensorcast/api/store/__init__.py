@@ -108,8 +108,9 @@ from tensorcast.types import (
 )
 from tensorcast.types import (
     AssemblyAttemptRef,
-    CloseoutPolicySnapshot,
-    ContributionContractSnapshot,
+    AssemblyCloseoutContract,
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
     DeregisterArtifactOutcome,
     PartialSealResult,
     PublishedModelVersion,
@@ -243,17 +244,74 @@ def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
     return inferred or ArtifactIdKind.MI2
 
 
-def _decode_attempt_spec_or_raise(
-    attempt: AssemblyAttemptRef,
-) -> store_daemon_pb2.AssemblyAttemptSpec:
-    try:
-        return attempt.decode_attempt_spec()
-    except Exception as exc:  # noqa: BLE001
+def _decode_published_model_version_from_response(
+    resp: operation_pb2.GetOperationResponse, *, assembly_id: str
+) -> PublishedModelVersion:
+    if resp.status.state != operation_pb2.OPERATION_STATE_SUCCESS:
+        message = (
+            resp.status.message or "Assembly attempt did not complete successfully"
+        )
+        if resp.status.HasField("error"):
+            message = resp.status.error.message or message
         raise ArtifactError(
-            "AssemblyAttemptRef is missing a valid immutable attempt spec",
-            status_code="INVALID_ARGUMENT",
+            message,
+            status_code="FAILED_PRECONDITION",
             retryable=False,
-        ) from exc
+        )
+    payload = store_daemon_pb2.SealAssemblyResult()
+    if not resp.status.result.Unpack(payload):
+        raise ArtifactError(
+            "Unexpected assembly attempt result type",
+            status_code="INTERNAL",
+            retryable=False,
+        )
+    artifact = payload.artifact
+    descriptor = TypedArtifactDescriptor(
+        artifact_id=str(artifact.artifact_id),
+        index_multihash=str(artifact.index_multihash or "") or None,
+        data_multihash=str(artifact.data_multihash or "") or None,
+        schema_version=str(artifact.schema_version or "") or None,
+        encoding=str(artifact.encoding or "") or None,
+        total_size=int(artifact.total_size),
+        id_kind=_artifact_id_kind_from_proto(artifact.id_kind, artifact.artifact_id),
+    )
+    return PublishedModelVersion(
+        assembly_id=assembly_id,
+        source_artifact_id=descriptor.artifact_id,
+        source_descriptor=descriptor,
+        serving_artifact_id=(
+            str(payload.serving_artifact.artifact_id)
+            if payload.HasField("serving_artifact")
+            and payload.serving_artifact.artifact_id
+            else None
+        ),
+        serving_descriptor=(
+            TypedArtifactDescriptor(
+                artifact_id=str(payload.serving_artifact.artifact_id),
+                index_multihash=str(payload.serving_artifact.index_multihash or "")
+                or None,
+                data_multihash=str(payload.serving_artifact.data_multihash or "")
+                or None,
+                schema_version=str(payload.serving_artifact.schema_version or "")
+                or None,
+                encoding=str(payload.serving_artifact.encoding or "") or None,
+                total_size=int(payload.serving_artifact.total_size),
+                id_kind=_artifact_id_kind_from_proto(
+                    payload.serving_artifact.id_kind,
+                    payload.serving_artifact.artifact_id,
+                ),
+            )
+            if payload.HasField("serving_artifact")
+            and payload.serving_artifact.artifact_id
+            else None
+        ),
+        source_version_key=str(payload.source_version_key or "") or None,
+        serving_version_key=str(payload.serving_version_key or "") or None,
+        representation_contract_hash=(
+            str(payload.representation_contract_hash or "") or None
+        ),
+        serving_manifest_ref=str(payload.serving_manifest_ref or "") or None,
+    )
 
 
 def _split_mi2_artifact_id(artifact_id: str) -> tuple[str | None, str | None]:
@@ -975,21 +1033,64 @@ class Store:
         self,
         *,
         layout_id: str,
-        contribution_contract: ContributionContractSnapshot | None = None,
-        closeout_policy: CloseoutPolicySnapshot | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        closeout_contract: AssemblyCloseoutContract | None = None,
         ctx: CallContext | None = None,
     ) -> AssemblyAttemptRef:
         del ctx
         kwargs: dict[str, object] = {"layout_id": layout_id}
-        if contribution_contract is not None:
-            kwargs["contribution_contract"] = contribution_contract
-        if closeout_policy is not None:
-            kwargs["closeout_policy"] = closeout_policy
+        if requirements is not None:
+            kwargs["requirements"] = requirements
+        if readiness_policy is not None:
+            kwargs["readiness_policy"] = readiness_policy
+        if closeout_contract is not None:
+            kwargs["closeout_contract"] = closeout_contract
         return self._runtime.ensure_client().start_assembly_attempt(**kwargs)
+
+    def seal_assembly_attempt(
+        self,
+        attempt: AssemblyAttemptRef,
+        *,
+        ctx: CallContext | None = None,
+    ) -> Operation[PublishedModelVersion]:
+        if not attempt.coordinator_operation_id:
+            raise ArtifactError(
+                "AssemblyAttemptRef is missing coordinator operation metadata",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        resp = self._runtime.ensure_client().seal_assembly_attempt(
+            attempt_id=attempt.attempt_id,
+            timeout_s=10.0,
+        )
+        operation_ref = operation_pb2.OperationRef()
+        operation_ref.CopyFrom(resp.operation)
+        context = {
+            "attempt_id": attempt.attempt_id,
+            "workspace_assembly_id": attempt.workspace_assembly_id,
+            "layout_id": attempt.layout_id,
+        }
+
+        def _decode(
+            op_resp: operation_pb2.GetOperationResponse,
+        ) -> PublishedModelVersion:
+            return _decode_published_model_version_from_response(
+                op_resp, assembly_id=attempt.workspace_assembly_id
+            )
+
+        return DaemonGlobalStoreOperation(
+            operation_id=str(operation_ref.operation_id),
+            runtime_ref=weakref.ref(self._runtime),
+            ctx=ctx,
+            context=context,
+            result_factory=_decode,
+            operation_ref=operation_ref,
+        )
 
     def wait_assembly_attempt(
         self,
-        attempt: AssemblyAttemptRef | Operation[PublishedModelVersion] | str,
+        attempt: AssemblyAttemptRef | Operation[PublishedModelVersion],
         *,
         timeout_s: float | None = None,
         ctx: CallContext | None = None,
@@ -1002,8 +1103,6 @@ class Store:
         operation_id: str
         assembly_id: str
         operation_ref: operation_pb2.OperationRef | None = None
-        fallback_spec: store_daemon_pb2.AssemblyAttemptSpec | None = None
-        trigger_timeout_s: float | None = None
         if isinstance(attempt, AssemblyAttemptRef):
             if not attempt.coordinator_operation_id:
                 raise ArtifactError(
@@ -1012,40 +1111,9 @@ class Store:
                     retryable=False,
                 )
             operation_id = attempt.coordinator_operation_id
-            assembly_id = attempt.assembly_id
+            assembly_id = attempt.workspace_assembly_id
             operation_ref = operation_pb2.OperationRef()
             operation_ref.CopyFrom(attempt.coordinator_operation)
-            fallback_spec = _decode_attempt_spec_or_raise(attempt)
-            trigger_timeout_s = (
-                10.0 if timeout_s is None else max(1.0, min(float(timeout_s), 10.0))
-            )
-            # Piece/view replicas are published asynchronously through worker-state
-            # reconciliation. A short settle window avoids sealing against a view
-            # set whose metadata exists but whose transport-eligible replicas have
-            # not become visible yet.
-            time.sleep(1.0)
-            try:
-                current = client.get_operation(
-                    operation_id,
-                    operation_ref=operation_ref,
-                    timeout_s=trigger_timeout_s,
-                )
-            except Exception:
-                current = None
-            if (
-                current is None
-                or current.status.state == operation_pb2.OPERATION_STATE_PENDING
-            ):
-                client.start_seal_assembly(
-                    assembly_id=attempt.assembly_id,
-                    layout_id=attempt.layout_id,
-                    expected_coordinator_generation=attempt.coordinator_generation,
-                    attempt_spec=fallback_spec,
-                    timeout_s=trigger_timeout_s,
-                )
-        else:
-            operation_id = str(attempt)
-            assembly_id = ""
         wait_timeout_s = 120.0 if timeout_s is None else float(timeout_s)
         resp = client.wait_operation(
             operation_id,
@@ -1053,72 +1121,8 @@ class Store:
             timeout_ms=max(1, int(wait_timeout_s * 1000)),
             timeout_s=wait_timeout_s + 5.0,
         )
-        if resp.status.state != operation_pb2.OPERATION_STATE_SUCCESS:
-            message = (
-                resp.status.message or "Assembly attempt did not complete successfully"
-            )
-            if resp.status.HasField("error"):
-                message = resp.status.error.message or message
-            raise ArtifactError(
-                message,
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-        payload = store_daemon_pb2.SealAssemblyResult()
-        if not resp.status.result.Unpack(payload):
-            raise ArtifactError(
-                "Unexpected assembly attempt result type",
-                status_code="INTERNAL",
-                retryable=False,
-            )
-        artifact = payload.artifact
-        descriptor = TypedArtifactDescriptor(
-            artifact_id=str(artifact.artifact_id),
-            index_multihash=str(artifact.index_multihash or "") or None,
-            data_multihash=str(artifact.data_multihash or "") or None,
-            schema_version=str(artifact.schema_version or "") or None,
-            encoding=str(artifact.encoding or "") or None,
-            total_size=int(artifact.total_size),
-            id_kind=_artifact_id_kind_from_proto(
-                artifact.id_kind, artifact.artifact_id
-            ),
-        )
-        return PublishedModelVersion(
-            assembly_id=assembly_id,
-            source_artifact_id=descriptor.artifact_id,
-            source_descriptor=descriptor,
-            serving_artifact_id=(
-                str(payload.serving_artifact.artifact_id)
-                if payload.HasField("serving_artifact")
-                and payload.serving_artifact.artifact_id
-                else None
-            ),
-            serving_descriptor=(
-                TypedArtifactDescriptor(
-                    artifact_id=str(payload.serving_artifact.artifact_id),
-                    index_multihash=str(payload.serving_artifact.index_multihash or "")
-                    or None,
-                    data_multihash=str(payload.serving_artifact.data_multihash or "")
-                    or None,
-                    schema_version=str(payload.serving_artifact.schema_version or "")
-                    or None,
-                    encoding=str(payload.serving_artifact.encoding or "") or None,
-                    total_size=int(payload.serving_artifact.total_size),
-                    id_kind=_artifact_id_kind_from_proto(
-                        payload.serving_artifact.id_kind,
-                        payload.serving_artifact.artifact_id,
-                    ),
-                )
-                if payload.HasField("serving_artifact")
-                and payload.serving_artifact.artifact_id
-                else None
-            ),
-            source_version_key=str(payload.source_version_key or "") or None,
-            serving_version_key=str(payload.serving_version_key or "") or None,
-            representation_contract_hash=(
-                str(payload.representation_contract_hash or "") or None
-            ),
-            serving_manifest_ref=str(payload.serving_manifest_ref or "") or None,
+        return _decode_published_model_version_from_response(
+            resp, assembly_id=assembly_id
         )
 
     def persistence_operation(
@@ -1767,20 +1771,30 @@ def persistence_operation(
 def start_assembly_attempt(
     *,
     layout_id: str,
-    contribution_contract: ContributionContractSnapshot | None = None,
-    closeout_policy: CloseoutPolicySnapshot | None = None,
+    requirements: AssemblyRequirementSetRef | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    closeout_contract: AssemblyCloseoutContract | None = None,
     ctx: CallContext | None = None,
 ) -> AssemblyAttemptRef:
     return _coerce_store().start_assembly_attempt(
         layout_id=layout_id,
-        contribution_contract=contribution_contract,
-        closeout_policy=closeout_policy,
+        requirements=requirements,
+        readiness_policy=readiness_policy,
+        closeout_contract=closeout_contract,
         ctx=ctx,
     )
 
 
+def seal_assembly_attempt(
+    attempt: AssemblyAttemptRef,
+    *,
+    ctx: CallContext | None = None,
+) -> Operation[PublishedModelVersion]:
+    return _coerce_store().seal_assembly_attempt(attempt, ctx=ctx)
+
+
 def wait_assembly_attempt(
-    attempt: AssemblyAttemptRef | Operation[PublishedModelVersion] | str,
+    attempt: AssemblyAttemptRef | Operation[PublishedModelVersion],
     *,
     timeout_s: float | None = None,
     ctx: CallContext | None = None,
@@ -1877,6 +1891,9 @@ __all__ = [
     "ArtifactFuture",
     "ArtifactStatusCode",
     "AssemblyAttemptRef",
+    "AssemblyCloseoutContract",
+    "AssemblyReadinessPolicy",
+    "AssemblyRequirementSetRef",
     "Binding",
     "BindingLayout",
     "BindingUpdateEpoch",
@@ -1928,6 +1945,7 @@ __all__ = [
     "unregister_vram_region",
     "deregister_artifact",
     "seal_assembly",
+    "seal_assembly_attempt",
     "wait_assembly_attempt",
     "get_daemon_client",
     "require_runtime",

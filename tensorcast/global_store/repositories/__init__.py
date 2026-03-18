@@ -5,9 +5,10 @@
 from .artifact_binding_repository import ArtifactBindingRepository
 from .artifact_disk_location_repository import ArtifactDiskLocationRepository
 from .artifact_layout_attachment_repository import ArtifactLayoutAttachmentRepository
-from .assembly_contribution_repository import AssemblyContributionRepository
+from .assembly_attempt_repository import AssemblyAttemptRepository
 from .assembly_layout_binding_repository import AssemblyLayoutBindingRepository
-from .assembly_runtime_policy_repository import AssemblyRuntimePolicyRepository
+from .assembly_readiness_cut_repository import AssemblyReadinessCutRepository
+from .assembly_slot_occupancy_repository import AssemblySlotOccupancyRepository
 from .chunk_directory_repository import ChunkDirectoryRepository
 from .cluster_info_repository import ClusterInfoRepository
 from .idempotency_repository import IdempotencyRepository
@@ -34,9 +35,10 @@ __all__ = [
     "ArtifactBindingRepository",
     "ArtifactDiskLocationRepository",
     "ArtifactLayoutAttachmentRepository",
-    "AssemblyContributionRepository",
+    "AssemblyAttemptRepository",
     "AssemblyLayoutBindingRepository",
-    "AssemblyRuntimePolicyRepository",
+    "AssemblyReadinessCutRepository",
+    "AssemblySlotOccupancyRepository",
     "InstanceRepository",
     "IdempotencyRepository",
     "MemoryTierSnapshotRepository",

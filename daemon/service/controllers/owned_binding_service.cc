@@ -449,9 +449,9 @@ absl::Status ensure_no_live_binding_contributions(
   if (!client || !client->is_connected()) {
     return absl::OkStatus();
   }
-  auto contributions_or = client->list_assembly_contributions(
-      /*assembly_id=*/std::nullopt,
-      /*view_id=*/std::nullopt,
+  auto contributions_or = client->list_assembly_slot_occupancies(
+      /*attempt_id=*/std::nullopt,
+      /*slot_id=*/std::nullopt,
       binding_id,
       binding_value_id,
       {"accepted"});
@@ -467,19 +467,19 @@ absl::Status ensure_no_live_binding_contributions(
   }
   const auto& active_identities = *active_identities_or;
   const absl::Time now = absl::Now();
-  std::vector<std::string> assemblies;
-  assemblies.reserve(contributions_or->size());
+  std::vector<std::string> attempts;
+  attempts.reserve(contributions_or->size());
   for (const auto& contribution : *contributions_or) {
-    if (!coordination::assembly_contribution_is_live(contribution, now, &active_identities)) {
+    if (!coordination::slot_occupancy_is_live(contribution, now, &active_identities)) {
       continue;
     }
-    assemblies.push_back(contribution.assembly_id);
+    attempts.push_back(contribution.attempt_id);
   }
-  if (assemblies.empty()) {
+  if (attempts.empty()) {
     return absl::OkStatus();
   }
   return absl::FailedPreconditionError(
-      absl::StrCat("binding value has live assembly contributions: ", absl::StrJoin(assemblies, ",")));
+      absl::StrCat("binding value has live assembly contributions: ", absl::StrJoin(attempts, ",")));
 }
 
 v2::MaterializeIntoTargetRequest build_unmapped_request(
@@ -1157,8 +1157,8 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     RpcContext& rctx,
     const v2::SubmitBindingContributionRequest& req,
     v2::SubmitBindingContributionResponse& resp) {
-  if (req.assembly_id().empty() || req.layout_id().empty() || req.contribution_contract_hash().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "assembly_id, layout_id, and contribution_contract_hash are required"};
+  if (req.attempt_id().empty() || req.workspace_assembly_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "attempt_id and workspace_assembly_id are required"};
   }
   if (req.binding_id().empty() || req.binding_value_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "binding_id and binding_value_id are required"};
@@ -1184,35 +1184,51 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     return {StatusCode::FAILED_PRECONDITION, "session lifecycle is unavailable"};
   }
 
-  auto record_or = d_.bindings.get(req.binding_id());
-  if (!record_or.ok()) {
-    return to_grpc_status(record_or.status());
+  auto binding_record_or = d_.bindings.get(req.binding_id());
+  if (!binding_record_or.ok()) {
+    return to_grpc_status(binding_record_or.status());
   }
-  const auto record = *record_or;
+  const auto binding_record = *binding_record_or;
 
   int owner_pid = 0;
   {
-    absl::MutexLock lock(&record->mu);
-    if (record->closed) {
+    absl::MutexLock lock(&binding_record->mu);
+    if (binding_record->closed) {
       return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
     }
-    if (record->state == v2::BINDING_STATE_DIRTY || record->state == v2::BINDING_STATE_MUTABLE) {
+    if (binding_record->state == v2::BINDING_STATE_DIRTY || binding_record->state == v2::BINDING_STATE_MUTABLE) {
       return {StatusCode::FAILED_PRECONDITION, "binding is not sealed"};
     }
-    if (record->current_binding_value_id.empty()) {
+    if (binding_record->current_binding_value_id.empty()) {
       return {StatusCode::FAILED_PRECONDITION, "binding has no current sealed value"};
     }
-    if (record->current_binding_value_id != req.binding_value_id()) {
+    if (binding_record->current_binding_value_id != req.binding_value_id()) {
       return {StatusCode::FAILED_PRECONDITION, "binding_value_id is no longer current"};
     }
-    owner_pid = record->owner_pid;
+    owner_pid = binding_record->owner_pid;
   }
 
-  auto binding_or = d_.global_store_client->get_assembly_layout_binding(req.assembly_id());
+  auto attempt_or = d_.global_store_client->get_assembly_attempt(req.attempt_id());
+  if (!attempt_or.ok()) {
+    return to_grpc_status(attempt_or.status());
+  }
+  v2::AssemblyAttemptRecord attempt_record;
+  if (!attempt_record.ParseFromString(attempt_or->attempt_record_proto)) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt record is malformed"};
+  }
+  if (attempt_record.workspace_assembly_id() != req.workspace_assembly_id()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt workspace changed"};
+  }
+  if (!req.attempt_intent_digest().empty() &&
+      attempt_record.intent().attempt_intent_digest() != req.attempt_intent_digest()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt intent changed"};
+  }
+
+  auto binding_or = d_.global_store_client->get_assembly_layout_binding(req.workspace_assembly_id());
   if (!binding_or.ok()) {
     return to_grpc_status(binding_or.status());
   }
-  if (binding_or->layout_id() != req.layout_id()) {
+  if (binding_or->layout_id() != attempt_record.intent().layout_id()) {
     return {StatusCode::FAILED_PRECONDITION, "assembly layout binding changed"};
   }
 
@@ -1232,28 +1248,12 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     return {StatusCode::FAILED_PRECONDITION, "assembly attempt is no longer accepting contributions"};
   }
 
-  tensorcast::daemon::v2::AssemblyAttemptOperationSnapshot operation_snapshot;
-  if (!operation_or->has_snapshot() || !operation_or->snapshot().UnpackTo(&operation_snapshot) ||
-      !operation_snapshot.has_spec()) {
-    return {StatusCode::FAILED_PRECONDITION, "assembly attempt snapshot is unavailable"};
-  }
-  const auto& attempt_spec = operation_snapshot.spec();
-  if (attempt_spec.layout_id() != req.layout_id()) {
-    return {StatusCode::FAILED_PRECONDITION, "assembly attempt layout changed"};
-  }
-  if (attempt_spec.contribution_contract_hash() != req.contribution_contract_hash()) {
-    return {StatusCode::FAILED_PRECONDITION, "assembly contribution contract changed"};
-  }
-  if (!req.attempt_spec_hash().empty() && attempt_spec.attempt_spec_hash() != req.attempt_spec_hash()) {
-    return {StatusCode::FAILED_PRECONDITION, "assembly attempt spec changed"};
-  }
-
-  const auto contract_status = coordination::validate_contribution_contract_entry(
-      attempt_spec.contribution_contract(), req.contribution_kind(), req.view_id());
+  const auto contract_status = coordination::validate_binding_requirement_entry(
+      attempt_record.intent().requirements(), req.contribution_kind(), req.view_id());
   if (!contract_status.ok()) {
     return to_grpc_status(contract_status);
   }
-  const std::string row_view_id = coordination::contribution_slot_key(req.contribution_kind(), req.view_id());
+  const std::string slot_id = coordination::contribution_slot_key(req.contribution_kind(), req.view_id());
   auto active_identities_or = coordination::list_active_contributor_identities(d_.global_store_client);
   if (!active_identities_or.ok()) {
     return to_grpc_status(active_identities_or.status());
@@ -1261,9 +1261,9 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   const auto& active_identities = *active_identities_or;
   const absl::Time now = absl::Now();
 
-  auto existing_or = d_.global_store_client->get_assembly_contribution(req.assembly_id(), row_view_id);
+  auto existing_or = d_.global_store_client->get_assembly_slot_occupancy(req.attempt_id(), slot_id);
   if (existing_or.ok()) {
-    const bool existing_live = coordination::assembly_contribution_is_live(*existing_or, now, &active_identities);
+    const bool existing_live = coordination::slot_occupancy_is_live(*existing_or, now, &active_identities);
     const bool same_coordinator_attempt = existing_or->coordinator_operation_id == req.coordinator_operation_id() &&
         existing_or->coordinator_generation == req.coordinator_generation();
     if (existing_or->binding_id == req.binding_id() && existing_or->binding_value_id == req.binding_value_id() &&
@@ -1273,6 +1273,7 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
       resp.set_lease_id(existing_or->lease_id);
       resp.set_lease_generation(existing_or->lease_generation);
       resp.set_state(existing_or->state);
+      resp.set_slot_id(existing_or->slot_id);
       rctx.mark_success();
       return Status::OK;
     }
@@ -1286,19 +1287,18 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   auto lease_id_holder = std::make_shared<std::string>();
   auto contribution_stop = std::make_shared<std::atomic<bool>>(false);
   auto contribution_client = d_.global_store_client;
-  const std::string assembly_id = req.assembly_id();
-  const std::string view_id = row_view_id;
+  const std::string attempt_id = req.attempt_id();
   auto lease_or = d_.lifecycle->create_use_lease(
       contribution_lease_subject(req.binding_id(), req.binding_value_id()),
       owner_pid,
-      {[contribution_client, assembly_id, view_id, lease_id_holder, contribution_stop]() -> absl::Status {
+      {[contribution_client, attempt_id, slot_id, lease_id_holder, contribution_stop]() -> absl::Status {
         contribution_stop->store(true, std::memory_order_relaxed);
         if (!contribution_client || !contribution_client->is_connected() || lease_id_holder->empty()) {
           return absl::OkStatus();
         }
-        auto state_or = contribution_client->update_assembly_contribution_state(
-            assembly_id,
-            view_id,
+        auto state_or = contribution_client->update_assembly_slot_occupancy_state(
+            attempt_id,
+            slot_id,
             "stale",
             *lease_id_holder,
             /*expected_lease_generation=*/1,
@@ -1314,9 +1314,12 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   }
   *lease_id_holder = absl::StrCat(*lease_or);
 
-  store::components::AssemblyContributionInfo contribution;
-  contribution.assembly_id = req.assembly_id();
-  contribution.view_id = row_view_id;
+  store::components::AssemblySlotOccupancyInfo contribution;
+  contribution.attempt_id = attempt_id;
+  contribution.slot_id = slot_id;
+  if (!req.view_id().empty()) {
+    contribution.structural_view_id = req.view_id();
+  }
   contribution.binding_id = req.binding_id();
   contribution.binding_value_id = req.binding_value_id();
   contribution.coverage_plan_hash = req.coverage_plan_hash();
@@ -1327,19 +1330,20 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   contribution.lease_generation = 1;
   contribution.lease_expires_at = absl::Now() + coordination::kContributionLeaseTtl;
   contribution.state = "accepted";
-  auto upsert_or = d_.global_store_client->upsert_assembly_contribution(contribution);
+  auto upsert_or = d_.global_store_client->upsert_assembly_slot_occupancy(contribution);
   if (!upsert_or.ok()) {
     if (absl::IsFailedPrecondition(upsert_or.status())) {
-      auto current_or = d_.global_store_client->get_assembly_contribution(req.assembly_id(), row_view_id);
+      auto current_or = d_.global_store_client->get_assembly_slot_occupancy(req.attempt_id(), slot_id);
       if (current_or.ok() && current_or->binding_id == req.binding_id() &&
           current_or->binding_value_id == req.binding_value_id() &&
-          coordination::assembly_contribution_is_live(*current_or, now, &active_identities)) {
+          coordination::slot_occupancy_is_live(*current_or, now, &active_identities)) {
         d_.lifecycle->release_lease(*lease_or);
         resp.set_accepted(true);
         resp.set_already_exists(true);
         resp.set_lease_id(current_or->lease_id);
         resp.set_lease_generation(current_or->lease_generation);
         resp.set_state(current_or->state);
+        resp.set_slot_id(current_or->slot_id);
         rctx.mark_success();
         return Status::OK;
       }
@@ -1364,8 +1368,8 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
                 executor,
                 keepalive_weak,
                 &timekeeper = d_.async_runtime.timekeeper(),
-                assembly_id,
-                view_id,
+                attempt_id,
+                slot_id,
                 lease_id,
                 lease_generation]() mutable {
     if (contribution_stop->load(std::memory_order_relaxed)) {
@@ -1383,8 +1387,8 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
                     contribution_client,
                     contribution_stop,
                     keepalive_weak,
-                    assembly_id,
-                    view_id,
+                    attempt_id,
+                    slot_id,
                     lease_id,
                     lease_generation](folly::Unit) mutable {
           if (contribution_stop->load(std::memory_order_relaxed)) {
@@ -1395,9 +1399,9 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
             }
             return;
           }
-          auto refresh_or = contribution_client->update_assembly_contribution_state(
-              assembly_id,
-              view_id,
+          auto refresh_or = contribution_client->update_assembly_slot_occupancy_state(
+              attempt_id,
+              slot_id,
               "accepted",
               lease_id,
               lease_generation,
@@ -1405,8 +1409,8 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
               {"accepted"});
           if (!refresh_or.ok()) {
             if (!absl::IsNotFound(refresh_or.status())) {
-              LOG(WARNING) << "assembly contribution keepalive failed for assembly=" << assembly_id
-                           << " view_id=" << view_id << ": " << refresh_or.status();
+              LOG(WARNING) << "assembly slot occupancy keepalive failed for attempt=" << attempt_id
+                           << " slot_id=" << slot_id << ": " << refresh_or.status();
               auto next = keepalive_weak.lock();
               if (next != nullptr) {
                 (*next)();
@@ -1436,6 +1440,7 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   resp.set_lease_id(upsert_or->lease_id);
   resp.set_lease_generation(upsert_or->lease_generation);
   resp.set_state(upsert_or->state);
+  resp.set_slot_id(upsert_or->slot_id);
   rctx.mark_success();
   return Status::OK;
 }

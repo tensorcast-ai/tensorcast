@@ -281,6 +281,58 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("get_assembly_layout_binding not supported in RecordingGlobalStoreClient");
   }
 
+  absl::StatusOr<components::AssemblyAttemptRecordInfo> get_assembly_attempt(std::string_view) override {
+    return absl::UnimplementedError("get_assembly_attempt not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblyAttemptRecordInfo> get_assembly_attempt_by_workspace(std::string_view) override {
+    return absl::UnimplementedError("get_assembly_attempt_by_workspace not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblyAttemptRecordInfo> upsert_assembly_attempt(
+      const components::AssemblyAttemptRecordInfo&) override {
+    return absl::UnimplementedError("upsert_assembly_attempt not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblyReadinessCutInfo> get_assembly_readiness_cut(std::string_view) override {
+    return absl::UnimplementedError("get_assembly_readiness_cut not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblyReadinessCutInfo> upsert_assembly_readiness_cut(
+      const components::AssemblyReadinessCutInfo&) override {
+    return absl::UnimplementedError("upsert_assembly_readiness_cut not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblySlotOccupancyInfo> get_assembly_slot_occupancy(std::string_view, std::string_view)
+      override {
+    return absl::UnimplementedError("get_assembly_slot_occupancy not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblySlotOccupancyInfo> upsert_assembly_slot_occupancy(
+      const components::AssemblySlotOccupancyInfo&) override {
+    return absl::UnimplementedError("upsert_assembly_slot_occupancy not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<std::vector<components::AssemblySlotOccupancyInfo>> list_assembly_slot_occupancies(
+      std::optional<std::string_view>,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>,
+      const std::vector<std::string>&) override {
+    return absl::UnimplementedError("list_assembly_slot_occupancies not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<components::AssemblySlotOccupancyInfo> update_assembly_slot_occupancy_state(
+      std::string_view,
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<uint64_t>,
+      std::optional<absl::Time>,
+      const std::vector<std::string>&) override {
+    return absl::UnimplementedError("update_assembly_slot_occupancy_state not supported in RecordingGlobalStoreClient");
+  }
+
   absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
     return absl::UnimplementedError("get_layout_spec not supported in RecordingGlobalStoreClient");
   }
@@ -301,11 +353,6 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
       const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
     return absl::UnimplementedError("check_proof_commitments_match not supported in RecordingGlobalStoreClient");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
-      std::string_view) override {
-    return absl::UnimplementedError("get_assembly_runtime_policy not supported in RecordingGlobalStoreClient");
   }
 
   absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(

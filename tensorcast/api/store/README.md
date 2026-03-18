@@ -84,12 +84,12 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   Global Store state. `register_view(..., registration_kind="piece")` is
   equivalent, while `allow_partial` is deprecated.
 - `Store.start_assembly_attempt(layout_id=...)` creates a fresh assembly
-  workspace bound to a `LayoutSpec` and returns an `AssemblyAttemptRef`
-  containing the expected `view_id` set and a deterministic
-  `contribution_contract_hash`.
-- `Store.wait_assembly_attempt(attempt)` drives a still-open attempt onto that
-  same deterministic seal operation, then waits for it and decodes the source
-  publish lineage into a `PublishedModelVersion`.
+  attempt bound to a `LayoutSpec` and returns an `AssemblyAttemptRef`
+  containing durable attempt scope plus the workspace assembly id.
+- `Store.seal_assembly_attempt(attempt)` explicitly transitions an open attempt
+  onto its sealing workflow and returns `Operation[PublishedModelVersion]`.
+- `Store.wait_assembly_attempt(attempt)` observes an existing attempt workflow
+  and decodes the source publish lineage into a `PublishedModelVersion`.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 

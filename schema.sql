@@ -494,11 +494,26 @@ CREATE TABLE IF NOT EXISTS artifact_layout_attachments (
 CREATE INDEX IF NOT EXISTS idx_artifact_layout_attachments_mi2 ON artifact_layout_attachments(mi2_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_layout_attachments_layout ON artifact_layout_attachments(layout_id);
 
--- Per-assembly operational runtime policy (mutable; not content-addressed)
-CREATE TABLE IF NOT EXISTS assembly_runtime_policies (
-    assembly_id TEXT PRIMARY KEY,
-    policy_version BIGINT NOT NULL,
-    policy_json TEXT NOT NULL,
+-- Durable immutable attempt truth keyed by durable attempt identity.
+CREATE TABLE IF NOT EXISTS assembly_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    workspace_assembly_id TEXT NOT NULL UNIQUE,
+    layout_id TEXT NOT NULL,
+    attempt_intent_digest TEXT NOT NULL,
+    coordinator_operation_id TEXT NOT NULL,
+    attempt_record_proto BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_attempts_workspace
+    ON assembly_attempts(workspace_assembly_id);
+CREATE INDEX IF NOT EXISTS idx_assembly_attempts_operation
+    ON assembly_attempts(coordinator_operation_id);
+
+-- Durable readiness cut captured after explicit transition to sealing.
+CREATE TABLE IF NOT EXISTS assembly_readiness_cuts (
+    attempt_id TEXT PRIMARY KEY,
+    readiness_cut_proto BLOB NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -558,10 +573,11 @@ CREATE TABLE IF NOT EXISTS piece_proof_digests (
 );
 CREATE INDEX IF NOT EXISTS idx_piece_proof_digests_tensor ON piece_proof_digests(assembly_id, view_id, tensor_name);
 
--- Current contributor occupant per assembly view slot.
-CREATE TABLE IF NOT EXISTS assembly_contributions (
-    assembly_id TEXT NOT NULL,
-    view_id TEXT NOT NULL,
+-- Durable required-slot occupancy keyed by durable attempt scope and slot id.
+CREATE TABLE IF NOT EXISTS assembly_slot_occupancies (
+    attempt_id TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    structural_view_id TEXT NULL,
     binding_id TEXT NOT NULL,
     binding_value_id TEXT NOT NULL,
     coverage_plan_hash TEXT NOT NULL,
@@ -574,12 +590,12 @@ CREATE TABLE IF NOT EXISTS assembly_contributions (
     state TEXT NOT NULL CHECK (state IN ('accepted','stale','released','aborted')),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (assembly_id, view_id)
+    PRIMARY KEY (attempt_id, slot_id)
 );
-CREATE INDEX IF NOT EXISTS idx_assembly_contributions_assembly_state
-    ON assembly_contributions(assembly_id, state);
-CREATE INDEX IF NOT EXISTS idx_assembly_contributions_binding_value
-    ON assembly_contributions(binding_id, binding_value_id);
+CREATE INDEX IF NOT EXISTS idx_assembly_slot_occupancies_attempt_state
+    ON assembly_slot_occupancies(attempt_id, state);
+CREATE INDEX IF NOT EXISTS idx_assembly_slot_occupancies_binding_value
+    ON assembly_slot_occupancies(binding_id, binding_value_id);
 
 -- Assembly → sealed bindings (cgid -> mi2)
 CREATE TABLE IF NOT EXISTS artifact_bindings (

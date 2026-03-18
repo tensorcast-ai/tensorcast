@@ -292,6 +292,13 @@ grpc::Status MaterializationController::start_assembly_attempt(
   return assembly_operation_service_.start_assembly_attempt(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::seal_assembly_attempt(
+    RpcContext& rctx,
+    const v2::SealAssemblyAttemptRequest& req,
+    v2::SealAssemblyAttemptResponse& resp) {
+  return assembly_operation_service_.seal_assembly_attempt(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::start_seal_assembly(
     RpcContext& rctx,
     const v2::StartSealAssemblyRequest& req,

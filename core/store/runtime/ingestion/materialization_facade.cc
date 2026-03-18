@@ -320,8 +320,8 @@ void fill_runtime_p2p_bindings(
   if (source == nullptr || !comm_manager || !comm_manager->is_enabled()) {
     return;
   }
-  source->comm_engine = gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{
-      comm_manager->get_shared_engine()};
+  source->comm_engine =
+      gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager->get_shared_engine()};
   source->routing_context = comm_manager->routing_context();
 }
 
@@ -1056,6 +1056,86 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_piece_source(
     return absl::NotFoundError(absl::StrCat("local replica missing for view_id=", view_id));
   }
   return LocalReplicaSource::Create(std::move(*replica_or), location, device_id, view_size_bytes);
+}
+
+absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_remote_piece_source(
+    components::CommunicationManager& comm_manager,
+    const components::RemoteReplicaInfo& remote,
+    std::string_view view_id,
+    std::string_view local_endpoint_id,
+    std::chrono::milliseconds request_budget,
+    std::string_view artifact_id_for_diagnostics) {
+  if (remote.remote_memory_keys.empty()) {
+    return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", view_id));
+  }
+  if (remote.buffer_sizes.size() != remote.remote_memory_keys.size()) {
+    return absl::FailedPreconditionError(absl::StrCat("buffer size mismatch for view_id=", view_id));
+  }
+  std::vector<size_t> buffer_sizes;
+  buffer_sizes.reserve(remote.buffer_sizes.size());
+  for (uint64_t size : remote.buffer_sizes) {
+    buffer_sizes.push_back(static_cast<size_t>(size));
+  }
+  loader::RemoteKeySource::Options opts{
+      .comm_engine =
+          gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+              comm_manager.get_shared_engine()},
+      .memory_keys = remote.remote_memory_keys,
+      .buffer_sizes = std::move(buffer_sizes),
+      .ip = remote.node_address,
+      .port = static_cast<uint16_t>(remote.node_port),
+      .local_endpoint_id = std::string(local_endpoint_id),
+      .remote_endpoint_id = remote.endpoint_id,
+      .routing_context = comm_manager.routing_context(),
+      .total_size = remote.memory_size,
+      .request_budget = request_budget,
+      .artifact_id = std::string(artifact_id_for_diagnostics),
+  };
+  return std::shared_ptr<loader::SeekableSource>(std::make_shared<loader::RemoteKeySource>(std::move(opts)));
+}
+
+absl::StatusOr<std::shared_ptr<loader::SeekableSource>> resolve_assembly_piece_source(
+    components::ReplicaRegistry& registry,
+    std::string_view assembly_id,
+    const AssemblySourceInfo& source,
+    const components::WorkerIdentity& local_identity,
+    const DeviceKey& target_device,
+    std::string_view local_endpoint_id,
+    const std::shared_ptr<components::CommunicationManager>& comm_manager,
+    std::chrono::milliseconds request_budget,
+    std::string_view artifact_id_for_diagnostics) {
+  const auto& remote = source.session.remote_replica;
+  const bool comm_enabled = comm_manager != nullptr && comm_manager->is_enabled();
+  if (is_local_replica(remote, local_identity)) {
+    DeviceKey local_device;
+    if (remote.memory_type == common::memory::MemoryLocation::CPU) {
+      local_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+    } else {
+      const int local_device_id = remote.device_id >= 0 ? remote.device_id : target_device.ordinal;
+      local_device = DeviceRegistry::instance().gpu_key(local_device_id);
+    }
+    auto local_or = make_local_piece_source(
+        registry,
+        assembly_id,
+        source.view_id,
+        local_device,
+        remote.memory_type,
+        remote.device_id,
+        source.view_size_bytes);
+    if (local_or.ok()) {
+      return local_or;
+    }
+    if (!absl::IsNotFound(local_or.status()) || !comm_enabled) {
+      return local_or.status();
+    }
+    return make_remote_piece_source(
+        *comm_manager, remote, source.view_id, local_endpoint_id, request_budget, artifact_id_for_diagnostics);
+  }
+  if (!comm_enabled) {
+    return absl::FailedPreconditionError("Communication not enabled");
+  }
+  return make_remote_piece_source(
+      *comm_manager, remote, source.view_id, local_endpoint_id, request_budget, artifact_id_for_diagnostics);
 }
 
 absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_canonical_source(
@@ -2760,7 +2840,6 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
     local_identity.p2p_port = options.p2p_port;
   }
   auto comm_manager = config_.runtime_context->communication_manager();
-  const bool comm_enabled = comm_manager && comm_manager->is_enabled();
   const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
   auto& replica_registry = config_.replica_runtime->registry();
 
@@ -2769,90 +2848,21 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
   std::vector<std::shared_ptr<std::vector<std::uint8_t>>> canonicalized_sources;
   canonicalized_sources.reserve(assembly_plan.sources.size());
   for (auto& source : assembly_plan.sources) {
-    const auto& remote = source.session.remote_replica;
-    std::shared_ptr<loader::SeekableSource> source_ptr;
-    if (is_local_replica(remote, local_identity)) {
-      DeviceKey local_device;
-      if (remote.memory_type == common::memory::MemoryLocation::CPU) {
-        local_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-      } else {
-        const int local_device_id = remote.device_id >= 0 ? remote.device_id : target_device.ordinal;
-        local_device = DeviceRegistry::instance().gpu_key(local_device_id);
-      }
-      auto local_or = make_local_piece_source(
-          replica_registry,
-          assembly_id,
-          source.view_id,
-          local_device,
-          remote.memory_type,
-          remote.device_id,
-          source.view_size_bytes);
-      if (!local_or.ok()) {
-        if (absl::IsNotFound(local_or.status())) {
-          if (!comm_enabled) {
-            return local_or.status();
-          }
-          if (remote.remote_memory_keys.empty()) {
-            return local_or.status();
-          }
-          if (remote.buffer_sizes.size() != remote.remote_memory_keys.size()) {
-            return local_or.status();
-          }
-          std::vector<size_t> buffer_sizes;
-          buffer_sizes.reserve(remote.buffer_sizes.size());
-          for (uint64_t size : remote.buffer_sizes) {
-            buffer_sizes.push_back(static_cast<size_t>(size));
-          }
-          loader::RemoteKeySource::Options opts{
-              .comm_engine =
-                  gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-                      comm_manager->get_shared_engine()},
-              .memory_keys = remote.remote_memory_keys,
-              .buffer_sizes = std::move(buffer_sizes),
-              .ip = remote.node_address,
-              .port = static_cast<uint16_t>(remote.node_port),
-              .local_endpoint_id = local_endpoint_id,
-              .remote_endpoint_id = remote.endpoint_id,
-              .routing_context = comm_manager->routing_context(),
-              .total_size = remote.memory_size,
-          };
-          source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
-        } else {
-          return local_or.status();
-        }
-      } else {
-        source_ptr = *local_or;
-      }
-    } else {
-      if (!comm_enabled) {
-        return absl::FailedPreconditionError("Communication not enabled");
-      }
-      if (remote.remote_memory_keys.empty()) {
-        return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", source.view_id));
-      }
-      if (remote.buffer_sizes.size() != remote.remote_memory_keys.size()) {
-        return absl::FailedPreconditionError(absl::StrCat("buffer size mismatch for view_id=", source.view_id));
-      }
-      std::vector<size_t> buffer_sizes;
-      buffer_sizes.reserve(remote.buffer_sizes.size());
-      for (uint64_t size : remote.buffer_sizes) {
-        buffer_sizes.push_back(static_cast<size_t>(size));
-      }
-      loader::RemoteKeySource::Options opts{
-          .comm_engine =
-              gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-                  comm_manager->get_shared_engine()},
-          .memory_keys = remote.remote_memory_keys,
-          .buffer_sizes = std::move(buffer_sizes),
-          .ip = remote.node_address,
-          .port = static_cast<uint16_t>(remote.node_port),
-          .local_endpoint_id = local_endpoint_id,
-          .remote_endpoint_id = remote.endpoint_id,
-          .routing_context = comm_manager->routing_context(),
-          .total_size = remote.memory_size,
-      };
-      source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
+    auto source_or = resolve_assembly_piece_source(
+        replica_registry,
+        assembly_id,
+        source,
+        local_identity,
+        target_device,
+        local_endpoint_id,
+        comm_manager,
+        std::chrono::milliseconds(0),
+        assembly_id);
+    if (!source_or.ok()) {
+      return source_or.status();
     }
+    const auto& remote = source.session.remote_replica;
+    std::shared_ptr<loader::SeekableSource> source_ptr = *source_or;
 
     if (source.inverse_transform.requires_materialization && !source.inverse_transform.tensors.empty()) {
       const uint64_t total_bytes = source.view_size_bytes > 0 ? source.view_size_bytes : remote.memory_size;
@@ -3152,7 +3162,6 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
     local_identity.p2p_port = options.p2p_port;
   }
   auto comm_manager = config_.runtime_context->communication_manager();
-  const bool comm_enabled = comm_manager && comm_manager->is_enabled();
   const std::string local_endpoint_id = components::derive_endpoint_id(local_identity, request.target_device());
   auto& replica_registry = config_.replica_runtime->registry();
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
@@ -3160,96 +3169,21 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   std::vector<std::shared_ptr<std::vector<std::uint8_t>>> canonicalized_sources;
   canonicalized_sources.reserve(plan.sources.size());
   for (auto& source : plan.sources) {
-    const auto& remote = source.session.remote_replica;
-    std::shared_ptr<loader::SeekableSource> source_ptr;
-    if (is_local_replica(remote, local_identity)) {
-      DeviceKey local_device;
-      if (remote.memory_type == common::memory::MemoryLocation::CPU) {
-        local_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-      } else {
-        const int local_device_id = remote.device_id >= 0 ? remote.device_id : request.target_device().ordinal;
-        local_device = DeviceRegistry::instance().gpu_key(local_device_id);
-      }
-      auto local_or = make_local_piece_source(
-          replica_registry,
-          request.canonical_artifact_id(),
-          source.view_id,
-          local_device,
-          remote.memory_type,
-          remote.device_id,
-          source.view_size_bytes);
-      if (!local_or.ok()) {
-        // LIP pieces are not registered in the local replica registry. If Global Store
-        // routed us to a "local" replica with remote keys, fall back to key-based reads.
-        if (absl::IsNotFound(local_or.status())) {
-          if (!comm_enabled) {
-            return local_or.status();
-          }
-          if (remote.remote_memory_keys.empty()) {
-            return local_or.status();
-          }
-          if (remote.buffer_sizes.size() != remote.remote_memory_keys.size()) {
-            return local_or.status();
-          }
-          std::vector<size_t> buffer_sizes;
-          buffer_sizes.reserve(remote.buffer_sizes.size());
-          for (uint64_t size : remote.buffer_sizes) {
-            buffer_sizes.push_back(static_cast<size_t>(size));
-          }
-          loader::RemoteKeySource::Options opts{
-              .comm_engine =
-                  gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-                      comm_manager->get_shared_engine()},
-              .memory_keys = remote.remote_memory_keys,
-              .buffer_sizes = std::move(buffer_sizes),
-              .ip = remote.node_address,
-              .port = static_cast<uint16_t>(remote.node_port),
-              .local_endpoint_id = local_endpoint_id,
-              .remote_endpoint_id = remote.endpoint_id,
-              .routing_context = comm_manager->routing_context(),
-              .total_size = remote.memory_size,
-              .request_budget = request.hints().request_budget,
-              .artifact_id = request.canonical_artifact_id(),
-          };
-          source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
-        } else {
-          return local_or.status();
-        }
-      } else {
-        source_ptr = *local_or;
-      }
-    } else {
-      if (!comm_enabled) {
-        return absl::FailedPreconditionError("Communication not enabled");
-      }
-      if (remote.remote_memory_keys.empty()) {
-        return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", source.view_id));
-      }
-      if (remote.buffer_sizes.size() != remote.remote_memory_keys.size()) {
-        return absl::FailedPreconditionError(absl::StrCat("buffer size mismatch for view_id=", source.view_id));
-      }
-      std::vector<size_t> buffer_sizes;
-      buffer_sizes.reserve(remote.buffer_sizes.size());
-      for (uint64_t size : remote.buffer_sizes) {
-        buffer_sizes.push_back(static_cast<size_t>(size));
-      }
-      loader::RemoteKeySource::Options opts{
-          .comm_engine =
-              gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-                  comm_manager->get_shared_engine()},
-          .memory_keys = remote.remote_memory_keys,
-          .buffer_sizes = std::move(buffer_sizes),
-          .ip = remote.node_address,
-          .port = static_cast<uint16_t>(remote.node_port),
-          .local_endpoint_id = local_endpoint_id,
-          .remote_endpoint_id = remote.endpoint_id,
-          .routing_context = comm_manager->routing_context(),
-          .total_size = remote.memory_size,
-          .request_budget = request.hints().request_budget,
-          .artifact_id = request.canonical_artifact_id(),
-      };
-      source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
+    auto source_or = resolve_assembly_piece_source(
+        replica_registry,
+        request.canonical_artifact_id(),
+        source,
+        local_identity,
+        request.target_device(),
+        local_endpoint_id,
+        comm_manager,
+        request.hints().request_budget,
+        request.canonical_artifact_id());
+    if (!source_or.ok()) {
+      return source_or.status();
     }
+    const auto& remote = source.session.remote_replica;
+    std::shared_ptr<loader::SeekableSource> source_ptr = *source_or;
 
     if (source.inverse_transform.requires_materialization && !source.inverse_transform.tensors.empty()) {
       const uint64_t total_bytes = source.view_size_bytes > 0 ? source.view_size_bytes : remote.memory_size;
@@ -3564,32 +3498,21 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
   std::vector<std::shared_ptr<std::vector<std::uint8_t>>> canonicalized_sources;
   canonicalized_sources.reserve(plan.sources.size());
   for (auto& source : plan.sources) {
+    auto source_or = resolve_assembly_piece_source(
+        *registry,
+        assembly_id,
+        source,
+        local_identity,
+        target_device,
+        local_endpoint_id,
+        comm_manager,
+        std::chrono::milliseconds(0),
+        assembly_id);
+    if (!source_or.ok()) {
+      return source_or.status();
+    }
     const auto& remote = source.session.remote_replica;
-    if (remote.remote_memory_keys.empty()) {
-      return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", source.view_id));
-    }
-    if (remote.buffer_sizes.size() != remote.remote_memory_keys.size()) {
-      return absl::FailedPreconditionError(absl::StrCat("buffer size mismatch for view_id=", source.view_id));
-    }
-    std::vector<size_t> buffer_sizes;
-    buffer_sizes.reserve(remote.buffer_sizes.size());
-    for (uint64_t size : remote.buffer_sizes) {
-      buffer_sizes.push_back(static_cast<size_t>(size));
-    }
-    loader::RemoteKeySource::Options opts{
-        .comm_engine =
-            gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-                comm_manager->get_shared_engine()},
-        .memory_keys = remote.remote_memory_keys,
-        .buffer_sizes = std::move(buffer_sizes),
-        .ip = remote.node_address,
-        .port = static_cast<uint16_t>(remote.node_port),
-        .local_endpoint_id = local_endpoint_id,
-        .remote_endpoint_id = remote.endpoint_id,
-        .routing_context = comm_manager->routing_context(),
-        .total_size = remote.memory_size,
-    };
-    std::shared_ptr<loader::SeekableSource> source_ptr = std::make_shared<loader::RemoteKeySource>(std::move(opts));
+    std::shared_ptr<loader::SeekableSource> source_ptr = *source_or;
     if (source.inverse_transform.requires_materialization && !source.inverse_transform.tensors.empty()) {
       const uint64_t total_bytes = source.view_size_bytes > 0 ? source.view_size_bytes : remote.memory_size;
       if (total_bytes == 0) {
@@ -3714,6 +3637,16 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
   if (!existing_or.ok() && !absl::IsNotFound(existing_or.status())) {
     return existing_or.status();
   }
+  auto build_seal_source = [&]() -> absl::StatusOr<std::unique_ptr<loader::SeekableSource>> {
+    if (use_canonical_fallback) {
+      return SharedSourceLoader(canonical_fallback_source).open_source();
+    }
+    loader::ByteRangeMappedSource::Options map_opts{
+        .path = "seal_assembly",
+        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+    };
+    return loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+  };
   if (!existing_or.ok()) {
     loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan_total_bytes};
     replica::ReplicaConfig cfg{
@@ -3737,17 +3670,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     }
     auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
 
-    absl::StatusOr<std::unique_ptr<loader::SeekableSource>> source_or =
-        [&]() -> absl::StatusOr<std::unique_ptr<loader::SeekableSource>> {
-      if (use_canonical_fallback) {
-        return SharedSourceLoader(canonical_fallback_source).open_source();
-      }
-      loader::ByteRangeMappedSource::Options map_opts{
-          .path = "seal_assembly",
-          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-      };
-      return loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
-    }();
+    absl::StatusOr<std::unique_ptr<loader::SeekableSource>> source_or = build_seal_source();
     if (!source_or.ok()) {
       return source_or.status();
     }
@@ -3768,6 +3691,59 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     absl::Status emplace_status = registry->emplace(key, gsl::not_null{replica});
     if (!emplace_status.ok() && !absl::IsAlreadyExists(emplace_status)) {
       return emplace_status;
+    }
+  }
+
+  loading::ReplicaKey cpu_key;
+  cpu_key.artifact_id = result.sealed_artifact_id;
+  cpu_key.device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  cpu_key.replica = 0;
+  auto cpu_existing_or = registry->find(cpu_key);
+  if (!cpu_existing_or.ok() && !absl::IsNotFound(cpu_existing_or.status())) {
+    return cpu_existing_or.status();
+  }
+  if (!cpu_existing_or.ok()) {
+    loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan_total_bytes};
+    replica::ReplicaConfig cpu_cfg{
+        .source = inline_source,
+        .artifact_identifier = cpu_key.artifact_id,
+        .device_type = DeviceType::CPU,
+        .local_device_id = -1,
+        .pinned_buffer_pool = config_.runtime_context->pinned_buffer_pool(),
+        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{config_.runtime_context->async_runtime()},
+        .artifact_chunk_bytes = config_.artifact_chunk_bytes,
+        .expected_artifact_size = plan_total_bytes,
+        .byte_mapping_config = config_.options->byte_mapping,
+        .memory_tier_config = config_.options->memory_tier_config,
+    };
+    cpu_cfg.pinned_memory_timeout = config_.pinned_memory_timeout;
+    cpu_cfg.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+
+    auto cpu_replica_or = replica::Replica::create(cpu_cfg);
+    if (!cpu_replica_or.ok()) {
+      return cpu_replica_or.status();
+    }
+    auto cpu_replica = std::shared_ptr<replica::Replica>(std::move(cpu_replica_or.value()));
+    auto cpu_source_or = build_seal_source();
+    if (!cpu_source_or.ok()) {
+      return cpu_source_or.status();
+    }
+    const int concurrency = std::max(1, config_.num_threads);
+    auto cpu_load_future = cpu_replica->get_memory_manager().load_async_from_source(
+        std::move(*cpu_source_or),
+        common::memory::MemoryLocation::CPU,
+        concurrency,
+        std::nullopt,
+        std::function<absl::Status()>{});
+    absl::Status cpu_load_status = std::move(cpu_load_future).get();
+    if (!cpu_load_status.ok()) {
+      return cpu_load_status;
+    }
+    cpu_replica->set_ready_signal(common::memory::MemoryLocation::CPU, absl::OkStatus());
+
+    absl::Status cpu_emplace_status = registry->emplace(cpu_key, gsl::not_null{cpu_replica});
+    if (!cpu_emplace_status.ok() && !absl::IsAlreadyExists(cpu_emplace_status)) {
+      return cpu_emplace_status;
     }
   }
 

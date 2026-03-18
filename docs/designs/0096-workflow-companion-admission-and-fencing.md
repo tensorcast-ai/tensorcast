@@ -4,7 +4,7 @@ title: Workflow Semantic Plane for Gate, Observation, Replay, and Fencing
 status: implemented
 areas: ["daemon", "sdk", "docs", "tests"]
 created: 2026-03-09
-last_updated: 2026-03-17
+last_updated: 2026-03-18
 related_code:
   - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
@@ -93,6 +93,9 @@ Repository rule:
 - child designs may depend on `publish` semantic gate, terminal mapping, and the first `attach_existing -> Operation[T]`
   closeout today,
 - but they must not treat declared `wait_not_ready` continuation as dependency-ready.
+- later workflow owners may reuse the same public continuation contract only if
+  they keep observation side-effect-free and keep durable workflow truth outside
+  lifecycle state and outside operation-snapshot-only storage.
 
 # Problem Statement
 
@@ -181,6 +184,32 @@ Repository rule:
   tested,
 - `0055` operation semantics and `0060` queue semantics remain calibration constraints used to validate contract
   generality, not to expand implementation scope in this phase.
+
+## 2.1 Follow-on owner rule after publish
+
+Once the first `publish` path is closed, later workflow owners may reuse the
+same semantic contract only if they preserve the same workflow boundary.
+
+Required rules:
+
+1. workflow truth must remain durable outside lifecycle state,
+2. workflow truth must not live only inside `OperationStatus` or operation
+   snapshot blobs,
+3. explicit transition APIs must remain separate from observation APIs,
+4. public `wait/status/cancel` must observe an existing owned outcome rather
+   than create or advance it,
+5. `attach_existing` may be reused only for already-existing attachable
+   outcomes,
+6. `retry_later` remains out of dependency-ready scope until it is explicitly
+   closed end to end.
+
+Assembly-attempt consequence:
+
+- `start_assembly_attempt(...)` may create an open attempt record,
+- explicit `seal_assembly_attempt(...)` may advance that record into the sealing
+  workflow,
+- `wait_assembly_attempt(...)` may observe or attach to that workflow,
+- but `wait_assembly_attempt(...)` must not trigger seal implicitly.
 
 ## 3. Publish semantic contract
 

@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 import grpc
@@ -61,6 +62,7 @@ from tensorcast.api.store.views import (
     ViewOrchestrator,
 )
 from tensorcast.common.selection_contract import compute_selected_index_bytes
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,43 @@ logger = logging.getLogger(__name__)
 def _uses_fake_cuda_backend() -> bool:
     backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
     return backend == "fake"
+
+
+@dataclass(frozen=True)
+class StructuralContributionCommit:
+    """Unified structural commit result for direct and binding-backed assembly."""
+
+    artifact: RegisteredArtifact
+    contribution_kind: str
+    view_id: str | None
+    canonical_ranges: tuple[object, ...]
+
+
+def _view_spec_is_subset_identity(
+    view_spec: common_pb2.ViewSpec,
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> bool:
+    if not tensor_names:
+        return False
+    entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+    if set(view_spec.tensors.keys()) != set(tensor_names):
+        return False
+    for name in tensor_names:
+        entry = entry_by_name.get(str(name))
+        ops = view_spec.tensors.get(str(name))
+        if entry is None or ops is None or len(ops.ops) != 1 or not entry.shape:
+            return False
+        op = ops.ops[0]
+        if not op.HasField("narrow"):
+            return False
+        if (
+            int(op.narrow.dim) != 0
+            or int(op.narrow.start) != 0
+            or int(op.narrow.length) != int(entry.shape[0])
+        ):
+            return False
+    return True
 
 
 class RegistrationPipeline:
@@ -322,23 +361,18 @@ class RegistrationPipeline:
             has_transpose=False,
             for_registration=True,
         )
-        view_ctx, upload_tensors = self._build_view_registration(
+        committed = self.commit_structural_contribution(
+            tensors,
+            assembly_id=assembly_id,
             canonical_index_bytes=canonical_index_bytes,
             canonical_index=canonical_index,
             build_result=build_result,
-            tensors=tensors,
             placement_enum=placement_enum,
-            registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
-        )
-        return self._perform_registration(
-            upload_tensors,
-            artifact_id=assembly_id,
             key=key,
-            plan=PlanType.VRAM_COALESCED,
-            options_override=options,
-            ttl_override=ttl_ms,
-            view_registration=view_ctx,
+            options=options,
+            ttl_ms=ttl_ms,
         )
+        return committed.artifact
 
     @staticmethod
     def _normalize_registration_kind(
@@ -570,6 +604,104 @@ class RegistrationPipeline:
             registration_kind=registration_kind,
         )
         return view_ctx, upload_tensors
+
+    def commit_structural_contribution(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+        *,
+        assembly_id: str,
+        canonical_index_bytes: bytes | None = None,
+        canonical_index: CanonicalIndex | None = None,
+        build_result: ViewSpecBuildResult | None = None,
+        placement_enum: TransformPlacement = TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
+        selection_names: Sequence[str] | None = None,
+        key: str | None = None,
+        options: RegisterArtifactOptions | None = None,
+        ttl_ms: int | None = None,
+    ) -> StructuralContributionCommit:
+        if not assembly_id:
+            raise ArtifactError(
+                "assembly_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if build_result is None:
+            artifact = self._perform_registration(
+                tensors,
+                artifact_id=assembly_id,
+                key=key,
+                plan=PlanType.VRAM_COALESCED,
+                options_override=options,
+                ttl_override=ttl_ms,
+            )
+            return StructuralContributionCommit(
+                artifact=artifact,
+                contribution_kind="canonical_full",
+                view_id=None,
+                canonical_ranges=(),
+            )
+
+        if build_result.proto is None:
+            raise ArtifactError(
+                "View spec missing for structural contribution",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if canonical_index_bytes is None:
+            raise ArtifactError(
+                "canonical_index_bytes is required for piece contribution",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        resolved_canonical_index = canonical_index or canonical_index_from_bytes(
+            canonical_index_bytes
+        )
+        resolved_selection_names = tuple(str(name) for name in (selection_names or ()))
+        if resolved_selection_names and _view_spec_is_subset_identity(
+            build_result.proto,
+            resolved_canonical_index,
+            resolved_selection_names,
+        ):
+            view_ctx, upload_tensors = self._build_subset_piece_registration(
+                canonical_index_bytes=canonical_index_bytes,
+                canonical_index=resolved_canonical_index,
+                tensor_names=resolved_selection_names,
+                view_spec_proto=build_result.proto,
+                tensors=tensors,
+            )
+        else:
+            view_ctx, upload_tensors = self._build_view_registration(
+                canonical_index_bytes=canonical_index_bytes,
+                canonical_index=resolved_canonical_index,
+                build_result=build_result,
+                tensors=tensors,
+                placement_enum=placement_enum,
+                registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
+                selection_names=(),
+            )
+
+        artifact = self._perform_registration(
+            upload_tensors,
+            artifact_id=assembly_id,
+            key=key,
+            plan=PlanType.VRAM_COALESCED,
+            options_override=options,
+            ttl_override=ttl_ms,
+            view_registration=view_ctx,
+        )
+        reg_result = artifact.registration_result
+        if reg_result is None or not reg_result.view_id:
+            raise ArtifactError(
+                "piece contribution registration did not return a view_id",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return StructuralContributionCommit(
+            artifact=artifact,
+            contribution_kind="piece_partial",
+            view_id=str(reg_result.view_id),
+            canonical_ranges=tuple(reg_result.canonical_ranges),
+        )
 
     @staticmethod
     def _require_put_tensors(tensors: Mapping[str, torch.Tensor]) -> None:

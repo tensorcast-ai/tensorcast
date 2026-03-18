@@ -41,6 +41,11 @@ class AssemblyOperationService {
       const v2::StartAssemblyAttemptRequest& req,
       v2::StartAssemblyAttemptResponse& resp);
 
+  grpc::Status seal_assembly_attempt(
+      RpcContext& rctx,
+      const v2::SealAssemblyAttemptRequest& req,
+      v2::SealAssemblyAttemptResponse& resp);
+
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 
   grpc::Status start_seal_assembly(
