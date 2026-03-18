@@ -193,19 +193,8 @@ absl::StatusOr<v2::AssemblyReadinessCut> capture_seal_readiness_snapshot(
   }
   readiness.set_workspace_layout_binding_version(binding_or->binding_version());
 
-  absl::flat_hash_map<std::string, store::components::ViewInfo> current_views;
-  auto current_views_or = client->list_views(record.workspace_assembly_id());
-  if (!current_views_or.ok()) {
-    return current_views_or.status();
-  }
-  current_views.reserve(current_views_or->size());
-  for (const auto& view : *current_views_or) {
-    if (!view.view_id.empty()) {
-      current_views.emplace(view.view_id, view);
-    }
-  }
-
   absl::flat_hash_set<std::string> added_view_ids;
+  std::vector<std::string> required_view_ids;
   for (const auto& requirement : record.intent().requirements().inline_requirements()) {
     if (requirement.target().kind() != v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW ||
         requirement.target().structural_view_id().empty()) {
@@ -214,16 +203,7 @@ absl::StatusOr<v2::AssemblyReadinessCut> capture_seal_readiness_snapshot(
     if (!added_view_ids.insert(requirement.target().structural_view_id()).second) {
       continue;
     }
-    auto it = current_views.find(requirement.target().structural_view_id());
-    if (it == current_views.end()) {
-      return absl::FailedPreconditionError(
-          absl::StrCat(
-              "required expected_view_id missing from current view set: ", requirement.target().structural_view_id()));
-    }
-    auto* out = readiness.add_views();
-    out->set_structural_view_id(it->second.view_id);
-    const auto digest = compute_view_meta_digest(it->second);
-    out->set_meta_digest(digest.data(), static_cast<int>(digest.size()));
+    required_view_ids.push_back(requirement.target().structural_view_id());
   }
 
   auto accepted_or = client->list_assembly_slot_occupancies(
@@ -278,7 +258,74 @@ absl::StatusOr<v2::AssemblyReadinessCut> capture_seal_readiness_snapshot(
     out->set_lease_generation(it->second.lease_generation);
   }
 
+  absl::flat_hash_map<std::string, store::components::ViewInfo> current_views;
+  if (!required_view_ids.empty()) {
+    auto views_or = client->list_views(record.workspace_assembly_id());
+    if (!views_or.ok()) {
+      return views_or.status();
+    }
+    current_views.reserve(views_or->size());
+    for (auto& view : *views_or) {
+      if (!view.view_id.empty()) {
+        current_views.emplace(view.view_id, std::move(view));
+      }
+    }
+  }
+
+  for (const auto& required_view_id : required_view_ids) {
+    auto it = current_views.find(required_view_id);
+    if (it == current_views.end()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("required expected_view_id missing from current view set: ", required_view_id));
+    }
+    auto* out = readiness.add_views();
+    out->set_structural_view_id(it->second.view_id);
+    const auto digest = compute_view_meta_digest(it->second);
+    out->set_meta_digest(digest.data(), static_cast<int>(digest.size()));
+    out->set_view_spec_json(it->second.view_spec_json);
+    out->set_view_size_bytes(it->second.view_size_bytes);
+    if (it->second.view_data_hash.has_value()) {
+      out->set_view_data_hash(*it->second.view_data_hash);
+    }
+    out->set_canonical_size_bytes(it->second.canonical_size_bytes);
+    out->set_canonical_bytes_covered(it->second.canonical_bytes_covered);
+    for (const auto& range : it->second.canonical_ranges) {
+      auto* out_range = out->add_canonical_ranges();
+      out_range->set_offset(range.offset);
+      out_range->set_length(range.length);
+    }
+  }
+
   return readiness;
+}
+
+store::StoreEngine::SealAssemblyCutInput build_seal_cut_input(const v2::AssemblyReadinessCut& readiness_cut) {
+  store::StoreEngine::SealAssemblyCutInput input;
+  input.structural_views.reserve(static_cast<size_t>(readiness_cut.views_size()));
+  for (const auto& cut_view : readiness_cut.views()) {
+    store::components::ViewInfo view;
+    view.view_id = cut_view.structural_view_id();
+    view.view_spec_json = cut_view.view_spec_json();
+    view.view_size_bytes = cut_view.view_size_bytes();
+    if (!cut_view.view_data_hash().empty()) {
+      view.view_data_hash = cut_view.view_data_hash();
+    }
+    view.canonical_size_bytes = cut_view.canonical_size_bytes();
+    view.canonical_bytes_covered = cut_view.canonical_bytes_covered();
+    view.canonical_ranges.reserve(static_cast<size_t>(cut_view.canonical_ranges_size()));
+    for (const auto& range : cut_view.canonical_ranges()) {
+      view.canonical_ranges.push_back(
+          store::components::CanonicalRange{.offset = range.offset(), .length = range.length()});
+    }
+    input.structural_views.push_back(std::move(view));
+  }
+  input.canonical_full = std::any_of(
+      readiness_cut.live_slots().begin(),
+      readiness_cut.live_slots().end(),
+      [](const v2::AssemblyReadinessCutSlot& slot) {
+        return slot.slot_id() == coordination::kCanonicalFullContributionSlotKey;
+      });
+  return input;
 }
 
 bool retryable_status(const absl::Status& st) {
@@ -386,11 +433,67 @@ absl::StatusOr<std::vector<TensorInterval>> parse_tensor_intervals(std::string_v
   return out;
 }
 
-void copy_artifact_descriptor(
-    const tensorcast::common::v1::ArtifactDescriptor& src,
-    tensorcast::common::v1::ArtifactDescriptor* dst) {
-  ABSL_CHECK(dst != nullptr);
-  dst->CopyFrom(src);
+absl::Status publish_immutable_key(store::StoreEngine* engine, std::string_view key, std::string_view artifact_id);
+
+void populate_artifact_descriptor_from_seal_result(
+    const store::SealAssemblyResult& seal_result,
+    tensorcast::common::v1::ArtifactDescriptor* artifact) {
+  ABSL_CHECK(artifact != nullptr);
+  artifact->set_artifact_id(seal_result.sealed_artifact_id);
+  artifact->set_id_kind(tensorcast::common::v1::ARTIFACT_ID_KIND_MI2);
+  if (!seal_result.index_multihash.empty()) {
+    artifact->set_index_multihash(seal_result.index_multihash);
+  }
+  if (!seal_result.data_multihash.empty()) {
+    artifact->set_data_multihash(seal_result.data_multihash);
+  }
+  if (!seal_result.schema_version.empty()) {
+    artifact->set_schema_version(seal_result.schema_version);
+  }
+  if (!seal_result.encoding.empty()) {
+    artifact->set_encoding(seal_result.encoding);
+  }
+  if (seal_result.total_size > 0) {
+    artifact->set_total_size(seal_result.total_size);
+  }
+}
+
+absl::Status finalize_dependency_ready_closeout(
+    store::StoreEngine* engine,
+    const v2::AssemblyCloseoutContract& closeout_contract,
+    const store::SealAssemblyResult& seal_result,
+    v2::SealAssemblyResult* result_msg) {
+  ABSL_CHECK(engine != nullptr);
+  ABSL_CHECK(result_msg != nullptr);
+
+  populate_artifact_descriptor_from_seal_result(seal_result, result_msg->mutable_artifact());
+
+  const auto canonical = coordination::canonicalize_closeout_contract(closeout_contract);
+  switch (canonical.kind()) {
+    case v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY:
+      if (!canonical.serving_version_key().empty() || !canonical.serving_artifact_id().empty() ||
+          !canonical.serving_manifest_ref().empty()) {
+        return absl::InvalidArgumentError(
+            "source_publish_only closeout contracts may not set serving_version_key, serving_artifact_id, or "
+            "serving_manifest_ref");
+      }
+      if (!canonical.source_version_key().empty()) {
+        auto publish_status =
+            publish_immutable_key(engine, canonical.source_version_key(), seal_result.sealed_artifact_id);
+        if (!publish_status.ok()) {
+          return publish_status;
+        }
+        result_msg->set_source_version_key(canonical.source_version_key());
+      }
+      return absl::OkStatus();
+    case v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH:
+    case v2::ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH:
+      return absl::UnimplementedError(
+          "attempt closeout beyond source_publish_only requires typed child closeout contracts");
+    case v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED:
+    default:
+      return absl::InternalError("unexpected assembly closeout contract kind");
+  }
 }
 
 absl::Status publish_immutable_key(store::StoreEngine* engine, std::string_view key, std::string_view artifact_id) {
@@ -446,15 +549,27 @@ grpc::Status AssemblyOperationService::start_assembly_attempt(
     return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
   }
 
-  auto layout_or = d_.global_store_client->get_layout_spec(req.layout_id());
+  if (!req.has_requirements()) {
+    return {
+        StatusCode::INVALID_ARGUMENT,
+        "requirements are required; daemon no longer derives attempt requirements from layout expected_view_ids"};
+  }
+
+  const auto layout_or = d_.global_store_client->get_layout_spec(req.layout_id());
   if (!layout_or.ok()) {
     return to_grpc_status(layout_or.status());
   }
 
-  v2::AssemblyRequirementSetRef requirements = req.has_requirements()
-      ? coordination::canonicalize_requirement_set(req.requirements())
-      : coordination::canonicalize_requirement_set(
-            coordination::build_phase1_requirement_set(layout_or->layout().expected_view_ids()));
+  v2::AssemblyRequirementSetRef requirements = coordination::canonicalize_requirement_set(req.requirements());
+  if (requirements.inline_requirements_size() == 0) {
+    return {
+        StatusCode::INVALID_ARGUMENT,
+        "requirements.inline_requirements must be non-empty; use a canonical_layout requirement for canonical-full "
+        "attempts"};
+  }
+  if (auto requirement_status = coordination::validate_requirement_set(requirements); !requirement_status.ok()) {
+    return to_grpc_status(requirement_status);
+  }
 
   v2::AssemblyReadinessPolicy readiness_policy = req.has_readiness_policy()
       ? coordination::canonicalize_readiness_policy(req.readiness_policy())
@@ -768,7 +883,7 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
           }
 
           v2::AssemblyReadinessCut readiness_cut;
-          std::vector<std::string> allowed_view_ids;
+          std::optional<store::StoreEngine::SealAssemblyCutInput> seal_cut_input;
           if (final_status.ok()) {
             auto readiness_or = capture_seal_readiness_snapshot(client_sp, record, lease_generation);
             if (!readiness_or.ok()) {
@@ -786,12 +901,7 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
                 }
               }
               if (final_status.ok()) {
-                allowed_view_ids.reserve(static_cast<size_t>(readiness_cut.views_size()));
-                for (const auto& view : readiness_cut.views()) {
-                  if (!view.structural_view_id().empty()) {
-                    allowed_view_ids.push_back(view.structural_view_id());
-                  }
-                }
+                seal_cut_input = build_seal_cut_input(readiness_cut);
               }
             }
           }
@@ -831,11 +941,12 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
                 }
               };
 
-          const std::vector<std::string>* allowed_ptr = allowed_view_ids.empty() ? nullptr : &allowed_view_ids;
-          auto seal_or = final_status.ok()
-              ? engine->seal_assembly(
-                    workspace_assembly_id, /*publish_canonical=*/true, std::move(progress_cb), allowed_ptr)
-              : absl::StatusOr<store::SealAssemblyResult>(final_status);
+          auto seal_or = final_status.ok() ? engine->seal_assembly_from_cut(
+                                                 workspace_assembly_id,
+                                                 *seal_cut_input,
+                                                 /*publish_canonical=*/true,
+                                                 std::move(progress_cb))
+                                           : absl::StatusOr<store::SealAssemblyResult>(final_status);
           if (!seal_or.ok()) {
             final_status = seal_or.status();
           } else {
@@ -845,61 +956,9 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
             }
 
             tensorcast::daemon::v2::SealAssemblyResult result_msg;
-            auto* artifact = result_msg.mutable_artifact();
-            artifact->set_artifact_id(sealed_artifact_id);
-            if (!seal_or->index_multihash.empty()) {
-              artifact->set_index_multihash(seal_or->index_multihash);
-            }
-            if (!seal_or->data_multihash.empty()) {
-              artifact->set_data_multihash(seal_or->data_multihash);
-            }
-            if (!seal_or->schema_version.empty()) {
-              artifact->set_schema_version(seal_or->schema_version);
-            }
-            if (!seal_or->encoding.empty()) {
-              artifact->set_encoding(seal_or->encoding);
-            }
-            if (seal_or->total_size > 0) {
-              artifact->set_total_size(seal_or->total_size);
-            }
-
-            const auto& closeout_contract = record.intent().closeout_contract();
-            if (final_status.ok() && !closeout_contract.source_version_key().empty()) {
-              final_status = publish_immutable_key(engine, closeout_contract.source_version_key(), sealed_artifact_id);
-              if (final_status.ok()) {
-                result_msg.set_source_version_key(closeout_contract.source_version_key());
-              }
-            }
-
-            tensorcast::common::v1::ArtifactDescriptor serving_descriptor;
-            bool serving_descriptor_ready = false;
-            if (final_status.ok() && !closeout_contract.serving_version_key().empty()) {
-              if (!closeout_contract.serving_artifact_id().empty()) {
-                auto serving_descriptor_or =
-                    client_sp->get_artifact_descriptor(closeout_contract.serving_artifact_id());
-                if (!serving_descriptor_or.ok()) {
-                  final_status = serving_descriptor_or.status();
-                } else {
-                  serving_descriptor = *serving_descriptor_or;
-                  serving_descriptor_ready = true;
-                }
-              } else {
-                serving_descriptor = *result_msg.mutable_artifact();
-                serving_descriptor_ready = true;
-              }
-            }
-
-            if (final_status.ok() && !closeout_contract.serving_version_key().empty()) {
-              ABSL_CHECK(serving_descriptor_ready);
-              final_status = publish_immutable_key(
-                  engine, closeout_contract.serving_version_key(), serving_descriptor.artifact_id());
-              if (final_status.ok()) {
-                copy_artifact_descriptor(serving_descriptor, result_msg.mutable_serving_artifact());
-                result_msg.set_serving_version_key(closeout_contract.serving_version_key());
-                if (!closeout_contract.serving_manifest_ref().empty()) {
-                  result_msg.set_serving_manifest_ref(closeout_contract.serving_manifest_ref());
-                }
-              }
+            if (final_status.ok()) {
+              final_status = finalize_dependency_ready_closeout(
+                  engine, record.intent().closeout_contract(), *seal_or, &result_msg);
             }
 
             if (final_status.ok()) {
@@ -984,24 +1043,7 @@ grpc::Status AssemblyOperationService::seal_assembly(
   const auto& result = *result_or;
   resp.set_sealed_artifact_id(result.sealed_artifact_id);
   resp.set_already_sealed(result.already_sealed);
-  auto* desc = resp.mutable_descriptor_();
-  desc->set_artifact_id(result.sealed_artifact_id);
-  if (!result.index_multihash.empty()) {
-    desc->set_index_multihash(result.index_multihash);
-  }
-  if (!result.data_multihash.empty()) {
-    desc->set_data_multihash(result.data_multihash);
-  }
-  if (!result.schema_version.empty()) {
-    desc->set_schema_version(result.schema_version);
-  }
-  if (!result.encoding.empty()) {
-    desc->set_encoding(result.encoding);
-  }
-  if (result.total_size > 0) {
-    desc->set_total_size(result.total_size);
-  }
-  desc->set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+  populate_artifact_descriptor_from_seal_result(result, resp.mutable_descriptor_());
   rctx.mark_success();
   return Status::OK;
 }
@@ -1475,23 +1517,7 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
             }
 
             tensorcast::daemon::v2::SealAssemblyResult result_msg;
-            auto* artifact = result_msg.mutable_artifact();
-            artifact->set_artifact_id(sealed_artifact_id);
-            if (!seal_or->index_multihash.empty()) {
-              artifact->set_index_multihash(seal_or->index_multihash);
-            }
-            if (!seal_or->data_multihash.empty()) {
-              artifact->set_data_multihash(seal_or->data_multihash);
-            }
-            if (!seal_or->schema_version.empty()) {
-              artifact->set_schema_version(seal_or->schema_version);
-            }
-            if (!seal_or->encoding.empty()) {
-              artifact->set_encoding(seal_or->encoding);
-            }
-            if (seal_or->total_size > 0) {
-              artifact->set_total_size(seal_or->total_size);
-            }
+            populate_artifact_descriptor_from_seal_result(*seal_or, result_msg.mutable_artifact());
 
             tensorcast::operation::v1::UpdateOperationRequest success;
             success.set_operation_id(operation_id);

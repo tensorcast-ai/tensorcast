@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -15,6 +17,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/testing/global_store_client_stub.h"
+#include "daemon/service/controllers/assembly_coordination_utils.h"
 #include "google/protobuf/util/time_util.h"
 #include "grpcpp/server_context.h"
 
@@ -38,6 +41,29 @@ tensorcast::store::StoreEngineOptions make_opts() {
   opts.num_thread = 2;
   opts.global_store_address.clear();
   return opts;
+}
+
+void add_requirement_family(
+    tensorcast::daemon::v2::StartAssemblyAttemptRequest* req,
+    std::initializer_list<std::string_view> structural_view_ids) {
+  auto* requirements = req->mutable_requirements();
+  requirements->set_carrier_form("inline");
+  if (structural_view_ids.size() == 0) {
+    auto* requirement = requirements->add_inline_requirements();
+    requirement->set_slot_id("__canonical_full__");
+    requirement->mutable_target()->set_kind(tensorcast::daemon::v2::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+    requirement->set_coverage_contract("canonical_full");
+    requirements->set_requirement_count(1);
+    return;
+  }
+  for (const auto structural_view_id : structural_view_ids) {
+    auto* requirement = requirements->add_inline_requirements();
+    requirement->set_slot_id(std::string(structural_view_id));
+    requirement->mutable_target()->set_kind(tensorcast::daemon::v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW);
+    requirement->mutable_target()->set_structural_view_id(std::string(structural_view_id));
+    requirement->set_coverage_contract("pp_structural_view");
+  }
+  requirements->set_requirement_count(requirements->inline_requirements_size());
 }
 
 class StartSealLeaseReleaseClient final : public tensorcast::store::testing::GlobalStoreClientStub {
@@ -197,6 +223,7 @@ TEST_CASE("StartAssemblyAttempt persists attempt record and continuation metadat
 
   tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
   req.set_layout_id("layout-1");
+  add_requirement_family(&req, {"view-a", "view-b"});
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
@@ -235,6 +262,33 @@ TEST_CASE("StartAssemblyAttempt persists attempt record and continuation metadat
   REQUIRE(metadata.ref().target_artifact_id() == attempt.workspace_assembly_id());
 }
 
+TEST_CASE("StartAssemblyAttempt rejects missing requirements", "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  req.set_layout_id("layout-1");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(st.error_message().find("requirements are required") != std::string::npos);
+}
+
 TEST_CASE("StartAssemblyAttempt rejects non dependency-ready closeout kinds", "[daemon][assembly][attempt]") {
   auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
@@ -252,6 +306,7 @@ TEST_CASE("StartAssemblyAttempt rejects non dependency-ready closeout kinds", "[
 
   tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
   req.set_layout_id("layout-1");
+  add_requirement_family(&req, {"view-a", "view-b"});
   req.mutable_closeout_contract()->set_kind(tensorcast::daemon::v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH);
 
   grpc::ServerContext ctx;
@@ -280,6 +335,7 @@ TEST_CASE("StartAssemblyAttempt rejects serving fields for source_publish_only",
 
   tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
   req.set_layout_id("layout-1");
+  add_requirement_family(&req, {"view-a", "view-b"});
   auto* closeout = req.mutable_closeout_contract();
   closeout->set_kind(tensorcast::daemon::v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY);
   closeout->set_source_version_key("models/demo/source/v1");
@@ -292,4 +348,65 @@ TEST_CASE("StartAssemblyAttempt rejects serving fields for source_publish_only",
   REQUIRE_FALSE(st.ok());
   REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   REQUIRE(st.error_message().find("serving_version_key") != std::string::npos);
+}
+
+TEST_CASE("Assembly requirement validation rejects unknown coverage contracts", "[daemon][assembly][requirements]") {
+  tensorcast::daemon::v2::AssemblyRequirementSetRef requirements;
+  requirements.set_carrier_form("inline");
+  auto* requirement = requirements.add_inline_requirements();
+  requirement->set_slot_id("view-a");
+  requirement->mutable_target()->set_kind(tensorcast::daemon::v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW);
+  requirement->mutable_target()->set_structural_view_id("view-a");
+  requirement->set_coverage_contract("unknown-contract");
+
+  const auto st = tensorcast::daemon::assembly_coordination::validate_requirement_set(requirements);
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.code() == absl::StatusCode::kInvalidArgument);
+  REQUIRE(std::string(st.message()).find("unknown coverage_contract") != std::string::npos);
+}
+
+TEST_CASE("Assembly coordination distinguishes pp ep and canonical_full families", "[daemon][assembly][requirements]") {
+  tensorcast::daemon::v2::AssemblyRequirementSetRef pp_requirements;
+  pp_requirements.set_carrier_form("inline");
+  auto* pp_requirement = pp_requirements.add_inline_requirements();
+  pp_requirement->set_slot_id("view-a");
+  pp_requirement->mutable_target()->set_kind(tensorcast::daemon::v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW);
+  pp_requirement->mutable_target()->set_structural_view_id("view-a");
+  pp_requirement->set_coverage_contract("pp_structural_view");
+
+  tensorcast::daemon::v2::AssemblyRequirementSetRef ep_requirements;
+  ep_requirements.set_carrier_form("inline");
+  auto* ep_requirement = ep_requirements.add_inline_requirements();
+  ep_requirement->set_slot_id("view-a");
+  ep_requirement->mutable_target()->set_kind(tensorcast::daemon::v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW);
+  ep_requirement->mutable_target()->set_structural_view_id("view-a");
+  ep_requirement->set_coverage_contract("ep_structural_view");
+
+  tensorcast::daemon::v2::AssemblyRequirementSetRef canonical_requirements;
+  canonical_requirements.set_carrier_form("inline");
+  auto* canonical_requirement = canonical_requirements.add_inline_requirements();
+  canonical_requirement->set_slot_id("__canonical_full__");
+  canonical_requirement->mutable_target()->set_kind(tensorcast::daemon::v2::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+  canonical_requirement->set_coverage_contract("canonical_full");
+
+  REQUIRE(
+      tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
+          pp_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL, "view-a")
+          .ok());
+
+  const auto pp_vs_ep = tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
+      ep_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL, "view-a");
+  REQUIRE_FALSE(pp_vs_ep.ok());
+  REQUIRE(pp_vs_ep.code() == absl::StatusCode::kFailedPrecondition);
+  REQUIRE(std::string(pp_vs_ep.message()).find("coverage_contract mismatch") != std::string::npos);
+
+  const auto canonical_vs_piece = tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
+      pp_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL, "");
+  REQUIRE_FALSE(canonical_vs_piece.ok());
+  REQUIRE(canonical_vs_piece.code() == absl::StatusCode::kFailedPrecondition);
+
+  REQUIRE(
+      tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
+          canonical_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL, "")
+          .ok());
 }

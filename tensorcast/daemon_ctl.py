@@ -3411,9 +3411,15 @@ class DaemonCtl:
     ) -> AssemblyAttemptRef:
         if not layout_id:
             raise ValueError("layout_id is required")
+        if requirements is None:
+            raise ValueError(
+                "requirements are required; construct them explicitly with "
+                "AssemblyRequirementSetRef.pp_from_structural_views(...), "
+                "AssemblyRequirementSetRef.ep_from_structural_views(...), "
+                "or AssemblyRequirementSetRef.canonical_full()"
+            )
         req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
-        if requirements is not None:
-            req.requirements.CopyFrom(requirements.to_proto())
+        req.requirements.CopyFrom(requirements.to_proto())
         if readiness_policy is not None:
             req.readiness_policy.CopyFrom(readiness_policy.to_proto())
         if closeout_contract is not None:

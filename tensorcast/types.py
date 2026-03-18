@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Union
+from typing import Iterable, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -184,6 +184,7 @@ _CONTRIBUTION_KIND_FROM_PROTO: dict[int, ContributionKind] = {
 
 
 AssemblyTargetKind = Literal["structural_view", "canonical_layout"]
+AssemblyContractFamily = Literal["pp", "ep", "canonical_full"]
 AssemblyContributorLivenessMode = Literal[
     "require_live_until_cut",
     "allow_durable_occupancy",
@@ -240,6 +241,10 @@ _ASSEMBLY_CLOSEOUT_KIND_FROM_PROTO: dict[int, AssemblyCloseoutKind] = {
         "rollout_gated_publish"
     ),
 }
+_ASSEMBLY_CANONICAL_SLOT_ID = "__canonical_full__"
+_ASSEMBLY_PP_PIECE_COVERAGE_CONTRACT = "pp_structural_view"
+_ASSEMBLY_EP_PIECE_COVERAGE_CONTRACT = "ep_structural_view"
+_ASSEMBLY_CANONICAL_COVERAGE_CONTRACT = "canonical_full"
 
 
 class AssemblyTargetRef(BaseModel):
@@ -336,6 +341,103 @@ class AssemblyRequirementSetRef(BaseModel):
                 AssemblyRequirement.from_proto(requirement)
                 for requirement in proto.inline_requirements
             ),
+        )
+
+    @staticmethod
+    def _dedupe_structural_view_ids(
+        structural_view_ids: Iterable[str],
+    ) -> tuple[str, ...]:
+        deduped_view_ids = tuple(
+            sorted(
+                {
+                    str(view_id).strip()
+                    for view_id in structural_view_ids
+                    if str(view_id).strip()
+                }
+            )
+        )
+        return deduped_view_ids
+
+    @classmethod
+    def canonical_full(cls) -> "AssemblyRequirementSetRef":
+        requirements = (
+            AssemblyRequirement(
+                slot_id=_ASSEMBLY_CANONICAL_SLOT_ID,
+                target=AssemblyTargetRef(kind="canonical_layout"),
+                coverage_contract=_ASSEMBLY_CANONICAL_COVERAGE_CONTRACT,
+            ),
+        )
+        return cls(
+            requirement_count=1,
+            carrier_form="inline",
+            inline_requirements=requirements,
+        )
+
+    @classmethod
+    def pp_from_structural_views(
+        cls, structural_view_ids: Iterable[str]
+    ) -> "AssemblyRequirementSetRef":
+        deduped_view_ids = cls._dedupe_structural_view_ids(structural_view_ids)
+        if not deduped_view_ids:
+            raise ValueError(
+                "PP requirements require at least one structural_view_id; "
+                "use canonical_full() for single-rank canonical publish"
+            )
+        return cls._piece_family_requirements(
+            deduped_view_ids,
+            coverage_contract=_ASSEMBLY_PP_PIECE_COVERAGE_CONTRACT,
+        )
+
+    @classmethod
+    def ep_from_structural_views(
+        cls, structural_view_ids: Iterable[str]
+    ) -> "AssemblyRequirementSetRef":
+        deduped_view_ids = cls._dedupe_structural_view_ids(structural_view_ids)
+        if not deduped_view_ids:
+            raise ValueError(
+                "EP requirements require at least one structural_view_id; "
+                "use canonical_full() for single-rank canonical publish"
+            )
+        return cls._piece_family_requirements(
+            deduped_view_ids,
+            coverage_contract=_ASSEMBLY_EP_PIECE_COVERAGE_CONTRACT,
+        )
+
+    @classmethod
+    def from_contract_family(
+        cls,
+        *,
+        family: AssemblyContractFamily,
+        structural_view_ids: Iterable[str] = (),
+    ) -> "AssemblyRequirementSetRef":
+        if family == "canonical_full":
+            return cls.canonical_full()
+        if family == "pp":
+            return cls.pp_from_structural_views(structural_view_ids)
+        return cls.ep_from_structural_views(structural_view_ids)
+
+    @classmethod
+    def _piece_family_requirements(
+        cls,
+        structural_view_ids: tuple[str, ...],
+        *,
+        coverage_contract: str,
+    ) -> "AssemblyRequirementSetRef":
+        requirements = tuple(
+            AssemblyRequirement(
+                slot_id=view_id,
+                target=AssemblyTargetRef(
+                    kind="structural_view",
+                    structural_view_id=view_id,
+                ),
+                coverage_contract=coverage_contract,
+            )
+            for view_id in structural_view_ids
+        )
+        return cls(
+            requirement_count=len(requirements),
+            carrier_form="inline",
+            inline_requirements=requirements,
         )
 
 
@@ -631,6 +733,7 @@ __all__ = [
     "ArtifactDescriptor",
     "AssemblyCloseoutContract",
     "AssemblyAttemptRef",
+    "AssemblyContractFamily",
     "AssemblyReadinessPolicy",
     "AssemblyRequirement",
     "AssemblyRequirementSetRef",

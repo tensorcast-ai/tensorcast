@@ -21,7 +21,13 @@ import torch
 import yaml
 from google.protobuf import wrappers_pb2
 
-from tensorcast.api.store import ArtifactError, AssemblyCloseoutContract, Store
+from tensorcast.api.store import (
+    ArtifactError,
+    AssemblyCloseoutContract,
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
+    Store,
+)
 from tensorcast.api.store.view_composer import compute_index_multihash, compute_view_id
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
@@ -157,12 +163,23 @@ def _artifact_index_multihash(
     *,
     artifact_id: str,
 ) -> str:
-    resp = gs_stub.GetArtifactInfoById(
+    deadline = time.time() + 5.0
+    last_resp = gs_stub.GetArtifactInfoById(
         global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=artifact_id)
     )
-    assert resp.status == global_store_pb2.Status.STATUS_OK
-    assert resp.descriptor.index_multihash
-    return str(resp.descriptor.index_multihash)
+    while time.time() < deadline:
+        if (
+            last_resp.status == global_store_pb2.Status.STATUS_OK
+            and last_resp.descriptor.index_multihash
+        ):
+            return str(last_resp.descriptor.index_multihash)
+        time.sleep(0.05)
+        last_resp = gs_stub.GetArtifactInfoById(
+            global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=artifact_id)
+        )
+    assert last_resp.status == global_store_pb2.Status.STATUS_OK
+    assert last_resp.descriptor.index_multihash
+    return str(last_resp.descriptor.index_multihash)
 
 
 def _put_layout_for_source_artifact(
@@ -189,6 +206,18 @@ def _put_layout_for_source_artifact(
     assert put_layout.status == global_store_pb2.Status.STATUS_OK
     assert put_layout.layout_id
     return str(put_layout.layout_id)
+
+
+def _pp_requirements(expected_view_ids: list[str]) -> AssemblyRequirementSetRef:
+    return AssemblyRequirementSetRef.pp_from_structural_views(expected_view_ids)
+
+
+def _ep_requirements(expected_view_ids: list[str]) -> AssemblyRequirementSetRef:
+    return AssemblyRequirementSetRef.ep_from_structural_views(expected_view_ids)
+
+
+def _canonical_full_requirements() -> AssemblyRequirementSetRef:
+    return AssemblyRequirementSetRef.canonical_full()
 
 
 def _artifact_tensor_dict(
@@ -905,6 +934,7 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
         source_version_key = "models/demo/source/v1"
         attempt = store.start_assembly_attempt(
             layout_id=layout_id,
+            requirements=_canonical_full_requirements(),
             closeout_contract=AssemblyCloseoutContract(
                 kind="source_publish_only",
                 source_version_key=source_version_key,
@@ -932,6 +962,406 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
         with contextlib.suppress(Exception):
             if binding is not None:
                 binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_assembly_attempt_intent_digest_depends_only_on_semantic_intent(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-intent-digest",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[],
+        )
+
+        attempt_a = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_canonical_full_requirements(),
+        )
+        attempt_b = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_canonical_full_requirements(),
+        )
+        attempt_c = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_canonical_full_requirements(),
+            readiness_policy=AssemblyReadinessPolicy(
+                contributor_liveness_mode="allow_durable_occupancy"
+            ),
+        )
+
+        assert attempt_a.attempt_id != attempt_b.attempt_id
+        assert attempt_a.workspace_assembly_id != attempt_b.workspace_assembly_id
+        assert attempt_a.attempt_intent_digest == attempt_b.attempt_intent_digest
+        assert attempt_c.attempt_intent_digest != attempt_a.attempt_intent_digest
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_assembly_attempt_stays_pending_until_explicit_seal(daemon_process, gs_server):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-explicit-seal",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[],
+        )
+
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_canonical_full_requirements(),
+        )
+
+        for _ in range(3):
+            operation_resp = gs_stub.GetOperation(
+                operation_pb2.GetOperationRequest(
+                    operation_id=attempt.coordinator_operation_id
+                )
+            )
+            assert operation_resp.status.state == operation_pb2.OPERATION_STATE_PENDING
+            readiness_resp = gs_stub.GetAssemblyReadinessCut(
+                global_store_pb2.GetAssemblyReadinessCutRequest(
+                    attempt_id=attempt.attempt_id
+                )
+            )
+            assert readiness_resp.status == global_store_pb2.Status.STATUS_NOT_FOUND
+            time.sleep(0.1)
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_binding_attempt_rejects_serving_closeout_before_typed_contracts(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-serving-closeout",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[],
+        )
+
+        with pytest.raises((ArtifactError, grpc.RpcError)) as exc_info:
+            store.start_assembly_attempt(
+                layout_id=layout_id,
+                requirements=_canonical_full_requirements(),
+                closeout_contract=AssemblyCloseoutContract(
+                    kind="source_publish_only",
+                    source_version_key="models/demo/source/v1",
+                    serving_version_key="models/demo/serving/v1",
+                ),
+            )
+        assert "serving_version_key" in str(exc_info.value)
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    binding = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-frozen-closeout",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[],
+        )
+
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        binding = source_artifact.bind(device="cuda:0", packing="byte_space")
+        sealed = binding.seal_current(update_epoch=binding.begin_update())
+
+        frozen_key = "models/demo/source/frozen-v1"
+        ignored_key = "models/demo/source/ignored-v2"
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_canonical_full_requirements(),
+            closeout_contract=AssemblyCloseoutContract(
+                kind="source_publish_only",
+                source_version_key=frozen_key,
+            ),
+        )
+
+        attempt_resp = gs_stub.GetAssemblyAttempt(
+            global_store_pb2.GetAssemblyAttemptRequest(attempt_id=attempt.attempt_id)
+        )
+        assert attempt_resp.status == global_store_pb2.Status.STATUS_OK
+        attempt_record = store_daemon_pb2.AssemblyAttemptRecord()
+        assert attempt_record.ParseFromString(attempt_resp.attempt.attempt_record_proto)
+        assert attempt_record.intent.closeout_contract.source_version_key == frozen_key
+
+        sealed.contribute_to_assembly(attempt=attempt)
+        result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
+        assert result.source_version_key == frozen_key
+
+        frozen_mapping = gs_stub.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key=frozen_key)
+        )
+        assert frozen_mapping.status == global_store_pb2.Status.STATUS_OK
+        assert frozen_mapping.artifact_id == result.source_artifact_id
+
+        ignored_mapping = gs_stub.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key=ignored_key)
+        )
+        assert ignored_mapping.status == global_store_pb2.Status.STATUS_NOT_FOUND
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if binding is not None:
+                binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_piece_partial_contribution_rejected_for_ep_requirements(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    binding = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-pp-vs-ep",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        binding = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+
+        view_id = str(binding.selection.view_id)
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[view_id],
+        )
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_ep_requirements([view_id]),
+        )
+
+        with pytest.raises(ArtifactError) as exc_info:
+            binding.seal_current(
+                update_epoch=binding.begin_update()
+            ).contribute_to_assembly(attempt=attempt)
+        assert "coverage_contract mismatch" in str(exc_info.value)
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if binding is not None:
+                binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_canonical_full_contribution_rejected_for_piece_requirements(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    full_binding = None
+    piece_binding = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-canonical-vs-piece",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        full_binding = source_artifact.bind(device="cuda:0", packing="byte_space")
+        piece_binding = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+
+        view_id = str(piece_binding.selection.view_id)
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[view_id],
+        )
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements([view_id]),
+        )
+
+        with pytest.raises(ArtifactError) as exc_info:
+            full_binding.seal_current(
+                update_epoch=full_binding.begin_update()
+            ).contribute_to_assembly(attempt=attempt)
+        message = str(exc_info.value)
+        assert (
+            "not part of the snapped requirements" in message
+            or "__canonical_full__" in message
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if full_binding is not None:
+                full_binding.close()
+        with contextlib.suppress(Exception):
+            if piece_binding is not None:
+                piece_binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_readiness_cut_carries_full_structural_view_evidence(daemon_process, gs_server):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    binding_a = None
+    binding_b = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-cut-evidence",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        binding_a = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+        binding_b = source_artifact.view(slices={"bias": (slice(4, 8),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+
+        view_id_a = str(binding_a.selection.view_id)
+        view_id_b = str(binding_b.selection.view_id)
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[view_id_a, view_id_b],
+            replicated_tensors=["weights"],
+        )
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements([view_id_a, view_id_b]),
+        )
+
+        binding_a.seal_current(
+            update_epoch=binding_a.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+        binding_b.seal_current(
+            update_epoch=binding_b.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+
+        operation = store.seal_assembly_attempt(attempt)
+        cut_row = _wait_for_readiness_cut(gs_stub, attempt_id=attempt.attempt_id)
+        readiness_cut = store_daemon_pb2.AssemblyReadinessCut()
+        assert readiness_cut.ParseFromString(cut_row.readiness_cut_proto)
+        assert readiness_cut.views
+        assert {view.structural_view_id for view in readiness_cut.views} == {
+            view_id_a,
+            view_id_b,
+        }
+        for view in readiness_cut.views:
+            assert view.meta_digest
+            assert view.view_spec_json
+            assert view.view_size_bytes > 0
+            assert view.canonical_size_bytes > 0
+            assert view.canonical_bytes_covered > 0
+            assert view.canonical_ranges
+
+        result = operation.wait(timeout_s=60.0)
+        assert result.source_artifact_id.startswith("mi2:")
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if binding_a is not None:
+                binding_a.close()
+        with contextlib.suppress(Exception):
+            if binding_b is not None:
+                binding_b.close()
         with contextlib.suppress(Exception):
             store.close()
         gs_channel.close()
@@ -977,7 +1407,10 @@ def test_binding_same_slot_replacement_rejected_after_readiness_cut(
             expected_view_ids=[view_id_a, view_id_b],
             replicated_tensors=["weights"],
         )
-        attempt = store.start_assembly_attempt(layout_id=layout_id)
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements([view_id_a, view_id_b]),
+        )
 
         sealed_a_old = binding_a_old.seal_current(
             update_epoch=binding_a_old.begin_update()
@@ -1014,6 +1447,94 @@ def test_binding_same_slot_replacement_rejected_after_readiness_cut(
         with contextlib.suppress(Exception):
             if binding_a_new is not None:
                 binding_a_new.close()
+        with contextlib.suppress(Exception):
+            if binding_b is not None:
+                binding_b.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_binding_readiness_cut_remains_stable_after_post_cut_liveness_loss(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    binding_a = None
+    binding_b = None
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:binding-source-post-cut-liveness",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+
+        binding_a = source_artifact.view(slices={"bias": (slice(0, 4),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+        binding_b = source_artifact.view(slices={"bias": (slice(4, 8),)}).bind(
+            device="cuda:0", packing="byte_space"
+        )
+
+        view_id_a = str(binding_a.selection.view_id)
+        view_id_b = str(binding_b.selection.view_id)
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[view_id_a, view_id_b],
+            replicated_tensors=["weights"],
+        )
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements([view_id_a, view_id_b]),
+        )
+
+        binding_a.seal_current(
+            update_epoch=binding_a.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+        binding_b.seal_current(
+            update_epoch=binding_b.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+
+        operation = store.seal_assembly_attempt(attempt)
+        initial_cut = _wait_for_readiness_cut(gs_stub, attempt_id=attempt.attempt_id)
+        initial_proto = bytes(initial_cut.readiness_cut_proto)
+
+        binding_a.close()
+        binding_a = None
+        time.sleep(0.2)
+
+        refreshed_cut = gs_stub.GetAssemblyReadinessCut(
+            global_store_pb2.GetAssemblyReadinessCutRequest(
+                attempt_id=attempt.attempt_id
+            )
+        )
+        assert refreshed_cut.status == global_store_pb2.Status.STATUS_OK
+        assert bytes(refreshed_cut.readiness_cut.readiness_cut_proto) == initial_proto
+
+        result = operation.wait(timeout_s=60.0)
+        assert result.source_artifact_id.startswith("mi2:")
+
+        final_cut = gs_stub.GetAssemblyReadinessCut(
+            global_store_pb2.GetAssemblyReadinessCutRequest(
+                attempt_id=attempt.attempt_id
+            )
+        )
+        assert final_cut.status == global_store_pb2.Status.STATUS_OK
+        assert bytes(final_cut.readiness_cut.readiness_cut_proto) == initial_proto
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            if binding_a is not None:
+                binding_a.close()
         with contextlib.suppress(Exception):
             if binding_b is not None:
                 binding_b.close()
@@ -1060,7 +1581,10 @@ def test_binding_piece_partial_replacement_and_pp_attempt(daemon_process, gs_ser
             expected_view_ids=[view_id_a, view_id_b],
             replicated_tensors=["weights"],
         )
-        attempt = store.start_assembly_attempt(layout_id=layout_id)
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements([view_id_a, view_id_b]),
+        )
 
         sealed_a_old = binding_a_old.seal_current(
             update_epoch=binding_a_old.begin_update()
@@ -1162,7 +1686,10 @@ def test_binding_attempt_fails_after_contributor_liveness_loss(
             expected_view_ids=[view_id_a, view_id_b],
             replicated_tensors=["weights"],
         )
-        attempt = store.start_assembly_attempt(layout_id=layout_id)
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements([view_id_a, view_id_b]),
+        )
 
         partial_a = binding_a.seal_current(
             update_epoch=binding_a.begin_update()
@@ -1242,7 +1769,10 @@ def test_binding_ep_subset_attempt(daemon_process, gs_server):
             artifact_id=source_artifact_id,
             expected_view_ids=[view_id_e0, view_id_e1],
         )
-        attempt = store.start_assembly_attempt(layout_id=layout_id)
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_ep_requirements([view_id_e0, view_id_e1]),
+        )
 
         sealed_e0 = binding_e0.seal_current(update_epoch=binding_e0.begin_update())
         sealed_e1 = binding_e1.seal_current(update_epoch=binding_e1.begin_update())
@@ -1313,13 +1843,25 @@ def test_binding_attempt_requires_all_expected_views(daemon_process, gs_server):
             ],
             replicated_tensors=["weights"],
         )
-        attempt = store.start_assembly_attempt(layout_id=layout_id)
+        attempt = store.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=_pp_requirements(
+                [
+                    str(binding_a.selection.view_id),
+                    str(binding_b.selection.view_id),
+                ]
+            ),
+        )
         sealed_a = binding_a.seal_current(update_epoch=binding_a.begin_update())
         sealed_a.contribute_to_assembly(attempt=attempt)
 
         with pytest.raises(ArtifactError) as exc_info:
             store.seal_assembly_attempt(attempt).wait(timeout_s=20.0)
-        assert "required expected_view_id missing" in str(exc_info.value)
+        message = str(exc_info.value)
+        assert (
+            "required slot_id missing from live contributor set" in message
+            or "required expected_view_id missing from current view set" in message
+        )
     finally:
         with contextlib.suppress(Exception):
             channel.close()

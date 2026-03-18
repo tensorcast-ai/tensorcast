@@ -18,6 +18,7 @@
 #include "daemon/service/controllers/disk_artifact_service.h"
 #include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/controllers/owned_binding_service.h"
+#include "daemon/service/controllers/public_operation_admission_service.h"
 #include "daemon/service/controllers/replica_lifecycle_service.h"
 #include "daemon/service/controllers/replica_materialization_service.h"
 #include "daemon/service/controllers/target_materialization_service.h"
@@ -30,6 +31,7 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/ref_tracker.h"
+#include "daemon/state/registration_manager.h"
 #include "daemon/state/routed_authority_protocol.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
@@ -48,6 +50,7 @@ class MaterializationController {
     SessionsService& sessions;
     LipBridge& lip;
     LipManager& lip_manager;
+    RegistrationManager& registration_manager;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
     ArtifactSourceRegistry& disk_imports;
@@ -206,6 +209,7 @@ class MaterializationController {
   ReplicaLifecycleService replica_lifecycle_service_;
   TargetMaterializationService target_materialization_service_;
   OwnedBindingService owner_binding_service_;
+  PublicOperationAdmissionService public_operation_admission_service_;
 };
 
 } // namespace tensorcast::daemon

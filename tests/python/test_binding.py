@@ -7,7 +7,8 @@ import importlib
 import json
 import time
 import types
-from typing import Any, Iterator, Mapping
+import weakref
+from typing import Any, Iterator
 
 import pytest
 import torch
@@ -15,9 +16,8 @@ import torch
 import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api import context as tc_context
-from tensorcast.api._config import PlanType
 from tensorcast.api.store import ArtifactError, Store
-from tensorcast.api.store.binding import Binding, BindingUpdateEpoch
+from tensorcast.api.store.binding import Binding, BindingUpdateEpoch, SealedBindingValue
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.common.v1 import common_pb2
@@ -797,30 +797,12 @@ def test_sealed_binding_value_contributes_piece_partial(
     initial_selection = binding.selection
     assert initial_selection is not None
     expected_view_id = str(initial_selection.view_id)
-    captured: dict[str, object] = {}
-
-    def _fake_perform_registration(
-        tensors: Mapping[str, torch.Tensor], **kwargs: object
-    ) -> object:
-        del tensors
-        captured.update(kwargs)
-        view_registration = kwargs.get("view_registration")
-        canonical_ranges = (
-            tuple(view_registration.canonical_ranges)
-            if view_registration is not None
-            else ()
-        )
-        return types.SimpleNamespace(
-            registration_result=types.SimpleNamespace(
-                view_id=expected_view_id,
-                canonical_ranges=canonical_ranges,
-            )
-        )
-
     monkeypatch.setattr(
         store._registration,
         "_perform_registration",
-        _fake_perform_registration,
+        lambda *_args, **_kwargs: pytest.fail(
+            "binding contribution should not pre-register structural data in the SDK"
+        ),
     )
     sealed = binding.seal_current(update_epoch=binding.begin_update())
     attempt = _build_attempt_ref(
@@ -834,12 +816,11 @@ def test_sealed_binding_value_contributes_piece_partial(
     assert result.contribution_kind == "piece_partial"
     assert result.view_id == expected_view_id
     assert result.coverage_plan_hash.startswith("bcp1:")
-    assert captured["artifact_id"] == "cgid:assembly-piece"
-    assert captured["plan"] is PlanType.VRAM_COALESCED
     submit_call = client.submit_contribution_calls[-1]
     assert submit_call["attempt_id"] == "cgid:assembly-piece:attempt"
     assert submit_call["workspace_assembly_id"] == "cgid:assembly-piece"
     assert submit_call["view_id"] == expected_view_id
+    assert submit_call["coverage_plan_hash"] == result.coverage_plan_hash
     assert (
         submit_call["contribution_kind"]
         == store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
@@ -850,40 +831,25 @@ def test_subset_binding_exposes_piece_view_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, _runtime, _client = _setup_store(monkeypatch)
-    binding = store.artifact(artifact_id="artifact-1").subset(["alpha"]).bind(
-        device="cuda:0",
-        packing="byte_space",
+    binding = (
+        store.artifact(artifact_id="artifact-1")
+        .subset(["alpha"])
+        .bind(
+            device="cuda:0",
+            packing="byte_space",
+        )
     )
     selection = binding.selection
     assert selection is not None
     assert str(selection.view_id)
     assert selection.HasField("view_spec")
     assert tuple(str(name) for name in selection.tensor_names) == ("alpha",)
-
-    captured: dict[str, object] = {}
-
-    def _fake_perform_registration(
-        tensors: Mapping[str, torch.Tensor], **kwargs: object
-    ) -> object:
-        del tensors
-        captured.update(kwargs)
-        view_registration = kwargs.get("view_registration")
-        canonical_ranges = (
-            tuple(view_registration.canonical_ranges)
-            if view_registration is not None
-            else ()
-        )
-        return types.SimpleNamespace(
-            registration_result=types.SimpleNamespace(
-                view_id=str(selection.view_id),
-                canonical_ranges=canonical_ranges,
-            )
-        )
-
     monkeypatch.setattr(
         store._registration,
         "_perform_registration",
-        _fake_perform_registration,
+        lambda *_args, **_kwargs: pytest.fail(
+            "binding contribution should not pre-register structural data in the SDK"
+        ),
     )
 
     sealed = binding.seal_current(update_epoch=binding.begin_update())
@@ -897,9 +863,8 @@ def test_subset_binding_exposes_piece_view_identity(
 
     assert result.contribution_kind == "piece_partial"
     assert result.view_id == str(selection.view_id)
-    view_registration = captured["view_registration"]
-    assert view_registration is not None
-    assert "alpha" in view_registration.view_options.spec.tensors
+    submit_call = _client.submit_contribution_calls[-1]
+    assert submit_call["view_id"] == str(selection.view_id)
 
 
 def test_sealed_binding_value_contributes_canonical_full(
@@ -910,24 +875,12 @@ def test_sealed_binding_value_contributes_canonical_full(
         device="cuda:0",
         packing="byte_space",
     )
-    captured: dict[str, object] = {}
-
-    def _fake_perform_registration(
-        tensors: Mapping[str, torch.Tensor], **kwargs: object
-    ) -> object:
-        del tensors
-        captured.update(kwargs)
-        return types.SimpleNamespace(
-            registration_result=types.SimpleNamespace(
-                view_id=None,
-                canonical_ranges=(),
-            )
-        )
-
     monkeypatch.setattr(
         store._registration,
         "_perform_registration",
-        _fake_perform_registration,
+        lambda *_args, **_kwargs: pytest.fail(
+            "binding contribution should not pre-register structural data in the SDK"
+        ),
     )
     sealed = binding.seal_current(update_epoch=binding.begin_update())
     attempt = _build_attempt_ref(
@@ -941,8 +894,6 @@ def test_sealed_binding_value_contributes_canonical_full(
     assert result.contribution_kind == "canonical_full"
     assert result.view_id is None
     assert result.coverage_plan_hash.startswith("bcp1:")
-    assert captured["artifact_id"] == "cgid:assembly-canonical"
-    assert captured["plan"] is PlanType.VRAM_COALESCED
     submit_call = client.submit_contribution_calls[-1]
     assert submit_call["attempt_id"] == "cgid:assembly-canonical:attempt"
     assert submit_call["workspace_assembly_id"] == "cgid:assembly-canonical"
@@ -951,6 +902,74 @@ def test_sealed_binding_value_contributes_canonical_full(
         submit_call["contribution_kind"]
         == store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
     )
+
+
+def test_binding_piece_partial_submission_uses_selection_view_id_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index_bytes = _make_index_bytes()
+    client = FakeBindingClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+
+    expected_view_id = "view-piece-alpha"
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        lambda *_args, **_kwargs: pytest.fail(
+            "binding contribution should not pre-register structural data in the SDK"
+        ),
+    )
+
+    tensors = {
+        "alpha": torch.arange(4, dtype=torch.float32),
+        "beta": torch.arange(4, 8, dtype=torch.float32),
+    }
+    contribution_selection = common_pb2.ArtifactSelection(
+        artifact_id="artifact-1",
+        view_id=expected_view_id,
+    )
+    fake_slot = types.SimpleNamespace(
+        _store=store,
+        _view_spec=None,
+        contribution_selection=contribution_selection,
+        contribution_source_artifact_id="artifact-1",
+    )
+
+    class _FakeBinding:
+        def __init__(self) -> None:
+            self._slot = fake_slot
+            self._runtime = runtime
+            self.binding_layout_id = "layout-piece-1"
+            self.tensors = tensors
+            self.current_value = types.SimpleNamespace(
+                binding_value_id="value-piece-1",
+                seal_generation=1,
+            )
+
+    binding = _FakeBinding()
+    sealed = SealedBindingValue(
+        binding_id="binding-piece-1",
+        binding_layout_id="layout-piece-1",
+        binding_value_id="value-piece-1",
+        seal_generation=1,
+        source_artifact_id="artifact-1",
+        selection=contribution_selection,
+        is_artifact_backed=True,
+        _binding_ref=weakref.ref(binding),
+    )
+    attempt = _build_attempt_ref(
+        workspace_assembly_id="cgid:assembly-binding-piece",
+        layout_id="layout-piece",
+        attempt_intent_digest="bafkattempt-piece",
+    )
+
+    result = sealed.contribute_to_assembly(attempt=attempt)
+
+    assert result.contribution_kind == "piece_partial"
+    assert result.view_id == expected_view_id
+    assert client.submit_contribution_calls[-1]["view_id"] == expected_view_id
 
 
 class _FakeBindingRuntimeClient:

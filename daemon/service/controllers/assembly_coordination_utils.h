@@ -17,8 +17,9 @@
 namespace tensorcast::daemon::assembly_coordination {
 
 inline constexpr std::string_view kCanonicalFullContributionSlotKey = "__canonical_full__";
-inline constexpr std::string_view kPiecePartialCoverageSemantics = "phase1_layout_expected_view";
-inline constexpr std::string_view kCanonicalFullCoverageSemantics = "phase1_canonical_full";
+inline constexpr std::string_view kPpStructuralViewCoverageContract = "pp_structural_view";
+inline constexpr std::string_view kEpStructuralViewCoverageContract = "ep_structural_view";
+inline constexpr std::string_view kCanonicalFullCoverageContract = "canonical_full";
 inline constexpr absl::Duration kContributionLeaseTtl = absl::Seconds(20);
 inline constexpr absl::Duration kContributionLeaseRefreshInterval = absl::Seconds(5);
 
@@ -28,12 +29,13 @@ std::string contribution_structural_view_id(
     v2::BindingContributionKind contribution_kind,
     std::string_view structural_view_id);
 
-v2::AssemblyRequirementSetRef build_phase1_requirement_set(
-    const google::protobuf::RepeatedPtrField<std::string>& expected_view_ids);
-
 v2::AssemblyRequirementSetRef canonicalize_requirement_set(const v2::AssemblyRequirementSetRef& requirements);
 
 std::string compute_requirement_set_digest(const v2::AssemblyRequirementSetRef& requirements);
+
+absl::StatusOr<std::string> canonicalize_coverage_contract(std::string_view coverage_contract);
+
+absl::Status validate_requirement_set(const v2::AssemblyRequirementSetRef& requirements);
 
 v2::AssemblyReadinessPolicy canonicalize_readiness_policy(const v2::AssemblyReadinessPolicy& policy);
 

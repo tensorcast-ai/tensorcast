@@ -213,6 +213,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .sessions = app->kernel_->sessions_service(),
       .lip = app->kernel_->lip_bridge(),
       .lip_manager = app->kernel_->lip_manager(),
+      .registration_manager = app->kernel_->registration_manager(),
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
       .disk_imports = app->kernel_->source_registry(),

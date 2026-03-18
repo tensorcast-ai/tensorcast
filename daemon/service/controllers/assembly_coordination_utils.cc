@@ -16,20 +16,6 @@
 namespace tensorcast::daemon::assembly_coordination {
 namespace {
 
-std::vector<std::string> sorted_expected_view_ids(
-    const google::protobuf::RepeatedPtrField<std::string>& expected_view_ids) {
-  std::vector<std::string> sorted_ids;
-  sorted_ids.reserve(static_cast<size_t>(expected_view_ids.size()));
-  for (const auto& view_id : expected_view_ids) {
-    if (!view_id.empty()) {
-      sorted_ids.push_back(view_id);
-    }
-  }
-  std::sort(sorted_ids.begin(), sorted_ids.end());
-  sorted_ids.erase(std::unique(sorted_ids.begin(), sorted_ids.end()), sorted_ids.end());
-  return sorted_ids;
-}
-
 std::vector<v2::AssemblyRequirement> collect_requirements(const v2::AssemblyRequirementSetRef& requirements) {
   std::vector<v2::AssemblyRequirement> out;
   out.reserve(static_cast<size_t>(requirements.inline_requirements_size()));
@@ -66,6 +52,19 @@ absl::Time timestamp_to_absl(const google::protobuf::Timestamp& ts) {
   return absl::UnixEpoch() + absl::Nanoseconds(nanos);
 }
 
+absl::StatusOr<std::string_view> expected_coverage_contract_for_binding_contribution(
+    v2::BindingContributionKind contribution_kind) {
+  switch (contribution_kind) {
+    case v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL:
+      return kPpStructuralViewCoverageContract;
+    case v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL:
+      return kCanonicalFullCoverageContract;
+    case v2::BINDING_CONTRIBUTION_KIND_UNSPECIFIED:
+    default:
+      return absl::InvalidArgumentError("unsupported binding contribution kind");
+  }
+}
+
 } // namespace
 
 std::string contribution_slot_key(v2::BindingContributionKind contribution_kind, std::string_view structural_view_id) {
@@ -73,30 +72,6 @@ std::string contribution_slot_key(v2::BindingContributionKind contribution_kind,
     return std::string(kCanonicalFullContributionSlotKey);
   }
   return std::string(structural_view_id);
-}
-
-v2::AssemblyRequirementSetRef build_phase1_requirement_set(
-    const google::protobuf::RepeatedPtrField<std::string>& expected_view_ids) {
-  v2::AssemblyRequirementSetRef requirements;
-  requirements.set_carrier_form("inline");
-  const auto sorted_ids = sorted_expected_view_ids(expected_view_ids);
-  if (sorted_ids.empty()) {
-    auto* requirement = requirements.add_inline_requirements();
-    requirement->set_slot_id(std::string(kCanonicalFullContributionSlotKey));
-    requirement->mutable_target()->set_kind(v2::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
-    requirement->set_coverage_contract(std::string(kCanonicalFullCoverageSemantics));
-    requirements.set_requirement_count(1);
-    return requirements;
-  }
-  for (const auto& view_id : sorted_ids) {
-    auto* requirement = requirements.add_inline_requirements();
-    requirement->set_slot_id(view_id);
-    requirement->mutable_target()->set_kind(v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW);
-    requirement->mutable_target()->set_structural_view_id(view_id);
-    requirement->set_coverage_contract(std::string(kPiecePartialCoverageSemantics));
-  }
-  requirements.set_requirement_count(requirements.inline_requirements_size());
-  return requirements;
 }
 
 v2::AssemblyRequirementSetRef canonicalize_requirement_set(const v2::AssemblyRequirementSetRef& requirements) {
@@ -124,6 +99,51 @@ std::string compute_requirement_set_digest(const v2::AssemblyRequirementSetRef& 
   const auto bytes = absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
   const std::vector<uint8_t> digest = tensorcast::common::sha256_digest_bytes(bytes);
   return tensorcast::common::multibase_multihash_sha256(digest);
+}
+
+absl::StatusOr<std::string> canonicalize_coverage_contract(std::string_view coverage_contract) {
+  if (coverage_contract == kPpStructuralViewCoverageContract) {
+    return std::string(kPpStructuralViewCoverageContract);
+  }
+  if (coverage_contract == kEpStructuralViewCoverageContract) {
+    return std::string(kEpStructuralViewCoverageContract);
+  }
+  if (coverage_contract == kCanonicalFullCoverageContract) {
+    return std::string(kCanonicalFullCoverageContract);
+  }
+  return absl::InvalidArgumentError(absl::StrCat("unknown coverage_contract: ", coverage_contract));
+}
+
+absl::Status validate_requirement_set(const v2::AssemblyRequirementSetRef& requirements) {
+  for (const auto& requirement : collect_requirements(requirements)) {
+    auto coverage_or = canonicalize_coverage_contract(requirement.coverage_contract());
+    if (!coverage_or.ok()) {
+      return coverage_or.status();
+    }
+    const std::string& coverage_contract = *coverage_or;
+    if (coverage_contract == kCanonicalFullCoverageContract) {
+      if (requirement.slot_id() != kCanonicalFullContributionSlotKey) {
+        return absl::InvalidArgumentError("canonical_full requirements must use slot_id=__canonical_full__");
+      }
+      if (requirement.target().kind() != v2::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT) {
+        return absl::InvalidArgumentError("canonical_full requirements must target canonical_layout");
+      }
+      if (!requirement.target().structural_view_id().empty()) {
+        return absl::InvalidArgumentError("canonical_full requirements must not set structural_view_id");
+      }
+      continue;
+    }
+    if (requirement.target().kind() != v2::ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW) {
+      return absl::InvalidArgumentError("piece requirements must target structural_view");
+    }
+    if (requirement.target().structural_view_id().empty()) {
+      return absl::InvalidArgumentError("piece requirements must set structural_view_id");
+    }
+    if (requirement.slot_id() != requirement.target().structural_view_id()) {
+      return absl::InvalidArgumentError("piece requirement slot_id must match structural_view_id");
+    }
+  }
+  return absl::OkStatus();
 }
 
 v2::AssemblyReadinessPolicy canonicalize_readiness_policy(const v2::AssemblyReadinessPolicy& policy) {
@@ -266,8 +286,16 @@ absl::Status validate_binding_requirement_entry(
     const v2::AssemblyRequirementSetRef& requirements,
     v2::BindingContributionKind contribution_kind,
     std::string_view structural_view_id) {
+  auto expected_coverage_or = expected_coverage_contract_for_binding_contribution(contribution_kind);
+  if (!expected_coverage_or.ok()) {
+    return expected_coverage_or.status();
+  }
   const std::string expected_slot_id = contribution_slot_key(contribution_kind, structural_view_id);
   for (const auto& requirement : collect_requirements(requirements)) {
+    auto coverage_or = canonicalize_coverage_contract(requirement.coverage_contract());
+    if (!coverage_or.ok()) {
+      return coverage_or.status();
+    }
     if (requirement.slot_id() != expected_slot_id) {
       continue;
     }
@@ -284,6 +312,16 @@ absl::Status validate_binding_requirement_entry(
       }
     } else {
       continue;
+    }
+    if (*coverage_or != *expected_coverage_or) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "binding contribution coverage_contract mismatch for slot_id=",
+              expected_slot_id,
+              " expected=",
+              *expected_coverage_or,
+              " actual=",
+              *coverage_or));
     }
     return absl::OkStatus();
   }

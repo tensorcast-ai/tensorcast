@@ -23,6 +23,7 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/view/view_identity.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
@@ -145,10 +146,7 @@ ArtifactRegistration MakeRegistration(uint64_t total_bytes) {
   return reg;
 }
 
-ArtifactRegistration MakePieceRegistration(
-    std::string_view artifact_id,
-    std::string_view assembly_id,
-    std::string_view view_id) {
+ArtifactRegistration MakePieceRegistration(std::string_view artifact_id, std::string_view assembly_id) {
   constexpr uint64_t kCanonicalElements = 8;
   constexpr uint64_t kPieceElements = 4;
 
@@ -166,13 +164,25 @@ ArtifactRegistration MakePieceRegistration(
   spec.tensors.emplace("weights", ops);
 
   tensorcast::store::runtime::metadata::ViewRegistration view;
-  view.view_id = std::string(view_id);
   view.spec = std::move(spec);
   view.placement = tensorcast::store::runtime::metadata::ViewPlacement::kServer;
   view.canonical_size_bytes = kCanonicalElements * sizeof(float);
   view.registration_kind = tensorcast::store::runtime::metadata::ViewRegistrationKind::kPiece;
   reg.view = std::move(view);
   return reg;
+}
+
+std::string ComputePieceViewId() {
+  tensorcast::store::loader::ViewSpec spec;
+  tensorcast::store::loader::TensorViewOps ops;
+  ops.ops.push_back(
+      tensorcast::store::loader::ViewOp::Narrow(
+          tensorcast::store::loader::NarrowOp{.dim = 0, .start = 0, .length = 4}));
+  spec.tensors.emplace("weights", ops);
+  auto view_id_or =
+      tensorcast::store::loader::compute_view_id_from_spec(spec, R"({"weights":[0,32,[8],[1],"torch.float32",0]})");
+  REQUIRE(view_id_or.ok());
+  return *view_id_or;
 }
 
 std::array<std::byte, 16> MakePiecePayload(float base) {
@@ -795,16 +805,16 @@ TEST_CASE("RegistrationBackend abort cleans pending mem_reg alias from ReplicaRe
   CHECK(harness.replica_registry->size() == 0);
 }
 
-TEST_CASE("RegistrationBackend piece retry reuses existing local replica", "[registration_backend][piece]") {
+TEST_CASE("RegistrationBackend piece replacement republishes unchanged slot", "[registration_backend][piece]") {
   SKIP_IF_NO_CUDA();
 
   RegistrationBackendHarness harness;
-  harness.publisher.reject_view_hash_conflicts = true;
   auto backend = harness.make_backend();
+  const std::string expected_view_id = ComputePieceViewId();
 
   const auto payload = MakePiecePayload(/*base=*/1.0f);
 
-  auto reg_one = MakePieceRegistration("temp-piece-one", "cgid:piece-retry", "view-piece");
+  auto reg_one = MakePieceRegistration("temp-piece-one", "cgid:piece-retry");
   auto begin_one = backend.begin(reg_one);
   REQUIRE(begin_one.ok());
   REQUIRE(backend.ingest_view_chunk(begin_one->registration_id, /*view_offset=*/0, absl::MakeConstSpan(payload)).ok());
@@ -812,11 +822,15 @@ TEST_CASE("RegistrationBackend piece retry reuses existing local replica", "[reg
   auto commit_one = backend.commit(begin_one->registration_id);
   REQUIRE(commit_one.ok());
   REQUIRE(commit_one->view_data_multihash.has_value());
+  REQUIRE(commit_one->view_id.has_value());
   CHECK_FALSE(commit_one->existed);
+  CHECK(*commit_one->view_id == expected_view_id);
   CHECK(harness.publisher.publications.size() == 1);
   CHECK(harness.publisher.view_updates == 1);
+  REQUIRE(harness.publisher.publications.back().view_id.has_value());
+  CHECK(*harness.publisher.publications.back().view_id == expected_view_id);
 
-  auto reg_two = MakePieceRegistration("temp-piece-two", "cgid:piece-retry", "view-piece");
+  auto reg_two = MakePieceRegistration("temp-piece-two", "cgid:piece-retry");
   auto begin_two = backend.begin(reg_two);
   REQUIRE(begin_two.ok());
   REQUIRE(backend.ingest_view_chunk(begin_two->registration_id, /*view_offset=*/0, absl::MakeConstSpan(payload)).ok());
@@ -824,32 +838,40 @@ TEST_CASE("RegistrationBackend piece retry reuses existing local replica", "[reg
   auto commit_two = backend.commit(begin_two->registration_id);
   REQUIRE(commit_two.ok());
   REQUIRE(commit_two->view_data_multihash.has_value());
-  CHECK(commit_two->existed);
+  REQUIRE(commit_two->view_id.has_value());
+  CHECK_FALSE(commit_two->existed);
+  CHECK(*commit_two->view_id == expected_view_id);
   CHECK(*commit_two->view_data_multihash == *commit_one->view_data_multihash);
-  CHECK(harness.publisher.publications.size() == 1);
+  CHECK(harness.publisher.publications.size() == 2);
   CHECK(harness.publisher.view_updates == 2);
   CHECK(harness.replica_registry->find_by_artifact("cgid:piece-retry").size() == 1);
 }
 
-TEST_CASE("RegistrationBackend conflicting piece retry does not republish", "[registration_backend][piece]") {
+TEST_CASE(
+    "RegistrationBackend conflicting piece replacement republishes latest slot",
+    "[registration_backend][piece]") {
   SKIP_IF_NO_CUDA();
 
   RegistrationBackendHarness harness;
-  harness.publisher.reject_view_hash_conflicts = true;
   auto backend = harness.make_backend();
+  const std::string expected_view_id = ComputePieceViewId();
 
   const auto payload = MakePiecePayload(/*base=*/1.0f);
   const auto conflicting_payload = MakePiecePayload(/*base=*/11.0f);
 
-  auto reg_one = MakePieceRegistration("temp-piece-one", "cgid:piece-conflict", "view-piece");
+  auto reg_one = MakePieceRegistration("temp-piece-one", "cgid:piece-conflict");
   auto begin_one = backend.begin(reg_one);
   REQUIRE(begin_one.ok());
   REQUIRE(backend.ingest_view_chunk(begin_one->registration_id, /*view_offset=*/0, absl::MakeConstSpan(payload)).ok());
-  REQUIRE(backend.commit(begin_one->registration_id).ok());
+  auto commit_one = backend.commit(begin_one->registration_id);
+  REQUIRE(commit_one.ok());
+  REQUIRE(commit_one->view_data_multihash.has_value());
+  REQUIRE(commit_one->view_id.has_value());
+  CHECK(*commit_one->view_id == expected_view_id);
   CHECK(harness.publisher.publications.size() == 1);
   CHECK(harness.publisher.view_updates == 1);
 
-  auto reg_two = MakePieceRegistration("temp-piece-two", "cgid:piece-conflict", "view-piece");
+  auto reg_two = MakePieceRegistration("temp-piece-two", "cgid:piece-conflict");
   auto begin_two = backend.begin(reg_two);
   REQUIRE(begin_two.ok());
   REQUIRE(
@@ -857,14 +879,15 @@ TEST_CASE("RegistrationBackend conflicting piece retry does not republish", "[re
           .ok());
 
   auto commit_two = backend.commit(begin_two->registration_id);
-  REQUIRE_FALSE(commit_two.ok());
-  CHECK(commit_two.status().code() == absl::StatusCode::kFailedPrecondition);
-  CHECK(harness.publisher.publications.size() == 1);
-  CHECK(harness.publisher.view_updates == 1);
+  REQUIRE(commit_two.ok());
+  REQUIRE(commit_two->view_data_multihash.has_value());
+  REQUIRE(commit_two->view_id.has_value());
+  CHECK_FALSE(commit_two->existed);
+  CHECK(*commit_two->view_id == expected_view_id);
+  CHECK(*commit_two->view_data_multihash != *commit_one->view_data_multihash);
+  CHECK(harness.publisher.publications.size() == 2);
+  CHECK(harness.publisher.view_updates == 2);
   CHECK(harness.replica_registry->find_by_artifact("cgid:piece-conflict").size() == 1);
-
-  REQUIRE(backend.abort(begin_two->registration_id).ok());
-  CHECK(harness.replica_registry->find_by_artifact("temp-piece-two").empty());
 }
 
 TEST_CASE(

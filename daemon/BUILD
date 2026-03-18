@@ -1057,6 +1057,17 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "public_operation_admission_service_lib",
+    srcs = ["service/controllers/public_operation_admission_service.cc"],
+    hdrs = ["service/controllers/public_operation_admission_service.h"],
+    deps = [
+        "//proto/tensorcast/operation/v1:operation_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+sc_cc_library(
     name = "materialization_controller_lib",
     srcs = ["service/controllers/materialization_controller.cc"],
     hdrs = ["service/controllers/materialization_controller.h"],
@@ -1074,7 +1085,9 @@ sc_cc_library(
         ":lip_bridge_lib",
         ":lip_manager_lib",
         ":owned_binding_service_lib",
+        ":public_operation_admission_service_lib",
         ":ref_tracker_hdr",
+        ":registration_manager_lib",
         ":replica_lifecycle_service_lib",
         ":replica_materialization_service_lib",
         ":rpc_context_hdr",
@@ -1123,6 +1136,9 @@ sc_cc_library(
         ":materialization_policy_utils_lib",
         ":materialization_request_common_utils_lib",
         ":materialization_target_plan_utils_lib",
+        ":registration_controller_lib",
+        ":registration_manager_lib",
+        ":registration_storage_mapping_utils_lib",
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
@@ -1626,6 +1642,8 @@ sc_cc_library(
         "//core/cuda:device_guard_lib",
         "//core/store:device_registry",
         "//core/store:store_engine",
+        "//core/store/materialization/common:piece_view_state_utils",
+        "//core/store/materialization/common:view_registration_normalization_utils",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",

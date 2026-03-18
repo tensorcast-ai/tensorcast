@@ -577,7 +577,6 @@ class Store:
         view_id: str | None = None,
         placement: str | None = None,
         ttl_ms: int | None = None,
-        allow_partial: bool = False,
         options: RegisterArtifactOptions | None = None,
         canonical_index_bytes: bytes | None = None,
         registration_kind: str | int | None = None,
@@ -591,7 +590,6 @@ class Store:
             view_id=view_id,
             placement=placement,
             ttl_ms=ttl_ms,
-            allow_partial=allow_partial,
             options=options,
             canonical_index_bytes=canonical_index_bytes,
             registration_kind=registration_kind,
@@ -1039,9 +1037,15 @@ class Store:
         ctx: CallContext | None = None,
     ) -> AssemblyAttemptRef:
         del ctx
+        if requirements is None:
+            raise ValueError(
+                "requirements are required; construct them explicitly with "
+                "AssemblyRequirementSetRef.pp_from_structural_views(...), "
+                "AssemblyRequirementSetRef.ep_from_structural_views(...), "
+                "or AssemblyRequirementSetRef.canonical_full()"
+            )
         kwargs: dict[str, object] = {"layout_id": layout_id}
-        if requirements is not None:
-            kwargs["requirements"] = requirements
+        kwargs["requirements"] = requirements
         if readiness_policy is not None:
             kwargs["readiness_policy"] = readiness_policy
         if closeout_contract is not None:
@@ -1604,7 +1608,6 @@ def register_view(
     view_id: str | None = None,
     placement: str | None = None,
     ttl_ms: int | None = None,
-    allow_partial: bool = False,
     options: RegisterArtifactOptions | None = None,
     canonical_index_bytes: bytes | None = None,
     registration_kind: str | int | None = None,
@@ -1618,7 +1621,6 @@ def register_view(
         view_id=view_id,
         placement=placement,
         ttl_ms=ttl_ms,
-        allow_partial=allow_partial,
         options=options,
         canonical_index_bytes=canonical_index_bytes,
         registration_kind=registration_kind,

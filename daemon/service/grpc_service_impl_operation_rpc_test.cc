@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -46,6 +47,7 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
   std::vector<tensorcast::operation::v1::OperationState> states;
   std::atomic<int> get_calls{0};
   absl::Status get_error = absl::OkStatus();
+  std::function<void(tensorcast::operation::v1::OperationRef*)> fill_ref;
 
   absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
       const tensorcast::operation::v1::GetOperationRequest& req) override {
@@ -56,6 +58,9 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
     tensorcast::operation::v1::GetOperationResponse resp;
     auto* ref = resp.mutable_ref();
     ref->set_operation_id(req.operation_id());
+    if (fill_ref != nullptr) {
+      fill_ref(ref);
+    }
     auto* status = resp.mutable_status();
     const size_t idx = static_cast<size_t>(std::max(0, get_calls.load(std::memory_order_relaxed) - 1));
     const size_t state_idx = states.empty() ? 0 : std::min(idx, states.size() - 1);
@@ -93,6 +98,52 @@ TEST_CASE("GetOperation surfaces backend errors", "[daemon][operation]") {
   grpc::ServerContext ctx;
   const auto st = harness->service().GetOperation(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::UNAVAILABLE);
+}
+
+TEST_CASE("GetOperation bypasses child-owner admission for unrelated operation kinds", "[daemon][operation]") {
+  auto client = std::make_shared<OperationClient>();
+  client->states = {
+      tensorcast::operation::v1::OperationState::OPERATION_STATE_RUNNING,
+  };
+  client->fill_ref = [](tensorcast::operation::v1::OperationRef* ref) {
+    ref->set_kind("assembly_attempt");
+    ref->set_authority_scope_kind("assembly_attempt");
+    ref->set_authority_scope_id("attempt-1");
+    ref->set_attachment_kind("assembly_attempt");
+    ref->set_recovery_class("coordinator_process");
+  };
+  auto harness = make_harness(client);
+
+  tensorcast::operation::v1::GetOperationRequest req;
+  req.set_operation_id("op-assembly");
+  tensorcast::operation::v1::GetOperationResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = harness->service().GetOperation(&ctx, &req, &resp);
+  REQUIRE(st.ok());
+  REQUIRE(resp.ref().kind() == "assembly_attempt");
+}
+
+TEST_CASE("GetOperation routes publish observation through shared admission dispatcher", "[daemon][operation]") {
+  auto client = std::make_shared<OperationClient>();
+  client->states = {
+      tensorcast::operation::v1::OperationState::OPERATION_STATE_RUNNING,
+  };
+  client->fill_ref = [](tensorcast::operation::v1::OperationRef* ref) {
+    ref->set_kind("publish_target_replica");
+    ref->set_authority_scope_kind("wrong_scope");
+    ref->set_authority_scope_id("wf-1");
+    ref->set_attachment_kind("target_publication");
+    ref->set_recovery_class("ephemeral_process_local");
+  };
+  auto harness = make_harness(client);
+
+  tensorcast::operation::v1::GetOperationRequest req;
+  req.set_operation_id("op-publish");
+  tensorcast::operation::v1::GetOperationResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = harness->service().GetOperation(&ctx, &req, &resp);
+  REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(std::string(st.error_message()).find("authority_scope_kind mismatch") != std::string::npos);
 }
 
 TEST_CASE("WaitOperation returns once operation becomes terminal", "[daemon][operation]") {

@@ -458,6 +458,68 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
     assert view_reg.placement == store_daemon_pb2.TRANSFORM_PLACEMENT_CLIENT
 
 
+def test_register_view_piece_registration_kind_builds_piece_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _fresh_store()
+
+    canonical_index = b'{"weights":[0,16,[4],[1],"torch.float32",0]}'
+    view_spec = common_pb2.ViewSpec()
+    narrow = view_spec.tensors["weights"].ops.add().narrow
+    narrow.dim = 0
+    narrow.start = 1
+    narrow.length = 2
+
+    def fake_resolve(
+        self: ViewOrchestrator,
+        *,
+        artifact_id: str | None,
+        key: str | None,
+        slices: Any,
+        transpose: Any,
+        view_id: str | None,
+    ) -> ResolvedViewInputs:
+        del artifact_id, key, slices, transpose, view_id
+        build_result = ViewSpecBuildResult(
+            proto=view_spec,
+            tensor_ops={"weights": [NarrowOp(dim=0, start=1, length=2)]},
+        )
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=canonical_index,
+            build_result=build_result,
+        )
+
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve.__get__(store._views, ViewOrchestrator),
+    )
+
+    captured: dict[str, Any] = {}
+
+    def fake_perform(self, upload_tensors, **kwargs):
+        del self, upload_tensors
+        captured["view_registration"] = kwargs.get("view_registration")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        fake_perform.__get__(store._registration, store._registration.__class__),
+    )
+
+    result = store.register_view(
+        tensors={"weights": torch.tensor([10.0, 20.0], dtype=torch.float32)},
+        artifact_id="artifact-123",
+        registration_kind="piece",
+    )
+
+    assert isinstance(result, SimpleNamespace)
+    view_reg = captured["view_registration"]
+    assert view_reg.registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+
+
 def test_register_view_server_placement_error_guidance() -> None:
     _fresh_store()
     failure = _PlacementRpcError(

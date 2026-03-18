@@ -136,6 +136,14 @@ class StoreEngine {
       runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb = {},
       const std::vector<std::string>* allowed_view_ids = nullptr);
 
+  using SealAssemblyCutInput = runtime::ingestion::MaterializationFacade::SealAssemblyCutInput;
+
+  absl::StatusOr<SealAssemblyResult> seal_assembly_from_cut(
+      std::string_view assembly_id,
+      const SealAssemblyCutInput& cut_input,
+      bool publish_canonical,
+      runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb = {});
+
   absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
       const P2PSource& source,

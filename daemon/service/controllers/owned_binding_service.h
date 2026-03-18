@@ -19,6 +19,10 @@
 #include "daemon/state/binding_registry.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
+#include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/ref_tracker.h"
+#include "daemon/state/registration_manager.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/worker_identity_store.h"
@@ -39,6 +43,11 @@ class OwnedBindingService {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
+    RegistrationManager* registration_manager{nullptr};
+    LipManager* lip_manager{nullptr};
+    RefTracker* refs{nullptr};
+    IpcRegionRegistry* regions{nullptr};
+    uint32_t max_concurrency{4};
     common::CapabilityTokenManager* capability_tokens{nullptr};
     TargetMaterializationService* target_materialization_service{nullptr};
     std::filesystem::path storage_path;

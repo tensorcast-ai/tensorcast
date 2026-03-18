@@ -174,6 +174,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .sessions = kernel->sessions_service(),
       .lip = kernel->lip_bridge(),
       .lip_manager = kernel->lip_manager(),
+      .registration_manager = kernel->registration_manager(),
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
       .disk_imports = kernel->source_registry(),

@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <optional>
+#include <string_view>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
@@ -46,6 +47,10 @@ class TargetPublishService {
   explicit TargetPublishService(Dep d);
 
   static absl::Duration target_publication_token_ttl();
+
+  static constexpr std::string_view public_operation_kind() {
+    return "publish_target_replica";
+  }
 
   struct TargetPublicationFrontDoorContext {
     TargetPublicationRegistry::Record record;

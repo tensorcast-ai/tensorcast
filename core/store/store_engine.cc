@@ -846,6 +846,14 @@ absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly(
   return ingestion_runtime_->seal_assembly(assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
 }
 
+absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly_from_cut(
+    std::string_view assembly_id,
+    const SealAssemblyCutInput& cut_input,
+    bool publish_canonical,
+    runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb) {
+  return ingestion_runtime_->seal_assembly_from_cut(assembly_id, cut_input, publish_canonical, std::move(progress_cb));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Store registration helper for already-loaded replicas
 // ═══════════════════════════════════════════════════════════════════════════

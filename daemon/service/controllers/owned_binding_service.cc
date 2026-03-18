@@ -5,12 +5,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -30,13 +33,19 @@
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
+#include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/registration_storage_mapping_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
 
 #include "core/common/artifact_hash.h"
 #include "core/common/selection_identity.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_ipc.h"
+#include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "core/store/view_utils.h"
 #include "folly/futures/Future.h"
 #include "gsl/pointers"
 
@@ -51,6 +60,8 @@ namespace {
 using materialization_index_source::load_canonical_index_with_disk_fallback;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::build_descriptors_from_index;
+using materialization_policy::build_view_spec_proto;
+using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::resolve_source_policy;
 using materialization_policy::resolve_transform_placement;
 using materialization_policy::to_hint_preference;
@@ -227,6 +238,487 @@ absl::StatusOr<OwnedStorageLayout> build_owned_storage_layout(
     return absl::InvalidArgumentError("target_layout storages must be non-empty");
   }
   return result;
+}
+
+struct ContributionStorageLayout {
+  std::vector<LeaseSegMeta> segments;
+  std::vector<RegisterStorageMeta> storages;
+  uint64_t total_size{0};
+};
+
+struct PreparedContributionSegment {
+  int device_id{0};
+  cuda::IpcMapping* mapping{nullptr};
+  uint64_t base_offset{0};
+  uint64_t artifact_offset{0};
+  uint64_t length{0};
+};
+
+struct OpenedContributionLayout {
+  std::vector<PreparedContributionSegment> segments;
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
+  std::unique_ptr<RegionPinGuard> region_pin;
+};
+
+struct PieceContributionViewSpec {
+  tensorcast::common::v1::ViewSpec spec;
+  std::vector<std::string> tensor_names;
+  std::string view_id;
+  uint64_t canonical_size_bytes{0};
+};
+
+struct BindingContributionRegistrationPlan {
+  v2::BeginRegisterArtifactRequest begin_request;
+  ContributionStorageLayout storage_layout;
+  std::string slot_id;
+  std::optional<std::string> structural_view_id;
+};
+
+constexpr uint64_t kContributionFeedChunkBytes = 4ULL * 1024ULL * 1024ULL;
+
+absl::StatusOr<ContributionStorageLayout> build_contribution_storage_layout(const BindingRegistry::Record& record) {
+  ContributionStorageLayout result;
+  result.segments.reserve(record.target_layout.storages_size());
+  result.storages.reserve(record.target_layout.storages_size());
+
+  uint64_t cursor = 0;
+  const auto handle_view = record.handle_bytes.as_string_view();
+  for (const auto& storage : record.target_layout.storages()) {
+    if (storage.storage_id().empty()) {
+      return absl::InvalidArgumentError("storage_id is required");
+    }
+    if (storage.storage_length() == 0) {
+      return absl::InvalidArgumentError("storage_length must be non-zero");
+    }
+    if (storage.device_id() != record.device_id) {
+      return absl::InvalidArgumentError("storage.device_id does not match binding device");
+    }
+
+    RegisterStorageMeta meta;
+    meta.storage_id = storage.storage_id();
+    meta.device_id = storage.device_id();
+    meta.storage_length = storage.storage_length();
+    if (storage.storage_source_case() == v2::StorageEntry::kVramRegionId) {
+      meta.region_id = storage.vram_region_id();
+      meta.mapping_base_offset = storage.mapping_base_offset();
+    } else if (storage.storage_source_case() == v2::StorageEntry::kCudaIpcHandle) {
+      meta.handle_bytes = storage.cuda_ipc_handle();
+      meta.mapping_base_offset = storage.mapping_base_offset();
+    } else {
+      if (!handle_view.empty()) {
+        meta.handle_bytes = std::string(handle_view);
+        meta.mapping_base_offset = cursor;
+      } else {
+        return absl::FailedPreconditionError(
+            "binding target_layout storage is missing a readable source for contribution lowering");
+      }
+    }
+    result.storages.push_back(std::move(meta));
+
+    LeaseSegMeta segment;
+    segment.storage_id = storage.storage_id();
+    segment.storage_offset = 0;
+    segment.artifact_offset = cursor;
+    segment.length = storage.storage_length();
+    result.segments.push_back(std::move(segment));
+    cursor += storage.storage_length();
+  }
+
+  if (cursor == 0) {
+    return absl::InvalidArgumentError("binding target_layout storages must be non-empty");
+  }
+  result.total_size = cursor;
+  return result;
+}
+
+absl::StatusOr<PieceContributionViewSpec> build_subset_identity_piece_view_spec(
+    std::string_view canonical_index_json,
+    const google::protobuf::RepeatedPtrField<std::string>& tensor_names) {
+  auto index_table_or = materialization_layout::parse_canonical_index(canonical_index_json);
+  if (!index_table_or.ok()) {
+    return index_table_or.status();
+  }
+  PieceContributionViewSpec result;
+  result.tensor_names.reserve(tensor_names.size());
+  result.canonical_size_bytes = index_table_or->logical_total_size;
+  for (const auto& tensor_name : tensor_names) {
+    const auto it = index_table_or->entries.find(tensor_name);
+    if (it == index_table_or->entries.end()) {
+      return absl::InvalidArgumentError(absl::StrCat("binding contribution references unknown tensor=", tensor_name));
+    }
+    if (it->second.shape.empty()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("binding subset contribution requires shape metadata for tensor=", tensor_name));
+    }
+    auto* ops = (*result.spec.mutable_tensors())[tensor_name].add_ops();
+    ops->mutable_narrow()->set_dim(0);
+    ops->mutable_narrow()->set_start(0);
+    ops->mutable_narrow()->set_length(static_cast<uint64_t>(it->second.shape.front()));
+    result.tensor_names.push_back(tensor_name);
+  }
+  auto view_id_or = compute_view_id_from_spec(result.spec, canonical_index_json);
+  if (!view_id_or.ok()) {
+    return view_id_or.status();
+  }
+  result.view_id = *view_id_or;
+  return result;
+}
+
+absl::StatusOr<PieceContributionViewSpec> resolve_piece_contribution_view_spec(
+    store::StoreEngine& engine,
+    std::string_view resolved_artifact_id,
+    std::string_view canonical_index_json,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    std::string_view requested_view_id) {
+  PieceContributionViewSpec result;
+  auto index_table_or = materialization_layout::parse_canonical_index(canonical_index_json);
+  if (!index_table_or.ok()) {
+    return index_table_or.status();
+  }
+  result.canonical_size_bytes = index_table_or->logical_total_size;
+  for (const auto& name : selection.tensor_names()) {
+    if (!name.empty()) {
+      result.tensor_names.push_back(name);
+    }
+  }
+
+  if (selection.has_view_spec()) {
+    result.spec = selection.view_spec();
+  } else if (!selection.view_id().empty()) {
+    auto metadata_or = engine.get_view_metadata(std::string(resolved_artifact_id), selection.view_id());
+    if (!metadata_or.ok()) {
+      return metadata_or.status();
+    }
+    auto parsed_or = store::view::parse_view_selection_json(metadata_or->view_spec_json);
+    if (!parsed_or.ok()) {
+      return parsed_or.status();
+    }
+    result.spec = build_view_spec_proto(parsed_or->spec);
+    if (result.tensor_names.empty()) {
+      result.tensor_names.assign(parsed_or->tensor_names.begin(), parsed_or->tensor_names.end());
+    }
+  } else if (selection.tensor_names_size() > 0) {
+    auto subset_or = build_subset_identity_piece_view_spec(canonical_index_json, selection.tensor_names());
+    if (!subset_or.ok()) {
+      return subset_or.status();
+    }
+    return *subset_or;
+  } else {
+    return absl::InvalidArgumentError(
+        "piece contribution requires binding selection metadata with view_spec, view_id, or tensor_names");
+  }
+
+  auto view_id_or = compute_view_id_from_spec(result.spec, canonical_index_json);
+  if (!view_id_or.ok()) {
+    return view_id_or.status();
+  }
+  result.view_id = *view_id_or;
+  const std::string expected_view_id = requested_view_id.empty() ? selection.view_id() : std::string(requested_view_id);
+  if (!expected_view_id.empty() && expected_view_id != result.view_id) {
+    return absl::InvalidArgumentError("binding contribution view_id does not match binding selection");
+  }
+  return result;
+}
+
+absl::StatusOr<BindingContributionRegistrationPlan> build_binding_contribution_registration_plan(
+    const OwnedBindingService::Dep& dep,
+    const grpc::ServerContext& server_context,
+    const BindingRegistry::Record& record,
+    const v2::SubmitBindingContributionRequest& req) {
+  auto storage_layout_or = build_contribution_storage_layout(record);
+  if (!storage_layout_or.ok()) {
+    return storage_layout_or.status();
+  }
+
+  BindingContributionRegistrationPlan plan;
+  plan.storage_layout = std::move(*storage_layout_or);
+  plan.begin_request.set_device_id(record.device_id);
+  plan.begin_request.set_total_size(plan.storage_layout.total_size);
+  plan.begin_request.set_owner_pid(record.owner_pid);
+  plan.begin_request.set_client_artifact_id(req.workspace_assembly_id());
+  plan.begin_request.mutable_tensor_index_data()->set_schema_version("v3");
+  plan.begin_request.mutable_tensor_index_data()->set_encoding("json");
+  plan.begin_request.mutable_coalesced();
+
+  if (req.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL) {
+    plan.begin_request.mutable_tensor_index_data()->set_data(record.target_index_json);
+    plan.slot_id = std::string(coordination::kCanonicalFullContributionSlotKey);
+    return plan;
+  }
+
+  const auto& selection =
+      !record.current_selection.artifact_id().empty() ? record.current_selection : record.source_selection;
+  if (selection.artifact_id().empty()) {
+    return absl::FailedPreconditionError("piece contribution requires artifact-backed binding selection metadata");
+  }
+
+  const bool loopback_peer = is_loopback_grpc_peer(server_context.peer());
+  auto resolution_or = resolve_artifact_and_disk_source(
+      dep.global_store_client,
+      &dep.disk_imports,
+      dep.storage_path,
+      selection.artifact_id(),
+      /*allow_disk=*/true,
+      /*allow_local_import_fallback=*/true,
+      loopback_peer);
+  if (!resolution_or.ok()) {
+    return resolution_or.status();
+  }
+  auto resolution = std::move(*resolution_or);
+  auto canonical_index_or = load_canonical_index_with_disk_fallback(
+      dep.engine,
+      resolution.resolved_artifact_id,
+      resolution.normalized_disk_path,
+      record.device_id,
+      resolution.gs_connected);
+  if (!canonical_index_or.ok()) {
+    return canonical_index_or.status();
+  }
+
+  auto piece_or = resolve_piece_contribution_view_spec(
+      dep.engine, resolution.resolved_artifact_id, *canonical_index_or, selection, req.view_id());
+  if (!piece_or.ok()) {
+    return piece_or.status();
+  }
+
+  plan.begin_request.mutable_tensor_index_data()->set_data(*canonical_index_or);
+  auto* view = plan.begin_request.mutable_view();
+  view->mutable_spec()->CopyFrom(piece_or->spec);
+  view->set_placement(v2::TRANSFORM_PLACEMENT_SERVER);
+  view->set_canonical_size_bytes(piece_or->canonical_size_bytes);
+  view->set_registration_kind(v2::VIEW_REGISTRATION_KIND_PIECE);
+  view->set_view_id(piece_or->view_id);
+  for (const auto& tensor_name : piece_or->tensor_names) {
+    view->add_tensor_names(tensor_name);
+  }
+  plan.slot_id = piece_or->view_id;
+  plan.structural_view_id = piece_or->view_id;
+  return plan;
+}
+
+absl::StatusOr<OpenedContributionLayout> prepare_contribution_segments(
+    const ContributionStorageLayout& layout,
+    IpcRegionRegistry& regions,
+    int owner_pid) {
+  OpenedContributionLayout opened;
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  storage_by_id.reserve(layout.storages.size());
+  for (const auto& storage : layout.storages) {
+    storage_by_id.emplace(storage.storage_id, &storage);
+  }
+
+  opened.region_pin = std::make_unique<RegionPinGuard>(regions);
+  opened.mapping_cache.reserve(layout.storages.size());
+
+  opened.segments.reserve(layout.segments.size());
+  for (const auto& segment : layout.segments) {
+    const auto it = storage_by_id.find(segment.storage_id);
+    if (it == storage_by_id.end()) {
+      return absl::InvalidArgumentError("binding contribution segment references unknown storage_id");
+    }
+    auto mapping_or =
+        get_or_open_mapping_for_storage(*it->second, opened.mapping_cache, *opened.region_pin, regions, owner_pid);
+    if (!mapping_or.ok()) {
+      return mapping_or.status();
+    }
+    PreparedContributionSegment prepared_segment;
+    prepared_segment.device_id = it->second->device_id;
+    prepared_segment.mapping = *mapping_or;
+    prepared_segment.base_offset = it->second->mapping_base_offset + segment.storage_offset;
+    prepared_segment.artifact_offset = segment.artifact_offset;
+    prepared_segment.length = segment.length;
+    opened.segments.push_back(prepared_segment);
+  }
+  std::sort(
+      opened.segments.begin(),
+      opened.segments.end(),
+      [](const PreparedContributionSegment& lhs, const PreparedContributionSegment& rhs) {
+        return lhs.artifact_offset < rhs.artifact_offset;
+      });
+  return opened;
+}
+
+absl::Status read_contribution_bytes(
+    absl::Span<const PreparedContributionSegment> segments,
+    uint64_t artifact_offset,
+    absl::Span<uint8_t> dst) {
+  uint64_t cursor = artifact_offset;
+  size_t remaining = dst.size();
+  uint8_t* out = dst.data();
+  while (remaining > 0) {
+    const PreparedContributionSegment* segment = nullptr;
+    for (const auto& candidate : segments) {
+      if (cursor >= candidate.artifact_offset && cursor < candidate.artifact_offset + candidate.length) {
+        segment = &candidate;
+        break;
+      }
+    }
+    if (segment == nullptr || segment->mapping == nullptr) {
+      return absl::FailedPreconditionError("binding contribution storage layout is missing byte coverage");
+    }
+    const uint64_t local_offset = cursor - segment->artifact_offset;
+    const size_t available = static_cast<size_t>(segment->length - local_offset);
+    const size_t take = std::min(remaining, available);
+    cuda::CudaDeviceGuard guard(segment->device_id);
+    if (!guard.status().ok()) {
+      return guard.status();
+    }
+    auto memcpy_status = cuda::memcpy(
+        out,
+        static_cast<const uint8_t*>(segment->mapping->get()) +
+            static_cast<std::ptrdiff_t>(segment->base_offset + local_offset),
+        take,
+        cudaMemcpyDeviceToHost);
+    if (!memcpy_status.ok()) {
+      return memcpy_status;
+    }
+    if (auto sync = cuda::device_synchronize(); !sync.ok()) {
+      return sync;
+    }
+    out += take;
+    cursor += take;
+    remaining -= take;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status copy_contribution_segments_to_device_buffer(
+    absl::Span<const PreparedContributionSegment> segments,
+    void* dst_base_ptr,
+    int device_id) {
+  if (dst_base_ptr == nullptr) {
+    return absl::InvalidArgumentError("destination registration buffer is null");
+  }
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
+  }
+  for (const auto& segment : segments) {
+    if (segment.mapping == nullptr || segment.length == 0) {
+      continue;
+    }
+    auto* dst = static_cast<uint8_t*>(dst_base_ptr) + static_cast<std::ptrdiff_t>(segment.artifact_offset);
+    auto* src = static_cast<const uint8_t*>(segment.mapping->get()) + static_cast<std::ptrdiff_t>(segment.base_offset);
+    auto memcpy_status = cuda::memcpy(dst, src, static_cast<size_t>(segment.length), cudaMemcpyDeviceToDevice);
+    if (!memcpy_status.ok()) {
+      return memcpy_status;
+    }
+  }
+  return cuda::device_synchronize();
+}
+
+grpc::Status abort_registration_best_effort(
+    RegistrationController& controller,
+    grpc::ServerContext& server_context,
+    std::string_view registration_id) {
+  if (registration_id.empty()) {
+    return Status::OK;
+  }
+  v2::AbortRegisteredArtifactRequest abort_req;
+  abort_req.set_registration_id(std::string(registration_id));
+  v2::AbortRegisteredArtifactResponse abort_resp;
+  RpcContext abort_rctx{
+      "AbortRegisterArtifact.InternalBindingContribution", server_context, /*allow_high_card_attrs=*/true};
+  return controller.abort(abort_rctx, abort_req, abort_resp);
+}
+
+grpc::Status commit_binding_contribution_registration(
+    const OwnedBindingService::Dep& dep,
+    grpc::ServerContext& server_context,
+    const BindingRegistry::Record& record,
+    const BindingContributionRegistrationPlan& plan,
+    std::optional<std::string>& committed_view_id) {
+  if (dep.registration_manager == nullptr || dep.lip_manager == nullptr || dep.refs == nullptr ||
+      dep.lifecycle == nullptr || dep.regions == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "binding contribution registration dependencies are unavailable"};
+  }
+
+  RegistrationController controller(
+      RegistrationController::Dep{
+          .engine = dep.engine,
+          .reg = *dep.registration_manager,
+          .lip = *dep.lip_manager,
+          .refs = *dep.refs,
+          .identity = &dep.identity,
+          .global_store_client = dep.global_store_client,
+          .lifecycle = dep.lifecycle,
+          .handle_leases = dep.handle_leases,
+          .regions = *dep.regions,
+          .max_concurrency = dep.max_concurrency,
+      });
+
+  v2::BeginRegisterArtifactResponse begin_resp;
+  RpcContext begin_rctx{
+      "BeginRegisterArtifact.InternalBindingContribution", server_context, /*allow_high_card_attrs=*/true};
+  auto begin_status = controller.begin(begin_rctx, plan.begin_request, begin_resp);
+  if (!begin_status.ok()) {
+    return begin_status;
+  }
+
+  const std::string registration_id = begin_resp.registration_id();
+  auto prepared_layout_or = prepare_contribution_segments(plan.storage_layout, *dep.regions, record.owner_pid);
+  if (!prepared_layout_or.ok()) {
+    (void)abort_registration_best_effort(controller, server_context, registration_id);
+    return to_grpc_status(prepared_layout_or.status());
+  }
+
+  if (plan.structural_view_id.has_value()) {
+    std::vector<uint8_t> chunk_buffer;
+    chunk_buffer.resize(
+        static_cast<size_t>(std::min<uint64_t>(kContributionFeedChunkBytes, plan.storage_layout.total_size)));
+    for (uint64_t offset = 0; offset < plan.storage_layout.total_size;
+         offset += static_cast<uint64_t>(chunk_buffer.size())) {
+      const size_t chunk_bytes =
+          static_cast<size_t>(std::min<uint64_t>(chunk_buffer.size(), plan.storage_layout.total_size - offset));
+      auto read_status = read_contribution_bytes(
+          prepared_layout_or->segments, offset, absl::MakeSpan(chunk_buffer).subspan(0, chunk_bytes));
+      if (!read_status.ok()) {
+        (void)abort_registration_best_effort(controller, server_context, registration_id);
+        return to_grpc_status(read_status);
+      }
+      v2::FeedRegisterArtifactStreamRequest feed_req;
+      feed_req.set_registration_id(registration_id);
+      feed_req.mutable_view_chunk()->set_view_offset(offset);
+      feed_req.mutable_view_chunk()->set_data(chunk_buffer.data(), static_cast<int>(chunk_bytes));
+      const auto feed_status = controller.feed_vector({std::move(feed_req)});
+      if (!feed_status.ok()) {
+        (void)abort_registration_best_effort(controller, server_context, registration_id);
+        return feed_status;
+      }
+    }
+  } else {
+    auto gpu_ptr_or = dep.engine.get_registration_gpu_ptr(registration_id);
+    if (!gpu_ptr_or.ok()) {
+      (void)abort_registration_best_effort(controller, server_context, registration_id);
+      return to_grpc_status(gpu_ptr_or.status());
+    }
+    auto copy_status = copy_contribution_segments_to_device_buffer(
+        prepared_layout_or->segments, reinterpret_cast<void*>(static_cast<uintptr_t>(*gpu_ptr_or)), record.device_id);
+    if (!copy_status.ok()) {
+      (void)abort_registration_best_effort(controller, server_context, registration_id);
+      return to_grpc_status(copy_status);
+    }
+  }
+
+  v2::CommitRegisteredArtifactRequest commit_req;
+  commit_req.set_registration_id(registration_id);
+  v2::CommitRegisteredArtifactResponse commit_resp;
+  RpcContext commit_rctx{
+      "CommitRegisteredArtifact.InternalBindingContribution", server_context, /*allow_high_card_attrs=*/true};
+  const auto commit_status = controller.commit(commit_rctx, commit_req, commit_resp);
+  if (!commit_status.ok()) {
+    (void)abort_registration_best_effort(controller, server_context, registration_id);
+    return commit_status;
+  }
+  if (plan.structural_view_id.has_value()) {
+    if (commit_resp.view_id().empty()) {
+      return {StatusCode::DATA_LOSS, "piece contribution registration returned empty view_id"};
+    }
+    committed_view_id = commit_resp.view_id();
+  } else {
+    committed_view_id.reset();
+  }
+  return Status::OK;
 }
 
 tensorcast::common::v1::ByteSpaceRef byte_space_from_selection(
@@ -1171,9 +1663,6 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   if (req.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_UNSPECIFIED) {
     return {StatusCode::INVALID_ARGUMENT, "contribution_kind is required"};
   }
-  if (req.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL && req.view_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "piece contributions require view_id"};
-  }
   if (d_.shutdown_signal.is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
@@ -1191,6 +1680,7 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   const auto binding_record = *binding_record_or;
 
   int owner_pid = 0;
+  BindingRegistry::Record contribution_record;
   {
     absl::MutexLock lock(&binding_record->mu);
     if (binding_record->closed) {
@@ -1206,6 +1696,15 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
       return {StatusCode::FAILED_PRECONDITION, "binding_value_id is no longer current"};
     }
     owner_pid = binding_record->owner_pid;
+    contribution_record.owner_pid = binding_record->owner_pid;
+    contribution_record.device_id = binding_record->device_id;
+    contribution_record.device_uuid = binding_record->device_uuid;
+    contribution_record.target_layout = binding_record->target_layout;
+    contribution_record.target_index_json = binding_record->target_index_json;
+    contribution_record.current_artifact_id = binding_record->current_artifact_id;
+    contribution_record.current_selection = binding_record->current_selection;
+    contribution_record.source_selection = binding_record->source_selection;
+    contribution_record.handle_bytes = binding_record->handle_bytes;
   }
 
   auto attempt_or = d_.global_store_client->get_assembly_attempt(req.attempt_id());
@@ -1248,12 +1747,22 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     return {StatusCode::FAILED_PRECONDITION, "assembly attempt is no longer accepting contributions"};
   }
 
+  auto registration_plan_or =
+      build_binding_contribution_registration_plan(d_, rctx.server_context(), contribution_record, req);
+  if (!registration_plan_or.ok()) {
+    return to_grpc_status(registration_plan_or.status());
+  }
+  BindingContributionRegistrationPlan registration_plan = std::move(*registration_plan_or);
+
   const auto contract_status = coordination::validate_binding_requirement_entry(
-      attempt_record.intent().requirements(), req.contribution_kind(), req.view_id());
+      attempt_record.intent().requirements(),
+      req.contribution_kind(),
+      registration_plan.structural_view_id.has_value() ? std::string_view(*registration_plan.structural_view_id)
+                                                       : std::string_view());
   if (!contract_status.ok()) {
     return to_grpc_status(contract_status);
   }
-  const std::string slot_id = coordination::contribution_slot_key(req.contribution_kind(), req.view_id());
+  const std::string slot_id = registration_plan.slot_id;
   auto active_identities_or = coordination::list_active_contributor_identities(d_.global_store_client);
   if (!active_identities_or.ok()) {
     return to_grpc_status(active_identities_or.status());
@@ -1282,6 +1791,17 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     }
   } else if (!absl::IsNotFound(existing_or.status())) {
     return to_grpc_status(existing_or.status());
+  }
+
+  std::optional<std::string> committed_view_id;
+  const auto registration_status = commit_binding_contribution_registration(
+      d_, rctx.server_context(), contribution_record, registration_plan, committed_view_id);
+  if (!registration_status.ok()) {
+    return registration_status;
+  }
+  if (registration_plan.structural_view_id.has_value() && committed_view_id.has_value() &&
+      committed_view_id != registration_plan.structural_view_id) {
+    return {StatusCode::FAILED_PRECONDITION, "piece contribution structural lowering changed during registration"};
   }
 
   auto lease_id_holder = std::make_shared<std::string>();
@@ -1317,8 +1837,9 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   store::components::AssemblySlotOccupancyInfo contribution;
   contribution.attempt_id = attempt_id;
   contribution.slot_id = slot_id;
-  if (!req.view_id().empty()) {
-    contribution.structural_view_id = req.view_id();
+  if (registration_plan.structural_view_id.has_value()) {
+    contribution.structural_view_id =
+        committed_view_id.has_value() ? *committed_view_id : *registration_plan.structural_view_id;
   }
   contribution.binding_id = req.binding_id();
   contribution.binding_value_id = req.binding_value_id();

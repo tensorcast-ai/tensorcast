@@ -8,6 +8,11 @@ import "tensorcast/operation/v1/operation.proto";
 import "tensorcast/plan/v1/plan.proto";
 
 service StoreDaemonService {
+  // First dependency-ready ingress slice:
+  // - serves local worker-targeted plans only
+  // - serves `terminal_only` projection only
+  // - fails closed on non-local instance, cluster, and public-continuation
+  //   execution requests
   rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
@@ -128,6 +133,9 @@ enum PlanExecutionClass {
 
 message ExecutePlanRequest {
   tensorcast.plan.v1.PlanSpec plan = 1;
+  // Declares whether the caller needs request-scoped terminal projection or a
+  // long-lived public continuation family.
+  // Current ingress implementation serves `TERMINAL_ONLY` only.
   PlanExecutionClass execution_class = 2;
   bool dry_run = 3;
 }
@@ -1963,6 +1971,12 @@ message AssemblyAttemptRecord {
 message AssemblyReadinessCutView {
   string structural_view_id = 1;
   bytes meta_digest = 2;
+  string view_spec_json = 3;
+  uint64 view_size_bytes = 4;
+  string view_data_hash = 5;
+  uint64 canonical_size_bytes = 6;
+  uint64 canonical_bytes_covered = 7;
+  repeated CanonicalRange canonical_ranges = 8;
 }
 
 message AssemblyReadinessCutSlot {

@@ -120,6 +120,12 @@ class IngestionRuntime {
       ingestion::MaterializationFacade::SealProgressCallback progress_cb = {},
       const std::vector<std::string>* allowed_view_ids = nullptr);
 
+  absl::StatusOr<SealAssemblyResult> seal_assembly_from_cut(
+      std::string_view assembly_id,
+      const ingestion::MaterializationFacade::SealAssemblyCutInput& cut_input,
+      bool publish_canonical,
+      ingestion::MaterializationFacade::SealProgressCallback progress_cb = {});
+
  private:
   Config config_;
   std::unique_ptr<ingestion::MaterializationFacade> materialization_facade_;

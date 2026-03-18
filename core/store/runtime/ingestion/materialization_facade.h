@@ -17,6 +17,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/control/materialization_backend.h"
@@ -74,6 +75,11 @@ namespace store = tensorcast::store;
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
   using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
+
+  struct SealAssemblyCutInput {
+    std::vector<components::ViewInfo> structural_views;
+    bool canonical_full{false};
+  };
 
   struct Config {
     gsl::not_null<RuntimeContext*> runtime_context;
@@ -180,6 +186,12 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       bool publish_canonical,
       SealProgressCallback progress_cb = {},
       const std::vector<std::string>* allowed_view_ids = nullptr);
+
+  absl::StatusOr<store::SealAssemblyResult> seal_assembly_from_cut(
+      std::string_view assembly_id,
+      const SealAssemblyCutInput& cut_input,
+      bool publish_canonical,
+      SealProgressCallback progress_cb = {});
 
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);

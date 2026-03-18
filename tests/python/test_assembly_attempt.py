@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import concurrent.futures
 
-from tensorcast.api.store import Store
+import pytest
+
+from tensorcast.api.store import AssemblyRequirementSetRef, Store
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
@@ -102,6 +104,7 @@ class FakeAttemptClient:
                 encoding="json",
                 total_size=128,
             ),
+            source_version_key="models/demo/source/v1",
         )
         response = operation_pb2.GetOperationResponse()
         response.status.state = operation_pb2.OPERATION_STATE_SUCCESS
@@ -127,8 +130,14 @@ def test_start_assembly_attempt_returns_attempt_ref() -> None:
     client = FakeAttemptClient()
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
+    requirements = AssemblyRequirementSetRef.pp_from_structural_views(
+        ["view-a", "view-b"]
+    )
 
-    attempt = store.start_assembly_attempt(layout_id="layout-1")
+    attempt = store.start_assembly_attempt(
+        layout_id="layout-1",
+        requirements=requirements,
+    )
 
     assert attempt.attempt_id == "cgid:assembly-attempt-1"
     assert attempt.workspace_assembly_id == "cgid:assembly-workspace-1"
@@ -136,7 +145,23 @@ def test_start_assembly_attempt_returns_attempt_ref() -> None:
     assert attempt.attempt_intent_digest == "bafkattemptintent"
     assert attempt.coordinator_operation.operation_id == "bafkattemptop"
     assert attempt.coordinator_operation.kind == "assembly_attempt"
-    assert client.start_calls == [{"layout_id": "layout-1"}]
+    assert client.start_calls == [
+        {
+            "layout_id": "layout-1",
+            "requirements": requirements,
+        }
+    ]
+
+
+def test_start_assembly_attempt_requires_explicit_requirements() -> None:
+    client = FakeAttemptClient()
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+
+    with pytest.raises(ValueError) as exc_info:
+        store.start_assembly_attempt(layout_id="layout-1")
+
+    assert "requirements are required" in str(exc_info.value)
 
 
 def test_seal_assembly_attempt_decodes_source_lineage() -> None:
@@ -168,6 +193,7 @@ def test_seal_assembly_attempt_decodes_source_lineage() -> None:
     assert result.assembly_id == "cgid:assembly-workspace-9"
     assert result.source_artifact_id == "mi2:test:artifact"
     assert result.source_descriptor.artifact_id == "mi2:test:artifact"
+    assert result.source_version_key == "models/demo/source/v1"
     assert result.serving_artifact_id is None
     assert result.representation_contract_hash is None
     assert client.seal_calls == [
@@ -179,3 +205,33 @@ def test_seal_assembly_attempt_decodes_source_lineage() -> None:
     assert wait_call["operation_ref"] == operation_ref
     assert 4900 <= int(wait_call["timeout_ms"]) <= 5000
     assert 9.0 <= float(wait_call["timeout_s"]) <= 10.0
+
+
+def test_requirement_family_builders_encode_distinct_contracts() -> None:
+    pp = AssemblyRequirementSetRef.pp_from_structural_views(
+        ["view-b", "view-a", "view-a"]
+    )
+    ep = AssemblyRequirementSetRef.ep_from_structural_views(["view-b", "view-a"])
+    canonical = AssemblyRequirementSetRef.canonical_full()
+
+    assert tuple(req.slot_id for req in pp.inline_requirements) == (
+        "view-a",
+        "view-b",
+    )
+    assert tuple(req.coverage_contract for req in pp.inline_requirements) == (
+        "pp_structural_view",
+        "pp_structural_view",
+    )
+
+    assert tuple(req.slot_id for req in ep.inline_requirements) == (
+        "view-a",
+        "view-b",
+    )
+    assert tuple(req.coverage_contract for req in ep.inline_requirements) == (
+        "ep_structural_view",
+        "ep_structural_view",
+    )
+
+    assert canonical.requirement_count == 1
+    assert canonical.inline_requirements[0].slot_id == "__canonical_full__"
+    assert canonical.inline_requirements[0].coverage_contract == "canonical_full"

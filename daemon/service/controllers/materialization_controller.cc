@@ -130,10 +130,24 @@ MaterializationController::MaterializationController(Dep d)
               .global_store_client = d.global_store_client,
               .lifecycle = d.lifecycle,
               .handle_leases = d.handle_leases,
+              .registration_manager = &d.registration_manager,
+              .lip_manager = &d.lip_manager,
+              .refs = &d.refs,
+              .regions = &d.regions,
+              .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
               .target_materialization_service = &target_materialization_service_,
               .storage_path = d.storage_path,
-          }) {}
+          }) {
+  // Register publish replay admission as one child-owner policy behind the
+  // shared observation-path dispatcher. The dispatcher itself does not own
+  // publish semantics.
+  public_operation_admission_service_.register_handler(
+      std::string(TargetPublishService::public_operation_kind()),
+      [this](const tensorcast::operation::v1::OperationRef& operation_ref, absl::Time now) {
+        return target_materialization_service_.admit_public_operation(operation_ref, now);
+      });
+}
 
 absl::StatusOr<TargetPublicationRegistry::Record> MaterializationController::insert_target_publication_for_testing(
     TargetPublicationRegistry::Record record) {
@@ -330,7 +344,7 @@ grpc::Status MaterializationController::get_operation(
   if (req.has_ref()) {
     merge_operation_ref_metadata(req.ref(), op_or->mutable_ref());
   }
-  auto admit_status = target_materialization_service_.admit_public_operation(op_or->ref(), absl::Now());
+  auto admit_status = public_operation_admission_service_.admit(op_or->ref(), absl::Now());
   if (!admit_status.ok()) {
     return to_grpc_status(admit_status);
   }
@@ -375,7 +389,7 @@ grpc::Status MaterializationController::wait_operation(
     if (req.has_ref()) {
       merge_operation_ref_metadata(req.ref(), op_or->mutable_ref());
     }
-    auto admit_status = target_materialization_service_.admit_public_operation(op_or->ref(), absl::Now());
+    auto admit_status = public_operation_admission_service_.admit(op_or->ref(), absl::Now());
     if (!admit_status.ok()) {
       return to_grpc_status(admit_status);
     }

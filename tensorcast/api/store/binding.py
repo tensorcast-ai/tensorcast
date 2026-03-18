@@ -4,27 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 import uuid
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import torch
 
-from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
 from tensorcast.api.operation import Operation, OperationStatus, PollingOperation
 from tensorcast.api.store.binding_state import clone_selection
-from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
 from tensorcast.api.store.owned_binding_slot import OwnedBindingSlot
 from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.types import ArtifactError
-from tensorcast.api.store.views import TransformPlacement
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import AssemblyAttemptRef, PartialSealResult
@@ -141,67 +136,6 @@ def _clone_view_spec(
     return cloned
 
 
-def _build_view_result_from_proto(
-    view_spec: common_pb2.ViewSpec,
-) -> ViewSpecBuildResult:
-    tensor_ops: dict[str, tuple[NarrowOp | TransposeOp, ...]] = {}
-    for name, ops in sorted(view_spec.tensors.items()):
-        entries: list[NarrowOp | TransposeOp] = []
-        for op in ops.ops:
-            if op.HasField("narrow"):
-                entries.append(
-                    NarrowOp(
-                        dim=int(op.narrow.dim),
-                        start=int(op.narrow.start),
-                        length=int(op.narrow.length),
-                    )
-                )
-            elif op.HasField("transpose"):
-                entries.append(
-                    TransposeOp(
-                        dim0=int(op.transpose.dim0),
-                        dim1=int(op.transpose.dim1),
-                    )
-                )
-        if entries:
-            tensor_ops[str(name)] = tuple(entries)
-    if not tensor_ops:
-        raise ArtifactError(
-            "binding contribution requires a non-empty view_spec",
-            status_code="FAILED_PRECONDITION",
-            retryable=False,
-        )
-    proto = common_pb2.ViewSpec()
-    proto.CopyFrom(view_spec)
-    return ViewSpecBuildResult(
-        proto=proto,
-        tensor_ops=MappingProxyType(tensor_ops),
-    )
-
-
-def _load_artifact_index_bytes(
-    binding: "Binding",
-    artifact_id: str,
-) -> bytes:
-    runtime = binding._runtime
-    cached = runtime.get_artifact_index_cached(artifact_id)
-    if cached is not None and cached.canonical_index_bytes:
-        return bytes(cached.canonical_index_bytes)
-    return bytes(runtime.ensure_client().get_artifact_index_by_id(artifact_id))
-
-
-def _slot_contribution_source_artifact_id(
-    slot: InplaceSlot | OwnedBindingSlot,
-) -> str | None:
-    value = getattr(slot, "contribution_source_artifact_id", None)
-    if value:
-        return str(value)
-    metadata = slot.current_value_metadata
-    if metadata is not None and metadata.source_artifact_id:
-        return str(metadata.source_artifact_id)
-    return None
-
-
 def _slot_contribution_view_spec(
     slot: InplaceSlot | OwnedBindingSlot,
 ) -> common_pb2.ViewSpec | None:
@@ -218,16 +152,28 @@ def _slot_contribution_view_spec(
     return None
 
 
-def _slot_contribution_tensor_names(
+def _slot_contribution_selection(
     slot: InplaceSlot | OwnedBindingSlot,
-) -> tuple[str, ...]:
+) -> common_pb2.ArtifactSelection | None:
     selection = getattr(slot, "contribution_selection", None)
-    if selection is not None and selection.tensor_names:
-        return tuple(str(name) for name in selection.tensor_names)
+    if selection is not None:
+        return clone_selection(selection)
     live_selection = getattr(slot, "selection", None)
-    if live_selection is not None and live_selection.tensor_names:
-        return tuple(str(name) for name in live_selection.tensor_names)
-    return ()
+    if live_selection is not None:
+        return clone_selection(live_selection)
+    return None
+
+
+def _slot_contribution_view_id_hint(
+    slot: InplaceSlot | OwnedBindingSlot,
+) -> str | None:
+    selection = _slot_contribution_selection(slot)
+    if selection is not None and selection.view_id:
+        return str(selection.view_id)
+    slot_view_id = getattr(slot, "_view_id", None)
+    if slot_view_id:
+        return str(slot_view_id)
+    return None
 
 
 def _compute_coverage_plan_hash(
@@ -235,29 +181,32 @@ def _compute_coverage_plan_hash(
     contribution_kind: str,
     binding: "Binding",
     view_id: str | None,
-    canonical_ranges: tuple[object, ...],
+    selection: common_pb2.ArtifactSelection | None,
 ) -> str:
     payload = {
         "binding_layout_id": binding.binding_layout_id,
         "contribution_kind": contribution_kind,
         "view_id": view_id or "",
-        "ranges": [[int(item.offset), int(item.length)] for item in canonical_ranges],
+        "source_artifact_id": (
+            str(selection.artifact_id)
+            if selection is not None and selection.artifact_id
+            else ""
+        ),
+        "logical_layout_hash": (
+            selection.logical_layout_hash.hex()
+            if selection is not None and selection.logical_layout_hash
+            else ""
+        ),
+        "selection_hash": (
+            selection.selection_hash.hex()
+            if selection is not None and selection.selection_hash
+            else ""
+        ),
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return f"bcp1:{digest}"
-
-
-def _prepare_contribution_tensors(
-    tensors: Mapping[str, torch.Tensor],
-) -> Mapping[str, torch.Tensor]:
-    if os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() != "fake":
-        return tensors
-    prepared: dict[str, torch.Tensor] = {}
-    for name, tensor in tensors.items():
-        prepared[name] = tensor.detach().cpu() if tensor.is_cuda else tensor
-    return prepared
 
 
 def _wait_for_events(wait_events: tuple[object, ...] | list[object] | None) -> None:
@@ -428,61 +377,30 @@ class SealedBindingValue:
     ) -> PartialSealResult:
         binding = self._require_current_binding()
         slot = binding._slot
-        store = slot._store
-        pipeline = store._registration
-
+        selection = _slot_contribution_selection(slot)
         view_spec = _slot_contribution_view_spec(slot)
-        selection_names = _slot_contribution_tensor_names(slot)
-        prepared_tensors = _prepare_contribution_tensors(binding.tensors)
-        if view_spec is not None:
-            source_artifact_id = _slot_contribution_source_artifact_id(slot)
-            if not source_artifact_id:
-                if (
-                    slot.layout.target_layout.index_kind
-                    != store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
-                ):
-                    canonical_index_bytes = bytes(slot.layout.target_index_bytes)
-                else:
-                    raise ArtifactError(
-                        "binding contribution requires a source artifact-backed canonical index",
-                        status_code="FAILED_PRECONDITION",
-                        retryable=False,
-                    )
-            else:
-                canonical_index_bytes = _load_artifact_index_bytes(
-                    binding, source_artifact_id
-                )
-            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
-            committed = pipeline.commit_structural_contribution(
-                prepared_tensors,
-                assembly_id=attempt.workspace_assembly_id,
-                canonical_index_bytes=canonical_index_bytes,
-                canonical_index=canonical_index,
-                build_result=_build_view_result_from_proto(view_spec),
-                placement_enum=TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
-                selection_names=selection_names,
-            )
-            contribution_kind = committed.contribution_kind
-            contributed_view_id = committed.view_id
+        view_id_hint = _slot_contribution_view_id_hint(slot)
+        piece_partial = (
+            view_spec is not None
+            or view_id_hint is not None
+            or (selection is not None and bool(selection.tensor_names))
+        )
+        if piece_partial:
+            contribution_kind = "piece_partial"
             coverage_plan_hash = _compute_coverage_plan_hash(
                 contribution_kind=contribution_kind,
                 binding=binding,
-                view_id=contributed_view_id,
-                canonical_ranges=committed.canonical_ranges,
+                view_id=view_id_hint,
+                selection=selection,
             )
             submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
         else:
-            committed = pipeline.commit_structural_contribution(
-                prepared_tensors,
-                assembly_id=attempt.workspace_assembly_id,
-            )
-            contribution_kind = committed.contribution_kind
-            contributed_view_id = committed.view_id
+            contribution_kind = "canonical_full"
             coverage_plan_hash = _compute_coverage_plan_hash(
                 contribution_kind=contribution_kind,
                 binding=binding,
                 view_id=_CANONICAL_FULL_CONTRIBUTION_VIEW_ID,
-                canonical_ranges=committed.canonical_ranges,
+                selection=selection,
             )
             submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
 
@@ -498,19 +416,21 @@ class SealedBindingValue:
                 coordinator_operation_id=attempt.coordinator_operation_id,
                 coordinator_generation=attempt.coordinator_generation,
                 attempt_intent_digest=attempt.attempt_intent_digest,
-                view_id=contributed_view_id,
+                view_id=view_id_hint,
                 timeout_s=timeout_s if timeout_s is not None else 30.0,
             )
         except Exception as exc:  # noqa: BLE001
             raise_mapped_registration_error(exc)
+        returned_slot_id = str(getattr(response, "slot_id", "") or "") or None
+        returned_view_id = (returned_slot_id if piece_partial else None) or view_id_hint
         return PartialSealResult(
             attempt_id=attempt.attempt_id,
             workspace_assembly_id=attempt.workspace_assembly_id,
-            slot_id=str(getattr(response, "slot_id", "") or "") or None,
+            slot_id=returned_slot_id,
             binding_id=self.binding_id,
             binding_value_id=self.binding_value_id,
             contribution_kind=contribution_kind,
-            view_id=contributed_view_id,
+            view_id=returned_view_id,
             coverage_plan_hash=coverage_plan_hash,
             accepted=bool(getattr(response, "accepted", False)),
             already_exists=bool(getattr(response, "already_exists", False)),

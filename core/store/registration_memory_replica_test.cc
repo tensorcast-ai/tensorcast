@@ -13,6 +13,7 @@
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/materialization/dataplane/view/view_identity.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
@@ -49,6 +50,14 @@ static StoreEngine make_store(
 
 static DeviceKey make_gpu_key(int ordinal) {
   return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
+}
+
+static std::string compute_deterministic_view_id(
+    const tensorcast::store::loader::ViewSpec& spec,
+    std::string_view canonical_index_json) {
+  auto view_id_or = tensorcast::store::loader::compute_view_id_from_spec(spec, canonical_index_json);
+  REQUIRE(view_id_or.ok());
+  return *view_id_or;
 }
 
 TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine][memory-registration]") {
@@ -261,7 +270,6 @@ TEST_CASE(
   reg.enable_p2p = false;
 
   StoreEngine::ViewRegistration view_reg;
-  view_reg.view_id = "view-full";
   tensorcast::store::loader::ViewSpec spec;
   tensorcast::store::loader::TensorViewOps ops;
   ops.ops.push_back(
@@ -273,6 +281,7 @@ TEST_CASE(
   view_reg.canonical_size_bytes = canonical_size;
   view_reg.registration_kind = StoreEngine::ViewRegistrationKind::kCanonical;
   reg.view = view_reg;
+  const std::string expected_view_id = compute_deterministic_view_id(spec, index_data);
 
   auto begin_or = store.begin_register_artifact(reg);
   REQUIRE(begin_or.ok());
@@ -295,12 +304,12 @@ TEST_CASE(
   }
   const auto commit = commit_or.value();
   REQUIRE(commit.view_id.has_value());
-  CHECK(commit.view_id.value() == "view-full");
+  CHECK(commit.view_id.value() == expected_view_id);
   CHECK(commit.view_data_multihash.has_value());
 
   REQUIRE(gs_stub->view_updates.size() == 1);
   const auto& update = gs_stub->view_updates.front();
-  CHECK(update.view_id == "view-full");
+  CHECK(update.view_id == expected_view_id);
   CHECK(update.view_data_hash.has_value());
   CHECK(update.canonical_size_bytes == canonical_size);
   CHECK(update.canonical_bytes_covered == canonical_size);
@@ -310,7 +319,7 @@ TEST_CASE(
     const auto& hash_space = leaf.hash_space();
     if (hash_space.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW) {
       ++variant_count;
-      CHECK(hash_space.byte_space().id() == "view-full");
+      CHECK(hash_space.byte_space().id() == expected_view_id);
       CHECK(leaf.leaf_idx() == 0);
       CHECK(leaf.digest().size() == 32);
     } else if (hash_space.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL) {
@@ -375,7 +384,6 @@ TEST_CASE(
   reg.enable_p2p = false;
 
   StoreEngine::ViewRegistration view_reg;
-  view_reg.view_id = "view-piece-0-4";
   tensorcast::store::loader::ViewSpec spec;
   tensorcast::store::loader::TensorViewOps ops;
   ops.ops.push_back(
@@ -387,6 +395,7 @@ TEST_CASE(
   view_reg.canonical_size_bytes = canonical_size;
   view_reg.registration_kind = StoreEngine::ViewRegistrationKind::kPiece;
   reg.view = view_reg;
+  const std::string expected_view_id = compute_deterministic_view_id(spec, index_data);
 
   auto begin_or = store.begin_register_artifact(reg);
   REQUIRE(begin_or.ok());
@@ -403,7 +412,7 @@ TEST_CASE(
   REQUIRE(commit_or.ok());
   const auto& commit = commit_or.value();
   REQUIRE(commit.view_id.has_value());
-  CHECK(commit.view_id.value() == "view-piece-0-4");
+  CHECK(commit.view_id.value() == expected_view_id);
   CHECK(commit.view_data_multihash.has_value());
   CHECK(commit.registration_kind == StoreEngine::ViewRegistrationKind::kPiece);
   REQUIRE(commit.canonical_ranges.size() == 1);
@@ -412,7 +421,7 @@ TEST_CASE(
 
   REQUIRE(gs_stub->view_updates.size() == 1);
   const auto& update = gs_stub->view_updates.front();
-  CHECK(update.view_id == "view-piece-0-4");
+  CHECK(update.view_id == expected_view_id);
   CHECK(update.view_data_hash.has_value());
   CHECK(update.canonical_size_bytes == canonical_size);
   CHECK(update.canonical_bytes_covered == view_size);
@@ -459,7 +468,6 @@ TEST_CASE("Piece registration rejects full coverage view", "[store_engine][memor
   reg.total_size_bytes = canonical_size;
 
   StoreEngine::ViewRegistration view_reg;
-  view_reg.view_id = "view-full";
   tensorcast::store::loader::ViewSpec spec;
   tensorcast::store::loader::TensorViewOps ops;
   ops.ops.push_back(

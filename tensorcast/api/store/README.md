@@ -82,14 +82,39 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   and require server placement.
 - Pass `canonical_index_bytes` to bootstrap a new assembly without needing
   Global Store state. `register_view(..., registration_kind="piece")` is
-  equivalent, while `allow_partial` is deprecated.
-- `Store.start_assembly_attempt(layout_id=...)` creates a fresh assembly
-  attempt bound to a `LayoutSpec` and returns an `AssemblyAttemptRef`
-  containing durable attempt scope plus the workspace assembly id.
+  equivalent.
+- `Store.start_assembly_attempt(layout_id=..., requirements=...)` creates a
+  fresh assembly attempt bound to a `LayoutSpec` and returns an
+  `AssemblyAttemptRef` containing durable attempt scope plus the workspace
+  assembly id. Requirement truth must be explicit in the request; use
+  `AssemblyRequirementSetRef.pp_from_structural_views(...)`,
+  `AssemblyRequirementSetRef.ep_from_structural_views(...)`, or
+  `AssemblyRequirementSetRef.canonical_full()` for the current dependency-ready
+  carriers.
+- The dependency-ready requirement mapping is exact and deterministic:
+  - `PP`: dedupe + sort the structural view ids, then emit one requirement per
+    view with `slot_id = view_id`, `target = structural_view(view_id)`, and
+    `coverage_contract = "pp_structural_view"`.
+  - `EP`: dedupe + sort the structural view ids, then emit one requirement per
+    view with `slot_id = view_id`, `target = structural_view(view_id)`, and
+    `coverage_contract = "ep_structural_view"`.
+  - `canonical_full`: emit one requirement with
+    `slot_id = "__canonical_full__"`, `target = canonical_layout`, and
+    `coverage_contract = "canonical_full"`.
+  - `TP > 1` is not part of the current dependency-ready carrier set.
 - `Store.seal_assembly_attempt(attempt)` explicitly transitions an open attempt
   onto its sealing workflow and returns `Operation[PublishedModelVersion]`.
+  - The daemon captures one durable readiness cut, persists full structural
+    evidence into that cut, and seals from the cut rather than rereading live
+    workspace view state.
 - `Store.wait_assembly_attempt(attempt)` observes an existing attempt workflow
-  and decodes the source publish lineage into a `PublishedModelVersion`.
+  and decodes the dependency-ready source publish lineage into a
+  `PublishedModelVersion`.
+  - In the current wave, `PublishedModelVersion` always carries real source
+    lineage and optional `source_version_key`.
+  - Serving lineage fields remain `None` until typed serving closeout contracts
+    exist; the daemon rejects serving-facing closeout input today instead of
+    returning placeholder values.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
@@ -132,9 +157,8 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
   current values created by bind/swap flows.
 - `sealed_value.contribute_to_assembly(attempt=...)` compiles the sealed binding
   onto the existing assembly trunk:
-  piece/view-backed bindings reuse the same piece registration path, while
-  full-canonical bindings reuse canonical registration when the attempt
-  contract has no required `expected_view_ids`.
+  piece/view-backed bindings satisfy structural-view slots, while
+  full-canonical bindings satisfy the canonical-layout slot.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
   enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
