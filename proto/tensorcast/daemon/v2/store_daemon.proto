@@ -1811,10 +1811,37 @@ message ContributionContractEntry {
   string coverage_semantics = 3;
 }
 
+message ContributionSlot {
+  string slot_key = 1;
+  string structural_view_id = 2;
+  BindingContributionKind contribution_kind = 3;
+  string coverage_semantics = 4;
+}
+
 message ContributionContractSnapshot {
   string layout_id = 1;
-  repeated ContributionContractEntry required_contributions = 2;
-  bool require_live_contributions = 3;
+  repeated ContributionSlot required_slots = 2;
+  bool require_live_contributions_until_readiness_cut = 3;
+
+  // Compatibility-only carrier for older clients. New code must use
+  // `required_slots`.
+  repeated ContributionContractEntry required_contributions = 4 [deprecated = true];
+  bool require_live_contributions = 5 [deprecated = true];
+}
+
+message CloseoutPolicySnapshot {
+  string policy_json = 1;
+  uint64 source_policy_version = 2;
+  string closeout_policy_hash = 3;
+}
+
+message AssemblyAttemptSpec {
+  string assembly_id = 1;
+  string layout_id = 2;
+  ContributionContractSnapshot contribution_contract = 3;
+  CloseoutPolicySnapshot closeout_policy = 4;
+  string contribution_contract_hash = 5;
+  string attempt_spec_hash = 6;
 }
 
 message AssemblyAttemptRef {
@@ -1823,12 +1850,17 @@ message AssemblyAttemptRef {
   string contribution_contract_hash = 3;
   string coordinator_operation_id = 4;
   uint64 coordinator_generation = 5;
-  repeated string expected_view_ids = 6;
-  ContributionContractSnapshot contribution_contract = 7;
+  repeated string expected_view_ids = 6 [deprecated = true];
+  ContributionContractSnapshot contribution_contract = 7 [deprecated = true];
+  string attempt_spec_hash = 8;
+  tensorcast.operation.v1.OperationRef coordinator_operation = 9;
+  AssemblyAttemptSpec attempt_spec = 10;
 }
 
 message StartAssemblyAttemptRequest {
   string layout_id = 1;
+  ContributionContractSnapshot contribution_contract = 2;
+  CloseoutPolicySnapshot closeout_policy = 3;
 }
 
 message StartAssemblyAttemptResponse {
@@ -1852,6 +1884,7 @@ message SubmitBindingContributionRequest {
   BindingContributionKind contribution_kind = 8;
   string coordinator_operation_id = 9;
   uint64 coordinator_generation = 10;
+  string attempt_spec_hash = 11;
 }
 
 message SubmitBindingContributionResponse {
@@ -1888,30 +1921,41 @@ message StartSealAssemblyRequest {
   string layout_id = 2;
   // Optional attempt fence for layout-qualified assembly waits.
   uint64 expected_coordinator_generation = 3;
-  // Optional fallback attempt snapshot used when the coordinator record is not yet visible.
-  SealAssemblySnapshot attempt_snapshot = 4;
+  // Optional fallback immutable attempt spec used when the coordinator record
+  // is not yet visible.
+  AssemblyAttemptSpec attempt_spec = 4;
 }
 
 message StartSealAssemblyResponse {
   tensorcast.operation.v1.OperationRef operation = 1;
 }
 
-// Immutable seal snapshot stored inside Operation.snapshot.
 message SealAssemblySnapshotView {
   string view_id = 1;
   // Raw 32-byte SHA-256 digest over immutable view metadata (e.g., coverage ranges + view_data_hash).
   bytes meta_digest = 2;
 }
 
-message SealAssemblySnapshot {
-  string assembly_id = 1;
-  string layout_id = 2;
+message SealReadinessSnapshotSlot {
+  string slot_key = 1;
+  string binding_id = 2;
+  string binding_value_id = 3;
+  string lease_id = 4;
+  uint64 lease_generation = 5;
+  string structural_view_id = 6;
+}
+
+message SealReadinessSnapshot {
+  string attempt_spec_hash = 1;
+  uint64 coordinator_generation = 2;
   uint64 assembly_layout_binding_version = 3;
   repeated SealAssemblySnapshotView views = 4;
-  string contribution_contract_hash = 5;
-  repeated string expected_view_ids = 6;
-  ContributionContractSnapshot contribution_contract = 7;
-  string publication_policy_json = 8;
+  repeated SealReadinessSnapshotSlot live_slots = 5;
+}
+
+message AssemblyAttemptOperationSnapshot {
+  AssemblyAttemptSpec spec = 1;
+  SealReadinessSnapshot seal_readiness = 2;
 }
 
 message WaitOperationRequest {

@@ -1232,26 +1232,28 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     return {StatusCode::FAILED_PRECONDITION, "assembly attempt is no longer accepting contributions"};
   }
 
-  tensorcast::daemon::v2::SealAssemblySnapshot operation_snapshot;
-  if (!operation_or->has_snapshot() || !operation_or->snapshot().UnpackTo(&operation_snapshot)) {
+  tensorcast::daemon::v2::AssemblyAttemptOperationSnapshot operation_snapshot;
+  if (!operation_or->has_snapshot() || !operation_or->snapshot().UnpackTo(&operation_snapshot) ||
+      !operation_snapshot.has_spec()) {
     return {StatusCode::FAILED_PRECONDITION, "assembly attempt snapshot is unavailable"};
   }
-  if (operation_snapshot.layout_id() != req.layout_id()) {
+  const auto& attempt_spec = operation_snapshot.spec();
+  if (attempt_spec.layout_id() != req.layout_id()) {
     return {StatusCode::FAILED_PRECONDITION, "assembly attempt layout changed"};
   }
-  if (operation_snapshot.contribution_contract_hash() != req.contribution_contract_hash()) {
+  if (attempt_spec.contribution_contract_hash() != req.contribution_contract_hash()) {
     return {StatusCode::FAILED_PRECONDITION, "assembly contribution contract changed"};
   }
-  if (!operation_snapshot.has_contribution_contract()) {
-    return {StatusCode::FAILED_PRECONDITION, "assembly attempt contract snapshot is unavailable"};
+  if (!req.attempt_spec_hash().empty() && attempt_spec.attempt_spec_hash() != req.attempt_spec_hash()) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly attempt spec changed"};
   }
 
   const auto contract_status = coordination::validate_contribution_contract_entry(
-      operation_snapshot.contribution_contract(), req.contribution_kind(), req.view_id());
+      attempt_spec.contribution_contract(), req.contribution_kind(), req.view_id());
   if (!contract_status.ok()) {
     return to_grpc_status(contract_status);
   }
-  const std::string row_view_id = coordination::contribution_slot_view_id(req.contribution_kind(), req.view_id());
+  const std::string row_view_id = coordination::contribution_slot_key(req.contribution_kind(), req.view_id());
   auto active_identities_or = coordination::list_active_contributor_identities(d_.global_store_client);
   if (!active_identities_or.ok()) {
     return to_grpc_status(active_identities_or.status());

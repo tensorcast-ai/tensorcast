@@ -3,16 +3,20 @@ slug: distributed-binding-assembly-and-coordinator
 title: Distributed Binding Assembly on the Existing Assembly and Layout Trunk
 status: proposed
 created: 2026-03-14
-last_updated: 2026-03-15
+last_updated: 2026-03-18
 areas: ["sdk", "daemon", "core", "proto", "global_store"]
 related_code:
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/registration.py
   - tensorcast/api/_register.py
+  - tensorcast/types.py
   - proto/tensorcast/layout/v1/layout.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
-  - tensorcast/schema.sql
+  - proto/tensorcast/operation/v1/operation.proto
+  - schema.sql
   - daemon/service/controllers/assembly_operation_service.cc
+  - daemon/service/controllers/assembly_coordination_utils.cc
+  - daemon/service/controllers/owned_binding_service.cc
   - daemon/service/controllers/registration_controller.cc
   - core/store/runtime/metadata/registration_backend.cc
   - core/store/runtime/ingestion/materialization_facade.cc
@@ -20,906 +24,582 @@ related_code:
   - tensorcast/global_store/services/view_state_service.py
   - tensorcast/global_store/repositories/assembly_layout_binding_repository.py
   - tensorcast/global_store/repositories/artifact_binding_repository.py
+  - tensorcast/global_store/repositories/assembly_contribution_repository.py
 links:
   plan: ../plans/0085-distributed-binding-assembly-and-coordinator.md
+  schema: ../../schema.sql
+  successors:
+    - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
   predecessors:
     - ./0084-binding-unified-model-and-contract.md
     - ./0055-programmable-framework.md
     - ./0078-selection-first-artifact-retrieval.md
     - ./0011-unified-session-lifecycle-leases.md
+    - ./0090-existence-semantics-and-single-authority-truth.md
+    - ./0094-unified-lifecycle-kernel-and-capability-families.md
+    - ./0096-workflow-companion-admission-and-fencing.md
+    - ./0100-distributed-authority-handoff-security-and-public-surfaces.md
 ---
 
 # Summary
 
-Define distributed publish for binding-backed training by **reusing the
-repository’s existing assembly and layout trunk**, not by creating a second
-assembly model beside it.
+Define distributed publish for binding-backed training by reusing the
+repository's existing assembly and layout trunk.
 
-This design makes one architectural commitment explicit:
+`0085` now has one job only:
 
-- TensorCast has **one** assembly trunk
-- TensorCast has **one** layout contract trunk
-- training, inference, `register`, `put`, byte-in, and future frontends must all
-  compile onto that same trunk
+- define the parent thesis for the assembly-attempt domain,
+- lock the repository-wide invariants that must remain true,
+- and define how binding-backed publish fits onto the existing structural trunk.
 
-This revision also makes three long-term decisions explicit:
+`0085` no longer tries to be the executable carrier specification for the
+attempt domain.
+That executable responsibility now belongs to `0105`.
 
-- the system has one **contribution contract extension point**
-  - `LayoutSpec.expected_view_ids` remains the completeness root
-  - the per-view semantic contract must still exist explicitly and be
-    snapshot-able
-- one assembly attempt yields one **published model version** result
-  - source assembly and optional serving publication are one lineage, not two
-    unrelated outcomes
-- contributor liveness reuses the repository’s existing **lease/guard/finalizer
-  lifecycle** from `0011`
-  - `assembly_contributions` is durable truth
-  - it is not a replacement for runtime lease fences
+The long-term rule set is:
 
-In current TensorCast, the trunk already exists in recognizable form:
+- TensorCast has one structural assembly trunk.
+- TensorCast does not have one universal identity plane for all attempt
+  semantics.
+- Frontend-specific planner or topology languages must canonicalize into one
+  explicit attempt contract before attempt creation completes.
+- Distributed binding publish is one frontend onto the existing structural
+  trunk, not a second assembly implementation.
 
-- **`LayoutSpec`**
-  - canonical layout + overlap/proof rules
-  - plus `expected_view_ids` for the expected contribution/view set
-- **`ViewSpec` + deterministic `view_id`**
-  - contribution or projection identity
-- **`assembly_id`**
-  - one concrete unsealed assembly workspace
-- **view registration keyed by `(artifact_id, view_id)`**
-  - contribution submission and partial replacement substrate
+# Status Update
 
-This design does not replace those concepts. It deepens them and makes
-binding-backed contributors use them directly.
+`0085` is the parent design for:
+
+- one structural assembly trunk,
+- one layout contract trunk,
+- one frontend-agnostic structural commit path,
+- and the semantic separation between structural truth, attempt truth,
+  liveness, workflow fencing, and closeout truth.
+
+`0105` is the active child design for:
+
+- `AssemblyAttemptSpec`,
+- `AssemblyAttemptRuntime`,
+- `SealReadinessSnapshot`,
+- `slot_key`,
+- snapshotted closeout-policy authority,
+- and the public continuation contract for assembly attempts.
+
+Normative ownership split:
+
+- `0085` owns the parent invariants and the one-trunk integration model.
+- `0105` owns the executable carrier model and the hard cut at the join points.
 
 # Goals / Non-Goals
 
 ## Goals
 
 - Publish one full distributed model version from many local sealed values.
-- Keep `LayoutSpec` as the global canonical layout and overlap/proof contract.
-- Reuse the current assembly substrate:
+- Keep `LayoutSpec` as the canonical structural layout and overlap or proof
+  contract.
+- Reuse the existing structural assembly substrate:
   - `assembly_id`
   - `LayoutSpec`
   - `assembly_layout_bindings`
-  - view registration and `view_id`
-  - coverage/proof persistence
+  - `ViewSpec` and deterministic `view_id`
+  - coverage and proof persistence
   - `artifact_bindings`
   - `StartSealAssembly`
-- Make binding-backed contribution one frontend of the existing piece/view
-  registration trunk, not a second assembly implementation.
-- Make completeness depend on the expected view set already carried by the active
-  layout contract.
-- Define an explicit contribution-contract layer above `LayoutSpec` so the
-  system can describe required per-view semantics without forking the trunk.
-- Reuse current `(artifact_id, view_id)` identity plane as the basis for partial
-  replacement inside one assembly workspace.
+- Keep binding-backed contribution as one frontend onto the existing structural
+  registration and seal path.
+- Keep the semantic kernels separated so the same question never has two
+  competing authority roots.
+- Preserve a clean extension path for `PP`, `EP`, `canonical_full`, future
+  byte-in frontends, and later richer contract families.
 - Keep SDK control-path operations daemon-mediated only.
-- Make the publish result authoritative at the **model-version** level:
-  - source artifact lineage
-  - optional serving artifact lineage
-  - immutable published keys and manifest metadata
-- Reuse the daemon lifecycle system from `0011` for contributor liveness and
-  mutation fencing instead of inventing a second cleanup model.
-- Preserve a clean extension path for `TP > 1`, ranges, transforms, and future
-  frontend sources without splitting the trunk.
+- Keep final success defined by published lineage, not by source seal alone.
 
 ## Non-Goals
 
-- This design does not redefine the local binding contract from `0084`.
-- This design does not create a second global contract object if current
-  `LayoutSpec` + view identity is sufficient.
-- This design does not widen `LayoutSpec` with topology ownership metadata.
-- This design does not reuse one mutable `assembly_id` across many published
-  versions.
-- This design does not make distributed publish a training-only concept; binding
-  is only one contributing surface.
-- This design does not require `TP > 1` in phase 1.
-- This design does not require phase 1 to persist a standalone
-  `ProjectionContract` table if the same semantics can be carried by attempt
-  snapshot plus existing layout storage.
-
-# Phase-1 Scope and Assumptions
-
-Phase 1 is intentionally aligned with what the current assembly trunk already
-does well.
-
-## Supported Parallel Modes
-
-- `PP`
-  - supported in phase 1
-  - each stage or chunk contributes a disjoint subset of the full artifact
-- `EP`
-  - supported in phase 1
-  - each expert group contributes a disjoint subset of the full artifact once
-    canonical expert naming is fixed
-- `CP`
-  - orthogonal to weight ownership for this design
-- `TP`
-  - not the focus in phase 1
-  - current retrieval-side TP view support exists, but assembly-side TP still
-    needs more deliberate range or transform design
-
-## Disjoint Contribution Assumption
-
-Phase 1 assumes:
-
-- each required contribution view represents part of the full artifact
-- required views do not overlap each other
-- together they cover the full canonical artifact at seal time
-
-This is the most realistic first landing because it matches current assembly
-behavior:
-
-- piece registration already rejects overlaps across distinct `view_id` under
-  the default disjoint policy
-- current tests already exercise dense piece assembly from disjoint pieces
-- `PP` and `EP` naturally fit the "disjoint partial view" model
-
-This assumption is strong enough for the target production direction and narrow
-enough to avoid prematurely inventing a second projection language.
+- Redefine the local binding contract from `0084`.
+- Redefine repository-wide distributed continuation rules from `0100`.
+- Redefine lifecycle semantics from `0011` or `0094`.
+- Widen `LayoutSpec` with frontend topology or ownership metadata.
+- Introduce a second persistent assembly implementation.
+- Introduce a training-only layout plane.
+- Promise `TP > 1` assembly semantics in phase 1.
 
 # Problem Statement
 
-The repository already contains the beginnings of the exact decomposition we
-want:
+The repository already contains the structural substrate we want:
 
-- `LayoutSpec` is content-addressed and bound to canonical index multihash
-- `LayoutSpec.expected_view_ids` already defines a stable expected view set
-- `ViewSpec` canonically maps to a deterministic content-addressed `view_id`
-- piece/view registration already writes dense view bytes into an assembly
-  workspace
-- `view_state_service` already upserts per-view metadata and
-  `replace_ranges(...)` for the same `(artifact_id, view_id)`
-- `assembly_id` already names an unsealed assembly workspace
-- `artifact_bindings` already make `assembly_id -> mi2` the post-seal authority
+- `LayoutSpec` is content-addressed and layout-scoped.
+- `ViewSpec` canonically maps to deterministic `view_id`.
+- view registration already persists structural facts through
+  `view_state_service`.
+- `assembly_id` already names an unsealed structural workspace.
+- `artifact_bindings` already make `assembly_id -> mi2` the post-seal authority.
 
-That means the project already has one trunk in approximate form:
+The historical inconsistency was not the trunk.
+It was the join points around the trunk.
 
-- `LayoutSpec`
-  resembles the canonical layout plus contract root
-- `ViewSpec` and `view_id`
-  resemble projection or contribution specs
-- `assembly_id`
-  already is the attempt or workspace
+Previous drafts and partial implementations blurred:
 
-The mistake would be to ignore that trunk and build a second one just for
-binding-backed training.
+1. immutable attempt truth and mutable seal-time truth,
+2. structural projection identity and required-slot identity,
+3. durable occupancy projection and lifecycle authority,
+4. source seal completion and final published success,
+5. public continuation metadata and bare internal workflow ids,
+6. layout-scoped structural hints and attempt-contract authority,
+7. pre-attempt policy scope and post-start workspace identity.
 
-The original `0085` draft still leaned too far in that direction:
+That blurring is the real design bug.
 
-- it overlaid a new `(assembly_id, version)` model on top of an existing
-  assembly workspace model
-- it measured completeness by contributor identity instead of by expected view
-  satisfaction
-- it left contributor liveness too local while the coordinator remained durable
+# Repository Alignment
 
-This revision corrects that:
+`0085` must now be read under four repository-wide rules that are already owned
+elsewhere.
 
-- **view identity is the slot identity**
-- **the active `LayoutSpec` already acts as the reusable assembly contract root
-  in phase 1**
-- **`assembly_id` already is the attempt**
-- **published result must be a model-version lineage, not only a sealed
-  artifact id**
+## One authority root per question
 
-# One Trunk Mapping
+`0090` established the repository rule that different questions must have
+different authority roots.
+Assembly attempts must follow the same rule.
 
-## Conceptual Mapping To Existing Objects
+For this domain:
 
-The long-term conceptual decomposition still matters, but in phase 1 it maps
-onto current TensorCast objects directly:
+- structural layout truth belongs to `LayoutSpec`,
+- structural projection truth belongs to `ViewSpec` plus `view_id`,
+- attempt contract truth belongs to the immutable attempt spec,
+- workflow currentness belongs to the coordinator operation runtime,
+- live occupancy belongs to the durable slot projection plus lifecycle-backed
+  liveness,
+- closeout truth belongs to the final attempt result.
 
-| Conceptual role | Existing TensorCast object | Notes |
-| --- | --- | --- |
-| canonical layout + overlap/proof rule | `LayoutSpec` | already present and content-addressed |
-| projection or contribution spec | `ViewSpec` + deterministic `view_id` + canonical coverage | already present in view registration |
-| reusable assembly contract | active `LayoutSpec` plus snapped `ContributionContractSnapshot` | phase 1 keeps the root in `LayoutSpec` but snapshots the per-view contract explicitly |
-| assembly attempt | `assembly_id` | already the unsealed workspace |
+No row, proto, or helper may silently answer more than one of those questions
+by accident.
 
-This is the key unification rule for the design:
+## Lifecycle is not workflow truth
 
-- do not fork the trunk when the current object already carries the required
-  semantics
-
-## Why `expected_view_ids` Matters
-
-`LayoutSpec.expected_view_ids` is currently underused, but it is exactly the
-right anchor for phase-1 distributed completeness:
-
-- it is immutable
-- it is layout-rooted
-- it is deterministic and sorted
-- it already names view identities, which are the current per-contribution
-  identity key in the assembly pipeline
-
-Therefore, phase-1 completeness should be defined as:
-
-- all required `expected_view_ids` for the bound `layout_id` are present and live
-  in the assembly workspace
-
-not:
-
-- some opaque set of contributor ids submitted rows
-
-Those required `expected_view_ids` must be computed once during layout or
-contract generation from deterministic partial-view specs. They must not be
-re-derived ad hoc on every publish update.
-
-## Contribution Contract Lives Above `expected_view_ids`
-
-`expected_view_ids` is the required **set root**. It is not the whole
-contribution contract.
-
-The system also needs explicit, per-view semantic inputs:
-
-- the semantic `ViewSpec` or equivalent canonical contribution mapping
-- the required contribution kind
-  - `piece_partial`
-  - `canonical_full`
-  - future range or transform kinds
-- whether this attempt requires durable live contributor occupancy rows
-  - binding-backed distributed attempts do
-  - direct piece-registration seal snapshots do not
-- planner-derived coverage semantics
-- a stable digest of that contribution plan
-
-Therefore this design makes the following rule normative:
-
-- phase 1 completeness is rooted in `LayoutSpec.expected_view_ids`
-- phase 1 attempt creation must also snapshot an explicit
-  `ContributionContractSnapshot`
-- `contribution_contract_hash` must digest that explicit snapshot content
-  rather than only `layout_id` plus `expected_view_ids`
-- submit and seal must validate against the same snapped contract; they must
-  not silently recompute a weaker substitute contract on the side
-
-The long-term extension point is:
-
-- `LayoutSpec`
-  - global layout root
-  - expected `view_id` set
-- `ContributionContractSnapshot`
-  - required per-view semantics for one attempt
-  - phase 1 may store it in the coordinator snapshot instead of a new durable
-    top-level contract table
-- future `ProjectionContract`
-  - may become a standalone durable object if the system outgrows the phase-1
-    snapshot form
-
-This keeps one trunk while avoiding the mistake of pretending that a sorted list
-of ids is sufficient to reconstruct the entire required contribution meaning.
-
-# Core Design
-
-## `LayoutSpec` Stays Narrow, But Deep Enough
-
-`LayoutSpec` continues to answer:
-
-- canonical index binding
-- overlap policy
-- proof policy
-- expected view set
-
-It still must not absorb:
-
-- training topology labels
-- local binding identity
-- contributor runtime liveness policy
-- attempt-specific state
-
-This preserves one narrow but deep trunk:
-
-- global layout contract lives in `LayoutSpec`
-- frontend-specific ownership lives outside it
-
-## `ViewSpec` And `view_id` Are Phase-1 `ProjectionSpec`
-
-Current TensorCast already computes deterministic view identity from semantic
-view spec and canonical index bytes.
-
-Phase-1 rule:
-
-- the existing `ViewSpec` plus deterministic `view_id` is the reusable
-  projection identity
-- a binding-backed contributor must map its local sealed bytes to one or more of
-  those view identities
-
-That means:
-
-- `register_view(...)`
-- future binding contribution
-- future byte-in partial registration
-
-all land on the same view-registration substrate.
-
-For phase 1, the projection model is intentionally restricted to the forms that
-fit the current trunk:
-
-- deterministic content-addressed `view_id`
-- canonical coverage attached to that `view_id`
-- disjoint piece semantics across distinct required views
-
-If a future frontend needs richer range or transform composition than the
-current view-registration trunk can express cleanly, the project may extend the
-projection model. It must still extend the trunk, not fork away from it.
-
-## Contribution Kinds Are Part Of The Contract
-
-Phase 1 needs one more explicit distinction:
-
-- `piece_partial`
-  - disjoint partial contribution that registers through the existing dense
-    piece path
-- `canonical_full`
-  - full-canonical contribution that still belongs to the same assembly attempt
-    and contract, but must not masquerade as a full-coverage piece
-
-This matters for the degenerate single-rank case:
-
-- a one-rank publish may use:
-  - one `canonical_full` contribution
-  - or a deterministic multi-view disjoint contract
-- it must not rely on an ad hoc "full-coverage piece" shortcut that contradicts
-  current piece-registration rules
-
-## `assembly_id` Is The Attempt
-
-This design makes the following explicit:
-
-- one publish attempt uses one fresh `assembly_id`
-- once sealed or aborted, that workspace is finished
-- a later version uses a different `assembly_id`
-
-This is already how the current assembly workspace behaves. We are aligning with
-it, not replacing it.
-
-## `view_id` Is The Slot Identity
-
-There is no need to invent a second slot-id plane in phase 1.
-
-The assembly slot identity is the content-addressed `view_id`.
-
-Reasons:
-
-- current Global Store state is already keyed by `(artifact_id, view_id)`
-- current proof digests are keyed by `(assembly_id, view_id, tensor_name, ...)`
-- current upsert and replacement behavior is already per `view_id`
-- current `LayoutSpec.expected_view_ids` already names the expected contribution
-  set in the same identity plane
+`0094` and `0011` established that lifecycle protects a bounded runtime promise.
+It does not own workflow truth.
 
 Therefore:
 
-- view completeness = expected `view_id` set satisfied
-- partial replacement = same `view_id` re-registered inside one `assembly_id`
+- leases and keepalives may protect live contributions,
+- finalizers may accelerate cleanup,
+- but lifecycle state does not replace attempt contract truth,
+- and lifecycle state does not replace coordinator workflow truth.
 
-In phase 1, this also means:
+## Workflow semantics stay above lifecycle
 
-- each required `view_id` is assumed to contribute a disjoint part of the full
-  artifact
-- the final assembly seal succeeds only when the union of those required views
-  covers the full canonical artifact
+`0096` established that replay, currentness, fencing, wait, and completion are
+workflow semantics.
+Assembly attempts must follow the same split.
 
-## Binding Contribution Is One Frontend Onto Existing Piece Registration
+Therefore:
 
-`SealedBindingValue` from `0084` becomes one frontend onto the existing view or
-piece registration trunk.
+- mutation fences may be derived from live slot occupancy,
+- but whether an attempt is still open, sealing, failed, or complete is a
+  workflow question,
+- and whether final success may be reported is a closeout-workflow question.
+
+## Public continuation follows `0100`
+
+`0100` established that public continuation must converge on `Operation[T]` or
+another explicit public family surface.
+Bare internal attachment carriers and bare string ids are not enough.
+
+Therefore:
+
+- assembly attempts may not define a private continuation dialect,
+- public reentry must carry enough metadata for honest recovery,
+- and child designs must not weaken the repository's continuation contract just
+  because the attempt path started life as a local daemon workflow.
+
+# Architectural Thesis
+
+## Hard Parent-Child Split
+
+The repository needs both a parent thesis and an executable hard cut.
+They answer different questions.
+
+| Design | Owns | Must not own |
+| --- | --- | --- |
+| `0085` | one-trunk thesis, semantic kernel separation, frontend-agnostic structural lowering, parent invariants, high-level success model | concrete public carriers, operation snapshot shape, public continuation payloads, exact slot-key or proto fields |
+| `0105` | immutable attempt spec, runtime projection, readiness cut, public slot identity, continuation metadata, closeout-policy hard cut | second structural trunk, alternative layout root, alternate lifecycle system |
+
+## One Structural Trunk, Multiple Semantic Kernels
+
+The design should be read through the following table.
+
+| Semantic kernel | Carrier family | Authoritative question answered |
+| --- | --- | --- |
+| Structural layout kernel | `LayoutSpec` | what canonical structure must final bytes satisfy |
+| Structural projection kernel | `ViewSpec` plus deterministic `view_id` | which structural projection is being registered |
+| Attempt contract kernel | immutable attempt spec | which required slots must be satisfied for this attempt |
+| Workflow fence kernel | coordinator operation runtime | who is currently allowed to accept contributions and transition to seal |
+| Occupancy kernel | `assembly_contributions` plus lifecycle-backed liveness | which contributor currently occupies one required slot |
+| Mutation-fence kernel | live occupancies that point at `(binding_id, binding_value_id)` | may this local binding value become mutable again |
+| Assembly workspace kernel | `assembly_id` | where unsealed structural bytes are accumulated |
+| Closeout kernel | `PublishedModelVersion` lineage | what externally visible result did the attempt produce |
+
+No kernel replaces another.
+
+## Structural Kernel
+
+`LayoutSpec` remains narrow but deep.
+It continues to own:
+
+- canonical index binding,
+- overlap policy,
+- proof policy,
+- and optional layout-scoped expected piece projections.
+
+It must not absorb:
+
+- local binding identity,
+- contributor liveness state,
+- attempt-specific workflow state,
+- or serving closeout policy for one specific attempt.
+
+`ViewSpec` plus deterministic `view_id` remain the reusable structural
+projection identity.
+They answer the structural question only.
+
+## Attempt Contract Kernel
+
+The authoritative attempt root is not `LayoutSpec.expected_view_ids`.
+It is the immutable attempt specification defined by `0105`.
+
+Within that immutable attempt spec, the contract kernel remains the explicit
+`ContributionContractSnapshot`.
+
+Parent-level rules:
+
+- attempt completeness is checked against explicit required entries,
+- frontend-specific planner or topology state must canonicalize once into those
+  explicit required entries before attempt creation completes,
+- `LayoutSpec.expected_view_ids` is only the layout-scoped seed for the
+  disjoint `piece_partial` family,
+- `canonical_full` is a legal contract family member and must not be disguised
+  as a full-coverage piece,
+- and no controller may rebuild a weaker substitute contract from layout hints
+  after the attempt exists.
+
+## Attempt Entry Boundary
+
+The attempt domain is contract-first at its entry boundary.
+
+Parent-level rules:
+
+- a frontend may present either explicit required-slot data or a
+  frontend-specific template that canonicalizes to it,
+- `layout_id` alone is acceptable only as a phase-1 shorthand for the
+  layout-seeded `piece_partial` family,
+- once the attempt exists, the canonical contract is the only authoritative
+  required-slot answer.
+
+## Slot, Occupancy, And Contributor Identity
+
+The design must distinguish at least three related but non-equal identities:
+
+1. structural projection identity
+   - usually `view_id`
+   - answers which structural bytes exist
+2. required-slot identity
+   - answers which attempt-contract entry must be satisfied
+3. contributor-value identity
+   - `(binding_id, binding_value_id)`
+   - answers which sealed local value currently occupies one required slot
+
+Phase 1 may still reuse existing carriers, but only as an explicit alias.
+No design or implementation may describe those identities as one universal
+plane.
+
+## Binding Contribution Reuses The Structural Registration Trunk
+
+`SealedBindingValue` from `0084` becomes one frontend onto the existing
+structural registration trunk.
 
 It must not bypass:
 
-- view identity computation
-- coverage validation
-- overlap/proof checks
-- `view_state_service`
-- existing seal flow
+- deterministic structural identity computation,
+- coverage validation,
+- overlap and proof checks,
+- `view_state_service`,
+- or the existing assembly seal flow.
 
-Instead, binding contribution should compile down to the same logical operation
-as piece registration:
+The lowering rules are:
 
-1. determine the target view identity or identities
-2. expose the local bytes through the appropriate plan
-   - LIP when valid
-   - stable-dram or copied buffers otherwise
-3. register or update those views under the target `assembly_id`
-4. let the existing assembly seal path produce the final `mi2`
+- `piece_partial` lowers onto the structural piece or view commit path,
+- `canonical_full` lowers onto the canonical structural registration path,
+- both use the same trunk-level validation and sealing semantics,
+- neither creates a second publish path.
 
-This is the core unification guarantee for future frontends.
+This is how "one trunk" should be interpreted.
+The shared trunk is the structural commit and seal substrate, not one
+overloaded submit carrier.
 
-For `PP` and `EP` in phase 1, this means the binding frontend should compile its
-local coverage into the same disjoint partial-view shape the current piece path
-already understands, rather than introducing training-specific contributor
-objects into the sealing path.
+## Workflow, Readiness, And Closeout Boundary
 
-For the single-rank case, this means:
+Parent-level ordering rule:
 
-- use the same attempt and contract machinery
-- choose a contract that is actually legal on the trunk
-  - `canonical_full`
-  - or deterministic disjoint multi-view coverage
-- do not invent a binding-local publish shortcut outside the assembly model
+1. one fresh `assembly_id` names one attempt workspace,
+2. contributors may submit only while the attempt is open,
+3. the system must capture one readiness cut before structural seal begins,
+4. structural seal consumes that readiness cut,
+5. closeout consumes the seal result and produces final published lineage.
 
-# Partial Replacement Semantics
+That ordering is required even though the concrete runtime and snapshot carriers
+are owned by `0105`.
 
-## Existing Behavior
+## Pre-Attempt Policy Source Boundary
 
-Current Global Store behavior already supports **idempotent upsert** for the
-same `(artifact_id, view_id)` identity and already scopes canonical coverage to
-that same key:
+Mutable closeout-policy configuration is a pre-attempt input, not attempt
+truth.
 
-- `view_repository.upsert(...)` keeps one current metadata row per
-  `(artifact_id, view_id)`
-- `replace_ranges(...)` rewrites the canonical coverage rows for that same
-  identity
+Parent-level rules:
 
-This is the right identity plane for replacement, but it is not yet sufficient
-by itself to define the full open-attempt replacement semantics needed here.
+- mutable policy sources must be keyed by a pre-attempt scope visible before the
+  attempt workspace exists,
+- post-start `assembly_id` may identify the frozen attempt snapshot but must not
+  remain the sole mutable lookup key for pre-attempt policy resolution,
+- once the attempt exists, the snapshotted closeout policy is authoritative.
 
-## Required Phase-1 Rule
+## Parent-Level Public Surface Direction
 
-For distributed publish in phase 1:
+`0085` no longer defines concrete public carriers.
+That is now owned by `0105`.
 
-- every expected contribution corresponds to one deterministic `view_id`
-- re-contributing that same `view_id` within the same `assembly_id` is a legal
-  replacement of that slot **only while the assembly attempt is open**
-- replacement must be validated against the snapped contribution contract for
-  that `view_id`
-- once the attempt is sealed or aborted, that slot is finished
-- the coordinator must judge completeness against the current set of live
-  required `view_id`
+The parent-level API direction remains:
 
-This directly answers the long-term concern:
+- callers use an explicit assembly-attempt surface,
+- binding-backed contribution stays on `SealedBindingValue`,
+- wait returns a published lineage result rather than a bare source artifact,
+- and public continuation must align with `0100`.
 
-- we can keep `LayoutSpec` narrow
-- we can keep one assembly trunk
-- we can still express deep partial replacement by leaning on view identity
+## Naming Compliance
 
-# Architecture & Interfaces
-
-## Public Surface
-
-```python
-class AssemblyAttemptRef:
-    assembly_id: str
-    layout_id: str
-    contribution_contract_hash: str
-    coordinator_operation_id: str
-    coordinator_generation: int
-
-
-class PublishedModelVersion:
-    assembly_id: str
-    source_artifact: Artifact
-    source_artifact_id: str
-    serving_artifact: Artifact | None
-    serving_artifact_id: str | None
-    source_version_key: str | None
-    serving_version_key: str | None
-    representation_contract_hash: str | None
-    serving_manifest_ref: str | None
-
-
-class Store:
-    def start_assembly_attempt(
-        self,
-        *,
-        layout_id: str,
-        ctx: CallContext | None = None,
-    ) -> AssemblyAttemptRef: ...
-
-    def wait_assembly_attempt(
-        self,
-        attempt: AssemblyAttemptRef | str,
-        *,
-        ctx: CallContext | None = None,
-    ) -> PublishedModelVersion: ...
-
-
-class SealedBindingValue:
-    def contribute_to_assembly(
-        self,
-        *,
-        attempt: AssemblyAttemptRef,
-        ctx: CallContext | None = None,
-    ) -> PartialSealResult: ...
-```
-
-Important surface rules:
-
-- callers reference the active `layout_id`
-- callers do not restate per-update tensor subsets in API parameters
-- binding uses its captured local contribution plan to determine which required
-  view ids it can satisfy
-- the contributor surface stays on `SealedBindingValue`, never on mutable
-  `Binding`
-- attempt creation snapshots the explicit contribution contract and exposes its
-  digest through `contribution_contract_hash`
-- `wait_assembly_attempt(...)` must drive a still-open attempt onto that same
-  deterministic coordinator operation before it waits; callers do not start a
-  second unrelated seal workflow
-- attempt completion returns a **published model version** result, not a bare
-  source artifact
-
-## Coordinator
-
-The coordinator is an `operation.proto`-backed daemon operation.
-
-Responsibilities:
-
-- create a fresh `assembly_id`
-- bind that `assembly_id` to the requested `layout_id` via
-  `assembly_layout_bindings`
-- snapshot coordinator generation, current view metadata, and the explicit
-  contribution contract
-- wait for all required `expected_view_ids` to become satisfied and live
-- call existing `StartSealAssembly`
-- record the sealed source artifact lineage
-- run the required post-assembly publish stages
-  - source publish
-  - optional serving builder or publisher
-- publish immutable version keys and manifest metadata only after all required
-  stages succeed
-- release contribution leases and close the attempt
-
-Phase-1 implementation note:
-
-- the open-attempt to seal transition may be initiated by
-  `wait_assembly_attempt(...)`
-- that transition must target the same deterministic `operation_id` created by
-  `start_assembly_attempt(...)`
-- when `StartSealAssembly` is invoked for an existing attempt (for example via
-  `layout_id`-qualified wait flow), it must fail closed if the snapped attempt
-  contract is missing or malformed; it must not silently reconstruct a weaker
-  contract
-
-## Contribution Flow
-
-```mermaid
-sequenceDiagram
-  participant F as "Frontend"
-  participant B as "SealedBindingValue"
-  participant D as "Store Daemon"
-  participant GS as "Global Store"
-  participant Lease as "SessionLifecycle"
-  participant C as "Coordinator Operation"
-
-  F->>D: start_assembly_attempt(layout_id)
-  D->>GS: create fresh assembly_id + bind layout_id
-  D->>GS: snapshot contribution contract
-  D-->>F: AssemblyAttemptRef
-  F->>B: contribute_to_assembly(attempt)
-  B->>D: submit binding-backed piece or view registrations
-  D->>GS: upsert view metadata keyed by (assembly_id, view_id)
-  D->>Lease: create or refresh ContributionLease
-  D->>GS: upsert durable contributor row keyed by (assembly_id, view_id)
-  GS-->>C: current view set and contributor liveness visible
-  C->>GS: compare current live view set with LayoutSpec.expected_view_ids
-  C->>D: StartSealAssembly(assembly_id)
-  D-->>C: sealed source mi2 artifact
-  C->>D: optional source -> serving build or publish
-  D-->>C: PublishedModelVersion
-  C->>GS: publish immutable source/serving keys + release leases
-```
-
-# Source Assembly And Serving Publication
-
-The assembly trunk seals a **source artifact** first.
-
-That is not yet the whole publish result for every consumer.
-
-This design therefore makes the following model normative:
-
-- every attempt seals one source artifact from one `assembly_id`
-- the attempt result is one `PublishedModelVersion`
-- a `PublishedModelVersion` may contain:
-  - source artifact lineage
-  - serving artifact lineage
-  - immutable published keys
-  - manifest metadata such as `representation_contract_hash`
-
-Rules:
-
-- if the serving representation is identical to the source representation, the
-  serving artifact may equal the source artifact
-- if the serving representation differs, the builder step is part of the same
-  publish lineage
-- serving-facing workflows, including the StepTron -> vLLM integration, are not
-  complete until the serving artifact and immutable serving key exist
-- `wait_assembly_attempt(...)` returns the full published lineage so callers do
-  not have to infer it from unrelated side effects
-- when serving publication is configured, source seal alone must not be exposed
-  as final attempt success
+`0085` no longer introduces executable API carriers of its own.
+Concrete naming compliance for public and proto-facing attempt carriers now
+lives in `0105`.
 
 # Consistency Model
 
-## One Durable Coordinator Fence
+## Authority Separation
 
-Global fencing remains in `operation.proto`.
+Durable rows and runtime projections may each carry facts from several kernels,
+but no single row replaces all of them.
 
-That means:
+Assembly attempts must keep the following split explicit:
 
-- one live coordinator generation controls one attempt
-- stale contributors must be rejected against that coordinator generation
-- the coordinator must snapshot the bound `layout_id`, contribution contract,
-  and current view set before seal
-- attempt creation must materialize or acquire that coordinator fence before
-  contributors can be accepted against it
-- durable contributor rows may record `coordinator_operation_id` and
-  `coordinator_generation`, but those fields are audit and replay data; the
-  live coordinator fence remains authoritative at submit time
+- structural authority
+  - `LayoutSpec`
+  - `views`
+  - coverage and proof persistence
+- attempt authority
+  - immutable attempt spec
+- workflow authority
+  - coordinator operation runtime
+- occupancy authority
+  - durable slot projection plus lifecycle-backed liveness
+- closeout authority
+  - final published lineage
 
-## One Contributor Identity Plane
+## Seal Correctness Is A Conjunction
 
-Since `view_id` is the slot identity in phase 1, the persisted contributor key
-should be:
+Seal correctness is not one scalar predicate.
+The attempt may progress only when all relevant kernels agree:
 
-- `(assembly_id, view_id)`
+- `structural_ready`
+- `workflow_current`
+- `occupancy_live` when the contract requires live contributors
+- `closeout_policy_satisfied` before final success is reported
 
-with current occupant metadata:
+This conjunction is the deepest parent invariant in the design.
 
-- `binding_id`
-- `binding_value_id`
-- `coverage_plan_hash`
-- contributing daemon identity
-- lease identity and liveness fence
+## Mutation Fencing
 
-This is better aligned with the repository than contributor-count keys because
-completeness is about satisfying required `view_id`, not about counting submitters.
-
-## Contribution Leases Reuse `0011`
-
-Contributor liveness must reuse the daemon’s existing lease/guard/finalizer
-system from `0011`.
+If a `SealedBindingValue` currently occupies one live required slot in an open
+attempt, that same binding value must not become mutable again.
 
 Therefore:
 
-- the runtime fence is a `ContributionLease`
-- `assembly_contributions` stores the durable current occupant projection
-- the durable row is not itself the lease authority
-- phase-1 seal correctness depends on the durable row carrying enough liveness
-  projection to distinguish an accepted-and-live contributor from an
-  accepted-but-stale contributor after crash or coordinator loss
+- mutation fencing is keyed by contributor-value identity,
+- it is derived from live slot occupancy,
+- and it must remain coherent with the same liveness model used by seal.
 
-`ContributionLease` follows the same lifecycle model:
+## Recovery Boundary
 
-- subject
-  - `(assembly_id, view_id)`
-- principal
-  - contributor daemon identity plus session or PID identity as applicable
-- guards
-  - coordinator-generation fence
-  - heartbeat or deadline guard
-  - PID guard when the contribution depends on process-owned resources
-- finalizers
-  - mark durable row `released`, `stale`, or `aborted`
-  - release mutation fences on `(binding_id, binding_value_id)`
-  - notify the coordinator when required contributors are lost
+The attempt domain must make its recovery boundary explicit.
 
-Phase-1 live contributor rule:
+Parent-level rule:
 
-- a required contributor counts toward completeness only when:
-  - its durable row is `accepted`
-  - its projected liveness fence is still current
-  - its contributing daemon identity is still current enough for seal
-- an `accepted` row without a current liveness fence must be treated as
-  non-live at seal time
-
-This keeps contribution cleanup coherent with the rest of the daemon instead of
-building a second lifecycle subsystem beside it.
-
-## Binding Mutation Fence
-
-If a `SealedBindingValue` currently occupies one live required `view_id` in an
-open attempt, the same binding value must not become mutable again.
-
-Therefore:
-
-- `Binding.begin_update(...)` must block or fail while a live contribution lease
-  exists for the current `(binding_id, binding_value_id)`
-- lease release happens only after attempt success, failure, or abort
-
-## Frontend-Agnostic Rule
-
-The same trunk must serve all frontends:
-
-- binding-backed training
-- direct `register_view`
-- future byte-in partial uploads
-- future daemon-owned partial assembly feeds
-
-The frontend decides how bytes are produced and exported. The trunk decides:
-
-- view identity
-- coverage validation
-- overlap/proof rules
-- seal semantics
+- before the readiness cut, live slot occupancy and coordinator currentness are
+  still part of correctness,
+- after the readiness cut, seal correctness must depend on the captured cut
+  rather than on post-cut mutations,
+- terminal closeout may still fail,
+- but later contributor loss or policy edits must not retroactively change the
+  semantic contents of the already-captured readiness cut.
 
 # Invariants and Error Model
 
 ## Invariants
 
-- `LayoutSpec` remains the single global layout contract root.
-- `LayoutSpec.expected_view_ids` is the phase-1 expected contribution set.
-- the explicit contribution contract for those required views is snapped per
-  attempt and is part of the coordinator fence.
-- `view_id` is the phase-1 contribution or slot identity.
-- one publish attempt uses one fresh `assembly_id`.
-- partial replacement is scoped to the same `(assembly_id, view_id)`.
-- only `SealedBindingValue` may contribute binding-backed bytes.
-- a live contributor may not reopen for mutation.
-- attempt success means the required **published model version** stages
-  completed, not only that source seal produced an `mi2`.
+- one structural assembly trunk remains in the system,
+- one layout contract trunk remains in the system,
+- `LayoutSpec` remains the single structural layout root,
+- `LayoutSpec.expected_view_ids` remains only the layout-scoped seed for the
+  disjoint `piece_partial` family,
+- the attempt boundary remains contract-first even if a phase-1 layout-seeded
+  shorthand remains,
+- one immutable attempt root exists per attempt,
+- slot identity, structural identity, and contributor identity remain distinct,
+- one publish attempt uses one fresh `assembly_id`,
+- mutable closeout-policy lookup uses pre-attempt scope and is snapshotted
+  before contributors are accepted,
+- only `SealedBindingValue` may contribute binding-backed bytes,
+- a live contributor may not reopen for mutation,
+- final success means published lineage completion, not source seal alone,
 - SDK code never talks to Global Store directly for this workflow.
 
 ## Error Model
 
+Parent-level error expectations:
+
 - `INVALID_ARGUMENT`
-  - unknown `layout_id`, malformed view identity mapping, invalid contribution
-    plan, malformed coordinator token, or invalid publish lineage request
+  - malformed layout or contribution mapping
+  - malformed continuation payload
+  - invalid closeout policy input
 - `FAILED_PRECONDITION`
-  - no current sealed value, local contribution plan does not match the required
-    expected view set, attempt contract changed, attempt layout changed, binding
-    is already reopening for mutation, or required serving-publication metadata
-    is absent
-- `ALREADY_EXISTS`
-  - same `(assembly_id, view_id)` contribution is resubmitted idempotently
+  - attempt contract mismatch
+  - slot already occupied by another live contributor
+  - binding no longer has the current sealed value
+  - required readiness facts are missing
 - `ABORTED`
-  - coordinator generation advanced, contributor lease expired, or attempt was
-    aborted explicitly
+  - coordinator generation advanced
+  - contributor liveness was lost before the readiness cut
+  - explicit attempt abort occurred
 - `DATA_LOSS`
-  - view registration or final seal observed inconsistent bytes after safe
-    recovery was no longer possible
-- `FAILED_PRECONDITION` or `INTERNAL`
-  - source seal succeeded but required serving-builder or version-publication
-    stage failed; the attempt must not report full publish success
+  - structural bytes or seal evidence are inconsistent after safe recovery is no
+    longer possible
 - `DEADLINE_EXCEEDED`
-  - coordinator wait or seal exceeded the budget
+  - coordinator wait, seal, or closeout exceeded the budget
+
+The concrete public and proto-facing mapping is owned by `0105`.
 
 # Schema Changes
 
-This design reuses current assembly and layout persistence and adds only the
-missing contributor-liveness layer.
+`0085` still reuses the existing structural and occupancy tables.
 
-## Existing Tables Reused As-Is
+Parent-level schema rules:
 
-- `layout_specs`
-- `assembly_layout_bindings`
-- `artifact_layout_attachments`
-- `artifact_bindings`
-- `operations`
-- `views`
-- `view_coverage_ranges`
-- `assembly_proof_commitments`
-- `piece_proof_digests`
-
-## New Table
-
-- `assembly_contributions`
-  - one current live occupant per `(assembly_id, view_id)`
-  - columns:
-    - `assembly_id TEXT`
-    - `view_id TEXT`
-    - `binding_id TEXT NOT NULL`
-    - `binding_value_id TEXT NOT NULL`
-    - `coverage_plan_hash TEXT NOT NULL`
-    - `contributor_daemon_id TEXT NOT NULL`
-    - `coordinator_operation_id TEXT NOT NULL`
-    - `coordinator_generation BIGINT NOT NULL`
-    - `lease_id TEXT NOT NULL`
-    - `lease_generation BIGINT NOT NULL`
-    - `lease_expires_at TIMESTAMP WITH TIME ZONE NULL`
-    - `state TEXT CHECK (state IN ('accepted','stale','released','aborted'))`
-    - `created_at`, `updated_at`
-  - primary key:
-    - `(assembly_id, view_id)`
-  - secondary indexes:
-    - `(assembly_id, state)` for completeness checks
-    - `(binding_id, binding_value_id)` for mutation-fence cleanup
-
-Notably absent:
-
-- no new persistent `AssemblyContract` table in phase 1
-- no second slot-id plane
-- no `(assembly_id, version)` overlay
-
-If future requirements exceed what phase-1 `LayoutSpec` plus snapped
-contribution contract can express, the design may extend from this trunk. It
-must not fork away from it.
-
-## Proto Impact
-
-Phase-1 proto changes should stay incremental:
-
-- daemon RPCs for:
-  - starting an assembly attempt from `layout_id`
-  - submitting binding-backed contributions
-  - waiting on the coordinator result
-- daemon result protos should return a model-version lineage, not only a source
-  artifact id
-- Global Store RPCs or repositories for `assembly_contributions`
-
-No standalone contract proto is required in phase 1 if the attempt snapshot can
-carry the explicit contribution contract cleanly.
+- `layout_specs`, `assembly_layout_bindings`, `views`,
+  `view_coverage_ranges`, `artifact_bindings`, and `operations` remain the
+  structural and workflow substrate,
+- `assembly_contributions` remains the durable occupancy projection,
+- phase-1 carrier reuse is acceptable only if code and docs remain explicit
+  about any storage alias,
+- and the next evolution step is a first-class slot representation, not a
+  second assembly trunk.
 
 # Alternatives and Rationale
 
-## Create A Second Persistent `AssemblyContract` Object In Phase 1
+## Collapse The Attempt Contract Into `LayoutSpec.expected_view_ids`
 
 Rejected.
 
 Reasons:
 
-- the current repository already has a viable contract root in `LayoutSpec`
-  combined with deterministic view identity
-- adding a second contract object too early would split the trunk
-- phase 1 should first exhaust the existing abstraction before introducing a new
-  one
+- `expected_view_ids` is only the layout-scoped seed for one contract family,
+- `canonical_full` and later richer families require explicit attempt-level
+  entry semantics,
+- and completeness must be checked against the immutable attempt contract, not
+  against a weaker reconstruction.
 
-## Extend `LayoutSpec` With Topology Ownership Metadata
-
-Rejected.
-
-Reasons:
-
-- topology ownership is frontend and deployment metadata
-- the same canonical model layout should not get a different `layout_id` because
-  PP or EP placement changed
-- `LayoutSpec` must stay reusable across frontends
-
-## Keep `(assembly_id, version)` As The Main Version Model
+## Treat Structural Identity, Slot Identity, And Contributor Identity As One Plane
 
 Rejected.
 
 Reasons:
 
-- current assembly workspace is already keyed by `assembly_id`
-- partial replacement is already expressed by `view_id`
-- a fresh `assembly_id` per publish attempt is simpler and safer
+- they answer different questions,
+- `canonical_full` proves not every slot is naturally a structural view,
+- and mutation fencing is already keyed by contributor-value identity in
+  `0084`.
 
-## Use Contributor Count Instead Of Required View Set
+## Create A Second Persistent Assembly Implementation
 
 Rejected.
 
 Reasons:
 
-- completeness is about satisfying required views
-- one contributor may satisfy multiple required views
-- replacement revisits the same `view_id`
+- the repository already has a viable structural assembly trunk,
+- the real problem is semantic overloading at the join points,
+- and a second assembly implementation would hide that problem rather than fix
+  it.
+
+## Let Source Seal Alone Define Final Success
+
+Rejected.
+
+Reasons:
+
+- serving-facing workflows may require additional closeout stages,
+- immutable version keys and manifest facts are part of the externally visible
+  result,
+- and callers should not infer success from side effects outside the attempt
+  result.
+
+# Trade-offs and Risks
+
+- **More named objects**
+  - The domain becomes more explicit, but the explicit split is less risky than
+    continuing to overload one carrier.
+- **Phase-1 storage alias risk**
+  - Reusing old columns as temporary slot carriers keeps migration cost down,
+    but the alias must stay explicit or drift returns quickly.
+- **Hard-cut discipline**
+  - The parent-child split only works if `0085` stops restating executable
+    carriers and `0105` becomes the sole source of truth for those carriers.
+- **Readiness-cut rigor**
+  - If implementations continue to reread mutable policy or post-cut occupancy
+    during seal, the design becomes inconsistent again even if the prose is
+    correct.
 
 # Compatibility & Acceptance Criteria
 
-Phase-1 acceptance requires:
+Parent-level acceptance requires:
 
-- distributed publish is implemented on the existing assembly and layout trunk
-- `LayoutSpec` remains the global canonical contract root
-- `LayoutSpec.expected_view_ids` becomes the phase-1 expected contribution set
-- attempt creation snapshots an explicit per-view contribution contract
-- `contribution_contract_hash` is derived from that explicit contract snapshot,
-  not from `expected_view_ids` alone
-- binding-backed contribution compiles down to the same view or piece
-  registration path used by other frontends
-- completeness is checked by required `view_id`
-- partial replacement of the same `view_id` inside one `assembly_id` works as an
-  open-attempt slot replacement on the same identity plane
-- every publish attempt uses a fresh `assembly_id`
-- submit validates a live coordinator generation before accepting a
-  contribution
-- contributor liveness loss prevents false successful seal
-- contributor liveness and mutation fencing are implemented through the existing
-  lease/guard/finalizer lifecycle model
-- seal completeness is computed from the required live contributor set rather
-  than from accepted rows alone
-- publish completion returns a `PublishedModelVersion` lineage rather than only
-  a source artifact id
-- serving-facing workflows publish immutable serving keys or manifests before the
-  attempt reports success
-- single-binding publish works on the same trunk through a legal contribution
-  kind such as `canonical_full`
-- future `register`, `put`, byte-in, and other frontends can reuse the same
-  trunk without creating separate assembly implementations
+- distributed publish is implemented on the existing structural assembly and
+  layout trunk,
+- `0105` is the sole executable carrier specification for the attempt domain,
+- `ContributionContractSnapshot` is explicit and authoritative for attempt
+  completeness,
+- attempt creation lowers one canonical contract before the attempt domain
+  begins,
+- `canonical_full` is modeled as a legal contract family member rather than as
+  a fake full-coverage piece,
+- binding-backed contribution, direct `register_view`, and future frontends all
+  lower onto the same structural commit and seal substrate,
+- mutable closeout-policy configuration is resolved on pre-attempt scope and
+  snapshotted before contributors are accepted,
+- slot identity, structural identity, and contributor identity are no longer
+  described or implemented as one plane,
+- seal consumes a captured readiness cut rather than post-cut ambient state,
+- public continuation aligns with `0100`,
+- published success means the required lineage and closeout facts exist,
+- future `PP`, `EP`, single-rank `canonical_full`, and later frontends can all
+  reuse the same trunk without creating separate assembly implementations.
 
 # References
 
 - `docs/designs/0084-binding-unified-model-and-contract.md`
+- `docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md`
 - `docs/plans/0085-distributed-binding-assembly-and-coordinator.md`
+- `docs/plans/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md`
+- `docs/designs/0011-unified-session-lifecycle-leases.md`
+- `docs/designs/0055-programmable-framework.md`
+- `docs/designs/0090-existence-semantics-and-single-authority-truth.md`
+- `docs/designs/0094-unified-lifecycle-kernel-and-capability-families.md`
+- `docs/designs/0096-workflow-companion-admission-and-fencing.md`
+- `docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md`
 - `docs/architecture/view-replicas-and-assembly.md`
 - `docs/architecture/api/api-design.md`
-- `docs/guides/steptron-vllm-binding-integration.md`

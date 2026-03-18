@@ -182,7 +182,7 @@ The correct distributed publish shape is therefore:
 
 - one local binding per process
 - one global `LayoutSpec` for the full model family, including the expected
-  contribution view set
+  contribution view set for layout-derived disjoint-piece contracts
 - one planner-derived `BindingContributionPlan` per local binding
 - one explicit snapped contribution contract per publish attempt
 - many local sealed-value `contribute_to_assembly(...)` operations
@@ -197,8 +197,9 @@ TensorCast must own:
 - `LayoutSpec` capture, validation, and expected-view completeness enforcement
 - explicit contribution-contract capture and snapshot
 - local coverage capture
-- binding-backed contribution that compiles to the same LIP/view registration
-  trunk used by other assembly frontends
+- binding-backed contribution that compiles to the same structural
+  view-or-piece registration trunk used by other assembly frontends
+  - phase 1 does not require a LIP-backed piece path
 - distributed completion tracking
 - contributor liveness through the existing lease/guard/finalizer runtime
 - final source `seal_assembly(...)`

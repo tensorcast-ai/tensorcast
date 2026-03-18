@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from tensorcast.api._config import StorePolicy
     from tensorcast.proto.node_agent.v1 import node_agent_pb2
     from tensorcast.proto.operation.v1 import operation_pb2
+
 from tensorcast.error_reporting import debug_errors_enabled
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
@@ -45,14 +46,17 @@ from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
 )
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
     ArtifactIdKind,
     AssemblyAttemptRef,
     BeginRegisterArtifactResult,
     CanonicalRange,
+    CloseoutPolicySnapshot,
     CoalescedHandshake,
     CommitResult,
+    ContributionContractSnapshot,
     DeregisterArtifactOutcome,
     LeaseHandshake,
     LeaseSegment,
@@ -3393,11 +3397,17 @@ class DaemonCtl:
         self,
         *,
         layout_id: str,
+        contribution_contract: ContributionContractSnapshot | None = None,
+        closeout_policy: CloseoutPolicySnapshot | None = None,
         timeout_s: float = 30.0,
     ) -> AssemblyAttemptRef:
         if not layout_id:
             raise ValueError("layout_id is required")
         req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
+        if contribution_contract is not None:
+            req.contribution_contract.CopyFrom(contribution_contract.to_proto())
+        if closeout_policy is not None:
+            req.closeout_policy.CopyFrom(closeout_policy.to_proto())
         with self._client_span("Client/StartAssemblyAttempt") as span:
             resp = self._unary_call(
                 self.stub.StartAssemblyAttempt,
@@ -3407,20 +3417,25 @@ class DaemonCtl:
                 retries=1,
             )
         attempt = resp.attempt
+        coordinator_operation = operation_pb2.OperationRef()
+        if attempt.HasField("coordinator_operation"):
+            coordinator_operation.CopyFrom(attempt.coordinator_operation)
+        elif attempt.coordinator_operation_id:
+            coordinator_operation.operation_id = str(attempt.coordinator_operation_id)
+        attempt_spec_proto = b""
+        if attempt.HasField("attempt_spec"):
+            attempt_spec_proto = attempt.attempt_spec.SerializeToString()
         return AssemblyAttemptRef(
             assembly_id=str(attempt.assembly_id),
             layout_id=str(attempt.layout_id),
+            attempt_spec_hash=(
+                str(attempt.attempt_spec_hash)
+                or str(attempt.attempt_spec.attempt_spec_hash or "")
+            ),
             contribution_contract_hash=str(attempt.contribution_contract_hash),
-            coordinator_operation_id=str(attempt.coordinator_operation_id),
+            coordinator_operation=coordinator_operation,
             coordinator_generation=int(attempt.coordinator_generation),
-            expected_view_ids=tuple(
-                str(view_id) for view_id in attempt.expected_view_ids
-            ),
-            contribution_contract_proto=(
-                attempt.contribution_contract.SerializeToString()
-                if attempt.HasField("contribution_contract")
-                else None
-            ),
+            attempt_spec_proto=attempt_spec_proto,
         )
 
     def submit_binding_contribution(
@@ -3526,7 +3541,7 @@ class DaemonCtl:
         assembly_id: str,
         layout_id: str | None = None,
         expected_coordinator_generation: int | None = None,
-        attempt_snapshot: store_daemon_pb2.SealAssemblySnapshot | None = None,
+        attempt_spec: store_daemon_pb2.AssemblyAttemptSpec | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartSealAssemblyResponse:
         if not assembly_id:
@@ -3537,8 +3552,8 @@ class DaemonCtl:
         )
         if expected_coordinator_generation is not None:
             req.expected_coordinator_generation = int(expected_coordinator_generation)
-        if attempt_snapshot is not None:
-            req.attempt_snapshot.CopyFrom(attempt_snapshot)
+        if attempt_spec is not None:
+            req.attempt_spec.CopyFrom(attempt_spec)
         with self._client_span("Client/StartSealAssembly") as span:
             resp = self._unary_call(
                 self.stub.StartSealAssembly,

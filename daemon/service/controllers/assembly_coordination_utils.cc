@@ -30,34 +30,61 @@ std::vector<std::string> sorted_expected_view_ids(
   return sorted_ids;
 }
 
-std::vector<v2::ContributionContractEntry> sorted_contract_entries(const v2::ContributionContractSnapshot& snapshot) {
-  std::vector<v2::ContributionContractEntry> entries;
-  entries.reserve(static_cast<size_t>(snapshot.required_contributions_size()));
-  for (const auto& entry : snapshot.required_contributions()) {
-    entries.push_back(entry);
+bool require_live_contributions_until_readiness_cut(const v2::ContributionContractSnapshot& snapshot) {
+  if (snapshot.required_slots_size() == 0 && snapshot.required_contributions_size() > 0) {
+    return snapshot.require_live_contributions();
   }
-  std::sort(
-      entries.begin(),
-      entries.end(),
-      [](const v2::ContributionContractEntry& lhs, const v2::ContributionContractEntry& rhs) {
-        if (lhs.view_id() != rhs.view_id()) {
-          return lhs.view_id() < rhs.view_id();
-        }
-        if (lhs.contribution_kind() != rhs.contribution_kind()) {
-          return lhs.contribution_kind() < rhs.contribution_kind();
-        }
-        return lhs.coverage_semantics() < rhs.coverage_semantics();
-      });
-  return entries;
+  return snapshot.require_live_contributions_until_readiness_cut() || snapshot.require_live_contributions();
 }
 
-v2::ContributionContractSnapshot canonicalize_snapshot(const v2::ContributionContractSnapshot& snapshot) {
-  v2::ContributionContractSnapshot canonical;
-  canonical.set_layout_id(snapshot.layout_id());
-  canonical.set_require_live_contributions(snapshot.require_live_contributions());
-  for (const auto& entry : sorted_contract_entries(snapshot)) {
-    *canonical.add_required_contributions() = entry;
+std::vector<v2::ContributionSlot> collect_required_slots(const v2::ContributionContractSnapshot& snapshot) {
+  std::vector<v2::ContributionSlot> slots;
+  if (snapshot.required_slots_size() > 0) {
+    slots.reserve(static_cast<size_t>(snapshot.required_slots_size()));
+    for (const auto& slot : snapshot.required_slots()) {
+      slots.push_back(slot);
+    }
+  } else {
+    slots.reserve(static_cast<size_t>(snapshot.required_contributions_size()));
+    for (const auto& entry : snapshot.required_contributions()) {
+      v2::ContributionSlot slot;
+      slot.set_slot_key(contribution_slot_key(entry.contribution_kind(), entry.view_id()));
+      slot.set_structural_view_id(contribution_structural_view_id(entry.contribution_kind(), entry.view_id()));
+      slot.set_contribution_kind(entry.contribution_kind());
+      slot.set_coverage_semantics(entry.coverage_semantics());
+      slots.push_back(std::move(slot));
+    }
   }
+
+  std::sort(slots.begin(), slots.end(), [](const v2::ContributionSlot& lhs, const v2::ContributionSlot& rhs) {
+    if (lhs.slot_key() != rhs.slot_key()) {
+      return lhs.slot_key() < rhs.slot_key();
+    }
+    if (lhs.structural_view_id() != rhs.structural_view_id()) {
+      return lhs.structural_view_id() < rhs.structural_view_id();
+    }
+    if (lhs.contribution_kind() != rhs.contribution_kind()) {
+      return lhs.contribution_kind() < rhs.contribution_kind();
+    }
+    return lhs.coverage_semantics() < rhs.coverage_semantics();
+  });
+  slots.erase(
+      std::unique(
+          slots.begin(),
+          slots.end(),
+          [](const v2::ContributionSlot& lhs, const v2::ContributionSlot& rhs) {
+            return lhs.slot_key() == rhs.slot_key() && lhs.structural_view_id() == rhs.structural_view_id() &&
+                lhs.contribution_kind() == rhs.contribution_kind() &&
+                lhs.coverage_semantics() == rhs.coverage_semantics();
+          }),
+      slots.end());
+  return slots;
+}
+
+v2::CloseoutPolicySnapshot closeout_policy_for_hash(const v2::CloseoutPolicySnapshot& snapshot) {
+  v2::CloseoutPolicySnapshot canonical;
+  canonical.set_policy_json(snapshot.policy_json());
+  canonical.set_source_policy_version(snapshot.source_policy_version());
   return canonical;
 }
 
@@ -68,39 +95,121 @@ absl::Time timestamp_to_absl(const google::protobuf::Timestamp& ts) {
 
 } // namespace
 
-std::string contribution_slot_view_id(v2::BindingContributionKind contribution_kind, std::string_view view_id) {
+std::string contribution_slot_key(v2::BindingContributionKind contribution_kind, std::string_view structural_view_id) {
   if (contribution_kind == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL) {
-    return std::string(kCanonicalFullContributionViewId);
+    return std::string(kCanonicalFullContributionSlotKey);
   }
-  return std::string(view_id);
+  return std::string(structural_view_id);
+}
+
+std::string contribution_structural_view_id(
+    v2::BindingContributionKind contribution_kind,
+    std::string_view structural_view_id) {
+  if (contribution_kind == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL) {
+    return std::string();
+  }
+  return std::string(structural_view_id);
 }
 
 v2::ContributionContractSnapshot build_phase1_contribution_contract(
     std::string_view layout_id,
     const google::protobuf::RepeatedPtrField<std::string>& expected_view_ids,
-    bool require_live_contributions) {
+    bool require_live_contributions_until_readiness_cut) {
   v2::ContributionContractSnapshot snapshot;
   snapshot.set_layout_id(std::string(layout_id));
-  snapshot.set_require_live_contributions(require_live_contributions);
+  snapshot.set_require_live_contributions_until_readiness_cut(require_live_contributions_until_readiness_cut);
+  snapshot.set_require_live_contributions(require_live_contributions_until_readiness_cut);
   const auto sorted_ids = sorted_expected_view_ids(expected_view_ids);
   if (sorted_ids.empty()) {
-    auto* entry = snapshot.add_required_contributions();
-    entry->set_view_id(std::string(kCanonicalFullContributionViewId));
-    entry->set_contribution_kind(v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL);
-    entry->set_coverage_semantics(std::string(kCanonicalFullCoverageSemantics));
+    auto* slot = snapshot.add_required_slots();
+    slot->set_slot_key(std::string(kCanonicalFullContributionSlotKey));
+    slot->set_contribution_kind(v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL);
+    slot->set_coverage_semantics(std::string(kCanonicalFullCoverageSemantics));
+
+    auto* compat = snapshot.add_required_contributions();
+    compat->set_view_id(std::string(kCanonicalFullContributionSlotKey));
+    compat->set_contribution_kind(v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL);
+    compat->set_coverage_semantics(std::string(kCanonicalFullCoverageSemantics));
     return snapshot;
   }
+
   for (const auto& view_id : sorted_ids) {
-    auto* entry = snapshot.add_required_contributions();
-    entry->set_view_id(view_id);
-    entry->set_contribution_kind(v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL);
-    entry->set_coverage_semantics(std::string(kPiecePartialCoverageSemantics));
+    auto* slot = snapshot.add_required_slots();
+    slot->set_slot_key(view_id);
+    slot->set_structural_view_id(view_id);
+    slot->set_contribution_kind(v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL);
+    slot->set_coverage_semantics(std::string(kPiecePartialCoverageSemantics));
+
+    auto* compat = snapshot.add_required_contributions();
+    compat->set_view_id(view_id);
+    compat->set_contribution_kind(v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL);
+    compat->set_coverage_semantics(std::string(kPiecePartialCoverageSemantics));
   }
   return snapshot;
 }
 
+v2::ContributionContractSnapshot canonicalize_contribution_contract(const v2::ContributionContractSnapshot& snapshot) {
+  v2::ContributionContractSnapshot canonical;
+  canonical.set_layout_id(snapshot.layout_id());
+  canonical.set_require_live_contributions_until_readiness_cut(
+      require_live_contributions_until_readiness_cut(snapshot));
+  canonical.set_require_live_contributions(require_live_contributions_until_readiness_cut(snapshot));
+  for (const auto& slot : collect_required_slots(snapshot)) {
+    *canonical.add_required_slots() = slot;
+    auto* compat = canonical.add_required_contributions();
+    compat->set_view_id(
+        slot.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL ? slot.slot_key()
+                                                                                 : slot.structural_view_id());
+    compat->set_contribution_kind(slot.contribution_kind());
+    compat->set_coverage_semantics(slot.coverage_semantics());
+  }
+  return canonical;
+}
+
 std::string compute_contribution_contract_hash(const v2::ContributionContractSnapshot& snapshot) {
-  const v2::ContributionContractSnapshot canonical = canonicalize_snapshot(snapshot);
+  const v2::ContributionContractSnapshot canonical = canonicalize_contribution_contract(snapshot);
+  std::string payload;
+  canonical.SerializeToString(&payload);
+  const auto bytes = absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  const std::vector<uint8_t> digest = tensorcast::common::sha256_digest_bytes(bytes);
+  return tensorcast::common::multibase_multihash_sha256(digest);
+}
+
+v2::CloseoutPolicySnapshot canonicalize_closeout_policy_snapshot(const v2::CloseoutPolicySnapshot& snapshot) {
+  v2::CloseoutPolicySnapshot canonical = closeout_policy_for_hash(snapshot);
+  canonical.set_closeout_policy_hash(compute_closeout_policy_hash(snapshot));
+  return canonical;
+}
+
+std::string compute_closeout_policy_hash(const v2::CloseoutPolicySnapshot& snapshot) {
+  const v2::CloseoutPolicySnapshot canonical = closeout_policy_for_hash(snapshot);
+  std::string payload;
+  canonical.SerializeToString(&payload);
+  const auto bytes = absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  const std::vector<uint8_t> digest = tensorcast::common::sha256_digest_bytes(bytes);
+  return tensorcast::common::multibase_multihash_sha256(digest);
+}
+
+v2::AssemblyAttemptSpec canonicalize_attempt_spec(const v2::AssemblyAttemptSpec& spec) {
+  v2::AssemblyAttemptSpec canonical;
+  canonical.set_assembly_id(spec.assembly_id());
+  canonical.set_layout_id(spec.layout_id());
+  *canonical.mutable_contribution_contract() = canonicalize_contribution_contract(spec.contribution_contract());
+  *canonical.mutable_closeout_policy() = canonicalize_closeout_policy_snapshot(spec.closeout_policy());
+  canonical.set_contribution_contract_hash(compute_contribution_contract_hash(canonical.contribution_contract()));
+  canonical.set_attempt_spec_hash(compute_attempt_spec_hash(spec));
+  return canonical;
+}
+
+std::string compute_attempt_spec_hash(const v2::AssemblyAttemptSpec& spec) {
+  v2::AssemblyAttemptSpec canonical;
+  canonical.set_assembly_id(spec.assembly_id());
+  canonical.set_layout_id(spec.layout_id());
+  *canonical.mutable_contribution_contract() = canonicalize_contribution_contract(spec.contribution_contract());
+  *canonical.mutable_closeout_policy() = canonicalize_closeout_policy_snapshot(spec.closeout_policy());
+  canonical.set_contribution_contract_hash(compute_contribution_contract_hash(canonical.contribution_contract()));
+  canonical.clear_attempt_spec_hash();
+
   std::string payload;
   canonical.SerializeToString(&payload);
   const auto bytes = absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
@@ -158,18 +267,27 @@ bool operation_allows_contributions(const tensorcast::operation::v1::GetOperatio
 absl::Status validate_contribution_contract_entry(
     const v2::ContributionContractSnapshot& snapshot,
     v2::BindingContributionKind contribution_kind,
-    std::string_view view_id) {
-  if (!snapshot.require_live_contributions()) {
+    std::string_view structural_view_id) {
+  if (!require_live_contributions_until_readiness_cut(snapshot)) {
     return absl::FailedPreconditionError("assembly attempt does not accept binding-backed live contributions");
   }
-  const std::string expected_view_id = contribution_slot_view_id(contribution_kind, view_id);
-  for (const auto& entry : snapshot.required_contributions()) {
-    if (entry.view_id() == expected_view_id && entry.contribution_kind() == contribution_kind) {
-      return absl::OkStatus();
+  const std::string expected_slot_key = contribution_slot_key(contribution_kind, structural_view_id);
+  const std::string expected_structural_view_id =
+      contribution_structural_view_id(contribution_kind, structural_view_id);
+  for (const auto& slot : collect_required_slots(snapshot)) {
+    if (slot.slot_key() != expected_slot_key) {
+      continue;
     }
+    if (slot.contribution_kind() != contribution_kind) {
+      continue;
+    }
+    if (slot.structural_view_id() != expected_structural_view_id) {
+      continue;
+    }
+    return absl::OkStatus();
   }
   return absl::FailedPreconditionError(
-      absl::StrCat("binding contribution is not part of the snapped contract for view_id=", expected_view_id));
+      absl::StrCat("binding contribution is not part of the snapped contract for slot_key=", expected_slot_key));
 }
 
 absl::Status validate_live_required_contributions(
@@ -177,31 +295,30 @@ absl::Status validate_live_required_contributions(
     absl::Span<const store::components::AssemblyContributionInfo> contributions,
     const absl::flat_hash_set<std::string>& active_contributor_identities,
     absl::Time now) {
-  if (!snapshot.require_live_contributions()) {
+  if (!require_live_contributions_until_readiness_cut(snapshot)) {
     return absl::OkStatus();
   }
 
-  absl::flat_hash_set<std::string> live_view_ids;
-  live_view_ids.reserve(contributions.size());
+  absl::flat_hash_set<std::string> live_slot_keys;
+  live_slot_keys.reserve(contributions.size());
   for (const auto& contribution : contributions) {
     if (!assembly_contribution_is_live(contribution, now, &active_contributor_identities)) {
       continue;
     }
     if (!contribution.view_id.empty()) {
-      live_view_ids.insert(contribution.view_id);
+      live_slot_keys.insert(contribution.view_id);
     }
   }
 
-  for (const auto& entry : snapshot.required_contributions()) {
-    const std::string row_view_id = contribution_slot_view_id(entry.contribution_kind(), entry.view_id());
-    if (live_view_ids.contains(row_view_id)) {
+  for (const auto& slot : collect_required_slots(snapshot)) {
+    if (live_slot_keys.contains(slot.slot_key())) {
       continue;
     }
-    if (entry.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL) {
+    if (slot.contribution_kind() == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL) {
       return absl::FailedPreconditionError("required canonical_full contribution missing from live contributor set");
     }
     return absl::FailedPreconditionError(
-        absl::StrCat("required expected_view_id missing from live contributor set: ", row_view_id));
+        absl::StrCat("required slot_key missing from live contributor set: ", slot.slot_key()));
   }
   return absl::OkStatus();
 }

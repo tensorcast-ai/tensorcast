@@ -120,6 +120,14 @@ def _wait_for_view_ready_for_seal(
     return last_resp
 
 
+def _maybe_debug_dump_view_replicas(
+    name: str,
+    response: global_store_pb2.GetArtifactInfoByIdResponse,
+) -> None:
+    del name
+    del response
+
+
 def _artifact_index_multihash(
     gs_stub: GlobalStoreCompositeStub,
     *,
@@ -794,11 +802,12 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     op_result = store_daemon_pb2.SealAssemblyResult()
     assert wait_resp.operation.status.result.Unpack(op_result) is True
     assert op_result.artifact.artifact_id.startswith("mi2:")
-    snapshot = store_daemon_pb2.SealAssemblySnapshot()
+    snapshot = store_daemon_pb2.AssemblyAttemptOperationSnapshot()
     assert wait_resp.operation.snapshot.Unpack(snapshot) is True
-    assert snapshot.layout_id == put_layout.layout_id
+    assert snapshot.spec.layout_id == put_layout.layout_id
     assert (
-        snapshot.assembly_layout_binding_version == bind_layout.binding.binding_version
+        snapshot.seal_readiness.assembly_layout_binding_version
+        == bind_layout.binding.binding_version
     )
 
     seal_resp_2 = stub.SealAssembly(

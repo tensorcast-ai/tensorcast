@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <string_view>
 #include <thread>
 
 #include <catch2/catch_test_macros.hpp>
@@ -40,6 +41,47 @@ tensorcast::store::StoreEngineOptions make_opts() {
   opts.num_thread = 2;
   opts.global_store_address.clear();
   return opts;
+}
+
+tensorcast::daemon::v2::AssemblyAttemptSpec make_piece_attempt_spec(
+    std::string_view assembly_id,
+    std::string_view layout_id,
+    std::string_view contribution_contract_hash,
+    std::string_view attempt_spec_hash) {
+  tensorcast::daemon::v2::AssemblyAttemptSpec spec;
+  spec.set_assembly_id(std::string(assembly_id));
+  spec.set_layout_id(std::string(layout_id));
+  spec.set_contribution_contract_hash(std::string(contribution_contract_hash));
+  spec.set_attempt_spec_hash(std::string(attempt_spec_hash));
+  spec.mutable_closeout_policy()->set_closeout_policy_hash("closeout-hash");
+  auto* slot = spec.mutable_contribution_contract()->add_required_slots();
+  slot->set_slot_key("view-a");
+  slot->set_structural_view_id("view-a");
+  slot->set_contribution_kind(tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL);
+  slot->set_coverage_semantics("phase1_layout_expected_view");
+  spec.mutable_contribution_contract()->set_layout_id(std::string(layout_id));
+  spec.mutable_contribution_contract()->set_require_live_contributions_until_readiness_cut(true);
+  return spec;
+}
+
+tensorcast::daemon::v2::AssemblyAttemptSpec make_canonical_attempt_spec(
+    std::string_view assembly_id,
+    std::string_view layout_id,
+    std::string_view contribution_contract_hash,
+    std::string_view attempt_spec_hash) {
+  tensorcast::daemon::v2::AssemblyAttemptSpec spec;
+  spec.set_assembly_id(std::string(assembly_id));
+  spec.set_layout_id(std::string(layout_id));
+  spec.set_contribution_contract_hash(std::string(contribution_contract_hash));
+  spec.set_attempt_spec_hash(std::string(attempt_spec_hash));
+  spec.mutable_closeout_policy()->set_closeout_policy_hash("closeout-hash");
+  auto* slot = spec.mutable_contribution_contract()->add_required_slots();
+  slot->set_slot_key(std::string(tensorcast::daemon::assembly_coordination::kCanonicalFullContributionSlotKey));
+  slot->set_contribution_kind(tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL);
+  slot->set_coverage_semantics("phase1_canonical_full");
+  spec.mutable_contribution_contract()->set_layout_id(std::string(layout_id));
+  spec.mutable_contribution_contract()->set_require_live_contributions_until_readiness_cut(true);
+  return spec;
 }
 
 class StartSealLeaseReleaseClient final : public tensorcast::store::testing::GlobalStoreClientStub {
@@ -135,6 +177,11 @@ class StartAssemblyAttemptClient final : public tensorcast::store::testing::Glob
     return absl::OkStatus();
   }
 
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view) override {
+    return absl::NotFoundError("policy not found");
+  }
+
   absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
       const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
     tensorcast::operation::v1::KeepaliveOperationLeaseResponse resp;
@@ -178,16 +225,8 @@ class StartSealStaleGenerationClient final : public tensorcast::store::testing::
     resp.mutable_ref()->set_operation_id(req.operation_id());
     resp.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_PENDING);
     resp.set_lease_generation(2);
-    tensorcast::daemon::v2::SealAssemblySnapshot snapshot;
-    snapshot.set_assembly_id("assembly:test");
-    snapshot.set_layout_id("layout-1");
-    snapshot.set_contribution_contract_hash("contract-hash");
-    auto* entry = snapshot.mutable_contribution_contract()->add_required_contributions();
-    entry->set_view_id("view-a");
-    entry->set_contribution_kind(tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL);
-    entry->set_coverage_semantics("phase1_layout_expected_view");
-    snapshot.mutable_contribution_contract()->set_layout_id("layout-1");
-    snapshot.mutable_contribution_contract()->set_require_live_contributions(true);
+    tensorcast::daemon::v2::AssemblyAttemptOperationSnapshot snapshot;
+    *snapshot.mutable_spec() = make_piece_attempt_spec("assembly:test", "layout-1", "contract-hash", "attempt-hash");
     resp.mutable_snapshot()->PackFrom(snapshot);
     return resp;
   }
@@ -214,7 +253,7 @@ class CanonicalFullContributionLivenessClient final : public tensorcast::store::
 
   CanonicalFullContributionLivenessClient() {
     current_operation.mutable_ref()->set_operation_id("pending-op");
-    current_operation.mutable_ref()->set_kind("seal_assembly");
+    current_operation.mutable_ref()->set_kind("assembly_attempt");
     current_operation.mutable_ref()->set_target_artifact_id("assembly:canonical");
     current_operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_PENDING);
     current_operation.mutable_status()->set_message("assembly attempt open");
@@ -223,20 +262,14 @@ class CanonicalFullContributionLivenessClient final : public tensorcast::store::
     *current_operation.mutable_lease_expires_at() =
         google::protobuf::util::TimeUtil::TimeTToTimestamp(std::time(nullptr) + 60);
 
-    tensorcast::daemon::v2::SealAssemblySnapshot snapshot;
-    snapshot.set_assembly_id("assembly:canonical");
-    snapshot.set_layout_id("layout-canonical");
-    snapshot.set_contribution_contract_hash("contract-hash-canonical");
-    auto* entry = snapshot.mutable_contribution_contract()->add_required_contributions();
-    entry->set_view_id(std::string(tensorcast::daemon::assembly_coordination::kCanonicalFullContributionViewId));
-    entry->set_contribution_kind(tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL);
-    entry->set_coverage_semantics("phase1_canonical_full");
-    snapshot.mutable_contribution_contract()->set_layout_id("layout-canonical");
-    snapshot.mutable_contribution_contract()->set_require_live_contributions(true);
+    tensorcast::daemon::v2::AssemblyAttemptOperationSnapshot snapshot;
+    *snapshot.mutable_spec() = make_canonical_attempt_spec(
+        "assembly:canonical", "layout-canonical", "contract-hash-canonical", "attempt-hash-canonical");
     current_operation.mutable_snapshot()->PackFrom(snapshot);
 
     contribution_row.assembly_id = "assembly:canonical";
-    contribution_row.view_id = std::string(tensorcast::daemon::assembly_coordination::kCanonicalFullContributionViewId);
+    contribution_row.view_id =
+        std::string(tensorcast::daemon::assembly_coordination::kCanonicalFullContributionSlotKey);
     contribution_row.binding_id = "binding-1";
     contribution_row.binding_value_id = "value-1";
     contribution_row.coverage_plan_hash = "cph-1";
@@ -281,6 +314,19 @@ class CanonicalFullContributionLivenessClient final : public tensorcast::store::
     return resp;
   }
 
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view assembly_id) override {
+    tensorcast::global_store::v1::AssemblyLayoutBinding binding;
+    binding.set_assembly_id(std::string(assembly_id));
+    binding.set_layout_id("layout-canonical");
+    binding.set_binding_version(1);
+    return binding;
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ViewInfo>> list_views(std::string_view) override {
+    return std::vector<tensorcast::store::components::ViewInfo>{};
+  }
+
   absl::StatusOr<std::vector<tensorcast::store::components::AssemblyContributionInfo>> list_assembly_contributions(
       std::optional<std::string_view> assembly_id,
       std::optional<std::string_view>,
@@ -320,9 +366,9 @@ TEST_CASE("Contribution contract hash changes when per-view semantics change", "
   auto baseline = tensorcast::daemon::assembly_coordination::build_phase1_contribution_contract(
       "layout-1",
       expected_view_ids,
-      /*require_live_contributions=*/true);
+      /*require_live_contributions_until_readiness_cut=*/true);
   auto modified = baseline;
-  modified.mutable_required_contributions(0)->set_coverage_semantics("phase1_view_semantics_v2");
+  modified.mutable_required_slots(0)->set_coverage_semantics("phase1_view_semantics_v2");
 
   REQUIRE(
       tensorcast::daemon::assembly_coordination::compute_contribution_contract_hash(baseline) !=
@@ -392,18 +438,17 @@ TEST_CASE("StartAssemblyAttempt snapshots a live contribution contract", "[daemo
   REQUIRE_FALSE(attempt.assembly_id().empty());
   REQUIRE(attempt.layout_id() == "layout-1");
   REQUIRE(attempt.coordinator_generation() == 1);
-  REQUIRE(attempt.expected_view_ids_size() == 2);
-  REQUIRE(attempt.has_contribution_contract());
-  REQUIRE(attempt.contribution_contract().require_live_contributions());
+  REQUIRE(attempt.attempt_spec_hash() == attempt.attempt_spec().attempt_spec_hash());
+  REQUIRE(attempt.has_attempt_spec());
+  REQUIRE(attempt.attempt_spec().contribution_contract().required_slots_size() == 2);
 
   REQUIRE(gs_client->last_update.status().state() == tensorcast::operation::v1::OPERATION_STATE_PENDING);
   REQUIRE(gs_client->last_update.has_snapshot());
-  tensorcast::daemon::v2::SealAssemblySnapshot snapshot;
+  tensorcast::daemon::v2::AssemblyAttemptOperationSnapshot snapshot;
   REQUIRE(gs_client->last_update.snapshot().UnpackTo(&snapshot));
-  REQUIRE(snapshot.contribution_contract_hash() == attempt.contribution_contract_hash());
-  REQUIRE(snapshot.has_contribution_contract());
-  REQUIRE(snapshot.contribution_contract().require_live_contributions());
-  REQUIRE(snapshot.contribution_contract().required_contributions_size() == 2);
+  REQUIRE(snapshot.has_spec());
+  REQUIRE(snapshot.spec().contribution_contract_hash() == attempt.contribution_contract_hash());
+  REQUIRE(snapshot.spec().contribution_contract().required_slots_size() == 2);
 }
 
 TEST_CASE(

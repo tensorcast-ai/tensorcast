@@ -272,10 +272,10 @@ class OperationRepository(BaseRepository):
             raise ValueError("operation lease expired")
 
         existing_snapshot = row.get("snapshot_proto")
-        setting_snapshot = existing_snapshot is None and snapshot_proto is not None
-        if existing_snapshot is not None:
-            if snapshot_proto is not None and snapshot_proto != existing_snapshot:
-                raise ValueError("snapshot mismatch with existing operation")
+        setting_snapshot = (
+            snapshot_proto is not None and snapshot_proto != existing_snapshot
+        )
+        if snapshot_proto is None:
             snapshot_proto = existing_snapshot
 
         # Throttle in-place updates to avoid DB write amplification. Terminal

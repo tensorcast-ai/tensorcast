@@ -476,6 +476,47 @@ def _setup_store(
     return store, runtime, client
 
 
+def _build_attempt_ref(
+    *,
+    assembly_id: str,
+    layout_id: str,
+    contribution_contract_hash: str,
+    attempt_spec_hash: str,
+    required_slots: list[store_daemon_pb2.ContributionSlot],
+) -> store_mod.AssemblyAttemptRef:
+    spec = store_daemon_pb2.AssemblyAttemptSpec(
+        assembly_id=assembly_id,
+        layout_id=layout_id,
+        contribution_contract_hash=contribution_contract_hash,
+        attempt_spec_hash=attempt_spec_hash,
+        closeout_policy=store_daemon_pb2.CloseoutPolicySnapshot(
+            closeout_policy_hash="bafkcloseout"
+        ),
+    )
+    spec.contribution_contract.layout_id = layout_id
+    spec.contribution_contract.require_live_contributions_until_readiness_cut = True
+    spec.contribution_contract.required_slots.extend(required_slots)
+    operation_ref = operation_pb2.OperationRef(
+        operation_id=f"{assembly_id}:op",
+        kind="assembly_attempt",
+        target_artifact_id=assembly_id,
+        authority_scope_kind="assembly_attempt",
+        authority_scope_id=assembly_id,
+        attachment_kind="assembly_attempt",
+        recovery_class="cluster_durable",
+        fencing_digest=attempt_spec_hash,
+    )
+    return store_mod.AssemblyAttemptRef(
+        assembly_id=assembly_id,
+        layout_id=layout_id,
+        attempt_spec_hash=attempt_spec_hash,
+        contribution_contract_hash=contribution_contract_hash,
+        coordinator_operation=operation_ref,
+        coordinator_generation=1,
+        attempt_spec_proto=spec.SerializeToString(),
+    )
+
+
 def test_binding_swap_preserves_data_ptr(monkeypatch: pytest.MonkeyPatch) -> None:
     store, _runtime, _client = _setup_store(monkeypatch)
     artifact1 = store.artifact(artifact_id="artifact-1")
@@ -790,13 +831,19 @@ def test_sealed_binding_value_contributes_piece_partial(
         _fake_perform_registration,
     )
     sealed = binding.seal_current(update_epoch=binding.begin_update())
-    attempt = store_mod.AssemblyAttemptRef(
+    attempt = _build_attempt_ref(
         assembly_id="cgid:assembly-piece",
         layout_id="layout-piece",
         contribution_contract_hash="bafkcontract-piece",
-        coordinator_operation_id="sealop-piece",
-        coordinator_generation=1,
-        expected_view_ids=(expected_view_id,),
+        attempt_spec_hash="bafkattempt-piece",
+        required_slots=[
+            store_daemon_pb2.ContributionSlot(
+                slot_key=expected_view_id,
+                structural_view_id=expected_view_id,
+                contribution_kind=store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL,
+                coverage_semantics="phase1_layout_expected_view",
+            )
+        ],
     )
 
     result = sealed.contribute_to_assembly(attempt=attempt)
@@ -856,13 +903,19 @@ def test_subset_binding_exposes_piece_view_identity(
     )
 
     sealed = binding.seal_current(update_epoch=binding.begin_update())
-    attempt = store_mod.AssemblyAttemptRef(
+    attempt = _build_attempt_ref(
         assembly_id="cgid:assembly-subset-piece",
         layout_id="layout-subset-piece",
         contribution_contract_hash="bafkcontract-subset-piece",
-        coordinator_operation_id="sealop-subset-piece",
-        coordinator_generation=1,
-        expected_view_ids=(str(selection.view_id),),
+        attempt_spec_hash="bafkattempt-subset-piece",
+        required_slots=[
+            store_daemon_pb2.ContributionSlot(
+                slot_key=str(selection.view_id),
+                structural_view_id=str(selection.view_id),
+                contribution_kind=store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL,
+                coverage_semantics="phase1_layout_expected_view",
+            )
+        ],
     )
 
     result = sealed.contribute_to_assembly(attempt=attempt)
@@ -902,13 +955,18 @@ def test_sealed_binding_value_contributes_canonical_full(
         _fake_perform_registration,
     )
     sealed = binding.seal_current(update_epoch=binding.begin_update())
-    attempt = store_mod.AssemblyAttemptRef(
+    attempt = _build_attempt_ref(
         assembly_id="cgid:assembly-canonical",
         layout_id="layout-canonical",
         contribution_contract_hash="bafkcontract-canonical",
-        coordinator_operation_id="sealop-canonical",
-        coordinator_generation=1,
-        expected_view_ids=(),
+        attempt_spec_hash="bafkattempt-canonical",
+        required_slots=[
+            store_daemon_pb2.ContributionSlot(
+                slot_key="__canonical_full__",
+                contribution_kind=store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL,
+                coverage_semantics="phase1_canonical_full",
+            )
+        ],
     )
 
     result = sealed.contribute_to_assembly(attempt=attempt)

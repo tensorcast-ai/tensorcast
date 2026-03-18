@@ -108,6 +108,8 @@ from tensorcast.types import (
 )
 from tensorcast.types import (
     AssemblyAttemptRef,
+    CloseoutPolicySnapshot,
+    ContributionContractSnapshot,
     DeregisterArtifactOutcome,
     PartialSealResult,
     PublishedModelVersion,
@@ -241,28 +243,17 @@ def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
     return inferred or ArtifactIdKind.MI2
 
 
-def _fallback_contribution_contract_proto(
+def _decode_attempt_spec_or_raise(
     attempt: AssemblyAttemptRef,
-) -> store_daemon_pb2.ContributionContractSnapshot:
-    snapshot = store_daemon_pb2.ContributionContractSnapshot(
-        layout_id=str(attempt.layout_id),
-        require_live_contributions=True,
-    )
-    if attempt.expected_view_ids:
-        for view_id in attempt.expected_view_ids:
-            entry = snapshot.required_contributions.add()
-            entry.view_id = str(view_id)
-            entry.contribution_kind = (
-                store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
-            )
-            entry.coverage_semantics = "phase1_layout_expected_view"
-        return snapshot
-
-    entry = snapshot.required_contributions.add()
-    entry.view_id = "__canonical_full__"
-    entry.contribution_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
-    entry.coverage_semantics = "phase1_canonical_full"
-    return snapshot
+) -> store_daemon_pb2.AssemblyAttemptSpec:
+    try:
+        return attempt.decode_attempt_spec()
+    except Exception as exc:  # noqa: BLE001
+        raise ArtifactError(
+            "AssemblyAttemptRef is missing a valid immutable attempt spec",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        ) from exc
 
 
 def _split_mi2_artifact_id(artifact_id: str) -> tuple[str | None, str | None]:
@@ -984,40 +975,47 @@ class Store:
         self,
         *,
         layout_id: str,
+        contribution_contract: ContributionContractSnapshot | None = None,
+        closeout_policy: CloseoutPolicySnapshot | None = None,
         ctx: CallContext | None = None,
     ) -> AssemblyAttemptRef:
         del ctx
-        return self._runtime.ensure_client().start_assembly_attempt(layout_id=layout_id)
+        kwargs: dict[str, object] = {"layout_id": layout_id}
+        if contribution_contract is not None:
+            kwargs["contribution_contract"] = contribution_contract
+        if closeout_policy is not None:
+            kwargs["closeout_policy"] = closeout_policy
+        return self._runtime.ensure_client().start_assembly_attempt(**kwargs)
 
     def wait_assembly_attempt(
         self,
-        attempt: AssemblyAttemptRef | str,
+        attempt: AssemblyAttemptRef | Operation[PublishedModelVersion] | str,
         *,
         timeout_s: float | None = None,
         ctx: CallContext | None = None,
     ) -> PublishedModelVersion:
+        del ctx
+        if isinstance(attempt, Operation):
+            return attempt.wait(timeout_s=timeout_s)
+
         client = self._runtime.ensure_client()
         operation_id: str
         assembly_id: str
-        fallback_snapshot: store_daemon_pb2.SealAssemblySnapshot | None = None
+        operation_ref: operation_pb2.OperationRef | None = None
+        fallback_spec: store_daemon_pb2.AssemblyAttemptSpec | None = None
         trigger_timeout_s: float | None = None
         if isinstance(attempt, AssemblyAttemptRef):
+            if not attempt.coordinator_operation_id:
+                raise ArtifactError(
+                    "AssemblyAttemptRef is missing coordinator operation metadata",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
             operation_id = attempt.coordinator_operation_id
             assembly_id = attempt.assembly_id
-            fallback_snapshot = store_daemon_pb2.SealAssemblySnapshot(
-                assembly_id=attempt.assembly_id,
-                layout_id=attempt.layout_id,
-                contribution_contract_hash=attempt.contribution_contract_hash,
-            )
-            fallback_snapshot.expected_view_ids.extend(attempt.expected_view_ids)
-            if attempt.contribution_contract_proto:
-                fallback_snapshot.contribution_contract.ParseFromString(
-                    attempt.contribution_contract_proto
-                )
-            else:
-                fallback_snapshot.contribution_contract.CopyFrom(
-                    _fallback_contribution_contract_proto(attempt)
-                )
+            operation_ref = operation_pb2.OperationRef()
+            operation_ref.CopyFrom(attempt.coordinator_operation)
+            fallback_spec = _decode_attempt_spec_or_raise(attempt)
             trigger_timeout_s = (
                 10.0 if timeout_s is None else max(1.0, min(float(timeout_s), 10.0))
             )
@@ -1029,6 +1027,7 @@ class Store:
             try:
                 current = client.get_operation(
                     operation_id,
+                    operation_ref=operation_ref,
                     timeout_s=trigger_timeout_s,
                 )
             except Exception:
@@ -1041,7 +1040,7 @@ class Store:
                     assembly_id=attempt.assembly_id,
                     layout_id=attempt.layout_id,
                     expected_coordinator_generation=attempt.coordinator_generation,
-                    attempt_snapshot=fallback_snapshot,
+                    attempt_spec=fallback_spec,
                     timeout_s=trigger_timeout_s,
                 )
         else:
@@ -1050,6 +1049,7 @@ class Store:
         wait_timeout_s = 120.0 if timeout_s is None else float(timeout_s)
         resp = client.wait_operation(
             operation_id,
+            operation_ref=operation_ref,
             timeout_ms=max(1, int(wait_timeout_s * 1000)),
             timeout_s=wait_timeout_s + 5.0,
         )
@@ -1767,13 +1767,20 @@ def persistence_operation(
 def start_assembly_attempt(
     *,
     layout_id: str,
+    contribution_contract: ContributionContractSnapshot | None = None,
+    closeout_policy: CloseoutPolicySnapshot | None = None,
     ctx: CallContext | None = None,
 ) -> AssemblyAttemptRef:
-    return _coerce_store().start_assembly_attempt(layout_id=layout_id, ctx=ctx)
+    return _coerce_store().start_assembly_attempt(
+        layout_id=layout_id,
+        contribution_contract=contribution_contract,
+        closeout_policy=closeout_policy,
+        ctx=ctx,
+    )
 
 
 def wait_assembly_attempt(
-    attempt: AssemblyAttemptRef | str,
+    attempt: AssemblyAttemptRef | Operation[PublishedModelVersion] | str,
     *,
     timeout_s: float | None = None,
     ctx: CallContext | None = None,

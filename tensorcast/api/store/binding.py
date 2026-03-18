@@ -461,6 +461,13 @@ class SealedBindingValue:
         slot = binding._slot
         store = slot._store
         pipeline = store._registration
+        attempt_spec = attempt.decode_attempt_spec()
+        contribution_contract = attempt_spec.contribution_contract
+        requires_piece_slots = any(
+            int(required_slot.contribution_kind)
+            == store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
+            for required_slot in contribution_contract.required_slots
+        )
 
         view_spec = _slot_contribution_view_spec(slot)
         selection_names = _slot_contribution_tensor_names(slot)
@@ -538,7 +545,7 @@ class SealedBindingValue:
             )
             submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
         else:
-            if attempt.expected_view_ids:
+            if requires_piece_slots:
                 raise ArtifactError(
                     "binding does not expose a piece contribution view_spec for this layout contract",
                     status_code="FAILED_PRECONDITION",
@@ -571,6 +578,7 @@ class SealedBindingValue:
             contribution_kind=submit_kind,
             coordinator_operation_id=attempt.coordinator_operation_id,
             coordinator_generation=attempt.coordinator_generation,
+            attempt_spec_hash=attempt.attempt_spec_hash,
             view_id=contributed_view_id,
             timeout_s=timeout_s if timeout_s is not None else 30.0,
         )
