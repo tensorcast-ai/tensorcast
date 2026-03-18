@@ -18,7 +18,7 @@ from tensorcast.api.plan import (
 from tensorcast.api.plan.artifact_set import resolve_artifact_set_ref
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.engine_adapter.kvcache_adapter import (
+from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
     HydrateResult,
     ManifestArtifactSetBridge,
@@ -239,6 +239,21 @@ def test_plan_proto_reserves_cluster_transport_slot() -> None:
         cluster_action=plan_pb2.ClusterActionRef(action_ref="wf:activate")
     )
     assert action.WhichOneof("kind") == "cluster_action"
+
+
+def test_local_plan_run_fails_closed_on_instance_steps_without_node_agent_bridge() -> None:
+    ctx = CallContext(request_id="req-instance-local")
+    plan = Plan(ctx)
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    step = plan.on_instance(inst).manifest(engine_request_id="rid-123")
+
+    result = plan.run(raise_on_error=False)
+
+    assert result.ok is False
+    step_result = result.step(step)
+    assert step_result.action == "manifest"
+    assert step_result.status.state == "failed"
+    assert "Node Agent" in step_result.status.message
 
 
 def test_artifact_set_ref_resolution_fails_closed_on_mismatch() -> None:

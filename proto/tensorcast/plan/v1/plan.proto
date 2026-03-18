@@ -172,19 +172,27 @@ message TransformRegisterAction {
 }
 
 message ManifestAction {
+  // Engine-local correlation handle for adapter inspection.
+  // This is compatibility context, not framework artifact or set identity.
   string engine_request_id = 1;
 }
 
 message PublishAction {
+  // Engine-local correlation handle for adapter inspection.
+  // This is compatibility context, not framework artifact or set identity.
   string engine_request_id = 1;
   optional uint64 ttl_ms = 2;
 }
 
 message HydrateAction {
+  // Engine-local correlation handle for adapter inspection.
+  // This is compatibility context, not framework artifact or set identity.
   string engine_request_id = 1;
 }
 
 message EvictLocalAction {
+  // Engine-local correlation handle for adapter inspection.
+  // This is compatibility context, not framework artifact or set identity.
   optional string engine_request_id = 1;
 }
 

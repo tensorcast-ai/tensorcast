@@ -19,7 +19,7 @@ from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
-from tensorcast.engine_adapter.kvcache_adapter import (
+from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
     HydrateResult,
     ManifestResult,

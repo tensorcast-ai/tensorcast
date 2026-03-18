@@ -13,7 +13,7 @@ from tensorcast.engine_adapter.adapter import (
     TransformPlugin,
     TransformRegistry,
 )
-from tensorcast.engine_adapter.kvcache_adapter import (
+from tensorcast.engine_adapter.artifact_api import (
     MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA,
     MANIFEST_ARTIFACT_SET_BRIDGE_VERSION,
     BatchOutcome,

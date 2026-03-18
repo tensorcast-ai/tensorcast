@@ -39,7 +39,7 @@ from tensorcast.api.store.artifact import (
     _decode_capability_token,
 )
 from tensorcast.api.store.view_composer import compute_view_id
-from tensorcast.engine_adapter.kvcache_adapter import (
+from tensorcast.engine_adapter.artifact_api import (
     BatchOutcome,
     BatchResult,
     HydrateResult,
@@ -798,6 +798,8 @@ class InstanceStepBuilder:
 
     @staticmethod
     def _validated_engine_request_id(engine_request_id: str) -> str:
+        # `engine_request_id` remains adapter-local context. Cross-step set
+        # identity belongs to manifest/projection bridge contracts instead.
         value = str(engine_request_id).strip()
         if not value:
             raise ArtifactError(
@@ -1240,6 +1242,8 @@ class Plan:
         if cancel_event.is_set():
             return _cancelled_result(step, "skipped due to prior failure")
         if isinstance(step.target, Instance):
+            # Local Plan.run still does not own instance-host routing. Instance
+            # execution remains on the Node Agent / Instance Agent boundary.
             return PlanStepResult(
                 step_id=step.step_id,
                 target_id=step.target.instance_id,
