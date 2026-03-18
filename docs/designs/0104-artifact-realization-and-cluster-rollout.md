@@ -4,24 +4,30 @@ title: Artifact Realization, Worker-Local Stable Readiness, and Cluster Rollout
 status: draft
 areas: ["daemon", "sdk", "global_store", "integrations", "docs"]
 created: 2026-03-17
-last_updated: 2026-03-17
+last_updated: 2026-03-19
 related_code:
-  - docs/designs/0056-programmable-framework-adv.md
-  - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
-  - docs/designs/0103-volatile-publication-subjects-and-multi-replica-semantics.md
   - tensorcast/api/plan/plan.py
   - proto/tensorcast/plan/v1/plan.proto
-  - tensorcast/api/store/artifact.py
+  - proto/tensorcast/node_agent/v1/node_agent.proto
+  - proto/tensorcast/daemon/v2/store_daemon.proto
+  - tensorcast/api/runtime.py
+  - tensorcast/api/signals.py
+  - tensorcast/api/store/registration.py
+  - tensorcast/api/store/handles.py
+  - daemon/service/controllers/materialization_controller.cc
+  - daemon/service/controllers/replica_materialization_service.cc
   - daemon/service/controllers/local_stable_tier_service.cc
+  - daemon/service/controllers/assembly_operation_service.cc
+  - daemon/state/worker_directory_cache.h
   - daemon/state/persistence_manager.cc
   - core/store/materialization/control/materialize_orchestrator.cc
   - core/store/materialization/dataplane/sources/remote_key_source.cc
   - core/store/replica/memory_export_registry.cc
   - tensorcast/tools/weight_publisher.py
-  - docs/deployment/weight-publisher.md
 related_docs:
   - docs/designs/0055-programmable-framework.md
   - docs/designs/0056-programmable-framework-adv.md
+  - docs/designs/0106-daemon-served-directory-and-target-resolution.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
   - docs/designs/0082-cpu-memfd-zero-copy-publish.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
@@ -31,6 +37,7 @@ related_docs:
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
   - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
   - docs/designs/0103-volatile-publication-subjects-and-multi-replica-semantics.md
+  - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
   - docs/architecture/api/policy-persistence.md
   - docs/architecture/p2p-transfer-strategies.md
 links:
@@ -38,6 +45,7 @@ links:
   dependencies:
     - ./0055-programmable-framework.md
     - ./0056-programmable-framework-adv.md
+    - ./0106-daemon-served-directory-and-target-resolution.md
     - ./0078-selection-first-artifact-retrieval.md
     - ./0082-cpu-memfd-zero-copy-publish.md
     - ./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
@@ -53,126 +61,192 @@ links:
 
 # Summary
 
-`0056` now cleanly owns:
+`0104` adopts a two-layer kernel for artifact rollout.
 
-- `Runtime`,
-- daemon ingress,
-- daemon-served low-cardinality signals,
-- `ArtifactSetRef`,
-- and the scalable worker-set warmup substrate.
+Layer 1 is the worker-local realization kernel:
 
-`0102` now cleanly owns:
+- it consumes `ArtifactSetRef`,
+- it introduces `realize_set` as the explicit worker action that may claim
+  `local_stable_ready`,
+- and it reuses the shared TensorCast dataplane and stable-tier machinery rather
+  than inventing a rollout-private copy path.
 
-- engine-side manifest production,
-- the bridge from engine carriers into `ArtifactSetRef`,
-- and canonical instance-side `manifest/publish/hydrate/evict_local` projection.
+Layer 2 is the cluster rollout orchestration kernel:
 
-`0103` now cleanly owns:
+- it compiles worker realization plus optional child publication and hydration
+  stages into canonical `PlanSpec` fragments,
+- it exposes rollout observation through `Operation[T]`,
+- and it keeps rollout barriers, source closeout, and version-switch timing
+  outside `0056`, `0102`, and `0103` rather than redefining their contracts.
 
-- volatile publication-subject semantics,
-- per-target publish currentness,
-- and the rule that multi-target replication intent is not one publish subject.
-
-What the repository still lacks is the layer between them:
-
-- a worker-local realization contract stronger than `prefetch_set`,
-- a cluster rollout contract that composes worker realization and instance realization without redefining
-  publication-subject truth,
-- and a source-retention model that allows training clusters to act as transient issuers rather than long-lived owners
-  of full replicas.
-
-This design introduces that missing layer.
-
-The core model is:
+Long-term repository rule:
 
 - `Artifact` and `ArtifactSetRef` remain the value and set-control units,
-- `realize_set` becomes the worker-local stable-realization action,
-- cluster rollout composes many child worker realizations and optional child publication subjects,
-- and `publish` keeps its `0103` meaning as volatile target promotion rather than becoming the name for all
-  cross-worker replication.
-
-Long-term rule:
-
-- `put/register/seal` still define artifact truth,
 - `realize_set` defines worker-local readiness,
-- `publish` defines volatile subject promotion,
-- `hydrate` defines instance-local realization,
-- and cluster rollout is the orchestration layer that composes those scopes honestly.
+- `publish` keeps its `0103` meaning as one volatile target-publication family,
+- `hydrate` keeps its `0102` meaning as one instance-local realization family,
+- and rollout is the orchestration layer that composes those scopes honestly.
+
+This design is explicitly depth-first rather than branch-first:
+
+- it strengthens the existing programmable framework,
+- it does not introduce a second execution substrate,
+- it does not create a second set carrier beside `ArtifactSetRef`,
+- and it does not create a second continuation family beside `Operation[T]`.
+
+First dependency-ready landing rule:
+
+- Wave 1 closes only worker-local stable realization plus a worker-only
+  `workers_ready` barrier,
+- multi-daemon rollout ownership, optional child instance stages, and issue-time
+  strategy sugar remain explicit follow-on scope,
+- and `0104` must not claim whole-cluster closure before those prerequisites are
+  genuinely landed.
+
+# Current Grounding and Dependency Readiness
+
+The repository already has most of the substrate that `0104` needs, but not all
+of the closure.
+
+| Capability | Current grounding | Dependency readiness |
+| --- | --- | --- |
+| `ArtifactSetRef` and scalable worker-set warmup | `0056`, `prefetch_set`, daemon ingress | ready |
+| explicit worker readiness floor for `prefetch_set` | `0056` says `local_replica_ready` only | ready |
+| canonical instance verbs | `manifest/publish/hydrate/evict_local` from `0102` | ready |
+| volatile target publication and `attach_existing -> Operation[T]` | `0103`, `0096`, `0100` | ready |
+| shared dataplane for source selection and transport | materialize orchestrator, remote key source, export registry | ready |
+| daemon-served `list_workers/list_instances/get_worker_capacity` | only partially landed today | not ready |
+| reusable worker-local stable admission outside registration | current code is registration-bound | not ready |
+| inter-daemon control-plane subplan dispatch | current peer-daemon helpers are data-plane-only | not ready |
+| `ExecutePlan(public_continuation_required)` | reserved but not supported in daemon ingress | not ready |
+| issue-time rollout strategy on `register/put` | not landed | not ready |
+| cluster-durable rollout observation on top of generic `Operation[T]` | generic operation substrate exists; rollout owner does not | not ready |
+
+Repository rule:
+
+- `0104` may depend on the ready rows above,
+- it must not assume the non-ready rows are already closed,
+- and it must stage its first implementation around the ready worker-realization
+  slice before claiming full cluster-workflow closure.
 
 # Problem Statement
 
-## 1. `ArtifactSetRef` exists, but worker-local stable readiness does not
+## 1. `prefetch_set` is intentionally narrow, but rollout needs a stronger worker contract
 
-`0056` correctly introduced `ArtifactSetRef` as the high-cardinality control unit.
-It also intentionally kept `prefetch_set` narrow:
+`0056` correctly defines `prefetch_set` as scalable worker-set warmup over
+`ArtifactSetRef`.
 
-- it is worker-layer data-plane warmup,
-- it reports worker-local readiness only,
-- and it must not silently claim `local_stable_ready`.
+It also correctly constrains that action:
 
-That restraint is correct, but it leaves a real gap for scenarios that require more than warmup:
+- worker scope only,
+- readiness floor only,
+- and no silent upgrade from `device="dram"` to `local_stable_ready`.
+
+That contract is sound, but it leaves a missing worker-level primitive for:
 
 - weight rollout to inference workers,
-- training-cluster issue then remote steady-state retention,
-- and any cluster workflow that needs a true worker-local stable barrier before instance hydration or activation.
+- source issue followed by target steady-state retention,
+- and any barrier that requires a real worker-local stable placement before
+  hydration or activation.
 
-The repository therefore needs an explicit worker-local realization contract rather than overloading `prefetch_set`.
+The repository therefore needs an explicit worker-local realization action
+instead of overloading `prefetch_set`.
 
-## 2. `publish` is now correctly narrow, so replication needs a different owner
+## 2. Stable admission already exists, but it is still registration-bound
 
-`0103` correctly narrows `publish`:
+Current local stable semantics are real and valuable:
 
-- it is a publication subject over volatile target memory,
-- it is not artifact-global truth,
-- and multi-target replication intent belongs to orchestration above it.
+- registration resolves `StorePolicy`,
+- the daemon may admit a local stable tier synchronously,
+- and callers already receive `local_stable_tier` results.
 
-That means the repository can no longer use the word "publish" to ambiguously mean:
+However, the implementation is still wired through registration metadata and
+registration commit flow.
 
-- source-side artifact issue,
-- worker-local stable placement,
-- target-side volatile slot promotion,
-- and cluster-wide version rollout.
+That is not yet the same abstraction as:
 
-Those are different scopes and need different contracts.
+- materialize an already-issued artifact on a target worker,
+- admit a target-local stable replica,
+- and report worker-local steady-state readiness independently of source issue.
 
-## 3. Current remote stable persistence is not the same thing as rollout readiness
+The missing piece is a reusable stable-realization kernel that sits below both:
 
-Current `policy` and `StartPersistence` semantics already talk about remote stable DRAM, but today's implementation is
-still persistence-oriented:
+- registration-time local stable admission,
+- and rollout-time worker realization.
+
+## 3. Rollout target identity is still too implicit
+
+`0055` and `0056` already treat stable target identity as config-derived and
+artifact-external:
+
+- workers are identified by `daemon_id`,
+- instances are identified by `instance_id`,
+- and addresses are transport details rather than stable workflow identity.
+
+But the repository does not yet expose a fully consistent daemon-served target
+directory for rollout callers:
+
+- `WorkerDirectoryCache` exists internally for routed paths,
+- SDK signals expose only `get_worker_status()` today,
+- and instance directory caching is not yet mirrored on the daemon side.
+
+If rollout intent accepts bare strings without a canonical resolution path, the
+project will grow a second target-selection dialect.
+
+## 4. Persistence remote stable and rollout readiness are not the same contract
+
+Current `StartPersistence` and remote stable tiers are durability-oriented:
 
 - placement planning,
-- memory-tier lease planning,
-- status reporting,
-- and remote-presence style metadata publication.
+- lease planning,
+- degraded-vs-required status,
+- and remote presence or policy satisfaction.
 
-That is not yet the same contract as:
+Rollout worker readiness asks a different question:
 
-- target daemon has a real local CPU DRAM replica,
-- stable admission is complete,
-- and the worker is ready to serve as a local source for the next wave or for instance hydration.
+- did the target worker actually materialize a local DRAM replica,
+- did that target finish local stable admission,
+- and can that worker now act as a steady-state local source or hydration base.
 
-The repository must keep those two contracts separate:
+The repository must continue treating those as separate contracts even if they
+reuse some of the same machinery.
 
-- persistence remains a backing and durability workflow,
-- rollout realization is an execution-readiness workflow.
+## 5. Current deployment helpers are persistence-driven rather than rollout-driven
 
-## 4. Training clusters should be issuers, not forced steady-state owners
+`WeightPublisher` today still centers on:
 
-For weight rollout, the common desired behavior is:
+- source-side `put/register`,
+- optional persistence waiting,
+- key mapping verification,
+- external reload trigger,
+- and GC.
 
-- weights exist in trainer CPU or GPU memory,
-- a source artifact is issued,
-- target inference workers realize local stable replicas,
-- and the training side drops its transient backing once rollout readiness is reached.
+That is useful, but it does not make rollout semantics first-class:
 
-If the repository keeps assuming that source issue implies long-lived local full-replica retention, it will continue to
-optimize the wrong steady state for this class of deployments.
+- there is no explicit worker-local stable barrier,
+- there is no rollout-owned source closeout contract,
+- and persistence state is too close to being treated as rollout completion.
 
-The missing abstraction is a source model that explicitly separates:
+`0104` needs to define the generic rollout substrate first so deployment helpers
+become thin wrappers over canonical rollout contracts rather than the semantic
+owner of cross-worker replication.
 
-- source artifact truth,
-- transient source backing,
-- and target steady-state worker-local replicas.
+## 6. The repository should deepen the framework, not fork it
+
+The core design pressure here is architectural, not only API-shaped.
+
+After `0055`, `0056`, `0102`, and `0103`, the right move is:
+
+- deepen worker realization,
+- deepen orchestration,
+- and keep all execution paths on the same programmable spine.
+
+The wrong move would be:
+
+- a rollout-private transport engine,
+- a rollout-private attach family,
+- a rollout-private target directory,
+- or a "weights publish" control plane that bypasses `PlanSpec`.
 
 # Ownership Boundary
 
@@ -181,238 +255,302 @@ The missing abstraction is a source model that explicitly separates:
 | Concern | Canonical object or contract | Owner |
 | --- | --- | --- |
 | artifact value and selection truth | `Artifact`, `ArtifactSelection`, `SelectionIdentity` | `0055`, `0078`, `0087` |
+| set transport and runtime front door | `ArtifactSetRef`, `Runtime`, daemon ingress, signals | `0056` |
 | source capability and backing truth | `ResolvedSourceCapability`, backing truth | `0093` |
-| lifecycle capability and protection | lifecycle kernel, capability families | `0094` |
-| workflow gate, replay, wait, and completion | workflow semantic plane | `0096` |
-| public continuation and routed attach surfaces | `Operation[T]` and public continuation algebra | `0100` |
-| engine manifest production and bridge into `ArtifactSetRef` | engine integration layer | `0102` |
-| volatile target publication subject | `PublicationSubjectKey`, `PublicationInstanceId`, `publish` modes | `0103` |
-| set transport, runtime, ingress, signals | `ArtifactSetRef`, `Runtime`, daemon ingress | `0056` |
-| worker-local stable realization and cluster rollout over sets | `realize_set`, rollout intent, rollout barrier, rollout path diagnostics | `0104` |
+| lifecycle capability and protection | lifecycle kernel and capability families | `0094` |
+| workflow gate and attach semantics | workflow semantic plane | `0096` |
+| public continuation contract | `Operation[T]`, `OperationRef`, continuation algebra | `0100` |
+| instance-side artifact verbs | `manifest/publish/hydrate/evict_local` | `0102` |
+| volatile target publication subject | `PublicationSubjectKey`, `PublicationInstanceId`, `publish` | `0103` |
+| worker-local stable realization kernel | `realize_set`, worker readiness, path diagnostics | `0104` |
+| cluster rollout orchestration kernel | rollout intent, rollout barrier, source closeout, typed child-stage composition | `0104` |
 
 Normative rules:
 
-1. `0104` must not redefine `ArtifactSetRef`; it consumes the set contract from `0056`.
-2. `0104` must not redefine `publish`; it composes child publication-subject actions from `0103`.
-3. `0104` must not invent a new attach or status family; it reuses `Operation[T]` and `0096`/`0100`.
-4. `0104` owns worker-local stable realization and cluster rollout semantics only.
-5. `0104` may recommend new plan actions or result carriers, but they must remain canonical artifact-first actions
-   rather than engine- or business-specific aliases.
+1. `0104` consumes `ArtifactSetRef` directly and must not define a second
+   high-cardinality set carrier.
+2. `0104` may add `RealizeSetAction` because `0056` explicitly reserved the
+   stronger worker-readiness seam, but it must not change the meaning of
+   `prefetch_set`.
+3. `0104` must not redefine `publish`; optional publication is composed from
+   child `0103` actions.
+4. `0104` must not redefine `hydrate`; optional hydration is composed from child
+   `0102` actions.
+5. `0104` must reuse `Operation[T]` for public observation and must not create a
+   rollout-private continuation family.
+6. `0104` must compile to the canonical `PlanSpec -> daemon / NodeAgent /
+   EngineAdapter` execution spine rather than inventing a second execution
+   substrate.
+7. `0104` must not require direct SDK connections to Global Store; rollout
+   target discovery and directory access remain daemon-served.
 
 # Goals / Non-Goals
 
 ## Goals
 
-- Define one explicit worker-local stable realization contract for `ArtifactSetRef`.
-- Define one cluster rollout contract that composes worker realization, optional volatile publication, and instance
-  hydration without collapsing those scopes.
-- Keep the rollout control unit artifact-first and set-first rather than weight- or KV-specific.
-- Allow training clusters to issue source artifacts without requiring long-lived local full-replica retention.
-- Reuse the existing shared dataplane for source selection, transport, and stable admission.
-- Make path selection largely automatic and diagnostics-rich rather than parameter-heavy.
-- Keep `WeightPublisher` and similar helpers as thin callers on top of this generic rollout layer.
+- Define one explicit worker-local stable realization kernel over
+  `ArtifactSetRef`.
+- Define one rollout orchestration kernel above that realization kernel rather
+  than flattening all replication into `publish`.
+- Keep rollout target identity stable and config-derived:
+  - workers by `daemon_id`
+  - instances by `instance_id`
+- Reuse the existing shared dataplane for source selection, transport,
+  materialization, and stable admission.
+- Introduce additive daemon-served directory surfaces needed by rollout:
+  - `list_workers`
+  - `list_instances`
+  - `get_worker_capacity`
+- Keep rollout observation on `Operation[T]`.
+- Make `WeightPublisher` and similar helpers thin callers on top of the same
+  realization and rollout kernels.
+- Expose a typed rollout barrier contract that later designs such as `0105` may
+  depend on.
 
 ## Non-Goals
 
-- Redefine `put`, `register`, `seal`, or assembly semantics.
-- Redefine `prefetch_set` as silently stronger than its current readiness floor.
+- Redefine `prefetch_set` as silently stronger than `local_replica_ready`.
 - Redefine `publish` to mean cross-worker replication.
-- Turn current persistence remote stable semantics into rollout semantics by documentation fiat.
-- Introduce a second high-cardinality set model beside `ArtifactSetRef`.
-- Introduce a second public continuation family beside `Operation[T]`.
-- Define low-level RDMA protocol or communicator behavior beyond existing shared dataplane rules.
-- Make Global Store a high-cardinality per-item rollout hot path.
+- Redefine persistence remote stable success as rollout success.
+- Introduce a second execution substrate beside `PlanSpec`.
+- Introduce a rollout-private engine adapter verb such as `engine.rollout(...)`.
+- Turn the reserved `cluster_action` slot into the v1 owner of rollout truth.
+- Add a per-item rollout hot path or per-item rollout table to Global Store.
+- Make `put(..., strategy=...)` dependency-ready before source semantics are
+  made honest for transient-source rollout.
 
 # Architecture & Interfaces
 
-## 1. Conceptual stack
+## 1. Two-layer kernel
 
 ```mermaid
 flowchart TB
-  A["Artifact or ArtifactSetRef<br>what items"] --> B["Worker realization<br>realize_set"]
-  B --> C["Optional volatile target publish<br>0103 subject"]
-  B --> D["Instance hydrate<br>0102 projection"]
-  C --> D
-  D --> E["Rollout barrier<br>cluster ready"]
-  E --> F["Source retention closeout<br>drop or keep"]
+  A["Artifact or ArtifactSetRef"] --> B["Layer 1<br>worker-local realization kernel"]
+  B --> C["worker-local readiness<br>local_replica_ready or local_stable_ready"]
+  C --> D["Layer 2<br>cluster rollout orchestration kernel"]
+  D --> E["optional child publish<br>0103 owner"]
+  D --> F["optional child hydrate<br>0102 owner"]
+  E --> G["rollout barrier"]
+  F --> G
+  G --> H["source closeout / activation timing"]
 ```
 
-Key rule:
+Kernel split:
 
-- rollout composes scoped realizations; it does not flatten them into one meaning of `publish`.
+- Layer 1 owns worker-local placement and readiness.
+- Layer 2 owns cluster barrier, optional child-stage composition, and source
+  closeout timing.
 
-## 2. Worker-local realization
+Long-term rule:
 
-### 2.1 Realization scope
+- worker realization is not cluster truth,
+- cluster rollout is not target-publication truth,
+- and target publication is not artifact truth.
 
-`0104` introduces a worker-local action stronger than warmup:
+## 2. Canonical target identity and resolution
 
-- `realize_set`
+### 2.1 Stable target ids
 
-`realize_set` means:
-
-- resolve each item in the `ArtifactSetRef`,
-- materialize it on the target worker,
-- and satisfy an explicit worker-local readiness contract.
-
-Current dependency-ready readiness kinds:
-
-- `local_replica_ready`
-- `local_stable_ready`
-
-Repository rule:
-
-- `prefetch_set` remains warmup-oriented and defaults to `local_replica_ready`,
-- `realize_set` is the action that may claim `local_stable_ready`.
-
-### 2.2 `realize_set` contract
-
-Suggested plan-layer shape:
+Recommended typed inputs:
 
 ```python
 @dataclass(frozen=True, slots=True)
-class ArtifactSetRealizationResult:
-    set_digest_hex: str
-    readiness_kind: str
-    outcomes: Sequence["ArtifactSetItemResult"]
-    selected_path_profile: str | None = None
-    degraded_reason: str | None = None
+class WorkerRealizationIntent:
+    artifact_set_ref: ArtifactSetRef
+    worker_daemon_ids: tuple[str, ...]
+    desired_readiness: Literal[
+        "local_replica_ready",
+        "local_stable_ready",
+    ] = "local_stable_ready"
+    placement: Literal["dram"] = "dram"
+    source_closeout: Literal[
+        "keep_source",
+        "drop_on_barrier",
+        "keep_until_ttl",
+        "best_effort",
+    ] = "drop_on_barrier"
+    source_closeout_ttl_ms: int | None = None
 
+
+@dataclass(frozen=True, slots=True)
+class PublicationStageIntent:
+    instance_ids: tuple[str, ...]
+    engine_request_id: str
+    ttl_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HydrationStageIntent:
+    instance_ids: tuple[str, ...]
+    engine_request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRolloutIntent:
+    worker_realization: WorkerRealizationIntent
+    publication: PublicationStageIntent | None = None
+    hydration: HydrationStageIntent | None = None
+    barrier_kind: Literal[
+        "workers_ready",
+        "targets_published",
+        "instances_hydrated",
+    ] = "workers_ready"
+    allow_partial: bool = False
+```
+
+Normative rules:
+
+1. worker targets are identified by `daemon_id`, not by address and not by a
+   caller-defined alias.
+2. instance targets are identified by `instance_id`, not by an ad hoc string.
+3. rollout inputs must not overload one string field to mean:
+   - stable target identity,
+   - transport address,
+   - and user-facing label.
+4. if `source_closeout="keep_until_ttl"`, `source_closeout_ttl_ms` is required.
+5. `barrier_kind` names rollout-owned cluster progression, not worker-local
+   readiness.
+
+### 2.2 Directory substrate
+
+`0104` depends on the daemon-served directory direction from `0056`.
+
+Required additions:
+
+- `DirectoryController` on the daemon front door,
+- `InstanceDirectoryCache` alongside existing `WorkerDirectoryCache`,
+- and SDK signal methods that resolve through the connected daemon:
+  - `runtime.signals().list_workers(...)`
+  - `runtime.signals().list_instances(...)`
+  - `runtime.signals().get_worker_capacity(...)`
+
+Normative rules:
+
+1. rollout callers query workers and instances through the connected daemon, not
+   by opening direct SDK connections to Global Store.
+2. daemon caches may be bounded-staleness, but they must expose freshness
+   evidence and fail closed when the budget is exceeded.
+3. rollout compilation may resolve addresses from those caches, but addresses are
+   transport details and must not become rollout identity.
+4. `0104` must not define a second target directory surface beside the `0056`
+   signals and directory model.
+
+## 3. Worker-local stable realization kernel
+
+### 3.1 Public contract
+
+`0104` adopts a distinct worker action:
+
+- `realize_set`
+
+Preferred `plan.proto` shape:
+
+```proto
+enum RealizationPlacement {
+  REALIZATION_PLACEMENT_UNSPECIFIED = 0;
+  REALIZATION_PLACEMENT_DRAM = 1;
+}
+
+enum RealizationReadinessKind {
+  REALIZATION_READINESS_KIND_UNSPECIFIED = 0;
+  REALIZATION_READINESS_KIND_LOCAL_REPLICA_READY = 1;
+  REALIZATION_READINESS_KIND_LOCAL_STABLE_READY = 2;
+}
+
+message RealizeSetAction {
+  ArtifactSetRef artifact_set = 1;
+  RealizationPlacement placement = 2;
+  RealizationReadinessKind desired_readiness = 3;
+}
+```
+
+Recommended SDK surface:
+
+```python
 class WorkerStepBuilder:
     def realize_set(
         self,
         art_set: ArtifactSetRef,
         *,
-        placement: str | int = "dram",
-        readiness_kind: str = "local_stable_ready",
-        policy: "StorePolicy | None" = None,
+        placement: Literal["dram"] = "dram",
+        readiness_kind: Literal[
+            "local_replica_ready",
+            "local_stable_ready",
+        ] = "local_stable_ready",
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
-    ) -> PlanStepRef[ArtifactSetRealizationResult]: ...
+    ) -> PlanStepRef[ArtifactSetResult]: ...
 ```
 
 Normative rules:
 
-1. `realize_set` consumes `ArtifactSetRef` directly; it does not invent another set carrier.
-2. `placement="dram"` and `readiness_kind="local_stable_ready"` is the first dependency-ready profile.
-3. `local_stable_ready` requires actual worker-local stable admission, not just a daemon-owned CPU replica.
-4. `realize_set` must not succeed with `local_stable_ready` if the daemon only reached `local_replica_ready`.
-5. Partial per-item outcomes remain visible in the result; the step-level failure policy remains action-specific.
-6. `policy` remains a storage and retention contract, not a rollout-governance contract.
+1. `prefetch_set` remains the normative scalable warmup action from `0056`.
+2. `realize_set` is the explicit stronger worker action when the caller needs a
+   stronger contract than warmup.
+3. in the first implementation wave, `placement="dram"` is the only
+   dependency-ready target placement for stable realization.
+4. `realize_set(..., readiness_kind="local_stable_ready")` must not succeed if
+   the worker only reached `local_replica_ready`.
+5. the public action remains artifact-first and set-first; there is no
+   weight-specific alias in proto or framework core.
 
-### 2.3 Relation to current local stable tier code
+### 3.2 Result family
 
-The worker-local stable contract should converge on existing local stable machinery instead of inventing a second
-concept:
+`0104` should extend the existing batch result family rather than creating a
+second rollout-private result tree.
 
-- `LocalStableTierService`
-- `StoreEngine::admit_stable_cache_policy(...)`
-- existing local stable tier result vocabulary
-
-Normative rules:
-
-1. `realize_set(..., readiness_kind="local_stable_ready")` must reuse the daemon's stable admission path.
-2. Worker-local stable realization is a local decision and must not require a Global Store round trip in the success
-   path.
-3. The result should project local stable success or degradation honestly rather than silently downgrading to replica
-   warmup.
-
-## 3. Cluster rollout
-
-### 3.1 `ArtifactRolloutIntent`
-
-`0104` introduces a parent orchestration concept:
+Recommended additive shape:
 
 ```python
 @dataclass(frozen=True, slots=True)
-class ArtifactRolloutIntent:
-    artifact_set_ref: ArtifactSetRef
-    worker_targets: Sequence[str]
-    instance_targets: Sequence[str] = ()
-    worker_readiness_kind: str = "local_stable_ready"
-    include_target_publication: bool = False
-    source_retention_mode: str = "drop_on_rollout_ready"
-    allow_partial: bool = False
+class ArtifactSetResult:
+    set_digest_hex: str
+    outcomes: tuple[ArtifactSetItemResult, ...]
+    observed_readiness_kind: str | None = None
+    path_profile: str | None = None
+    degraded_reason: str | None = None
 ```
 
-This is not a second truth object.
-It is a workflow input that compiles into canonical actions.
+Normative rules:
+
+1. partial per-item outcomes remain visible.
+2. readiness and path diagnostics are additive fields on the existing set-result
+   family.
+3. the step-level status must report degradation or failure honestly; it must
+   not silently downgrade success from `local_stable_ready` to
+   `local_replica_ready`.
+
+### 3.3 Internal decomposition
+
+`0104` should not treat current registration-time stable admission as the final
+reuse point.
+
+Recommended internal split:
+
+- `ReplicaMaterializationService`
+  - remains responsible for allocation, source selection, and data loading.
+- `StableRealizationService`
+  - new reusable kernel responsible for:
+    - materialize target-local DRAM replica
+    - request stable admission
+    - project readiness and path diagnostics
+- `LocalStableTierService`
+  - becomes a registration adapter over that reusable kernel rather than the
+    only owner of stable-realization logic.
 
 Normative rules:
 
-1. `artifact_set_ref` is the semantic payload of the rollout; worker and instance target lists are target scope only.
-2. `worker_readiness_kind` names the worker-local barrier required before instance hydration or source closeout.
-3. `include_target_publication` means target-side volatile publication subjects may be created, but those remain child
-   `0103` publishes.
-4. `source_retention_mode` governs transient source-backing closeout only; it does not alter artifact truth.
-5. `allow_partial=False` means rollout-ready requires the declared barrier to be fully satisfied.
+1. registration-time local stable admission and rollout-time worker realization
+   must converge on the same stable-realization kernel.
+2. `LocalStableTierService` should remain the registration-facing adapter because
+   registration still has its own policy-resolution and commit semantics.
+3. `0104` must not duplicate the materialization dataplane in a rollout-private
+   service.
 
-### 3.2 Rollout phases
+### 3.4 Path selection and diagnostics
 
-The canonical rollout phases are:
+Rollout path selection remains automatic and diagnostics-rich.
 
-1. source issue or source resolve
-2. worker realization
-3. optional child target publication
-4. instance hydration
-5. rollout barrier satisfaction
-6. source closeout and old-version retirement
-
-Normative rules:
-
-1. rollout barrier is a cluster workflow concept, not a worker-local readiness kind.
-2. optional target publication is never the same thing as worker realization.
-3. instance hydration is never inferred from worker realization.
-4. source closeout must happen after the rollout barrier selected by the intent, not before.
-
-## 4. Source model
-
-### 4.1 Source artifact truth vs transient source backing
-
-`0104` explicitly separates:
-
-- source artifact truth
-- transient source backing
-- target steady-state worker-local replicas
-
-Recommended source-retention modes:
-
-- `drop_on_rollout_ready`
-- `keep_until_ttl`
-- `best_effort`
-
-Training-weight rollout should default to:
-
-- `drop_on_rollout_ready`
-
-Normative rules:
-
-1. source issue does not imply long-lived local full-replica retention.
-2. rollout may depend on transient source backing while child worker realizations are running.
-3. once the selected rollout barrier is satisfied, source backing may be dropped according to the intent.
-4. source closeout must not mutate artifact truth or set identity.
-
-### 4.2 Relationship to persistence
-
-Current persistence remote stable semantics remain distinct:
-
-- persistence is a backing and durability workflow,
-- rollout realization is an execution-readiness workflow.
-
-Normative rules:
-
-1. current `StartPersistence` or remote stable policy success must not, by itself, be interpreted as `local_stable_ready`
-   on a target worker.
-2. rollout may reuse placement and memory-tier signals from persistence-oriented code, but not its semantics.
-3. if future persistence work gains real remote materialization, the shared pieces may converge, but the workflow
-   contracts remain separate.
-
-## 5. Automatic path selection
-
-### 5.1 Path families
-
-The system should choose data paths automatically and report them diagnostically.
-
-Recommended diagnostic path families:
+Recommended diagnostic path profiles:
 
 - `cpu_memfd_local_ingress`
 - `cpu_stream_local_ingress`
@@ -423,243 +561,273 @@ Recommended diagnostic path families:
 - `cpu_staged_pull_to_cpu_stable`
 - `disk_fallback_pull`
 
-These are diagnostics and observability labels, not user-facing identity.
+Selection rule:
 
-### 5.2 Selection rules
-
-Path selection should be split into two stages.
-
-#### Source ingress
-
-Source process or instance to issuer daemon:
-
-- CPU local source with memfd publish available
-  - prefer `cpu_memfd_local_ingress`
-- CPU local source without memfd publish
-  - fall back to `cpu_stream_local_ingress`
-- GPU local source
-  - prefer existing local GPU-backed ingress path
-
-#### Worker realization
-
-Issuer or source backing to target worker:
-
-- if source backing is GPU and RDMA direct read plus target CPU direct write are available
-  - prefer `gpu_direct_rdma_pull_to_cpu_stable`
-- else if source backing is GPU and RDMA staged transfer is available
-  - prefer `gpu_staged_rdma_pull_to_cpu_stable`
-- else if source backing is CPU and direct write is available
-  - prefer `cpu_direct_write_pull_to_cpu_stable`
-- else use staged communicator or MTCP pull
-- if the source path is unavailable but a policy-backed disk path exists
-  - allow `disk_fallback_pull`
+- stage 1 chooses source ingress into the issuer daemon,
+- stage 2 chooses worker realization into target-local stable DRAM.
 
 Normative rules:
 
-1. automatic selection must reuse the existing shared dataplane rather than creating a second rollout-private copy
-   engine.
-2. direct RDMA and staged RDMA are transport profiles, not different rollout semantics.
-3. the preferred steady state is target-local readiness, not source-local long-lived retention.
-4. path selection may consider source capabilities, target placement, and local stable headroom, but it must not
-   require many caller-specified tuning knobs in the default path.
+1. these are diagnostics, not semantic identity.
+2. default callers should not choose direct-RDMA vs staged-RDMA manually.
+3. path selection must reuse:
+   - `MaterializeOrchestrator`
+   - `RemoteKeySource`
+   - export capability flags from `MemoryExportRegistry`
+4. disk fallback may be used when source capability is unavailable and an honest
+   disk source exists, but that does not change rollout semantics.
 
-## 6. Relationship to `publish` from `0103`
+### 3.5 Relation to persistence
 
-`publish` remains optional in rollout and keeps its `0103` meaning:
-
-- one child publish subject over one target domain
-
-Typical rollout compositions:
-
-- source `publish` only
-  - source-side publication barrier before worker realization
-- worker `realize_set`
-  - target workers gain `local_stable_ready`
-- optional target `publish`
-  - target daemon or instance creates volatile routable subjects
-- target `hydrate`
-  - target engine realizes local execution state
+Persistence remains separate.
 
 Normative rules:
 
-1. rollout to many workers is many child worker realizations, not one publish subject.
-2. same artifact realized on multiple workers is legal and expected.
-3. optional target publication on many workers is many child publication subjects, not one shared publish workflow.
+1. current remote stable persistence success must not be interpreted as
+   `local_stable_ready` on a worker.
+2. rollout may reuse capacity signals, placement hints, and durability metadata
+   from persistence-oriented code, but not its semantic meaning.
+3. stable-realization failure and persistence degradation must remain separately
+   visible in results and telemetry.
 
-## 7. Relationship to `WeightPublisher`
+## 4. Cluster rollout orchestration kernel
 
-`WeightPublisher` and similar deployment helpers should become thin wrappers over rollout.
+### 4.1 Compiler model
 
-Recommended shape:
+Rollout is a compiler over canonical actions, not a second execution substrate.
 
-1. issue source artifact or source set
-2. compile rollout intent
-3. wait for worker-local stable barrier
-4. execute target hydration or reload
-5. trigger version switch only after the selected barrier is met
-6. retire source backing and old versions per policy
+Recommended internal carrier:
+
+```python
+@dataclass(frozen=True, slots=True)
+class RolloutBarrierRef:
+    rollout_id: str
+    barrier_kind: Literal[
+        "workers_ready",
+        "targets_published",
+        "instances_hydrated",
+    ]
+    artifact_set_digest_hex: str
+    target_scope_digest_hex: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledRollout:
+    plan: plan_pb2.PlanSpec
+    barrier_ref: RolloutBarrierRef
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRolloutResult:
+    rollout_id: str
+    barrier_ref: RolloutBarrierRef
+    worker_realization: ArtifactSetResult
+    publication_steps: tuple[PlanStepResult, ...] = ()
+    hydration_steps: tuple[PlanStepResult, ...] = ()
+    satisfied_barrier_kind: str | None = None
+    degraded_reason: str | None = None
+```
+
+Compiler phases:
+
+1. compile worker realization from `WorkerRealizationIntent`
+2. compile optional child publication stages
+3. compile optional child hydration stages
+4. compute rollout barrier
+5. execute source closeout only after the selected barrier is satisfied
 
 Normative rules:
 
-1. `WeightPublisher` must not become a second semantic owner for cross-worker replication.
-2. rollout is generic; weights are one important caller, not the owning domain.
+1. worker realization, publication, and hydration remain separate scopes even if
+   one rollout orchestrator composes them.
+2. rollout truth lives at cluster scope, not at worker scope and not at one
+   publication subject scope.
+3. the compiler must lower to canonical `PlanSpec` fragments and child action
+   families rather than inventing a rollout-private byte-moving primitive.
 
-## 8. Public SDK surface
+### 4.2 Dispatch and observation
 
-The repository needs two layers of public SDK surface:
+Recommended public front door:
 
-1. an issue-time convenience surface on `put/register`,
-2. and the fuller rollout-orchestration surface above it.
+```python
+class Runtime:
+    def rollout(
+        self,
+        intent: ArtifactRolloutIntent,
+        *,
+        ctx: CallContext | None = None,
+    ) -> Operation[ArtifactRolloutResult]: ...
+```
 
-The reason for the split is consistency:
+Recommended daemon front door:
 
-- `put/register` are already the canonical issue surfaces,
-- they are a natural place to request remote worker steady-state realization,
-- but they should not be overloaded with the full cluster workflow vocabulary for instance hydration, activation, and
-  multi-phase orchestration.
+- add `RolloutController`
+- add `StartRollout` RPC returning a public-safe `OperationRef`
+- persist rollout progress through the generic operation plane already used for
+  long-tail cluster-durable work
 
-### 8.1 Canonical issue-time surface
+Implementation staging rule:
 
-The canonical issue-time surface should be:
+- `Runtime.rollout(...)` and `StartRollout` remain the intended end-state front
+  door,
+- but the first code landing does not need to ship them before worker-local
+  realization, directory closure from `0106`, and inter-daemon control-plane
+  dispatch substrate are real,
+- otherwise `0104` would overclaim cluster rollout closure on top of missing
+  infrastructure.
 
-- top-level sugar:
-  - `tensorcast.put(..., strategy=...)`
-  - `tensorcast.register(..., strategy=...)`
-- canonical typed options field:
-  - `RegisterArtifactOptions.realization_strategy`
+Critical rule:
 
-Recommended shape:
+- rollout observation must reuse `Operation[T]`; `0104` does not create a new
+  wait/status/cancel family.
+
+Important dependency split:
+
+- `0104` v1 should not depend on `ExecutePlan(public_continuation_required)` or
+  on new inter-daemon control-plane dispatch,
+- because daemon ingress still supports `terminal_only` only and current
+  peer-daemon transport helpers are data-plane-only,
+- and `0104` does not need either substrate to close the first worker-local
+  realization plus worker-only barrier wave.
+
+### 4.3 Optional child publication and hydration stages
+
+Optional child stages remain owner-specific:
+
+- publication is still one `0103` child subject per target domain,
+- hydration is still one `0102` child instance realization per target instance.
+
+Normative rules:
+
+1. rollout to many workers is many child worker realizations, not one publish
+   subject.
+2. optional publication on many instances is many child publishes, not one
+   artifact-global publish workflow.
+3. optional hydration on many instances is many child hydrations, not one
+   implicit consequence of worker realization.
+4. `0104` must not add `EngineAdapter.rollout(...)`; it composes existing
+   `manifest/publish/hydrate` delegates only.
+
+Dependency-ready scope:
+
+- the worker-only rollout barrier (`workers_ready`) is the first dependency-ready
+  rollout slice,
+- remote child publication and hydration through daemon ingress remain follow-on
+  work until local instance-target execution is supported on that front door.
+
+### 4.4 Source closeout
+
+`0104` explicitly separates:
+
+- source artifact truth,
+- source backing,
+- and target steady-state worker-local replicas.
+
+Recommended closeout modes:
+
+- `keep_source`
+- `drop_on_barrier`
+- `keep_until_ttl`
+- `best_effort`
+
+Default for transient training issuer flows:
+
+- `drop_on_barrier`
+
+Normative rules:
+
+1. source closeout never mutates artifact truth or set identity.
+2. source closeout is gated by rollout barrier, not by persistence status alone.
+3. `keep_until_ttl` requires an explicit TTL field and must not inherit an
+   implicit timeout from unrelated retention settings.
+4. source closeout may release transient source backing after the selected
+   barrier without implying that the source daemon still owns steady-state
+   replicas.
+
+### 4.5 Rollout barrier contract and `0105`
+
+`0104` must expose a typed barrier contract, not just prose.
+
+Barrier contract:
+
+- `RolloutBarrierRef`
+- `barrier_kind`
+- `artifact_set_digest_hex`
+- target-scope digest
+
+Why this matters:
+
+- `0105` already reserves `rollout_gated_publish`,
+- and that closeout kind needs a typed child barrier contract rather than an
+  untyped hidden dependency.
+
+Normative rules:
+
+1. rollout barrier identity is separate from publication-subject identity.
+2. rollout barrier identity is separate from closeout-contract digest.
+3. later designs may depend on `RolloutBarrierRef`, but they must not reconstruct
+   rollout truth from an untyped string or from operation metadata alone.
+
+## 5. Public SDK surface
+
+### 5.1 Issue-time strategy
+
+Long-term ergonomic surface:
 
 ```python
 class RealizationStrategy(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    mode: Literal["local_only", "worker_rollout"] = "worker_rollout"
-    worker_targets: tuple[str, ...] = ()
+    mode: Literal["local_only", "worker_realization"] = "local_only"
+    worker_daemon_ids: tuple[str, ...] = ()
     placement: Literal["dram"] = "dram"
-    worker_readiness: Literal[
+    desired_readiness: Literal[
         "local_replica_ready",
         "local_stable_ready",
     ] = "local_stable_ready"
-    source_mode: Literal[
-        "transient",
-        "local_steady_state",
-    ] = "transient"
-    source_retention: Literal[
-        "drop_on_ready",
+    source_closeout: Literal[
+        "keep_source",
+        "drop_on_barrier",
         "keep_until_ttl",
         "best_effort",
-    ] = "drop_on_ready"
-    wait_for: Literal["issued", "workers_ready"] = "workers_ready"
-```
-
-Recommended convenience usage:
-
-```python
-artifact = tensorcast.put(
-    tensors,
-    key="model:llama:v123",
-    strategy=tensorcast.RealizationStrategy(
-        worker_targets=("daemon-a", "daemon-b"),
-    ),
-)
+    ] = "drop_on_barrier"
+    source_closeout_ttl_ms: int | None = None
+    wait_for: Literal["issued", "workers_ready"] = "issued"
 ```
 
 Normative rules:
 
-1. `strategy=` on `put/register` is convenience syntax only; the canonical typed surface should live in
+1. `strategy=` is convenience syntax over a typed field in
    `RegisterArtifactOptions`.
-2. `plan` in `RegisterArtifactOptions` keeps its existing meaning:
-   - local ingress and registration plan selection
-   - such as `dram_stable`, `lease`, or `coalesced`
-3. `realization_strategy` is a different layer:
-   - it governs the post-issue worker steady-state realization target
-   - and must not be conflated with `plan`
-4. `policy` also remains distinct:
-   - `policy` is backing and retention semantics,
-   - `realization_strategy` is issue-time orchestration and steady-state placement intent.
-5. the first dependency-ready strategy profile is:
-   - `mode="worker_rollout"`
-   - `placement="dram"`
-   - `worker_readiness="local_stable_ready"`
-   - `source_mode="transient"`
-   - `source_retention="drop_on_ready"`
-   - `wait_for="workers_ready"`
+2. `policy` remains backing and durability semantics.
+3. `plan` remains local ingress and registration-plan semantics.
+4. `strategy` is neither a replacement for `policy` nor a replacement for
+   explicit `Plan`.
+5. `mode="worker_realization"` requires non-empty `worker_daemon_ids`.
+6. `wait_for="workers_ready"` is only valid when worker realization is actually
+   requested.
+7. `source_closeout="keep_until_ttl"` requires `source_closeout_ttl_ms`.
 
-### 8.2 Why `put/register(strategy=...)` is the right convenience layer
+Dependency-ready first wave:
 
-This surface is more consistent than:
+- `register(..., strategy=...)`
 
-- overloading `policy`,
-- overloading `plan`,
-- or moving the entire scenario into a new top-level "weight publish" API.
+Declared but not dependency-ready first wave:
 
-Rationale:
+- `put(..., strategy=...)`
 
-1. from the user's point of view, this is still "issue an artifact", but with a different steady-state realization
-   strategy,
-2. source-side local stable retention is no longer the desired steady state in this profile,
-3. the issue-time surface is therefore the right place to select:
-   - local-only issue,
-   - or issue plus remote worker realization.
+Reason:
 
-### 8.3 What `put/register(strategy=...)` does and does not own
+- `register()` is already the more honest surface for transient or externally
+  backed source issuance,
+- while `put()` still implies a local stable source commit path today.
 
-`put/register(strategy=...)` should own only:
+### 5.2 Issue result and observation
 
-- source issue,
-- worker target selection,
-- worker-local realization barrier,
-- and source transient-backing closeout.
+Recommended additive fields on `RegisteredArtifact`:
 
-It should not become the owner of:
-
-- instance hydration,
-- target volatile publication subjects,
-- or version activation semantics.
-
-Those remain in:
-
-- rollout-orchestration helpers above this layer,
-- `Runtime.rollout(...)`,
-- `WeightPublisher`,
-- or other higher-level deployment workflows.
-
-Repository rule:
-
-- `put/register(strategy=...)` is the ergonomic shortcut for issue plus worker realization,
-- not the universal surface for every rollout phase.
-
-### 8.4 Full rollout surface remains above issue-time strategy
-
-The fuller orchestration surface is still needed for:
-
-- instance `hydrate`,
-- optional child `publish`,
-- activation barriers,
-- and old-version retirement.
-
-That fuller surface should remain above the issue APIs:
-
-- either `Runtime.rollout(...)`,
-- or a helper that compiles into the same canonical plan spine.
-
-Normative rules:
-
-1. `put/register(strategy=...)` and `Runtime.rollout(...)` must compile to the same underlying worker realization
-   semantics.
-2. the issue-time strategy surface is a subset convenience layer, not a second semantic owner.
-3. higher-level rollout helpers may accept a pre-issued artifact, an `ArtifactSetRef`, or a manifest bridge from
-   `0102`, but the issue-time strategy should stay focused on source issue plus worker realization.
-
-### 8.5 Return type and observation
-
-`put/register(strategy=...)` should continue returning `RegisteredArtifact`.
-
-Recommended additive fields:
-
-- `realization_operation_id: str | None`
-- `realization_result: ArtifactSetRealizationResult | None`
+- `realization_operation_ref: OperationRef | None`
+- `realization_result: ArtifactSetResult | None`
 
 Recommended helper:
 
@@ -670,152 +838,162 @@ result = op.result(timeout_s=...)
 
 Normative rules:
 
-1. `RegisteredArtifact` remains the return type; do not introduce a second issue-result top-level type.
-2. the realization follow-up must reuse `Operation[T]`, not a rollout-private continuation family.
-3. if `wait_for="workers_ready"` and the strategy completes inline, `realization_result` may be populated eagerly.
-4. if `source_mode="transient"` and local steady-state stable admission is intentionally skipped, the issuer-local
-   `local_stable_tier` result must report that honestly rather than implying local steady-state readiness.
+1. `RegisteredArtifact` remains the single top-level issue result type.
+2. realization observation reuses `Operation[T]`.
+3. if issue-time strategy completes inline, `realization_result` may be
+   populated eagerly.
+4. if realization continues asynchronously, `realization_operation_ref` must be
+   sufficient to reattach through the generic operation plane.
 
-### 8.6 Path selection and user knobs
+## 6. Delegate and Controller Topology
 
-The issue-time strategy must remain light on user knobs.
+`0104` does not need a new engine delegate family, but it does need a clearer
+control-plane split.
 
-Users should choose:
+Recommended additions and adjustments:
 
-- target workers,
-- desired worker readiness,
-- and source retention behavior.
+- `DirectoryController`
+  - daemon-served worker and instance directory plus worker-capacity snapshots
+- `InstanceDirectoryCache`
+  - daemon-side companion to `WorkerDirectoryCache`
+- `StableRealizationService`
+  - reusable worker-local stable realization kernel
+- `LocalStableTierService`
+  - narrowed into a registration adapter over `StableRealizationService`
+- `RolloutController`
+  - front door for `StartRollout` and rollout compilation / dispatch
 
-Users should not normally choose:
+Recommended no-op by design:
 
-- direct RDMA vs staged RDMA,
-- source ingress memfd vs stream,
-- or communicator-level transport modes.
+- do not add `EngineAdapter.rollout(...)`
+- do not add a rollout-private transport controller
+- do not add a rollout-private target-publication controller
 
-Those remain automatic path-selection concerns with diagnostic projection.
+## 7. Proto and Surface Implications
 
-Normative rules:
+### 7.1 Plan and NodeAgent
 
-1. the default strategy profile must strongly prefer remote worker steady-state DRAM placement with transient source
-   backing when users provide worker targets.
-2. transport and ingress profile selection remain automatic and diagnostics-rich.
-3. advanced tuning, when needed, should remain in unified config and daemon transport settings, not as a large new
-   put/register parameter family.
+Required additive changes:
 
-# Proto & Surface Implications
+- add `RealizeSetAction` to `plan.proto`
+- add realization enums for placement and readiness kind
+- extend `node_agent.v1.ArtifactSetResult` with:
+  - `observed_readiness_kind`
+  - `path_profile`
+  - `degraded_reason`
+- add SDK `WorkerStepBuilder.realize_set(...)`
+- add local runner and daemon-ingress execution support for `realize_set`
 
-## Plan surface
+### 7.2 Daemon front door
 
-`0104` recommends extending `plan.proto` with one worker-layer set action:
+Required additive changes:
 
-- `RealizeSetAction`
-
-This action should:
-
-- take `ArtifactSetRef`,
-- carry explicit placement and readiness kind,
-- and return a typed worker-local realization result.
-
-`0056` remains the owner of:
-
-- `ArtifactSetRef`,
-- ingress,
-- signals,
-- and plan transport.
-
-`0104` only owns the semantics of the new realization action and rollout composition.
-
-## Registration surface
-
-`0104` recommends extending the registration options family with:
-
-- `RegisterArtifactOptions.realization_strategy: RealizationStrategy | None`
-
-and adding top-level sugar:
-
-- `put(..., strategy=...)`
-- `register(..., strategy=...)`
-
-Normative rules:
-
-1. `strategy` and `realization_strategy` are aliases for the same semantic object.
-2. if both `strategy` and `options.realization_strategy` are provided, the SDK must either:
-   - require them to be semantically identical, or
-   - fail fast on mismatch.
-3. the SDK must reject contradictory combinations such as:
-   - `mode="worker_rollout"` with empty `worker_targets`,
-   - or `worker_readiness="local_stable_ready"` with non-DRAM placement in this phase.
-4. first-phase documentation should make clear that issue-time strategy covers worker realization only; fuller rollout
-   orchestration remains above it.
-
-## Runtime and helpers
-
-The long-term public shape may be either:
-
-- explicit plan building with `realize_set`, or
-- a helper that compiles `ArtifactRolloutIntent` into canonical plan fragments.
+- add daemon-served directory RPCs:
+  - `ListWorkers`
+  - `ListInstances`
+  - `GetWorkerCapacity`
+- add `StartRollout` RPC returning an `OperationRef`
 
 Repository rule:
 
-- any helper must compile to the same canonical action family rather than inventing a second orchestration substrate.
+- generic operation wait/status/cancel stay on the existing operation plane;
+  `0104` should not add rollout-specific wait/status RPCs if generic
+  `Operation[T]` already covers them.
 
-# Naming Compliance
+### 7.3 SDK registration and runtime
 
-The interfaces proposed by this design follow repository naming rules.
+Required additive changes:
+
+- add `RegisterArtifactOptions.realization_strategy`
+- add top-level `register(..., strategy=...)`
+- add `RegisteredArtifact.realization_operation()`
+- add `Runtime.rollout(...)`
+
+Follow-on changes:
+
+- `put(..., strategy=...)` once source semantics are made honest for that path
+
+## 8. Naming Compliance
+
+The interfaces proposed here follow repository naming rules.
 
 | Symbol | Kind | Required style | Result |
 | --- | --- | --- | --- |
-| `ArtifactRolloutIntent` | Python dataclass / C++ struct | `PascalCase` | pass |
-| `ArtifactSetRealizationResult` | Python dataclass / proto message | `PascalCase` | pass |
 | `RealizeSetAction` | proto message | `PascalCase` | pass |
+| `WorkerRealizationIntent` | Python dataclass / C++ struct | `PascalCase` | pass |
+| `ArtifactRolloutIntent` | Python dataclass / C++ struct | `PascalCase` | pass |
+| `RolloutBarrierRef` | Python dataclass / proto message | `PascalCase` | pass |
 | `realize_set` | Python method / C++ helper | `snake_case` | pass |
-| `compile_rollout_plan` | Python helper / C++ helper | `snake_case` | pass |
-| `REALIZATION_READINESS_LOCAL_STABLE_READY` | enum value | `ALL_CAPS` | pass |
+| `start_rollout` | RPC / helper name | `snake_case` | pass |
+| `REALIZATION_READINESS_KIND_LOCAL_STABLE_READY` | enum value | `ALL_CAPS` | pass |
 
 # Schema Changes
 
-None.
+None are required for the first worker-realization wave if rollout observation
+reuses the generic operation plane.
 
-This design intentionally avoids introducing:
+Repository rule:
 
-- a high-cardinality rollout table in Global Store,
-- a per-item rollout truth store,
-- or a second continuation registry beside existing operation and workflow owners.
+- `0104` must not introduce a per-item rollout table.
+- If a later phase needs rollout-owned durable summary state beyond generic
+  operation snapshots, it may introduce a low-cardinality rollout summary record,
+  not a high-cardinality item truth store.
 
-# Trade-offs & Risks
+# Trade-offs and Risks
 
-- Adding `realize_set` creates another worker action, but this is preferable to silently overloading `prefetch_set`.
-- Keeping persistence and rollout separate may feel repetitive, but conflating durability and readiness would be worse.
-- Automatic path selection improves operator ergonomics, but it requires strong diagnostics so degraded paths remain
-  understandable.
-- Source-transient rollout can increase pressure on source transport windows while rollout is active; that is an
-  operational trade, not a semantic flaw.
-- If rollout helpers are overgrown, they could start competing with `0056` itself; helpers must remain thin compilers to
-  canonical actions.
+- Adding `realize_set` increases worker action surface area, but that is cleaner
+  than silently overloading `prefetch_set`.
+- Requiring daemon-served directory closure adds prerequisite work, but skipping
+  it would create a second target-resolution dialect.
+- Making `register(..., strategy=...)` the first dependency-ready issue-time
+  surface is narrower than exposing both `put` and `register` at once, but it is
+  more honest about current source semantics.
+- Deferring rollout use of `ExecutePlan(public_continuation_required)` reduces
+  short-term cleverness, but it keeps `0104` aligned with current readiness in
+  `0100`.
+- If `RolloutController` starts executing bespoke transport logic instead of
+  compiling to canonical actions, the design will fork the framework rather than
+  deepen it.
 
-# Compatibility & Acceptance Criteria
+# Compatibility and Acceptance Criteria
 
-- `ArtifactSetRef` remains the only framework-owned set carrier consumed by the new layer.
-- `prefetch_set` semantics remain unchanged and do not silently claim `local_stable_ready`.
-- `realize_set(..., readiness_kind="local_stable_ready")` converges on actual worker-local stable admission.
-- current `publish` semantics from `0103` remain unchanged and are only composed as child actions.
-- current persistence remote stable semantics remain distinct from rollout readiness semantics.
-- rollout may drop transient source backing after the selected barrier without changing artifact truth.
-- automatic path selection reuses the existing shared dataplane and does not introduce a rollout-private copy engine.
-- `WeightPublisher`-style workflows can be expressed as source issue plus rollout plus hydrate without redefining
-  framework ownership boundaries.
+- `ArtifactSetRef` remains the only framework-owned set carrier.
+- `prefetch_set` semantics remain unchanged and continue to mean
+  `local_replica_ready` only.
+- `realize_set(..., readiness_kind="local_stable_ready")` converges on actual
+  worker-local stable admission.
+- worker targets are named by `daemon_id`; instance targets are named by
+  `instance_id`.
+- rollout target discovery and capacity queries flow through daemon-served
+  directory and signals surfaces rather than direct SDK-to-GS calls.
+- rollout compiles to canonical `PlanSpec` fragments and child action families
+  instead of a new execution substrate.
+- `publish` from `0103` remains optional child composition only.
+- persistence remote stable semantics remain distinct from rollout readiness.
+- `register(..., strategy=...)` is the first dependency-ready issue-time
+  strategy surface; `put(..., strategy=...)` is not implied by that first wave.
+- `WeightPublisher`-style workflows can be expressed as issue plus worker
+  realization plus optional external reload without becoming the semantic owner
+  of cross-worker replication.
+- `0105` can depend on a typed rollout barrier child contract rather than an
+  untyped rollout string.
 
 # References
 
-- `0055` for artifact-first programmable substrate and `Operation[T]`.
-- `0056` for `Runtime`, ingress, signals, and `ArtifactSetRef`.
-- `0078` and `0087` for value and selection semantics.
+- `0055` for artifact-first programmable primitives, stable target identity, and
+  `Operation[T]`.
+- `0056` for `ArtifactSetRef`, runtime / ingress / signals, and the explicit
+  `prefetch_set` readiness floor.
+- `0078` and `0087` for artifact value and selection semantics.
 - `0082` for CPU memfd local ingress optimization.
 - `0093` for source capability and backing truth.
 - `0094` for lifecycle capability families.
-- `0096` for workflow gate and completion semantics.
-- `0100` for public continuation and routed authority surfaces.
-- `0102` for engine manifest production and bridge into `ArtifactSetRef`.
-- `0103` for volatile publication subjects and multi-replica publish semantics.
-- `policy-persistence.md` for current persistence contract and why it must remain separate from rollout readiness.
-- `p2p-transfer-strategies.md` for the shared dataplane path family reused by rollout realization.
+- `0096` for workflow-semantic boundary and attach semantics.
+- `0100` for public continuation and routed-authority rules.
+- `0102` for canonical instance action vocabulary and manifest bridge.
+- `0103` for volatile publication-subject semantics.
+- `0105` for rollout-gated closeout that depends on a typed rollout barrier
+  contract.
+- `policy-persistence.md` for durability semantics that must remain distinct from
+  rollout readiness.
+- `p2p-transfer-strategies.md` for the shared dataplane reused by realization.

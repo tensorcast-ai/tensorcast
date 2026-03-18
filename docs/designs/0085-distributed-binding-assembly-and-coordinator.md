@@ -1,9 +1,9 @@
 ---
 slug: distributed-binding-assembly-and-coordinator
 title: Distributed Binding Assembly on the Existing Assembly and Layout Trunk
-status: proposed
+status: accepted
 created: 2026-03-14
-last_updated: 2026-03-18
+last_updated: 2026-03-19
 areas: ["sdk", "daemon", "core", "proto", "global_store"]
 related_code:
   - tensorcast/api/store/binding.py
@@ -24,7 +24,6 @@ related_code:
   - tensorcast/global_store/services/view_state_service.py
   - tensorcast/global_store/repositories/assembly_layout_binding_repository.py
   - tensorcast/global_store/repositories/artifact_binding_repository.py
-  - tensorcast/global_store/repositories/assembly_contribution_repository.py
 links:
   plan: ../plans/0085-distributed-binding-assembly-and-coordinator.md
   schema: ../../schema.sql
@@ -245,6 +244,37 @@ Parent-level rules:
 - no controller may rebuild a weaker substitute requirement set from layout hints
   after the attempt exists.
 
+### Exact Phase-1 Contract-Family Mapping
+
+The current dependency-ready wave has one exact phase-1 mapping.
+This mapping is canonical repository behavior, not a planner convention.
+
+Canonicalization rule before digesting or attempt creation:
+
+- drop empty structural view ids,
+- deduplicate,
+- sort lexicographically,
+- and then emit inline requirements in that canonical order.
+
+Exact family mapping:
+
+| Family | Canonical requirement entries | Notes |
+| --- | --- | --- |
+| `PP` | one entry per canonicalized structural view id with `slot_id = structural_view_id`, `target.kind = structural_view`, `target.structural_view_id = structural_view_id`, `coverage_contract = "pp_structural_view"` | `LayoutSpec.expected_view_ids` may seed this family for layout-shaped dependency-ready bridges, but only before attempt creation |
+| `EP` | one entry per canonicalized structural view id with `slot_id = structural_view_id`, `target.kind = structural_view`, `target.structural_view_id = structural_view_id`, `coverage_contract = "ep_structural_view"` | planner-owned expert placement must lower to deterministic structural view ids before attempt creation |
+| `canonical_full` | exactly one entry with `slot_id = "__canonical_full__"`, `target.kind = canonical_layout`, and `coverage_contract = "canonical_full"` | single-rank publish stays legal here and does not masquerade as a full-coverage piece |
+
+Contribution-time slot identity follows the same canonical mapping:
+
+- `piece_partial` occupies the requirement whose `slot_id` equals the committed
+  structural `view_id`,
+- `canonical_full` occupies the single `__canonical_full__` slot,
+- and seal consumes the snapped requirement set plus accepted occupancies rather
+  than rebuilding slots from layout hints.
+
+`TP > 1` stays explicitly out of scope for this phase.
+No frontend may invent a separate dependency-ready carrier that weakens the table above.
+
 ## Binding Frontend Reuses The Structural Registration Trunk
 
 `SealedBindingValue` from `0084` becomes one frontend onto the existing
@@ -313,6 +343,9 @@ The parent-level API direction remains:
 - attempt transition is explicit,
 - wait and status are observation only,
 - final success returns published lineage rather than a bare source artifact,
+- the current dependency-ready closeout wave returns real source lineage only,
+  with serving lineage remaining absent until typed child closeout contracts
+  exist,
 - and public continuation aligns with `0100`.
 
 # Consistency Model

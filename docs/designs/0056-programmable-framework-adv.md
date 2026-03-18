@@ -10,7 +10,7 @@ areas:
   - proto
   - docs
 created: 2026-02-04
-last_updated: 2026-03-17
+last_updated: 2026-03-19
 related_code:
   - tensorcast/api/plan/plan.py
   - tensorcast/node_agent/executor.py
@@ -30,6 +30,8 @@ related_docs:
   - docs/designs/0096-workflow-companion-admission-and-fencing.md
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
   - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
+  - docs/designs/0106-daemon-served-directory-and-target-resolution.md
+  - docs/designs/0104-artifact-realization-and-cluster-rollout.md
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0004-unified-runtime-config.md
 links:
@@ -47,6 +49,7 @@ links:
     - ./0096-workflow-companion-admission-and-fencing.md
     - ./0100-distributed-authority-handoff-security-and-public-surfaces.md
     - ./0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
+    - ./0106-daemon-served-directory-and-target-resolution.md
     - ./0004-unified-runtime-config.md
   schema: ../../schema.sql
 ---
@@ -81,6 +84,15 @@ Current repo reality already supports that direction:
 - canonical instance actions already exist in `plan.proto` and `node_agent.proto`,
 - NodeAgent already exposes `ExecutePlan`,
 - and `SelectionIdentity` already exists as the canonical per-item identity.
+
+Current implementation posture is narrower than the full long-term shape:
+
+- the first real daemon ingress slice is only worker-targeted plus `terminal_only`,
+- NodeAgent remains the only dependency-ready instance-scoped execution host,
+- the exact daemon-served directory and `NodeAgentDirectory` contract is now
+  factored into `0106`,
+- and inter-daemon control-plane dispatch is still follow-on work rather than
+  ready substrate.
 
 The remaining problem is therefore front-door convergence, not invention of another execution substrate.
 
@@ -379,7 +391,10 @@ Normative rules:
 
 1. the NodeAgent or Instance Agent boundary remains the unique instance-scoped execution host in this phase,
 2. callers never address instance hosts directly,
-3. instance routing remains `instance_id -> daemon_id`, with daemon-local transport resolution behind that mapping,
+3. stable caller-facing instance identity remains `instance_id`, while the
+   dependency-ready execution directory resolves `instance_id -> {daemon_id,
+   node_agent_endpoint}` through the daemon-served bounded-staleness contract
+   frozen in `0106`,
 4. `TargetSpec` minting and resolution remain engine-adapter responsibilities outside `0056`; framework code may carry
    `TargetSpec`, but it does not own target-capability mint semantics,
 5. `0056` must not introduce a second config surface, registration flow, or heartbeat contract for instance hosting.
@@ -397,7 +412,8 @@ Current baseline from `0055`:
 Planned extension from `0056`:
 
 - `StoreDaemonService.ExecutePlan(ExecutePlanRequest)` may execute the same `PlanSpec` through a daemon ingress role,
-- non-gateway daemons may still execute plan fragments dispatched by another daemon,
+- a future non-local dispatcher may execute plan fragments on peer daemons, but
+  that dispatch substrate is not dependency-ready in the current repo,
 - instance steps still resolve to `target daemon -> local NodeAgent or Instance Agent`.
 
 Normative rules:
@@ -413,6 +429,27 @@ Normative rules:
    the caller-visible request has ended,
 6. `0056` must not invent `PlanHandle`, `AttachPlan`, `GetPlanStatus`, or another plan-private continuation family,
 7. plan targets are stable identities (`daemon_id`, `instance_id`), not caller-supplied addresses.
+
+## Execution spine readiness split
+
+`0056` must separate long-term shape from dependency-ready closure.
+
+| Execution concern | Current repo state | Dependency readiness |
+| --- | --- | --- |
+| local worker plan execution through caller-local `Plan.run()` | landed | ready |
+| daemon ingress for worker-targeted `terminal_only` plans on the ingress daemon | landed | ready |
+| direct NodeAgent instance execution (`NodeAgent.ExecutePlan`) | landed | ready |
+| local runner closing instance steps through NodeAgent discovery and client routing | not landed | not ready |
+| daemon-local bridge from ingress daemon to local NodeAgent or in-process Instance Agent | not landed | not ready |
+| daemon-served full worker or instance directory and `NodeAgentDirectory` contract | partially specified today; exact contract moved to `0106` | not ready |
+| inter-daemon control-plane plan dispatch | transport helpers exist only for data-plane paths today | not ready |
+
+Repository rule:
+
+- child designs may depend only on rows marked ready above,
+- they must not treat declared future topology as already available substrate,
+- and `0056` itself must document each phase boundary explicitly rather than
+  hiding it inside prose about the end state.
 
 ## Next implementation slice: local-only terminal ingress
 
@@ -799,6 +836,12 @@ Normative rules:
 3. gateway and local runner implementations must share the same readiness floor; one implementation must not upgrade
    `prefetch_set` to `local_stable_ready` while the other treats it as replica-only warmup.
 
+Cross-design consequence:
+
+- the follow-on stronger worker action is owned by `0104`, not by `0056`,
+- and `0104` may add `realize_set` or an equivalent explicit worker-local
+  readiness action while keeping `prefetch_set` unchanged.
+
 ## Engine manifest boundary
 
 Current engine integrations already expose `ManifestResult`, but `0056` treats that as an integration-side carrier only.
@@ -831,6 +874,13 @@ Normative rules:
    `prefetch_set`,
 3. reserving this extension seam does not grant `0056` ownership of cluster workflow state.
 
+Cross-design consequence:
+
+- `0104` is the first intended consumer of this reserved cluster seam for
+  rollout orchestration,
+- but `0104` must still keep rollout truth, barriers, and source-closeout
+  semantics outside `0056`.
+
 ## Transport-slot reservation for future cluster actions
 
 Preserving an extension seam in prose is not enough.
@@ -858,6 +908,12 @@ Normative rules:
    - or cluster truth.
 4. if the plan IR cannot yet carry a cluster-scoped target or action envelope, the design must treat that as a known
    follow-up gap rather than as "already reserved by convention."
+
+Cross-design consequence:
+
+- `0104` may compile rollout kernels through this slot in a later phase,
+- but the slot itself remains an execution seam only; it is not the owner of
+  rollout barrier truth or `Operation[T]` semantics.
 
 # Signals and Directory
 
@@ -896,7 +952,18 @@ Normative rules:
    reservation or truth guarantees,
 5. public signal snapshots must expose enough freshness evidence to distinguish bounded-current from degraded or stale
    answers,
-6. adapter-owned execution signals are advisory only and must not replace TensorCast truth or lifecycle state.
+6. adapter-owned execution signals are advisory only and must not replace TensorCast truth or lifecycle state,
+7. `0056` owns the rule that programmable callers consume daemon-served
+   directory surfaces, while `0106` owns the exact worker, instance, and
+   `NodeAgentDirectory` contract plus the migration off SDK-direct GS reads.
+
+Read-model boundary:
+
+- daemon-served directory and signals are bounded-staleness read models over
+  lower truth layers,
+- they are not a new membership or workflow truth layer,
+- and exact SoT ownership for those questions remains frozen in `0106` and the
+  deeper owner designs.
 
 ## Watch correctness contract
 

@@ -187,8 +187,9 @@ The correct distributed publish shape is therefore:
 - one explicit snapped contribution contract per publish attempt
 - many local sealed-value `contribute_to_assembly(...)` operations
 - one coordinator-triggered source `seal_assembly(...)`
-- one published model-version result carrying source lineage and, when needed,
-  serving lineage
+- one published model-version result carrying source lineage now
+- and a serving-lineage extension only after typed child closeout contracts
+  exist
 
 ### What TensorCast Must Do
 
@@ -203,8 +204,10 @@ TensorCast must own:
 - distributed completion tracking
 - contributor liveness through the existing lease/guard/finalizer runtime
 - final source `seal_assembly(...)`
-- optional source -> serving builder or publisher
-- final immutable version-key and manifest publication
+- source immutable version-key publication in the current dependency-ready wave
+- optional source -> serving builder or publisher only in the successor wave
+  after typed child closeout contracts exist
+- final serving-key or serving-manifest publication only in that successor wave
 
 `steptron` should not:
 
@@ -236,8 +239,10 @@ serving split:
 
 - training local binding first seals a local value; TensorCast then promotes it
   through the assembly trunk into a source artifact
-- TensorCast builder or publish path produces the serving artifact as part of
-  the same published model-version lineage
+- the current dependency-ready wave stops at source published lineage and
+  returns `PublishedModelVersion` with serving fields unset
+- a later typed closeout wave may extend that same lineage with a serving
+  artifact
 - `internal-vllm` consumes the serving artifact
 
 Do not force `internal-vllm` back into consuming arbitrary training-local
@@ -275,9 +280,11 @@ layouts at reload time.
 2. Land single-rank `seal_current(...)` plus legal same-trunk publish
    (`canonical_full` or deterministic multi-view contract).
 3. Land distributed sealed-value contribution + source assembly for `TP1`.
-4. Land source -> serving publication and immutable serving-key output.
-5. Point `internal-vllm` at the published serving versions and validate reload.
-6. Only after that, expand toward `TP > 1` range coverage and
+4. Land typed child closeout contracts for source -> serving publication.
+5. Land serving publication and immutable serving-key output on that same
+   lineage.
+6. Point `internal-vllm` at the published serving versions and validate reload.
+7. Only after that, expand toward `TP > 1` range coverage and
    transform-aware assembly.
 
 ## Common Failure Modes To Watch

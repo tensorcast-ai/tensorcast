@@ -4,10 +4,11 @@ title: Plan - Programmable Framework Advanced Runtime, Ingress, and Signals
 status: in_progress
 areas: ["sdk", "daemon", "global_store", "proto", "integrations", "docs"]
 created: 2026-03-04
-last_updated: 2026-03-17
+last_updated: 2026-03-19
 related_code:
   - docs/designs/0056-programmable-framework-adv.md
   - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
+  - docs/designs/0106-daemon-served-directory-and-target-resolution.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0055-programmable-framework.md
   - tensorcast/api/plan/artifact_set.py
@@ -65,6 +66,9 @@ This plan explicitly does not turn `0056` into:
   target-backed publish; `0056` must reuse that substrate rather than reopen it.
 - `0102` now owns engine manifest production, engine request context, alias policy, and the bridge from engine-side
   manifest carriers into `ArtifactSetRef`.
+- the exact daemon-served directory, bounded-staleness target identity, and
+  `NodeAgentDirectory` contract are now being frozen as shared prerequisite work
+  in `0106`; `0056` depends on that contract but does not own it in detail.
 - `tensorcast/common/selection_identity.py` already defines the canonical `SelectionIdentity`; `0056` must reuse it
   rather than invent a second item-identity type.
 - current code already exposes:
@@ -84,6 +88,8 @@ This plan explicitly does not turn `0056` into:
     derive canonical set identity from it directly.
   - the future cluster-workflow seam now exists in IR transport shape, but there is still no builder or daemon
     execution surface that owns cluster workflow semantics.
+  - inter-daemon control-plane dispatch still does not exist as dependency-ready
+    plan substrate; current peer-daemon transport helpers are data-plane-only.
 
 # Status Update
 
@@ -175,6 +181,9 @@ This plan explicitly does not turn `0056` into:
         rules as local execution for the first worker-targeted `ArtifactSetRef` flows.
   - [x] Milestone 3.5: define the `prefetch_set` readiness floor explicitly as `local_replica_ready` unless and until a
         stronger readiness selector is added to the action contract.
+        Follow-on owner note:
+        `0104` owns that stronger worker-local realization contract; `0056`
+        keeps `prefetch_set` unchanged.
   - [x] Milestone 3.6: prove at least one end-to-end high-cardinality flow that runs through `ArtifactSetRef` rather
         than raw manifest outputs.
   - [x] Milestone 3.7: keep ingress in the terminal-only execution class until a dependency-ready plan-level public
@@ -184,12 +193,18 @@ This plan explicitly does not turn `0056` into:
         completion estimates.
   - [x] Milestone 3.10: reserve a cluster-scoped transport slot in the IR so future cluster-workflow owners do not
         have to encode workflow semantics as worker-only DAG glue.
+        Follow-on owner note:
+        `0104` is the intended first rollout consumer of this seam, while cluster
+        truth and barriers remain outside `0056`.
   - [x] Milestone 3.11: scope the first daemon-side execution slice to `local-only` plus `terminal_only` with
         explicit fail-closed behavior for remote worker targets, non-local instance targets, and cluster targets.
 
 - [ ] Phase 4: Signals and low-cardinality directory cache
-  - [ ] Milestone 4.1: daemon-served worker and instance listing with `as_of_ms`, `staleness_ms`, and bounded-current
-        vs degraded freshness state.
+  - [ ] Milestone 4.1: close the shared directory contract from `0106`:
+    - worker directory
+    - instance directory
+    - `NodeAgentDirectory`
+    - bounded-staleness freshness evidence
   - [ ] Milestone 4.2: GS watch streams and daemon-side cache controllers for low-cardinality routing data only.
   - [x] Milestone 4.3: expose SDK `TensorCastSignals` as a daemon-backed read surface for connected-worker status.
   - [x] Milestone 4.4: expose `cache_epoch` or equivalent freshness evidence publicly, while keeping replay cursors such
@@ -198,6 +213,12 @@ This plan explicitly does not turn `0056` into:
         staleness-breach fail-closed behavior) and test it explicitly.
   - [x] Milestone 4.6: define one canonical governance transport shape for plan execution.
   - [ ] Milestone 4.7: define one canonical metadata vocabulary for non-plan RPC propagation.
+        Follow-on owner note:
+        `0104` rollout target resolution depends on these daemon-served
+        directory and freshness guarantees rather than direct SDK-to-GS
+        directory calls.
+  - [ ] Milestone 4.8: make `NodeAgentDirectory` a hard prerequisite to any
+        attempt to close daemon-side instance-step routing.
 
 - [ ] Phase 5: Rollout safety and verification
   - [ ] Milestone 5.1: verify mixed-version compatibility between local runner and ingress mode.

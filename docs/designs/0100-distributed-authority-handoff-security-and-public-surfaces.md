@@ -4,7 +4,7 @@ title: Unified Distributed Authority Routing, Security, and Public Continuation
 status: implemented
 areas: ["daemon", "sdk", "proto", "docs", "tests"]
 created: 2026-03-10
-last_updated: 2026-03-18
+last_updated: 2026-03-19
 related_code:
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
@@ -19,6 +19,8 @@ related_code:
   - daemon/state/routed_authority_protocol.h
   - daemon/state/worker_directory_cache.h
   - daemon/state/worker_directory_cache.cc
+  - daemon/service/controllers/public_operation_admission_service.h
+  - daemon/service/controllers/public_operation_admission_service.cc
   - daemon/service/grpc_service_impl_rpc_delegates.cc
   - daemon/service/payload_transport_broker.h
   - daemon/service/payload_transport_broker.cc
@@ -83,7 +85,9 @@ Current code now includes:
   fail-closed reply admission,
 - the first routed issuer path using `RoutedAuthorityRequest` plus `OwnerStageReply(ready_for_lowering)`,
 - additive public-safe continuation metadata on `OperationRef`,
-- and the first real `attach_existing -> Operation[T]` closeout via `0096` publish replay.
+- the first real `attach_existing -> Operation[T]` closeout via `0096` publish replay,
+- and a repository-owned public-operation admission dispatcher so observation
+  paths do not hardwire child-owner admission logic into one controller branch.
 
 # Dependency Readiness
 
@@ -276,6 +280,32 @@ Assembly-attempt consequence:
 - and `wait_assembly_attempt(...)` must not double as the API that initiates
   sealing.
 
+### 2.5 Observation-path admission
+
+Public continuation is not only a metadata problem.
+It also needs one repository-owned admission seam on `GetOperation` and
+`WaitOperation`.
+
+Required rules:
+
+1. observation calls must pass through a dispatcher keyed by public-safe
+   continuation metadata such as `OperationRef.kind`,
+2. child owners may register owner-specific fail-closed admission checks behind
+   that dispatcher,
+3. unknown operation kinds must not be rejected merely because another child
+   owner needs admission logic,
+4. the dispatcher must not mutate workflow state or synthesize a second public
+   continuation model.
+
+Current implementation direction:
+
+- child-owner admission is now routed through a dedicated public-operation
+  admission service rather than being hard-coded inside one publish-specific
+  observation branch,
+- publish replay remains the first owner using that seam,
+- later child owners may attach their own admission only when they define a
+  durable authority scope and explicit fail-closed contract.
+
 ## 3. Owner reply to public projection mapping
 
 | `OwnerStageReply.reply_kind` | Public projection in this phase | Readiness |
@@ -426,6 +456,9 @@ Minimum required dimensions:
   That cost is justified because bare `operation_id` is not a sound distributed attach contract.
 - Keeping `retry_later` out of the first closeout scope slows feature breadth, but it prevents two partially finished
   continuation paths from drifting at once.
+- Adding a repository-owned observation-path admission dispatcher introduces one
+  extra layer, but that is still narrower than letting each child owner patch
+  `GetOperation` and `WaitOperation` independently.
 
 # Compatibility & Acceptance Criteria
 
@@ -439,6 +472,8 @@ Acceptance criteria:
 - bare `AuthorityAttachmentRef` and bare `OwnerStageReply` never cross the SDK boundary,
 - long-lived public continuation still converges on `Operation[T]` or another explicit family surface,
 - child designs stop depending on declared-but-not-ready continuation paths,
+- public observation and wait flows admit child-owner continuation through one
+  repository-owned dispatcher rather than child-specific ad hoc branches,
 - byte-moving distributed success still terminates in `ResolvedSourceCapability` plus ingress-owned lowering.
 
 # References

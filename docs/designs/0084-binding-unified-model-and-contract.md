@@ -3,7 +3,7 @@ slug: binding-unified-model-and-contract
 title: Binding Unified Model and Contract
 status: accepted
 created: 2026-03-12
-last_updated: 2026-03-14
+last_updated: 2026-03-19
 areas: ["sdk", "daemon", "core", "proto"]
 related_code:
   - tensorcast/api/store/artifact.py
@@ -28,6 +28,7 @@ links:
   plan: ../plans/0084-binding-doc-consolidation.md
   related:
     - ./0085-distributed-binding-assembly-and-coordinator.md
+    - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
   predecessors:
     - ./0039-artifact-first-sdk.md
     - ./0055-programmable-framework.md
@@ -71,6 +72,11 @@ This yields one coherent rule set:
 - promotion of a locally sealed value into the artifact plane is an explicit
   assembly concern from `0085`, including the single-slot case
 
+After the assembly-side hard cut from `0085` and `0105`, this boundary is
+final: local-only sealed values leave the binding plane only through the
+assembly attempt domain, never by implicitly minting artifact identity inside
+`0084`.
+
 # Goals / Non-Goals
 
 ## Goals
@@ -95,7 +101,8 @@ This yields one coherent rule set:
 ## Non-Goals
 
 - This document does not define distributed multi-binding publish in detail.
-  That design lives in `0085`.
+  The parent structural direction lives in `0085`, and the executable
+  attempt-domain carriers live in `0105`.
 - This document does not redefine global `LayoutSpec`.
 - This document does not make a local `seal_current(...)` automatically mint a
   globally routable artifact id.
@@ -163,7 +170,14 @@ does **not** by itself create:
 Promotion of a local sealed value into the artifact plane is a separate,
 explicit concern. `0085` defines that promotion through the existing
 assembly/layout trunk; a single-binding publish is the degenerate one-view case
-of the same model.
+of the same model. `0105` then hardens the executable attempt-domain carriers
+that promotion runs through:
+
+- `AssemblyRequirementSetRef`
+- `AssemblyReadinessPolicy`
+- `AssemblyCloseoutContract`
+- `AssemblyAttemptRecord`
+- durable slot occupancy and readiness cut
 
 ## Artifact-Backed Values Remain First-Class
 
@@ -197,7 +211,7 @@ Reasons:
 | --- | --- | --- | --- |
 | Local binding plane | `binding_id`, `binding_layout_id`, `binding_value_id`, `seal_generation` | local storage, mutable windows, pointer stability, local current value | global routing, keys, model-family layout contracts |
 | Artifact plane | `artifact_id`, `ArtifactSelection`, ByteSpace | publish, key activation, materialization, retrieval | local mutable windows |
-| Assembly plane | `assembly_id`, `layout_id`, contract ids from `0085` | promotion of sealed local values into globally visible artifacts | local tensor ownership and mutable windows |
+| Assembly plane | `attempt_id`, `workspace_assembly_id`, `layout_id`, attempt contract ids from `0085` / `0105` | promotion of sealed local values into globally visible artifacts | local tensor ownership and mutable windows |
 
 ## Binding Is Location, `SealedBindingValue` Is Current Local Value
 
@@ -258,8 +272,9 @@ Normative rules:
   must not silently synthesize a replacement `binding_value_id` or current-value
   snapshot when the daemon response is missing one
 
-This rule is required because `0085` uses `(binding_id, binding_value_id)` as a
-durable contributor identity and mutation-fence anchor.
+This rule is required because `0085` / `0105` use
+`(binding_id, binding_value_id)` as a durable contributor identity and
+mutation-fence anchor.
 
 ## State Dimensions
 
@@ -287,7 +302,7 @@ flattened enum to represent all combinations.
 2. **local-only sealed value**
    - created by `seal_current(...)`
    - has no artifact id yet
-   - may contribute to assembly in `0085`
+   - may contribute to assembly in `0085` / `0105`
    - must not use artifact-key publish or retrieval paths directly
 
 This distinction is the main long-term consistency boundary.
@@ -507,9 +522,9 @@ The binding protocol must not depend on which planning frontend produced the
 layout.
 
 The planner output must also preserve stable canonical tensor naming, ordering,
-and local offsets. `0085` depends on that stability to compile one local sealed
-value into deterministic disjoint contribution views on the existing
-assembly/layout trunk without re-planning from live framework objects.
+and local offsets. `0085` / `0105` depend on that stability to compile one
+local sealed value into deterministic disjoint contribution views on the
+existing assembly/layout trunk without re-planning from live framework objects.
 
 # Artifact Selection, Publishability, and Promotion Boundary
 
@@ -543,6 +558,29 @@ Therefore:
 - single-rank training publish must use the explicit one-slot assembly path from
   `0085`, not a binding-local shortcut that silently creates a second artifact
   identity contract
+
+## Assembly Boundary After `0085` / `0105`
+
+The landed assembly direction makes the ownership split explicit:
+
+- `0084` owns local binding identity, mutable-window control, pointer
+  stability, and current-value semantics
+- `0085` owns the one-trunk parent thesis for distributed binding-backed
+  assembly
+- `0105` owns the executable attempt-domain carriers and durability model:
+  `attempt_id`, `workspace_assembly_id`, `AssemblyRequirementSetRef`,
+  readiness policy, closeout contract, readiness cut, and durable slot
+  occupancy
+
+Normative rule:
+
+- a local-only `SealedBindingValue` may become globally useful only by entering
+  the assembly attempt domain; `Binding` itself does not accumulate attempt
+  requirements, slot occupancy state, or closeout semantics
+- single-rank publish remains the degenerate `canonical_full` or equivalent
+  same-trunk case from `0085` / `0105`, not a binding-local publish shortcut
+- local binding APIs may surface the contributor identity needed by assembly,
+  but they must not redefine attempt truth or closeout truth
 
 ## Wait-Event Barrier
 
@@ -642,8 +680,12 @@ Binding control lifetime must integrate with existing daemon lifecycle rules:
 - retire and drain stay the visibility exclusion boundary
 - owner PID exit or explicit close must retire published visibility and cancel
   any mutable window
-- `0085` may add contribution leases that fence overwrite entry points such as
-  `begin_update(...)` and `swap(...)`
+- overwrite fencing for contributed local values is rooted in the assembly-side
+  mutation-fence authority from `0085` / `0105`: durable slot occupancy plus
+  lifecycle-backed liveness, keyed to the current contributor-value identity
+- binding overwrite legality must therefore follow daemon authority over
+  current `binding_value_id`, live occupancy, and attempt workflow currentness
+  rather than any SDK-local approximation
 
 This keeps binding semantics consistent with the repository’s existing
 lease/guard/finalizer model rather than inventing a parallel cleanup system.
@@ -656,7 +698,8 @@ lease/guard/finalizer model rather than inventing a parallel cleanup system.
 - `FAILED_PRECONDITION`
   - no current sealed value exists, update epoch mismatch, publish requested for
     a local-only value, owner mismatch, layout invariant drift, or mutation
-    requested while a contribution lease still fences the current value
+    requested while live slot occupancy still fences the current
+    `binding_value_id`
 - `DEADLINE_EXCEEDED`
   - retire or drain wait exceeds the requested budget
 - `DATA_LOSS`
@@ -679,7 +722,8 @@ None.
 
 This design requires SDK, daemon, and proto changes, but it does not require new
 Global Store persistent tables by itself. Promotion of local sealed values into
-the artifact plane is handled by `0085`.
+the artifact plane is handled by `0085`, and the durable attempt rows used by
+that promotion belong to `0105`, not to the local binding plane.
 
 # Alternatives and Rationale
 
@@ -703,7 +747,7 @@ Reasons:
   `ArtifactSelection`
 - silently minting a local-only artifact plane would create a second routing
   contract
-- the correct promotion boundary is assembly from `0085`
+- the correct promotion boundary is assembly from `0085` / `0105`
 
 ## Put Distributed Contribution Directly On `Binding`
 
@@ -748,12 +792,17 @@ The design is accepted when:
   rejected explicitly; it is never silently ignored
 - local contiguous slab initialization is expressible without a second
   model-sized persistent weight copy
+- mutation fencing for contributed local values is rooted in durable slot
+  occupancy plus lifecycle-backed liveness from `0085` / `0105`
 - distributed and single-slot promotion of local sealed values is specified in
-  `0085` without redefining the local binding contract
+  `0085` and concretized in `0105` without redefining the local binding
+  contract
 
 # References
 
 - `docs/plans/0084-binding-doc-consolidation.md`
 - `docs/designs/0085-distributed-binding-assembly-and-coordinator.md`
+- `docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md`
 - `docs/plans/0085-distributed-binding-assembly-and-coordinator.md`
+- `docs/plans/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md`
 - `docs/guides/steptron-vllm-binding-integration.md`

@@ -9,7 +9,7 @@ areas:
   - integrations
   - docs
 created: 2026-03-17
-last_updated: 2026-03-17
+last_updated: 2026-03-19
 related_code:
   - tensorcast/engine_adapter/kvcache_adapter.py
   - tensorcast/node_agent/executor.py
@@ -22,6 +22,7 @@ related_docs:
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
+  - docs/designs/0104-artifact-realization-and-cluster-rollout.md
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
 links:
@@ -249,6 +250,15 @@ Normative rules:
 3. until a dependency-ready projection form exists, cross-instance migration remains terminal action composition over the
    existing spine rather than a closed non-terminal workflow family.
 
+Current compatibility rule:
+
+- `ManifestAction`, `PublishAction`, `HydrateAction`, and `EvictLocalAction`
+  may continue to carry `engine_request_id` in today's proto and adapter
+  surfaces,
+- but that field remains engine-local context only,
+- and no child design may reinterpret it as framework-owned set identity,
+  workflow identity, or rollout barrier identity.
+
 ## `engine_request_id` is engine context, not artifact identity
 
 `engine_request_id` or any equivalent engine-local handle is:
@@ -393,6 +403,27 @@ Bridge rules:
    advertised `ArtifactSetRef`, the consuming path must fail closed.
 6. additive transport through plan or NodeAgent surfaces may preserve both `ManifestResult` and
    `ManifestArtifactSetBridge`, but framework code must key set orchestration off the explicit bridge output.
+
+## Dependency-ready consequence for `0056` and `0104`
+
+The bridge rules above constrain adjacent designs directly.
+
+For `0056`:
+
+- runtime, ingress, and worker code may preserve `engine_request_id` as adapter
+  input,
+- but framework-owned set orchestration must consume `ArtifactSetRef` or another
+  explicit bridge output only.
+
+For `0104`:
+
+- worker-only realization over `ArtifactSetRef` is dependency-ready once the
+  worker-local kernel exists,
+- but optional child `publish` or `hydrate` stages must not rely on repeated ad
+  hoc rescans by `engine_request_id`,
+- those child stages become dependency-ready only when the integration exposes a
+  typed projection form or manifest-backed bridge explicit enough to preserve
+  cross-step set identity honestly.
 
 ## Why manifest-first is the right abstraction
 
@@ -557,6 +588,9 @@ Proto and SDK additions that follow from this design should remain generic:
   resolution behavior before they are treated as dependency-ready carriers.
 - `key_set_digest_hex` does not silently become a second framework set-identity model beside the `0056`
   `ArtifactSetRef` contract.
+- optional rollout or migration child stages from `0104` do not become
+  dependency-ready on top of bare `engine_request_id`; they require explicit
+  projection identity or manifest-backed bridge output first.
 - in this phase, `0102` instance-action closeout remains terminal-only unless and until a dependency-ready `0096` and
   `0100` public continuation path is explicitly adopted.
 - Compatibility aliases such as `kvcache_*` remain helper vocabulary only and do not become required framework proto or

@@ -3,7 +3,7 @@ slug: assembly-attempt-hard-cut-spec-runtime-slot-closeout
 title: Assembly Attempt Hard Cut for Intent, Workflow, and Durable Attempt State
 status: proposed
 created: 2026-03-18
-last_updated: 2026-03-18
+last_updated: 2026-03-19
 areas: ["sdk", "daemon", "proto", "global_store", "core"]
 related_code:
   - docs/designs/0085-distributed-binding-assembly-and-coordinator.md
@@ -19,9 +19,7 @@ related_code:
   - daemon/service/controllers/owned_binding_service.cc
   - daemon/service/controllers/registration_controller.cc
   - core/store/runtime/metadata/registration_backend.cc
-  - tensorcast/global_store/repositories/assembly_contribution_repository.py
   - tensorcast/global_store/repositories/operation_repository.py
-  - tensorcast/global_store/repositories/assembly_runtime_policy_repository.py
   - tensorcast/global_store/services/view_state_service.py
 links:
   plan: ../plans/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -193,6 +191,8 @@ That is not a strong long-term contract for a repository that already splits:
 
 If attempt closeout depends on `0102` representation or `0104` rollout
 contracts, those dependencies must appear as typed child references.
+For `0104`, that means a typed rollout barrier child contract such as
+`RolloutBarrierRef`, not an ambient rollout alias or implicit workflow name.
 If they are not dependency-ready yet, `0105` must narrow scope rather than hide
 those semantics in JSON.
 
@@ -438,7 +438,8 @@ Follow-on rule:
 - `representation_publish` becomes dependency-ready only when `0102` exposes a
   typed representation or manifest child contract,
 - `rollout_gated_publish` becomes dependency-ready only when `0104` exposes a
-  typed rollout barrier child contract.
+  dependency-ready typed rollout barrier child contract such as
+  `RolloutBarrierRef`.
 
 Normative rules:
 
@@ -548,8 +549,20 @@ Minimum contents:
 - `attempt_intent_digest`
 - `coordinator_generation`
 - `workspace_layout_binding_version`
-- structural evidence for all required structural targets
+- full structural evidence for all required structural targets:
+  - `structural_view_id`
+  - `view_spec_json`
+  - `view_size_bytes`
+  - `view_data_hash`
+  - `canonical_size_bytes`
+  - `canonical_bytes_covered`
+  - `canonical_ranges`
+  - `meta_digest` computed from that same full evidence
 - accepted live slot occupancies at the cut
+
+Seal correctness must consume the captured cut directly.
+It must not reread live workspace structural state after the cut is captured in
+order to reconstruct authoritative seal inputs.
 
 Ordering rule:
 
@@ -604,6 +617,8 @@ Optional follow-on wave:
 
 - if the repository chooses to absorb representation or rollout closeout in the
   same program, `0102` and `0104` must expose typed child references first,
+  where the `0104` child ref is a typed rollout barrier contract rather than an
+  untyped rollout string,
 - `0105` may then extend `AssemblyCloseoutContract.kind`,
 - but it must not do so through untyped JSON or mutable post-start policy.
 
@@ -764,7 +779,8 @@ Acceptance requires:
   still lower onto the same structural helper path,
 - the first dependency-ready closeout scope is explicit,
 - and any broader closeout scope depends on typed child contracts from `0102`
-  and `0104`.
+  and `0104`, with rollout-gated closeout consuming a typed rollout barrier
+  contract rather than ambient rollout metadata.
 
 # References
 
