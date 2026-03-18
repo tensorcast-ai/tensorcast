@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import contextlib
 import fcntl
+import logging
 import os
 import socket
 import struct
@@ -37,6 +38,8 @@ from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import ServerConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -397,6 +400,7 @@ def materialize_artifact_v2(
             preference=preference_value,
             source_policy=source_policy,
             export_policy=export_policy,
+            need_view_data_hash=bool(opts.need_view_data_hash),
             target_device_type=target_device_type,
             lease_mode=lease_mode,
             collective_load_group=collective_load_group,

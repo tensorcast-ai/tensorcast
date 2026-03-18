@@ -1830,6 +1830,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
+        need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
@@ -1852,6 +1853,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
+        need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
@@ -1874,6 +1876,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
+        need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
@@ -1894,6 +1897,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
+        need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
@@ -1951,6 +1955,8 @@ class DaemonCtl:
                 request.source_policy.CopyFrom(source_policy)
             if export_policy is not None:
                 request.export_policy = export_policy
+            if not need_view_data_hash:
+                request.need_view_data_hash = False
             if placement is not None:
                 request.placement = placement
             try:

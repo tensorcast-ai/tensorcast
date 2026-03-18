@@ -32,12 +32,12 @@ from tensorcast.proto.common.v1 import common_pb2
 
 @dataclass(frozen=True, slots=True)
 class ViewMetadataCache:
+    view_id: str
+    view_index_bytes: bytes
+    view_data_hash: str | None
     tensor_names: tuple[str, ...]
     nbytes: int
     selected_index: CanonicalIndex | None = None
-    view_id: str = ""
-    view_index_bytes: bytes = b""
-    view_data_hash: str = ""
 
 
 def _multibase_multihash_sha256(digest: bytes) -> str:
@@ -329,11 +329,25 @@ class ViewSpecComposer:
                 normalized_ops,
                 subset_payload,
             )
+            view_index_bytes = bytes(view_payload["view_index_bytes"])
+            resolved_selected_index = canonical_index_from_bytes(view_index_bytes)
+            view_id: str | None = None
+            if composed_spec is not None and not composed_spec.is_identity:
+                view_proto = composed_spec.proto
+                if view_proto is None:
+                    raise ArtifactError(
+                        "View spec proto missing while computing view_id",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                view_id = compute_view_id(view_proto, canonical_bytes)
             view_cache = ViewMetadataCache(
+                view_id=view_id or "",
+                view_index_bytes=view_index_bytes,
+                view_data_hash=None,
                 tensor_names=tensor_names,
-                nbytes=int(view_payload["view_size_bytes"]),
-                selected_index=None,
-                view_index_bytes=bytes(view_payload["view_index_bytes"]),
+                nbytes=int(resolved_selected_index.total_size_bytes),
+                selected_index=resolved_selected_index,
             )
 
         return composed_spec, view_cache, depth

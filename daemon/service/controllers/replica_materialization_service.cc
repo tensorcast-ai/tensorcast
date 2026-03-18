@@ -277,6 +277,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   span->SetAttribute("tc.store.preference", static_cast<int64_t>(effective_policy.preference));
   span->SetAttribute("tc.store.allow_p2p", effective_policy.allow_p2p);
   span->SetAttribute("tc.store.allow_disk", effective_policy.allow_disk);
+  span->SetAttribute("tc.view.need_data_hash", req.has_need_view_data_hash() ? req.need_view_data_hash() : true);
 
   using v2::MaterializeReplicaStatus;
   if (d_.shutdown_signal.is_shutting_down()) {
@@ -713,6 +714,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
   hints.export_policy = to_hint_export_policy(req.export_policy());
+  hints.need_view_data_hash = req.has_need_view_data_hash() ? req.need_view_data_hash() : true;
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
   if (auto collective_group = resolve_collective_group_hint(req); collective_group.has_value()) {

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <algorithm>
@@ -16,8 +17,11 @@
 #include <cstring>
 #include <map>
 #include <numeric>
+#include <optional>
+#include <vector>
 
 #include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
 #include "absl/strings/str_format.h"
 #include "core/common/const/granularity.h"
 #include "core/common/system_capabilities.h"
@@ -31,6 +35,69 @@
 
 namespace tensorcast::store::replica {
 using tensorcast::common::SystemCapabilities;
+
+namespace {
+
+struct ThreadFaultSnapshot {
+  long minor_faults{0};
+  long major_faults{0};
+};
+
+struct ResidencySnapshot {
+  size_t resident_pages{0};
+  size_t total_pages{0};
+};
+
+std::optional<ThreadFaultSnapshot> capture_thread_fault_snapshot() {
+  struct rusage usage{};
+  if (::getrusage(RUSAGE_THREAD, &usage) != 0) {
+    return std::nullopt;
+  }
+  return ThreadFaultSnapshot{.minor_faults = usage.ru_minflt, .major_faults = usage.ru_majflt};
+}
+
+std::optional<ResidencySnapshot> capture_residency_snapshot(void* addr, size_t len) {
+  if (addr == nullptr || len == 0) {
+    return ResidencySnapshot{};
+  }
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    return std::nullopt;
+  }
+  const size_t page_count = (len + static_cast<size_t>(page_size) - 1) / static_cast<size_t>(page_size);
+  std::vector<unsigned char> pages(page_count, 0);
+  if (::mincore(addr, len, pages.data()) != 0) {
+    return std::nullopt;
+  }
+  size_t resident_pages = 0;
+  for (unsigned char page : pages) {
+    resident_pages += (page & 1U) != 0U ? 1U : 0U;
+  }
+  return ResidencySnapshot{.resident_pages = resident_pages, .total_pages = page_count};
+}
+
+void maybe_hint_hugepage(void* addr, size_t bytes) {
+#ifdef MADV_HUGEPAGE
+  if (addr == nullptr || bytes == 0) {
+    return;
+  }
+  const auto hugepage_start = std::chrono::steady_clock::now();
+  const int hugepage_rc = ::madvise(addr, bytes, MADV_HUGEPAGE);
+  const int hugepage_errno = hugepage_rc == 0 ? 0 : errno;
+  const auto hugepage_end = std::chrono::steady_clock::now();
+  if (hugepage_rc != 0 && hugepage_errno != EINVAL && hugepage_errno != ENOSYS) {
+    PLOG(WARNING) << "madvise MADV_HUGEPAGE failed in UMA allocate_region";
+  }
+  VLOG(1) << "uma.cpu_arena.hugepage_hint bytes=" << bytes << " rc=" << hugepage_rc << " errno=" << hugepage_errno
+          << " duration_us="
+          << std::chrono::duration_cast<std::chrono::microseconds>(hugepage_end - hugepage_start).count();
+#else
+  (void)addr;
+  (void)bytes;
+#endif
+}
+
+} // namespace
 
 UnifiedMemoryAuthority::UnifiedMemoryAuthority(size_t artifact_chunk_bytes)
     : UnifiedMemoryAuthority(artifact_chunk_bytes, Options{}) {}
@@ -1286,6 +1353,7 @@ absl::Status UnifiedMemoryAuthority::write_cpu_span(
     uint64_t va_offset,
     const void* src,
     size_t bytes) {
+  const auto total_start = std::chrono::steady_clock::now();
   if (bytes == 0) {
     return absl::OkStatus();
   }
@@ -1297,11 +1365,19 @@ absl::Status UnifiedMemoryAuthority::write_cpu_span(
   if (it == allocations_.end()) {
     return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
   }
+  const auto arena_start = std::chrono::steady_clock::now();
   auto status = cpu_arena_.write_span(it->second, va_offset, src, bytes);
+  const auto arena_end = std::chrono::steady_clock::now();
   if (!status.ok()) {
     return status;
   }
+  const auto record_start = std::chrono::steady_clock::now();
   record_cpu_write_locked_(it->second, va_offset, bytes);
+  const auto record_end = std::chrono::steady_clock::now();
+  VLOG(2) << "uma.write_cpu_span artifact_id=" << key.artifact_id << " offset=" << va_offset << " bytes=" << bytes
+          << " arena_us=" << std::chrono::duration_cast<std::chrono::microseconds>(arena_end - arena_start).count()
+          << " record_us=" << std::chrono::duration_cast<std::chrono::microseconds>(record_end - record_start).count()
+          << " total_us=" << std::chrono::duration_cast<std::chrono::microseconds>(record_end - total_start).count();
   return absl::OkStatus();
 }
 
@@ -1345,6 +1421,7 @@ absl::Status UnifiedMemoryAuthority::CpuArena::allocate_region(ReplicaAllocation
     alloc.cpu_region.bytes = bytes;
     alloc.cpu_region.memfd = fd;
     alloc.cpu_region.offset_bytes = 0;
+    maybe_hint_hugepage(addr, bytes);
     return absl::OkStatus();
   }
 
@@ -1356,6 +1433,7 @@ absl::Status UnifiedMemoryAuthority::CpuArena::allocate_region(ReplicaAllocation
   alloc.cpu_region.bytes = bytes;
   alloc.cpu_region.memfd = -1;
   alloc.cpu_region.offset_bytes = 0;
+  maybe_hint_hugepage(addr, bytes);
   return absl::OkStatus();
 }
 
@@ -1395,12 +1473,16 @@ absl::Status UnifiedMemoryAuthority::CpuArena::write_span(
     uint64_t va_offset,
     const void* src,
     size_t bytes) const {
+  const auto total_start = std::chrono::steady_clock::now();
+  const bool memfd_backed = alloc.cpu_region.memfd >= 0;
   if (bytes == 0) {
     return absl::OkStatus();
   }
+  const auto bounds_start = std::chrono::steady_clock::now();
   if (auto st = ensure_bounds(alloc, va_offset, bytes); !st.ok()) {
     return st;
   }
+  const auto bounds_end = std::chrono::steady_clock::now();
 
   const long page = sysconf(_SC_PAGESIZE);
   uint64_t page_aligned_off = (va_offset / page) * page;
@@ -1408,26 +1490,89 @@ absl::Status UnifiedMemoryAuthority::CpuArena::write_span(
   uint64_t page_aligned_end = ((end_off + page - 1) / page) * page;
   size_t aligned_len = static_cast<size_t>(page_aligned_end - page_aligned_off);
   void* aligned_addr = static_cast<char*>(alloc.cpu_region.base) + page_aligned_off;
-  if (::mprotect(aligned_addr, aligned_len, PROT_READ | PROT_WRITE) != 0) {
-    if (alloc.cpu_region.memfd >= 0) {
-      return absl::ErrnoToStatus(errno, "UMA write: mprotect failed for memfd-backed CPU arena");
-    }
-    void* mapped =
-        ::mmap(aligned_addr, aligned_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-    if (mapped == MAP_FAILED || mapped != aligned_addr) {
-      return absl::ErrnoToStatus(errno, "UMA write: failed to ensure writable mapping");
+  const bool collect_vlog2 = ABSL_VLOG_IS_ON(2);
+  const auto fault_before = collect_vlog2 ? capture_thread_fault_snapshot() : std::nullopt;
+  const auto resident_before =
+      collect_vlog2 && memfd_backed ? capture_residency_snapshot(aligned_addr, aligned_len) : std::nullopt;
+  const auto protect_start = std::chrono::steady_clock::now();
+  if (!memfd_backed) {
+    if (::mprotect(aligned_addr, aligned_len, PROT_READ | PROT_WRITE) != 0) {
+      void* mapped =
+          ::mmap(aligned_addr, aligned_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      if (mapped == MAP_FAILED || mapped != aligned_addr) {
+        return absl::ErrnoToStatus(errno, "UMA write: failed to ensure writable mapping");
+      }
     }
   }
+  const auto protect_end = std::chrono::steady_clock::now();
 
-  if (SystemCapabilities::instance().madv_willneed_available()) {
+  const auto madvise_start = std::chrono::steady_clock::now();
+  const bool need_madvise = !memfd_backed;
+  if (need_madvise && SystemCapabilities::instance().madv_willneed_available()) {
     int rc = ::madvise(aligned_addr, aligned_len, MADV_WILLNEED);
     if (rc != 0 && errno != EINVAL) {
       PLOG(WARNING) << "madvise WILLNEED failed in UMA write";
     }
   }
+  const auto madvise_end = std::chrono::steady_clock::now();
 
   void* dst = static_cast<char*>(alloc.cpu_region.base) + va_offset;
-  std::memcpy(dst, src, bytes);
+  const auto copy_start = std::chrono::steady_clock::now();
+  if (memfd_backed) {
+    const char* src_bytes = static_cast<const char*>(src);
+    size_t remaining = bytes;
+    uint64_t written = 0;
+    while (remaining > 0) {
+      const ssize_t rc =
+          ::pwrite(alloc.cpu_region.memfd, src_bytes + written, remaining, static_cast<off_t>(va_offset + written));
+      if (rc < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        return absl::ErrnoToStatus(errno, "UMA write: pwrite to memfd-backed CPU arena failed");
+      }
+      if (rc == 0) {
+        return absl::InternalError("UMA write: pwrite returned 0 for memfd-backed CPU arena");
+      }
+      written += static_cast<size_t>(rc);
+      remaining -= static_cast<size_t>(rc);
+    }
+  } else {
+    std::memcpy(dst, src, bytes);
+  }
+  const auto copy_end = std::chrono::steady_clock::now();
+  const auto fault_after = collect_vlog2 ? capture_thread_fault_snapshot() : std::nullopt;
+  const auto resident_after =
+      collect_vlog2 && memfd_backed ? capture_residency_snapshot(aligned_addr, aligned_len) : std::nullopt;
+  const auto copy_us = std::chrono::duration_cast<std::chrono::microseconds>(copy_end - copy_start).count();
+  const double copy_gib_per_s = copy_us > 0
+      ? (static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0)) / (static_cast<double>(copy_us) / 1e6)
+      : 0.0;
+  VLOG(2) << "uma.cpu_arena.write_span offset=" << va_offset << " bytes=" << bytes << " aligned_len=" << aligned_len
+          << " memfd_backed=" << memfd_backed << " copy_method=" << (memfd_backed ? "pwrite" : "memcpy")
+          << " ensure_bounds_us="
+          << std::chrono::duration_cast<std::chrono::microseconds>(bounds_end - bounds_start).count() << " mprotect_us="
+          << std::chrono::duration_cast<std::chrono::microseconds>(protect_end - protect_start).count()
+          << " madvise_us="
+          << std::chrono::duration_cast<std::chrono::microseconds>(madvise_end - madvise_start).count()
+          << " copy_us=" << copy_us << " copy_gib_per_s=" << absl::StrFormat("%.3f", copy_gib_per_s)
+          << " fault_minor_delta="
+          << ((fault_before.has_value() && fault_after.has_value())
+                  ? (fault_after->minor_faults - fault_before->minor_faults)
+                  : -1)
+          << " fault_major_delta="
+          << ((fault_before.has_value() && fault_after.has_value())
+                  ? (fault_after->major_faults - fault_before->major_faults)
+                  : -1)
+          << " resident_pages_before="
+          << (resident_before.has_value() ? static_cast<long long>(resident_before->resident_pages) : -1)
+          << " resident_pages_after="
+          << (resident_after.has_value() ? static_cast<long long>(resident_after->resident_pages) : -1)
+          << " total_pages="
+          << (resident_after.has_value()
+                  ? static_cast<long long>(resident_after->total_pages)
+                  : (resident_before.has_value() ? static_cast<long long>(resident_before->total_pages) : -1))
+          << " total_us=" << std::chrono::duration_cast<std::chrono::microseconds>(copy_end - total_start).count();
   return absl::OkStatus();
 }
 

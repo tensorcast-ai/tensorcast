@@ -1269,7 +1269,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
     }
     if (effective_plan != nullptr) {
       handle.view_index_json = effective_plan->view_index_json;
-      if (effective_plan->view_size_bytes > 0) {
+      if (request.hints().need_view_data_hash && effective_plan->view_size_bytes > 0) {
         auto computer = config_.runtime_context->view_hash_computer();
         if (computer) {
           auto hash = computer->hash_replica_view(
@@ -3406,7 +3406,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   if (view_plan.has_value() && !view_plan->is_identity) {
     handle.view_index_json = view_plan->view_index_json;
     const uint64_t view_size = view_plan->view_size_bytes;
-    if (view_size > 0) {
+    if (request.hints().need_view_data_hash && view_size > 0) {
       auto computer = config_.runtime_context->view_hash_computer();
       if (computer) {
         auto hash = computer->hash_replica_view(

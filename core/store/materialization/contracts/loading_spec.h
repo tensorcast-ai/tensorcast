@@ -164,6 +164,7 @@ struct MaterializeHints {
   bool allow_p2p{true};
   bool allow_disk{true};
   ExportPolicy export_policy{ExportPolicy::kNever};
+  bool need_view_data_hash{true};
   SourceMutationPolicy source_mutation_policy{SourceMutationPolicy::kReadWrite};
 
   std::optional<VariantIdentity> variant;

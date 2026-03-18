@@ -1953,11 +1953,8 @@ class Artifact:
         self._ensure_identified()
         loop = asyncio.get_running_loop()
         view_hash = None
-        view_metadata = self._ensure_view_metadata_cache(require_view_hash=True)
-        if view_metadata is not None:
-            view_hash = view_metadata.view_data_hash or None
-        elif self._view_spec is not None:
-            view_hash = ViewSpecComposer.hash_view_spec(self._view_spec)
+        if self._view_metadata is not None:
+            view_hash = self._view_metadata.view_data_hash
         batcher = getattr(store, "_batcher", None)
         if batcher is None:
             return await loop.run_in_executor(
@@ -2994,10 +2991,6 @@ class Artifact:
             view_index = canonical_index_from_bytes(view_index_bytes)
             view_hash = getattr(payload, "view_data_hash", None)
             subset_names = tuple(entry.name for entry in view_index.entries)
-            if view_hash is None:
-                view_hash = ViewSpecComposer.hash_view_spec(
-                    self._view_spec, subset=subset_names
-                )
             resolved_view_id: str | None = None
             if self._view_spec is not None and not self._view_spec.is_identity:
                 view_proto = self._view_spec.proto
@@ -3011,7 +3004,7 @@ class Artifact:
             view_cache = ViewMetadataCache(
                 view_id=str(resolved_view_id or ""),
                 view_index_bytes=view_index_bytes,
-                view_data_hash=str(view_hash),
+                view_data_hash=(str(view_hash) if view_hash else None),
                 tensor_names=subset_names,
                 nbytes=sum(entry.size_bytes for entry in view_index.entries),
                 selected_index=view_index,

@@ -541,7 +541,7 @@ ReplicaHandle MaterializationService::build_handle(
   if (view_plan.has_value() && !view_plan->is_identity) {
     handle.view_index_json = view_plan->view_index_json;
     const uint64_t view_size = view_plan->view_size_bytes;
-    if (view_size > 0 && deps_.view_hash_computer) {
+    if (request.hints().need_view_data_hash && view_size > 0 && deps_.view_hash_computer) {
       const bool target_is_gpu = request.target_is_gpu();
       const bool target_loaded =
           target_is_gpu ? handle.gpu_state == MemoryState::LOADED : handle.cpu_state == MemoryState::LOADED;
