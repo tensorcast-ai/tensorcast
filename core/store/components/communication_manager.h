@@ -8,6 +8,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
+#include "core/communicator/routing/routing_context.h"
 #include "core/store/communication_types.h"
 #include "tensorcast/communicator/v1/communicator_config.pb.h"
 
@@ -98,10 +99,17 @@ class CommunicationManager {
     return listen_port_;
   }
 
+  void set_routing_context(std::shared_ptr<communicator::routing::RoutingContext> routing_context);
+
+  [[nodiscard]] std::shared_ptr<communicator::routing::RoutingContext> routing_context() const {
+    return routing_context_;
+  }
+
  private:
   bool enabled_ = false;
   uint16_t listen_port_{0};
   std::shared_ptr<tensorcast::communicator::engine::Communicator> comm_engine_;
+  std::shared_ptr<communicator::routing::RoutingContext> routing_context_;
 };
 
 } // namespace tensorcast::store::components

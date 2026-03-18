@@ -95,115 +95,18 @@ absl::Status DiskLoader::initialize() {
   }
 
   // Use the configured path directly as the replica directory
-  std::filesystem::path artifact_dir = source_.path;
-
-  // Check if the directory exists
-  if (!std::filesystem::exists(artifact_dir)) {
-    return absl::NotFoundError(absl::StrCat("Replica directory not found: ", artifact_dir.string()));
+  std::filesystem::path artifact_dir =
+      source_.path.is_absolute() ? source_.path : std::filesystem::absolute(source_.path);
+  artifact_dir = artifact_dir.lexically_normal();
+  auto context_or = loader::get_disk_artifact_context(artifact_dir);
+  if (!context_or.ok()) {
+    return context_or.status();
   }
-
-  if (!std::filesystem::is_directory(artifact_dir)) {
-    return absl::InvalidArgumentError(absl::StrCat("Path is not a directory: ", artifact_dir.string()));
-  }
-
-  // Find all partition files
-  partition_paths_.clear();
-  partition_sizes_.clear();
-  artifact_size_ = 0;
-
-  // First scan and categorize to avoid double-counting when both single-file
-  // (tensor.data) and multi-part (tensor.data_*) exist. Prefer multi-part if present.
-  bool has_single_file = false;
-  std::filesystem::path single_file_path;
-  std::vector<std::pair<uint64_t, std::filesystem::path>> multipart_paths;
-
-  auto parse_partition_index = [](std::string_view name) -> std::optional<uint64_t> {
-    constexpr std::string_view kPrefix = "tensor.data_";
-    if (!name.starts_with(kPrefix)) {
-      return std::nullopt;
-    }
-    const std::string_view suffix = name.substr(kPrefix.size());
-    if (suffix.empty()) {
-      return std::nullopt;
-    }
-    uint64_t value = 0;
-    for (char c : suffix) {
-      if (!std::isdigit(static_cast<unsigned char>(c))) {
-        return std::nullopt;
-      }
-      value = value * 10 + static_cast<uint64_t>(c - '0');
-    }
-    return value;
-  };
-
-  for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
-    if (!entry.is_regular_file()) {
-      continue;
-    }
-    const std::string filename = entry.path().filename().string();
-    if (filename == "tensor.data") {
-      has_single_file = true;
-      single_file_path = entry.path();
-    } else if (auto idx = parse_partition_index(filename)) {
-      multipart_paths.emplace_back(*idx, entry.path());
-    }
-  }
-
-  if (!multipart_paths.empty()) {
-    // Use only multi-part files
-    std::ranges::sort(multipart_paths, [](const auto& a, const auto& b) {
-      if (a.first != b.first) {
-        return a.first < b.first;
-      }
-      return a.second.filename() < b.second.filename();
-    });
-    for (const auto& [_, path] : multipart_paths) {
-      partition_paths_.push_back(path);
-      size_t file_size = std::filesystem::file_size(path);
-      partition_sizes_.push_back(file_size);
-      artifact_size_ += file_size;
-    }
-  } else if (has_single_file) {
-    // Fallback to single-file format
-    partition_paths_.push_back(single_file_path);
-    size_t file_size = std::filesystem::file_size(single_file_path);
-    partition_sizes_.push_back(file_size);
-    artifact_size_ += file_size;
-  }
-
-  // If no partitions were detected with the supported patterns, probe for .safetensors files
-  if (partition_paths_.empty()) {
-    std::vector<std::filesystem::path> safetensors_paths;
-    for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
-      if (entry.is_regular_file()) {
-        const std::string filename = entry.path().filename().string();
-        const std::string ext = ".safetensors";
-        if (filename.ends_with(ext)) {
-          safetensors_paths.push_back(entry.path());
-        }
-      }
-    }
-    if (safetensors_paths.empty()) {
-      return absl::NotFoundError(
-          absl::StrCat("No replica partition files found in: ", artifact_dir.string(), " (also no .safetensors)"));
-    }
-    std::ranges::sort(safetensors_paths, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
-    for (const auto& p : safetensors_paths) {
-      int fd = ::open(p.c_str(), O_RDONLY);
-      if (fd < 0) {
-        return absl::ErrnoToStatus(errno, absl::StrCat("Failed to open ", p.string()));
-      }
-      // Use the shared utility function to parse the header
-      auto header_info = loader::ParseSafetensorsHeader(fd);
-      ::close(fd);
-      if (!header_info.ok()) {
-        return header_info.status();
-      }
-      partition_paths_.push_back(p);
-      partition_sizes_.push_back(static_cast<size_t>(header_info->data_size));
-      artifact_size_ += header_info->data_size;
-    }
-  }
+  shared_context_ = *context_or;
+  source_.path = artifact_dir;
+  partition_paths_ = shared_context_->partition_paths();
+  partition_sizes_ = shared_context_->partition_sizes();
+  artifact_size_ = shared_context_->total_size();
 
   // RFC-0007: For standard partition format, require descriptor and index presence
   // (artifact_descriptor.json + tensor_index.(json|cbor)). Safetensors is exempt (may be backfilled later).
@@ -217,8 +120,8 @@ absl::Status DiskLoader::initialize() {
       const auto index_json_path = artifact_dir / "tensor_index.json";
       const auto index_cbor_path = artifact_dir / "tensor_index.cbor";
 
-      if (!std::filesystem::exists(descriptor_path) ||
-          (!std::filesystem::exists(index_json_path) && !std::filesystem::exists(index_cbor_path))) {
+      if (!shared_context_->descriptor_present() ||
+          (!shared_context_->tensor_index_json_present() && !shared_context_->tensor_index_cbor_present())) {
         return absl::FailedPreconditionError(
             "ARTIFACT_DESCRIPTOR_REQUIRED: missing artifact_descriptor.json or tensor_index.(json|cbor)");
       }
@@ -271,12 +174,20 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> DiskLoader::open_source(
     }
   }
   // If paths end with .safetensors, return safetensors sources
+  std::shared_ptr<const loader::DiskArtifactContext> shared_context;
   {
     absl::MutexLock lock(&mutex_);
+    shared_context = shared_context_;
     if (!partition_paths_.empty()) {
       const auto first_name = partition_paths_[0].filename().string();
       const std::string ext = ".safetensors";
       if (first_name.ends_with(ext)) {
+        if (shared_context && !shared_context->safetensors_segments().empty()) {
+          if (shared_context->safetensors_segments().size() == 1) {
+            return std::make_unique<loader::SafetensorsSource>(shared_context->safetensors_segments()[0]);
+          }
+          return std::make_unique<loader::MultiSafetensorsSource>(shared_context->safetensors_segments());
+        }
         if (partition_paths_.size() == 1) {
           return std::make_unique<loader::SafetensorsSource>(partition_paths_[0]);
         }
@@ -311,6 +222,17 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> DiskLoader::get_ver
   }
   // Return placeholder for now
   return absl::NotFoundError("No verification info available");
+}
+
+absl::StatusOr<std::shared_ptr<const loader::DiskArtifactContext>> DiskLoader::shared_context() const {
+  absl::MutexLock lock(&mutex_);
+  if (!initialized_) {
+    return absl::FailedPreconditionError("DiskLoader not initialized");
+  }
+  if (shared_context_ == nullptr) {
+    return absl::FailedPreconditionError("DiskLoader shared context is unavailable");
+  }
+  return shared_context_;
 }
 
 } // namespace tensorcast::store

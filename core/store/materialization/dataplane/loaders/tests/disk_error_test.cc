@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -53,7 +53,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
 
     auto mstatus = Replica::create(cfg);
     REQUIRE(!mstatus.ok());
-    REQUIRE_THAT(mstatus.status().ToString(), ContainsSubstring("Replica directory not found"));
+    REQUIRE_THAT(mstatus.status().ToString(), ContainsSubstring("Artifact directory not found"));
   }
 
   SECTION("Mismatched expected size") {

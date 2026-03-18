@@ -10,14 +10,21 @@
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/byte_artifact_body_store.h"
+#include "daemon/service/byte_artifact_route_resolver.h"
+#include "daemon/service/byte_artifact_runtime_state.h"
+#include "daemon/service/payload_transport_broker.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/background_scheduler.h"
+#include "daemon/state/binding_registry.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/persistence_manager.h"
@@ -32,7 +39,9 @@
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/transport_lock_manager.h"
 #include "daemon/state/verification_tracker.h"
+#include "daemon/state/worker_directory_cache.h"
 #include "daemon/state/worker_identity_store.h"
+#include "grpcpp/security/credentials.h"
 
 namespace tensorcast::daemon {
 
@@ -41,7 +50,8 @@ class DaemonKernel {
   DaemonKernel(
       std::shared_ptr<store::StoreEngine> engine,
       std::shared_ptr<common::AsyncRuntime> async_runtime,
-      DaemonOptions options);
+      DaemonOptions options,
+      std::shared_ptr<store::components::IGlobalStoreClient> global_store_client = nullptr);
 
   ~DaemonKernel();
 
@@ -83,6 +93,10 @@ class DaemonKernel {
     return *lifecycle_mgr_;
   }
 
+  [[nodiscard]] LifecycleKernel& lifecycle_kernel() const {
+    return *lifecycle_kernel_;
+  }
+
   [[nodiscard]] IpcRegionRegistry& region_registry() const {
     return *region_registry_;
   }
@@ -97,6 +111,10 @@ class DaemonKernel {
 
   [[nodiscard]] ArtifactSourceRegistry& source_registry() {
     return source_registry_;
+  }
+
+  [[nodiscard]] BindingRegistry& binding_registry() const {
+    return *binding_registry_;
   }
 
   [[nodiscard]] RegistrationManager& registration_manager() const {
@@ -129,6 +147,30 @@ class DaemonKernel {
 
   [[nodiscard]] WorkerIdentityStore& worker_identity_store() const {
     return *identity_store_;
+  }
+
+  [[nodiscard]] ByteArtifactRuntimeState& byte_artifact_runtime_state() const {
+    return *byte_artifact_runtime_state_;
+  }
+
+  [[nodiscard]] ByteArtifactBodyStore& byte_artifact_body_store() const {
+    return *byte_artifact_body_store_;
+  }
+
+  [[nodiscard]] ByteArtifactRouteResolver& byte_artifact_route_resolver() const {
+    return *byte_artifact_route_resolver_;
+  }
+
+  [[nodiscard]] PayloadTransportBroker& payload_transport_broker() const {
+    return *payload_transport_broker_;
+  }
+
+  [[nodiscard]] WorkerDirectoryCache& worker_directory_cache() const {
+    return *worker_directory_cache_;
+  }
+
+  [[nodiscard]] std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials() const {
+    return inter_daemon_channel_credentials_;
   }
 
   [[nodiscard]] PlacementLeaseTokens& placement_lease_tokens() const {
@@ -172,6 +214,7 @@ class DaemonKernel {
 
   std::unique_ptr<BackgroundScheduler> scheduler_;
   std::shared_ptr<SessionLifecycleManager> lifecycle_mgr_;
+  std::unique_ptr<LifecycleKernel> lifecycle_kernel_;
   std::unique_ptr<PidMonitor> pid_monitor_;
 
   std::unique_ptr<VerificationTracker> verif_tracker_;
@@ -185,10 +228,18 @@ class DaemonKernel {
   std::unique_ptr<LipBridge> lip_bridge_;
   std::unique_ptr<PersistenceManager> persistence_mgr_;
   ArtifactSourceRegistry source_registry_;
+  std::unique_ptr<BindingRegistry> binding_registry_;
 
   DeviceResolver devices_;
   ShutdownSignal shutdown_signal_;
   std::unique_ptr<WorkerIdentityStore> identity_store_;
+  std::unique_ptr<ByteArtifactRuntimeState> byte_artifact_runtime_state_;
+  std::unique_ptr<ByteArtifactBodyStore> byte_artifact_body_store_;
+  std::unique_ptr<store::runtime::RuntimeContextEvents::Subscription> runtime_event_subscription_;
+  std::unique_ptr<ByteArtifactRouteResolver> byte_artifact_route_resolver_;
+  std::unique_ptr<PayloadTransportBroker> payload_transport_broker_;
+  std::unique_ptr<WorkerDirectoryCache> worker_directory_cache_;
+  std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials_;
   std::unique_ptr<RetireGates> retire_gates_;
 
   std::atomic<bool> started_{false};

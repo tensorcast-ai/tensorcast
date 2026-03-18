@@ -16,14 +16,30 @@ from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.api.context import CallContext
 from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import OperationError, OperationStatus
+from tensorcast.api.plan.artifact_set import (
+    ArtifactSetItemResult,
+    ArtifactSetRef,
+    ArtifactSetResult,
+    resolve_artifact_set_ref,
+    summarize_artifact_set_outcomes,
+)
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
-from tensorcast.engine_adapter import EngineAdapter
+from tensorcast.engine_adapter import (
+    BatchResult,
+    EngineAdapter,
+    HydrateResult,
+    ManifestArtifactSetBridge,
+    ManifestResult,
+    PublishResult,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+
+ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +48,8 @@ class NodeAgentStepResult:
     target_id: str
     action: str
     status: OperationStatus
+    artifact_result: ArtifactActionResult | None = None
+    artifact_set_result: ArtifactSetResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +114,27 @@ def _derive_action_idempotency_key(
     return f"tc.plan.action.v1:{digest.hexdigest()}"
 
 
+def _derive_instance_action_idempotency_key(
+    *,
+    base_key: str,
+    action: str,
+    target_id: str,
+    step_id: str,
+    ttl_ms: int | None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(base_key.encode("utf-8"))
+    digest.update(b"|")
+    digest.update(action.encode("utf-8"))
+    digest.update(b"|target=")
+    digest.update(target_id.encode("utf-8"))
+    digest.update(b"|step=")
+    digest.update(step_id.encode("utf-8"))
+    if ttl_ms is not None:
+        digest.update(f"|ttl={int(ttl_ms)}".encode("utf-8"))
+    return f"tc.plan.action.v1:{digest.hexdigest()}"
+
+
 def _call_context_from_proto(ctx: plan_pb2.CallContext) -> CallContext:
     qos = "interactive"
     if ctx.qos == plan_pb2.QOS_CLASS_REALTIME:
@@ -148,17 +187,17 @@ def _view_spec_from_proto(
 
 
 def _store_policy_from_proto(
-    policy: store_daemon_pb2.StorePolicy | None,
+    policy: plan_pb2.StorePolicy | None,
 ) -> StorePolicy | None:
     if policy is None:
         return None
     if (
-        policy.profile == store_daemon_pb2.POLICY_PROFILE_UNSPECIFIED
+        policy.profile == plan_pb2.POLICY_PROFILE_UNSPECIFIED
         and not policy.must
         and not policy.should
         and not policy.may
-        and policy.overflow_policy == store_daemon_pb2.OVERFLOW_POLICY_UNSPECIFIED
-        and policy.layout == store_daemon_pb2.POLICY_LAYOUT_UNSPECIFIED
+        and policy.overflow_policy == plan_pb2.OVERFLOW_POLICY_UNSPECIFIED
+        and policy.layout == plan_pb2.POLICY_LAYOUT_UNSPECIFIED
     ):
         return None
     from tensorcast.api._config import (
@@ -173,25 +212,21 @@ def _store_policy_from_proto(
     )
 
     profile = None
-    if policy.profile != store_daemon_pb2.POLICY_PROFILE_UNSPECIFIED:
-        name = store_daemon_pb2.PolicyProfile.Name(policy.profile).replace(
+    if policy.profile != plan_pb2.POLICY_PROFILE_UNSPECIFIED:
+        name = plan_pb2.PolicyProfile.Name(policy.profile).replace(
             "POLICY_PROFILE_", ""
         )
         profile = StorePolicyProfile.parse(name.lower())
 
-    def _tier_from_proto(spec: store_daemon_pb2.TierSpec) -> TierSpec:
-        tier_name = store_daemon_pb2.PolicyTier.Name(spec.tier).replace(
-            "POLICY_TIER_", ""
+    def _tier_from_proto(spec: plan_pb2.TierSpec) -> TierSpec:
+        tier_name = plan_pb2.PolicyTier.Name(spec.tier).replace("POLICY_TIER_", "")
+        scope_name = plan_pb2.PolicyScope.Name(spec.scope).replace("POLICY_SCOPE_", "")
+        retention_name = plan_pb2.RetentionPolicy.Name(spec.retention_policy).replace(
+            "RETENTION_POLICY_", ""
         )
-        scope_name = store_daemon_pb2.PolicyScope.Name(spec.scope).replace(
-            "POLICY_SCOPE_", ""
-        )
-        retention_name = store_daemon_pb2.RetentionPolicy.Name(
-            spec.retention_policy
-        ).replace("RETENTION_POLICY_", "")
         retention = (
             RetentionPolicy.parse(retention_name.lower())
-            if spec.retention_policy != store_daemon_pb2.RETENTION_POLICY_UNSPECIFIED
+            if spec.retention_policy != plan_pb2.RETENTION_POLICY_UNSPECIFIED
             else RetentionPolicy.BEST_EFFORT
         )
         ttl = int(spec.retention_ttl_ms) if spec.HasField("retention_ttl_ms") else None
@@ -203,20 +238,20 @@ def _store_policy_from_proto(
             retention_ttl_ms=ttl,
         )
 
-    overflow_name = store_daemon_pb2.OverflowPolicy.Name(
-        policy.overflow_policy
-    ).replace("OVERFLOW_POLICY_", "")
+    overflow_name = plan_pb2.OverflowPolicy.Name(policy.overflow_policy).replace(
+        "OVERFLOW_POLICY_", ""
+    )
     overflow = (
         OverflowPolicy.parse(overflow_name.lower())
-        if policy.overflow_policy != store_daemon_pb2.OVERFLOW_POLICY_UNSPECIFIED
+        if policy.overflow_policy != plan_pb2.OVERFLOW_POLICY_UNSPECIFIED
         else OverflowPolicy.EVICT
     )
-    layout_name = store_daemon_pb2.PolicyLayout.Name(policy.layout).replace(
+    layout_name = plan_pb2.PolicyLayout.Name(policy.layout).replace(
         "POLICY_LAYOUT_", ""
     )
     layout = (
         PolicyLayout.parse(layout_name.lower())
-        if policy.layout != store_daemon_pb2.POLICY_LAYOUT_UNSPECIFIED
+        if policy.layout != plan_pb2.POLICY_LAYOUT_UNSPECIFIED
         else PolicyLayout.AUTO
     )
 
@@ -414,6 +449,10 @@ class NodeAgentExecutor:
         action_kind = action.WhichOneof("kind")
         if action_kind == "prefetch":
             return self._prefetch(plan, step, action.prefetch, call_ctx=call_ctx)
+        if action_kind == "prefetch_set":
+            return self._prefetch_set(
+                plan, step, action.prefetch_set, call_ctx=call_ctx
+            )
         if action_kind == "pin_device_residency":
             return self._pin(plan, step, action.pin_device_residency, call_ctx=call_ctx)
         if action_kind == "unpin_device_residency":
@@ -455,6 +494,14 @@ class NodeAgentExecutor:
             return self._transform_register(
                 plan, step, action.transform_register, call_ctx
             )
+        if action_kind == "manifest":
+            return self._manifest(plan, step, action.manifest, call_ctx)
+        if action_kind == "publish":
+            return self._publish(plan, step, action.publish, call_ctx)
+        if action_kind == "hydrate":
+            return self._hydrate(plan, step, action.hydrate, call_ctx)
+        if action_kind == "evict_local":
+            return self._evict_local(plan, step, action.evict_local, call_ctx)
         return NodeAgentStepResult(
             step_id=step.step_id,
             target_id=step.target.target_id,
@@ -486,6 +533,33 @@ class NodeAgentExecutor:
             device_id=None,
             ttl_ms=None,
             extra=extra,
+        )
+        return CallContext(
+            request_id=call_ctx.request_id,
+            qos=call_ctx.qos,
+            deadline_ms=call_ctx.deadline_ms,
+            idempotency_key=derived_key,
+            tags=call_ctx.tags,
+        )
+
+    def _instance_action_context(
+        self,
+        *,
+        plan: plan_pb2.PlanSpec,
+        action: str,
+        target_id: str,
+        step_id: str,
+        ttl_ms: int | None,
+        call_ctx: CallContext,
+    ) -> CallContext:
+        if not plan.context.idempotency_key:
+            return call_ctx
+        derived_key = _derive_instance_action_idempotency_key(
+            base_key=plan.context.idempotency_key,
+            action=action,
+            target_id=target_id,
+            step_id=step_id,
+            ttl_ms=ttl_ms,
         )
         return CallContext(
             request_id=call_ctx.request_id,
@@ -629,6 +703,243 @@ class NodeAgentExecutor:
             status=_status_success("transform_register completed"),
         )
 
+    def _manifest(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.ManifestAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="manifest",
+                target_id=target_id,
+                step_id=step.step_id,
+                ttl_ms=None,
+                call_ctx=call_ctx,
+            )
+            manifest_result = engine_adapter.execute_manifest(
+                engine_request_id=action.engine_request_id,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="manifest",
+                status=_status_failed(
+                    f"manifest failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="manifest",
+                status=_status_failed(
+                    f"manifest failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="manifest",
+            status=_status_success("manifest completed"),
+            artifact_result=manifest_result,
+        )
+
+    def _publish(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.PublishAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        ttl_ms = int(action.ttl_ms) if action.HasField("ttl_ms") else None
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="publish",
+                target_id=target_id,
+                step_id=step.step_id,
+                ttl_ms=ttl_ms,
+                call_ctx=call_ctx,
+            )
+            publish_result = engine_adapter.execute_publish(
+                engine_request_id=action.engine_request_id,
+                ttl_ms=ttl_ms,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="publish",
+                status=_status_failed(
+                    f"publish failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="publish",
+                status=_status_failed(
+                    f"publish failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="publish",
+            status=_status_success("publish completed"),
+            artifact_result=publish_result,
+        )
+
+    def _hydrate(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.HydrateAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="hydrate",
+                target_id=target_id,
+                step_id=step.step_id,
+                ttl_ms=None,
+                call_ctx=call_ctx,
+            )
+            hydrate_result = engine_adapter.execute_hydrate(
+                engine_request_id=action.engine_request_id,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="hydrate",
+                status=_status_failed(
+                    f"hydrate failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="hydrate",
+                status=_status_failed(
+                    f"hydrate failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="hydrate",
+            status=_status_success("hydrate completed"),
+            artifact_result=hydrate_result,
+        )
+
+    def _evict_local(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.EvictLocalAction,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        engine_request_id = (
+            action.engine_request_id if action.HasField("engine_request_id") else None
+        )
+        try:
+            engine_adapter = self._engine_adapter
+            if engine_adapter is None:
+                raise ArtifactError(
+                    "EngineAdapter is not configured on node agent",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            scoped_ctx = self._instance_action_context(
+                plan=plan,
+                action="evict_local",
+                target_id=target_id,
+                step_id=step.step_id,
+                ttl_ms=None,
+                call_ctx=call_ctx,
+            )
+            evict_result = engine_adapter.execute_evict_local(
+                engine_request_id=engine_request_id,
+                ctx=scoped_ctx,
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="evict_local",
+                status=_status_failed(
+                    f"evict_local failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="evict_local",
+                status=_status_failed(
+                    f"evict_local failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                ),
+            )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="evict_local",
+            status=_status_success("evict_local completed"),
+            artifact_result=evict_result,
+        )
+
     def _prefetch(
         self,
         plan: plan_pb2.PlanSpec,
@@ -666,22 +977,12 @@ class NodeAgentExecutor:
                 ),
             )
         try:
-            device_id = int(action.device_id)
-            if device_id == CPU_DEVICE_ID:
-                target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-                device_uuid = ""
-            else:
-                target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
-                device_uuid = device_uuid_for(device_id)
-            self._client.materialize_by_artifact_id_v2(
+            self._materialize_selection(
                 selection=selection,
+                device_id=int(action.device_id),
                 replica_uuid=replica_uuid,
-                device_uuid=device_uuid,
-                wait_for_completion=False,
-                return_response=True,
-                target_device_type=target_device_type,
-                lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
                 timeout_s=timeout_s,
+                wait_for_completion=False,
             )
         except DeviceMismatch as exc:
             return NodeAgentStepResult(
@@ -710,6 +1011,155 @@ class NodeAgentExecutor:
             target_id=target_id,
             action="prefetch",
             status=_status_success("prefetch issued"),
+        )
+
+    def _prefetch_set(
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        action: plan_pb2.PrefetchSetAction,
+        *,
+        call_ctx: CallContext,
+    ) -> NodeAgentStepResult:
+        target_id = step.target.target_id
+        timeout_s = _ctx_timeout_s(call_ctx)
+        if timeout_s is not None and timeout_s <= 0:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="prefetch_set",
+                status=_status_failed(
+                    "CallContext deadline exceeded",
+                    status_code="DEADLINE_EXCEEDED",
+                    retryable=True,
+                ),
+            )
+        try:
+            artifact_set = ArtifactSetRef.from_proto(action.artifact_set)
+            manifest_bridge = (
+                ManifestArtifactSetBridge.from_proto(action.manifest_bridge)
+                if action.HasField("manifest_bridge")
+                else None
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="prefetch_set",
+                status=_status_failed(
+                    f"prefetch_set failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        try:
+            resolved_items = resolve_artifact_set_ref(
+                artifact_set,
+                manifest_resolver=(
+                    manifest_bridge.resolve_artifact_set
+                    if manifest_bridge is not None
+                    else None
+                ),
+            )
+        except ArtifactError as exc:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="prefetch_set",
+                status=_status_failed(
+                    f"prefetch_set failed: {exc}",
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                ),
+            )
+        outcomes: list[ArtifactSetItemResult] = []
+        for item in resolved_items:
+            try:
+                scoped_ctx = self._action_context(
+                    plan=plan,
+                    action="prefetch_set",
+                    target_id=target_id,
+                    selection=item.selection,
+                    extra=artifact_set.set_digest_hex,
+                    call_ctx=call_ctx,
+                )
+                base_key = scoped_ctx.idempotency_key
+                if base_key:
+                    ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
+                    replica_uuid = str(uuid.uuid5(ns, base_key))
+                else:
+                    replica_uuid = uuid.uuid4().hex
+                self._materialize_selection(
+                    selection=item.selection,
+                    device_id=int(action.device_id),
+                    replica_uuid=replica_uuid,
+                    timeout_s=timeout_s,
+                    wait_for_completion=True,
+                )
+                item_status = OperationStatus(
+                    state="success",
+                    message="local_replica_ready",
+                    as_of_ms=int(time.time() * 1000),
+                )
+            except DeviceMismatch as exc:
+                item_status = _status_failed(
+                    f"prefetch_set failed: {exc}",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                item_status = _status_failed(
+                    f"prefetch_set failed: {exc}",
+                    status_code="INTERNAL",
+                    retryable=True,
+                )
+            outcomes.append(
+                ArtifactSetItemResult(
+                    item_identity=item.item_identity,
+                    artifact_id=item.item_identity.artifact_id,
+                    status=item_status,
+                )
+            )
+
+        artifact_set_result = ArtifactSetResult(
+            set_digest_hex=artifact_set.set_digest_hex,
+            outcomes=tuple(outcomes),
+        )
+        return NodeAgentStepResult(
+            step_id=step.step_id,
+            target_id=target_id,
+            action="prefetch_set",
+            status=summarize_artifact_set_outcomes(
+                action_name="prefetch_set",
+                outcomes=artifact_set_result.outcomes,
+            ),
+            artifact_set_result=artifact_set_result,
+        )
+
+    def _materialize_selection(
+        self,
+        *,
+        selection: common_pb2.ArtifactSelection,
+        device_id: int,
+        replica_uuid: str,
+        timeout_s: float | None,
+        wait_for_completion: bool,
+    ) -> None:
+        if device_id == CPU_DEVICE_ID:
+            target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+            device_uuid = ""
+        else:
+            target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
+            device_uuid = device_uuid_for(device_id)
+        self._client.materialize_by_artifact_id_v2(
+            selection=selection,
+            replica_uuid=replica_uuid,
+            device_uuid=device_uuid,
+            wait_for_completion=wait_for_completion,
+            return_response=True,
+            target_device_type=target_device_type,
+            lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
+            timeout_s=timeout_s,
         )
 
     def _pin(

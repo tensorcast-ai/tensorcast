@@ -9,7 +9,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import torch
 
@@ -19,6 +19,13 @@ from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
+from tensorcast.engine_adapter.kvcache_adapter import (
+    BatchResult,
+    HydrateResult,
+    ManifestResult,
+    PublishResult,
+    SealedByteArtifact,
+)
 
 
 def _encode_token(token: bytes) -> str:
@@ -60,6 +67,12 @@ class TransformContext:
 
 TransformIntoFn = Callable[[TransformContext], None]
 TransformRegisterFn = Callable[[TransformContext], object | None]
+ManifestFn = Callable[[str, CallContext | None], ManifestResult]
+PublishFn = Callable[
+    [str, int | None, tuple[SealedByteArtifact, ...], CallContext | None], PublishResult
+]
+HydrateFn = Callable[[str, CallContext | None], HydrateResult]
+EvictLocalFn = Callable[[str | None, CallContext | None], BatchResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +166,10 @@ class EngineAdapter:
         self._default_ttl_ms = max(1, int(default_target_ttl_ms))
         self._targets = TargetRegistry()
         self._transforms = TransformRegistry()
+        self._manifest_fn: ManifestFn | None = None
+        self._publish_fn: PublishFn | None = None
+        self._hydrate_fn: HydrateFn | None = None
+        self._evict_local_fn: EvictLocalFn | None = None
         if register_identity_transform:
             self._register_identity_transform()
 
@@ -181,6 +198,23 @@ class EngineAdapter:
         plugin = TransformPlugin(name=name, into=into, register=register)
         self.register_transform(plugin)
         return plugin
+
+    def register_artifact_fns(
+        self,
+        *,
+        manifest: ManifestFn | None = None,
+        publish: PublishFn | None = None,
+        hydrate: HydrateFn | None = None,
+        evict_local: EvictLocalFn | None = None,
+    ) -> None:
+        if manifest is not None:
+            self._manifest_fn = manifest
+        if publish is not None:
+            self._publish_fn = publish
+        if hydrate is not None:
+            self._hydrate_fn = hydrate
+        if evict_local is not None:
+            self._evict_local_fn = evict_local
 
     def mint_target(
         self,
@@ -329,6 +363,113 @@ class EngineAdapter:
             )
         )
 
+    def execute_manifest(
+        self,
+        *,
+        engine_request_id: str,
+        ctx: CallContext | None = None,
+    ) -> ManifestResult:
+        engine_request_id = str(engine_request_id).strip()
+        if not engine_request_id:
+            raise ArtifactError(
+                "engine_request_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if self._manifest_fn is None:
+            raise ArtifactError(
+                "manifest is not configured on this engine adapter",
+                status_code="UNIMPLEMENTED",
+                retryable=False,
+            )
+        return self._manifest_fn(engine_request_id, ctx)
+
+    def execute_publish(
+        self,
+        *,
+        engine_request_id: str,
+        ttl_ms: int | None = None,
+        sealed_artifacts: Sequence[SealedByteArtifact] = (),
+        ctx: CallContext | None = None,
+    ) -> PublishResult:
+        engine_request_id = str(engine_request_id).strip()
+        if not engine_request_id:
+            raise ArtifactError(
+                "engine_request_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if ttl_ms is not None and int(ttl_ms) <= 0:
+            raise ArtifactError(
+                "ttl_ms must be positive when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if self._publish_fn is None:
+            raise ArtifactError(
+                "publish is not configured on this engine adapter",
+                status_code="UNIMPLEMENTED",
+                retryable=False,
+            )
+        normalized_artifacts = tuple(sealed_artifacts)
+        for artifact in normalized_artifacts:
+            if not isinstance(artifact, SealedByteArtifact):
+                raise ArtifactError(
+                    "publish requires sealed byte artifacts",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+        return self._publish_fn(
+            engine_request_id,
+            int(ttl_ms) if ttl_ms is not None else None,
+            normalized_artifacts,
+            ctx,
+        )
+
+    def execute_hydrate(
+        self,
+        *,
+        engine_request_id: str,
+        ctx: CallContext | None = None,
+    ) -> HydrateResult:
+        engine_request_id = str(engine_request_id).strip()
+        if not engine_request_id:
+            raise ArtifactError(
+                "engine_request_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if self._hydrate_fn is None:
+            raise ArtifactError(
+                "hydrate is not configured on this engine adapter",
+                status_code="UNIMPLEMENTED",
+                retryable=False,
+            )
+        return self._hydrate_fn(engine_request_id, ctx)
+
+    def execute_evict_local(
+        self,
+        *,
+        engine_request_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> BatchResult:
+        if self._evict_local_fn is None:
+            raise ArtifactError(
+                "evict_local is not configured on this engine adapter",
+                status_code="UNIMPLEMENTED",
+                retryable=False,
+            )
+        normalized_request_id = (
+            str(engine_request_id).strip() if engine_request_id is not None else None
+        )
+        if normalized_request_id == "":
+            raise ArtifactError(
+                "engine_request_id must be non-empty when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return self._evict_local_fn(normalized_request_id, ctx)
+
     def _require_transform(self, name: str) -> TransformPlugin:
         plugin = self._transforms.resolve(name)
         if plugin is None:
@@ -394,6 +535,10 @@ class EngineAdapter:
 
 __all__ = [
     "EngineAdapter",
+    "EvictLocalFn",
+    "HydrateFn",
+    "ManifestFn",
+    "PublishFn",
     "TargetRegistry",
     "TransformContext",
     "TransformPlugin",

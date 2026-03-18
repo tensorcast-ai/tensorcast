@@ -194,7 +194,8 @@ absl::StatusOr<ReplicaHandle> MaterializationService::try_reuse_replica(const Ma
   const auto& replica = existing_or.value();
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
-  (void)replica->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
+  const int load_concurrency = loading::resolve_materialization_concurrency(deps_.num_threads, request.hints());
+  (void)replica->ensure_loaded_async(request.target_location(), load_concurrency, gpu_device);
   if (request.target_is_gpu()) {
     const auto gpu_state = replica->get_memory_state(MemoryLocation::GPU);
     const auto cpu_state = replica->get_memory_state(MemoryLocation::CPU);
@@ -479,7 +480,8 @@ absl::StatusOr<ReplicaHandle> MaterializationService::reuse_existing_replica(
   const auto& existing = existing_or.value();
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
-  (void)existing->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
+  const int load_concurrency = loading::resolve_materialization_concurrency(deps_.num_threads, request.hints());
+  (void)existing->ensure_loaded_async(request.target_location(), load_concurrency, gpu_device);
   if (request.target_is_gpu()) {
     const auto gpu_state = existing->get_memory_state(MemoryLocation::GPU);
     const auto cpu_state = existing->get_memory_state(MemoryLocation::CPU);

@@ -59,6 +59,17 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("unregister_worker not supported in GlobalStoreClientStub");
   }
 
+  absl::StatusOr<std::vector<components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_workers not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
+    return absl::UnimplementedError("list_active_worker_identities not supported in GlobalStoreClientStub");
+  }
+
   absl::StatusOr<std::string> register_replica(
       std::string_view,
       std::string_view,
@@ -174,6 +185,43 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("reconcile_worker_state not supported in GlobalStoreClientStub");
   }
 
+  absl::StatusOr<components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t,
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("acquire_shard_home_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("keepalive_shard_home_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<components::ShardHomeLeaseKeepaliveInput>&,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_keepalive_shard_home_leases not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const components::RpcOptions&) override {
+    return absl::UnimplementedError("release_shard_home_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<components::ShardHomeRouteInfo> get_shard_home_lease(uint64_t, const components::RpcOptions&)
+      override {
+    return absl::UnimplementedError("get_shard_home_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_get_shard_home_leases not supported in GlobalStoreClientStub");
+  }
+
   bool is_connected() const override {
     return connected;
   }
@@ -187,6 +235,10 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
 
   absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view) override {
     return absl::UnimplementedError("resolve_key_mapping not supported in GlobalStoreClientStub");
+  }
+
+  absl::Status upsert_artifact_metadata(const common::v1::ArtifactDescriptor&, std::string_view) override {
+    return absl::UnimplementedError("upsert_artifact_metadata not supported in GlobalStoreClientStub");
   }
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {

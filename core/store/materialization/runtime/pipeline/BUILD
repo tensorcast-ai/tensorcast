@@ -37,6 +37,7 @@ sc_cc_library(
         "//core/store/materialization/common:view_hash_utils",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:canonical_index",
+        "//core/store/materialization/dataplane:disk_artifact_context",
         "//core/store/materialization/dataplane:index_reader",
         "//core/store/materialization/dataplane:safetensors_util",
         "//core/store/materialization/dataplane:source_hash",

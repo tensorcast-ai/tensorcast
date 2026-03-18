@@ -93,6 +93,7 @@ class RdmaTransport {
   rdma_thread_t io_thread_;
   std::vector<struct ibv_qp*> qps_;
   int qp_count_;
+  int max_send_wr_;
   std::atomic<int> next_qp_index_;
   union ibv_gid local_gid_;
   int gid_idx_;
@@ -100,7 +101,7 @@ class RdmaTransport {
   std::atomic_bool ready_;
   std::atomic_int inflight_send_;
   misc::Queue<read_request_t> read_queue_;
-  
+
   std::array<misc::Queue<read_request_t>, kMaxQpCount> per_qp_inflight_queues_;
 
   std::function<void(const read_request_t&)> ack_cb_;

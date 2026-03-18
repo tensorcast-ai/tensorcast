@@ -7,6 +7,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/store/device_registry.h"
@@ -22,6 +23,24 @@ using status_utils::to_grpc_status;
 namespace {
 
 constexpr absl::Duration kPlacementLeaseDefaultTokenTtl = absl::Hours(24 * 30);
+
+std::string placement_capability_id(uint64_t lease_id) {
+  return absl::StrCat("placement:", lease_id);
+}
+
+std::string placement_subject_id(const store::loading::ReplicaKey& key) {
+  return absl::StrCat(
+      "placement:",
+      key.artifact_id,
+      "|",
+      key.view_id.value_or(""),
+      "|",
+      static_cast<int>(key.device.type),
+      "|",
+      key.device.ordinal,
+      "|",
+      key.replica);
+}
 
 void fill_retention_handle(const RetentionRegistry::Handle& handle, v2::RetentionHandle* out) {
   out->set_handle_id(handle.handle_id);
@@ -169,6 +188,7 @@ grpc::Status LeaseController::create_placement_lease(
   const absl::Duration token_ttl = ttl > absl::ZeroDuration() ? ttl : kPlacementLeaseDefaultTokenTtl;
   const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + token_ttl));
   std::string lease_token;
+  const std::string capability_id = placement_capability_id(*lease_or);
   if (d_.capability_tokens != nullptr && d_.capability_tokens->configured()) {
     tensorcast::common::v1::PlacementLeaseScope scope;
     scope.set_lease_id(*lease_or);
@@ -191,6 +211,73 @@ grpc::Status LeaseController::create_placement_lease(
       return to_grpc_status(token_or.status());
     }
     lease_token = *token_or;
+  }
+
+  auto finalizer_status = d_.lifecycle.add_finalizer(*lease_or, [kernel = &d_.lifecycle_kernel, capability_id]() {
+    return kernel->release_capability(capability_id);
+  });
+  if (!finalizer_status.ok()) {
+    d_.lifecycle.release_lease(*lease_or);
+    return to_grpc_status(finalizer_status);
+  }
+
+  const absl::Time issued_at = absl::Now();
+  LifecycleSubjectRecord subject;
+  subject.subject_id = placement_subject_id(key);
+  subject.epochs.subject_generation = *lease_or;
+  subject.subject_kind = LifecycleSubjectKind::kPlacementTarget;
+  subject.created_at = issued_at;
+  subject.last_observed_at = issued_at;
+  subject.artifact_id = key.artifact_id;
+  subject.semantic_ref_id = subject.subject_id;
+  auto capability_or = d_.lifecycle_kernel.mint_capability(
+      MintCapabilityRequest{
+          .subject = subject,
+          .address =
+              CapabilityBindingAddress{
+                  .route_principal = make_issuer_route_principal(d_.lifecycle_kernel.issuer_daemon_id()),
+                  .family = LifecycleCapabilityFamily::kPlacement,
+                  .binding_space = LifecycleBindingSpace::kPlacementLease,
+                  .binding_key_kind = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+                      ? BindingKeyKind::kLeaseId
+                      : BindingKeyKind::kOpaqueLocalToken,
+                  .binding_key = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+                      ? std::to_string(*lease_or)
+                      : lease_token,
+                  .epochs = subject.epochs,
+                  .binding_id = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+                      ? std::nullopt
+                      : std::optional<std::string>(lease_token),
+              },
+          .front_door_kind = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+              ? LifecycleFrontDoorKind::kPlacementLeaseEnvelope
+              : LifecycleFrontDoorKind::kPlacementLeaseLocalToken,
+          .capability_id = capability_id,
+          .lease_id = *lease_or,
+          .capability_expires_at = issued_at + token_ttl,
+          .carriage_kind = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+              ? CredentialCarriageKind::kSelfDescribing
+              : CredentialCarriageKind::kOpaqueLocalCompat,
+          .binding_mode = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+              ? LifecycleBindingMode::kAddressDerived
+              : LifecycleBindingMode::kBindingRecord,
+          .constraint_claims =
+              ConstraintClaims{
+                  .artifact_id = key.artifact_id,
+                  .local_only = d_.capability_tokens == nullptr || !d_.capability_tokens->configured(),
+              },
+          .credential_expires_at = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+              ? std::nullopt
+              : std::optional<absl::Time>(issued_at + token_ttl),
+          .binding_id = d_.capability_tokens != nullptr && d_.capability_tokens->configured()
+              ? std::nullopt
+              : std::optional<std::string>(lease_token),
+          .local_only = d_.capability_tokens == nullptr || !d_.capability_tokens->configured(),
+          .workflow_gate = WorkflowGateKind::kNone,
+      });
+  if (!capability_or.ok()) {
+    d_.lifecycle.release_lease(*lease_or);
+    return to_grpc_status(capability_or.status());
   }
 
   resp.set_lease_id(*lease_or);
@@ -250,6 +337,16 @@ grpc::Status LeaseController::renew_placement_lease(
 
   resp.set_lease_id(lease_id);
   fill_timestamp(absl::Now() + ttl, resp.mutable_expires_at());
+  auto capability_or = d_.lifecycle_kernel.renew_capability(
+      RenewCapabilityRequest{
+          .capability_id = placement_capability_id(lease_id),
+          .capability_expires_at = absl::Now() + ttl,
+          .credential_expires_at = envelope_token ? std::nullopt : std::optional<absl::Time>(absl::Now() + ttl),
+          .binding_id = envelope_token ? std::nullopt : std::optional<std::string>(req.lease_token()),
+      });
+  if (!capability_or.ok()) {
+    return to_grpc_status(capability_or.status());
+  }
   rctx.mark_success();
   return Status::OK;
 }
@@ -269,6 +366,10 @@ grpc::Status LeaseController::release_placement_lease(
   const bool envelope_token = resolution_or->envelope_token;
 
   d_.lifecycle.release_lease(lease_id);
+  auto capability_status = d_.lifecycle_kernel.release_capability(placement_capability_id(lease_id));
+  if (!capability_status.ok()) {
+    return to_grpc_status(capability_status);
+  }
   const bool erased = envelope_token ? true : d_.placement_lease_tokens.erase(req.lease_token());
   resp.set_released(erased);
   rctx.mark_success();

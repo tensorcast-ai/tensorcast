@@ -162,6 +162,21 @@ TEST_CASE("MaterializationService reuses resident replicas", "[materialization_s
   REQUIRE(result->replica_key.artifact_id == request.canonical_artifact_id());
 }
 
+TEST_CASE("Materialization concurrency is capped by daemon worker budget", "[materialization_service]") {
+  MaterializeHints hints;
+  REQUIRE(tensorcast::store::loading::resolve_materialization_concurrency(16, hints) == 4);
+
+  hints.pipeline_concurrency = 32;
+  REQUIRE(tensorcast::store::loading::resolve_materialization_concurrency(16, hints) == 16);
+
+  hints.pipeline_concurrency = 3;
+  REQUIRE(tensorcast::store::loading::resolve_materialization_concurrency(16, hints) == 3);
+
+  hints.pipeline_concurrency = 0;
+  REQUIRE(tensorcast::store::loading::resolve_materialization_concurrency(16, hints) == 16);
+  REQUIRE(tensorcast::store::loading::resolve_materialization_concurrency(0, hints) == 1);
+}
+
 TEST_CASE("MaterializationService COPY_ONLY fails without GPU sources", "[materialization_service]") {
   TestHarness harness;
   harness.ingest_from_disk = [](const std::string&, const DiskSource&, const ReplicaTarget&, const MaterializeHints&) {

@@ -128,6 +128,13 @@ class SourceBalanceWeights:
 
 
 @dataclass(frozen=True)
+class GroupSourceSpreadPolicy:
+    spread_weight: float = 2.0
+    soft_cap_ratio: float = 1.3
+    min_candidates_for_enforce: int = 3
+
+
+@dataclass(frozen=True)
 class TransportSelectionResult:
     replica: Replica | None
     exportable_replicas: int
@@ -386,6 +393,8 @@ class ReplicaRepository(BaseRepository):
         view_id: str | None = None,
         scheduler_mode: str = "LEGACY",
         source_balance_weights: SourceBalanceWeights | None = None,
+        group_source_counts: dict[str, int] | None = None,
+        group_source_policy: GroupSourceSpreadPolicy | None = None,
         cursor=None,
     ) -> TransportSelectionResult:
         """
@@ -472,6 +481,20 @@ class ReplicaRepository(BaseRepository):
                     continue
                 eligible_candidates.append(candidate)
 
+            normalized_group_source_counts = self._normalize_group_source_counts(
+                group_source_counts
+            )
+            spread_policy = (
+                group_source_policy
+                if group_source_policy is not None
+                else GroupSourceSpreadPolicy()
+            )
+            group_candidate_count = len(eligible_candidates)
+            group_penalty_scale = self._group_source_penalty_scale(
+                candidate_count=group_candidate_count,
+                min_candidates_for_enforce=spread_policy.min_candidates_for_enforce,
+            )
+
             ranked_candidates = eligible_candidates
             mode = str(scheduler_mode or "LEGACY").upper()
             if mode in ("SOURCE_BALANCE", "GROUP_DISPATCH"):
@@ -483,12 +506,47 @@ class ReplicaRepository(BaseRepository):
                 ranked_candidates = sorted(
                     eligible_candidates,
                     key=lambda candidate: self._source_balance_sort_key(
-                        candidate, worker_loads, now_ts, weights
+                        candidate,
+                        worker_loads,
+                        now_ts,
+                        weights,
+                        group_source_counts=normalized_group_source_counts,
+                        group_candidate_count=group_candidate_count,
+                        group_source_spread_weight=spread_policy.spread_weight,
+                        group_source_penalty_scale=group_penalty_scale,
                     ),
+                )
+
+            enforce_group_soft_cap = (
+                mode == "GROUP_DISPATCH"
+                and group_candidate_count
+                >= max(1, int(spread_policy.min_candidates_for_enforce))
+            )
+            has_soft_cap_alternative = False
+            if enforce_group_soft_cap:
+                has_soft_cap_alternative = any(
+                    not self._is_group_source_over_soft_cap(
+                        replica_id=str(candidate.replica.replica_id),
+                        group_source_counts=normalized_group_source_counts,
+                        candidate_count=group_candidate_count,
+                        soft_cap_ratio=spread_policy.soft_cap_ratio,
+                    )
+                    for candidate in ranked_candidates
                 )
 
             for candidate in ranked_candidates:
                 replica_id = str(candidate.replica.replica_id)
+                if (
+                    enforce_group_soft_cap
+                    and has_soft_cap_alternative
+                    and self._is_group_source_over_soft_cap(
+                        replica_id=replica_id,
+                        group_source_counts=normalized_group_source_counts,
+                        candidate_count=group_candidate_count,
+                        soft_cap_ratio=spread_policy.soft_cap_ratio,
+                    )
+                ):
+                    continue
                 claim = cursor.execute(
                     """
                     UPDATE replica_counters
@@ -570,6 +628,79 @@ class ReplicaRepository(BaseRepository):
         age_sec = max(0.0, now_ts - assigned_ts)
         return min(1.0, age_sec / 30.0)
 
+    @staticmethod
+    def _normalize_group_source_counts(
+        group_source_counts: dict[str, int] | None,
+    ) -> dict[str, int]:
+        if not group_source_counts:
+            return {}
+        normalized: dict[str, int] = {}
+        for replica_id, count in group_source_counts.items():
+            normalized[str(replica_id)] = max(0, int(count))
+        return normalized
+
+    @staticmethod
+    def _group_source_penalty_scale(
+        *, candidate_count: int, min_candidates_for_enforce: int
+    ) -> float:
+        bounded_min_candidates = max(1, int(min_candidates_for_enforce))
+        if candidate_count <= 1:
+            return 0.0
+        if candidate_count >= bounded_min_candidates:
+            return 1.0
+        if bounded_min_candidates <= 1:
+            return 1.0
+        return float(candidate_count - 1) / float(bounded_min_candidates - 1)
+
+    @staticmethod
+    def _group_source_assignment_total(group_source_counts: dict[str, int]) -> int:
+        return sum(max(0, int(count)) for count in group_source_counts.values())
+
+    @classmethod
+    def _group_hotspot_penalty(
+        cls,
+        *,
+        replica_id: str,
+        group_source_counts: dict[str, int],
+        candidate_count: int,
+    ) -> float:
+        if candidate_count <= 1:
+            return 0.0
+        total_assignments = cls._group_source_assignment_total(group_source_counts)
+        if total_assignments <= 0:
+            return 0.0
+        replica_assignments = max(0, int(group_source_counts.get(replica_id, 0)))
+        actual_share = float(replica_assignments) / float(total_assignments)
+        fair_share = 1.0 / float(candidate_count)
+        if fair_share <= 0.0 or actual_share <= fair_share:
+            return 0.0
+        return (actual_share / fair_share) - 1.0
+
+    @classmethod
+    def _is_group_source_over_soft_cap(
+        cls,
+        *,
+        replica_id: str,
+        group_source_counts: dict[str, int],
+        candidate_count: int,
+        soft_cap_ratio: float,
+    ) -> bool:
+        if candidate_count <= 1:
+            return False
+        effective_soft_cap_ratio = max(0.0, float(soft_cap_ratio))
+        if effective_soft_cap_ratio <= 0.0:
+            return False
+        total_assignments = cls._group_source_assignment_total(group_source_counts)
+        if total_assignments <= 0:
+            return False
+        projected_assignments = float(
+            max(0, int(group_source_counts.get(replica_id, 0))) + 1
+        )
+        projected_total = float(total_assignments + 1)
+        projected_fair_assignments = projected_total / float(candidate_count)
+        soft_cap = max(1.0, projected_fair_assignments * effective_soft_cap_ratio)
+        return projected_assignments > soft_cap
+
     @classmethod
     def _source_balance_sort_key(
         cls,
@@ -577,6 +708,11 @@ class ReplicaRepository(BaseRepository):
         worker_loads: dict[str, float],
         now_ts: float,
         weights: SourceBalanceWeights,
+        *,
+        group_source_counts: dict[str, int],
+        group_candidate_count: int,
+        group_source_spread_weight: float,
+        group_source_penalty_scale: float,
     ) -> tuple[int, float, int, int, float, str]:
         replica = candidate.replica
         replica_load = float(replica.current_requests) / float(
@@ -588,11 +724,19 @@ class ReplicaRepository(BaseRepository):
             candidate.last_assigned_at, now_ts
         )
         diffusion_bonus = cls._diffusion_bonus(candidate, now_ts)
+        group_hotspot_penalty = cls._group_hotspot_penalty(
+            replica_id=str(replica.replica_id),
+            group_source_counts=group_source_counts,
+            candidate_count=group_candidate_count,
+        )
         source_score = (
             float(weights.replica_load) * replica_load
             + float(weights.worker_load) * worker_load
             + float(weights.recent_assignment_penalty) * recent_penalty
             - float(weights.diffusion_bonus) * diffusion_bonus
+            + float(group_source_spread_weight)
+            * float(group_source_penalty_scale)
+            * group_hotspot_penalty
         )
         return (
             cls._memory_priority(replica.memory_type),

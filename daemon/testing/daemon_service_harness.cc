@@ -57,6 +57,8 @@ absl::StatusOr<std::string> auto_local_handle_socket_path() {
 DaemonServiceHarness::DaemonServiceHarness(
     std::shared_ptr<common::AsyncRuntime> async_runtime,
     std::unique_ptr<DaemonKernel> kernel,
+    std::unique_ptr<ExternalTargetAccessService> external_target_access_service,
+    std::unique_ptr<ByteArtifactController> byte_artifact_controller,
     std::unique_ptr<MaterializationController> materialization_controller,
     std::unique_ptr<RegistrationController> registration_controller,
     std::unique_ptr<TransportController> transport_controller,
@@ -69,6 +71,8 @@ DaemonServiceHarness::DaemonServiceHarness(
     std::unique_ptr<LocalHandleServer> local_handle_server)
     : async_runtime_(std::move(async_runtime)),
       kernel_(std::move(kernel)),
+      external_target_access_service_(std::move(external_target_access_service)),
+      byte_artifact_controller_(std::move(byte_artifact_controller)),
       materialization_controller_(std::move(materialization_controller)),
       registration_controller_(std::move(registration_controller)),
       transport_controller_(std::move(transport_controller)),
@@ -92,12 +96,16 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
     std::shared_ptr<store::StoreEngine> engine,
     DaemonOptions options,
     std::shared_ptr<common::AsyncRuntime> async_runtime,
-    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client) {
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client,
+    std::shared_ptr<StartupCoordinator> startup_coordinator) {
   if (!engine) {
     return absl::InvalidArgumentError("DaemonServiceHarness requires StoreEngine");
   }
   if (!async_runtime) {
     async_runtime = std::make_shared<common::AsyncRuntime>();
+  }
+  if (!startup_coordinator) {
+    startup_coordinator = std::make_shared<StartupCoordinator>();
   }
   if (options.handle_lease_ttl.has_value()) {
     const auto ttl_ms = *options.handle_lease_ttl;
@@ -119,13 +127,46 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   }
   options.storage_path = std::move(*storage_root_or);
 
-  auto kernel = std::make_unique<DaemonKernel>(engine, async_runtime, options);
+  auto kernel = std::make_unique<DaemonKernel>(engine, async_runtime, options, global_store_client);
   if (global_store_client) {
     if (kernel->persistence_manager()) {
       kernel->persistence_manager()->set_global_store_client(global_store_client.get());
     }
     kernel->lip_manager().set_global_store_client(global_store_client);
   }
+
+  auto external_target_access_service = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
+      .devices = kernel->device_resolver(),
+      .regions = kernel->region_registry(),
+  });
+
+  auto byte_artifact_controller = std::make_unique<ByteArtifactController>(
+      ByteArtifactController::Dep{
+          .body_store = kernel->byte_artifact_body_store(),
+          .route_resolver = kernel->byte_artifact_route_resolver(),
+          .payload_transport_broker = kernel->payload_transport_broker(),
+          .worker_directory_cache = kernel->worker_directory_cache(),
+          .external_target_access_service = *external_target_access_service,
+          .identity_store = kernel->worker_identity_store(),
+          .engine = kernel->engine(),
+          .persistence_manager = kernel->persistence_manager(),
+          .global_store_client = global_store_client,
+          .inter_daemon_channel_credentials = kernel->inter_daemon_channel_credentials(),
+      },
+      ByteArtifactController::Options{
+          .routing =
+              {
+                  .shard_count = options.byte_artifact_routing.shard_count,
+                  .inline_payload_threshold_bytes = options.byte_artifact_routing.inline_payload_threshold_bytes,
+                  .route_staleness_budget = options.byte_artifact_routing.route_staleness_budget,
+                  .lease_ttl = options.byte_artifact_routing.lease_ttl,
+                  .keepalive_interval = options.byte_artifact_routing.keepalive_interval,
+                  .worker_directory_staleness_budget = options.byte_artifact_routing.worker_directory_staleness_budget,
+                  .routing_epoch = options.byte_artifact_routing.routing_epoch,
+                  .shard_home_eligible = options.byte_artifact_routing.shard_home_eligible,
+              },
+          .gateway_ingress_enabled = options.gateway_ingress_enabled,
+      });
 
   MaterializationController::Dep mdep{
       .engine = kernel->engine(),
@@ -136,11 +177,14 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
       .disk_imports = kernel->source_registry(),
+      .binding_registry = kernel->binding_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
       .async_runtime = *async_runtime,
       .identity = kernel->worker_identity_store(),
+      .external_target_access_service = *external_target_access_service,
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
+      .lifecycle_kernel = &kernel->lifecycle_kernel(),
       .handle_leases = kernel->handle_leases(),
       .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
@@ -162,7 +206,12 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   auto registration_controller = std::make_unique<RegistrationController>(rdep);
 
   TransportController::Dep tdep{
-      .engine = kernel->engine(), .locks = kernel->transport_lock_manager(), .lip = kernel->lip_manager()};
+      .engine = kernel->engine(),
+      .locks = kernel->transport_lock_manager(),
+      .lip = kernel->lip_manager(),
+      .materialization_controller = materialization_controller.get(),
+      .payload_transport_broker = &kernel->payload_transport_broker(),
+  };
   auto transport_controller = std::make_unique<TransportController>(tdep);
 
   StatusController::Dep sdep{
@@ -173,12 +222,15 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .start_time = kernel->start_time(),
       .local_handle_socket_path = options.local_handle_socket_path,
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
+      .startup_coordinator = startup_coordinator,
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
   KeyMappingController::Dep kmdep{
       .engine = kernel->engine(),
       .shutdown_signal = kernel->shutdown_signal(),
+      .source_registry = &kernel->source_registry(),
+      .global_store_client = global_store_client,
   };
   auto key_mapping_controller = std::make_unique<KeyMappingController>(kmdep);
 
@@ -197,6 +249,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   LeaseController::Dep ldep{
       .engine = kernel->engine(),
       .lifecycle = kernel->lifecycle_manager(),
+      .lifecycle_kernel = kernel->lifecycle_kernel(),
       .placement_lease_tokens = kernel->placement_lease_tokens(),
       .capability_tokens = kernel->capability_tokens(),
       .retention_registry = kernel->retention_registry(),
@@ -208,9 +261,11 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = kernel->engine(),
       .materialization_controller = *materialization_controller,
+      .byte_artifact_controller = *byte_artifact_controller,
       .registration_controller = *registration_controller,
       .transport_controller = *transport_controller,
       .status_controller = *status_controller,
+      .identity_store = kernel->worker_identity_store(),
       .region_registry = kernel->region_registry(),
       .lip_manager = kernel->lip_manager(),
       .global_store_client = global_store_client,
@@ -220,11 +275,13 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .replica_session_controller = *replica_session_controller,
       .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
+      .startup_coordinator = startup_coordinator,
       .source_registry = &kernel->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = options.allow_high_card_attrs,
       .use_cursor_pagination = options.use_cursor_pagination,
+      .gateway_ingress_enabled = options.gateway_ingress_enabled,
       .storage_path = options.storage_path,
   };
   auto service = std::make_unique<StoreDaemonServiceImpl>(sdeps, svc_opts);
@@ -245,6 +302,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   return std::unique_ptr<DaemonServiceHarness>(new DaemonServiceHarness(
       std::move(async_runtime),
       std::move(kernel),
+      std::move(external_target_access_service),
+      std::move(byte_artifact_controller),
       std::move(materialization_controller),
       std::move(registration_controller),
       std::move(transport_controller),

@@ -100,7 +100,8 @@ class Channel {
     StageLeaseRegistry registry;
     const uint32_t max_window_segments;
     std::deque<std::shared_ptr<RdmaReadSession>> rdma_pending_reads;
-    bool rdma_refill_in_progress = false;
+    std::atomic_bool rdma_refill_in_progress{false};
+    std::atomic_bool rdma_refill_requested{false};
   };
 
   std::shared_ptr<FlowState> flow_state() const {

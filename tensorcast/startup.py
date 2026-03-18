@@ -25,10 +25,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import BaseModel, ConfigDict, field_validator
+
 from tensorcast import runtime
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
 from tensorcast.cli_utils.config import discover_daemon_config
-from tensorcast.cli_utils.health import ping_daemon
+from tensorcast.cli_utils.health import ping_daemon, wait_for_daemon
 from tensorcast.cli_utils.paths import runtime_lock_path, runtime_root, session_paths
 from tensorcast.cli_utils.process import (
     atomic_write_json,
@@ -52,16 +54,52 @@ _ctx_lock: "threading.Lock" = threading.Lock()
 _AUTO_STATE_SCHEMA_VERSION = 1
 _AUTO_STATUS_EMPTY = "EMPTY"
 _AUTO_STATUS_STARTING = "STARTING"
+_AUTO_STATUS_LISTENING = "LISTENING"
 _AUTO_STATUS_READY = "READY"
 _AUTO_STATUS_FAILED = "FAILED"
 _AUTO_STATUS_VALUES = {
     _AUTO_STATUS_EMPTY,
     _AUTO_STATUS_STARTING,
+    _AUTO_STATUS_LISTENING,
     _AUTO_STATUS_READY,
     _AUTO_STATUS_FAILED,
 }
 _AUTO_WAIT_TIMEOUT_SECONDS = 180.0
 _AUTO_POLL_INTERVAL_SECONDS = 0.2
+
+
+class PortConfig(BaseModel):
+    """Optional port overrides for SDK-managed create/auto startup."""
+
+    model_config = ConfigDict(frozen=True)
+
+    daemon_listen_port: int | None = None
+    daemon_p2p_port: int | None = None
+    global_store_listen_port: int | None = None
+    global_store_metrics_port: int | None = None
+
+    @field_validator(
+        "daemon_listen_port",
+        "daemon_p2p_port",
+        "global_store_listen_port",
+        "global_store_metrics_port",
+        mode="before",
+    )
+    @classmethod
+    def _validate_port(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("port values must be integers between 0 and 65535")
+        try:
+            port = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "port values must be integers between 0 and 65535"
+            ) from exc
+        if port < 0 or port > 65535:
+            raise ValueError("port values must be integers between 0 and 65535")
+        return port
 
 
 @dataclass(slots=True)
@@ -217,6 +255,35 @@ def _clear_auto_state_if_matches(
             _auto_state_path().unlink()
 
 
+def _promote_auto_state_ready_when_rpc_ready(
+    *, session_id: str | None, address: str
+) -> None:
+    def _monitor() -> None:
+        if not wait_for_daemon(address, timeout=None):
+            return
+        with file_lock(runtime_lock_path()):
+            state = _read_auto_state_locked()
+            tracked_session = str(state.get("session_id", "") or "")
+            tracked_address = str(state.get("address", "") or "")
+            if tracked_session != (session_id or "") or tracked_address != address:
+                return
+            if (
+                str(state.get("status", _AUTO_STATUS_EMPTY)).upper()
+                != _AUTO_STATUS_LISTENING
+            ):
+                return
+            ready = dict(state)
+            ready["status"] = _AUTO_STATUS_READY
+            ready["error_code"] = ""
+            ready["error_message"] = ""
+            _write_auto_state_locked(ready)
+
+    thread = threading.Thread(
+        target=_monitor, name="tensorcast-auto-ready-promoter", daemon=True
+    )
+    thread.start()
+
+
 def _auto_wait_timeout_seconds() -> float:
     raw = os.environ.get("TENSORCAST_STARTUP_AUTO_WAIT_TIMEOUT_SECONDS")
     if raw is None or raw == "":
@@ -277,6 +344,7 @@ def _compute_auto_config_hash(
     cluster_id: str | None,
     allow_gs_fallback: bool,
     session_id: str | None,
+    port_config: PortConfig | None,
 ) -> str:
     daemon_path = (
         str(daemon_config_path.expanduser().resolve()) if daemon_config_path else None
@@ -296,10 +364,40 @@ def _compute_auto_config_hash(
         "cluster_id": cluster_id,
         "allow_gs_fallback": bool(allow_gs_fallback),
         "session_id": session_id,
+        "port_config": (
+            port_config.model_dump(exclude_none=True) if port_config is not None else {}
+        ),
     }
     digest = hashlib.sha256()
     digest.update(json.dumps(payload, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _normalize_port_config(
+    *,
+    port_config: PortConfig | None,
+    global_store_mode: Literal["connect", "start", "none"],
+    logger,
+) -> PortConfig | None:
+    if port_config is None:
+        return None
+    if global_store_mode == "start":
+        return port_config
+    if (
+        port_config.global_store_listen_port is None
+        and port_config.global_store_metrics_port is None
+    ):
+        return port_config
+    logger.warning(
+        "port_config.global_store_listen_port/global_store_metrics_port are ignored "
+        "unless global_store_mode='start'."
+    )
+    return port_config.model_copy(
+        update={
+            "global_store_listen_port": None,
+            "global_store_metrics_port": None,
+        }
+    )
 
 
 def _owner_alive(owner_pid: int, owner_fingerprint: object) -> bool:
@@ -410,6 +508,7 @@ def _start_context(
     cluster_id: str | None,
     allow_gs_fallback: bool,
     session_id: str | None,
+    port_config: PortConfig | None,
     reuse_existing: bool,
     logger,
 ) -> Context:
@@ -429,6 +528,18 @@ def _start_context(
         register_current=session_id is None,
         ephemeral=session_id is not None,
         restrict_to_localhost=restrict_localhost,
+        listen_port=(
+            port_config.daemon_listen_port if port_config is not None else None
+        ),
+        p2p_listen_port=(
+            port_config.daemon_p2p_port if port_config is not None else None
+        ),
+        global_store_listen_port=(
+            port_config.global_store_listen_port if port_config is not None else None
+        ),
+        global_store_metrics_port=(
+            port_config.global_store_metrics_port if port_config is not None else None
+        ),
         to_console=show_daemon_logs,
         reuse_existing=reuse_existing,
     )
@@ -437,7 +548,12 @@ def _start_context(
     if not daemon_address and cfg is not None:
         with contextlib.suppress(Exception):
             host = cfg.server.listen.host or "127.0.0.1"
-            port = int(cfg.server.listen.port or 0)
+            port = (
+                port_config.daemon_listen_port
+                if port_config is not None
+                and port_config.daemon_listen_port is not None
+                else int(cfg.server.listen.port or 0)
+            )
             daemon_address = f"{host}:{port}"
     if not daemon_address:
         daemon_address = "127.0.0.1:0"
@@ -479,6 +595,7 @@ def _init_auto_mode(
     cluster_id: str | None,
     allow_gs_fallback: bool,
     session_id: str | None,
+    port_config: PortConfig | None,
     logger,
 ) -> Context:
     if address and address not in {"auto", "local"}:
@@ -494,6 +611,7 @@ def _init_auto_mode(
         cluster_id=cluster_id,
         allow_gs_fallback=allow_gs_fallback,
         session_id=session_id,
+        port_config=port_config,
     )
     timeout_s = _auto_wait_timeout_seconds()
     while True:
@@ -523,7 +641,10 @@ def _init_auto_mode(
             state_hash = (
                 str(state_hash_raw).strip() if isinstance(state_hash_raw, str) else ""
             )
-            enforce_hash = status == _AUTO_STATUS_STARTING or (
+            enforce_hash = status in {
+                _AUTO_STATUS_STARTING,
+                _AUTO_STATUS_LISTENING,
+            } or (
                 status == _AUTO_STATUS_READY
                 and bool(existing_address)
                 and bool(state_address)
@@ -563,7 +684,7 @@ def _init_auto_mode(
                             ),
                             state=state,
                         )
-            elif status == _AUTO_STATUS_READY:
+            elif status in {_AUTO_STATUS_LISTENING, _AUTO_STATUS_READY}:
                 owner_pid = _coerce_int(state.get("owner_pid"), default=0)
                 if owner_pid > 0 and not _owner_alive(
                     owner_pid, state.get("owner_fingerprint")
@@ -572,17 +693,17 @@ def _init_auto_mode(
                     _write_auto_state_locked(_default_auto_state())
                     next_action = "reset"
                 else:
-                    ready_address = state.get("address")
-                    if isinstance(ready_address, str) and ready_address:
-                        connect_address = ready_address
+                    listening_address = state.get("address")
+                    if isinstance(listening_address, str) and listening_address:
+                        connect_address = listening_address
                         next_action = "connect"
                     elif existing_address:
                         connect_address = existing_address
                         next_action = "connect"
                     else:
                         raise _auto_error(
-                            code="AUTO_READY_INVALID",
-                            reason="ready state is missing daemon address",
+                            code="AUTO_LISTENING_INVALID",
+                            reason="listening state is missing daemon address",
                             state=state,
                         )
             elif status == _AUTO_STATUS_STARTING:
@@ -668,7 +789,12 @@ def _init_auto_mode(
                 else ""
             )
             if (
-                latest_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
+                latest_status
+                in {
+                    _AUTO_STATUS_LISTENING,
+                    _AUTO_STATUS_READY,
+                    _AUTO_STATUS_FAILED,
+                }
                 and latest_address
                 and latest_address == connect_address
                 and not latest_owner_alive
@@ -688,7 +814,12 @@ def _init_auto_mode(
                         refreshed.get("owner_pid"), default=0
                     )
                     if (
-                        refreshed_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
+                        refreshed_status
+                        in {
+                            _AUTO_STATUS_LISTENING,
+                            _AUTO_STATUS_READY,
+                            _AUTO_STATUS_FAILED,
+                        }
                         and refreshed_address == connect_address
                         and not _owner_alive(
                             refreshed_owner_pid, refreshed.get("owner_fingerprint")
@@ -720,6 +851,7 @@ def _init_auto_mode(
                     cluster_id=cluster_id,
                     allow_gs_fallback=allow_gs_fallback,
                     session_id=leader_session_id,
+                    port_config=port_config,
                     reuse_existing=False,
                     logger=logger,
                 )
@@ -737,16 +869,20 @@ def _init_auto_mode(
                     _write_auto_state_locked(failed)
                 raise
             with file_lock(runtime_lock_path()):
-                ready = dict(leader_state)
-                ready["status"] = _AUTO_STATUS_READY
-                ready["address"] = ctx.address
-                ready["session_id"] = ctx.session_id or ""
-                ready["logs_dir"] = (
+                listening = dict(leader_state)
+                listening["status"] = _AUTO_STATUS_LISTENING
+                listening["address"] = ctx.address
+                listening["session_id"] = ctx.session_id or ""
+                listening["logs_dir"] = (
                     str(session_paths(ctx.session_id).logs) if ctx.session_id else ""
                 )
-                ready["error_code"] = ""
-                ready["error_message"] = ""
-                _write_auto_state_locked(ready)
+                listening["error_code"] = ""
+                listening["error_message"] = ""
+                _write_auto_state_locked(listening)
+            _promote_auto_state_ready_when_rpc_ready(
+                session_id=ctx.session_id,
+                address=ctx.address,
+            )
             return ctx
 
         time.sleep(_AUTO_POLL_INTERVAL_SECONDS)
@@ -766,6 +902,7 @@ def init(
     cluster_id: str | None = None,
     allow_gs_fallback: bool = False,
     session_id: str | None = None,
+    port_config: PortConfig | None = None,
 ) -> Context:
     """Launch or connect to a Store Daemon and set global address.
 
@@ -792,7 +929,12 @@ def init(
         show_daemon_logs: Mirror daemon stdout/stderr to the current console when
             launching locally.
         global_store_mode: connect|start|none orchestration mode shared with CLI.
-            Applies only when launching daemon (mode="create"|"auto").
+            Applies only when launching daemon (mode="create"|"auto"). In
+            start mode, startup creates a new local Global Store and fails only
+            if a healthy local Global Store is already recorded for the current
+            runtime root. Stale local state does not block startup; a fresh
+            local Global Store is created with a new token unless `cluster_id`
+            explicitly pins the identity.
         global_store_address: Optional Global Store host:port to connect.
             Applies only when launching daemon (mode="create"|"auto").
         global_store_config_path: Optional Global Store config path used when
@@ -801,8 +943,13 @@ def init(
             discovers one via $TENSORCAST_GLOBAL_STORE_CONFIG or
             examples/config/global_store_config.yaml (repo or packaged wheel).
         cluster_id: Optional cluster identity to enforce when connecting/starting GS.
-        allow_gs_fallback: If True, start mode may fall back to none on GS failure.
+        allow_gs_fallback: If True, start mode may fall back to none when GS
+            startup itself fails.
         session_id: Optional explicit daemon session id (treated as private/ephemeral).
+        port_config: Optional port overrides for SDK-managed daemon / Global
+            Store launch. Supports daemon listen, daemon P2P, Global Store
+            listen, and Global Store metrics ports. Applies only when launching
+            locally (`mode="create"|"auto"`).
     """
     global _current_ctx, _atexit_registered, _ctx_lock
 
@@ -820,10 +967,11 @@ def init(
                 global_store_mode != "none"
                 or global_store_address is not None
                 or global_store_config_path is not None
+                or port_config is not None
             ):
                 logger.warning(
                     "init(mode='connect') does not reconfigure daemon Global Store settings; "
-                    "global_store_mode/global_store_address/global_store_config_path are ignored. "
+                    "global_store_mode/global_store_address/global_store_config_path/port_config are ignored. "
                     "Set Global Store when creating/starting daemon via "
                     "tc.init(mode='create'|'auto', ...) or "
                     "`uv run tensorcast-cli daemon start ...`."
@@ -855,6 +1003,11 @@ def init(
                 "Use mode='connect' to attach to an existing daemon."
             )
 
+        port_config = _normalize_port_config(
+            port_config=port_config,
+            global_store_mode=global_store_mode,
+            logger=logger,
+        )
         cfg_path, cfg, restrict_localhost = _resolve_launch_config(daemon_config_path)
         if mode == "auto":
             return _init_auto_mode(
@@ -871,6 +1024,7 @@ def init(
                 cluster_id=cluster_id,
                 allow_gs_fallback=allow_gs_fallback,
                 session_id=session_id,
+                port_config=port_config,
                 logger=logger,
             )
         return _start_context(
@@ -886,6 +1040,7 @@ def init(
             cluster_id=cluster_id,
             allow_gs_fallback=allow_gs_fallback,
             session_id=session_id,
+            port_config=port_config,
             reuse_existing=False,
             logger=logger,
         )
@@ -963,6 +1118,7 @@ def init_from_client_config(config_path: str | Path | None) -> None:
 
 __all__ = [
     "Context",
+    "PortConfig",
     "init",
     "shutdown",
     "is_initialized",

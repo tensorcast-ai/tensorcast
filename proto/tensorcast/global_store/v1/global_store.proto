@@ -49,6 +49,14 @@ service ClusterRuntimeService {
   // Chunk directory operations
   rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
   rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
+
+  // Shard-home leases (byte artifacts): low-cardinality fencing authority.
+  rpc AcquireShardHomeLease(AcquireShardHomeLeaseRequest) returns (AcquireShardHomeLeaseResponse) {}
+  rpc KeepaliveShardHomeLease(KeepaliveShardHomeLeaseRequest) returns (KeepaliveShardHomeLeaseResponse) {}
+  rpc BatchKeepaliveShardHomeLeases(BatchKeepaliveShardHomeLeasesRequest) returns (BatchKeepaliveShardHomeLeasesResponse) {}
+  rpc ReleaseShardHomeLease(ReleaseShardHomeLeaseRequest) returns (ReleaseShardHomeLeaseResponse) {}
+  rpc GetShardHomeLease(GetShardHomeLeaseRequest) returns (GetShardHomeLeaseResponse) {}
+  rpc BatchGetShardHomeLeases(BatchGetShardHomeLeasesRequest) returns (BatchGetShardHomeLeasesResponse) {}
 }
 
 // Artifact metadata domain: durable identity and addressing metadata.
@@ -56,6 +64,9 @@ service ArtifactCatalogService {
   // Resolve or upsert artifact bindings (e.g., assembly_id -> mi2_id)
   rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
   rpc UpsertArtifactBinding(UpsertArtifactBindingRequest) returns (UpsertArtifactBindingResponse) {}
+
+  // Upsert canonical artifact metadata without registering a replica or disk location.
+  rpc UpsertArtifactMetadata(UpsertArtifactMetadataRequest) returns (UpsertArtifactMetadataResponse) {}
 
   // Get artifact tensor index data by key
   rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
@@ -96,6 +107,10 @@ service AssemblyViewService {
   rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
   rpc GetAssemblyRuntimePolicy(GetAssemblyRuntimePolicyRequest) returns (GetAssemblyRuntimePolicyResponse) {}
   rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
+  rpc GetAssemblyContribution(GetAssemblyContributionRequest) returns (GetAssemblyContributionResponse) {}
+  rpc UpsertAssemblyContribution(UpsertAssemblyContributionRequest) returns (UpsertAssemblyContributionResponse) {}
+  rpc ListAssemblyContributions(ListAssemblyContributionsRequest) returns (ListAssemblyContributionsResponse) {}
+  rpc UpdateAssemblyContributionState(UpdateAssemblyContributionStateRequest) returns (UpdateAssemblyContributionStateResponse) {}
 }
 
 // Workflow domain: lease-based long-running operations and placement/persistence plans.
@@ -158,6 +173,8 @@ enum WorkerCapabilityFlag {
   WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED = 1;
   WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED = 2;
   WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED = 3;
+  WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED = 4;
+  WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE = 5;
 }
 
 // Instance capability flags (bit positions in capability_flags).
@@ -165,6 +182,93 @@ enum InstanceCapabilityFlag {
   INSTANCE_CAPABILITY_FLAG_UNSPECIFIED = 0;
   INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED = 1;
   INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED = 2;
+}
+
+// Shard-home lease (byte artifact) used for routed home authority fencing.
+message ShardHomeLease {
+  uint64 shard_id = 1;
+  string holder_daemon_id = 2;
+  string lease_token = 3;
+  uint64 lease_generation = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+// Shard-home route used for routing decisions (no lease_token).
+message ShardHomeRoute {
+  uint64 shard_id = 1;
+  string holder_daemon_id = 2;
+  uint64 lease_generation = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message AcquireShardHomeLeaseRequest {
+  uint64 shard_id = 1;
+  // Stable daemon identity for the acquiring daemon.
+  string holder_daemon_id = 2;
+  // Requested lease TTL.
+  uint64 ttl_ms = 3;
+}
+
+message AcquireShardHomeLeaseResponse {
+  bool acquired = 1;
+  ShardHomeLease lease = 2;
+}
+
+message KeepaliveShardHomeLeaseRequest {
+  string lease_token = 1;
+  uint64 ttl_ms = 2;
+}
+
+message KeepaliveShardHomeLeaseResponse {
+  ShardHomeLease lease = 1;
+}
+
+message ShardHomeLeaseKeepalive {
+  uint64 shard_id = 1;
+  uint64 lease_generation = 2;
+  string lease_token = 3;
+}
+
+message ShardHomeLeaseKeepaliveOutcome {
+  uint64 shard_id = 1;
+  uint64 lease_generation = 2;
+  string lease_token = 3;
+  bool ok = 4;
+  ShardHomeLease lease = 5;
+  string message = 6;
+}
+
+message BatchKeepaliveShardHomeLeasesRequest {
+  repeated ShardHomeLeaseKeepalive leases = 1;
+  uint64 ttl_ms = 2;
+}
+
+message BatchKeepaliveShardHomeLeasesResponse {
+  repeated ShardHomeLeaseKeepaliveOutcome outcomes = 1;
+}
+
+message ReleaseShardHomeLeaseRequest {
+  string lease_token = 1;
+}
+
+message ReleaseShardHomeLeaseResponse {
+  bool released = 1;
+}
+
+message GetShardHomeLeaseRequest {
+  uint64 shard_id = 1;
+}
+
+message GetShardHomeLeaseResponse {
+  ShardHomeRoute lease = 1;
+}
+
+message BatchGetShardHomeLeasesRequest {
+  repeated uint64 shard_ids = 1;
+}
+
+message BatchGetShardHomeLeasesResponse {
+  repeated ShardHomeRoute leases = 1;
 }
 
 // ========== Worker管理相关消息 ==========
@@ -582,6 +686,70 @@ message UpdateAssemblyRuntimePolicyResponse {
   AssemblyRuntimePolicy policy = 2;
 }
 
+message AssemblyContribution {
+  string assembly_id = 1;
+  string view_id = 2;
+  string binding_id = 3;
+  string binding_value_id = 4;
+  string coverage_plan_hash = 5;
+  string contributor_daemon_id = 6;
+  string coordinator_operation_id = 7;
+  uint64 coordinator_generation = 8;
+  string lease_id = 9;
+  uint64 lease_generation = 10;
+  google.protobuf.Timestamp lease_expires_at = 11;
+  string state = 12;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp updated_at = 14;
+}
+
+message GetAssemblyContributionRequest {
+  string assembly_id = 1;
+  string view_id = 2;
+}
+
+message GetAssemblyContributionResponse {
+  Status status = 1;
+  AssemblyContribution contribution = 2;
+}
+
+message UpsertAssemblyContributionRequest {
+  AssemblyContribution contribution = 1;
+}
+
+message UpsertAssemblyContributionResponse {
+  Status status = 1;
+  AssemblyContribution contribution = 2;
+}
+
+message ListAssemblyContributionsRequest {
+  string assembly_id = 1;
+  string view_id = 2;
+  string binding_id = 3;
+  string binding_value_id = 4;
+  repeated string states = 5;
+}
+
+message ListAssemblyContributionsResponse {
+  Status status = 1;
+  repeated AssemblyContribution contributions = 2;
+}
+
+message UpdateAssemblyContributionStateRequest {
+  string assembly_id = 1;
+  string view_id = 2;
+  string state = 3;
+  string expected_lease_id = 4;
+  uint64 expected_lease_generation = 5;
+  repeated string current_states = 6;
+  google.protobuf.Timestamp lease_expires_at = 7;
+}
+
+message UpdateAssemblyContributionStateResponse {
+  Status status = 1;
+  AssemblyContribution contribution = 2;
+}
+
 message LeafWrite {
   tensorcast.common.v1.HashSpaceRef hash_space = 1;
   uint64 leaf_idx = 2;
@@ -657,6 +825,15 @@ message UpsertArtifactBindingResponse {
   Status status = 1;
   ArtifactBinding binding = 2;
   bool created = 3;
+}
+
+message UpsertArtifactMetadataRequest {
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 1;
+  bytes canonical_index_data = 2;
+}
+
+message UpsertArtifactMetadataResponse {
+  Status status = 1;
 }
 
 // Get artifact index request

@@ -56,6 +56,50 @@ message SimpleNumaConfig {
   repeated SimpleNumaNode nodes = 2;
 }
 
+message LldpDiscoveryConfig {
+  // LLDP rail mapping file. Example line:
+  //   eth1=0000:19:00.0,mlx5_0,1
+  // default: /host-config/lldp-info.txt
+  string file_path = 1;
+  // When true, missing file or parse failures fail fast during topology build.
+  // default: false
+  bool required = 2;
+}
+
+message NvlinkDiscoveryConfig {
+  enum Source {
+    SOURCE_UNSPECIFIED = 0;
+    SOURCE_DISABLED = 1;
+    SOURCE_SNAPSHOT_FILE = 2;
+    SOURCE_RUNTIME_PROBE = 3;
+  }
+  // default: SOURCE_DISABLED
+  Source source = 1;
+  // Used when source == SOURCE_SNAPSHOT_FILE.
+  string snapshot_file_path = 2;
+  // When true, unavailable NVLINK source fails topology build.
+  // default: false
+  bool required = 3;
+}
+
+message TopologyMergePolicy {
+  // Emit per-rail switch endpoints (netsw_rail_<id>).
+  // default: true
+  bool emit_rail_switch_endpoints = 1;
+  // Require full graph connectivity during topology validation.
+  // default: false
+  bool require_connected = 2;
+}
+
+message TopologyDiscoveryConfig {
+  // Enable LLDP/NVLINK-based topology discovery.
+  // default: false
+  bool enable = 1;
+  LldpDiscoveryConfig lldp = 2;
+  NvlinkDiscoveryConfig nvlink = 3;
+  TopologyMergePolicy merge_policy = 4;
+}
+
 message CommunicatorConfig {
   bool enable_rdma = 1; // default: false
   StagerConfig stager = 2;
@@ -65,4 +109,5 @@ message CommunicatorConfig {
   TransportConfig transport = 5;
   AffinityConfig affinity = 6;
   SimpleNumaConfig simple_numa = 7; // optional; mirrors env-based interim
+  TopologyDiscoveryConfig topology_discovery = 8;
 }

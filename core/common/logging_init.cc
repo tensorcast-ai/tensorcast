@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/logging_init.h"
 
@@ -36,6 +36,9 @@ absl::LogSeverityAtLeast map_log_level(tensorcast::config::v1::Observability::Lo
 
 void set_vlog_level(int32_t vlog_level) {
   const int32_t clamped = std::max<int32_t>(0, vlog_level);
+  if (clamped == 0) {
+    return;
+  }
   absl::SetVLogLevel("*", clamped);
 }
 

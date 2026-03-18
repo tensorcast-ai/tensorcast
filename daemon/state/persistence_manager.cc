@@ -18,6 +18,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -25,6 +26,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/lip_manager.h"
@@ -272,6 +274,55 @@ std::string disk_failure_token(const absl::Status& status, DiskFailureStage stag
   return "shared_disk_write_failed";
 }
 
+absl::Status write_byte_artifact_disk_metadata(
+    const std::filesystem::path& object_dir,
+    std::string_view logical_artifact_id,
+    uint64_t total_size_bytes) {
+  const std::string canonical_index_json =
+      store::loading::build_synthetic_payload_canonical_index_json(total_size_bytes);
+  const auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+  if (!index_mh_or.ok()) {
+    return index_mh_or.status();
+  }
+  const auto data_mh_or = store::loader::compute_data_multihash_from_disk_dir(object_dir.string());
+  if (!data_mh_or.ok()) {
+    return data_mh_or.status();
+  }
+
+  const std::filesystem::path index_path = object_dir / "tensor_index.json";
+  std::ofstream index_out(index_path, std::ios::trunc);
+  if (!index_out.is_open()) {
+    return absl::FailedPreconditionError("shared_disk_index_write_failed");
+  }
+  index_out << canonical_index_json;
+  index_out.flush();
+  if (!index_out.good()) {
+    return absl::FailedPreconditionError("shared_disk_index_write_failed");
+  }
+
+  nlohmann::json descriptor;
+  descriptor["artifact_id"] = absl::StrCat("mi2:", *index_mh_or, ":", *data_mh_or);
+  descriptor["logical_artifact_id"] = std::string(logical_artifact_id);
+  descriptor["index_multihash"] = *index_mh_or;
+  descriptor["data_multihash"] = *data_mh_or;
+  descriptor["schema_version"] = "v3";
+  descriptor["encoding"] = "json";
+  descriptor["total_size"] = total_size_bytes;
+
+  const std::filesystem::path descriptor_path = object_dir / "artifact_descriptor.json";
+  std::ofstream desc_out(descriptor_path, std::ios::trunc);
+  if (!desc_out.is_open()) {
+    return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+  }
+  desc_out << descriptor.dump(2);
+  desc_out.flush();
+  if (!desc_out.good()) {
+    return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+  }
+
+  return absl::OkStatus();
+}
+
 void send_reports(comps::IGlobalStoreClient* client, const std::vector<comps::PersistenceReport>& reports) {
   if (client == nullptr) {
     return;
@@ -319,11 +370,48 @@ nlohmann::json shard_to_json(const PersistenceShardState& shard) {
   return j;
 }
 
+nlohmann::json verified_content_descriptor_to_json(
+    const store::runtime::ingestion::VerifiedContentDescriptor& descriptor) {
+  nlohmann::json j;
+  j["layout_kind"] = static_cast<int>(descriptor.content_identity.semantic_layout_identity.kind);
+  j["layout_value"] = descriptor.content_identity.semantic_layout_identity.value;
+  j["logical_size_bytes"] = descriptor.content_identity.logical_size_bytes;
+  j["digest_alg"] = descriptor.content_identity.digest_alg;
+  j["digest_hex"] = store::runtime::ingestion::content_digest_bytes_to_hex(descriptor.content_identity.digest_bytes);
+  return j;
+}
+
+std::optional<store::runtime::ingestion::VerifiedContentDescriptor> verified_content_descriptor_from_json(
+    const nlohmann::json& j) {
+  if (!j.is_object()) {
+    return std::nullopt;
+  }
+  store::runtime::ingestion::VerifiedContentDescriptor descriptor;
+  descriptor.content_identity.semantic_layout_identity.kind =
+      static_cast<store::runtime::ingestion::SemanticLayoutKind>(
+          j.value("layout_kind", static_cast<int>(store::runtime::ingestion::SemanticLayoutKind::kUnspecified)));
+  descriptor.content_identity.semantic_layout_identity.value = j.value("layout_value", "");
+  descriptor.content_identity.logical_size_bytes = j.value("logical_size_bytes", 0u);
+  descriptor.content_identity.digest_alg = j.value("digest_alg", "");
+  std::string digest_bytes;
+  const std::string digest_hex = j.value("digest_hex", "");
+  if (!digest_hex.empty() && !absl::HexStringToBytes(digest_hex, &digest_bytes)) {
+    digest_bytes = digest_hex;
+  }
+  descriptor.content_identity.digest_bytes = std::move(digest_bytes);
+  return descriptor;
+}
+
 nlohmann::json task_to_json(const PersistenceTaskState& task) {
   nlohmann::json j;
   j["task_id"] = task.task_id;
   j["plan_id"] = task.plan_id;
   j["artifact_id"] = task.artifact_id;
+  j["source_artifact_id"] = task.source_artifact_id;
+  if (task.verified_content_descriptor.has_value()) {
+    j["verified_content_descriptor"] = verified_content_descriptor_to_json(*task.verified_content_descriptor);
+  }
+  j["key_hint"] = task.key_hint;
   j["placement_policy"] = task.placement_policy;
   j["persist_to_shared_disk"] = task.persist_to_shared_disk;
   j["remote_requirement"] = static_cast<int>(task.remote_requirement);
@@ -333,6 +421,12 @@ nlohmann::json task_to_json(const PersistenceTaskState& task) {
   j["progress"] = task.progress;
   j["degraded_reason"] = task.degraded_reason;
   j["last_error"] = task.last_error;
+  j["total_size_bytes"] = task.total_size_bytes;
+  j["disk_relative_path"] = task.disk_relative_path;
+  j["disk_directory_ready"] = task.disk_directory_ready;
+  j["disk_metadata_written"] = task.disk_metadata_written;
+  j["disk_location_registered"] = task.disk_location_registered;
+  j["by_key_linked"] = task.by_key_linked;
   nlohmann::json shards = nlohmann::json::array();
   for (const auto& shard : task.shards) {
     shards.push_back(shard_to_json(shard));
@@ -364,6 +458,11 @@ absl::optional<PersistenceTaskState> task_from_json(const nlohmann::json& j) {
     }
     task.plan_id = j.value("plan_id", "");
     task.artifact_id = j.value("artifact_id", "");
+    task.source_artifact_id = j.value("source_artifact_id", task.artifact_id);
+    if (j.contains("verified_content_descriptor")) {
+      task.verified_content_descriptor = verified_content_descriptor_from_json(j.at("verified_content_descriptor"));
+    }
+    task.key_hint = j.value("key_hint", "");
     task.placement_policy = static_cast<v2::PlacementPolicy>(j.value("placement_policy", 0));
     task.persist_to_shared_disk = j.value("persist_to_shared_disk", false);
     task.remote_requirement = static_cast<RequirementLevel>(j.value("remote_requirement", 0));
@@ -373,6 +472,12 @@ absl::optional<PersistenceTaskState> task_from_json(const nlohmann::json& j) {
     task.progress = j.value("progress", 0.0);
     task.degraded_reason = j.value("degraded_reason", "");
     task.last_error = j.value("last_error", "");
+    task.total_size_bytes = j.value("total_size_bytes", 0u);
+    task.disk_relative_path = j.value("disk_relative_path", "");
+    task.disk_directory_ready = j.value("disk_directory_ready", false);
+    task.disk_metadata_written = j.value("disk_metadata_written", false);
+    task.disk_location_registered = j.value("disk_location_registered", false);
+    task.by_key_linked = j.value("by_key_linked", false);
     if (j.contains("shards")) {
       for (const auto& shard_json : j.at("shards")) {
         PersistenceShardState shard;
@@ -458,6 +563,8 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
       .task_id = absl::StrFormat("persist-%016x", id),
       .plan_id = absl::StrFormat("plan-%016x", id),
       .artifact_id = source.artifact_id,
+      .source_artifact_id = source.source_artifact_id.empty() ? source.artifact_id : source.source_artifact_id,
+      .verified_content_descriptor = source.verified_content_descriptor,
       .key_hint = std::string(key_hint),
       .placement_policy = placement_policy,
       .persist_to_shared_disk = persist_to_shared_disk,
@@ -509,8 +616,9 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
 
   {
     absl::MutexLock lock(&mu_);
-    artifact_to_task_[task.artifact_id] = task.task_id;
     tasks_[task.task_id] = task;
+    index_task_locked(task);
+    refresh_policy_source_registry_locked(task);
     persist_task_locked(task);
   }
   if (scheduler_) {
@@ -525,11 +633,26 @@ absl::StatusOr<PersistenceManager::PersistenceSource> PersistenceManager::resolv
   if (stable_or.ok()) {
     return stable_or;
   }
+  ResolveExternalSourceFn external_source_resolver;
+  {
+    absl::MutexLock lock(&mu_);
+    external_source_resolver = external_source_resolver_;
+  }
+  if (external_source_resolver) {
+    auto external_or = external_source_resolver(artifact_id);
+    if (external_or.ok()) {
+      if (external_or->source_artifact_id.empty()) {
+        external_or->source_artifact_id = external_or->artifact_id;
+      }
+      return external_or;
+    }
+  }
   if (lip_mgr_ != nullptr) {
     auto lease_opt = lip_mgr_->find_active_by_artifact_id(std::string(artifact_id));
     if (lease_opt.has_value()) {
       PersistenceSource source;
       source.artifact_id = lease_opt->artifact_id;
+      source.source_artifact_id = source.artifact_id;
       source.total_size_bytes = lease_opt->total_size;
       return source;
     }
@@ -564,6 +687,7 @@ absl::StatusOr<PersistenceManager::PersistenceSource> PersistenceManager::stable
     }
     PersistenceSource source;
     source.artifact_id = std::string(artifact_id);
+    source.source_artifact_id = source.artifact_id;
     source.total_size_bytes = *size_or;
     return source;
   }
@@ -638,15 +762,185 @@ void PersistenceManager::set_global_store_client(store::components::IGlobalStore
   if (!cluster_id.empty()) {
     cluster_id_ = std::move(cluster_id);
   }
+  rebuild_policy_source_registry_locked();
 }
 
 void PersistenceManager::set_storage_path(std::filesystem::path storage_root) {
   absl::MutexLock lock(&mu_);
   storage_root_ = std::move(storage_root);
+  rebuild_policy_source_registry_locked();
 }
 
 void PersistenceManager::set_max_concurrency(uint32_t max_concurrency) {
   max_concurrency_.store(std::max<uint32_t>(1, max_concurrency), std::memory_order_relaxed);
+}
+
+void PersistenceManager::set_external_source_resolver(ResolveExternalSourceFn resolver) {
+  absl::MutexLock lock(&mu_);
+  external_source_resolver_ = std::move(resolver);
+}
+
+void PersistenceManager::index_task_locked(const PersistenceTaskState& task) {
+  if (task.artifact_id.empty() || task.task_id.empty()) {
+    return;
+  }
+  artifact_to_tasks_[task.artifact_id].insert(task.task_id);
+  auto& latest_task_id = artifact_to_task_[task.artifact_id];
+  if (latest_task_id.empty() || latest_task_id < task.task_id) {
+    latest_task_id = task.task_id;
+  }
+}
+
+void PersistenceManager::rebuild_policy_source_registry_locked() {
+  policy_sources_by_control_ref_.clear();
+  artifact_policy_sources_.clear();
+  for (const auto& [task_id, task] : tasks_) {
+    (void)task_id;
+    refresh_policy_source_registry_locked(task);
+  }
+}
+
+void PersistenceManager::refresh_policy_source_registry_locked(const PersistenceTaskState& task) {
+  if (task.artifact_id.empty() || task.task_id.empty()) {
+    return;
+  }
+
+  auto artifact_sources_it = artifact_policy_sources_.find(task.artifact_id);
+  if (artifact_sources_it != artifact_policy_sources_.end()) {
+    artifact_sources_it->second.erase(task.task_id);
+    if (artifact_sources_it->second.empty()) {
+      artifact_policy_sources_.erase(artifact_sources_it);
+    }
+  }
+  policy_sources_by_control_ref_.erase(task.task_id);
+
+  auto source = policy_source_record_locked(task);
+  if (!source.has_value()) {
+    return;
+  }
+  artifact_policy_sources_[task.artifact_id].insert(source->control_ref);
+  policy_sources_by_control_ref_[source->control_ref] = *source;
+}
+
+bool PersistenceManager::task_has_actionable_shared_disk_locked(const PersistenceTaskState& task) const {
+  if (!task.persist_to_shared_disk || !task.disk_location_registered || task.disk_relative_path.empty() ||
+      storage_root_.empty()) {
+    return false;
+  }
+  if (task.shards.empty()) {
+    return false;
+  }
+  for (const auto& shard : task.shards) {
+    bool shard_complete = false;
+    for (const auto& target : shard.targets) {
+      if (!target.is_shared_disk) {
+        continue;
+      }
+      if (target.target_state == gs::PLACEMENT_TARGET_STATE_COMPLETE ||
+          target.target_state == gs::PLACEMENT_TARGET_STATE_SKIPPED) {
+        shard_complete = true;
+        break;
+      }
+    }
+    if (!shard_complete) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<PersistenceManager::PolicySourceRecord> PersistenceManager::policy_source_record_locked(
+    const PersistenceTaskState& task) const {
+  if (!task_has_actionable_shared_disk_locked(task)) {
+    return std::nullopt;
+  }
+  const auto object_dir_or = disk_object_dir(task);
+  if (!object_dir_or.ok()) {
+    return std::nullopt;
+  }
+  const auto& object_dir = *object_dir_or;
+  if (!std::filesystem::exists(object_dir / "artifact_descriptor.json") ||
+      !std::filesystem::exists(object_dir / "tensor_index.json")) {
+    return std::nullopt;
+  }
+  for (const auto& shard : task.shards) {
+    std::error_code ec;
+    const std::filesystem::path part_path = object_dir / std::format("tensor.data_{}", shard.shard_idx);
+    if (!std::filesystem::exists(part_path, ec) || ec) {
+      return std::nullopt;
+    }
+    const auto file_size = std::filesystem::file_size(part_path, ec);
+    if (ec || file_size != shard.size_bytes) {
+      return std::nullopt;
+    }
+  }
+  return PolicySourceRecord{
+      .artifact_id = task.artifact_id,
+      .path_id = absl::StrCat("shared_disk:", task.task_id),
+      .path_kind = PolicySourceKind::kSharedDisk,
+      .control_ref = task.task_id,
+      .workflow_task_id = task.task_id,
+      .local_path = object_dir,
+      .verified_content_descriptor = task.verified_content_descriptor,
+  };
+}
+
+std::vector<PersistenceManager::PolicySourceRecord> PersistenceManager::list_policy_sources(
+    absl::string_view artifact_id) const {
+  absl::MutexLock lock(&mu_);
+  std::vector<PolicySourceRecord> sources;
+  auto artifact_sources_it = artifact_policy_sources_.find(std::string(artifact_id));
+  if (artifact_sources_it == artifact_policy_sources_.end()) {
+    return sources;
+  }
+  sources.reserve(artifact_sources_it->second.size());
+  for (const auto& control_ref : artifact_sources_it->second) {
+    auto task_it = tasks_.find(control_ref);
+    if (task_it == tasks_.end()) {
+      continue;
+    }
+    auto source = policy_source_record_locked(task_it->second);
+    if (source.has_value()) {
+      sources.push_back(std::move(*source));
+    }
+  }
+  std::sort(sources.begin(), sources.end(), [](const PolicySourceRecord& lhs, const PolicySourceRecord& rhs) {
+    return lhs.control_ref > rhs.control_ref;
+  });
+  return sources;
+}
+
+std::optional<PersistenceManager::PolicySourceRecord> PersistenceManager::resolve_policy_source(
+    absl::string_view artifact_id,
+    std::optional<absl::string_view> expected_control_ref) const {
+  absl::MutexLock lock(&mu_);
+  if (expected_control_ref.has_value()) {
+    auto task_it = tasks_.find(std::string(*expected_control_ref));
+    if (task_it == tasks_.end() || task_it->second.artifact_id != artifact_id) {
+      return std::nullopt;
+    }
+    return policy_source_record_locked(task_it->second);
+  }
+
+  auto artifact_sources_it = artifact_policy_sources_.find(std::string(artifact_id));
+  if (artifact_sources_it == artifact_policy_sources_.end()) {
+    return std::nullopt;
+  }
+  std::optional<PolicySourceRecord> best_source;
+  for (const auto& control_ref : artifact_sources_it->second) {
+    auto task_it = tasks_.find(control_ref);
+    if (task_it == tasks_.end()) {
+      continue;
+    }
+    auto source = policy_source_record_locked(task_it->second);
+    if (!source.has_value()) {
+      continue;
+    }
+    if (!best_source.has_value() || best_source->control_ref < source->control_ref) {
+      best_source = std::move(source);
+    }
+  }
+  return best_source;
 }
 
 absl::Status PersistenceManager::ack_and_register_remote(
@@ -891,18 +1185,21 @@ absl::StatusOr<std::filesystem::path> PersistenceManager::disk_object_dir(const 
   if (storage_root_.empty()) {
     return absl::FailedPreconditionError("storage_path_missing");
   }
-  if (cluster_id_.empty()) {
-    return absl::FailedPreconditionError("cluster_id_missing");
-  }
   std::filesystem::path relative;
   if (!task.disk_relative_path.empty()) {
     relative = task.disk_relative_path;
   } else {
+    if (cluster_id_.empty()) {
+      return absl::FailedPreconditionError("cluster_id_missing");
+    }
     const std::string artifact_segment = sanitize_segment(task.artifact_id);
     relative = std::filesystem::path(kClustersDir) / cluster_id_ / kObjectsDir / artifact_segment;
   }
   if (!is_safe_relative_path(relative)) {
     return absl::FailedPreconditionError("disk_relative_path_missing");
+  }
+  if (!task.disk_relative_path.empty()) {
+    return storage_root_ / relative;
   }
   const std::filesystem::path expected_prefix = std::filesystem::path(kClustersDir) / cluster_id_;
   if (!has_path_prefix(relative, expected_prefix)) {
@@ -1017,7 +1314,10 @@ absl::Status PersistenceManager::start_disk_write(
     return absl::FailedPreconditionError("async_runtime_unavailable");
   }
 
-  auto base_ptr_or = store_engine_->get_replica_cpu_base_ptr(task.artifact_id);
+  const absl::string_view source_artifact_id = task.source_artifact_id.empty()
+      ? absl::string_view(task.artifact_id)
+      : absl::string_view(task.source_artifact_id);
+  auto base_ptr_or = store_engine_->get_replica_cpu_base_ptr(source_artifact_id);
   if (!base_ptr_or.ok()) {
     return base_ptr_or.status();
   }
@@ -1092,45 +1392,53 @@ absl::Status PersistenceManager::finalize_disk_directory(PersistenceTaskState& t
   if (store_engine_ == nullptr) {
     return absl::FailedPreconditionError("store_engine_unavailable");
   }
-  auto index_or = store_engine_->get_canonical_index_by_id(task.artifact_id);
-  if (!index_or.ok()) {
-    return index_or.status();
-  }
-  const std::filesystem::path index_path = object_dir / "tensor_index.json";
-  std::ofstream idx_out(index_path, std::ios::trunc);
-  if (!idx_out.is_open()) {
-    return absl::FailedPreconditionError("shared_disk_index_write_failed");
-  }
-  idx_out << *index_or;
-  idx_out.flush();
-  if (!idx_out.good()) {
-    return absl::FailedPreconditionError("shared_disk_index_write_failed");
-  }
+  if (common::is_byte_artifact_id(task.artifact_id)) {
+    auto metadata_status = write_byte_artifact_disk_metadata(object_dir, task.artifact_id, task.total_size_bytes);
+    if (!metadata_status.ok()) {
+      return metadata_status;
+    }
+  } else {
+    auto index_or = store_engine_->get_canonical_index_by_id(
+        task.source_artifact_id.empty() ? task.artifact_id : task.source_artifact_id);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    const std::filesystem::path index_path = object_dir / "tensor_index.json";
+    std::ofstream idx_out(index_path, std::ios::trunc);
+    if (!idx_out.is_open()) {
+      return absl::FailedPreconditionError("shared_disk_index_write_failed");
+    }
+    idx_out << *index_or;
+    idx_out.flush();
+    if (!idx_out.good()) {
+      return absl::FailedPreconditionError("shared_disk_index_write_failed");
+    }
 
-  auto parsed_or = parse_mi2_identity(task.artifact_id);
-  if (!parsed_or.ok()) {
-    return parsed_or.status();
-  }
-  const auto& index_mh = parsed_or->first;
-  const auto& data_mh = parsed_or->second;
+    auto parsed_or = parse_mi2_identity(task.artifact_id);
+    if (!parsed_or.ok()) {
+      return parsed_or.status();
+    }
+    const auto& index_mh = parsed_or->first;
+    const auto& data_mh = parsed_or->second;
 
-  nlohmann::json desc;
-  desc["artifact_id"] = task.artifact_id;
-  desc["index_multihash"] = index_mh;
-  desc["data_multihash"] = data_mh;
-  desc["schema_version"] = "v3";
-  desc["encoding"] = "json";
-  desc["total_size"] = task.total_size_bytes;
+    nlohmann::json desc;
+    desc["artifact_id"] = task.artifact_id;
+    desc["index_multihash"] = index_mh;
+    desc["data_multihash"] = data_mh;
+    desc["schema_version"] = "v3";
+    desc["encoding"] = "json";
+    desc["total_size"] = task.total_size_bytes;
 
-  const std::filesystem::path descriptor_path = object_dir / "artifact_descriptor.json";
-  std::ofstream desc_out(descriptor_path, std::ios::trunc);
-  if (!desc_out.is_open()) {
-    return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
-  }
-  desc_out << desc.dump(2);
-  desc_out.flush();
-  if (!desc_out.good()) {
-    return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+    const std::filesystem::path descriptor_path = object_dir / "artifact_descriptor.json";
+    std::ofstream desc_out(descriptor_path, std::ios::trunc);
+    if (!desc_out.is_open()) {
+      return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+    }
+    desc_out << desc.dump(2);
+    desc_out.flush();
+    if (!desc_out.good()) {
+      return absl::FailedPreconditionError("shared_disk_descriptor_write_failed");
+    }
   }
 
   task.disk_metadata_written = true;
@@ -1614,9 +1922,12 @@ void PersistenceManager::load_task_log() {
   bool notify_scheduler = false;
   {
     absl::MutexLock lock(&mu_);
+    tasks_.clear();
+    artifact_to_task_.clear();
+    artifact_to_tasks_.clear();
+    durability_index_.clear();
     for (auto& entry : recovered) {
       update_counter_from_task_id(entry.second.task_id);
-      artifact_to_task_[entry.second.artifact_id] = entry.second.task_id;
       if (!is_terminal(entry.second.state) && !entry.second.metrics_active) {
         adjust_active_metric(1);
         entry.second.metrics_active = true;
@@ -1625,8 +1936,10 @@ void PersistenceManager::load_task_log() {
         entry.second.metrics_closed = true;
       }
       tasks_[entry.first] = std::move(entry.second);
+      index_task_locked(tasks_[entry.first]);
       update_durability_locked(tasks_[entry.first]);
     }
+    rebuild_policy_source_registry_locked();
   }
   if (scheduler_ != nullptr && notify_scheduler) {
     scheduler_->notify(TaskKind::kPersistence);
@@ -1825,6 +2138,7 @@ void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& r
       }
     }
     record_progress_metric(task.progress);
+    refresh_policy_source_registry_locked(task);
     maybe_report_status_locked(task, reports);
     persist_task_locked(task);
   }

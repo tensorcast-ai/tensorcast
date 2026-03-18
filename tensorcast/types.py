@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Union
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 
 # ---------------------------------------------------------------------------
 # Canonical typed models used across the Python SDK in place of raw dicts
@@ -155,7 +156,6 @@ class CommitResult(BaseModel):
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     registration_kind: ViewRegistrationKind = "canonical"
-    allow_partial: bool = False
     local_stable_tier: LocalStableTierResult | None = None
 
 
@@ -167,6 +167,181 @@ class SealAssemblyResult(BaseModel):
     sealed_artifact_id: str
     descriptor: ArtifactDescriptor
     already_sealed: bool = False
+
+
+ContributionKind = Literal["piece_partial", "canonical_full"]
+
+
+_CONTRIBUTION_KIND_TO_PROTO: dict[ContributionKind, int] = {
+    "piece_partial": int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL),
+    "canonical_full": int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL),
+}
+
+_CONTRIBUTION_KIND_FROM_PROTO: dict[int, ContributionKind] = {
+    int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL): "piece_partial",
+    int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL): "canonical_full",
+}
+
+
+class CloseoutPolicySnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    policy_json: str = ""
+    source_policy_version: int = 0
+    closeout_policy_hash: str = ""
+
+    def to_proto(self) -> store_daemon_pb2.CloseoutPolicySnapshot:
+        return store_daemon_pb2.CloseoutPolicySnapshot(
+            policy_json=str(self.policy_json),
+            source_policy_version=int(self.source_policy_version),
+            closeout_policy_hash=str(self.closeout_policy_hash),
+        )
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.CloseoutPolicySnapshot,
+    ) -> "CloseoutPolicySnapshot":
+        return cls(
+            policy_json=str(proto.policy_json),
+            source_policy_version=int(proto.source_policy_version),
+            closeout_policy_hash=str(proto.closeout_policy_hash),
+        )
+
+
+class ContributionSlot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    slot_key: str
+    structural_view_id: str | None = None
+    contribution_kind: ContributionKind
+    coverage_semantics: str
+
+    def to_proto(self) -> store_daemon_pb2.ContributionSlot:
+        proto = store_daemon_pb2.ContributionSlot(
+            slot_key=str(self.slot_key),
+            contribution_kind=_CONTRIBUTION_KIND_TO_PROTO[self.contribution_kind],
+            coverage_semantics=str(self.coverage_semantics),
+        )
+        if self.structural_view_id:
+            proto.structural_view_id = str(self.structural_view_id)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.ContributionSlot,
+    ) -> "ContributionSlot":
+        return cls(
+            slot_key=str(proto.slot_key),
+            structural_view_id=str(proto.structural_view_id or "") or None,
+            contribution_kind=_CONTRIBUTION_KIND_FROM_PROTO[
+                int(proto.contribution_kind)
+            ],
+            coverage_semantics=str(proto.coverage_semantics),
+        )
+
+
+class ContributionContractSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    layout_id: str
+    required_slots: tuple[ContributionSlot, ...] = ()
+    require_live_contributions_until_readiness_cut: bool = True
+
+    def to_proto(self) -> store_daemon_pb2.ContributionContractSnapshot:
+        proto = store_daemon_pb2.ContributionContractSnapshot(
+            layout_id=str(self.layout_id),
+            require_live_contributions_until_readiness_cut=bool(
+                self.require_live_contributions_until_readiness_cut
+            ),
+        )
+        proto.required_slots.extend(slot.to_proto() for slot in self.required_slots)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.ContributionContractSnapshot,
+    ) -> "ContributionContractSnapshot":
+        return cls(
+            layout_id=str(proto.layout_id),
+            required_slots=tuple(
+                ContributionSlot.from_proto(slot) for slot in proto.required_slots
+            ),
+            require_live_contributions_until_readiness_cut=bool(
+                proto.require_live_contributions_until_readiness_cut
+            ),
+        )
+
+
+class AssemblyAttemptRef(BaseModel):
+    """Fresh assembly workspace reference rooted in a layout contract."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    assembly_id: str
+    layout_id: str
+    attempt_spec_hash: str
+    contribution_contract_hash: str
+    coordinator_operation: operation_pb2.OperationRef = Field(
+        default_factory=operation_pb2.OperationRef
+    )
+    coordinator_generation: int
+    attempt_spec_proto: bytes
+
+    @property
+    def coordinator_operation_id(self) -> str:
+        return str(self.coordinator_operation.operation_id or "")
+
+    def decode_attempt_spec(self) -> store_daemon_pb2.AssemblyAttemptSpec:
+        if not self.attempt_spec_proto:
+            raise ValueError("attempt_spec_proto is empty")
+        spec = store_daemon_pb2.AssemblyAttemptSpec()
+        spec.ParseFromString(self.attempt_spec_proto)
+        if (
+            self.attempt_spec_hash
+            and spec.attempt_spec_hash
+            and (str(spec.attempt_spec_hash) != str(self.attempt_spec_hash))
+        ):
+            raise ValueError("attempt_spec_hash does not match attempt_spec_proto")
+        return spec
+
+    def decode_contribution_contract(
+        self,
+    ) -> store_daemon_pb2.ContributionContractSnapshot:
+        return self.decode_attempt_spec().contribution_contract
+
+
+class PartialSealResult(BaseModel):
+    """Accepted assembly contribution rooted in one open attempt."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assembly_id: str
+    binding_id: str
+    binding_value_id: str
+    contribution_kind: Literal["piece_partial", "canonical_full"]
+    view_id: str | None = None
+    coverage_plan_hash: str
+    accepted: bool = True
+    already_exists: bool = False
+
+
+class PublishedModelVersion(BaseModel):
+    """Published model-version lineage for an assembly attempt."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assembly_id: str
+    source_artifact_id: str
+    source_descriptor: ArtifactDescriptor
+    serving_artifact_id: str | None = None
+    serving_descriptor: ArtifactDescriptor | None = None
+    source_version_key: str | None = None
+    serving_version_key: str | None = None
+    representation_contract_hash: str | None = None
+    serving_manifest_ref: str | None = None
 
 
 # ------------------------------ Plan models --------------------------------
@@ -334,8 +509,11 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "AssemblyAttemptRef",
+    "PartialSealResult",
     "CanonicalRange",
     "CommitResult",
+    "PublishedModelVersion",
     "ViewRegistrationKind",
     "SealAssemblyResult",
     "PlanBase",

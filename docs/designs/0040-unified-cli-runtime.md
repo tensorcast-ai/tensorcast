@@ -17,7 +17,7 @@ related_code:
 
 # Summary
 
-TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. The CLI surface is split into `tensorcast daemon` and `tensorcast global` subcommands with a minimal command set (`start`, `stop`, `status`, `logs`, `restart`). When HA is enabled, every daemon launch is two-phase: resolve or start a single Global Store first, validate the cluster token to avoid split-brain, then inject the resolved endpoint into the daemon HA config before startup. Runtime state is authoritative, versioned, and reconciled under a strict lock order so stale PIDs and pointers are cleaned without dropping cluster identity. SDK `tensorcast.init(mode="connect"|"create"|"auto")` forwards into the orchestrator (create/auto) or binds to an existing daemon (connect), preserving CLI semantics including `global_store_mode` and ownership behavior for created sessions.
+TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. The CLI surface is split into `tensorcast daemon` and `tensorcast global` subcommands with a minimal command set (`start`, `stop`, `status`, `logs`, `restart`). When HA is enabled, every daemon launch is two-phase: resolve or start a single Global Store first, validate the cluster token to avoid split-brain, then inject the resolved endpoint into the daemon HA config before startup. Runtime state is authoritative, versioned, and reconciled under a strict lock order so stale PIDs and pointers are cleaned while healthy GS identity is preserved and fresh local restarts can mint a new token. SDK `tensorcast.init(mode="connect"|"create"|"auto")` forwards into the orchestrator (create/auto) or binds to an existing daemon (connect), preserving CLI semantics including `global_store_mode` and ownership behavior for created sessions.
 
 # Goals / Non-Goals
 
@@ -61,7 +61,7 @@ tensorcast
 - `global_store_mode`: `connect` (must reach an existing GS), `start` (start a local GS if needed), `none` (skip HA). Default is `none`. `--global-store-address` implies `connect`.
 - `--set KEY=VALUE` overlays daemon config values using dot-paths (proto field names). Values are YAML-parsed and applied before HA injection and port backfill; repeat to set multiple fields.
 - Convenience flags (`--stable-bytes`, `--mem-pool-size-bytes`, `--enable-rdma`, `--log-level`) are translated into config overlays. `--global-store-endpoints` seeds both GS resolution (connect-only) and HA endpoint injection.
-- Cluster identity is implicit. The runtime refuses to start a new GS when a cluster token already exists but is unreachable unless the caller explicitly cleans state.
+- Cluster identity is carried by the running GS token. Healthy local GS instances are reused; when a new local GS is started after stale-state cleanup, the launcher generates a fresh token unless the caller explicitly pins `cluster_id`.
 
 ## Runtime orchestrator (CLI + SDK)
 
@@ -166,7 +166,7 @@ Key schemas (schema_version=1):
 ## Locking and reconciliation
 
 - Lock order is strict: `runtime.lock` → `global_store.lock` → per-session `pids.lock`. All entry points (CLI + SDK) respect this order to avoid cross-deadlocks.
-- Reconcile on every CLI/SDK entry: read state, check PID liveness, compare instance fingerprints (host_id + boot_id + pid), and gRPC health (`ping_daemon` / `ping_global_store`). Stale entries are pruned; cluster tokens are retained to prevent accidental cluster re-creation.
+- Reconcile on every CLI/SDK entry: read state, check PID liveness, compare instance fingerprints (host_id + boot_id + pid), and gRPC health (`ping_daemon` / `ping_global_store`). Stale entries are pruned; local GS restarts mint a fresh token unless `cluster_id` explicitly requests a stable identity.
 - `current_session`/`current_global_session` writes are atomic (0600) and updated only under the relevant locks.
 
 ## Global Store lifecycle

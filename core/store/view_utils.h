@@ -18,7 +18,13 @@ struct CanonicalRange {
   uint64_t length{0};
 };
 
-std::string build_view_spec_json(const loader::ViewSpec& spec);
+struct ParsedViewSelection {
+  loader::ViewSpec spec;
+  std::vector<std::string> tensor_names;
+};
+
+std::string build_view_spec_json(const loader::ViewSpec& spec, absl::Span<const std::string> tensor_names = {});
+absl::StatusOr<ParsedViewSelection> parse_view_selection_json(std::string_view view_spec_json);
 absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec_json);
 
 uint64_t align_up(uint64_t value, uint64_t align);

@@ -10,14 +10,34 @@ QosClass = Literal["realtime", "interactive", "background"]
 
 
 @dataclass(frozen=True, slots=True)
+class CollectiveLoadGroup:
+    """Explicit collective load contract for a single materialization call."""
+
+    group_id: str
+    world_size: int
+    rank: int
+
+
+@dataclass(frozen=True, slots=True)
+class GovernanceContext:
+    """Typed low-cardinality governance hints propagated with a plan."""
+
+    lane: str | None = None
+    policy_version: int | None = None
+    staleness_budget_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CallContext:
-    """Pure per-call container for deadlines, idempotency, and trace tags."""
+    """Pure per-call container for deadlines, idempotency, and execution hints."""
 
     request_id: str | None = None
     qos: QosClass = "interactive"
     deadline_ms: int | None = None
     idempotency_key: str | None = None
     tags: Mapping[str, SpanAttributeValue] | None = None
+    collective: CollectiveLoadGroup | None = None
+    governance: GovernanceContext | None = None
 
 
 def context(
@@ -27,6 +47,8 @@ def context(
     deadline_ms: int | None = None,
     idempotency_key: str | None = None,
     tags: Mapping[str, SpanAttributeValue] | None = None,
+    collective: CollectiveLoadGroup | None = None,
+    governance: GovernanceContext | None = None,
 ) -> CallContext:
     return CallContext(
         request_id=request_id,
@@ -34,11 +56,15 @@ def context(
         deadline_ms=deadline_ms,
         idempotency_key=idempotency_key,
         tags=tags,
+        collective=collective,
+        governance=governance,
     )
 
 
 __all__ = [
     "CallContext",
+    "CollectiveLoadGroup",
+    "GovernanceContext",
     "QosClass",
     "SpanAttributeValue",
     "context",

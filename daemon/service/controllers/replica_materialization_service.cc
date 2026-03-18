@@ -73,6 +73,29 @@ using store::loader::ViewSpec;
 
 using store::loading::MaterializationSource;
 
+std::optional<store::loading::CollectiveLoadGroupHint> resolve_collective_group_hint(
+    const v2::MaterializeReplicaRequest& req) {
+  // Collective disk load is an explicit request contract. Do not infer it from
+  // replica_uuid or ambient process state.
+  if (!req.has_collective_load_group()) {
+    return std::nullopt;
+  }
+  const auto& group = req.collective_load_group();
+  if (group.group_id().empty()) {
+    return std::nullopt;
+  }
+  const uint32_t world_size = group.world_size();
+  const uint32_t rank = group.rank();
+  if (world_size <= 1 || rank >= world_size) {
+    return std::nullopt;
+  }
+  return store::loading::CollectiveLoadGroupHint{
+      .group_id = group.group_id(),
+      .world_size = world_size,
+      .rank = rank,
+  };
+}
+
 void record_lease_create_failed() {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -303,6 +326,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   std::string resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
   std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
   std::optional<std::string> fallback_artifact_id = std::move(artifact_resolution.fallback_artifact_id);
+  std::optional<bool> post_seal_view_reuse_safe;
   const bool gs_connected = artifact_resolution.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
   std::optional<ArtifactSourceRegistry::Entry> local_import = std::move(artifact_resolution.local_import);
@@ -397,6 +421,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     }
     auto& metadata = *disk_metadata;
     metadata.descriptor_present = metadata.descriptor_present || local_import->descriptor_present;
+    if (!metadata.source_index_json.has_value() && local_import->source_index_json.has_value()) {
+      metadata.source_index_json = *local_import->source_index_json;
+    }
     if (!metadata.index_multihash.has_value() && local_import->index_multihash.has_value()) {
       metadata.index_multihash = *local_import->index_multihash;
     }
@@ -511,7 +538,22 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (!has_artifact) {
       return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires artifact_id for routing"};
     }
-    auto view_meta_or = d_.engine.get_view_metadata(index_source_artifact_id, selection.view_id());
+    auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, selection.view_id());
+    if (!view_meta_or.ok() && fallback_artifact_id.has_value() && absl::IsNotFound(view_meta_or.status()) &&
+        d_.post_seal_policy.reuse_views_if_safe) {
+      if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+        return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+      }
+      auto safe_or =
+          check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
+      if (!safe_or.ok()) {
+        return to_grpc_status(safe_or.status());
+      }
+      post_seal_view_reuse_safe = *safe_or;
+      if (*safe_or) {
+        view_meta_or = d_.engine.get_view_metadata(*fallback_artifact_id, selection.view_id());
+      }
+    }
     if (!view_meta_or.ok()) {
       return to_grpc_status(view_meta_or.status());
     }
@@ -645,6 +687,10 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
 
   // Engine-backed materialization
   store::loading::MaterializeHints hints;
+  const bool prefer_direct_disk_for_local_import = local_import.has_value() && disk_source.has_value() &&
+      effective_policy.allow_disk &&
+      effective_policy.preference != v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P &&
+      (view_spec.has_value() || resolved_view_id.has_value() || !selection_names.empty());
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
@@ -653,9 +699,17 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.transport_wait_timeout = request_budget;
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
+  hints.source_preference = prefer_direct_disk_for_local_import
+      ? to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK)
+      : to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = prefer_direct_disk_for_local_import ? false : effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
+  if (prefer_direct_disk_for_local_import) {
+    LOG(INFO) << "Using disk-first materialization for local import artifact_id=" << resolved_artifact_id
+              << " (view_requested="
+              << ((view_spec.has_value() || resolved_view_id.has_value() || !selection_names.empty()) ? 1 : 0)
+              << ", selection_tensors=" << selection_names.size() << ")";
+  }
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
@@ -663,6 +717,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.need_view_data_hash = req.has_need_view_data_hash() ? req.need_view_data_hash() : true;
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
+  if (auto collective_group = resolve_collective_group_hint(req); collective_group.has_value()) {
+    hints.collective_load_group = std::move(*collective_group);
+  }
   if (disk_metadata.has_value()) {
     hints.disk_metadata = std::move(*disk_metadata);
   }
@@ -715,19 +772,22 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (!result.ok() && view_requested && fallback_artifact_id.has_value() && absl::IsNotFound(result.status())) {
     bool allow_reuse = false;
     if (d_.post_seal_policy.reuse_views_if_safe) {
-      if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+      if (!post_seal_view_reuse_safe.has_value()) {
+        if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+        }
+        auto safe_or =
+            check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
+        if (!safe_or.ok()) {
+          LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *fallback_artifact_id
+                       << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return to_grpc_status(safe_or.status());
+        }
+        post_seal_view_reuse_safe = *safe_or;
       }
-      auto safe_or =
-          check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
-      if (!safe_or.ok()) {
-        LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *fallback_artifact_id
-                     << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(safe_or.status());
-      }
-      allow_reuse = *safe_or;
+      allow_reuse = *post_seal_view_reuse_safe;
       if (!allow_reuse) {
         LOG(WARNING) << "post-seal view reuse disabled: proof commitments mismatch for assembly="
                      << *fallback_artifact_id << " mi2=" << resolved_artifact_id;

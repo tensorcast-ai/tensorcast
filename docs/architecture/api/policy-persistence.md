@@ -35,6 +35,13 @@ correctness (data loss avoidance) and operational behavior (admission/eviction).
 - `overflow_policy` for local stable DRAM admission.
 - `layout` to control shard layout.
 
+Architectural boundary:
+
+- profile-specific runtimes may derive internal lowering hints from `StorePolicy`,
+- but they must not introduce a second declarative policy surface beside `StorePolicy`,
+- this applies to retained byte-body staging as well: any body-specific backing hint must stay an internal execution
+  derivation rather than a user-facing policy contract.
+
 The SDK validates policy shape and forwards it to the daemon. The daemon is the
 authoritative resolver.
 

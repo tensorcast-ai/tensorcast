@@ -52,8 +52,9 @@ server:
       key_file: ""
       # Optional client CA bundle for mTLS; empty disables client cert checks.
       client_ca_file: ""
-  # Prometheus metrics HTTP port; 0 lets the service choose an available port.
-  metrics_port: 18000
+  # Prometheus metrics HTTP port; use a less common fixed port to reduce
+  # collisions with other local services. Set 0 to auto-pick a free port.
+  metrics_port: 18008
 
 # Worker lifecycle and cleanup policy.
 worker_policy:
@@ -90,6 +91,10 @@ worker_policy:
       starvation_aging_threshold: 5s
       queue_scan_limit: 128
       dispatch_batch_limit: 16
+      # Stage C source anti-hotspot controls within one (group_kind, group_id, epoch).
+      group_source_spread_weight: 2.0
+      group_source_soft_cap_ratio: 1.3
+      group_source_min_candidates_for_enforce: 3
 
 # v2 limits and retention policies.
 limits:

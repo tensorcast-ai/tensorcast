@@ -117,6 +117,11 @@ class SessionLifecycleManager {
   absl::StatusOr<LeaseId> create_placement_lease(const ReplicaSubject& subj, /*spec*/ absl::Duration ttl)
       ABSL_LOCKS_EXCLUDED(mu_);
 
+  absl::StatusOr<LeaseId> create_placement_lease(
+      const ReplicaSubject& subj,
+      /*spec*/ absl::Duration ttl,
+      std::vector<std::function<absl::Status()>> extra_finalizers) ABSL_LOCKS_EXCLUDED(mu_);
+
   [[nodiscard]] absl::StatusOr<LeaseId> create_retention_lease(
       absl::Duration ttl,
       std::vector<std::function<absl::Status()>> finalizers) ABSL_LOCKS_EXCLUDED(mu_);
@@ -137,6 +142,9 @@ class SessionLifecycleManager {
   [[nodiscard]] absl::Status renew_placement(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_);
 
   [[nodiscard]] absl::Status renew_retention(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_);
+
+  [[nodiscard]] absl::Status add_finalizer(LeaseId id, std::function<absl::Status()> finalizer)
+      ABSL_LOCKS_EXCLUDED(mu_);
 
   void release_lease(LeaseId id) ABSL_LOCKS_EXCLUDED(mu_);
 

@@ -211,6 +211,10 @@ class Replica {
     return canonical_index_json_;
   }
 
+  [[nodiscard]] const std::optional<loading::CollectiveLoadGroupHint>& collective_load_group() const {
+    return collective_load_group_;
+  }
+
  private:
   // Immutable identifier for multi-device binding.
   const loading::ReplicaKey key_{};
@@ -225,6 +229,8 @@ class Replica {
       std::optional<loader::ViewPlan> view_plan,
       std::optional<std::string> canonical_index_json,
       std::optional<std::string> source_index_json,
+      std::optional<loading::CollectiveLoadGroupHint> collective_load_group,
+      std::optional<loading::VariantIdentity> variant_identity,
       loading::TransformPlacement transform_placement,
       StoreEngineOptions::ByteMappingConfig byte_mapping_config);
 
@@ -245,6 +251,8 @@ class Replica {
   const std::optional<loader::ViewPlan> view_plan_;
   const std::optional<std::string> canonical_index_json_;
   const std::optional<std::string> source_index_json_;
+  const std::optional<loading::CollectiveLoadGroupHint> collective_load_group_;
+  const std::optional<loading::VariantIdentity> variant_identity_;
   const loading::TransformPlacement transform_placement_;
   const StoreEngineOptions::ByteMappingConfig byte_mapping_config_;
 

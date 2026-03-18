@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "core/store/store_engine.h"
+#include "daemon/app/startup_coordinator.h"
+#include "daemon/service/controllers/byte_artifact_controller.h"
 #include "daemon/service/controllers/key_mapping_controller.h"
 #include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
@@ -20,6 +22,7 @@
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
+#include "daemon/state/worker_identity_store.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -30,15 +33,18 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   struct Options {
     bool allow_high_card_attrs{false};
     bool use_cursor_pagination{false};
+    bool gateway_ingress_enabled{false};
     std::filesystem::path storage_path;
   };
 
   struct Deps {
     store::StoreEngine& engine;
     MaterializationController& materialization_controller;
+    ByteArtifactController& byte_artifact_controller;
     RegistrationController& registration_controller;
     TransportController& transport_controller;
     StatusController& status_controller;
+    WorkerIdentityStore& identity_store;
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
@@ -48,10 +54,14 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     ReplicaSessionController& replica_session_controller;
     LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
+    std::shared_ptr<StartupCoordinator> startup_coordinator;
     ArtifactSourceRegistry* source_registry{nullptr};
   };
 
   StoreDaemonServiceImpl(Deps deps, Options opts);
+
+  grpc::Status ExecutePlan(grpc::ServerContext* ctx, const v2::ExecutePlanRequest* req, v2::ExecutePlanResponse* resp)
+      override;
 
   grpc::Status MaterializeReplica(
       grpc::ServerContext* ctx,
@@ -67,6 +77,49 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::MaterializeIntoMappedTargetRequest* req,
       v2::MaterializeIntoTargetResponse* resp) override;
+
+  grpc::Status CreateOwnedBinding(
+      grpc::ServerContext* ctx,
+      const v2::CreateOwnedBindingRequest* req,
+      v2::CreateOwnedBindingResponse* resp) override;
+
+  grpc::Status CreateBinding(
+      grpc::ServerContext* ctx,
+      const v2::CreateBindingRequest* req,
+      v2::CreateBindingResponse* resp) override;
+
+  grpc::Status CommitBindingArtifact(
+      grpc::ServerContext* ctx,
+      const v2::CommitBindingArtifactRequest* req,
+      v2::CommitBindingArtifactResponse* resp) override;
+
+  grpc::Status BeginBindingUpdate(
+      grpc::ServerContext* ctx,
+      const v2::BeginBindingUpdateRequest* req,
+      v2::BeginBindingUpdateResponse* resp) override;
+
+  grpc::Status SubmitBindingContribution(
+      grpc::ServerContext* ctx,
+      const v2::SubmitBindingContributionRequest* req,
+      v2::SubmitBindingContributionResponse* resp) override;
+
+  grpc::Status SealBinding(grpc::ServerContext* ctx, const v2::SealBindingRequest* req, v2::SealBindingResponse* resp)
+      override;
+
+  grpc::Status StartAssemblyAttempt(
+      grpc::ServerContext* ctx,
+      const v2::StartAssemblyAttemptRequest* req,
+      v2::StartAssemblyAttemptResponse* resp) override;
+
+  grpc::Status RefillOwnedBinding(
+      grpc::ServerContext* ctx,
+      const v2::RefillOwnedBindingRequest* req,
+      v2::RefillOwnedBindingResponse* resp) override;
+
+  grpc::Status CloseOwnedBinding(
+      grpc::ServerContext* ctx,
+      const v2::CloseOwnedBindingRequest* req,
+      v2::CloseOwnedBindingResponse* resp) override;
 
   grpc::Status ConfirmReplica(
       grpc::ServerContext* ctx,
@@ -114,6 +167,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::PublishTargetReplicaRequest* req,
       v2::PublishTargetReplicaResponse* resp) override;
+
+  grpc::Status StartPublishTargetReplica(
+      grpc::ServerContext* ctx,
+      const v2::PublishTargetReplicaRequest* req,
+      v2::StartPublishTargetReplicaResponse* resp) override;
 
   grpc::Status RetirePublishedReplica(
       grpc::ServerContext* ctx,
@@ -277,12 +335,64 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetLoadedReplicasV2Request* req,
       v2::GetLoadedReplicasV2Response* resp) override;
 
+  grpc::Status BatchExists(grpc::ServerContext* ctx, const v2::BatchExistsRequest* req, v2::BatchExistsResponse* resp)
+      override;
+
+  grpc::Status BatchGetIntoRegion(
+      grpc::ServerContext* ctx,
+      const v2::BatchGetIntoRegionRequest* req,
+      v2::BatchGetIntoRegionResponse* resp) override;
+
+  grpc::Status BatchPutIfAbsentFromRegion(
+      grpc::ServerContext* ctx,
+      const v2::BatchPutIfAbsentFromRegionRequest* req,
+      v2::BatchPutIfAbsentFromRegionResponse* resp) override;
+
+  grpc::Status BatchTouchTtl(
+      grpc::ServerContext* ctx,
+      const v2::BatchTouchTtlRequest* req,
+      v2::BatchTouchTtlResponse* resp) override;
+
+  grpc::Status HomeBatchExists(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchExistsRequest* req,
+      v2::HomeBatchExistsResponse* resp) override;
+
+  grpc::Status HomeBatchGet(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchGetRequest* req,
+      v2::HomeBatchGetResponse* resp) override;
+
+  grpc::Status HomeBatchPutIfAbsent(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchPutIfAbsentRequest* req,
+      v2::HomeBatchPutIfAbsentResponse* resp) override;
+
+  grpc::Status HomeBatchTouchTtl(
+      grpc::ServerContext* ctx,
+      const v2::HomeBatchTouchTtlRequest* req,
+      v2::HomeBatchTouchTtlResponse* resp) override;
+
+  grpc::Status FetchPayloadRefChunk(
+      grpc::ServerContext* ctx,
+      const v2::FetchPayloadRefChunkRequest* req,
+      v2::FetchPayloadRefChunkResponse* resp) override;
+
+  grpc::Status RouteAuthorityStage(
+      grpc::ServerContext* ctx,
+      const v2::RouteAuthorityStageRequest* req,
+      v2::RouteAuthorityStageResponse* resp) override;
+
  private:
+  grpc::Status block_if_startup_pending() const;
+
   store::StoreEngine* engine_;
   MaterializationController* materialization_controller_;
+  ByteArtifactController* byte_artifact_controller_;
   RegistrationController* registration_controller_;
   TransportController* transport_controller_;
   StatusController* status_controller_;
+  WorkerIdentityStore* identity_store_;
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
@@ -292,6 +402,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   ReplicaSessionController* replica_session_controller_;
   LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
+  std::shared_ptr<StartupCoordinator> startup_coordinator_;
   ArtifactSourceRegistry* source_registry_{nullptr};
   Options opts_;
 };

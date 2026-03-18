@@ -6,6 +6,11 @@ It provides:
 - Target minting + capability validation (`TargetSpec`)
 - Transform plugin registry (execute node-local transforms)
 - Convenience identity transform (`identity.v1`)
+- Canonical artifact action results (`ManifestResult`, `PublishResult`,
+  `HydrateResult`, `BatchResult`)
+- Explicit high-cardinality bridge metadata
+  (`ManifestArtifactSetBridge`) so engine manifest output can lower into
+  framework-owned `ArtifactSetRef` without local raw-manifest derivation
 
 The adapter is intended to run inside the engine process. Node agents can
 receive a reference to an adapter when executing instance-scoped plan steps.

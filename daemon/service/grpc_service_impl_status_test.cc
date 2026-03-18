@@ -34,6 +34,10 @@ TEST_CASE("Status RPCs reflect worker registration", "[daemon][status]") {
     REQUIRE(resp.is_registered());
     REQUIRE(resp.worker_id() == "worker-1");
     REQUIRE(resp.mem_pool_total_size() == engine->get_mem_pool_size());
+    REQUIRE(resp.as_of_ms() > 0);
+    REQUIRE(resp.staleness_ms() == 0);
+    REQUIRE(resp.cache_epoch() > 0);
+    REQUIRE(resp.freshness_state() == "current");
   }
 
   {

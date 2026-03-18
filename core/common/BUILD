@@ -57,6 +57,8 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@boringssl//:crypto",
+        "@folly//folly/executors:cpu_thread_pool_executor",
+        "@folly//folly/futures:core",
     ],
 )
 
@@ -66,7 +68,17 @@ sc_cc_library(
     hdrs = ["artifact_identity.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "@abseil-cpp//absl/strings:strings",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "artifact_identity_test",
+    size = "small",
+    srcs = ["artifact_identity_test.cc"],
+    deps = [
+        ":artifact_identity_lib",
+        "@catch2//:catch2_main",
     ],
 )
 
@@ -77,7 +89,9 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":artifact_hash_lib",
+        "//proto/tensorcast/common/v1:common_cc",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
     ],
@@ -90,6 +104,18 @@ cc_test(
     deps = [
         ":selection_identity_lib",
         "@abseil-cpp//absl/strings",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "artifact_hash_test",
+    size = "small",
+    srcs = ["artifact_hash_test.cc"],
+    deps = [
+        ":artifact_hash_lib",
+        "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
 )
@@ -125,6 +151,17 @@ sc_cc_library(
     ],
 )
 
+cc_test(
+    name = "pinned_buffer_pool_test",
+    size = "small",
+    srcs = ["memory/pinned_buffer_pool_test.cc"],
+    deps = [
+        ":pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Memory management - Pinned memory
 sc_cc_library(
     name = "pinned_memory_lib",
@@ -148,6 +185,8 @@ sc_cc_library(
         ":pinned_buffer_pool_lib",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
+        "@folly//folly/executors:cpu_thread_pool_executor",
+        "@folly//folly/futures:core",
     ],
 )
 

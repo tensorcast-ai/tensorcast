@@ -20,10 +20,7 @@ from tensorcast.api._view_ops import (
     ViewSpecBuildResult,
     build_view_spec,
 )
-from tensorcast.api.store.common import (
-    canonical_index_from_bytes,
-    canonical_index_to_bytes,
-)
+from tensorcast.api.store.common import canonical_index_to_bytes
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
@@ -40,7 +37,7 @@ class ViewMetadataCache:
     view_data_hash: str | None
     tensor_names: tuple[str, ...]
     nbytes: int
-    selected_index: CanonicalIndex
+    selected_index: CanonicalIndex | None = None
 
 
 def _multibase_multihash_sha256(digest: bytes) -> str:
@@ -294,17 +291,30 @@ class ViewSpecComposer:
                 retryable=False,
             )
 
-        view_index: CanonicalIndex | None = None
         tensor_names: tuple[str, ...] | None = None
-        if composed_spec is not None or subset_names:
-            view_index, tensor_names = self._build_view_index(
-                canonical_index=canonical_index,
-                view_spec=composed_spec,
-                subset_names=subset_names,
+        if composed_spec is not None or subset_names is not None:
+            base_entries = {entry.name: entry for entry in canonical_index.entries}
+            tensor_names = (
+                tuple(str(name) for name in subset_names)
+                if subset_names is not None
+                else tuple(entry.name for entry in canonical_index.entries)
             )
+            if len(set(tensor_names)) != len(tensor_names):
+                raise ArtifactError(
+                    "View subset tensor_names must be unique",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            unknown = [name for name in tensor_names if name not in base_entries]
+            if unknown:
+                raise ArtifactError(
+                    f"View references unknown tensor(s): {', '.join(sorted(unknown))}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
 
         view_cache: ViewMetadataCache | None = None
-        if view_index is not None and tensor_names is not None:
+        if tensor_names is not None:
             canonical_bytes = (
                 bytes(identity_index_bytes)
                 if identity_index_bytes is not None

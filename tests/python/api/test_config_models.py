@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from tensorcast.api._config import (
     GetArtifactOptions,
+    OverflowPolicy,
     PlanType,
     PolicyScope,
     PolicyTier,
@@ -17,7 +18,6 @@ from tensorcast.api._config import (
     StorePolicy,
     StorePolicyProfile,
     TierSpec,
-    OverflowPolicy,
 )
 from tensorcast.api._errors import InvalidPlan
 from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
@@ -39,6 +39,7 @@ def test_register_options_reject_unknown_plan() -> None:
 def test_register_options_are_frozen() -> None:
     opts = RegisterArtifactOptions()
     assert opts.plan is PlanType.DRAM_STABLE
+    assert opts.require_cpu_memfd_publish is True
     with pytest.raises((TypeError, ValidationError)):
         opts.plan = PlanType.VRAM_LEASED
 
@@ -204,12 +205,12 @@ def test_store_policy_profile_warm_expands_to_local_should() -> None:
     assert proto.profile == store_daemon_pb2.POLICY_PROFILE_WARM
 
 
-def test_get_options_validate_prefer_values() -> None:
-    valid = GetArtifactOptions(prefer="p2p")
-    assert valid.prefer == "p2p"
-
-    with pytest.raises(ValidationError):
-        GetArtifactOptions(prefer="bluetooth")
+def test_get_options_reject_removed_prefer_field() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="GetArtifactOptions.prefer has been removed",
+    ):
+        GetArtifactOptions(prefer="p2p")
 
 
 def test_get_options_validate_wait_for_shared_disk_ms() -> None:

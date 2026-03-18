@@ -27,6 +27,13 @@ using read_result_t = struct ReadResult {
   uint64_t read_cost = 0;
   uint64_t rdma_queue_cost = 0;
   uint64_t rdma_regmr_cost = 0;
+  bool transport_is_rdma = false;
+  bool rdma_staged_response = false;
+  bool rdma_zero_copy_response = false;
+  int16_t local_rail_id = -1;
+  int16_t remote_rail_id = -1;
+  std::string local_nic;
+  std::string remote_nic;
   std::string tensor_key;
 } __attribute__((aligned(128)));
 
@@ -38,6 +45,12 @@ static inline std::string get_request_key(std::string key, uint64_t offset) {
   return url.str();
 }
 
+static inline std::string get_request_instance_key(std::string key, uint64_t offset, uint64_t request_id) {
+  std::stringstream url;
+  url << key << ":" << offset << "#" << request_id;
+  return url.str();
+}
+
 class ReadRequest {
  public:
   ReadRequest(
@@ -46,6 +59,7 @@ class ReadRequest {
       uint16_t dst_port,
       tensor_t local,
       uint64_t remote_offset,
+      uint64_t request_id,
       int rail_id = -1);
   ~ReadRequest() = default;
 
@@ -54,7 +68,12 @@ class ReadRequest {
   void set_remote_tensor(remote_tensor_t tensor);
   future_read_result_t get_future();
   void set_result(absl::Status result);
+  void set_on_result(std::function<void()> callback);
   bool is_result_set();
+
+  [[nodiscard]] uint64_t request_id() const {
+    return request_id_;
+  }
 
   std::string get_dst_url();
 
@@ -71,6 +90,15 @@ class ReadRequest {
 
   void add_expected_completions(int n) {
     expected_completions_.fetch_add(n);
+  }
+
+  void note_rdma_window(int n, bool final_window) {
+    if (n > 0) {
+      expected_completions_.fetch_add(n);
+    }
+    if (final_window) {
+      rdma_final_window_received_.store(true, std::memory_order_release);
+    }
   }
 
   void set_mtcp_stage_unit_hint_bytes(uint64_t bytes) {
@@ -137,7 +165,8 @@ class ReadRequest {
         sender(window.window_seq, window.offsets, window.final_window);
       }
     }
-    return done >= expected_completions_.load();
+    return rdma_final_window_received_.load(std::memory_order_acquire) &&
+        done >= expected_completions_.load(std::memory_order_acquire);
   }
 
   void set_ack_sender(std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> fn) {
@@ -167,16 +196,20 @@ class ReadRequest {
   uint16_t dst_port_;
   std::promise<read_result_t> result_;
   std::atomic_bool result_set_;
+  absl::Mutex result_mu_;
+  std::function<void()> on_result_ ABSL_GUARDED_BY(result_mu_);
 
   misc::Timer timer_;
   read_result_t status_;
   uint64_t remote_offset_;
+  uint64_t request_id_;
   int16_t rail_id_;
   std::atomic<uint64_t> mtcp_stage_unit_hint_bytes_{0};
 
   // Number of expected RDMA READ completions for this request
   std::atomic<int> expected_completions_{0};
   std::atomic<int> completed_{0};
+  std::atomic_bool rdma_final_window_received_{false};
 
   struct PendingAckWindow {
     uint32_t window_seq = 0;

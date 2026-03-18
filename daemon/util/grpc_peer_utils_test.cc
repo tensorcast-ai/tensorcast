@@ -22,4 +22,16 @@ TEST_CASE("is_loopback_grpc_peer rejects non-loopback", "[daemon][grpc_peer]") {
   REQUIRE_FALSE(is_loopback_grpc_peer("dns:localhost:12345"));
 }
 
+TEST_CASE("grpc_peer_endpoint normalizes peer endpoint strings", "[daemon][grpc_peer]") {
+  REQUIRE(grpc_peer_endpoint("ipv4:127.0.0.1:50051") == std::optional<std::string>("127.0.0.1:50051"));
+  REQUIRE(grpc_peer_endpoint("ipv6:[::1]:50051") == std::optional<std::string>("[::1]:50051"));
+  REQUIRE_FALSE(grpc_peer_endpoint("unix:/tmp/tensorcast.sock").has_value());
+}
+
+TEST_CASE("grpc_peer_matches_address matches normalized peer addresses", "[daemon][grpc_peer]") {
+  REQUIRE(grpc_peer_matches_address("ipv4:127.0.0.1:50051", "127.0.0.1:50051"));
+  REQUIRE_FALSE(grpc_peer_matches_address("ipv4:127.0.0.1:50051", "127.0.0.1:50052"));
+  REQUIRE_FALSE(grpc_peer_matches_address("unix:/tmp/tensorcast.sock", "127.0.0.1:50051"));
+}
+
 } // namespace tensorcast::daemon

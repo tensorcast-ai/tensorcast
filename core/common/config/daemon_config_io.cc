@@ -264,6 +264,13 @@ void normalize_size_fields(nlohmann::json& root) {
       }
     }
   }
+
+  if (root.contains("byte_artifact_routing") && root["byte_artifact_routing"].is_object()) {
+    auto& byte_artifact_routing = root["byte_artifact_routing"];
+    if (byte_artifact_routing.contains("inline_payload_threshold_bytes")) {
+      to_bytes(byte_artifact_routing["inline_payload_threshold_bytes"]);
+    }
+  }
 }
 
 // Convert duration-like string fields (e.g., "500ms", "2m") into canonical
@@ -346,6 +353,21 @@ void normalize_duration_fields(nlohmann::json& root) {
       to_duration(rh["default_ttl"]);
     if (rh.contains("max_ttl"))
       to_duration(rh["max_ttl"]);
+  }
+
+  if (root.contains("byte_artifact_routing") && root["byte_artifact_routing"].is_object()) {
+    auto& byte_artifact_routing = root["byte_artifact_routing"];
+    const char* fields[] = {
+        "route_staleness_budget",
+        "lease_ttl",
+        "keepalive_interval",
+        "worker_directory_staleness_budget",
+    };
+    for (const char* f : fields) {
+      if (byte_artifact_routing.contains(f)) {
+        to_duration(byte_artifact_routing[f]);
+      }
+    }
   }
 }
 
@@ -457,6 +479,35 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   if (!rh->has_max_ttl()) {
     auto* d = rh->mutable_max_ttl();
     d->set_seconds(24 * 60 * 60);
+    d->set_nanos(0);
+  }
+
+  // Byte artifact routed home defaults.
+  auto* byte_artifact_routing = cfg->mutable_byte_artifact_routing();
+  if (byte_artifact_routing->shard_count() == 0) {
+    byte_artifact_routing->set_shard_count(4096);
+  }
+  if (byte_artifact_routing->inline_payload_threshold_bytes() == 0) {
+    byte_artifact_routing->set_inline_payload_threshold_bytes(1ULL << 20);
+  }
+  if (!byte_artifact_routing->has_route_staleness_budget()) {
+    auto* d = byte_artifact_routing->mutable_route_staleness_budget();
+    d->set_seconds(0);
+    d->set_nanos(500 * 1000 * 1000);
+  }
+  if (!byte_artifact_routing->has_lease_ttl()) {
+    auto* d = byte_artifact_routing->mutable_lease_ttl();
+    d->set_seconds(5);
+    d->set_nanos(0);
+  }
+  if (!byte_artifact_routing->has_keepalive_interval()) {
+    auto* d = byte_artifact_routing->mutable_keepalive_interval();
+    d->set_seconds(1);
+    d->set_nanos(0);
+  }
+  if (!byte_artifact_routing->has_worker_directory_staleness_budget()) {
+    auto* d = byte_artifact_routing->mutable_worker_directory_staleness_budget();
+    d->set_seconds(2);
     d->set_nanos(0);
   }
 

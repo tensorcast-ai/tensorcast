@@ -20,7 +20,14 @@ from tensorcast.api._indices import (
     calculate_tensor_device_offsets,
 )
 from tensorcast.api._register import RegisteredLease, RegistrationResult
-from tensorcast.api.context import CallContext, QosClass, SpanAttributeValue, context
+from tensorcast.api.context import (
+    CallContext,
+    CollectiveLoadGroup,
+    GovernanceContext,
+    QosClass,
+    SpanAttributeValue,
+    context,
+)
 from tensorcast.api.operation import (
     Operation,
     OperationError,
@@ -30,6 +37,7 @@ from tensorcast.api.operation import (
     TimeoutErrorDetails,
 )
 from tensorcast.api.plan import (
+    ArtifactActionResult,
     Instance,
     Plan,
     PlanFailedError,
@@ -41,11 +49,16 @@ from tensorcast.api.plan import (
     Worker,
     plan,
 )
+from tensorcast.api.runtime import Runtime, connect, runtime
+from tensorcast.api.signals import SignalSnapshot, TensorCastSignals, WorkerStatus
 from tensorcast.api.store import (
     Artifact,
     ArtifactError,
     ArtifactFuture,
+    AssemblyAttemptRef,
     FallbackOptions,
+    PartialSealResult,
+    PublishedModelVersion,
     RegisteredArtifact,
     Store,
     StoreOptions,
@@ -83,18 +96,24 @@ __all__ = [
     "SealAssemblyResult",
     "ViewRegistrationKind",
     "ArtifactDescriptor",
+    "AssemblyAttemptRef",
     "Artifact",
     "CallContext",
+    "CollectiveLoadGroup",
+    "GovernanceContext",
     "Operation",
     "OperationError",
     "OperationState",
     "OperationStatus",
     "OperationTimeoutError",
     "QosClass",
+    "PartialSealResult",
+    "PublishedModelVersion",
     "SpanAttributeValue",
     "TimeoutErrorDetails",
     "context",
     "Instance",
+    "ArtifactActionResult",
     "Plan",
     "PlanFailedError",
     "PlanResult",
@@ -104,4 +123,10 @@ __all__ = [
     "TransformSpec",
     "Worker",
     "plan",
+    "Runtime",
+    "SignalSnapshot",
+    "TensorCastSignals",
+    "WorkerStatus",
+    "connect",
+    "runtime",
 ]

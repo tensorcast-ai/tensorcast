@@ -122,9 +122,11 @@ PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size, Options
   // the driver may fault/lock pages under the default policy.
   maybe_bind_to_numa_node(slab, slab_bytes, options.numa_node, options.prefault);
 
-  auto register_status = cuda::host_register(slab, slab_bytes, cudaHostRegisterDefault);
-  if (!register_status.ok()) {
-    LOG(FATAL) << "PinnedBufferPool: cudaHostRegister failed: " << register_status.message();
+  if (options.register_on_create) {
+    auto register_status = cuda::host_register(slab, slab_bytes, cudaHostRegisterDefault);
+    if (!register_status.ok()) {
+      LOG(FATAL) << "PinnedBufferPool: cudaHostRegister failed: " << register_status.message();
+    }
   }
 
   {
@@ -135,20 +137,28 @@ PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size, Options
       pool_.insert(buffer);
       free_list_.insert(buffer);
     }
+    host_registered_ = options.register_on_create;
   }
 }
 
 PinnedBufferPool::~PinnedBufferPool() {
   std::vector<Slab> slabs_copy;
+  bool host_registered = false;
   {
     const std::lock_guard<std::mutex> lock(mutex_);
     slabs_copy = slabs_;
+    host_registered = host_registered_;
+    host_registered_ = false;
+  }
+  if (host_registered) {
+    for (const auto& slab : slabs_copy) {
+      auto unregister_status = cuda::host_unregister(slab.base.get());
+      if (!unregister_status.ok()) {
+        LOG(ERROR) << "Failed to unregister CUDA host memory: " << unregister_status.message();
+      }
+    }
   }
   for (const auto& slab : slabs_copy) {
-    auto unregister_status = cuda::host_unregister(slab.base.get());
-    if (!unregister_status.ok()) {
-      LOG(ERROR) << "Failed to unregister CUDA host memory: " << unregister_status.message();
-    }
     free(slab.base.get());
   }
 }
@@ -162,6 +172,12 @@ int PinnedBufferPool::allocate(
   if (size == 0) {
     LOG(ERROR) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
                << " allocate: size is zero"
+               << " request_context=" << context;
+    return -1;
+  }
+  if (!is_host_registered()) {
+    LOG(ERROR) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
+               << " allocate rejected before host registration completed"
                << " request_context=" << context;
     return -1;
   }
@@ -307,6 +323,44 @@ uint64_t PinnedBufferPool::acquire_timeouts_total() const {
 uint64_t PinnedBufferPool::budget_exhausted_total() const {
   const std::lock_guard<std::mutex> lock(mutex_);
   return budget_exhausted_total_;
+}
+
+bool PinnedBufferPool::is_host_registered() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return host_registered_;
+}
+
+absl::Status PinnedBufferPool::register_host_memory() {
+  std::vector<Slab> slabs_copy;
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (host_registered_) {
+      return absl::OkStatus();
+    }
+    slabs_copy = slabs_;
+  }
+
+  std::vector<gsl::not_null<char*>> newly_registered;
+  newly_registered.reserve(slabs_copy.size());
+  for (const auto& slab : slabs_copy) {
+    auto register_status = cuda::host_register(slab.base.get(), slab.bytes, cudaHostRegisterDefault);
+    if (!register_status.ok()) {
+      for (auto ptr : newly_registered) {
+        auto unregister_status = cuda::host_unregister(ptr.get());
+        if (!unregister_status.ok()) {
+          LOG(ERROR) << "PinnedBufferPool rollback host_unregister failed: " << unregister_status.message();
+        }
+      }
+      return register_status;
+    }
+    newly_registered.push_back(slab.base);
+  }
+
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    host_registered_ = true;
+  }
+  return absl::OkStatus();
 }
 
 std::vector<gsl::not_null<char*>> PinnedBufferPool::list_buffers() const {

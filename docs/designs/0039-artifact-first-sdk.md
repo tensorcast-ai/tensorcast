@@ -7,7 +7,6 @@ related_code:
   - tensorcast/startup.py
   - tensorcast/api/store/__init__.py
   - tensorcast/api/store/artifact.py
-  - tensorcast/api/store/deferred_loader.py
   - tensorcast/api/store/inplace_slot.py
   - tensorcast/api/store/materialization.py
   - tensorcast/api/store/registration.py
@@ -15,9 +14,7 @@ related_code:
 
 # Summary
 
-Define a single, artifact-first Python SDK surface that is easy to learn, consistent, and free of redundant entry points. The SDK assumes one daemon per process and exposes functional helpers plus a single **retrieval** handle type (`Artifact`). Retrieval flows are handle-driven; legacy eager verbs (`get`, `get_into`, `get_view`, etc.) will be removed after the migration in favor of `artifact(...).tensor_*`. Ingestion remains explicit via `register`/`put` and view registration. For client-owned inplace binding (vLLM-style meta-init and weight swap), the SDK additionally exposes `DeferredLoader` and `InplaceSlot` via `Artifact.deferred_loader(...)`. Region-backed flows stay available but clearly separated as lifecycle utilities.
-
-Update (2026-02-03): the preferred inplace-update surface is now `Binding` (`Artifact.bind` / `bind_into`); `DeferredLoader`/`InplaceSlot` remain available for advanced workflows. See `docs/designs/0063-binding-first-inplace-updates.md`.
+Define a single, artifact-first Python SDK surface that is easy to learn, consistent, and free of redundant entry points. The SDK assumes one daemon per process and exposes functional helpers plus a single **retrieval** handle type (`Artifact`). Retrieval flows are handle-driven; legacy eager verbs (`get`, `get_into`, `get_view`, etc.) will be removed after the migration in favor of `artifact(...).tensor_*`. Ingestion remains explicit via `register`/`put` and view registration. For client-owned inplace binding (vLLM-style meta-init and weight swap), the SDK uses `Binding` via `Artifact.bind(...)` / `Artifact.bind_into(...)`. Region-backed flows stay available but clearly separated as lifecycle utilities.
 
 # Goals / Non-Goals
 
@@ -49,7 +46,7 @@ Non-Goals
 - Ingestion:
   - `tc.register(tensors, *, key=None, artifact_id=None, options=None, ttl_ms=None)` / `register_async(...)`.
   - `tc.put(tensors, *, key=None, artifact_id=None, options=None, device=None)` / `put_async(...)`.
-  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None, canonical_index_bytes=None, registration_kind=None)`.
+  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, options=None, canonical_index_bytes=None, registration_kind=None)`.
   - `tc.register_piece(tensors, *, assembly_id, key=None, slices=None, canonical_index_bytes=None, placement=None, ttl_ms=None, options=None)`.
 - Region & lifecycle (advanced):
   - `tc.register_vram_region(device_id, base_ptr, size_bytes, ttl_ms, name=None) -> VramRegionHandle`.
@@ -67,7 +64,7 @@ Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_i
 - Materialization (async): `.tensor_async(name, device)`, `.tensor_dict_async(device, names=None)`.
 - Views/composition: `.view(slices=None, transpose=None, names=None)`, `.subset(names)`, `.slice({...})`, `.view_builder()`.
 - Performance helpers: `.batch(device=...) -> BatchContext`, `.prefetch(device=..., ctx=None) -> Operation[PrefetchedReplica]` for daemon-owned cache warm with unified `status/wait/cancel` semantics.
-- Deferred inplace binding: `.deferred_loader(device=..., packing="byte_space" | "append" | "plan", capacity_bytes=None) -> DeferredLoader` returns CUDA placeholders backed by a client-owned arena; `.commit() -> InplaceSlot` performs a single region-backed materialization into the arena. `InplaceSlot.swap(artifact_or_ref, ...)` safely retires any published replica (if present) before overwrite and can optionally `publish_replica()` after refill. Swap always preserves the slot’s tensor storage pointers and reuses the slot’s selection (including any `.view(...)` slices) so callers do not need to restate slices on every swap.
+- Inplace binding: `.bind(device=..., packing="byte_space" | "append" | "plan", publish=False) -> Binding` allocates client-owned CUDA target tensors, performs one region-backed materialization, and returns a handle whose `.swap(artifact_or_ref, ...)` preserves tensor storage pointers while reusing the original selection (including any `.view(...)` slices). `.bind_into(target_tensors, ...) -> Binding` adopts user-owned target tensors and uses the same swap lifecycle.
 - Policy override: `.with_fallback(FallbackOptions(...))`.
 - Serialization (process-local): `.to_dict()`, `.from_dict(data, store)`.
 
@@ -84,7 +81,7 @@ All retrieval flows pass through `MaterializationPipeline` with canonical index 
 - `FallbackOptions`: `prefer` = `"auto" | "local" | "p2p" | "disk"` (default `"auto"`); `disk_path`; `allow_p2p` (default `True`); `verify_checksums` (default `True`); `replica_uuid` (prefetch reuse). Helpers: `for_disk(path, verify=True)`, `local_only()`. Accept string shortcuts at the surface (e.g., `fallback="disk:/tmp/foo"` → `for_disk`).
 - `PlanType`: user-facing strings `plan="lease" | "copy"` (default `lease`), coerced internally to `PlanType.VRAM_LEASED` / `PlanType.VRAM_COALESCED`; enum remains for power users.
 - `RegisterArtifactOptions`: public-facing fields `plan`, `lease_in_place`, `max_inflight_bytes`, `release_on_tensor_commit`; accept string `plan` and map to enum internally; keep advanced knobs optional.
-- `GetArtifactOptions`: `prefer` (mirrors `FallbackOptions`), `wait_for_completion` (default `True`), `enable_verification` (default `True`), `transport_hold_ms` (advanced).
+- `GetArtifactOptions`: execution-only options such as `wait_for_completion` (default `True`), `enable_verification` (default `True`), and `transport_hold_ms` (advanced). Source selection belongs to `FallbackOptions`.
 - Devices: accept `str | torch.device`; retrieval defaults to the current CUDA device if available (otherwise require explicit CPU with disk fallback). For `put`, CUDA inputs target their device unless `device` is provided (must match); CPU inputs are not supported yet.
 
 ## Behavioral Notes
@@ -132,7 +129,7 @@ None. No persistent schema or proto schema changes are required; reuse existing 
   - `tc.init(mode="create")` defaults to launch-per-process; docs updated accordingly.
   - Options enforce small, intention-based enums with validation and clear errors.
   - All public docs/README/AGENTS updated to reflect the new surface; legacy examples removed.
-  - Tests cover handle flows (sync/async), views, deferred loaders + inplace slots (commit/swap/publish/retire), batch, prefetch, region lifecycle, and init/shutdown paths.
+  - Tests cover handle flows (sync/async), views, bindings and mapped bindings, batch, prefetch, region lifecycle, and init/shutdown paths.
 
 # References
 
@@ -142,5 +139,5 @@ None. No persistent schema or proto schema changes are required; reuse existing 
 - [materialization-flow](../architecture/api/materialization-flow.md)
 - [api-design](../architecture/api/api-design.md)
 - 0037-store-py-refactor.md
-- 0061-slot-based-inplace-binding-and-swap.md
+- 0084-binding-unified-model-and-contract.md
 - `tensorcast/api/store/__init__.py`, `tensorcast/api/store/artifact.py`, `tensorcast/startup.py`

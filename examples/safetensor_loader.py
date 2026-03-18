@@ -10,12 +10,8 @@
 # print(tensor_dict)
 
 
-# with artifact.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-#     for name in names:
-#         _ = loader.tensor(name)
-#     slot = loader.commit()
-
-# tensor_dict = dict(slot.tensors)
+# binding = artifact.bind(device="cuda:0", packing="byte_space")
+# tensor_dict = dict(binding.tensors)
 
 # print(tensor_dict)
 

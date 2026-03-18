@@ -53,12 +53,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
   std::vector<components::PlacementPlanResult> placement_plans;
   std::vector<components::PersistenceReport> persistence_reports;
+  std::unordered_map<std::string, tensorcast::operation::v1::GetOperationResponse> operations;
+  std::unordered_map<std::string, std::string> operation_lease_tokens;
+  std::unordered_map<std::string, std::string> operation_lease_owners;
   bool allow_plan_placement{true};
   bool plan_degraded{false};
   bool deny_leases{false};
   bool fail_register_replica{false};
   bool fail_acknowledge_lease{false};
   bool fail_disk_location_upsert{false};
+  absl::Duration register_memory_replica_delay{absl::ZeroDuration()};
+  absl::Status upsert_artifact_metadata_status{absl::OkStatus()};
   absl::Status unregister_replica_status{absl::OkStatus()};
   absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
   bool drain_success{true};
@@ -70,6 +75,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::optional<std::string> canonical_index_json;
   std::string cluster_id{"cluster-test"};
   std::vector<components::ArtifactDiskLocation> disk_locations;
+  std::vector<common::v1::ArtifactDescriptor> upserted_artifact_metadata_descriptors;
+  std::vector<std::string> upserted_artifact_metadata_indices;
 
   struct TransportReplicaInfo {
     std::string artifact_id;
@@ -139,6 +146,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("unregister_worker not supported in test stub");
   }
 
+  absl::StatusOr<std::vector<components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_workers not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
+    return absl::UnimplementedError("list_active_worker_identities not supported in test stub");
+  }
+
   absl::StatusOr<std::string> register_replica(
       std::string_view artifact_id,
       std::string_view,
@@ -178,6 +196,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const std::optional<std::string>&,
       std::optional<std::string_view> view_id,
       const std::optional<common::v1::ArtifactDescriptor>&) override {
+    if (register_memory_replica_delay > absl::ZeroDuration()) {
+      absl::SleepFor(register_memory_replica_delay);
+    }
     registered_replicas.emplace_back(std::string(artifact_id));
     TransportReplicaInfo info;
     info.artifact_id = std::string(artifact_id);
@@ -288,27 +309,138 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   }
 
   absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
-      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
-    return absl::UnimplementedError("acquire_operation_lease not supported in RecordingGlobalStoreClient");
+      const tensorcast::operation::v1::AcquireOperationLeaseRequest& request) override {
+    auto& operation = operations[request.operation_id()];
+    if (operation.ref().operation_id().empty()) {
+      operation.mutable_ref()->set_operation_id(request.operation_id());
+      operation.mutable_ref()->set_kind(request.kind());
+      operation.mutable_ref()->set_target_artifact_id(request.target_artifact_id());
+      operation.mutable_status()->set_state(tensorcast::operation::v1::OPERATION_STATE_PENDING);
+    }
+    const auto existing_token_it = operation_lease_tokens.find(request.operation_id());
+    const auto existing_owner_it = operation_lease_owners.find(request.operation_id());
+    if (existing_token_it != operation_lease_tokens.end() && existing_owner_it != operation_lease_owners.end() &&
+        existing_owner_it->second != request.owner_id()) {
+      tensorcast::operation::v1::AcquireOperationLeaseResponse response;
+      response.set_acquired(false);
+      auto* lease = response.mutable_lease();
+      lease->set_operation_id(request.operation_id());
+      lease->set_lease_token(existing_token_it->second);
+      lease->set_owner_id(existing_owner_it->second);
+      lease->set_lease_generation(operation.lease_generation());
+      if (operation.has_lease_expires_at()) {
+        lease->mutable_expires_at()->CopyFrom(operation.lease_expires_at());
+      }
+      return response;
+    }
+    const std::string lease_token = existing_token_it != operation_lease_tokens.end()
+        ? existing_token_it->second
+        : absl::StrCat("lease-", request.operation_id());
+    operation_lease_tokens[request.operation_id()] = lease_token;
+    operation_lease_owners[request.operation_id()] = request.owner_id();
+    operation.set_lease_generation(std::max<uint64_t>(1, operation.lease_generation()));
+    operation.set_lease_owner(request.owner_id());
+    auto* expires_at = operation.mutable_lease_expires_at();
+    expires_at->set_seconds(absl::ToUnixSeconds(absl::Now() + absl::Minutes(5)));
+    expires_at->set_nanos(0);
+
+    tensorcast::operation::v1::AcquireOperationLeaseResponse response;
+    response.set_acquired(true);
+    auto* lease = response.mutable_lease();
+    lease->set_operation_id(request.operation_id());
+    lease->set_lease_token(lease_token);
+    lease->set_owner_id(request.owner_id());
+    lease->set_lease_generation(operation.lease_generation());
+    lease->mutable_expires_at()->CopyFrom(*expires_at);
+    return response;
   }
 
   absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
-      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
-    return absl::UnimplementedError("keepalive_operation_lease not supported in RecordingGlobalStoreClient");
+      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest& request) override {
+    for (auto& [operation_id, lease_token] : operation_lease_tokens) {
+      if (lease_token != request.lease_token()) {
+        continue;
+      }
+      auto op_it = operations.find(operation_id);
+      if (op_it == operations.end()) {
+        break;
+      }
+      auto* expires_at = op_it->second.mutable_lease_expires_at();
+      expires_at->set_seconds(absl::ToUnixSeconds(absl::Now() + absl::Minutes(5)));
+      expires_at->set_nanos(0);
+      tensorcast::operation::v1::KeepaliveOperationLeaseResponse response;
+      auto* lease = response.mutable_lease();
+      lease->set_operation_id(operation_id);
+      lease->set_lease_token(lease_token);
+      lease->set_owner_id(op_it->second.lease_owner());
+      lease->set_lease_generation(op_it->second.lease_generation());
+      lease->mutable_expires_at()->CopyFrom(*expires_at);
+      return response;
+    }
+    return absl::NotFoundError("operation lease token not found");
   }
 
   absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
-      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
-    return absl::UnimplementedError("release_operation_lease not supported in RecordingGlobalStoreClient");
+      const tensorcast::operation::v1::ReleaseOperationLeaseRequest& request) override {
+    for (auto it = operation_lease_tokens.begin(); it != operation_lease_tokens.end(); ++it) {
+      if (it->second != request.lease_token()) {
+        continue;
+      }
+      auto op_it = operations.find(it->first);
+      if (op_it != operations.end()) {
+        op_it->second.clear_lease_owner();
+      }
+      operation_lease_owners.erase(it->first);
+      operation_lease_tokens.erase(it);
+      tensorcast::operation::v1::ReleaseOperationLeaseResponse response;
+      response.set_released(true);
+      return response;
+    }
+    tensorcast::operation::v1::ReleaseOperationLeaseResponse response;
+    response.set_released(false);
+    return response;
   }
 
   absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
-      const tensorcast::operation::v1::GetOperationRequest&) override {
-    return absl::UnimplementedError("get_operation not supported in RecordingGlobalStoreClient");
+      const tensorcast::operation::v1::GetOperationRequest& request) override {
+    auto it = operations.find(request.operation_id());
+    if (it == operations.end()) {
+      return absl::NotFoundError("operation not found");
+    }
+    auto response = it->second;
+    if (request.has_ref()) {
+      if (response.ref().authority_scope_kind().empty() && !request.ref().authority_scope_kind().empty()) {
+        response.mutable_ref()->set_authority_scope_kind(request.ref().authority_scope_kind());
+      }
+      if (response.ref().authority_scope_id().empty() && !request.ref().authority_scope_id().empty()) {
+        response.mutable_ref()->set_authority_scope_id(request.ref().authority_scope_id());
+      }
+      if (response.ref().attachment_kind().empty() && !request.ref().attachment_kind().empty()) {
+        response.mutable_ref()->set_attachment_kind(request.ref().attachment_kind());
+      }
+      if (response.ref().recovery_class().empty() && !request.ref().recovery_class().empty()) {
+        response.mutable_ref()->set_recovery_class(request.ref().recovery_class());
+      }
+      if (response.ref().fencing_digest().empty() && !request.ref().fencing_digest().empty()) {
+        response.mutable_ref()->set_fencing_digest(request.ref().fencing_digest());
+      }
+    }
+    return response;
   }
 
-  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
-    return absl::UnimplementedError("update_operation not supported in RecordingGlobalStoreClient");
+  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest& request) override {
+    auto& operation = operations[request.operation_id()];
+    if (operation.ref().operation_id().empty()) {
+      operation.mutable_ref()->set_operation_id(request.operation_id());
+    }
+    operation.mutable_status()->CopyFrom(request.status());
+    if (request.has_snapshot() && (!request.snapshot().type_url().empty() || !request.snapshot().value().empty())) {
+      operation.mutable_snapshot()->CopyFrom(request.snapshot());
+    }
+    if (operation.lease_generation() == 0) {
+      operation.set_lease_generation(request.lease_generation());
+    }
+    return absl::OkStatus();
   }
 
   absl::StatusOr<components::ArtifactBinding> get_artifact_binding(std::string_view) override {
@@ -417,6 +549,43 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("reconcile_worker_state not supported in test stub");
   }
 
+  absl::StatusOr<components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t,
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("acquire_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("keepalive_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<components::ShardHomeLeaseKeepaliveInput>&,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_keepalive_shard_home_leases not supported in test stub");
+  }
+
+  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const components::RpcOptions&) override {
+    return absl::UnimplementedError("release_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<components::ShardHomeRouteInfo> get_shard_home_lease(uint64_t, const components::RpcOptions&)
+      override {
+    return absl::UnimplementedError("get_shard_home_lease not supported in test stub");
+  }
+
+  absl::StatusOr<std::vector<components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("batch_get_shard_home_leases not supported in test stub");
+  }
+
   bool is_connected() const override {
     return connected;
   }
@@ -430,6 +599,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view) override {
     return absl::UnimplementedError("resolve_key_mapping not supported in test stub");
+  }
+
+  absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) override {
+    upserted_artifact_metadata_descriptors.push_back(descriptor);
+    upserted_artifact_metadata_indices.emplace_back(canonical_index_data);
+    return upsert_artifact_metadata_status;
   }
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {

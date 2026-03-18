@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "gsl/pointers"
 
 namespace tensorcast::common::memory {
@@ -53,6 +54,9 @@ class PinnedBufferPool {
     // If true and numa_node is set, pre-fault the slab (touch each page) before
     // cudaHostRegister to make the NUMA placement deterministic.
     bool prefault = false;
+    // When false, the pool only allocates/owns the slabs during construction.
+    // Call register_host_memory() before first use.
+    bool register_on_create = true;
   };
 
   explicit PinnedBufferPool(size_t total_size, size_t chunk_size);
@@ -84,6 +88,8 @@ class PinnedBufferPool {
 
   uint64_t acquire_timeouts_total() const;
   uint64_t budget_exhausted_total() const;
+  [[nodiscard]] bool is_host_registered() const;
+  absl::Status register_host_memory();
 
   // Expose current pool buffers for registration/warmup purposes.
   // Returns a snapshot copy of buffer base pointers.
@@ -110,5 +116,6 @@ class PinnedBufferPool {
   uint64_t budget_exhausted_total_ = 0;
   size_t chunk_size_; // May be adjusted in constructor for alignment
   std::string name_;
+  bool host_registered_ = false;
 };
 } // namespace tensorcast::common::memory

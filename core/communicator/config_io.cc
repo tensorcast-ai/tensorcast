@@ -116,6 +116,16 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
 
   // NUMA defaults
   cfg->mutable_simple_numa();
+
+  // Topology discovery defaults
+  auto* topology_discovery = cfg->mutable_topology_discovery();
+  if (topology_discovery->lldp().file_path().empty()) {
+    topology_discovery->mutable_lldp()->set_file_path("/host-config/lldp-info.txt");
+  }
+  if (topology_discovery->nvlink().source() == tc::NvlinkDiscoveryConfig::SOURCE_UNSPECIFIED) {
+    topology_discovery->mutable_nvlink()->set_source(tc::NvlinkDiscoveryConfig::SOURCE_DISABLED);
+  }
+  topology_discovery->mutable_merge_policy();
 }
 
 absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std::string& path) {
@@ -136,7 +146,6 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
     try {
       YAML::Node root = YAML::Load(content);
       root_json = YamlNodeToJson(root);
-      json_text = root_json.dump();
     } catch (const std::exception& e) {
       return absl::InvalidArgumentError(absl::StrCat("YAML parse error: ", e.what()));
     }
@@ -144,11 +153,23 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
     // Assume JSON
     try {
       root_json = nlohmann::json::parse(content);
-      json_text = root_json.dump();
     } catch (const std::exception& e) {
       return absl::InvalidArgumentError(absl::StrCat("JSON parse error: ", e.what()));
     }
   }
+
+  const nlohmann::json* config_json = &root_json;
+  if (root_json.is_object()) {
+    auto it = root_json.find("communicator");
+    if (it != root_json.end()) {
+      if (!it->is_object()) {
+        return absl::InvalidArgumentError("communicator field must be an object");
+      }
+      config_json = &(*it);
+    }
+  }
+
+  json_text = config_json->dump();
 
   auto status = google::protobuf::util::JsonStringToMessage(json_text, &cfg);
   if (!status.ok()) {
@@ -156,8 +177,17 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
   }
 
   // Handle boolean defaults that require presence checks on the original JSON
-  if (!(root_json.contains("stager") && root_json["stager"].contains("stage_cpu_for_rdma"))) {
+  if (!(config_json->is_object()
+        && config_json->contains("stager") && (*config_json)["stager"].contains("stage_cpu_for_rdma"))) {
     cfg.mutable_stager()->set_stage_cpu_for_rdma(true);
+  }
+  if (!(config_json->is_object()
+        && config_json->contains("topology_discovery")
+        && (*config_json)["topology_discovery"].is_object()
+        && (*config_json)["topology_discovery"].contains("merge_policy")
+        && (*config_json)["topology_discovery"]["merge_policy"].is_object()
+        && (*config_json)["topology_discovery"]["merge_policy"].contains("emit_rail_switch_endpoints"))) {
+    cfg.mutable_topology_discovery()->mutable_merge_policy()->set_emit_rail_switch_endpoints(true);
   }
 
   normalize_defaults(&cfg);

@@ -872,7 +872,7 @@
    - copy plan
    - target tensor layout
 2. `bind_into(..., mapping=...)` / `swap(..., publish=True)` 打通 mapped publish：
-   - `MaterializeIntoMappedTarget` 可返回 `target_write_token`；
+   - `MaterializeIntoMappedTarget` 可返回 `target_publication_token`；
    - `PublishTargetReplica` 可发布 VIEW byte-space 副本；
    - 使已完成 rank/实例可成为后续请求 source（可扩散）。
 3. daemon/controller 放开 opaque `selection.view_id`（无 metadata 也可作为 byte-space 身份），并将 mapped request 的 `VariantIdentity` 下传给 StoreEngine。

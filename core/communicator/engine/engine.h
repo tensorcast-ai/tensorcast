@@ -91,6 +91,20 @@ class Communicator {
       uint64_t remote_offset = 0);
 
   /**
+   * Read a locally registered tensor directly from the in-process tensor store.
+   * This path bypasses network transports and is used by same-node adapters
+   * (for example NVLINK/PCIE local datapaths) when source data is available in
+   * the same process.
+   */
+  transport::future_read_result_t read_tensor_local(
+      const std::string& key,
+      uint64_t addr,
+      uint64_t bytes,
+      int dev_type,
+      int dev_id,
+      uint64_t remote_offset = 0);
+
+  /**
    * Register a partition tensor
    * @param tensor_key the unique tensor key
    * @param addr uint64 address
@@ -106,6 +120,7 @@ class Communicator {
     bool needs_staging = false; // Hint for transports that staging is required
     bool async = false; // Async MR registration when applicable
     bool direct_rdma_enabled = false; // Allow zero-copy RDMA when preconditions hold
+    bool direct_rdma_required = false; // Fail the read instead of falling back when direct RDMA is unavailable
   };
 
   // Extended registration with options.
@@ -283,6 +298,7 @@ class Communicator {
   bool enable_rdma_;
   int mtcp_conn_count_;
   uint32_t ack_ttl_ms_ = 30000;
+  std::atomic<uint64_t> next_request_id_{1};
   v1::CommunicatorConfig config_{}; // defaults unless provided
   std::shared_ptr<ResidencyProvider> residency_provider_ = nullptr;
 

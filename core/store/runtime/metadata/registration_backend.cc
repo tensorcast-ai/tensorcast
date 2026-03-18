@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -222,6 +223,40 @@ std::vector<components::CanonicalRange> to_component_ranges(const std::vector<Ca
     out.push_back(converted);
   }
   return out;
+}
+
+ingestion::VerifiedContentDescriptor build_registration_verified_content_descriptor(
+    std::string_view index_multihash,
+    std::string_view data_multihash,
+    uint64_t size_bytes) {
+  ingestion::VerifiedContentDescriptor descriptor;
+  descriptor.content_identity.semantic_layout_identity.kind = ingestion::SemanticLayoutKind::kCanonicalIndexDigest;
+  descriptor.content_identity.semantic_layout_identity.value = std::string(index_multihash);
+  descriptor.content_identity.logical_size_bytes = size_bytes;
+  descriptor.content_identity.digest_alg = "multihash";
+  descriptor.content_identity.digest_bytes = std::string(data_multihash);
+  return descriptor;
+}
+
+ingestion::VerificationRecord build_registration_verification_record(std::string_view index_multihash) {
+  return ingestion::VerificationRecord{
+      .verification_method = ingestion::VerificationMethod::kRegistrationCommit,
+      .verified_at = absl::Now(),
+      .layout_proof_kind = ingestion::LayoutProofKind::kCanonicalIndexDigest,
+      .layout_proof_value = std::string(index_multihash),
+  };
+}
+
+void maybe_attach_registration_verification(
+    RegistrationCommitResult& result,
+    std::string_view index_multihash,
+    std::string_view data_multihash) {
+  if (result.id_kind != common::ArtifactIdKind::kMi2 || index_multihash.empty() || data_multihash.empty()) {
+    return;
+  }
+  result.verified_content_descriptor =
+      build_registration_verified_content_descriptor(index_multihash, data_multihash, result.size_bytes);
+  result.verification_record = build_registration_verification_record(index_multihash);
 }
 
 absl::Status zero_view_padding(
@@ -629,7 +664,10 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       }
       canonical_size = view_opts.canonical_size_bytes != 0 ? view_opts.canonical_size_bytes : reg.total_size_bytes;
     }
-    auto plan_or = loader::ViewPlanner::compute_bidirectional_view_plan(*reg.tensor_index_data, view_opts.spec);
+    auto plan_or = view_opts.tensor_names.empty()
+        ? loader::ViewPlanner::compute_bidirectional_view_plan(*reg.tensor_index_data, view_opts.spec)
+        : loader::ViewPlanner::compute_bidirectional_view_plan(
+              *reg.tensor_index_data, view_opts.spec, view_opts.tensor_names);
     if (!plan_or.ok()) {
       return plan_or.status();
     }
@@ -1185,6 +1223,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .view_id = view_id, .device = dev_key, .replica = 0};
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
   bool reuse_existing = false;
+  bool mi2_inserted_new = false;
   bool stable_cache_admitted = false;
   bool key_already_exists = false;
   if (allow_idempotent) {
@@ -1204,6 +1243,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       }
     } else if (!emplace_status.ok()) {
       return emplace_status;
+    } else {
+      mi2_inserted_new = true;
     }
   }
 
@@ -1230,77 +1271,19 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.schema_version = entry->schema_version;
     result.encoding = entry->encoding;
     result.id_kind = entry->id_kind;
+    maybe_attach_registration_verification(result, index_multihash, data_multihash);
     record_commit_latency(*entry, "existed");
     return result;
-  }
-
-  // Piece/view retries may hit an existing logical key. The newly ingested
-  // replica is transient in that case, so avoid publishing fresh transport
-  // keys that would become stale once this commit scope ends.
-  const bool skip_transport_publication = key_already_exists && entry->view_state != nullptr;
-
-  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
-      stable_cache_manager_) {
-    components::StableDramCacheManager::AdmissionRequest admit_request;
-    admit_request.key = mi2_key;
-    admit_request.replica = entry->replica;
-    admit_request.size_bytes = entry->size_bytes;
-    admit_request.policy = *entry->stable_cache_policy;
-    auto admit_or = stable_cache_manager_->admit(admit_request);
-    if (!admit_or.ok()) {
-      release_replica_memory(entry->replica, common::memory::MemoryLocation::CPU);
-      return admit_or.status();
-    }
-    stable_cache_admitted = admit_or->admitted && !admit_or->skipped;
   }
 
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
   std::optional<ExportRegistration> export_registration;
-  if (!skip_transport_publication && entry->enable_p2p && communication_manager_ &&
-      communication_manager_->is_enabled()) {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
-        ? common::memory::MemoryLocation::CPU
-        : common::memory::MemoryLocation::GPU;
-    auto reg_info_or = entry->replica->enable_remote_memory_access(location, communication_manager_->get_engine());
-    if (!reg_info_or.ok()) {
-      return reg_info_or.status();
-    }
-    export_registration = *reg_info_or;
-    remote_keys = reg_info_or->remote_memory_keys;
-    buffer_sizes.reserve(reg_info_or->buffer_sizes.size());
-    for (const auto& sz : reg_info_or->buffer_sizes) {
-      buffer_sizes.push_back(static_cast<uint64_t>(sz));
-    }
-  }
 
   DeviceKey device = entry->plan == PendingRegistrationContext::Plan::kStableDram
       ? DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""}
       : DeviceRegistry::instance().gpu_key(entry->device_id);
   std::optional<std::string> verification_json;
-  if (!remote_keys.empty()) {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
-        ? common::memory::MemoryLocation::CPU
-        : common::memory::MemoryLocation::GPU;
-    std::vector<void*> data_ptrs = entry->replica->get_memory_manager().get_pointer(location);
-    if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
-      std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
-      const int verify_device = (location == common::memory::MemoryLocation::GPU) ? entry->device_id : -1;
-      auto info_or = common::ArtifactVerifier::generate_verification_info(
-          data_ptrs, data_sizes, verify_device, common::VerificationLevel::KEY_POINTS);
-      if (info_or.ok()) {
-        verification_json = info_or->to_json();
-      }
-    }
-  }
-
-  if (promotion_manager_ && export_registration.has_value()) {
-    auto promotion_status =
-        promotion_manager_->record_export_registration(mi2_key, *export_registration, verification_json);
-    if (!promotion_status.ok()) {
-      LOG(WARNING) << "record_export_registration failed for " << mi2_key << ": " << promotion_status;
-    }
-  }
 
   std::optional<std::string> view_data_hash;
   std::optional<std::string> view_spec_json;
@@ -1308,8 +1291,40 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   std::vector<global_store::v1::PieceProofDigestWrite> proof_digests;
   std::vector<uint64_t> canonical_leaf_indices;
   std::optional<size_t> leaf_chunk_bytes;
+  const auto committed_location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+      ? common::memory::MemoryLocation::CPU
+      : common::memory::MemoryLocation::GPU;
+  auto rollback_inserted_replica = absl::MakeCleanup([&]() {
+    if (!mi2_inserted_new) {
+      return;
+    }
+    if (export_registration.has_value()) {
+      if (promotion_manager_) {
+        auto demote_status = promotion_manager_->finalize_replica_demotion(mi2_key);
+        if (!demote_status.ok()) {
+          LOG(WARNING) << "registration rollback demotion failed for " << mi2_key << ": " << demote_status;
+        }
+      } else if (communication_manager_ && communication_manager_->is_enabled()) {
+        auto disable_status =
+            entry->replica->disable_remote_memory_access(committed_location, communication_manager_->get_engine());
+        if (!disable_status.ok()) {
+          LOG(WARNING) << "registration rollback disable_remote_memory_access failed for " << mi2_key << ": "
+                       << disable_status;
+        }
+      }
+    }
+    if (stable_cache_admitted && stable_cache_manager_) {
+      stable_cache_manager_->on_replica_evicted(mi2_key, entry->replica, "registration_commit_failed");
+    }
+    auto removed = replica_registry_->erase(mi2_key);
+    if (!removed.has_value()) {
+      VLOG(1) << "registration rollback: committed key already absent " << mi2_key;
+    }
+    release_replica_memory(entry->replica, committed_location);
+  });
   if (entry->view_state) {
-    view_spec_json = view::build_view_spec_json(entry->view_state->options.spec);
+    view_spec_json =
+        view::build_view_spec_json(entry->view_state->options.spec, entry->view_state->options.tensor_names);
     leaf_chunk_bytes = artifact_chunk_bytes_ == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : artifact_chunk_bytes_;
 
     if (entry->view_state->options.registration_kind == ViewRegistrationKind::kPiece) {
@@ -1586,12 +1601,6 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_dram.stage_on_gpu &&
-      entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
-    entry->staging_gpu.reset();
-    entry->gpu_ptr = nullptr;
-  }
-
   if (entry->id_kind == common::ArtifactIdKind::kMi2 && entry->view_state && leaf_chunk_bytes.has_value() &&
       !canonical_leaf_indices.empty() && !index_multihash.empty()) {
     loader::verification::MemoryView canonical_view;
@@ -1636,38 +1645,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  size_t pending_size_after = 0;
-  erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
-  erase_pending(registration_id, &pending_size_after);
-  record_pending_gauge(pending_size_after);
-
-  RegistrationCommitResult result;
-  result.registration_id = std::string(registration_id);
-  result.artifact_id = entry->artifact_id;
-  result.device_id = entry->device_id;
-  result.device = device;
-  result.size_bytes = entry->size_bytes;
-  result.existed = skip_transport_publication;
-  result.stable_cache_admitted = stable_cache_admitted;
-  result.index_multihash = index_multihash;
-  result.data_multihash = data_multihash;
-  result.schema_version = entry->schema_version;
-  result.encoding = entry->encoding;
-  result.id_kind = entry->id_kind;
   uint64_t covered_bytes = 0;
   if (entry->view_state) {
-    if (!entry->view_state->options.view_id.empty()) {
-      result.view_id = entry->view_state->options.view_id;
-    }
-    if (view_data_hash.has_value()) {
-      result.view_data_multihash = view_data_hash;
-    }
-    if (!entry->view_state->plan.forward.view_index_json.empty()) {
-      result.view_index_json = entry->view_state->plan.forward.view_index_json;
-    }
-    result.canonical_ranges = entry->view_state->options.canonical_ranges;
-    result.registration_kind = entry->view_state->options.registration_kind;
-    for (const auto& range : result.canonical_ranges) {
+    for (const auto& range : entry->view_state->options.canonical_ranges) {
       covered_bytes += range.length;
     }
   }
@@ -1676,7 +1656,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     components::ViewStateUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
-    update.view_spec_json = view_spec_json.value_or(view::build_view_spec_json(entry->view_state->options.spec));
+    update.view_spec_json = view_spec_json.value_or(
+        view::build_view_spec_json(entry->view_state->options.spec, entry->view_state->options.tensor_names));
     update.view_size_bytes = entry->view_state->plan.forward.view_size_bytes;
     update.view_data_hash = view_data_hash;
     update.mark_verified = true;
@@ -1695,7 +1676,118 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  if (publisher_ && !skip_transport_publication) {
+  if (entry->view_state && !mi2_inserted_new) {
+    size_t pending_size_after = 0;
+    erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
+    release_replica_memory(entry->replica, committed_location);
+    erase_pending(registration_id, &pending_size_after);
+    record_pending_gauge(pending_size_after);
+
+    RegistrationCommitResult result;
+    result.registration_id = std::string(registration_id);
+    result.artifact_id = entry->artifact_id;
+    result.device_id = entry->device_id;
+    result.device = device;
+    result.size_bytes = entry->size_bytes;
+    result.existed = true;
+    result.stable_cache_admitted = false;
+    result.index_multihash = index_multihash;
+    result.data_multihash = data_multihash;
+    result.schema_version = entry->schema_version;
+    result.encoding = entry->encoding;
+    result.id_kind = entry->id_kind;
+    if (!entry->view_state->options.view_id.empty()) {
+      result.view_id = entry->view_state->options.view_id;
+    }
+    if (view_data_hash.has_value()) {
+      result.view_data_multihash = view_data_hash;
+    }
+    if (!entry->view_state->plan.forward.view_index_json.empty()) {
+      result.view_index_json = entry->view_state->plan.forward.view_index_json;
+    }
+    result.canonical_ranges = entry->view_state->options.canonical_ranges;
+    result.registration_kind = entry->view_state->options.registration_kind;
+    maybe_attach_registration_verification(result, index_multihash, data_multihash);
+    record_commit_latency(*entry, "existed");
+    return result;
+  }
+
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
+      stable_cache_manager_) {
+    components::StableDramCacheManager::AdmissionRequest admit_request;
+    admit_request.key = mi2_key;
+    admit_request.replica = entry->replica;
+    admit_request.size_bytes = entry->size_bytes;
+    admit_request.policy = *entry->stable_cache_policy;
+    auto admit_or = stable_cache_manager_->admit(admit_request);
+    if (!admit_or.ok()) {
+      return admit_or.status();
+    }
+    stable_cache_admitted = admit_or->admitted && !admit_or->skipped;
+  }
+
+  RegistrationCommitResult result;
+  result.registration_id = std::string(registration_id);
+  result.artifact_id = entry->artifact_id;
+  result.device_id = entry->device_id;
+  result.device = device;
+  result.size_bytes = entry->size_bytes;
+  result.existed = false;
+  result.stable_cache_admitted = stable_cache_admitted;
+  result.index_multihash = index_multihash;
+  result.data_multihash = data_multihash;
+  result.schema_version = entry->schema_version;
+  result.encoding = entry->encoding;
+  result.id_kind = entry->id_kind;
+  if (entry->view_state) {
+    if (!entry->view_state->options.view_id.empty()) {
+      result.view_id = entry->view_state->options.view_id;
+    }
+    if (view_data_hash.has_value()) {
+      result.view_data_multihash = view_data_hash;
+    }
+    if (!entry->view_state->plan.forward.view_index_json.empty()) {
+      result.view_index_json = entry->view_state->plan.forward.view_index_json;
+    }
+    result.canonical_ranges = entry->view_state->options.canonical_ranges;
+    result.registration_kind = entry->view_state->options.registration_kind;
+  }
+  maybe_attach_registration_verification(result, index_multihash, data_multihash);
+
+  if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
+    auto reg_info_or =
+        entry->replica->enable_remote_memory_access(committed_location, communication_manager_->get_engine());
+    if (!reg_info_or.ok()) {
+      return reg_info_or.status();
+    }
+    export_registration = *reg_info_or;
+    remote_keys = reg_info_or->remote_memory_keys;
+    buffer_sizes.reserve(reg_info_or->buffer_sizes.size());
+    for (const auto& sz : reg_info_or->buffer_sizes) {
+      buffer_sizes.push_back(static_cast<uint64_t>(sz));
+    }
+
+    std::vector<void*> data_ptrs = entry->replica->get_memory_manager().get_pointer(committed_location);
+    if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
+      std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
+      const int verify_device = (committed_location == common::memory::MemoryLocation::GPU) ? entry->device_id : -1;
+      auto info_or = common::ArtifactVerifier::generate_verification_info(
+          data_ptrs, data_sizes, verify_device, common::VerificationLevel::KEY_POINTS);
+      if (info_or.ok()) {
+        verification_json = info_or->to_json();
+      }
+    }
+  }
+
+  if (promotion_manager_ && export_registration.has_value()) {
+    auto promotion_status =
+        promotion_manager_->record_export_registration(mi2_key, *export_registration, verification_json);
+    if (!promotion_status.ok()) {
+      LOG(WARNING) << "record_export_registration failed for " << mi2_key << ": " << promotion_status;
+    }
+  }
+
+  if (publisher_) {
     RegistrationPublication publication{
         .artifact_id = entry->artifact_id,
         .device = device,
@@ -1711,6 +1803,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         .encoding = entry->encoding,
         .schema_version = entry->schema_version,
         .verification_json = verification_json,
+        .view_data_hash = view_data_hash,
         .index_multihash = index_multihash,
         .data_multihash = data_multihash,
         .id_kind = entry->id_kind};
@@ -1727,16 +1820,24 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_dram.stage_on_gpu &&
+      entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
+    entry->staging_gpu.reset();
+    entry->gpu_ptr = nullptr;
+  }
+
   {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
-        ? common::memory::MemoryLocation::CPU
-        : common::memory::MemoryLocation::GPU;
-    auto mark_status = entry->replica->mark_loaded(location);
+    auto mark_status = entry->replica->mark_loaded(committed_location);
     if (!mark_status.ok()) {
       return mark_status;
     }
-    entry->replica->set_ready_signal(location, absl::OkStatus());
+    entry->replica->set_ready_signal(committed_location, absl::OkStatus());
   }
+  size_t pending_size_after = 0;
+  erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
+  erase_pending(registration_id, &pending_size_after);
+  record_pending_gauge(pending_size_after);
+  std::move(rollback_inserted_replica).Cancel();
   record_commit_latency(*entry, "ok");
   return result;
 }

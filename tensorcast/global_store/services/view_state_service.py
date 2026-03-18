@@ -218,6 +218,7 @@ class ViewStateService:
 
             replicated_tensors: set[str] = set()
             proof_schema_version: str | None = None
+            replace_existing_assembly_view = False
             if active_layout is not None:
                 for tensor_name, policy in active_layout.tensors.items():
                     if policy.overlap_mode == layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL:
@@ -236,9 +237,12 @@ class ViewStateService:
                     and view.view_data_hash
                     and existing.get("view_data_hash") != view.view_data_hash
                 ):
-                    raise ValueError(
-                        "view_data_hash conflict for existing view registration"
-                    )
+                    if artifact_is_assembly:
+                        replace_existing_assembly_view = True
+                    else:
+                        raise ValueError(
+                            "view_data_hash conflict for existing view registration"
+                        )
 
                 self.view_repository.upsert(
                     artifact_id=view.artifact_id,
@@ -472,6 +476,22 @@ class ViewStateService:
                     )
 
                 for (space_kind, space_id), entries in grouped.items():
+                    if replace_existing_assembly_view:
+                        if space_kind == "V":
+                            self.leaf_repository.delete_all_for_space(
+                                artifact_id=artifact_id,
+                                space_kind=space_kind,
+                                space_id=space_id,
+                                cursor=cursor,
+                            )
+                        else:
+                            self.leaf_repository.delete_indices(
+                                artifact_id=artifact_id,
+                                space_kind=space_kind,
+                                space_id=space_id,
+                                leaf_idxs=[leaf_idx for leaf_idx, _ in entries],
+                                cursor=cursor,
+                            )
                     leaf_inserted += self.leaf_repository.upsert_many(
                         artifact_id=artifact_id,
                         space_kind=space_kind,

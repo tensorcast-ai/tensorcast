@@ -88,6 +88,9 @@ class GroupDispatchPolicyConfig(BaseModel):
     starvation_aging_threshold_ms: int = 5_000
     queue_scan_limit: int = 128
     dispatch_batch_limit: int = 16
+    group_source_spread_weight: float = 2.0
+    group_source_soft_cap_ratio: float = 1.3
+    group_source_min_candidates_for_enforce: int = 3
 
 
 class TransportSchedulerPolicyConfig(BaseModel):
@@ -355,6 +358,22 @@ class GlobalStoreConfig(BaseModel):
                         int(dispatch_pb.dispatch_batch_limit)
                         if "dispatch_batch_limit" in dispatch_section
                         else group_dispatch.dispatch_batch_limit,
+                    ),
+                    group_source_spread_weight=float(
+                        dispatch_pb.group_source_spread_weight
+                    )
+                    if "group_source_spread_weight" in dispatch_section
+                    else group_dispatch.group_source_spread_weight,
+                    group_source_soft_cap_ratio=float(
+                        dispatch_pb.group_source_soft_cap_ratio
+                    )
+                    if "group_source_soft_cap_ratio" in dispatch_section
+                    else group_dispatch.group_source_soft_cap_ratio,
+                    group_source_min_candidates_for_enforce=max(
+                        1,
+                        int(dispatch_pb.group_source_min_candidates_for_enforce)
+                        if "group_source_min_candidates_for_enforce" in dispatch_section
+                        else group_dispatch.group_source_min_candidates_for_enforce,
                     ),
                 )
             scheduler_policy = TransportSchedulerPolicyConfig(

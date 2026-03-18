@@ -31,6 +31,32 @@ using tensorcast::store::loader::verification::ViewHashResult;
 
 namespace {
 
+class ScopedTempDir {
+ public:
+  explicit ScopedTempDir(const std::string& prefix) : path_(make_unique_path(prefix)) {
+    fs::create_directories(path_);
+  }
+
+  ~ScopedTempDir() {
+    std::error_code ec;
+    fs::remove_all(path_, ec);
+  }
+
+  const fs::path& path() const {
+    return path_;
+  }
+
+ private:
+  static fs::path make_unique_path(const std::string& prefix) {
+    static std::atomic<uint64_t> counter{0};
+    const auto ticks = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    return fs::temp_directory_path() /
+        (prefix + "_" + std::to_string(ticks) + "_" + std::to_string(counter.fetch_add(1)));
+  }
+
+  fs::path path_;
+};
+
 MemoryView make_cpu_view(std::vector<uint8_t>& data) {
   MemoryView view;
   view.location = tensorcast::common::memory::MemoryLocation::CPU;
@@ -46,12 +72,6 @@ MemoryView make_gpu_view(void* ptr, size_t bytes, int device_id) {
   view.size_bytes = bytes;
   view.gpu_device_id = device_id;
   return view;
-}
-
-fs::path make_temp_dir(const std::string& prefix) {
-  fs::path dir = fs::temp_directory_path() / prefix;
-  fs::create_directories(dir);
-  return dir;
 }
 
 class VectorSource : public tensorcast::store::loader::SeekableSource {
@@ -130,18 +150,18 @@ TEST_CASE("VerificationUtils computes GPU multihash when CUDA available", "[veri
 }
 
 TEST_CASE("VerificationUtils generates and reuses verification.json", "[verification][metadata]") {
-  fs::path dir = make_temp_dir("verification_utils");
+  ScopedTempDir dir("verification_utils");
 
   std::vector<uint8_t> data(128, 0x5A);
   MemoryView view = make_cpu_view(data);
 
   // When file absent, it should be generated.
   auto status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"canonical",
       view);
   CHECK(status.ok());
-  fs::path verification_path = dir / "verification.view_canonical.json";
+  fs::path verification_path = dir.path() / "verification.view_canonical.json";
   CHECK(fs::exists(verification_path));
 
   std::ifstream in(verification_path);
@@ -153,15 +173,15 @@ TEST_CASE("VerificationUtils generates and reuses verification.json", "[verifica
 
   // Reuse should succeed without rewriting when byte_space_id matches.
   status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"canonical",
       view);
   CHECK(status.ok());
 
   // Mismatched byte_space_id should trigger regeneration into a new file.
-  fs::path mismatch_path = dir / "verification.view_variant.json";
+  fs::path mismatch_path = dir.path() / "verification.view_variant.json";
   status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"variant",
       view);
   CHECK(status.ok());
@@ -173,29 +193,27 @@ TEST_CASE("VerificationUtils generates and reuses verification.json", "[verifica
   auto updated_info = tensorcast::common::ArtifactVerificationInfo::from_json(updated);
   REQUIRE(updated_info.ok());
   CHECK(updated_info->byte_space_id == "variant");
-
-  fs::remove_all(dir);
 }
 
 TEST_CASE("VerificationUtils detects tampering even when metadata was cached", "[verification][metadata][tamper]") {
-  fs::path dir = make_temp_dir("verification_tamper");
+  ScopedTempDir dir("verification_tamper");
   std::vector<uint8_t> data(256, 0x7A);
   MemoryView view = make_cpu_view(data);
 
   auto status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"",
       view);
   REQUIRE(status.ok());
 
   // Warm the cache with a second successful reuse.
   status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"",
       view);
   REQUIRE(status.ok());
 
-  const fs::path verification_path = dir / "verification.json";
+  const fs::path verification_path = dir.path() / "verification.json";
   REQUIRE(fs::exists(verification_path));
 
   // Tamper with key values and rewrite the file with a matching signature.
@@ -215,27 +233,25 @@ TEST_CASE("VerificationUtils detects tampering even when metadata was cached", "
   out.close();
 
   status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"",
       view);
   REQUIRE_FALSE(status.ok());
   CHECK(status.code() == absl::StatusCode::kDataLoss);
-
-  fs::remove_all(dir);
 }
 
 TEST_CASE("VerificationUtils writes descriptor when absent", "[verification][descriptor]") {
-  fs::path dir = make_temp_dir("verification_descriptor");
+  ScopedTempDir dir("verification_descriptor");
 
   const std::string index_mh = "mindex";
   const std::string data_mh = "mdata";
   const uint64_t total_size = 42;
 
-  auto status =
-      tensorcast::store::loader::verification::write_descriptor_if_absent(dir, index_mh, data_mh, total_size, "json");
+  auto status = tensorcast::store::loader::verification::write_descriptor_if_absent(
+      dir.path(), index_mh, data_mh, total_size, "json");
   CHECK(status.ok());
 
-  fs::path descriptor = dir / "artifact_descriptor.json";
+  fs::path descriptor = dir.path() / "artifact_descriptor.json";
   CHECK(fs::exists(descriptor));
 
   std::ifstream in(descriptor);
@@ -247,18 +263,16 @@ TEST_CASE("VerificationUtils writes descriptor when absent", "[verification][des
   CHECK(j["total_size"] == total_size);
 
   // Second call should no-op.
-  status =
-      tensorcast::store::loader::verification::write_descriptor_if_absent(dir, index_mh, data_mh, total_size, "json");
+  status = tensorcast::store::loader::verification::write_descriptor_if_absent(
+      dir.path(), index_mh, data_mh, total_size, "json");
   CHECK(status.ok());
-
-  fs::remove_all(dir);
 }
 
 TEST_CASE("VerificationUtils atomic persistence prevents partial JSON reads", "[verification][atomic]") {
-  fs::path dir = make_temp_dir("verification_atomic");
+  ScopedTempDir dir("verification_atomic");
   std::vector<uint8_t> data(1024 * 32, 0x42);
   MemoryView view = make_cpu_view(data);
-  const fs::path verification_path = dir / "verification.view_canonical.json";
+  const fs::path verification_path = dir.path() / "verification.view_canonical.json";
   const int iterations = 32;
 
   std::atomic<bool> writer_done{false};
@@ -292,7 +306,7 @@ TEST_CASE("VerificationUtils atomic persistence prevents partial JSON reads", "[
     std::error_code ec;
     std::filesystem::remove(verification_path, ec);
     auto status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-        dir,
+        dir.path(),
         /*expected_byte_space_id=*/"canonical",
         view);
     REQUIRE(status.ok());
@@ -305,8 +319,6 @@ TEST_CASE("VerificationUtils atomic persistence prevents partial JSON reads", "[
 
   CHECK(parse_failures.load(std::memory_order_relaxed) == 0);
   CHECK(std::filesystem::exists(verification_path));
-
-  fs::remove_all(dir);
 }
 
 class CollectingLogSink : public absl::LogSink {
@@ -332,7 +344,7 @@ class CollectingLogSink : public absl::LogSink {
 };
 
 TEST_CASE("VerificationUtils emits structured logs on metadata write", "[verification][logging]") {
-  fs::path dir = make_temp_dir("verification_logging");
+  ScopedTempDir dir("verification_logging");
 
   std::vector<uint8_t> data(256, 0x11);
   MemoryView view = make_cpu_view(data);
@@ -341,15 +353,13 @@ TEST_CASE("VerificationUtils emits structured logs on metadata write", "[verific
   CollectingLogSink sink;
   absl::AddLogSink(&sink);
   auto status = tensorcast::store::loader::verification::reuse_or_generate_verification_json(
-      dir,
+      dir.path(),
       /*expected_byte_space_id=*/"",
       view);
   absl::RemoveLogSink(&sink);
 
   REQUIRE(status.ok());
   CHECK(sink.Contains("verification_metadata_write_succeeded"));
-
-  fs::remove_all(dir);
 }
 
 TEST_CASE("VerificationUtils computes view tree hash and leaf digests", "[verification][view]") {

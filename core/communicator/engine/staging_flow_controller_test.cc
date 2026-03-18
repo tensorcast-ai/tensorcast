@@ -162,6 +162,35 @@ TEST_CASE("StageLease releases credit and buffers exactly once") {
   credit_lease.release_unused();
 }
 
+TEST_CASE("StageLease concurrent release is idempotent", "[staging][concurrency]") {
+  FlowCreditLedger ledger(/*total_credit=*/2);
+  DummyStage helper;
+
+  auto lease_or = ledger.acquire(1);
+  REQUIRE(lease_or.ok());
+  FlowCreditLedger::Lease credit_lease = std::move(lease_or.value());
+  credit_lease.mark_consumed();
+
+  int value = 7;
+  StageLease lease = helper.make(&value, ledger, StageTransport::kRdma);
+  REQUIRE(lease.valid());
+
+  std::vector<std::thread> workers;
+  workers.reserve(8);
+  for (int i = 0; i < 8; ++i) {
+    workers.emplace_back([lease]() mutable { lease.release(); });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+
+  CHECK(helper.credit_released.load() == 1);
+  CHECK(helper.stager->released_ptrs_.size() == 1);
+  CHECK(helper.stager->released_ptrs_.front() == &value);
+  CHECK(ledger.outstanding_credit() == 0);
+  credit_lease.release_unused();
+}
+
 TEST_CASE("StageLeaseRegistry stores and retrieves leases") {
   FlowCreditLedger ledger(/*total_credit=*/2);
   DummyStage helper;
@@ -308,6 +337,39 @@ TEST_CASE("StageLease metadata preserves zero_copy flag") {
 
   lease.release();
   lease_or->release_unused();
+}
+
+TEST_CASE("StagingWindow supports request-scoped direct credit expansion", "[staging][direct]") {
+  FlowCreditLedger direct_ledger(/*total_credit=*/16);
+  DummyStage helper;
+
+  StagingWindow window(
+      direct_ledger,
+      [&](uint64_t offset, uint32_t bytes, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
+        StageLease::Metadata meta;
+        meta.transport = StageTransport::kRdma;
+        meta.offset = offset;
+        meta.bytes = bytes;
+        meta.segment_idx = segment_idx;
+        meta.zero_copy = true;
+        return helper.make(reinterpret_cast<void*>(offset + segment_idx), direct_ledger, StageTransport::kRdma);
+      },
+      /*total_bytes=*/64,
+      /*chunk_size=*/4,
+      /*initial_offset=*/0,
+      /*max_window_segments=*/16);
+
+  auto first = window.stage_next();
+  REQUIRE(first.ok());
+  CHECK(first->segments.size() == 16);
+  CHECK_FALSE(first->more_segments);
+  CHECK(first->granted_credit == 16);
+  CHECK(direct_ledger.outstanding_credit() == 16);
+
+  for (auto& seg : first->segments) {
+    seg.lease.release();
+  }
+  CHECK(direct_ledger.outstanding_credit() == 0);
 }
 
 } // namespace tensorcast::communicator::engine
