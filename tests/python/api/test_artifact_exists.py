@@ -55,8 +55,10 @@ class _RuntimeStub:
         if key and key in self._key_cache:
             del self._key_cache[key]
 
-    def resolve_key_mapping_cached(self, *, key: str) -> str | None:
-        return self._key_cache.get(key)
+    def resolve_key_mapping_cached(
+        self, *, key: str
+    ) -> tuple[str | None, str | None]:
+        return self._key_cache.get(key), None
 
     def cache_key_mapping(
         self, key: str, *, artifact_id: str | None, ttl_override=None

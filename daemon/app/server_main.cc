@@ -483,6 +483,9 @@ absl::StatusOr<std::optional<uint64_t>> read_memlock_limit_bytes() {
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
   common::ensure_logging_initialized();
+  // Broken pipes from log sinks or peer sockets must surface as write/send
+  // errors instead of terminating the daemon process.
+  std::signal(SIGPIPE, SIG_IGN);
   // Avoid global using-directives per project guidelines
   // Note: config loading happens below; defer OTel/log-sink init until then.
   const std::string cfg_path = absl::GetFlag(FLAGS_config);
