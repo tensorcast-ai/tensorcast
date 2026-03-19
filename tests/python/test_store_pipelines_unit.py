@@ -95,7 +95,7 @@ class _DummyRuntime:
         self.leases: list[object] = []
         self.futures: list[object] = []
         self.client = _FakeClient()
-        self._key_cache: dict[str, str | None] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
 
     def track_future(self, future: concurrent.futures.Future[object]) -> None:
         self.futures.append(future)
@@ -120,9 +120,9 @@ class _DummyRuntime:
 
     def resolve_key_mapping_cached(
         self, *, key: str
-    ) -> str | None:  # pragma: no cover - noop
+    ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
         mapping = self.client.resolve_key_mapping(key)
-        return mapping.artifact_id or None
+        return mapping.artifact_id or None, None
 
     def invalidate_artifact(
         self, artifact_id: str | None, *, key: str | None = None, reason: str | None = None
@@ -130,7 +130,9 @@ class _DummyRuntime:
         # Mirror StoreRuntimeContext.invalidate_artifact enough for tests: clear cached key mappings.
         keys_to_remove: list[str] = []
         for cached_key, cached_artifact in self._key_cache.items():
-            matches_artifact = bool(artifact_id and cached_artifact == artifact_id)
+            matches_artifact = bool(
+                artifact_id and cached_artifact[0] == artifact_id
+            )
             matches_key = bool(key is not None and cached_key == key)
             if matches_artifact or matches_key:
                 keys_to_remove.append(cached_key)
