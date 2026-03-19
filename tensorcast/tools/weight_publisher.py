@@ -31,6 +31,17 @@ logger = logging.getLogger(__name__)
 _CGID_SUFFIX_ALLOWED = re.compile(r"[-._~A-Za-z0-9]+")
 
 
+def _normalize_resolved_artifact_id(value: object) -> str | None:
+    if isinstance(value, tuple):
+        if not value:
+            return None
+        value = value[0]
+    if value is None:
+        return None
+    resolved = str(value).strip()
+    return resolved or None
+
+
 class WeightPublisherConfig(BaseModel):
     """Configuration for publishing weights to Tensorcast and triggering reloads.
 
@@ -562,7 +573,9 @@ class WeightPublisher:
         last_err: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                resolved = resolve_artifact(key=str(artifact_key)).artifact_id
+                resolved = _normalize_resolved_artifact_id(
+                    resolve_artifact(key=str(artifact_key)).artifact_id
+                )
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
                 time.sleep(float(self._config.key_mapping_poll_interval_s))
