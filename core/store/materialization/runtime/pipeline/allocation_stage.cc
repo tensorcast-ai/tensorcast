@@ -61,6 +61,8 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
     config.canonical_index_json = ctx.verification.canonical_index_json;
     config.source_index_json = ctx.disk.source_index_json;
   }
+  config.collective_load_group = ctx.hints.collective_load_group;
+  config.variant_identity = ctx.hints.variant;
   config.view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::nullopt;
   config.view_plan = ctx.resolved_view_plan;
   config.transform_placement = ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer;

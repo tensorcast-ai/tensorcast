@@ -32,7 +32,7 @@ class _FakeBinding:
 
 class _FakeBindingPublishFail(_FakeBinding):
     def publish_replica(self, *_: object, **__: object) -> None:
-        raise RuntimeError("target_write_token missing; daemon publish not available")
+        raise RuntimeError("target_publication_token missing; daemon publish not available")
 
 
 class _FailingArtifact:
@@ -164,7 +164,7 @@ def test_tp_bind_publish_failure_is_non_fatal(
     assert pointer_stable is True
     captured = capsys.readouterr().out
     assert "publish=skipped" in captured
-    assert "target_write_token missing" in captured
+    assert "target_publication_token missing" in captured
 
 
 def test_binding_swap_uses_group_ctx_tags(
@@ -267,8 +267,8 @@ def test_tp_bind_poisoned_error_raises_version_dropped() -> None:
     receiver._apply_mode = "tp_bind_into_swap"
     receiver._tp_world_size = 1
     receiver._tp_total_bytes = 40 * 1024**3
-    receiver._tp_bindings = {}
-    receiver._tp_binding_ptrs = {}
+    receiver._tp_bindings = {0: _FakeBinding({"weight": _FakeTensor(101)})}
+    receiver._tp_binding_ptrs = {0: {"weight": 101}}
     receiver._tp_pending_targets = {}
     receiver._tp_rank_device = lambda _rank: "cuda:0"
     receiver._make_tp_materialize_ctx = lambda **_: None
@@ -294,6 +294,9 @@ def test_tp_bind_poisoned_error_raises_version_dropped() -> None:
     assert raised.value.version == 1
     assert raised.value.artifact_id == "artifact-v1"
     assert raised.value.newer_version == 2
+    assert receiver._tp_bindings == {}
+    assert receiver._tp_binding_ptrs == {}
+    assert receiver._tp_pending_targets == {}
 
 
 def test_tp_bind_group_contract_error_raises_non_retryable_drop() -> None:
@@ -305,9 +308,9 @@ def test_tp_bind_group_contract_error_raises_non_retryable_drop() -> None:
     receiver._transport_group_mode = "tp_version"
     receiver._tp_world_size = 1
     receiver._tp_total_bytes = 40 * 1024**3
-    receiver._tp_bindings = {}
-    receiver._tp_binding_ptrs = {}
-    receiver._tp_pending_targets = {}
+    receiver._tp_bindings = {0: _FakeBinding({"weight": _FakeTensor(303)})}
+    receiver._tp_binding_ptrs = {0: {"weight": 303}}
+    receiver._tp_pending_targets = {0: {"weight": _FakeTensor(909)}}
     receiver._tp_rank_device = lambda _rank: "cuda:0"
     receiver._make_tp_materialize_ctx = lambda **_: None
     receiver._resolve_artifact_for_key = lambda *, key: object()  # noqa: ARG005
@@ -334,6 +337,9 @@ def test_tp_bind_group_contract_error_raises_non_retryable_drop() -> None:
     assert raised.value.version == 3
     assert raised.value.artifact_id == "artifact-v3"
     assert raised.value.newer_version is None
+    assert receiver._tp_bindings == {}
+    assert receiver._tp_binding_ptrs == {}
+    assert receiver._tp_pending_targets == {}
 
 
 def test_tp_bind_failure_reset_recycles_rank_targets() -> None:
@@ -353,7 +359,78 @@ def test_tp_bind_failure_reset_recycles_rank_targets() -> None:
     assert recycled["weight"].data_ptr() == 777
 
 
-def test_tp_bind_retry_uses_unique_request_id_per_attempt(
+def test_tp_bind_none_mode_retry_preserves_completed_ranks() -> None:
+    receiver = e2e.WeightUpdateReceiver.__new__(e2e.WeightUpdateReceiver)
+    receiver._per_version_timeout_s = 2.0
+    receiver._poll_interval_s = 0.01
+    receiver._progress_log_interval_s = 10.0
+    receiver._apply_mode = "tp_bind_into_swap"
+    receiver._transport_group_mode = "none"
+    receiver._tp_world_size = 2
+    receiver._tp_total_bytes = 40 * 1024**3
+    receiver._tp_materialize_deadline_s = 600.0
+    receiver._tp_bindings = {}
+    receiver._tp_binding_ptrs = {}
+    receiver._tp_pending_targets = {}
+    receiver._tp_rank_device = lambda _rank: "cuda:0"
+    receiver._make_tp_materialize_ctx = lambda **_: None
+    receiver._resolve_artifact_for_key = lambda *, key: object()  # noqa: ARG005
+    receiver._resolve_artifact_id_for_key = (
+        lambda *, key: "artifact-v1"  # noqa: ARG005
+    )
+    receiver._find_newer_materializable_version = (
+        lambda *, version, max_version: None  # noqa: ARG005
+    )
+    receiver._find_newer_resolved_version = (
+        lambda *, version, max_version: None  # noqa: ARG005
+    )
+
+    call_ranks: list[int] = []
+    failed_once = {"value": False}
+
+    def _fake_apply(**kwargs: object) -> tuple[str, bool]:
+        rank = kwargs.get("rank")
+        assert isinstance(rank, int)
+        call_ranks.append(rank)
+        if rank == 1 and not failed_once["value"]:
+            failed_once["value"] = True
+            raise RuntimeError("Deadline Exceeded")
+        ptr = 100 + rank
+        binding = _FakeBinding({"weight": _FakeTensor(ptr)})
+        binding.artifact_id = "artifact-v1"
+        receiver._tp_bindings[rank] = binding
+        receiver._tp_binding_ptrs[rank] = {"weight": ptr}
+        return ("bind_into", True)
+
+    receiver._apply_tp4_rank = _fake_apply
+
+    event = receiver._wait_one_tp4_binding(version=1, key="k1", max_version=1)
+
+    assert event.version == 1
+    assert event.artifact_id == "artifact-v1"
+    assert call_ranks == [0, 1, 1]
+    assert set(receiver._tp_bindings.keys()) == {0, 1}
+    assert set(receiver._tp_binding_ptrs.keys()) == {0, 1}
+
+
+def test_tp_bind_rank_reset_can_clear_pending_target() -> None:
+    receiver = e2e.WeightUpdateReceiver.__new__(e2e.WeightUpdateReceiver)
+    receiver._tp_bindings = {0: _FakeBinding({"weight": _FakeTensor(808)})}
+    receiver._tp_binding_ptrs = {0: {"weight": 808}}
+    receiver._tp_pending_targets = {}
+
+    receiver._reset_tp_rank_after_apply_failure(
+        version=1,
+        rank=0,
+        clear_pending_target=True,
+    )
+
+    assert receiver._tp_bindings == {}
+    assert receiver._tp_binding_ptrs == {}
+    assert 0 not in receiver._tp_pending_targets
+
+
+def test_tp_bind_retry_reuses_request_id_across_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receiver = e2e.WeightUpdateReceiver.__new__(e2e.WeightUpdateReceiver)
@@ -420,5 +497,78 @@ def test_tp_bind_retry_uses_unique_request_id_per_attempt(
 
     assert event.version == 1
     assert len(request_ids) == 2
-    assert request_ids[0] != request_ids[1]
+    assert request_ids[0] == request_ids[1]
     assert request_attempts == [0, 1]
+
+
+def test_tp_bind_retry_rebind_does_not_flip_swap_operation() -> None:
+    receiver = e2e.WeightUpdateReceiver.__new__(e2e.WeightUpdateReceiver)
+    receiver._per_version_timeout_s = 2.0
+    receiver._poll_interval_s = 0.01
+    receiver._progress_log_interval_s = 10.0
+    receiver._apply_mode = "tp_bind_into_swap"
+    receiver._transport_group_mode = "none"
+    receiver._tp_world_size = 1
+    receiver._tp_total_bytes = 40 * 1024**3
+    receiver._tp_materialize_deadline_s = 600.0
+    receiver._tp_rank_device = lambda _rank: "cuda:0"
+    receiver._make_tp_materialize_ctx = lambda **_: None
+    receiver._resolve_artifact_for_key = lambda *, key: object()  # noqa: ARG005
+    receiver._resolve_artifact_id_for_key = (
+        lambda *, key: "artifact-v2"  # noqa: ARG005
+    )
+    receiver._find_newer_materializable_version = (
+        lambda *, version, max_version: None  # noqa: ARG005
+    )
+    receiver._find_newer_resolved_version = (
+        lambda *, version, max_version: None  # noqa: ARG005
+    )
+
+    receiver._tp_bindings = {0: _FakeBinding({"weight": _FakeTensor(321)})}
+    receiver._tp_binding_ptrs = {0: {"weight": 321}}
+    receiver._tp_pending_targets = {}
+
+    calls = {"count": 0}
+
+    def _fake_apply(**kwargs: object) -> tuple[str, bool]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("Deadline Exceeded")
+        receiver._tp_bindings[0] = _FakeBinding({"weight": _FakeTensor(654)})
+        receiver._tp_binding_ptrs[0] = {"weight": 654}
+        return ("bind_into", True)
+
+    receiver._apply_tp4_rank = _fake_apply
+
+    event = receiver._wait_one_tp4_binding(version=2, key="k2", max_version=2)
+
+    assert calls["count"] == 2
+    assert event.version == 2
+    assert event.apply_operation == "swap"
+
+
+def test_tp_rank_attempt_timeout_retry_boosts_tail_rank_tp_version() -> None:
+    receiver = e2e.WeightUpdateReceiver.__new__(e2e.WeightUpdateReceiver)
+    receiver._tp_world_size = 4
+    receiver._tp_total_bytes = 40 * 1024**3
+    receiver._transport_group_mode = "tp_version"
+
+    first_attempt = receiver._tp_rank_attempt_timeout_s(
+        remaining_s=500.0,
+        attempt=0,
+        completed_ranks_count=3,
+    )
+    retry_tail = receiver._tp_rank_attempt_timeout_s(
+        remaining_s=500.0,
+        attempt=1,
+        completed_ranks_count=3,
+    )
+    retry_capped = receiver._tp_rank_attempt_timeout_s(
+        remaining_s=150.0,
+        attempt=1,
+        completed_ranks_count=3,
+    )
+
+    assert first_attempt == pytest.approx(128.0)
+    assert retry_tail > first_attempt
+    assert retry_capped == pytest.approx(150.0)

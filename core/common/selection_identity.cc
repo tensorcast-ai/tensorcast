@@ -9,10 +9,24 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "core/common/artifact_hash.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::common {
+
+namespace {
+
+constexpr std::string_view kByteArtifactLayoutProfile = "tensorcast.byte_artifact.layout.v1\n";
+constexpr std::string_view kByteArtifactSelectionProfile = "tensorcast.byte_artifact.selection.v1\n";
+
+std::string sha256_as_string(std::string_view payload) {
+  const std::vector<uint8_t> digest =
+      sha256_digest_bytes(absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+} // namespace
 
 std::string compute_logical_layout_hash_bytes(absl::Span<const uint8_t> index_bytes, bool needs_view_index) {
   std::string buffer;
@@ -65,6 +79,33 @@ std::string compute_selection_hash_bytes(std::string_view view_id, std::optional
   const std::vector<uint8_t> digest =
       sha256_digest_bytes(absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()));
   return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+std::string compute_byte_artifact_logical_layout_hash_bytes() {
+  static const std::string kHash = sha256_as_string(kByteArtifactLayoutProfile);
+  return kHash;
+}
+
+std::string compute_byte_artifact_selection_hash_bytes() {
+  static const std::string kHash = sha256_as_string(kByteArtifactSelectionProfile);
+  return kHash;
+}
+
+absl::StatusOr<SelectionIdentity> build_selection_identity(const tensorcast::common::v1::ArtifactSelection& selection) {
+  if (selection.artifact_id().empty()) {
+    return absl::InvalidArgumentError("selection.artifact_id is required");
+  }
+  if (selection.logical_layout_hash().empty()) {
+    return absl::InvalidArgumentError("selection.logical_layout_hash is required");
+  }
+  if (selection.selection_hash().empty()) {
+    return absl::InvalidArgumentError("selection.selection_hash is required");
+  }
+  return SelectionIdentity{
+      .artifact_id = selection.artifact_id(),
+      .logical_layout_hash = selection.logical_layout_hash(),
+      .selection_hash = selection.selection_hash(),
+  };
 }
 
 } // namespace tensorcast::common

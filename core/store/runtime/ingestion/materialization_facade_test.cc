@@ -1,22 +1,30 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/synchronization/mutex.h"
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmacro-redefined"
 #endif
 #include "catch2/catch_test_macros.hpp"
+#include "core/common/artifact_hash.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/components/worker_identity.h"
+#include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context_events.h"
+#include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/materialization_facade.h"
 #include "core/store/runtime/ingestion/testing/fake_ingestion_pipeline.h"
 #include "core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h"
@@ -43,6 +51,7 @@ using tensorcast::store::runtime::MaterializationHooks;
 using tensorcast::store::runtime::ReplicaRuntime;
 using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::RuntimeContextEvents;
+using tensorcast::store::runtime::ingestion::ArtifactLoweringPlan;
 using tensorcast::store::runtime::ingestion::MaterializationFacade;
 using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
@@ -149,6 +158,15 @@ struct FacadeHarness {
     return harness.options();
   }
 };
+
+std::string sha256_hex(std::string_view payload) {
+  const auto digest = tensorcast::common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  std::string hex =
+      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+  absl::AsciiStrToLower(&hex);
+  return hex;
+}
 
 } // namespace
 
@@ -262,6 +280,166 @@ TEST_CASE("MaterializationFacade registers stored publish contexts on demand", "
   auto status = harness.facade->register_replica_with_global_store(ready_handle.key(), {});
   CHECK(status.ok());
   CHECK(register_calls == 1);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade execute_artifact_lowering_plan returns verified content for replica staging",
+    "[materialization_facade][artifact_lowering]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_artifact_lowering";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  const auto payload = std::make_shared<std::string>("body-bytes-for-verification");
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+  tensorcast::common::SelectionIdentity selection_identity{
+      .artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE",
+      .logical_layout_hash = tensorcast::common::compute_byte_artifact_logical_layout_hash_bytes(),
+      .selection_hash = tensorcast::common::compute_byte_artifact_selection_hash_bytes(),
+  };
+  auto plan_or = lower_to_artifact_plan(
+      tensorcast::store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              tensorcast::store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE",
+                  .physical_artifact_id = "__tc_body__:verified",
+              },
+          .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          .source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+              .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+              .size_bytes = payload->size(),
+          }),
+          .selection_identity = selection_identity,
+          .expected_size_bytes = payload->size(),
+          .generation = 1,
+          .source_kind = loading::MaterializationSource::kLocalReplica,
+          .replica_target = target,
+      });
+  REQUIRE(plan_or.ok());
+  ArtifactLoweringPlan plan = std::move(*plan_or);
+
+  auto result_or = harness.facade->execute_artifact_lowering_plan(std::move(plan));
+  REQUIRE(result_or.ok());
+  REQUIRE(result_or->replica_handle.has_value());
+  REQUIRE(result_or->selection_identity.has_value());
+  REQUIRE(result_or->resolved_source_descriptor.has_value());
+  REQUIRE(result_or->verified_content_descriptor.has_value());
+  REQUIRE(result_or->verification_record.has_value());
+  REQUIRE(result_or->backing_identity.has_value());
+  CHECK(*result_or->selection_identity == selection_identity);
+  CHECK(result_or->resolved_source_descriptor->exact_size_bytes == payload->size());
+  CHECK(result_or->verified_content_descriptor->content_identity.logical_size_bytes == payload->size());
+  CHECK(result_or->verified_content_descriptor->content_identity.digest_alg == "sha256");
+  CHECK(
+      tensorcast::store::runtime::ingestion::content_digest_bytes_to_hex(
+          result_or->verified_content_descriptor->content_identity.digest_bytes) == sha256_hex(*payload));
+  CHECK(result_or->verification_record->verified_at != absl::InfinitePast());
+  CHECK(result_or->backing_identity->physical_artifact_id == "__tc_body__:verified");
+  CHECK(result_or->backing_identity->replica_key.artifact_id == "__tc_body__:verified");
+  CHECK_FALSE(result_or->backing_identity->replica_key.view_id.has_value());
+  CHECK(result_or->backing_identity->replica_key.replica == 0);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "lower_to_artifact_plan enforces exact source size for identity-map staging",
+    "[materialization_facade][artifact_lowering]") {
+  const auto payload = std::make_shared<std::string>("size-check");
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+
+  auto plan_or = lower_to_artifact_plan(
+      tensorcast::store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              tensorcast::store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.c2l6ZQ~layout_v1~b64u.azEy",
+                  .physical_artifact_id = "__tc_body__:size_check",
+              },
+          .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          .source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+              .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+              .size_bytes = payload->size(),
+          }),
+          .expected_size_bytes = payload->size() + 1,
+          .generation = 1,
+          .source_kind = loading::MaterializationSource::kLocalReplica,
+          .replica_target = target,
+      });
+  REQUIRE_FALSE(plan_or.ok());
+  CHECK(absl::IsFailedPrecondition(plan_or.status()));
+}
+
+TEST_CASE("Shared content identity is independent of artifact id", "[materialization_facade][artifact_lowering]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_content_identity";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  const auto payload = std::make_shared<std::string>("same-content-different-artifact-id");
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+
+  const auto execute = [&](std::string_view logical_artifact_id, std::string_view physical_artifact_id) {
+    auto plan_or = lower_to_artifact_plan(
+        tensorcast::store::runtime::ingestion::LowerToArtifactPlanRequest{
+            .identity =
+                tensorcast::store::runtime::ingestion::ArtifactLoweringIdentity{
+                    .logical_artifact_id = std::string(logical_artifact_id),
+                    .physical_artifact_id = std::string(physical_artifact_id),
+                },
+            .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+            .source_loader = std::make_unique<tensorcast::store::InlineBufferLoader>(loading::InlineBufferSource{
+                .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+                .size_bytes = payload->size(),
+            }),
+            .semantic_layout_identity =
+                tensorcast::store::runtime::ingestion::SemanticLayoutIdentity{
+                    .kind = tensorcast::store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId,
+                    .value = "layout_v1",
+                },
+            .expected_size_bytes = payload->size(),
+            .generation = 1,
+            .source_kind = loading::MaterializationSource::kLocalReplica,
+            .replica_target = target,
+        });
+    REQUIRE(plan_or.ok());
+    return harness.facade->execute_artifact_lowering_plan(std::move(*plan_or));
+  };
+
+  auto first_or =
+      execute("cgid:byte_artifact~tenant~engine~b64u.Zmlyc3Q~layout_v1~b64u.azEz", "__tc_body__:content_identity_a");
+  auto second_or =
+      execute("cgid:byte_artifact~tenant~engine~b64u.c2Vjb25k~layout_v1~b64u.azE0", "__tc_body__:content_identity_b");
+  REQUIRE(first_or.ok());
+  REQUIRE(second_or.ok());
+  REQUIRE(first_or->verified_content_descriptor.has_value());
+  REQUIRE(second_or->verified_content_descriptor.has_value());
+
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.semantic_layout_identity ==
+      second_or->verified_content_descriptor->content_identity.semantic_layout_identity);
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.logical_size_bytes ==
+      second_or->verified_content_descriptor->content_identity.logical_size_bytes);
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.digest_alg ==
+      second_or->verified_content_descriptor->content_identity.digest_alg);
+  CHECK(
+      first_or->verified_content_descriptor->content_identity.digest_bytes ==
+      second_or->verified_content_descriptor->content_identity.digest_bytes);
 
   harness.shutdown();
   std::error_code cleanup_ec;
@@ -579,6 +757,93 @@ TEST_CASE("MaterializationFacade AUTO serves view from local canonical replica",
   auto view_or = harness.replica_runtime().registry().find(handle_or->replica_key);
   REQUIRE(view_or.ok());
   CHECK(view_or.value()->get_memory_state(MemoryLocation::GPU) == tensorcast::store::replica::MemoryState::LOADED);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade materialize_into_target prefers local canonical replica", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kCanonicalSize = 16;
+  const std::string artifact_id = "cgid:artifact_local_into_target";
+  constexpr std::string_view kCanonicalIndexJson = R"({"tensor":[0,16,[16],[1],"torch.uint8",0]})";
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_local_into_target";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->allow_replica_transport = true;
+  harness.runtime_context().set_global_store_client_for_testing(gs_client);
+
+  loading::InlineBufferSource source{.data = nullptr, .size_bytes = kCanonicalSize};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = source,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool = harness.runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.runtime_context().async_runtime()},
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .expected_artifact_size = kCanonicalSize,
+  };
+  auto canonical_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(canonical_or.ok());
+  auto canonical_replica = std::shared_ptr<tensorcast::store::replica::Replica>(std::move(canonical_or.value()));
+
+  CHECK_OK(canonical_replica->get_memory_manager().allocate_memory(MemoryLocation::CPU));
+  auto cpu_ptrs = canonical_replica->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    cpu_ptr[i] = i;
+  }
+  CHECK_OK(canonical_replica->mark_loaded(MemoryLocation::CPU));
+  canonical_replica->set_ready_signal(MemoryLocation::CPU, absl::OkStatus());
+
+  loading::ReplicaKey canonical_key{
+      .artifact_id = artifact_id,
+      .view_id = std::nullopt,
+      .device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  CHECK_OK(harness.replica_runtime().registry().emplace(canonical_key, gsl::not_null{canonical_replica}));
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kCanonicalSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kCanonicalSize});
+  target_layout.total_size = kCanonicalSize;
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_into_target(
+      target_device, target_layout, kCanonicalIndexJson, /*generation=*/1, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kLocalReplica);
+  CHECK(gs_client->replica_requests.empty());
+
+  std::array<uint8_t, kCanonicalSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kCanonicalSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    CHECK(host_out[i] == i);
+  }
 
   harness.shutdown();
   std::error_code cleanup_ec;

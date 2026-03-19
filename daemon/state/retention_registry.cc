@@ -8,6 +8,7 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "core/store/device_types.h"
 #include "core/store/store_engine.h"
@@ -45,6 +46,20 @@ store::components::StableDramCachePolicy best_effort_policy() {
   policy.require_remote_stable_for_spill = false;
   policy.retention_ttl = std::nullopt;
   return policy;
+}
+
+std::string retention_capability_id(std::string_view handle_id) {
+  return absl::StrCat("retention:", handle_id);
+}
+
+std::string selection_subject_id(const common::SelectionIdentity& selection_identity) {
+  return absl::StrCat(
+      "selection:",
+      selection_identity.artifact_id,
+      "|",
+      selection_identity.logical_layout_hash,
+      "|",
+      selection_identity.selection_hash);
 }
 
 class StoreEngineRetentionBackend final : public RetentionBackend {
@@ -95,11 +110,13 @@ RetentionRegistry::RetentionRegistry(
     Options opts,
     std::unique_ptr<RetentionBackend> backend,
     SessionLifecycleManager& lifecycle,
+    LifecycleKernel& lifecycle_kernel,
     common::CapabilityTokenManager* capability_tokens,
     std::string daemon_id)
     : opts_(std::move(opts)),
       backend_(std::move(backend)),
       lifecycle_(&lifecycle),
+      lifecycle_kernel_(&lifecycle_kernel),
       capability_tokens_(capability_tokens),
       daemon_id_(std::move(daemon_id)) {}
 
@@ -292,6 +309,10 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
   if (selection.logical_layout_hash().empty() || selection.selection_hash().empty()) {
     return absl::InvalidArgumentError("selection logical_layout_hash and selection_hash are required");
   }
+  auto selection_identity_or = common::build_selection_identity(selection);
+  if (!selection_identity_or.ok()) {
+    return selection_identity_or.status();
+  }
   if (ttl_ms == 0 && opts_.default_ttl <= absl::ZeroDuration()) {
     return absl::InvalidArgumentError("ttl_ms is required");
   }
@@ -346,6 +367,11 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
       ttl,
       std::vector<std::function<absl::Status()>>{
           [this, handle_id]() -> absl::Status { return this->expire_handle_(handle_id); },
+          [this, handle_id]() -> absl::Status {
+            return lifecycle_kernel_ != nullptr
+                ? lifecycle_kernel_->release_capability(retention_capability_id(handle_id))
+                : absl::OkStatus();
+          },
       });
   if (!lease_or.ok()) {
     return absl::Status(
@@ -370,9 +396,47 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
   }
 
   SelectionKey selection_key{
-      .logical_layout_hash = selection.logical_layout_hash(),
-      .selection_hash = selection.selection_hash(),
+      .selection_identity = *selection_identity_or,
   };
+
+  if (lifecycle_kernel_ != nullptr) {
+    LifecycleSubjectRecord subject;
+    subject.subject_id = selection_subject_id(*selection_identity_or);
+    subject.epochs.subject_generation = 1;
+    subject.subject_kind = LifecycleSubjectKind::kSelectionTarget;
+    subject.created_at = absl::Now();
+    subject.last_observed_at = subject.created_at;
+    subject.artifact_id = selection.artifact_id();
+    subject.semantic_ref_id = subject.subject_id;
+    auto capability_or = lifecycle_kernel_->mint_capability(
+        MintCapabilityRequest{
+            .subject = subject,
+            .address =
+                CapabilityBindingAddress{
+                    .route_principal = make_issuer_route_principal(daemon_id_),
+                    .family = LifecycleCapabilityFamily::kRetention,
+                    .binding_space = LifecycleBindingSpace::kRetentionHandle,
+                    .binding_key_kind = BindingKeyKind::kHandleId,
+                    .binding_key = handle_id,
+                    .epochs = subject.epochs,
+                },
+            .front_door_kind = LifecycleFrontDoorKind::kRetentionHandleToken,
+            .capability_id = retention_capability_id(handle_id),
+            .lease_id = *lease_or,
+            .capability_expires_at = expires_at,
+            .carriage_kind = CredentialCarriageKind::kSelfDescribing,
+            .binding_mode = LifecycleBindingMode::kAddressDerived,
+            .constraint_claims =
+                ConstraintClaims{
+                    .artifact_id = selection.artifact_id(),
+                },
+            .workflow_gate = WorkflowGateKind::kNone,
+        });
+    if (!capability_or.ok()) {
+      lifecycle_->release_lease(*lease_or);
+      return capability_or.status();
+    }
+  }
 
   SelectionRecord selection_record;
   std::optional<EffectivePolicy> effective_policy;
@@ -489,6 +553,17 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::renew(
     return token_or.status();
   }
 
+  if (lifecycle_kernel_ != nullptr) {
+    auto capability_or = lifecycle_kernel_->renew_capability(
+        RenewCapabilityRequest{
+            .capability_id = retention_capability_id(handle_id),
+            .capability_expires_at = expires_at,
+        });
+    if (!capability_or.ok()) {
+      return capability_or.status();
+    }
+  }
+
   SelectionRecord updated_selection;
   std::optional<EffectivePolicy> effective_policy;
   absl::Status effective_status = absl::OkStatus();
@@ -581,6 +656,12 @@ absl::StatusOr<bool> RetentionRegistry::release(std::string_view handle_token) {
 
   if (lease_id != 0) {
     lifecycle_->release_lease(lease_id);
+  }
+  if (removed && lifecycle_kernel_ != nullptr) {
+    auto st = lifecycle_kernel_->release_capability(retention_capability_id(handle_id));
+    if (!st.ok()) {
+      return st;
+    }
   }
 
   if (selection_record.has_value()) {

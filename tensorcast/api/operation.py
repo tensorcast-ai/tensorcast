@@ -64,6 +64,18 @@ class OperationStatus:
     error: OperationError | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _OperationRefDescriptor:
+    operation_id: str
+    kind: str | None = None
+    target_artifact_id: str | None = None
+    authority_scope_kind: str | None = None
+    authority_scope_id: str | None = None
+    attachment_kind: str | None = None
+    recovery_class: str | None = None
+    fencing_digest: str | None = None
+
+
 class OperationTimeoutError(ArtifactError):
     def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message, status_code="DEADLINE_EXCEEDED", retryable=retryable)
@@ -165,7 +177,7 @@ def _coerce_grpc_status_code(code: object) -> ArtifactStatusCode:
         "DATA_LOSS",
         "UNAUTHENTICATED",
     }
-    return name if name in allowed else "UNKNOWN"  # type: ignore[return-value]
+    return name if name in allowed else "UNKNOWN"
 
 
 def _retryable_for_grpc(code: object) -> bool:
@@ -253,6 +265,48 @@ def _global_store_status_to_operation_status(
         ),
         error=error,
     )
+
+
+def _operation_ref_descriptor_from_proto(
+    operation_id: str,
+    operation_ref: operation_pb2.OperationRef | None,
+) -> _OperationRefDescriptor:
+    if operation_ref is None:
+        return _OperationRefDescriptor(operation_id=operation_id)
+    ref_operation_id = str(operation_ref.operation_id or "") or operation_id
+    return _OperationRefDescriptor(
+        operation_id=ref_operation_id,
+        kind=str(operation_ref.kind or "") or None,
+        target_artifact_id=str(operation_ref.target_artifact_id or "") or None,
+        authority_scope_kind=str(operation_ref.authority_scope_kind or "") or None,
+        authority_scope_id=str(operation_ref.authority_scope_id or "") or None,
+        attachment_kind=str(operation_ref.attachment_kind or "") or None,
+        recovery_class=str(operation_ref.recovery_class or "") or None,
+        fencing_digest=str(operation_ref.fencing_digest or "") or None,
+    )
+
+
+def _operation_ref_proto_from_descriptor(
+    descriptor: _OperationRefDescriptor,
+) -> operation_pb2.OperationRef:
+    operation_ref = operation_pb2.OperationRef(
+        operation_id=descriptor.operation_id,
+    )
+    if descriptor.kind is not None:
+        operation_ref.kind = descriptor.kind
+    if descriptor.target_artifact_id is not None:
+        operation_ref.target_artifact_id = descriptor.target_artifact_id
+    if descriptor.authority_scope_kind is not None:
+        operation_ref.authority_scope_kind = descriptor.authority_scope_kind
+    if descriptor.authority_scope_id is not None:
+        operation_ref.authority_scope_id = descriptor.authority_scope_id
+    if descriptor.attachment_kind is not None:
+        operation_ref.attachment_kind = descriptor.attachment_kind
+    if descriptor.recovery_class is not None:
+        operation_ref.recovery_class = descriptor.recovery_class
+    if descriptor.fencing_digest is not None:
+        operation_ref.fencing_digest = descriptor.fencing_digest
+    return operation_ref
 
 
 class DaemonReplicaOperation(Operation[T]):
@@ -410,13 +464,18 @@ class DaemonReplicaOperation(Operation[T]):
 
 class _DaemonGlobalStoreClient(Protocol):
     def get_operation(
-        self, operation_id: str, *, timeout_s: float = 10.0
+        self,
+        operation_id: str,
+        *,
+        operation_ref: operation_pb2.OperationRef | None = None,
+        timeout_s: float = 10.0,
     ) -> operation_pb2.GetOperationResponse: ...
 
     def wait_operation(
         self,
         operation_id: str,
         *,
+        operation_ref: operation_pb2.OperationRef | None = None,
         timeout_ms: int,
         timeout_s: float,
     ) -> operation_pb2.GetOperationResponse: ...
@@ -433,12 +492,16 @@ class DaemonGlobalStoreOperation(Operation[T]):
         ctx: CallContext | None,
         context: Mapping[str, str] | None,
         result_factory: Callable[[operation_pb2.GetOperationResponse], T],
+        operation_ref: operation_pb2.OperationRef | None = None,
     ) -> None:
         self.operation_id = str(operation_id)
         self._runtime_ref = runtime_ref
         self._ctx = ctx
         self._created_at = time.monotonic()
-        self._context = context
+        self._context = dict(context or {})
+        self._operation_ref = _operation_ref_descriptor_from_proto(
+            self.operation_id, operation_ref
+        )
         self._result_factory = result_factory
 
     def _runtime(self) -> _Runtime:
@@ -453,6 +516,58 @@ class DaemonGlobalStoreOperation(Operation[T]):
 
     def _client(self) -> _DaemonGlobalStoreClient:
         return cast(_DaemonGlobalStoreClient, self._runtime().ensure_client())
+
+    def _refresh_operation_ref(
+        self, operation_ref: operation_pb2.OperationRef | None
+    ) -> None:
+        descriptor = _operation_ref_descriptor_from_proto(
+            self.operation_id, operation_ref
+        )
+        if descriptor.operation_id != self.operation_id:
+            return
+        current = self._operation_ref
+        self._operation_ref = _OperationRefDescriptor(
+            operation_id=descriptor.operation_id,
+            kind=descriptor.kind or current.kind,
+            target_artifact_id=descriptor.target_artifact_id
+            or current.target_artifact_id,
+            authority_scope_kind=descriptor.authority_scope_kind
+            or current.authority_scope_kind,
+            authority_scope_id=descriptor.authority_scope_id
+            or current.authority_scope_id,
+            attachment_kind=descriptor.attachment_kind or current.attachment_kind,
+            recovery_class=descriptor.recovery_class or current.recovery_class,
+            fencing_digest=descriptor.fencing_digest or current.fencing_digest,
+        )
+
+    def _operation_context(self) -> Mapping[str, str] | None:
+        context = dict(self._context)
+        if self._operation_ref.kind is not None:
+            context.setdefault("operation_kind", self._operation_ref.kind)
+        if self._operation_ref.target_artifact_id is not None:
+            context.setdefault(
+                "target_artifact_id", self._operation_ref.target_artifact_id
+            )
+        if self._operation_ref.authority_scope_kind is not None:
+            context.setdefault(
+                "authority_scope_kind", self._operation_ref.authority_scope_kind
+            )
+        if self._operation_ref.authority_scope_id is not None:
+            context.setdefault(
+                "authority_scope_id", self._operation_ref.authority_scope_id
+            )
+        if self._operation_ref.attachment_kind is not None:
+            context.setdefault("attachment_kind", self._operation_ref.attachment_kind)
+        if self._operation_ref.recovery_class is not None:
+            context.setdefault("recovery_class", self._operation_ref.recovery_class)
+        if self._operation_ref.fencing_digest is not None:
+            context.setdefault("fencing_digest", self._operation_ref.fencing_digest)
+        runtime = self._runtime_ref()
+        if runtime is not None:
+            daemon_endpoint = str(getattr(runtime, "daemon_endpoint", "") or "")
+            if daemon_endpoint:
+                context.setdefault("daemon_endpoint", daemon_endpoint)
+        return context or None
 
     def _ctx_remaining_timeout_s(self) -> float | None:
         if self._ctx is None or self._ctx.deadline_ms is None:
@@ -473,13 +588,14 @@ class DaemonGlobalStoreOperation(Operation[T]):
                     status_code="DEADLINE_EXCEEDED",
                     message="CallContext deadline exceeded",
                     retryable=True,
-                    context=self._context,
+                    context=self._operation_context(),
                 ),
             )
 
         try:
             resp = self._client().get_operation(
                 self.operation_id,
+                operation_ref=_operation_ref_proto_from_descriptor(self._operation_ref),
                 timeout_s=timeout_s if timeout_s is not None else 10.0,
             )
         except grpc.RpcError as exc:
@@ -494,12 +610,14 @@ class DaemonGlobalStoreOperation(Operation[T]):
                     status_code=_coerce_grpc_status_code(code),
                     message=message,
                     retryable=_retryable_for_grpc(code),
-                    context=self._context,
+                    context=self._operation_context(),
                 ),
             )
 
+        if resp.HasField("ref"):
+            self._refresh_operation_ref(resp.ref)
         return _global_store_status_to_operation_status(
-            resp.status, context=self._context
+            resp.status, context=self._operation_context()
         )
 
     def wait(self, *, timeout_s: float | None = None) -> T:
@@ -536,6 +654,9 @@ class DaemonGlobalStoreOperation(Operation[T]):
             try:
                 resp = self._client().wait_operation(
                     self.operation_id,
+                    operation_ref=_operation_ref_proto_from_descriptor(
+                        self._operation_ref
+                    ),
                     timeout_ms=wait_ms,
                     timeout_s=float(wait_chunk_s) + 5.0,
                 )
@@ -553,8 +674,10 @@ class DaemonGlobalStoreOperation(Operation[T]):
                 )
                 _raise_api_error(error, cause=exc)
 
+            if resp.HasField("ref"):
+                self._refresh_operation_ref(resp.ref)
             status = _global_store_status_to_operation_status(
-                resp.status, context=self._context
+                resp.status, context=self._operation_context()
             )
             if status.state == "success":
                 return self._result_factory(resp)
@@ -574,6 +697,16 @@ class DaemonGlobalStoreOperation(Operation[T]):
                 continue
 
     def cancel(self) -> bool:
+        try:
+            resp = self._client().get_operation(
+                self.operation_id,
+                operation_ref=_operation_ref_proto_from_descriptor(self._operation_ref),
+                timeout_s=5.0,
+            )
+        except grpc.RpcError:
+            return False
+        if resp.HasField("ref"):
+            self._refresh_operation_ref(resp.ref)
         return False
 
 

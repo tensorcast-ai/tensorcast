@@ -2,10 +2,12 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_runtime.h"
@@ -34,6 +36,16 @@ class AssemblyOperationService {
 
   explicit AssemblyOperationService(Dep d);
 
+  grpc::Status start_assembly_attempt(
+      RpcContext& rctx,
+      const v2::StartAssemblyAttemptRequest& req,
+      v2::StartAssemblyAttemptResponse& resp);
+
+  grpc::Status seal_assembly_attempt(
+      RpcContext& rctx,
+      const v2::SealAssemblyAttemptRequest& req,
+      v2::SealAssemblyAttemptResponse& resp);
+
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 
   grpc::Status start_seal_assembly(
@@ -54,8 +66,14 @@ class AssemblyOperationService {
     absl::flat_hash_set<std::string> active_operations ABSL_GUARDED_BY(mu);
   };
 
+  struct CoordinatorKeepaliveTracker {
+    absl::Mutex mu;
+    absl::flat_hash_map<std::string, std::shared_ptr<std::atomic<bool>>> stop_flags ABSL_GUARDED_BY(mu);
+  };
+
   Dep d_;
   std::shared_ptr<SealOperationTracker> seal_operation_tracker_;
+  std::shared_ptr<CoordinatorKeepaliveTracker> coordinator_keepalive_tracker_;
 };
 
 } // namespace tensorcast::daemon

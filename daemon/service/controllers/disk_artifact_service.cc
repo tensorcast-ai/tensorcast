@@ -194,6 +194,25 @@ DiskArtifactService::DiskArtifactService(Dep d)
   }
 }
 
+absl::Status DiskArtifactService::ensure_artifact_metadata_registered(
+    const materialization_disk_resolve::ImportArtifactFromPathResult& imported) const {
+  if (d_.global_store_client == nullptr || !d_.global_store_client->is_connected()) {
+    return absl::OkStatus();
+  }
+  if (imported.artifact_id.empty() || imported.index_multihash.empty() || imported.canonical_index_json.empty()) {
+    return absl::FailedPreconditionError("imported artifact metadata is incomplete");
+  }
+
+  tensorcast::common::v1::ArtifactDescriptor descriptor;
+  descriptor.set_artifact_id(imported.artifact_id);
+  descriptor.set_index_multihash(imported.index_multihash);
+  descriptor.set_data_multihash(imported.data_multihash);
+  descriptor.set_schema_version("v3");
+  descriptor.set_encoding("json");
+  descriptor.set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+  return d_.global_store_client->upsert_artifact_metadata(descriptor, imported.canonical_index_json);
+}
+
 absl::Duration DiskArtifactService::import_cache_ttl_from_env() {
   const auto parsed = parse_positive_double_env("TENSORCAST_IMPORT_ARTIFACT_CACHE_TTL_SECONDS");
   return absl::Seconds(parsed.value_or(kDefaultImportCacheTtlSeconds));
@@ -411,6 +430,10 @@ grpc::Status DiskArtifactService::import_artifact_from_path(
   }
 
   const auto& imported = *imported_or;
+  auto metadata_status = ensure_artifact_metadata_registered(imported);
+  if (!metadata_status.ok()) {
+    return to_grpc_status(metadata_status);
+  }
   fill_import_response(imported, resp);
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.disk.path", imported.normalized_path.string());
@@ -423,6 +446,8 @@ grpc::Status DiskArtifactService::import_artifact_from_path(
       ArtifactSourceRegistry::Entry{
           .source_kind = ArtifactSourceRegistry::SourceKind::kLocalImport,
           .canonical_source_path = imported.normalized_path.string(),
+          .canonical_index_json = imported.canonical_index_json,
+          .source_index_json = imported.source_index_json,
           .source_disk_path = imported.normalized_path.string(),
           .descriptor_present = imported.descriptor_present,
           .index_multihash = imported.index_multihash,
@@ -521,6 +546,10 @@ grpc::Status DiskArtifactService::import_artifact_from_path_stream(
   }
 
   const auto& imported = *imported_or;
+  auto metadata_status = ensure_artifact_metadata_registered(imported);
+  if (!metadata_status.ok()) {
+    return send_error_and_return(to_grpc_status(metadata_status));
+  }
   v2::ImportArtifactFromPathResponse final_resp;
   fill_import_response(imported, final_resp);
   if (rctx.allow_high_card_attrs()) {
@@ -534,6 +563,8 @@ grpc::Status DiskArtifactService::import_artifact_from_path_stream(
       ArtifactSourceRegistry::Entry{
           .source_kind = ArtifactSourceRegistry::SourceKind::kLocalImport,
           .canonical_source_path = imported.normalized_path.string(),
+          .canonical_index_json = imported.canonical_index_json,
+          .source_index_json = imported.source_index_json,
           .source_disk_path = imported.normalized_path.string(),
           .descriptor_present = imported.descriptor_present,
           .index_multihash = imported.index_multihash,

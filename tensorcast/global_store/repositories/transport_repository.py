@@ -80,7 +80,7 @@ class TransportRepository(BaseRepository):
 
     def find_by_request_id(self, request_id: str, cursor=None) -> Transport | None:
         """Find a transport by request idempotency key."""
-        normalized = request_id.strip()
+        normalized = self._normalize_request_id(request_id)
         if not normalized:
             return None
         owns_cursor = cursor is None
@@ -118,6 +118,13 @@ class TransportRepository(BaseRepository):
 
     def create_with_cursor(self, transport: Transport, cursor) -> Transport:
         """Create a new transport record using an existing cursor."""
+        normalized_artifact_id = self._normalize_required_text(transport.artifact_id)
+        normalized_source_node_id = self._normalize_required_text(
+            transport.source_node_id
+        )
+        normalized_source_address = self._normalize_required_text(
+            transport.source_address
+        )
         normalized_request_id = self._normalize_request_id(transport.request_id)
         cursor.execute(
             """
@@ -134,11 +141,11 @@ class TransportRepository(BaseRepository):
             [
                 str(transport.transport_id),
                 str(transport.replica_id),
-                transport.artifact_id,
+                normalized_artifact_id,
                 self._normalize_optional_text(transport.requested_view_id),
                 transport.disk_path,
-                transport.source_node_id,
-                transport.source_address,
+                normalized_source_node_id,
+                normalized_source_address,
                 int(transport.source_port),
                 self._normalize_optional_int(transport.replica_memory_size_bytes),
                 normalized_request_id,
@@ -153,6 +160,9 @@ class TransportRepository(BaseRepository):
                 "in_progress",
             ],
         )
+        transport.artifact_id = normalized_artifact_id
+        transport.source_node_id = normalized_source_node_id
+        transport.source_address = normalized_source_address
         transport.request_id = normalized_request_id
         transport.status = "in_progress"
         transport.completion_outcome = TransportCompletionOutcome.UNSPECIFIED
@@ -168,7 +178,17 @@ class TransportRepository(BaseRepository):
         Returns (transport_row, created_now).
         """
         normalized_request_id = self._normalize_request_id(transport.request_id)
+        normalized_artifact_id = self._normalize_required_text(transport.artifact_id)
+        normalized_source_node_id = self._normalize_required_text(
+            transport.source_node_id
+        )
+        normalized_source_address = self._normalize_required_text(
+            transport.source_address
+        )
         if normalized_request_id is None:
+            transport.artifact_id = normalized_artifact_id
+            transport.source_node_id = normalized_source_node_id
+            transport.source_address = normalized_source_address
             created = self.create_with_cursor(transport, cursor)
             return created, True
 
@@ -192,11 +212,11 @@ class TransportRepository(BaseRepository):
                 [
                     str(transport.transport_id),
                     str(transport.replica_id),
-                    transport.artifact_id,
+                    normalized_artifact_id,
                     self._normalize_optional_text(transport.requested_view_id),
                     transport.disk_path,
-                    transport.source_node_id,
-                    transport.source_address,
+                    normalized_source_node_id,
+                    normalized_source_address,
                     int(transport.source_port),
                     self._normalize_optional_int(transport.replica_memory_size_bytes),
                     normalized_request_id,
@@ -220,9 +240,14 @@ class TransportRepository(BaseRepository):
 
         existing = self.find_by_request_id(normalized_request_id, cursor=cursor)
         if existing is None:
-            raise RuntimeError(f"Transport missing after insert request_id={normalized_request_id}")
+            raise RuntimeError(
+                f"Transport missing after insert request_id={normalized_request_id}"
+            )
         created_now = existing.transport_id == transport.transport_id
         if created_now:
+            transport.artifact_id = normalized_artifact_id
+            transport.source_node_id = normalized_source_node_id
+            transport.source_address = normalized_source_address
             transport.request_id = normalized_request_id
             transport.status = "in_progress"
             transport.completion_outcome = TransportCompletionOutcome.UNSPECIFIED
@@ -289,7 +314,7 @@ class TransportRepository(BaseRepository):
         Atomically complete an active transport row.
 
         Accept canonical status ``in_progress`` and malformed variants that still
-        contain ``in_progress`` (for example, ``in_progressin_progress``).
+        contain that token, including accidental exact duplication.
         """
         owns_cursor = cursor is None
         if owns_cursor:
@@ -458,14 +483,21 @@ class TransportRepository(BaseRepository):
                     TransportWindowRow(
                         transport_id=str(row[0] or ""),
                         replica_id=str(row[1] or ""),
-                        artifact_id=str(row[2] or ""),
-                        status=str(row[3] or ""),
+                        artifact_id=self._normalize_optional_text(str(row[2] or ""))
+                        or "",
+                        status=self._normalize_status_text(str(row[3] or "")),
                         completion_outcome=str(row[4] or ""),
-                        request_id=str(row[5] or ""),
-                        requester_worker_id=str(row[6] or ""),
-                        group_id=str(row[7] or ""),
-                        group_kind=str(row[8] or ""),
-                        group_part_id=str(row[9] or ""),
+                        request_id=self._normalize_optional_text(str(row[5] or ""))
+                        or "",
+                        requester_worker_id=self._normalize_optional_text(
+                            str(row[6] or "")
+                        )
+                        or "",
+                        group_id=self._normalize_optional_text(str(row[7] or "")) or "",
+                        group_kind=self._normalize_optional_text(str(row[8] or ""))
+                        or "",
+                        group_part_id=self._normalize_optional_text(str(row[9] or ""))
+                        or "",
                         group_total_parts=int(row[10] or 0),
                         created_at=created_at,
                         completed_at=completed_at,
@@ -475,6 +507,44 @@ class TransportRepository(BaseRepository):
             return result
         finally:
             cursor.close()
+
+    def get_group_source_counts(
+        self,
+        *,
+        group_kind: str,
+        group_id: str,
+        group_epoch: int,
+        cursor=None,
+    ) -> dict[str, int]:
+        """Return replica assignment counts for one scheduling group."""
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            rows = cursor.execute(
+                """
+                SELECT
+                    CAST(replica_id AS VARCHAR) AS replica_id,
+                    COUNT(*) AS assignment_count
+                FROM artifact_transports
+                WHERE group_kind = ?
+                  AND group_id = ?
+                  AND COALESCE(group_epoch, 0) = ?
+                  AND replica_id IS NOT NULL
+                GROUP BY replica_id
+                """,
+                [group_kind, group_id, int(group_epoch)],
+            ).fetchall()
+            counts: dict[str, int] = {}
+            for row in rows:
+                replica_id = str(row[0] or "")
+                if not replica_id:
+                    continue
+                counts[replica_id] = max(0, int(row[1] or 0))
+            return counts
+        finally:
+            if owns_cursor:
+                cursor.close()
 
     def get_group_progress(
         self,
@@ -527,10 +597,14 @@ class TransportRepository(BaseRepository):
 
     @staticmethod
     def _normalize_optional_text(value: str | None) -> str | None:
-        if value is None:
-            return None
-        stripped = value.strip()
-        return stripped if stripped else None
+        return TransportRepository._normalize_text_token(value)
+
+    @staticmethod
+    def _normalize_required_text(value: str | None) -> str:
+        normalized = TransportRepository._normalize_text_token(value)
+        if normalized is None:
+            raise ValueError("required transport field is missing")
+        return normalized
 
     @staticmethod
     def _normalize_optional_int(value: int | None) -> int | None:
@@ -540,10 +614,38 @@ class TransportRepository(BaseRepository):
 
     @staticmethod
     def _normalize_request_id(request_id: str | None) -> str | None:
-        if request_id is None:
+        return TransportRepository._normalize_text_token(request_id)
+
+    @staticmethod
+    def _normalize_text_token(value: str | None) -> str | None:
+        if value is None:
             return None
-        normalized = request_id.strip()
-        return normalized if normalized else None
+        stripped = str(value).strip()
+        if not stripped:
+            return None
+        return TransportRepository._collapse_exact_double(stripped)
+
+    @staticmethod
+    def _collapse_exact_double(value: str) -> str:
+        size = len(value)
+        if size < 8 or (size % 2) != 0:
+            return value
+        half = size // 2
+        if value[:half] != value[half:]:
+            return value
+        return value[:half]
+
+    @staticmethod
+    def _normalize_status_text(status: str) -> str:
+        normalized = TransportRepository._normalize_text_token(status)
+        if normalized is None:
+            return ""
+        lowered = normalized.lower()
+        if lowered == "in_progress":
+            return "in_progress"
+        if lowered == "completed":
+            return "completed"
+        return normalized
 
     @staticmethod
     def _looks_like_unique_violation(exc: Exception) -> bool:
@@ -604,11 +706,14 @@ class TransportRepository(BaseRepository):
         return Transport(
             transport_id=UUID(str(get("transport_id"))),
             replica_id=UUID(str(get("replica_id"))),
-            artifact_id=str(get("artifact_id", "")),
+            artifact_id=self._normalize_optional_text(str(get("artifact_id", "")))
+            or "",
             requested_view_id=self._normalize_optional_text(get("requested_view_id")),
             disk_path=get("disk_path"),
-            source_node_id=str(get("source_node_id", "")),
-            source_address=str(get("source_address", "")),
+            source_node_id=self._normalize_optional_text(str(get("source_node_id", "")))
+            or "",
+            source_address=self._normalize_optional_text(str(get("source_address", "")))
+            or "",
             source_port=int(get("source_port", 0)),
             replica_memory_size_bytes=self._normalize_optional_int(
                 get("replica_memory_size_bytes")

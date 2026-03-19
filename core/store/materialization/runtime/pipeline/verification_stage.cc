@@ -245,6 +245,10 @@ absl::Status handle_canonical_verification(IngestionContext& ctx) {
 }
 
 absl::Status verify_disk(IngestionContext& ctx) {
+  if (should_skip_disk_verification(ctx)) {
+    return absl::OkStatus();
+  }
+
   maybe_compute_view_hash(ctx);
 
   absl::Status status = compute_full_digest_if_needed(ctx);
@@ -312,6 +316,19 @@ FullDigestDecision resolve_full_digest_decision(const IngestionContext& ctx) {
   decision.should_compute =
       decision.forced_by_hint || decision.forced_by_engine_option || decision.forced_by_safetensors;
   return decision;
+}
+
+bool should_skip_disk_verification(const IngestionContext& ctx) {
+  if (ctx.source_type != SourceType::kDisk) {
+    return false;
+  }
+  if (source_mutation_allowed(ctx)) {
+    return false;
+  }
+  if (ctx.hints.export_policy != loading::ExportPolicy::kNever) {
+    return false;
+  }
+  return ctx.hints.verify != loading::MaterializeHints::Verify::FULL_DIGEST;
 }
 
 absl::Status VerificationStage::verify(IngestionContext& ctx) {

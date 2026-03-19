@@ -11,11 +11,13 @@ from typing import cast
 import pytest
 import torch
 
+import tensorcast
+import tensorcast.api.store as store_module
 from tensorcast.api._config import PlanType, RegisterArtifactOptions
 from tensorcast.api.store import Store
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import StoreRuntimeContext
-from tensorcast.api.store.types import ArtifactError
+from tensorcast.api.store.types import ArtifactError, CanonicalIndex, ReplicaInfo
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
@@ -32,12 +34,17 @@ class _DummyExecutor:
 class _RuntimeStub:
     def __init__(self, client) -> None:
         self.client = client
+        self._daemon_endpoint = "daemon-test"
         self.executor = _DummyExecutor()
         self.tracked_futures: list[object] = []
         self.tracked_leases: list[object] = []
 
     def ensure_client(self):
         return self.client
+
+    @property
+    def daemon_endpoint(self) -> str:
+        return self._daemon_endpoint
 
     def track_future(self, future) -> None:  # pragma: no cover - not used
         self.tracked_futures.append(future)
@@ -68,8 +75,13 @@ class _ClientStub:
         )
 
     def query_persistence_status(
-        self, *, task_id: str | None = None, artifact_id: str | None = None
+        self,
+        *,
+        task_id: str | None = None,
+        artifact_id: str | None = None,
+        timeout_s: float | None = None,
     ):
+        del timeout_s
         self.query_calls.append((task_id, artifact_id))
         return self.query_response
 
@@ -89,6 +101,25 @@ def _store_with_client(client: _ClientStub) -> Store:
     store = Store.__new__(Store)
     store._runtime = cast(StoreRuntimeContext, _RuntimeStub(client))
     return store
+
+
+def _registered_artifact(
+    *, task_id: str | None, daemon_endpoint: str | None
+) -> store_module.RegisteredArtifact:
+    return store_module.RegisteredArtifact(
+        artifact_id="artifact-persist",
+        replica=ReplicaInfo(
+            replica_id="replica-persist",
+            replica_type="VRAM_LEASED",
+            device=torch.device("cpu"),
+            plan=PlanType.VRAM_LEASED,
+            size_bytes=0,
+        ),
+        canonical_index=CanonicalIndex(entries=(), total_size_bytes=0, avbs_hash=""),
+        lease=None,
+        persistence_task_id=task_id,
+        _daemon_endpoint=daemon_endpoint,
+    )
 
 
 def test_maybe_start_persistence_skips_when_disabled() -> None:
@@ -194,6 +225,123 @@ def test_query_persistence_status_maps_proto_fields() -> None:
     assert shard.target_nodes == ("node-a", "node-b")
     assert shard.lease_ids == ("lease-1", "")
     assert client.query_calls == [("task-11", None)]
+
+
+def test_persistence_operation_status_carries_operation_context() -> None:
+    resp = store_daemon_pb2.QueryPersistenceStatusResponse(
+        task_id="task-21",
+        artifact_id="artifact-21",
+        plan_id="plan-21",
+        state=store_daemon_pb2.PERSISTENCE_STATE_DEGRADED,
+        progress=0.3,
+        degraded_reason="pending_remote",
+        last_error="copy still running elsewhere",
+    )
+    client = _ClientStub(query_response=resp)
+    store = _store_with_client(client)
+
+    status = store.persistence_operation(task_id="task-21").status()
+
+    assert status.state == "degraded"
+    assert status.error is not None
+    assert status.error.context == {
+        "operation_kind": "persistence_task",
+        "task_id": "task-21",
+        "artifact_id": "artifact-21",
+        "target_artifact_id": "artifact-21",
+    }
+
+
+def test_module_persistence_operation_delegates_to_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _ClientStub(
+        query_response=store_daemon_pb2.QueryPersistenceStatusResponse(
+            task_id="task-31",
+            artifact_id="artifact-31",
+            plan_id="plan-31",
+            state=store_daemon_pb2.PERSISTENCE_STATE_SUCCESS,
+            progress=1.0,
+        )
+    )
+    store = _store_with_client(client)
+    monkeypatch.setattr(store_module, "_coerce_store", lambda: store)
+
+    result = store_module.persistence_operation(task_id="task-31").result()
+
+    assert result.task_id == "task-31"
+    assert result.artifact_id == "artifact-31"
+    assert client.query_calls == [("task-31", None), ("task-31", None)]
+
+
+def test_top_level_persistence_operation_delegates_to_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ClientStub(
+        query_response=store_daemon_pb2.QueryPersistenceStatusResponse(
+            task_id="task-32",
+            artifact_id="artifact-32",
+            plan_id="plan-32",
+            state=store_daemon_pb2.PERSISTENCE_STATE_SUCCESS,
+            progress=1.0,
+        )
+    )
+    store = _store_with_client(client)
+    monkeypatch.setattr(store_module, "_coerce_store", lambda: store)
+
+    result = tensorcast.persistence_operation(task_id="task-32").result()
+
+    assert result.task_id == "task-32"
+    assert result.artifact_id == "artifact-32"
+    assert client.query_calls == [("task-32", None), ("task-32", None)]
+
+
+def test_registered_artifact_persistence_operation_reattaches_via_origin_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ClientStub(
+        query_response=store_daemon_pb2.QueryPersistenceStatusResponse(
+            task_id="task-41",
+            artifact_id="artifact-41",
+            plan_id="plan-41",
+            state=store_daemon_pb2.PERSISTENCE_STATE_SUCCESS,
+            progress=1.0,
+        )
+    )
+    stores: list[Store] = []
+
+    def _store_factory(daemon_endpoint: str) -> Store:
+        store = _store_with_client(client)
+        store._runtime._daemon_endpoint = daemon_endpoint  # type: ignore[attr-defined]
+        stores.append(store)
+        return store
+
+    monkeypatch.setattr(store_module, "Store", _store_factory)
+    artifact = _registered_artifact(task_id="task-41", daemon_endpoint="daemon-origin")
+
+    result = artifact.persistence_operation().result()
+
+    assert result.task_id == "task-41"
+    assert result.artifact_id == "artifact-41"
+    assert len(stores) == 1
+    assert stores[0]._runtime.daemon_endpoint == "daemon-origin"
+    assert client.query_calls == [("task-41", None), ("task-41", None)]
+
+
+def test_registered_artifact_persistence_operation_fails_closed_without_task_id() -> None:
+    artifact = _registered_artifact(task_id=None, daemon_endpoint="daemon-origin")
+
+    with pytest.raises(ArtifactError) as excinfo:
+        artifact.persistence_operation()
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+
+
+def test_registered_artifact_persistence_operation_fails_closed_without_daemon_endpoint() -> None:
+    artifact = _registered_artifact(task_id="task-42", daemon_endpoint=None)
+
+    with pytest.raises(ArtifactError) as excinfo:
+        artifact.persistence_operation()
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
 
 
 def test_attempt_registration_rejects_conflicting_policy_inputs() -> None:

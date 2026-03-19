@@ -3,6 +3,7 @@
 #include "core/store/replica/replica.h"
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -58,6 +59,63 @@ std::optional<uint64_t> compute_total_size_from_index(std::string_view index_jso
   } catch (const std::exception&) {
     return std::nullopt;
   }
+}
+
+StoreEngineOptions::ByteMappingConfig maybe_relax_mmap_strided_thresholds(
+    StoreEngineOptions::ByteMappingConfig config,
+    const loader::SeekableSource& source,
+    common::memory::MemoryLocation source_type,
+    const std::string& artifact_identifier) {
+  if (source_type != common::memory::MemoryLocation::DISK) {
+    return config;
+  }
+  if (source.cpu_base_ptr() == nullptr) {
+    return config;
+  }
+  constexpr uint32_t kMmapStridedMinRanges = 8;
+  constexpr uint64_t kMmapStridedMinRowLenBytes = 512;
+  bool changed = false;
+  if (config.strided_run_min_ranges <= kMmapStridedMinRanges) {
+  } else {
+    config.strided_run_min_ranges = kMmapStridedMinRanges;
+    changed = true;
+  }
+  if (config.strided_min_row_len_bytes > kMmapStridedMinRowLenBytes) {
+    config.strided_min_row_len_bytes = kMmapStridedMinRowLenBytes;
+    changed = true;
+  }
+  if (changed) {
+    VLOG(1) << "Replica(" << artifact_identifier << "): relaxing strided thresholds for mmap-capable disk source"
+            << " min_ranges=" << config.strided_run_min_ranges
+            << " min_row_len_bytes=" << config.strided_min_row_len_bytes;
+  }
+  return config;
+}
+
+loader::ByteRangeMappedSource::Options make_mmap_aware_map_options(
+    std::string path,
+    const loader::SeekableSource& source,
+    common::memory::MemoryLocation source_type,
+    const std::string& artifact_identifier,
+    bool enable_direct_write_at) {
+  loader::ByteRangeMappedSource::Options options{
+      .path = std::move(path),
+      .enable_direct_write_at = enable_direct_write_at,
+  };
+  if (source_type != common::memory::MemoryLocation::DISK || source.cpu_base_ptr() == nullptr) {
+    return options;
+  }
+  constexpr uint64_t kMmapDirectGatherMinRowLenBytes = 512;
+  constexpr size_t kMmapDirectGatherMinTotalBytes = 256ULL * 1024;
+  constexpr uint64_t kMmapDirectGatherMaxRowsTouched = std::numeric_limits<uint64_t>::max() / 2;
+  options.direct_gather_min_row_len_bytes = kMmapDirectGatherMinRowLenBytes;
+  options.direct_gather_min_total_bytes = kMmapDirectGatherMinTotalBytes;
+  options.direct_gather_max_rows_touched = kMmapDirectGatherMaxRowsTouched;
+  VLOG(1) << "Replica(" << artifact_identifier << "): relaxing direct_gather thresholds for mmap-capable disk source"
+          << " min_row_len_bytes=" << options.direct_gather_min_row_len_bytes
+          << " min_total_bytes=" << options.direct_gather_min_total_bytes
+          << " max_rows_touched=" << options.direct_gather_max_rows_touched;
+  return options;
 }
 
 } // namespace
@@ -214,6 +272,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       std::move(view_plan),
       std::move(config.canonical_index_json),
       std::move(config.source_index_json),
+      std::move(config.collective_load_group),
+      std::move(config.variant_identity),
       config.transform_placement,
       config.byte_mapping_config));
   return replica_ptr;
@@ -233,6 +293,8 @@ Replica::Replica(
     std::optional<loader::ViewPlan> view_plan,
     std::optional<std::string> canonical_index_json,
     std::optional<std::string> source_index_json,
+    std::optional<loading::CollectiveLoadGroupHint> collective_load_group,
+    std::optional<loading::VariantIdentity> variant_identity,
     loading::TransformPlacement transform_placement,
     StoreEngineOptions::ByteMappingConfig byte_mapping_config)
     : key_(std::move(key)),
@@ -244,6 +306,8 @@ Replica::Replica(
       view_plan_(std::move(view_plan)),
       canonical_index_json_(std::move(canonical_index_json)),
       source_index_json_(std::move(source_index_json)),
+      collective_load_group_(std::move(collective_load_group)),
+      variant_identity_(std::move(variant_identity)),
       transform_placement_(transform_placement),
       byte_mapping_config_(std::move(byte_mapping_config)) {}
 
@@ -387,71 +451,128 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     const bool source_is_view = source_location == MemoryLocation::REMOTE && source_is_view_;
-    bool composed_view = false;
-    if (!source_is_view && canonical_index_json_.has_value() && source_index_json_.has_value()) {
-      auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
-      if (!canonical_total_size.has_value()) {
-        ready_signal->set_value(absl::FailedPreconditionError("canonical index total_size is unavailable"));
-        return ready_signal->subscribe();
+    std::optional<ReplicaLoadController::CollectiveDiskLoadInput> collective_disk_load;
+    if (collective_load_group_.has_value()) {
+      if (target_location != MemoryLocation::GPU || source_location != MemoryLocation::DISK) {
+        LOG(INFO) << "Replica(" << key_.artifact_id
+                  << "): collective disk load skipped because target/source are not GPU<-DISK"
+                  << " target=" << location_to_string(target_location)
+                  << " source=" << location_to_string(source_location);
+      } else if (
+          !source_index_json_.has_value() || !canonical_index_json_.has_value() || !variant_identity_.has_value()) {
+        LOG(INFO) << "Replica(" << key_.artifact_id << "): collective disk load skipped because metadata is incomplete"
+                  << " source_index=" << source_index_json_.has_value()
+                  << " canonical_index=" << canonical_index_json_.has_value()
+                  << " variant_identity=" << variant_identity_.has_value();
+      } else if (view_plan_.has_value() && view_plan_->transform.requires_materialization) {
+        LOG(INFO) << "Replica(" << key_.artifact_id
+                  << "): collective disk load skipped because view transform requires materialization";
+      } else if (auto* disk_loader = dynamic_cast<const DiskLoader*>(loader_.get().get()); disk_loader != nullptr) {
+        auto shared_or = disk_loader->shared_context();
+        if (shared_or.ok()) {
+          const std::string view_index_json =
+              view_plan_.has_value() ? view_plan_->view_index_json : *canonical_index_json_;
+          if (!view_index_json.empty()) {
+            collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
+                .group = *collective_load_group_,
+                .disk_context = *shared_or,
+                .source_index_json = *source_index_json_,
+                .view_index_json = view_index_json,
+                .variant_identity = variant_identity_,
+            };
+            LOG(INFO) << "Replica(" << key_.artifact_id
+                      << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
+                      << " rank=" << collective_load_group_->rank
+                      << " world_size=" << collective_load_group_->world_size;
+          } else {
+            LOG(INFO) << "Replica(" << key_.artifact_id
+                      << "): collective disk load skipped because view_index_json is empty";
+          }
+        } else {
+          LOG(WARNING) << "Replica(" << key_.artifact_id
+                       << "): collective disk load disabled because shared_context is unavailable: "
+                       << shared_or.status();
+        }
+      } else {
+        LOG(INFO) << "Replica(" << key_.artifact_id
+                  << "): collective disk load skipped because loader is not DiskLoader";
       }
-      auto map_or = loader::build_byte_range_map_from_canonical_and_source_index_json(
-          *canonical_index_json_, *source_index_json_, *canonical_total_size);
-      if (!map_or.ok()) {
-        ready_signal->set_value(map_or.status());
-        return ready_signal->subscribe();
-      }
-      loader::ByteRangeMap effective_map = std::move(*map_or);
-      if (view_plan_.has_value() && !view_plan_->is_identity) {
-        auto composed_or = loader::compose_byte_range_maps(view_plan_->selection.map, effective_map);
-        if (!composed_or.ok()) {
-          ready_signal->set_value(composed_or.status());
+    }
+    const StoreEngineOptions::ByteMappingConfig effective_byte_mapping_config =
+        maybe_relax_mmap_strided_thresholds(byte_mapping_config_, *source_ptr, source_location, key_.artifact_id);
+    if (collective_disk_load.has_value()) {
+      op = memory_manager_->load_async_from_source(
+          std::move(source_ptr), target_location, concurrency, std::nullopt, {}, std::move(collective_disk_load));
+    } else {
+      bool composed_view = false;
+      if (!source_is_view && canonical_index_json_.has_value() && source_index_json_.has_value()) {
+        auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
+        if (!canonical_total_size.has_value()) {
+          ready_signal->set_value(absl::FailedPreconditionError("canonical index total_size is unavailable"));
           return ready_signal->subscribe();
         }
-        effective_map = std::move(*composed_or);
-        composed_view = true;
-      }
-      loader::ByteRangeCompiler compiler(byte_mapping_config_, "replica_disk_canonicalize");
-      auto program_or = compiler.Compile(effective_map);
-      if (!program_or.ok()) {
-        ready_signal->set_value(program_or.status());
-        return ready_signal->subscribe();
-      }
-      std::vector<std::shared_ptr<loader::SeekableSource>> sources;
-      sources.emplace_back(std::move(source_ptr));
-      loader::ByteRangeMappedSource::Options map_opts{
-          .path = "replica_disk_canonicalize",
-          .enable_direct_write_at = byte_mapping_config_.enable_direct_write_at,
-      };
-      auto mapped_or =
-          loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
-      if (!mapped_or.ok()) {
-        ready_signal->set_value(mapped_or.status());
-        return ready_signal->subscribe();
-      }
-      source_ptr = std::move(*mapped_or);
-    }
-    if (!source_is_view && view_plan_.has_value() && !view_plan_->is_identity) {
-      if (!composed_view) {
-        source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, byte_mapping_config_);
-      }
-    }
-    std::function<absl::Status()> post_load_fn;
-    if (!source_is_view && view_plan_.has_value() && !view_plan_->is_identity &&
-        view_plan_->transform.requires_materialization &&
-        transform_placement_ == loading::TransformPlacement::kServer) {
-      loader::TransformPlan transform_plan = view_plan_->transform;
-      auto mm_shared = memory_manager_;
-      post_load_fn = [mm = std::move(mm_shared), transform_plan, target_location]() -> absl::Status {
-        auto ptrs = mm->get_pointer(target_location);
-        if (ptrs.empty() || ptrs[0] == nullptr) {
-          return absl::FailedPreconditionError("View transform requires loaded memory, but no pointer is available");
+        auto map_or = loader::build_byte_range_map_from_canonical_and_source_index_json(
+            *canonical_index_json_, *source_index_json_, *canonical_total_size);
+        if (!map_or.ok()) {
+          ready_signal->set_value(map_or.status());
+          return ready_signal->subscribe();
         }
-        const int dev = (target_location == MemoryLocation::GPU) ? mm->get_local_device_id() : -1;
-        return loader::execute_transform(transform_plan, target_location, ptrs[0], dev);
-      };
+        loader::ByteRangeMap effective_map = std::move(*map_or);
+        if (view_plan_.has_value() && !view_plan_->is_identity) {
+          auto composed_or = loader::compose_byte_range_maps(view_plan_->selection.map, effective_map);
+          if (!composed_or.ok()) {
+            ready_signal->set_value(composed_or.status());
+            return ready_signal->subscribe();
+          }
+          effective_map = std::move(*composed_or);
+          composed_view = true;
+        }
+        loader::ByteRangeCompiler compiler(effective_byte_mapping_config, "replica_disk_canonicalize");
+        auto program_or = compiler.Compile(effective_map);
+        if (!program_or.ok()) {
+          ready_signal->set_value(program_or.status());
+          return ready_signal->subscribe();
+        }
+        loader::ByteRangeMappedSource::Options map_opts = make_mmap_aware_map_options(
+            "replica_disk_canonicalize",
+            *source_ptr,
+            source_location,
+            key_.artifact_id,
+            effective_byte_mapping_config.enable_direct_write_at);
+        std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+        sources.emplace_back(std::move(source_ptr));
+        auto mapped_or =
+            loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
+        if (!mapped_or.ok()) {
+          ready_signal->set_value(mapped_or.status());
+          return ready_signal->subscribe();
+        }
+        source_ptr = std::move(*mapped_or);
+      }
+      if (!source_is_view && view_plan_.has_value() && !view_plan_->is_identity) {
+        if (!composed_view) {
+          source_ptr = loader::make_view_plan_source(
+              std::move(source_ptr), view_plan_->selection, effective_byte_mapping_config);
+        }
+      }
+      std::function<absl::Status()> post_load_fn;
+      if (!source_is_view && view_plan_.has_value() && !view_plan_->is_identity &&
+          view_plan_->transform.requires_materialization &&
+          transform_placement_ == loading::TransformPlacement::kServer) {
+        loader::TransformPlan transform_plan = view_plan_->transform;
+        auto mm_shared = memory_manager_;
+        post_load_fn = [mm = std::move(mm_shared), transform_plan, target_location]() -> absl::Status {
+          auto ptrs = mm->get_pointer(target_location);
+          if (ptrs.empty() || ptrs[0] == nullptr) {
+            return absl::FailedPreconditionError("View transform requires loaded memory, but no pointer is available");
+          }
+          const int dev = (target_location == MemoryLocation::GPU) ? mm->get_local_device_id() : -1;
+          return loader::execute_transform(transform_plan, target_location, ptrs[0], dev);
+        };
+      }
+      op = memory_manager_->load_async_from_source(
+          std::move(source_ptr), target_location, concurrency, std::nullopt, std::move(post_load_fn));
     }
-    op = memory_manager_->load_async_from_source(
-        std::move(source_ptr), target_location, concurrency, std::nullopt, std::move(post_load_fn));
   } else {
     op = folly::makeSemiFuture<absl::Status>(absl::InternalError("Invalid source/target combination."));
   }

@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import uuid
+import weakref
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
 
 from tensorcast.api.context import CallContext
+from tensorcast.api.operation import Operation, OperationStatus, PollingOperation
+from tensorcast.api.store.binding_state import clone_selection
 from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
+from tensorcast.api.store.owned_binding_slot import OwnedBindingSlot
+from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.types import ArtifactError
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import AssemblyAttemptRef, PartialSealResult
 
 if TYPE_CHECKING:
     from tensorcast.api.store.artifact import Artifact
+    from tensorcast.api.store.owned_binding_layout import BindingLayout
     from tensorcast.api.store.runtime import StoreRuntimeContext
     from tensorcast.daemon_ctl import DaemonCtl
     from tensorcast.proto.common.v1 import common_pb2
@@ -28,6 +40,7 @@ _TRANSPORT_GROUP_PART_ID_TAG = "tc.transport.group.part_id"
 _TRANSPORT_GROUP_PRIORITY_TAG = "tc.transport.group.priority"
 _TRANSPORT_GROUP_EPOCH_TAG = "tc.transport.group.epoch"
 _TRANSPORT_REQUEST_ID_TAG = "tc.transport.request_id"
+_CANONICAL_FULL_CONTRIBUTION_VIEW_ID = "__canonical_full__"
 _ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
 )
@@ -64,7 +77,7 @@ def _read_context_tag_int(
     if value is None:
         return default
     try:
-        return int(value)
+        return int(str(value))
     except (TypeError, ValueError):
         return default
 
@@ -111,6 +124,118 @@ def _build_transport_operation_id(
         return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}rid={request_id}"
 
     return base_operation_id
+
+
+def _clone_view_spec(
+    view_spec: common_pb2.ViewSpec | None,
+) -> common_pb2.ViewSpec | None:
+    if view_spec is None or not view_spec.tensors:
+        return None
+    cloned = common_pb2.ViewSpec()
+    cloned.CopyFrom(view_spec)
+    return cloned
+
+
+def _slot_contribution_view_spec(
+    slot: InplaceSlot | OwnedBindingSlot,
+) -> common_pb2.ViewSpec | None:
+    view_spec = getattr(slot, "_view_spec", None)
+    cloned = _clone_view_spec(view_spec)
+    if cloned is not None:
+        return cloned
+    selection = getattr(slot, "contribution_selection", None)
+    if selection is not None and selection.HasField("view_spec"):
+        return _clone_view_spec(selection.view_spec)
+    live_selection = getattr(slot, "selection", None)
+    if live_selection is not None and live_selection.HasField("view_spec"):
+        return _clone_view_spec(live_selection.view_spec)
+    return None
+
+
+def _slot_contribution_selection(
+    slot: InplaceSlot | OwnedBindingSlot,
+) -> common_pb2.ArtifactSelection | None:
+    selection = getattr(slot, "contribution_selection", None)
+    if selection is not None:
+        return clone_selection(selection)
+    live_selection = getattr(slot, "selection", None)
+    if live_selection is not None:
+        return clone_selection(live_selection)
+    return None
+
+
+def _slot_contribution_view_id_hint(
+    slot: InplaceSlot | OwnedBindingSlot,
+) -> str | None:
+    selection = _slot_contribution_selection(slot)
+    if selection is not None and selection.view_id:
+        return str(selection.view_id)
+    slot_view_id = getattr(slot, "_view_id", None)
+    if slot_view_id:
+        return str(slot_view_id)
+    return None
+
+
+def _compute_coverage_plan_hash(
+    *,
+    contribution_kind: str,
+    binding: "Binding",
+    view_id: str | None,
+    selection: common_pb2.ArtifactSelection | None,
+) -> str:
+    payload = {
+        "binding_layout_id": binding.binding_layout_id,
+        "contribution_kind": contribution_kind,
+        "view_id": view_id or "",
+        "source_artifact_id": (
+            str(selection.artifact_id)
+            if selection is not None and selection.artifact_id
+            else ""
+        ),
+        "logical_layout_hash": (
+            selection.logical_layout_hash.hex()
+            if selection is not None and selection.logical_layout_hash
+            else ""
+        ),
+        "selection_hash": (
+            selection.selection_hash.hex()
+            if selection is not None and selection.selection_hash
+            else ""
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"bcp1:{digest}"
+
+
+def _wait_for_events(wait_events: tuple[object, ...] | list[object] | None) -> None:
+    if not wait_events:
+        return
+    for idx, event in enumerate(wait_events):
+        if event is None:
+            raise ArtifactError(
+                f"wait_events[{idx}] must not be None",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        synchronize = getattr(event, "synchronize", None)
+        if not callable(synchronize):
+            raise ArtifactError(
+                f"wait_events[{idx}] must provide synchronize()",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        try:
+            synchronize()
+        except ArtifactError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ArtifactError(
+                f"wait_events[{idx}] synchronize() failed: {exc}",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            ) from exc
 
 
 class _PublishedLeaseKeepalive:
@@ -166,12 +291,174 @@ class _PublishedLeaseKeepalive:
             thread.join(timeout=1.0)
 
 
+@dataclass(frozen=True, slots=True)
+class BindingUpdateEpoch:
+    binding_id: str
+    update_epoch: str
+
+    def __str__(self) -> str:
+        return self.update_epoch
+
+
+@dataclass(frozen=True, slots=True)
+class SealedBindingValue:
+    binding_id: str
+    binding_layout_id: str
+    binding_value_id: str
+    seal_generation: int
+    source_artifact_id: str | None
+    selection: "common_pb2.ArtifactSelection | None"
+    is_artifact_backed: bool
+    _binding_ref: weakref.ReferenceType["Binding"] = field(
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def artifact_id(self) -> str | None:
+        return self.source_artifact_id
+
+    @property
+    def is_current(self) -> bool:
+        binding = self._binding_ref()
+        current_value = None if binding is None else binding.current_value
+        return (
+            current_value is not None
+            and current_value.binding_value_id == self.binding_value_id
+            and current_value.seal_generation == self.seal_generation
+        )
+
+    @property
+    def is_published(self) -> bool:
+        binding = self._binding_ref()
+        current_value = None if binding is None else binding.current_value
+        return (
+            self.is_current
+            and current_value is not None
+            and binding is not None
+            and binding._slot.published_lease_id is not None
+        )
+
+    def publish_replica(self, *, ctx: CallContext | None = None) -> None:
+        binding = self._require_current_binding()
+        binding.publish_replica(ctx=ctx)
+
+    def publish_replica_operation(
+        self, *, ctx: CallContext | None = None
+    ) -> "Operation[SealedBindingValue]":
+        binding = self._require_current_binding()
+        return binding.publish_replica_operation(ctx=ctx)
+
+    def activate_key(
+        self,
+        key: str,
+        *,
+        expected_active_artifact_id: str | None = None,
+        expected_active_generation: int | None = None,
+        ctx: CallContext | None = None,
+    ) -> None:
+        binding = self._require_current_binding()
+        binding._activate_key(
+            key,
+            expected_active_artifact_id=expected_active_artifact_id,
+            expected_active_generation=expected_active_generation,
+            operation_id=_build_transport_operation_id(
+                base_operation_id=uuid.uuid4().hex,
+                ctx=ctx,
+            ),
+            ctx=ctx,
+        )
+
+    def contribute_to_assembly(
+        self,
+        *,
+        attempt: AssemblyAttemptRef,
+        ctx: CallContext | None = None,
+    ) -> PartialSealResult:
+        binding = self._require_current_binding()
+        slot = binding._slot
+        selection = _slot_contribution_selection(slot)
+        view_spec = _slot_contribution_view_spec(slot)
+        view_id_hint = _slot_contribution_view_id_hint(slot)
+        piece_partial = (
+            view_spec is not None
+            or view_id_hint is not None
+            or (selection is not None and bool(selection.tensor_names))
+        )
+        if piece_partial:
+            contribution_kind = "piece_partial"
+            coverage_plan_hash = _compute_coverage_plan_hash(
+                contribution_kind=contribution_kind,
+                binding=binding,
+                view_id=view_id_hint,
+                selection=selection,
+            )
+            submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL
+        else:
+            contribution_kind = "canonical_full"
+            coverage_plan_hash = _compute_coverage_plan_hash(
+                contribution_kind=contribution_kind,
+                binding=binding,
+                view_id=_CANONICAL_FULL_CONTRIBUTION_VIEW_ID,
+                selection=selection,
+            )
+            submit_kind = store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL
+
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = binding._runtime.ensure_client().submit_binding_contribution(
+                attempt_id=attempt.attempt_id,
+                workspace_assembly_id=attempt.workspace_assembly_id,
+                binding_id=self.binding_id,
+                binding_value_id=self.binding_value_id,
+                coverage_plan_hash=coverage_plan_hash,
+                contribution_kind=submit_kind,
+                coordinator_operation_id=attempt.coordinator_operation_id,
+                coordinator_generation=attempt.coordinator_generation,
+                attempt_intent_digest=attempt.attempt_intent_digest,
+                view_id=view_id_hint,
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise_mapped_registration_error(exc)
+        returned_slot_id = str(getattr(response, "slot_id", "") or "") or None
+        returned_view_id = (returned_slot_id if piece_partial else None) or view_id_hint
+        return PartialSealResult(
+            attempt_id=attempt.attempt_id,
+            workspace_assembly_id=attempt.workspace_assembly_id,
+            slot_id=returned_slot_id,
+            binding_id=self.binding_id,
+            binding_value_id=self.binding_value_id,
+            contribution_kind=contribution_kind,
+            view_id=returned_view_id,
+            coverage_plan_hash=coverage_plan_hash,
+            accepted=bool(getattr(response, "accepted", False)),
+            already_exists=bool(getattr(response, "already_exists", False)),
+        )
+
+    def _require_current_binding(self) -> "Binding":
+        binding = self._binding_ref()
+        if binding is None:
+            raise ArtifactError(
+                "Binding is no longer available",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if not self.is_current:
+            raise ArtifactError(
+                "SealedBindingValue is no longer current for this binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return binding
+
+
 class Binding:
     """Stable, client-owned CUDA layout that can be refilled in-place."""
 
     def __init__(
         self,
-        slot: InplaceSlot,
+        slot: InplaceSlot | OwnedBindingSlot,
         *,
         publish: bool = False,
         ctx: CallContext | None = None,
@@ -197,12 +484,46 @@ class Binding:
         return self._slot.tensors
 
     @property
-    def artifact_id(self) -> str:
-        return self._slot.artifact_id
+    def binding_id(self) -> str:
+        return self._slot.binding_id
 
     @property
-    def selection(self) -> "common_pb2.ArtifactSelection":
-        return self._slot.selection
+    def binding_layout_id(self) -> str:
+        return self._slot.binding_layout_id
+
+    @property
+    def layout(self) -> "BindingLayout":
+        return self._slot.layout
+
+    @property
+    def current_value(self) -> SealedBindingValue | None:
+        metadata = self._slot.current_value_metadata
+        if metadata is None:
+            return None
+        return SealedBindingValue(
+            binding_id=metadata.binding_id,
+            binding_layout_id=metadata.binding_layout_id,
+            binding_value_id=metadata.binding_value_id,
+            seal_generation=metadata.seal_generation,
+            source_artifact_id=metadata.source_artifact_id,
+            selection=clone_selection(metadata.selection),
+            is_artifact_backed=metadata.is_artifact_backed,
+            _binding_ref=weakref.ref(self),
+        )
+
+    @property
+    def artifact_id(self) -> str | None:
+        current_value = self.current_value
+        if current_value is None or not current_value.is_artifact_backed:
+            return None
+        return current_value.source_artifact_id
+
+    @property
+    def selection(self) -> "common_pb2.ArtifactSelection | None":
+        current_value = self.current_value
+        if current_value is None or not current_value.is_artifact_backed:
+            return None
+        return current_value.selection
 
     def swap(
         self,
@@ -215,7 +536,7 @@ class Binding:
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
-    ) -> None:
+    ) -> SealedBindingValue:
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
             ctx=ctx,
@@ -245,14 +566,113 @@ class Binding:
                 operation_id=operation_id,
                 ctx=ctx,
             )
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "swap() completed without a current sealed value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return current_value
+
+    def begin_update(
+        self,
+        *,
+        wait_events: tuple[object, ...] | list[object] | None = None,
+        drain_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> BindingUpdateEpoch:
+        _wait_for_events(wait_events)
+        self._stop_keepalive()
+        return self._slot.begin_update(
+            drain_timeout_s=drain_timeout_s,
+            ctx=ctx,
+        )
+
+    def seal_current(
+        self,
+        *,
+        update_epoch: BindingUpdateEpoch | str | int,
+        wait_events: tuple[object, ...] | list[object] | None = None,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue:
+        _wait_for_events(wait_events)
+        self._stop_keepalive()
+        self._slot.seal_current(update_epoch=update_epoch, ctx=ctx)
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "seal_current() completed without a current sealed value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return current_value
 
     def close(self) -> None:
         self._stop_keepalive()
         self._slot.close()
 
-    def publish_replica(self, *, ctx: CallContext | None = None) -> None:
+    def retire(
+        self,
+        *,
+        drain_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> None:
+        self._stop_keepalive()
+        self._slot.retire(
+            wait=True,
+            drain_timeout_s=drain_timeout_s,
+            ctx=ctx,
+        )
+
+    def publish_replica(
+        self,
+        *,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue:
         self._slot.publish_replica(ttl_ms=self._publish_ttl_ms, ctx=ctx)
         self._start_keepalive()
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "publish_replica() requires a current sealed value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return current_value
+
+    def publish_replica_operation(
+        self,
+        *,
+        ctx: CallContext | None = None,
+    ) -> "Operation[SealedBindingValue]":
+        slot_op = self._slot.publish_replica_operation(
+            ttl_ms=self._publish_ttl_ms,
+            ctx=ctx,
+        )
+
+        def _status() -> OperationStatus:
+            return slot_op.status()
+
+        def _result() -> SealedBindingValue:
+            _ = slot_op.wait()
+            self._start_keepalive()
+            current_value = self.current_value
+            if current_value is None:
+                raise ArtifactError(
+                    "publish_replica_operation() requires a current sealed value",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            return current_value
+
+        return PollingOperation(
+            operation_id=slot_op.operation_id,
+            status_fn=_status,
+            result_fn=_result,
+            cancel_fn=slot_op.cancel,
+            ctx=ctx,
+        )
 
     def _start_keepalive(self) -> None:
         lease_id = self._slot.published_lease_id
@@ -278,9 +698,16 @@ class Binding:
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
+        current_artifact_id = self._slot.artifact_id
+        if not current_artifact_id:
+            raise ArtifactError(
+                "activate_key requires an artifact-backed current value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         result = self._runtime.ensure_client().swap_key_mapping(
             key=key,
-            new_artifact_id=self._slot.artifact_id,
+            new_artifact_id=current_artifact_id,
             expected_artifact_id=expected_active_artifact_id,
             expected_generation=expected_active_generation,
             operation_id=operation_id,
@@ -299,4 +726,8 @@ class Binding:
         self._runtime.invalidate_artifact(None, key=key, reason="activate_key")
 
 
-__all__ = ["Binding"]
+__all__ = [
+    "Binding",
+    "BindingUpdateEpoch",
+    "SealedBindingValue",
+]

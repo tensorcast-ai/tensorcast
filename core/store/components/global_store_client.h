@@ -83,9 +83,32 @@ struct WorkerRegistrationInfo {
   uint32_t heartbeat_interval_ms{0};
 };
 
+struct ActiveWorkerInfo {
+  std::string worker_id;
+  std::string node_id;
+  std::string node_address;
+  uint32_t grpc_port{0};
+  uint32_t p2p_port{0};
+  bool accepting_new_requests{false};
+  std::string daemon_id;
+  uint64_t capability_flags{0};
+};
+
+struct ActiveInstanceInfo {
+  std::string instance_id;
+  std::string daemon_id;
+  std::string worker_id;
+  std::string engine;
+  std::string signals_endpoint;
+  std::string execution_endpoint;
+  std::string execution_host_kind;
+  uint64_t capability_flags{0};
+};
+
 // Information about a remote replica replica
 struct RemoteReplicaInfo {
   std::string node_id;
+  std::string endpoint_id;
   std::string node_address;
   uint32_t node_port;
   uint32_t grpc_port{0};
@@ -210,6 +233,42 @@ struct ViewInfo {
   std::vector<CanonicalRange> canonical_ranges;
 };
 
+struct AssemblyAttemptRecordInfo {
+  std::string attempt_id;
+  std::string workspace_assembly_id;
+  std::string layout_id;
+  std::string attempt_intent_digest;
+  std::string coordinator_operation_id;
+  std::string attempt_record_proto;
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+};
+
+struct AssemblyReadinessCutInfo {
+  std::string attempt_id;
+  std::string readiness_cut_proto;
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+};
+
+struct AssemblySlotOccupancyInfo {
+  std::string attempt_id;
+  std::string slot_id;
+  std::optional<std::string> structural_view_id;
+  std::string binding_id;
+  std::string binding_value_id;
+  std::string coverage_plan_hash;
+  std::string contributor_daemon_id;
+  std::string coordinator_operation_id;
+  uint64_t coordinator_generation{0};
+  std::string lease_id;
+  uint64_t lease_generation{0};
+  std::optional<absl::Time> lease_expires_at;
+  std::string state;
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+};
+
 struct ArtifactBinding {
   std::string from_artifact_id;
   std::string to_artifact_id;
@@ -226,6 +285,41 @@ struct ViewMetadata {
   std::string view_spec_json;
   uint64_t view_size_bytes{0};
   std::optional<std::string> view_data_hash;
+};
+
+struct ShardHomeRouteInfo {
+  uint64_t shard_id{0};
+  std::string holder_daemon_id;
+  uint64_t lease_generation{0};
+  absl::Time expires_at{absl::UnixEpoch()};
+};
+
+struct ShardHomeLeaseDescriptor {
+  uint64_t shard_id{0};
+  std::string holder_daemon_id;
+  std::string lease_token;
+  uint64_t lease_generation{0};
+  absl::Time expires_at{absl::UnixEpoch()};
+};
+
+struct AcquireShardHomeLeaseResult {
+  bool acquired{false};
+  ShardHomeLeaseDescriptor lease;
+};
+
+struct ShardHomeLeaseKeepaliveInput {
+  uint64_t shard_id{0};
+  uint64_t lease_generation{0};
+  std::string lease_token;
+};
+
+struct ShardHomeLeaseKeepaliveOutcome {
+  uint64_t shard_id{0};
+  uint64_t lease_generation{0};
+  std::string lease_token;
+  bool ok{false};
+  ShardHomeLeaseDescriptor lease;
+  std::string message;
 };
 
 enum class MemoryTierLeaseKind { kStable, kPreemptible };
@@ -362,6 +456,17 @@ class IGlobalStoreClient {
       uint64_t capability_flags = 0) = 0;
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
+
+  virtual absl::StatusOr<std::vector<ActiveWorkerInfo>> list_active_workers(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+  virtual absl::StatusOr<std::vector<ActiveInstanceInfo>> list_active_instances(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool include_unavailable = true) = 0;
 
   virtual absl::Status unregister_worker_idempotent(
       std::string_view worker_id,
@@ -513,6 +618,34 @@ class IGlobalStoreClient {
       const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
+  virtual absl::StatusOr<AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t shard_id,
+      std::string_view holder_daemon_id,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view lease_token,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<std::vector<ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<ShardHomeLeaseKeepaliveInput>& leases,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<bool> release_shard_home_lease(
+      std::string_view lease_token,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<ShardHomeRouteInfo> get_shard_home_lease(
+      uint64_t shard_id,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<std::vector<ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>& shard_ids,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
   virtual bool is_connected() const = 0;
 
   virtual absl::Status batch_update_chunk_states(
@@ -527,6 +660,15 @@ class IGlobalStoreClient {
       const RpcOptions& rpc_options) {
     (void)rpc_options;
     return resolve_key_mapping(key);
+  }
+
+  virtual absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) = 0;
+
+  virtual absl::StatusOr<common::v1::ArtifactDescriptor> get_artifact_descriptor(std::string_view artifact_id) {
+    (void)artifact_id;
+    return absl::UnimplementedError("GetArtifactDescriptor not available");
   }
 
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
@@ -591,6 +733,87 @@ class IGlobalStoreClient {
   // ========== Layout v2 ==========
   virtual absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
       std::string_view assembly_id) = 0;
+
+  virtual absl::StatusOr<global_store::AssemblyLayoutBinding> update_assembly_layout_binding(
+      std::string_view assembly_id,
+      std::string_view layout_id,
+      uint64_t expected_binding_version) {
+    return absl::UnimplementedError("UpdateAssemblyLayoutBinding not available");
+  }
+
+  virtual absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt(std::string_view attempt_id) {
+    (void)attempt_id;
+    return absl::UnimplementedError("GetAssemblyAttempt not available");
+  }
+
+  virtual absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt_by_workspace(
+      std::string_view workspace_assembly_id) {
+    (void)workspace_assembly_id;
+    return absl::UnimplementedError("GetAssemblyAttemptByWorkspace not available");
+  }
+
+  virtual absl::StatusOr<AssemblyAttemptRecordInfo> upsert_assembly_attempt(const AssemblyAttemptRecordInfo& attempt) {
+    (void)attempt;
+    return absl::UnimplementedError("UpsertAssemblyAttempt not available");
+  }
+
+  virtual absl::StatusOr<AssemblyReadinessCutInfo> get_assembly_readiness_cut(std::string_view attempt_id) {
+    (void)attempt_id;
+    return absl::UnimplementedError("GetAssemblyReadinessCut not available");
+  }
+
+  virtual absl::StatusOr<AssemblyReadinessCutInfo> upsert_assembly_readiness_cut(
+      const AssemblyReadinessCutInfo& readiness_cut) {
+    (void)readiness_cut;
+    return absl::UnimplementedError("UpsertAssemblyReadinessCut not available");
+  }
+
+  virtual absl::StatusOr<AssemblySlotOccupancyInfo> get_assembly_slot_occupancy(
+      std::string_view attempt_id,
+      std::string_view slot_id) {
+    (void)attempt_id;
+    (void)slot_id;
+    return absl::UnimplementedError("GetAssemblySlotOccupancy not available");
+  }
+
+  virtual absl::StatusOr<AssemblySlotOccupancyInfo> upsert_assembly_slot_occupancy(
+      const AssemblySlotOccupancyInfo& occupancy) {
+    (void)occupancy;
+    return absl::UnimplementedError("UpsertAssemblySlotOccupancy not available");
+  }
+
+  virtual absl::StatusOr<std::vector<AssemblySlotOccupancyInfo>> list_assembly_slot_occupancies(
+      std::optional<std::string_view> attempt_id = std::nullopt,
+      std::optional<std::string_view> slot_id = std::nullopt,
+      std::optional<std::string_view> binding_id = std::nullopt,
+      std::optional<std::string_view> binding_value_id = std::nullopt,
+      const std::vector<std::string>& states = {}) {
+    (void)attempt_id;
+    (void)slot_id;
+    (void)binding_id;
+    (void)binding_value_id;
+    (void)states;
+    return absl::UnimplementedError("ListAssemblySlotOccupancies not available");
+  }
+
+  virtual absl::StatusOr<AssemblySlotOccupancyInfo> update_assembly_slot_occupancy_state(
+      std::string_view attempt_id,
+      std::string_view slot_id,
+      std::string_view state,
+      std::optional<std::string_view> expected_lease_id = std::nullopt,
+      std::optional<uint64_t> expected_lease_generation = std::nullopt,
+      std::optional<absl::Time> lease_expires_at = std::nullopt,
+      const std::vector<std::string>& current_states = {}) {
+    (void)attempt_id;
+    (void)slot_id;
+    (void)state;
+    (void)expected_lease_id;
+    (void)expected_lease_generation;
+    (void)lease_expires_at;
+    (void)current_states;
+    return absl::UnimplementedError("UpdateAssemblySlotOccupancyState not available");
+  }
+
   virtual absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) = 0;
   virtual absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) = 0;
   virtual absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) = 0;
@@ -598,9 +821,6 @@ class IGlobalStoreClient {
       const global_store::WriteTensorProofCommitmentsRequest& request) = 0;
   virtual absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
       const global_store::CheckProofCommitmentsMatchRequest& request) = 0;
-
-  virtual absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
-      std::string_view assembly_id) = 0;
 
   // ========== Unified Operations ==========
   virtual absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
@@ -692,6 +912,16 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t capability_flags = 0) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
+
+  absl::StatusOr<std::vector<ActiveWorkerInfo>> list_active_workers(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+  absl::StatusOr<std::vector<ActiveInstanceInfo>> list_active_instances(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool include_unavailable = true) override;
   absl::Status unregister_worker_idempotent(
       std::string_view worker_id,
       bool is_graceful_shutdown = true,
@@ -821,6 +1051,34 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) override;
 
+  absl::StatusOr<AcquireShardHomeLeaseResult> acquire_shard_home_lease(
+      uint64_t shard_id,
+      std::string_view holder_daemon_id,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
+      std::string_view lease_token,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<std::vector<ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<ShardHomeLeaseKeepaliveInput>& leases,
+      uint64_t ttl_ms,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<bool> release_shard_home_lease(
+      std::string_view lease_token,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<ShardHomeRouteInfo> get_shard_home_lease(
+      uint64_t shard_id,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<std::vector<ShardHomeRouteInfo>> batch_get_shard_home_leases(
+      const std::vector<uint64_t>& shard_ids,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
   bool is_connected() const override;
 
   absl::Status batch_update_chunk_states(
@@ -866,6 +1124,11 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::StatusOr<std::vector<MemoryTierLeaseDescriptor>> list_memory_tier_leases(std::string_view node_id) override;
   absl::StatusOr<MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) override;
 
+  absl::Status upsert_artifact_metadata(
+      const common::v1::ArtifactDescriptor& descriptor,
+      std::string_view canonical_index_data) override;
+  absl::StatusOr<common::v1::ArtifactDescriptor> get_artifact_descriptor(std::string_view artifact_id) override;
+
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
   absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) override;
 
@@ -878,6 +1141,36 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
       std::string_view assembly_id) override;
+  absl::StatusOr<global_store::AssemblyLayoutBinding> update_assembly_layout_binding(
+      std::string_view assembly_id,
+      std::string_view layout_id,
+      uint64_t expected_binding_version) override;
+  absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt(std::string_view attempt_id) override;
+  absl::StatusOr<AssemblyAttemptRecordInfo> get_assembly_attempt_by_workspace(
+      std::string_view workspace_assembly_id) override;
+  absl::StatusOr<AssemblyAttemptRecordInfo> upsert_assembly_attempt(const AssemblyAttemptRecordInfo& attempt) override;
+  absl::StatusOr<AssemblyReadinessCutInfo> get_assembly_readiness_cut(std::string_view attempt_id) override;
+  absl::StatusOr<AssemblyReadinessCutInfo> upsert_assembly_readiness_cut(
+      const AssemblyReadinessCutInfo& readiness_cut) override;
+  absl::StatusOr<AssemblySlotOccupancyInfo> get_assembly_slot_occupancy(
+      std::string_view attempt_id,
+      std::string_view slot_id) override;
+  absl::StatusOr<AssemblySlotOccupancyInfo> upsert_assembly_slot_occupancy(
+      const AssemblySlotOccupancyInfo& occupancy) override;
+  absl::StatusOr<std::vector<AssemblySlotOccupancyInfo>> list_assembly_slot_occupancies(
+      std::optional<std::string_view> attempt_id = std::nullopt,
+      std::optional<std::string_view> slot_id = std::nullopt,
+      std::optional<std::string_view> binding_id = std::nullopt,
+      std::optional<std::string_view> binding_value_id = std::nullopt,
+      const std::vector<std::string>& states = {}) override;
+  absl::StatusOr<AssemblySlotOccupancyInfo> update_assembly_slot_occupancy_state(
+      std::string_view attempt_id,
+      std::string_view slot_id,
+      std::string_view state,
+      std::optional<std::string_view> expected_lease_id = std::nullopt,
+      std::optional<uint64_t> expected_lease_generation = std::nullopt,
+      std::optional<absl::Time> lease_expires_at = std::nullopt,
+      const std::vector<std::string>& current_states = {}) override;
   absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) override;
   absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) override;
   absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) override;
@@ -885,8 +1178,6 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const global_store::WriteTensorProofCommitmentsRequest& request) override;
   absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
       const global_store::CheckProofCommitmentsMatchRequest& request) override;
-  absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
-      std::string_view assembly_id) override;
 
   absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
       const operation::AcquireOperationLeaseRequest& request) override;

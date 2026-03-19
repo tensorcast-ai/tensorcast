@@ -15,6 +15,9 @@ Understand how TensorCast works:
 
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
+- **[Binding Unified Model](designs/0084-binding-unified-model-and-contract.md)** - Canonical binding semantics, lifecycle, mapped binding, and publishability
+- **[Assembly Attempt Seal Remediation Handoff Plan](plans/0105-01-assembly-attempt-cut-driven-seal-remediation-handoff.md)** - Ordered execution handoff for finishing cut-driven seal, contract-family enforcement, and validation closure
+- **[Daemon-Served Directory and Target Resolution](designs/0106-daemon-served-directory-and-target-resolution.md)** - Stable worker or instance identity, bounded-staleness directory reads, and NodeAgentDirectory contract
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
 - **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
 - **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics
@@ -24,6 +27,7 @@ Understand how TensorCast works:
 Cross-cutting high-level reasoning for centralized vs decentralized coordination, hot/cold state placement, and workload-driven mode switching:
 
 - **[Distributed Coordination Series](distributed-coordination-series/README.md)** - Index for the full strategy and trade-off document set
+
 
 ## 📘 User Guides
 

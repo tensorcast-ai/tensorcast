@@ -22,6 +22,7 @@
 #include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
@@ -107,6 +108,96 @@ uint64_t compute_bytes_for_chunks(
   }
   return total;
 }
+
+loading::ReplicaHandle build_replica_handle(
+    const std::shared_ptr<replica::Replica>& replica,
+    common::memory::MemoryLocation target_location,
+    loading::MaterializationSource source) {
+  loading::ReplicaHandle handle;
+  handle.replica_key = replica->replica_key();
+  handle.ready_signal = replica->ready_signal_for(target_location);
+  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
+  handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
+  handle.source = source;
+
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
+    handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+    auto ipc_or = replica->get_memory_manager().get_ipc_handle();
+    if (ipc_or.ok()) {
+      handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
+    }
+    return handle;
+  }
+
+  auto uma = replica->get_memory_manager().memory_authority();
+  if (uma != nullptr) {
+    auto region_or = uma->get_cpu_memfd_region(replica->replica_key());
+    if (region_or.ok()) {
+      handle.cpu_memfd_region = loading::CpuMemfdRegion{
+          .fd = region_or->fd,
+          .size_bytes = region_or->size_bytes,
+          .offset_bytes = region_or->offset_bytes,
+      };
+    }
+  }
+  return handle;
+}
+
+class LocalReplicaLoader final : public IArtifactLoader {
+ public:
+  LocalReplicaLoader(
+      std::shared_ptr<replica::Replica> replica,
+      common::memory::MemoryLocation location,
+      std::uint64_t total_size)
+      : replica_(std::move(replica)), location_(location), total_size_(total_size) {}
+
+  absl::Status initialize() override {
+    initialized_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::uint64_t> get_artifact_size() override {
+    if (!initialized_) {
+      return absl::FailedPreconditionError("LocalReplicaLoader not initialized");
+    }
+    return total_size_;
+  }
+
+  absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override {
+    if (!initialized_) {
+      return absl::FailedPreconditionError("LocalReplicaLoader not initialized");
+    }
+    if (!replica_) {
+      return absl::FailedPreconditionError("LocalReplicaLoader requires replica");
+    }
+    if (replica_->get_memory_state(location_) != MemoryState::LOADED) {
+      return absl::FailedPreconditionError("LocalReplicaLoader source location is not loaded");
+    }
+
+    if (location_ == MemoryLocation::GPU) {
+      const auto gpu_ptrs = replica_->get_memory_manager().get_pointer(MemoryLocation::GPU);
+      if (gpu_ptrs.empty() || gpu_ptrs[0] == nullptr) {
+        return absl::FailedPreconditionError("LocalReplicaLoader GPU pointer unavailable");
+      }
+      return std::unique_ptr<loader::SeekableSource>(std::make_unique<loader::GpuMemorySource>(
+          gsl::not_null<void*>{gpu_ptrs[0]}, replica_->replica_key().device.ordinal, total_size_));
+    }
+
+    const auto cpu_ptrs = replica_->get_memory_manager().get_pointer(MemoryLocation::CPU);
+    if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+      return absl::FailedPreconditionError("LocalReplicaLoader CPU pointer unavailable");
+    }
+    return std::unique_ptr<loader::SeekableSource>(
+        std::make_unique<loader::CpuMemorySource>(gsl::not_null<const void*>{cpu_ptrs[0]}, total_size_));
+  }
+
+ private:
+  bool initialized_{false};
+  std::shared_ptr<replica::Replica> replica_;
+  common::memory::MemoryLocation location_{MemoryLocation::CPU};
+  std::uint64_t total_size_{0};
+};
 
 } // namespace
 
@@ -475,11 +566,52 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
     const loading::InlineBufferSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  (void)artifact_identifier;
-  (void)source;
-  (void)target;
-  (void)hints;
-  return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
+  if (artifact_identifier.empty()) {
+    return absl::InvalidArgumentError("artifact_identifier is required");
+  }
+  if (!source.data || source.size_bytes == 0) {
+    return absl::InvalidArgumentError("InlineBufferSource requires non-empty backing data");
+  }
+
+  const auto target_device = target.location.to_device_key();
+  const auto target_location = target.location.type;
+  if (target_location != common::memory::MemoryLocation::CPU &&
+      target_location != common::memory::MemoryLocation::GPU) {
+    return absl::InvalidArgumentError("InlineBufferSource ingestion requires a CPU or GPU target");
+  }
+
+  replica::ReplicaConfig config{
+      .source = source,
+      .artifact_identifier = artifact_identifier,
+      .device_type = target_device.type,
+      .local_device_id = target_device.type == DeviceType::GPU ? target_device.ordinal : -1,
+      .pinned_buffer_pool = runtime_env_->runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{runtime_env_->runtime_context().async_runtime()},
+      .artifact_chunk_bytes = artifact_chunk_bytes_,
+      .expected_artifact_size = source.size_bytes,
+      .byte_mapping_config = options_.byte_mapping,
+      .memory_tier_config = options_.memory_tier_config,
+  };
+  config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
+  config.streaming_buffer_chunks =
+      std::max<size_t>(1, runtime_env_->runtime_context().options().streaming_buffer_chunks);
+  auto replica = replica_runtime_->get_or_create_replica(artifact_identifier, std::move(config));
+  if (replica == nullptr) {
+    return absl::InternalError("failed to create inline-buffer replica");
+  }
+
+  std::optional<int> device_id;
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    device_id = target_device.ordinal;
+  }
+  const int concurrency =
+      hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency) : std::max(1, num_thread_);
+  auto load_status = std::move(replica->ensure_loaded_async(target_location, concurrency, device_id)).get();
+  if (!load_status.ok()) {
+    return load_status;
+  }
+  return build_replica_handle(replica, target_location, loading::MaterializationSource::kLocalReplica);
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +669,54 @@ absl::StatusOr<uint64_t> StoreEngine::get_replica_gpu_ptr(const ReplicaKey& key)
 
 absl::StatusOr<uint64_t> StoreEngine::get_replica_size(const ReplicaKey& key) {
   return replica_runtime_->get_replica_size(key);
+}
+
+absl::StatusOr<StoreEngine::ReplicaBackingObservation> StoreEngine::inspect_replica_backing(
+    const loading::ReplicaKey& key) const {
+  auto replica_or = replica_runtime_->registry().find(key);
+  if (!replica_or.ok()) {
+    return replica_or.status();
+  }
+  auto size_or = replica_runtime_->get_replica_size(key);
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+
+  ReplicaBackingObservation observation;
+  observation.key = key;
+  observation.size_bytes = *size_or;
+  observation.memory_location =
+      key.device.type == DeviceType::GPU ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
+
+  const auto& replica = *replica_or;
+  if (observation.memory_location == common::memory::MemoryLocation::GPU) {
+    observation.cuda_ipc_available = replica->get_memory_manager().get_ipc_handle().ok();
+  } else {
+    auto uma = replica->get_memory_manager().memory_authority();
+    if (uma != nullptr) {
+      observation.cpu_memfd_available = uma->get_cpu_memfd_region(replica->replica_key()).ok();
+    }
+  }
+
+  const auto transport_state = replica_runtime_->get_transport_state(key);
+  observation.remote_export_state = transport_state.export_state;
+  observation.remote_export_generation = transport_state.export_generation;
+  observation.remote_access_enabled = !transport_state.remote_memory_keys.empty();
+  return observation;
+}
+
+absl::StatusOr<std::unique_ptr<IArtifactLoader>> StoreEngine::open_local_replica_loader(
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation location) const {
+  auto replica_or = replica_runtime_->registry().find(key);
+  if (!replica_or.ok()) {
+    return replica_or.status();
+  }
+  auto size_or = replica_runtime_->get_replica_size(key);
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+  return std::unique_ptr<IArtifactLoader>(std::make_unique<LocalReplicaLoader>(*replica_or, location, *size_or));
 }
 
 void StoreEngine::set_replica_publish_state(const ReplicaKey& key, ReplicaPublishState state) {
@@ -630,6 +810,22 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_ma
       target_device, target_layout, mapping, canonical_index_json, generation, hints);
 }
 
+absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_loader_into_target(
+    const DeviceKey& target_device,
+    const loading::IntoTargetLayout& target_layout,
+    std::unique_ptr<IArtifactLoader> loader,
+    const loader::ByteRangeMap& mapping,
+    const loading::MaterializeHints& hints,
+    loading::MaterializationSource source_kind) {
+  return ingestion_runtime_->materialize_mapped_loader_into_target(
+      target_device, target_layout, std::move(loader), mapping, hints, source_kind);
+}
+
+absl::StatusOr<runtime::ingestion::ArtifactLoweringResult> StoreEngine::execute_artifact_lowering_plan(
+    runtime::ingestion::ArtifactLoweringPlan plan) {
+  return ingestion_runtime_->execute_artifact_lowering_plan(std::move(plan));
+}
+
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_view_from_assembly(
     std::string_view assembly_id,
     std::string_view target_artifact_id,
@@ -648,6 +844,14 @@ absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly(
     runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb,
     const std::vector<std::string>* allowed_view_ids) {
   return ingestion_runtime_->seal_assembly(assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
+}
+
+absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly_from_cut(
+    std::string_view assembly_id,
+    const SealAssemblyCutInput& cut_input,
+    bool publish_canonical,
+    runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb) {
+  return ingestion_runtime_->seal_assembly_from_cut(assembly_id, cut_input, publish_canonical, std::move(progress_cb));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

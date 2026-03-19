@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
 #define COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
@@ -26,6 +26,7 @@ class PartitionTensor {
   void add_dev_list(const std::vector<net_dev_t>& devs);
 
   void register_mr(const NetDev* dev);
+  void set_registered_mr(const net_dev_t& dev, struct ibv_mr* mr, bool owns_mr, uint64_t regmr_cost = 0);
   void set_read_ready();
   void set_read_unready();
   void wait_read_ready();
@@ -63,6 +64,14 @@ class PartitionTensor {
 
   [[nodiscard]] bool direct_rdma_enabled() const {
     return direct_rdma_enabled_.load(std::memory_order_relaxed);
+  }
+
+  void set_direct_rdma_required(bool value) {
+    direct_rdma_required_.store(value, std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] bool direct_rdma_required() const {
+    return direct_rdma_required_.load(std::memory_order_relaxed);
   }
 
   [[nodiscard]] bool has_registered_mr() const {
@@ -108,12 +117,14 @@ class PartitionTensor {
   absl::flat_hash_map<std::string, std::shared_ptr<std::atomic_bool>> registered_;
   std::atomic_bool ready_;
   absl::flat_hash_map<std::string, struct ibv_mr*> mrs_;
+  absl::flat_hash_map<std::string, bool> owns_mr_;
   std::vector<net_dev_t> devs_;
   absl::flat_hash_map<std::string, uint64_t> regmr_costs_;
   int mem_type_;
   bool needs_staging_ = false; // Whether GPU->CPU staging is needed for TCP transport
   int device_id_ = -1; // GPU device ID (-1 for CPU)
   std::atomic_bool direct_rdma_enabled_{false};
+  std::atomic_bool direct_rdma_required_{false};
 };
 
 typedef std::shared_ptr<PartitionTensor> tensor_t;

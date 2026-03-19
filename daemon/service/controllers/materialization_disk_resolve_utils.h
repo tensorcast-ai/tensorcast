@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -64,6 +65,7 @@ struct ImportArtifactFromPathResult {
   std::filesystem::path normalized_path;
   std::string artifact_id;
   std::string canonical_index_json;
+  std::optional<std::string> source_index_json;
   std::string index_multihash;
   std::string data_multihash;
   std::uint64_t generation{0};

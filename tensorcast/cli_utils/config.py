@@ -3,7 +3,7 @@
 """Shared configuration helpers for CLI/SDK orchestration.
 
 - Discover default daemon / Global Store config paths
-- Build embedded daemon / Global Store configs for local launches
+- Build embedded Global Store configs for local launches
 - Allocate deterministic ports for daemon/Global Store
 - Manage the implicit cluster token persisted under the host-scoped runtime root
 """
@@ -35,7 +35,6 @@ from tensorcast.cli_utils.paths import (
 )
 from tensorcast.cli_utils.process import file_lock
 from tensorcast.proto.config.v1 import common_pb2 as common_pb
-from tensorcast.proto.config.v1 import daemon_config_pb2 as cfg_pb
 from tensorcast.proto.config.v1 import global_store_config_pb2 as gsc_pb
 
 _CLUSTER_TOKEN_FILENAME = "cluster_token"
@@ -163,79 +162,6 @@ def discover_daemon_config() -> Path | None:
     return None
 
 
-def build_embedded_daemon_config(
-    session: DaemonSession, *, restrict_to_localhost: bool = False
-) -> cfg_pb.DaemonConfig:
-    """Create an embedded daemon config anchored to a session directory."""
-
-    storage_dir = session.root / "data"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-
-    cfg = cfg_pb.DaemonConfig()
-    listen_host = (
-        "127.0.0.1"
-        if restrict_to_localhost
-        else (cfg.server.listen.host or "127.0.0.1")
-    )
-    cfg.server.listen.host = listen_host
-    cfg.server.listen.port = 0
-    cfg.server.storage_path = str(storage_dir)
-    cfg.server.num_threads = max(4, min(8, os.cpu_count() or 4))
-    cfg.server.p2p_listen.host = listen_host
-    cfg.server.p2p_listen.port = 0
-
-    cfg.engine.artifact_chunk_bytes = 256 * 1024 * 1024
-    cfg.engine.streaming_buffer_chunks = 16
-    cfg.engine.byte_mapping.enable_strided_execution = True
-    cfg.engine.byte_mapping.enable_direct_write_at = True
-    cfg.engine.byte_mapping.program_cache_entries = 256
-    cfg.engine.byte_mapping.strided_run_min_ranges = 128
-    cfg.engine.byte_mapping.strided_min_row_len_bytes = 4096
-    cfg.engine.byte_mapping.strided_max_amplification = 8
-    cfg.engine.byte_mapping.strided_block_target_bytes = 16 * 1024 * 1024
-    cfg.engine.byte_mapping.strided_block_max_bytes = 64 * 1024 * 1024
-    cfg.engine.byte_mapping.disk_source_ordered_read = True
-    cfg.engine.byte_mapping.disk_source_merge_max_gap_bytes = 256 * 1024
-    cfg.engine.byte_mapping.disk_source_merge_max_amplification = 4
-    cfg.engine.byte_mapping.disk_source_prefetch_depth = 2
-
-    cfg.pinned_memory.allocation_timeout.FromSeconds(30)
-    cfg.pinned_memory.classes.add(
-        name="engine",
-        slice_bytes=256 * 1024 * 1024,
-        pool_bytes=1 * 1024 * 1024 * 1024,
-        rdma_preregister=False,
-    )
-    cfg.pinned_memory.classes.add(
-        name="comm_gpu",
-        slice_bytes=16 * 1024 * 1024,
-        pool_bytes=512 * 1024 * 1024,
-        rdma_preregister=False,
-    )
-    cfg.pinned_memory.classes.add(
-        name="comm_cpu",
-        slice_bytes=4 * 1024 * 1024,
-        pool_bytes=128 * 1024 * 1024,
-        rdma_preregister=False,
-    )
-
-    cfg.lifecycle.gpu_memory_limit_fraction = 0.75
-    cfg.lifecycle.enable_periodic_eviction = False
-    cfg.lifecycle.eviction_loop_interval.FromSeconds(1)
-    cfg.lifecycle.proc_check_interval.FromSeconds(5)
-    cfg.lifecycle.sessions_sweep_interval.FromSeconds(10)
-    cfg.lifecycle.locks_sweep_interval.FromSeconds(10)
-    cfg.lifecycle.verification_sweep_interval.FromMilliseconds(500)
-    cfg.lifecycle.sessions_ttl.FromSeconds(60)
-    cfg.lifecycle.locks_ttl.FromSeconds(120)
-
-    cfg.high_availability.enabled = False
-    cfg.communicator.enable_rdma = False
-    cfg.observability.logging.level = common_pb.Observability.LogLevel.LOG_LEVEL_INFO
-    cfg.meta.description = "embedded-daemon-config"
-    return cfg
-
-
 def materialize_daemon_config(
     session: DaemonSession,
     config_path: Path | None,
@@ -304,6 +230,17 @@ def load_or_create_cluster_token(existing: str | None = None) -> str:
         return token
 
 
+def write_cluster_token(token: str | None = None) -> str:
+    """Overwrite the implicit cluster token and return the persisted value."""
+
+    path = _cluster_token_path()
+    resolved = token or secrets.token_hex(16)
+    payload = {"token": resolved, "hmac": _token_hmac(resolved)}
+    with file_lock(runtime_lock_path()):
+        write_text_atomic(path, json.dumps(payload, sort_keys=True), mode=0o600)
+    return resolved
+
+
 def build_embedded_global_store_config(
     session: GlobalSession | None = None,
     *,
@@ -339,13 +276,13 @@ def dump_global_store_config(cfg: gsc_pb.GlobalStoreConfig, path: Path) -> Path:
 
 
 __all__ = [
-    "build_embedded_daemon_config",
     "build_embedded_global_store_config",
     "choose_daemon_ports",
     "discover_daemon_config",
     "discover_global_store_config",
     "dump_global_store_config",
     "load_or_create_cluster_token",
+    "write_cluster_token",
     "materialize_daemon_config",
     "select_free_port",
 ]

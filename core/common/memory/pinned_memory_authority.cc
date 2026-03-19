@@ -4,11 +4,14 @@
 
 #include <algorithm>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "folly/executors/CPUThreadPoolExecutor.h"
+#include "folly/futures/Future.h"
 
 namespace tensorcast::common::memory {
 
@@ -44,6 +47,17 @@ absl::Status validate_class_config(const PinnedMemoryAuthority::ClassConfig& cls
             static_cast<unsigned long long>(cls.slice_bytes)));
   }
   return absl::OkStatus();
+}
+
+size_t startup_parallelism(size_t task_count) {
+  const size_t hw = static_cast<size_t>(std::thread::hardware_concurrency());
+  if (task_count == 0) {
+    return 1;
+  }
+  if (hw == 0) {
+    return task_count;
+  }
+  return std::max<size_t>(1, std::min(task_count, hw));
 }
 
 } // namespace
@@ -86,15 +100,99 @@ absl::Status PinnedMemoryAuthority::validate_and_build_pools() {
   // Phase 1 fixed-allocation: total pinned reservation is derived from class pools.
   cfg_.total_bytes = sum_pool_bytes;
 
-  for (const auto& cls : classes_) {
-    PinnedBufferPool::Options pool_opts;
-    pool_opts.name = cls.name;
-    pool_opts.numa_node = cls.numa_node;
-    pool_opts.prefault = cls.numa_prefault;
-    pools_.push_back(
-        std::make_shared<PinnedBufferPool>(static_cast<size_t>(cls.pool_bytes), cls.slice_bytes, std::move(pool_opts)));
+  pools_.resize(classes_.size());
+  if (classes_.size() == 1) {
+    const auto& cls = classes_.front();
+    PinnedBufferPool::Options options;
+    options.name = std::string(cls.name);
+    options.numa_node = cls.numa_node;
+    options.prefault = cls.numa_prefault;
+    options.register_on_create = !cfg_.defer_host_registration;
+    pools_.front() = std::make_shared<PinnedBufferPool>(static_cast<size_t>(cls.pool_bytes), cls.slice_bytes, options);
+    return absl::OkStatus();
   }
 
+  folly::CPUThreadPoolExecutor executor(startup_parallelism(classes_.size()));
+  auto keep_alive = folly::getKeepAliveToken(executor);
+  std::vector<folly::SemiFuture<absl::StatusOr<std::shared_ptr<PinnedBufferPool>>>> tasks;
+  tasks.reserve(classes_.size());
+  const bool register_on_create = !cfg_.defer_host_registration;
+  for (const auto& cls : classes_) {
+    tasks.push_back(
+        folly::via(keep_alive.copy(), [cls, register_on_create]() -> absl::StatusOr<std::shared_ptr<PinnedBufferPool>> {
+          try {
+            PinnedBufferPool::Options options{
+                .name = std::string(cls.name),
+                .register_on_create = register_on_create,
+            };
+            return std::make_shared<PinnedBufferPool>(static_cast<size_t>(cls.pool_bytes), cls.slice_bytes, options);
+          } catch (const std::exception& ex) {
+            return absl::InternalError(
+                absl::StrCat("PinnedBufferPool construction threw for class ", cls.name, ": ", ex.what()));
+          }
+        }));
+  }
+
+  auto results = folly::collectAll(std::move(tasks)).get();
+  for (size_t idx = 0; idx < results.size(); ++idx) {
+    const auto& result = results[idx];
+    if (!result.hasValue()) {
+      return absl::InternalError(
+          absl::StrCat("PinnedBufferPool construction future failed for class ", classes_[idx].name));
+    }
+    auto pool_or = result.value();
+    if (!pool_or.ok()) {
+      return pool_or.status();
+    }
+    pools_[idx] = std::move(*pool_or);
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status PinnedMemoryAuthority::register_all_pools() {
+  if (pools_.empty()) {
+    return absl::OkStatus();
+  }
+  if (pools_.size() == 1) {
+    return pools_.front()->register_host_memory();
+  }
+
+  folly::CPUThreadPoolExecutor executor(startup_parallelism(pools_.size()));
+  auto keep_alive = folly::getKeepAliveToken(executor);
+  std::vector<folly::SemiFuture<absl::Status>> tasks;
+  tasks.reserve(pools_.size());
+  for (size_t idx = 0; idx < pools_.size(); ++idx) {
+    auto pool = pools_[idx];
+    const std::string class_name = classes_[idx].name;
+    tasks.push_back(folly::via(keep_alive.copy(), [pool = std::move(pool), class_name]() -> absl::Status {
+      try {
+        auto status = pool->register_host_memory();
+        if (!status.ok()) {
+          return absl::Status(
+              status.code(),
+              absl::StrCat("host registration failed for pinned pool ", class_name, ": ", status.message()));
+        }
+        return absl::OkStatus();
+      } catch (const std::exception& ex) {
+        return absl::InternalError(
+            absl::StrCat("PinnedBufferPool host registration threw for class ", class_name, ": ", ex.what()));
+      }
+    }));
+  }
+
+  auto results = folly::collectAll(std::move(tasks)).get();
+  for (size_t idx = 0; idx < results.size(); ++idx) {
+    const auto& result = results[idx];
+    if (!result.hasValue()) {
+      return absl::InternalError(
+          absl::StrCat("PinnedBufferPool host registration future failed for class ", classes_[idx].name));
+    }
+    const absl::Status status = result.value();
+    if (!status.ok()) {
+      return status;
+    }
+  }
   return absl::OkStatus();
 }
 

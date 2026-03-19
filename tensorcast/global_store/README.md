@@ -191,6 +191,9 @@ Engine instances (user processes) register with the Global Store and send period
 
 Instances are keyed by a stable `instance_id` and associated with a `daemon_id` (and
 optionally a `worker_id`) to bridge engine processes with the node’s store daemon.
+Routable execution hosts publish explicit `execution_endpoint` and
+`execution_host_kind` facts; `signals_endpoint` remains observability-only and
+is no longer the execution-routing field.
 
 ### Capability Directory (Discovery)
 
@@ -202,6 +205,10 @@ The worker/instance registries also act as a low-frequency **capability director
   changes. Omitting the field leaves the stored flags untouched; sending an explicit `0` clears capabilities.
 - `ListActiveWorkers` / `ListActiveInstances` accept `required_capability_flags` for server-side filtering; responses
   always include the active `capability_flags`.
+- `ListActiveInstances` also returns explicit execution routing facts
+  (`execution_endpoint`, `execution_host_kind`) so daemon-side directory readers
+  can map `instance_id -> execution endpoint` without overloading
+  `signals_endpoint`.
 - Clients should cache directory results with bounded staleness; this is **advisory discovery**, not a hot path.
 
 **Metrics:** `tc_capability_directory_entries{scope="worker|instance", capability="..."}` tracks active capability
@@ -347,8 +354,10 @@ The canonical schema lives in `/schema.sql`. Key tables:
 | `leaves` | Merkle leaf digests for integrity verification | Cold |
 | `layout_specs` | Immutable, content-addressed layout declarations (v2) | Cold |
 | `assembly_layout_bindings` | Versioned `assembly_id → layout_id` pointer (v2) | Warm |
+| `assembly_attempts` | Immutable per-attempt truth keyed by `attempt_id` | Warm |
+| `assembly_readiness_cuts` | Durable readiness evidence captured before seal | Warm |
+| `assembly_slot_occupancies` | Durable `(attempt_id, slot_id)` occupancy state | Warm |
 | `artifact_layout_attachments` | Immutable `mi2_id → layout_id` attachments (v2) | Cold |
-| `assembly_runtime_policies` | Mutable per-assembly operational knobs (v2) | Warm |
 | `operations` | Unified operation status + coordinator leases (v2) | Warm |
 | `assembly_proof_commitments` | Assembly-scoped proof commitments (v2) | Warm |
 | `tensor_proof_commitments` | MI2-scoped proof commitments (v2) | Cold |

@@ -5,6 +5,13 @@ actions. Plans are serialized as a versioned IR (`PlanSpec`) and executed
 against worker identities (`daemon_id`) with bounded concurrency and
 best-effort cancellation.
 
+Repository rule:
+
+- `PlanSpec` is the canonical orchestration IR,
+- `tensorcast.plan(...)`, future runtime front doors, and daemon ingress should all lower to that same IR,
+- and NodeAgent or the in-process Instance Agent boundary is the unique
+  instance-scoped execution host in the current phase.
+
 ## Key Concepts
 
 - **Plan**: A collection of steps targeting workers and instances.
@@ -16,16 +23,37 @@ best-effort cancellation.
   `(artifact_id, logical_layout_hash, selection_hash)` so retries join the same operation.
   Hashes are computed via `tensorcast.common.selection_identity` from canonical
   index bytes or view index bytes plus view/subset inputs.
+- **Execution spine**: `PlanSpec` lowers worker steps to Store Daemons and
+  instance steps to NodeAgent or the in-process Instance Agent boundary, rather
+  than creating a second execution model per entrypoint.
 - **TargetSpec**: Capability-based reference to engine-owned buffers.
 - **TransformSpec**: Named transform invocation with structured arguments.
+- **Artifact actions**: Canonical instance actions for artifact lifecycle orchestration:
+  `manifest`, `publish`, `hydrate`, `evict_local`.
 
-## Current surface (Phase-4)
+## Current surface
 
 - `tensorcast.plan(ctx)` builds a plan with a single `CallContext`.
+- `CallContext.governance` carries typed plan governance transport (`lane`,
+  `policy_version`, `staleness_budget_ms`) directly in `PlanSpec`.
+- `PlanSpec` now also reserves a cluster-scoped transport slot in the IR
+  (`TARGET_TYPE_CLUSTER` plus opaque `cluster_action`) without defining any
+  workflow semantics in the framework layer.
 - Worker steps: `prefetch`, `pin_device_residency`, `unpin_device_residency`.
 - Instance steps: `transform_into`, `transform_register` (executed via Node Agent).
-- `Plan.run()` executes worker steps locally; instance steps require submitting
-  the `PlanSpec` to a node agent with an engine adapter.
+- Instance artifact steps: `manifest`, `publish`, `hydrate`, `evict_local`.
+- `tensorcast.connect(daemon_address=...)` installs a runtime front door bound
+  to one daemon endpoint; with an active runtime, `Plan.run()` submits the same
+  `PlanSpec` through daemon ingress in `terminal_only` mode.
+- Without an active runtime, `Plan.run()` keeps the existing local worker-step
+  execution path; instance steps still require submitting the same `PlanSpec`
+  to NodeAgent or an equivalent in-process Instance Agent boundary with an
+  engine adapter.
+- Node Agent executes artifact instance actions through the engine adapter
+  hooks (`register_artifact_fns(...)`).
+- Any future runtime or gateway ingress should remain a front-door adapter over
+  the same `PlanSpec -> NodeAgent / Instance Agent` execution spine rather than
+  introducing a second instance-hosting contract.
 - Instance targets must be expressed as `TargetSpec` capabilities minted by the
   engine adapter on the target process.
 - Worker prefetch supports both GPU and daemon-owned CPU/DRAM warm replicas:
@@ -36,6 +64,9 @@ best-effort cancellation.
 ## Execution semantics
 
 - `Plan.run()` executes with bounded concurrency and returns a `PlanResult`.
+- The current local runner is not yet a complete second implementation of
+  instance execution; instance-scoped execution converges through NodeAgent or
+  the in-process Instance Agent boundary.
 - Any failure marks the overall plan as failed (`PlanResult.ok = False`).
 - No rollback is attempted; completed steps may have persistent side effects.
 - In-flight operations receive best-effort cancellation after the first failure.

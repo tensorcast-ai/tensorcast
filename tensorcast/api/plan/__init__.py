@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+from tensorcast.api.plan.artifact_set import (
+    ARTIFACT_SET_CARRIER_INLINE,
+    ARTIFACT_SET_CARRIER_MANIFEST_BACKED,
+    MAX_INLINE_ARTIFACT_SET_ITEMS,
+    ArtifactSetItemResult,
+    ArtifactSetRef,
+    ArtifactSetResult,
+)
 from tensorcast.api.plan.plan import (
+    ArtifactActionResult,
     Instance,
     Plan,
     PlanFailedError,
@@ -16,7 +25,14 @@ from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 
 __all__ = [
+    "ARTIFACT_SET_CARRIER_INLINE",
+    "ARTIFACT_SET_CARRIER_MANIFEST_BACKED",
+    "ArtifactActionResult",
+    "ArtifactSetItemResult",
+    "ArtifactSetRef",
+    "ArtifactSetResult",
     "Instance",
+    "MAX_INLINE_ARTIFACT_SET_ITEMS",
     "Plan",
     "PlanFailedError",
     "PlanResult",

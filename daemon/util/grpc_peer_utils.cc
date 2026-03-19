@@ -2,6 +2,8 @@
 
 #include "daemon/util/grpc_peer_utils.h"
 
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace tensorcast::daemon {
@@ -48,6 +50,24 @@ bool is_loopback_grpc_peer(std::string_view peer) {
   }
 
   return false;
+}
+
+std::optional<std::string> grpc_peer_endpoint(std::string_view peer) {
+  if (has_prefix(peer, "ipv4:")) {
+    return std::string(strip_prefix(peer, "ipv4:"));
+  }
+  if (has_prefix(peer, "ipv6:")) {
+    std::string_view rest = strip_prefix(peer, "ipv6:");
+    if (rest.size() >= 2 && rest.front() == '[') {
+      return std::string(rest);
+    }
+  }
+  return std::nullopt;
+}
+
+bool grpc_peer_matches_address(std::string_view peer, std::string_view address) {
+  const auto endpoint = grpc_peer_endpoint(peer);
+  return endpoint.has_value() && *endpoint == address;
 }
 
 } // namespace tensorcast::daemon

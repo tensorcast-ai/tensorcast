@@ -14,6 +14,14 @@
 namespace tensorcast::daemon {
 
 struct DaemonOptions {
+  struct InterDaemonGrpcSecurity {
+    bool tls_enabled{false};
+    bool mutual_auth_enabled{false};
+    std::string cert_chain_pem;
+    std::string private_key_pem;
+    std::string root_cert_pem;
+  };
+
   struct PostSealPolicy {
     bool migrate_views{false};
     bool migrate_transpose_only{false};
@@ -52,6 +60,29 @@ struct DaemonOptions {
 
   // Stable daemon identity for control-plane actions (derived from DaemonConfig.daemon_id).
   std::string daemon_id;
+  InterDaemonGrpcSecurity inter_daemon_grpc_security{};
+
+  struct ByteArtifactRouting {
+    struct PayloadTransport {
+      absl::Duration ref_ttl{absl::Minutes(5)};
+      uint64_t max_chunk_bytes{1ULL << 20};
+      absl::Duration fetch_deadline{absl::Seconds(5)};
+      absl::Duration cleanup_interval{absl::Minutes(1)};
+    };
+
+    uint64_t shard_count{4096};
+    uint64_t inline_payload_threshold_bytes{1ULL << 20};
+    std::chrono::milliseconds route_staleness_budget{std::chrono::milliseconds(500)};
+    std::chrono::milliseconds lease_ttl{std::chrono::seconds(5)};
+    std::chrono::milliseconds keepalive_interval{std::chrono::seconds(1)};
+    std::chrono::milliseconds worker_directory_staleness_budget{std::chrono::seconds(2)};
+    uint64_t routing_epoch{1};
+    bool shard_home_eligible{true};
+    PayloadTransport payload_transport{};
+  };
+
+  ByteArtifactRouting byte_artifact_routing{};
+  bool gateway_ingress_enabled{false};
 
   // Capability token key material (v2 envelopes).
   common::CapabilityTokenConfig capability_tokens{};

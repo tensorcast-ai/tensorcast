@@ -13,6 +13,7 @@ from concurrent import futures
 import grpc
 
 from tensorcast import __version__ as _tc_version
+from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.engine_adapter import EngineAdapter
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.logger import init_logger
@@ -25,6 +26,9 @@ from tensorcast.observability.otel import (
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
 logger = init_logger(__name__)
+
+_NODE_AGENT_HOST_KIND = "node_agent_grpc"
+_WILDCARD_LISTEN_HOSTS = {"", "0.0.0.0", "::", "[::]"}
 
 
 def _load_transform_plugins(adapter: EngineAdapter, paths: list[str]) -> None:
@@ -40,12 +44,16 @@ def _load_transform_plugins(adapter: EngineAdapter, paths: list[str]) -> None:
         register(adapter)
 
 
-def _resolve_worker_id(stub: GlobalStoreCompositeStub, daemon_id: str) -> str | None:
-    resp = stub.ListActiveWorkers(global_store_pb2.ListActiveWorkersRequest())
-    for worker in resp.workers:
-        if worker.daemon_id == daemon_id:
-            return worker.worker_id
-    return None
+def _resolve_worker_id_from_daemon(client: DaemonCtl, *, daemon_id: str) -> str | None:
+    response = client.get_worker_status()
+    resolved_daemon_id = str(getattr(response, "daemon_id", "") or "").strip()
+    if resolved_daemon_id and resolved_daemon_id != str(daemon_id).strip():
+        raise RuntimeError(
+            "Connected daemon identity does not match node agent config: "
+            f"expected={daemon_id} actual={resolved_daemon_id}"
+        )
+    worker_id = str(getattr(response, "worker_id", "") or "").strip()
+    return worker_id or None
 
 
 def _register_instance(
@@ -54,6 +62,7 @@ def _register_instance(
     config: NodeAgentConfig,
     daemon_id: str,
     worker_id: str | None,
+    execution_endpoint: str,
 ) -> None:
     capability_flags = 0
     capability_flags |= (
@@ -70,6 +79,8 @@ def _register_instance(
         signals_endpoint=config.signals_endpoint or "",
         labels=dict(config.labels),
         capability_flags=capability_flags,
+        execution_endpoint=execution_endpoint,
+        execution_host_kind=_NODE_AGENT_HOST_KIND,
     )
     if worker_id:
         req.worker_id = worker_id
@@ -78,15 +89,28 @@ def _register_instance(
         raise RuntimeError("RegisterInstance failed")
 
 
+def _resolve_execution_endpoint(config: NodeAgentConfig, bound_port: int) -> str:
+    if config.execution_endpoint:
+        return config.execution_endpoint
+    if config.listen_host in _WILDCARD_LISTEN_HOSTS:
+        raise RuntimeError(
+            "Node Agent instance registration requires identity.execution_endpoint "
+            "when server.listen.host is wildcard"
+        )
+    return f"{config.listen_host}:{bound_port}"
+
+
 def _heartbeat_loop(
     *,
     stub: GlobalStoreCompositeStub,
     config: NodeAgentConfig,
-    daemon_id: str,
+    daemon_client: DaemonCtl,
     stop_event: threading.Event,
 ) -> None:
     while not stop_event.is_set():
-        worker_id = config.worker_id or _resolve_worker_id(stub, daemon_id)
+        worker_id = config.worker_id or _resolve_worker_id_from_daemon(
+            daemon_client, daemon_id=config.daemon_id
+        )
         capability_flags = 0
         capability_flags |= (
             1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED
@@ -160,20 +184,29 @@ def main() -> None:
     stop_event = threading.Event()
     hb_thread: threading.Thread | None = None
     stub: GlobalStoreCompositeStub | None = None
+    daemon_client: DaemonCtl | None = None
     if config.register_instance and config.global_store_endpoints:
         target = config.global_store_endpoints[0]
         channel = grpc.insecure_channel(target)
         stub = GlobalStoreCompositeStub(channel)
-        worker_id = config.worker_id or _resolve_worker_id(stub, config.daemon_id)
+        daemon_client = DaemonCtl(config.daemon_address)
+        worker_id = config.worker_id or _resolve_worker_id_from_daemon(
+            daemon_client, daemon_id=config.daemon_id
+        )
+        execution_endpoint = _resolve_execution_endpoint(config, bound_port)
         _register_instance(
-            stub, config=config, daemon_id=config.daemon_id, worker_id=worker_id
+            stub,
+            config=config,
+            daemon_id=config.daemon_id,
+            worker_id=worker_id,
+            execution_endpoint=execution_endpoint,
         )
         hb_thread = threading.Thread(
             target=_heartbeat_loop,
             kwargs={
                 "stub": stub,
                 "config": config,
-                "daemon_id": config.daemon_id,
+                "daemon_client": daemon_client,
                 "stop_event": stop_event,
             },
             daemon=True,
@@ -198,6 +231,8 @@ def main() -> None:
                 )
             except Exception:
                 logger.exception("Failed to unregister instance")
+        if daemon_client is not None:
+            daemon_client.close()
         server.stop(grace=2)
 
 

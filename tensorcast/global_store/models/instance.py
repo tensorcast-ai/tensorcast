@@ -16,6 +16,8 @@ class Instance:
     worker_id: str | None = None
     engine: str = ""
     signals_endpoint: str | None = None
+    execution_endpoint: str | None = None
+    execution_host_kind: str | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
     capability_flags: int = 0
     registered_at: datetime | None = None

@@ -6,8 +6,10 @@
 #include <chrono>
 #include <optional>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "daemon/util/status_utils.h"
 
@@ -19,6 +21,13 @@ namespace {
 
 constexpr absl::Duration kResolveKeyMappingFallbackTimeout = absl::Seconds(5);
 constexpr uint32_t kResolveKeyMappingMaxRetries = 0;
+constexpr absl::Duration kPublishReplicaKeyReadyRetryBudget = absl::Seconds(2);
+constexpr absl::Duration kPublishReplicaKeyReadyRetryInterval = absl::Milliseconds(50);
+
+bool is_key_mapping_readiness_race(const absl::Status& status) {
+  return absl::IsFailedPrecondition(status) &&
+      status.message().find("artifact/index not ready for key mapping upsert") != std::string::npos;
+}
 
 absl::StatusOr<store::components::RpcOptions> make_resolve_key_mapping_rpc_options(grpc::ServerContext& ctx) {
   store::components::RpcOptions options;
@@ -106,6 +115,57 @@ void KeyMappingController::erase_local_cache(std::string_view key) {
   local_cache_.erase(std::string(key));
 }
 
+absl::Status KeyMappingController::maybe_register_local_import_artifact_metadata(
+    const tensorcast::common::v1::ArtifactDescriptor& descriptor) const {
+  if (descriptor.artifact_id().empty()) {
+    return absl::InvalidArgumentError("artifact_id is required for local import metadata repair");
+  }
+  if (d_.source_registry == nullptr) {
+    return absl::FailedPreconditionError("source registry unavailable for local import metadata repair");
+  }
+  if (d_.global_store_client == nullptr || !d_.global_store_client->is_connected()) {
+    return absl::UnavailableError("global store client unavailable for local import metadata repair");
+  }
+
+  auto imported = d_.source_registry->lookup_binding(descriptor.artifact_id());
+  if (!imported.has_value() || imported->source_kind != ArtifactSourceRegistry::SourceKind::kLocalImport) {
+    return absl::NotFoundError("artifact is not a local import");
+  }
+
+  std::string canonical_index_json;
+  auto canonical_index_or = d_.engine.get_canonical_index_by_id(descriptor.artifact_id());
+  if (canonical_index_or.ok()) {
+    canonical_index_json = std::move(*canonical_index_or);
+  } else if (!imported->canonical_index_json.empty()) {
+    canonical_index_json = imported->canonical_index_json;
+  } else {
+    return canonical_index_or.status();
+  }
+
+  tensorcast::common::v1::ArtifactDescriptor publish_descriptor = descriptor;
+  publish_descriptor.set_artifact_id(descriptor.artifact_id());
+  if (publish_descriptor.index_multihash().empty() && imported->index_multihash.has_value()) {
+    publish_descriptor.set_index_multihash(*imported->index_multihash);
+  }
+  if (publish_descriptor.data_multihash().empty() && imported->data_multihash.has_value()) {
+    publish_descriptor.set_data_multihash(*imported->data_multihash);
+  }
+  if (publish_descriptor.schema_version().empty()) {
+    publish_descriptor.set_schema_version("v3");
+  }
+  if (publish_descriptor.encoding().empty()) {
+    publish_descriptor.set_encoding("json");
+  }
+  if (publish_descriptor.id_kind() == tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_UNSPECIFIED) {
+    publish_descriptor.set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+  }
+  if (publish_descriptor.index_multihash().empty()) {
+    return absl::FailedPreconditionError("local import metadata repair requires index_multihash");
+  }
+
+  return d_.global_store_client->upsert_artifact_metadata(publish_descriptor, canonical_index_json);
+}
+
 grpc::Status KeyMappingController::publish_replica_key(
     RpcContext& rctx,
     const v2::PublishReplicaKeyRequest& req,
@@ -120,7 +180,27 @@ grpc::Status KeyMappingController::publish_replica_key(
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  auto up = d_.engine.upsert_key_mapping(req.key(), req.artifact_descriptor().artifact_id());
+  absl::Status up = absl::UnknownError("uninitialized");
+  const absl::Time retry_deadline = absl::Now() + kPublishReplicaKeyReadyRetryBudget;
+  for (;;) {
+    up = d_.engine.upsert_key_mapping(req.key(), req.artifact_descriptor().artifact_id());
+    if (!is_key_mapping_readiness_race(up)) {
+      break;
+    }
+    auto repair_status = maybe_register_local_import_artifact_metadata(req.artifact_descriptor());
+    if (repair_status.ok()) {
+      continue;
+    }
+    VLOG(1) << "PublishReplicaKey local import metadata repair skipped/failed for artifact_id="
+            << req.artifact_descriptor().artifact_id() << ": " << repair_status;
+    if (rctx.server_context().IsCancelled() || d_.shutdown_signal.is_shutting_down()) {
+      break;
+    }
+    if (absl::Now() >= retry_deadline) {
+      break;
+    }
+    absl::SleepFor(kPublishReplicaKeyReadyRetryInterval);
+  }
   if (!up.ok()) {
     if (absl::IsAlreadyExists(up)) {
       resp.set_ok(false);

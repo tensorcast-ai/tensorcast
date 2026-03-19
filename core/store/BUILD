@@ -15,6 +15,7 @@ sc_header_only_library(
         ":device_types",
         "//core/common:memory_location_lib",
         "//core/communicator:engine_hdrs",
+        "//core/communicator:routing_context_lib",
         "@gsl",
     ],
 )
@@ -44,6 +45,9 @@ sc_header_only_library(
     name = "seal_assembly_result",
     hdrs = ["seal_assembly_result.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/runtime/ingestion:artifact_truth",
+    ],
 )
 
 sc_header_only_library(
@@ -128,6 +132,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":device_types",
+        ":endpoint_id",
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/communicator:utils_lib",
@@ -164,6 +169,7 @@ sc_cc_library(
         ":communication_types",
         "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
+        "//core/communicator:routing_context_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )
@@ -204,6 +210,19 @@ sc_header_only_library(
     name = "worker_identity",
     hdrs = ["components/worker_identity.h"],
     visibility = ["//visibility:public"],
+)
+
+sc_cc_library(
+    name = "endpoint_id",
+    srcs = ["components/endpoint_id.cc"],
+    hdrs = ["components/endpoint_id.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_types",
+        ":worker_identity",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+    ],
 )
 
 sc_cc_library(
@@ -353,6 +372,7 @@ sc_cc_library(
         "//core/store/replica:memory_state",
         "//core/store/replica:replica_config",
         "//core/store/runtime:runtime_env",
+        "//core/store/runtime/ingestion:artifact_lowering_plan",
         "//core/store/runtime/ingestion:ingestion_runtime",
         "//core/store/runtime/metadata:metadata_gateway",
         "//core/store/runtime/replica:replica_promotion_manager",

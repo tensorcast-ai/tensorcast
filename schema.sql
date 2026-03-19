@@ -75,12 +75,17 @@ CREATE TABLE IF NOT EXISTS instances (
     worker_id TEXT NULL,
     engine TEXT NOT NULL,
     signals_endpoint TEXT,
+    execution_endpoint TEXT,
+    execution_host_kind TEXT,
     labels_json TEXT NOT NULL DEFAULT '{}',
     capability_flags BIGINT NOT NULL DEFAULT 0,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE
 );
+
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS execution_endpoint TEXT;
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS execution_host_kind TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_instances_daemon_id ON instances (daemon_id);
 CREATE INDEX IF NOT EXISTS idx_instances_worker_id ON instances (worker_id);
@@ -151,6 +156,20 @@ CREATE TABLE IF NOT EXISTS memory_tier_leases (
     expires_at_ns BIGINT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_tier_leases_node_artifact ON memory_tier_leases(node_id, artifact_id, state);
+
+-- Shard-home lease fencing records for `cgid:byte_artifact~...` routing.
+-- These are low-cardinality (one row per shard_id) and are the strong-consistency
+-- authority for shard ownership.
+CREATE TABLE IF NOT EXISTS shard_home_leases (
+    shard_id BIGINT PRIMARY KEY,
+    holder_daemon_id TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    lease_generation BIGINT NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_shard_home_leases_holder ON shard_home_leases(holder_daemon_id);
+CREATE INDEX IF NOT EXISTS idx_shard_home_leases_expires_at ON shard_home_leases(expires_at);
 
 -- Artifacts: content-addressed artifact IDs (design-0007)
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -480,11 +499,26 @@ CREATE TABLE IF NOT EXISTS artifact_layout_attachments (
 CREATE INDEX IF NOT EXISTS idx_artifact_layout_attachments_mi2 ON artifact_layout_attachments(mi2_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_layout_attachments_layout ON artifact_layout_attachments(layout_id);
 
--- Per-assembly operational runtime policy (mutable; not content-addressed)
-CREATE TABLE IF NOT EXISTS assembly_runtime_policies (
-    assembly_id TEXT PRIMARY KEY,
-    policy_version BIGINT NOT NULL,
-    policy_json TEXT NOT NULL,
+-- Durable immutable attempt truth keyed by durable attempt identity.
+CREATE TABLE IF NOT EXISTS assembly_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    workspace_assembly_id TEXT NOT NULL UNIQUE,
+    layout_id TEXT NOT NULL,
+    attempt_intent_digest TEXT NOT NULL,
+    coordinator_operation_id TEXT NOT NULL,
+    attempt_record_proto BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_attempts_workspace
+    ON assembly_attempts(workspace_assembly_id);
+CREATE INDEX IF NOT EXISTS idx_assembly_attempts_operation
+    ON assembly_attempts(coordinator_operation_id);
+
+-- Durable readiness cut captured after explicit transition to sealing.
+CREATE TABLE IF NOT EXISTS assembly_readiness_cuts (
+    attempt_id TEXT PRIMARY KEY,
+    readiness_cut_proto BLOB NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -543,6 +577,30 @@ CREATE TABLE IF NOT EXISTS piece_proof_digests (
     PRIMARY KEY (assembly_id, view_id, tensor_name, proof_schema_version, proof_chunk_idx)
 );
 CREATE INDEX IF NOT EXISTS idx_piece_proof_digests_tensor ON piece_proof_digests(assembly_id, view_id, tensor_name);
+
+-- Durable required-slot occupancy keyed by durable attempt scope and slot id.
+CREATE TABLE IF NOT EXISTS assembly_slot_occupancies (
+    attempt_id TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    structural_view_id TEXT NULL,
+    binding_id TEXT NOT NULL,
+    binding_value_id TEXT NOT NULL,
+    coverage_plan_hash TEXT NOT NULL,
+    contributor_daemon_id TEXT NOT NULL,
+    coordinator_operation_id TEXT NOT NULL,
+    coordinator_generation BIGINT NOT NULL,
+    lease_id TEXT NOT NULL,
+    lease_generation BIGINT NOT NULL,
+    lease_expires_at TIMESTAMP WITH TIME ZONE NULL,
+    state TEXT NOT NULL CHECK (state IN ('accepted','stale','released','aborted')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (attempt_id, slot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_slot_occupancies_attempt_state
+    ON assembly_slot_occupancies(attempt_id, state);
+CREATE INDEX IF NOT EXISTS idx_assembly_slot_occupancies_binding_value
+    ON assembly_slot_occupancies(binding_id, binding_value_id);
 
 -- Assembly → sealed bindings (cgid -> mi2)
 CREATE TABLE IF NOT EXISTS artifact_bindings (

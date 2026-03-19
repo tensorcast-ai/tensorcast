@@ -72,6 +72,22 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materiali
       target_device, target_layout, mapping, canonical_index_json, generation, hints);
 }
 
+absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_loader_into_target(
+    const DeviceKey& target_device,
+    const loading::IntoTargetLayout& target_layout,
+    std::unique_ptr<IArtifactLoader> loader,
+    const loader::ByteRangeMap& mapping,
+    const loading::MaterializeHints& hints,
+    loading::MaterializationSource source_kind) {
+  return materialization_facade_->materialize_mapped_loader_into_target(
+      target_device, target_layout, std::move(loader), mapping, hints, source_kind);
+}
+
+absl::StatusOr<ingestion::ArtifactLoweringResult> IngestionRuntime::execute_artifact_lowering_plan(
+    ingestion::ArtifactLoweringPlan plan) {
+  return materialization_facade_->execute_artifact_lowering_plan(std::move(plan));
+}
+
 absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_from_disk(
     const std::string& artifact_identifier,
     const loading::DiskSource& source,
@@ -115,6 +131,15 @@ absl::StatusOr<SealAssemblyResult> IngestionRuntime::seal_assembly(
     const std::vector<std::string>* allowed_view_ids) {
   return materialization_facade_->seal_assembly(
       assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
+}
+
+absl::StatusOr<SealAssemblyResult> IngestionRuntime::seal_assembly_from_cut(
+    std::string_view assembly_id,
+    const ingestion::MaterializationFacade::SealAssemblyCutInput& cut_input,
+    bool publish_canonical,
+    ingestion::MaterializationFacade::SealProgressCallback progress_cb) {
+  return materialization_facade_->seal_assembly_from_cut(
+      assembly_id, cut_input, publish_canonical, std::move(progress_cb));
 }
 
 } // namespace tensorcast::store::runtime

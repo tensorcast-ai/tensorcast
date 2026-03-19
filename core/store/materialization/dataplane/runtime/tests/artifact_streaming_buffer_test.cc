@@ -32,6 +32,28 @@ using tensorcast::store::replica::ReplicaConfig;
 using namespace tensorcast::testing;
 
 namespace {
+
+class ScopedTempDir {
+ public:
+  explicit ScopedTempDir(const std::string& prefix) : path_(fs::temp_directory_path() / prefix) {
+    std::error_code ec;
+    fs::remove_all(path_, ec);
+    fs::create_directories(path_);
+  }
+
+  ~ScopedTempDir() {
+    std::error_code ec;
+    fs::remove_all(path_, ec);
+  }
+
+  const fs::path& path() const {
+    return path_;
+  }
+
+ private:
+  fs::path path_;
+};
+
 // Write minimal RFC-0007 metadata for a standard partition directory:
 // - tensor_index.json: one dummy entry covering [0, total_size)
 // - artifact_descriptor.json: with artifact_id = "mi2:<index_mh>:<data_mh>"
@@ -135,14 +157,11 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
     SKIP("CUDA not available. Skipping streaming GPU test.");
   }
 
-  fs::path base = fs::temp_directory_path() / "streaming_disk_test";
-  if (fs::exists(base)) {
-    fs::remove_all(base);
-  }
-  fs::create_directories(base / artifact_dir_name);
+  ScopedTempDir base("streaming_disk_test");
+  fs::create_directories(base.path() / artifact_dir_name);
 
-  fs::path path0 = base / artifact_dir_name / p0;
-  fs::path path1 = base / artifact_dir_name / p1;
+  fs::path path0 = base.path() / artifact_dir_name / p0;
+  fs::path path1 = base.path() / artifact_dir_name / p1;
   REQUIRE(create_dummy_file(path0, size0, 'S'));
   REQUIRE(create_dummy_file(path1, size1, 'T'));
 
@@ -157,7 +176,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
 
   // RFC-0007: Write minimal canonical index + descriptor for standard partitions
   {
-    auto st = write_descriptor_and_index(base / artifact_dir_name, static_cast<uint64_t>(total_size));
+    auto st = write_descriptor_and_index(base.path() / artifact_dir_name, static_cast<uint64_t>(total_size));
     REQUIRE(st.ok());
   }
 
@@ -172,7 +191,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   // Unified UMA is managed internally; no manual CPU arena injection needed.
   // Use new DiskSource
   DiskSource disk_src;
-  disk_src.path = base / artifact_dir_name;
+  disk_src.path = base.path() / artifact_dir_name;
 
   // Use aggregate initialization for ReplicaConfig
   ReplicaConfig cfg{
@@ -214,5 +233,4 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   // Cleanup
   replica.reset();
   pool.reset();
-  fs::remove_all(base);
 }

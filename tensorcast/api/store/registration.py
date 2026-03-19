@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 import grpc
@@ -28,6 +29,8 @@ from tensorcast.api._register import (
 )
 from tensorcast.api._register import (
     RegistrationResult,
+    ViewPlanChunk,
+    ViewPlanMetadata,
     ViewRegistrationContext,
     _compute_view_plan_metadata,
     _materialize_canonical_tensors,
@@ -58,6 +61,8 @@ from tensorcast.api.store.views import (
     TransformPlacement,
     ViewOrchestrator,
 )
+from tensorcast.common.selection_contract import compute_selected_index_bytes
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
@@ -65,13 +70,44 @@ logger = logging.getLogger(__name__)
 
 def _uses_fake_cuda_backend() -> bool:
     backend = os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip().lower()
-    if backend == "fake":
-        return True
-    with contextlib.suppress(Exception):
-        from tensorcast._C import is_fake_cuda
+    return backend == "fake"
 
-        return bool(is_fake_cuda())
-    return False
+
+@dataclass(frozen=True)
+class StructuralContributionCommit:
+    """Unified structural commit result for direct and binding-backed assembly."""
+
+    artifact: RegisteredArtifact
+    contribution_kind: str
+    view_id: str | None
+    canonical_ranges: tuple[object, ...]
+
+
+def _view_spec_is_subset_identity(
+    view_spec: common_pb2.ViewSpec,
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> bool:
+    if not tensor_names:
+        return False
+    entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+    if set(view_spec.tensors.keys()) != set(tensor_names):
+        return False
+    for name in tensor_names:
+        entry = entry_by_name.get(str(name))
+        ops = view_spec.tensors.get(str(name))
+        if entry is None or ops is None or len(ops.ops) != 1 or not entry.shape:
+            return False
+        op = ops.ops[0]
+        if not op.HasField("narrow"):
+            return False
+        if (
+            int(op.narrow.dim) != 0
+            or int(op.narrow.start) != 0
+            or int(op.narrow.length) != int(entry.shape[0])
+        ):
+            return False
+    return True
 
 
 class RegistrationPipeline:
@@ -172,15 +208,12 @@ class RegistrationPipeline:
         view_id: str | None = None,
         placement: str | None = None,
         ttl_ms: int | None = None,
-        allow_partial: bool = False,
         options: RegisterArtifactOptions | None = None,
         canonical_index_bytes: bytes | None = None,
         registration_kind: str | int | None = None,
         resolver: Callable[..., ResolvedViewInputs] | None = None,
     ) -> RegisteredArtifact:
-        resolved_kind = self._normalize_registration_kind(
-            registration_kind, allow_partial=allow_partial
-        )
+        resolved_kind = self._normalize_registration_kind(registration_kind)
         if (
             resolved_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
             and not artifact_id
@@ -328,37 +361,26 @@ class RegistrationPipeline:
             has_transpose=False,
             for_registration=True,
         )
-        view_ctx, upload_tensors = self._build_view_registration(
+        committed = self.commit_structural_contribution(
+            tensors,
+            assembly_id=assembly_id,
             canonical_index_bytes=canonical_index_bytes,
             canonical_index=canonical_index,
             build_result=build_result,
-            tensors=tensors,
             placement_enum=placement_enum,
-            registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
-        )
-        return self._perform_registration(
-            upload_tensors,
-            artifact_id=assembly_id,
             key=key,
-            plan=PlanType.VRAM_COALESCED,
-            options_override=options,
-            ttl_override=ttl_ms,
-            view_registration=view_ctx,
+            options=options,
+            ttl_ms=ttl_ms,
         )
+        return committed.artifact
 
     @staticmethod
     def _normalize_registration_kind(
         registration_kind: str | int | None,
-        *,
-        allow_partial: bool,
     ) -> store_daemon_pb2.ViewRegistrationKind:
         resolved: store_daemon_pb2.ViewRegistrationKind | None = None
         if registration_kind is None:
-            resolved = (
-                store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
-                if allow_partial
-                else store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
-            )
+            resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
         elif isinstance(registration_kind, str):
             normalized = registration_kind.strip().lower()
             if normalized in {"piece", "partial"}:
@@ -376,15 +398,99 @@ class RegistrationPipeline:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if allow_partial:
-            if resolved != store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
-                raise ArtifactError(
-                    "allow_partial is deprecated; use registration_kind='piece'",
-                    status_code="INVALID_ARGUMENT",
-                    retryable=False,
-                )
-            logger.warning("allow_partial is deprecated; use registration_kind='piece'")
         return resolved
+
+    @staticmethod
+    def _ordered_selection_entries(
+        canonical_index: CanonicalIndex,
+        tensor_names: Sequence[str],
+    ) -> tuple[object, ...]:
+        requested = tuple(str(name) for name in tensor_names)
+        if not requested:
+            return ()
+        requested_set = set(requested)
+        entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+        missing = sorted(requested_set - set(entry_by_name))
+        if missing:
+            raise ArtifactError(
+                f"View references unknown tensor(s): {', '.join(missing)}",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return tuple(
+            entry
+            for entry in canonical_index.entries
+            if str(entry.name) in requested_set
+        )
+
+    def _build_subset_piece_registration(
+        self,
+        *,
+        canonical_index_bytes: bytes,
+        canonical_index: CanonicalIndex,
+        tensor_names: Sequence[str],
+        view_spec_proto,
+        tensors: Mapping[str, torch.Tensor],
+    ) -> tuple[ViewRegistrationContext, dict[str, torch.Tensor]]:
+        ordered_entries = self._ordered_selection_entries(canonical_index, tensor_names)
+        if not ordered_entries:
+            raise ArtifactError(
+                "Piece registration requires at least one selected tensor",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if view_spec_proto is None:
+            raise ArtifactError(
+                "View spec missing for subset piece registration",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        selected_names = tuple(str(entry.name) for entry in ordered_entries)
+        write_chunks: tuple[ViewPlanChunk, ...] = ()
+        cursor = 0
+        write_chunk_items: list[ViewPlanChunk] = []
+        for entry in ordered_entries:
+            write_chunk_items.append(
+                ViewPlanChunk(
+                    canonical_offset=int(entry.segment_offset),
+                    view_offset=int(cursor),
+                    length=int(entry.size_bytes),
+                    segment_aligned=True,
+                )
+            )
+            cursor += int(entry.size_bytes)
+        write_chunks = tuple(write_chunk_items)
+        canonical_ranges = _merge_canonical_ranges(write_chunks)
+        view_index_json = compute_selected_index_bytes(
+            canonical_index_bytes=canonical_index_bytes,
+            view_spec=None,
+            tensor_names=selected_names,
+        )
+        view_options = store_daemon_pb2.ViewRegistrationOptions()
+        view_options.spec.CopyFrom(view_spec_proto)
+        view_options.placement = TransformPlacement.TRANSFORM_PLACEMENT_SERVER
+        view_options.canonical_size_bytes = canonical_index.total_size_bytes
+        view_options.registration_kind = store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+        view_options.tensor_names.extend(selected_names)
+        plan_metadata = ViewPlanMetadata(
+            view_size_bytes=sum(int(entry.size_bytes) for entry in ordered_entries),
+            view_index_json=view_index_json,
+            write_chunks=write_chunks,
+            inverse_requires_materialization=False,
+            inverse_tensors=(),
+        )
+        upload_tensors = {name: tensors[name] for name in selected_names}
+        view_ctx = ViewRegistrationContext(
+            canonical_index_bytes=canonical_index_bytes,
+            view_options=view_options,
+            placement=TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
+            plan=plan_metadata,
+            tensors=upload_tensors,
+            canonical_ranges=canonical_ranges,
+            registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
+        )
+        return view_ctx, upload_tensors
 
     def _build_view_registration(
         self,
@@ -395,7 +501,9 @@ class RegistrationPipeline:
         tensors: Mapping[str, torch.Tensor],
         placement_enum: TransformPlacement,
         registration_kind: store_daemon_pb2.ViewRegistrationKind,
+        selection_names: Sequence[str] | None = None,
     ) -> tuple[ViewRegistrationContext, dict[str, torch.Tensor]]:
+        resolved_selection_names = tuple(str(name) for name in (selection_names or ()))
         if build_result.is_identity:
             raise ArtifactError(
                 "View registration requires explicit view operations",
@@ -415,11 +523,33 @@ class RegistrationPipeline:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-        plan_metadata = _compute_view_plan_metadata(canonical_index_bytes, build_result)
-        canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
+        if (
+            registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+            and resolved_selection_names
+        ):
+            selected_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=build_result.proto,
+                tensor_names=resolved_selection_names,
+            )
+            selected_index = canonical_index_from_bytes(selected_index_bytes)
+            plan_metadata = ViewPlanMetadata(
+                view_size_bytes=int(selected_index.total_size_bytes),
+                view_index_json=selected_index_bytes,
+                write_chunks=(),
+                inverse_requires_materialization=False,
+                inverse_tensors=(),
+            )
+            canonical_ranges = ()
+        else:
+            plan_metadata = _compute_view_plan_metadata(
+                canonical_index_bytes, build_result
+            )
+            canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
         if (
             registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
             and not canonical_ranges
+            and not resolved_selection_names
         ):
             raise ArtifactError(
                 "Piece registration produced empty canonical coverage",
@@ -434,16 +564,26 @@ class RegistrationPipeline:
                 retryable=False,
             )
         view_options.spec.CopyFrom(build_result.proto)
+        if resolved_selection_names:
+            view_options.tensor_names.extend(resolved_selection_names)
         view_options.placement = placement_enum
         view_options.canonical_size_bytes = canonical_index.total_size_bytes
         view_options.registration_kind = registration_kind
-        for rng in canonical_ranges:
-            range_proto = view_options.ranges.add()
-            range_proto.offset = rng.offset
-            range_proto.length = rng.length
+        if registration_kind != store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
+            for rng in canonical_ranges:
+                range_proto = view_options.ranges.add()
+                range_proto.offset = rng.offset
+                range_proto.length = rng.length
         upload_tensors: dict[str, torch.Tensor]
         if placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_SERVER:
-            upload_tensors = dict(tensors)
+            if resolved_selection_names:
+                upload_tensors = {
+                    name: tensors[name]
+                    for name in resolved_selection_names
+                    if name in tensors
+                }
+            else:
+                upload_tensors = dict(tensors)
         elif placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_CLIENT:
             upload_tensors = _materialize_canonical_tensors(
                 canonical_index_bytes, build_result, tensors
@@ -464,6 +604,104 @@ class RegistrationPipeline:
             registration_kind=registration_kind,
         )
         return view_ctx, upload_tensors
+
+    def commit_structural_contribution(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+        *,
+        assembly_id: str,
+        canonical_index_bytes: bytes | None = None,
+        canonical_index: CanonicalIndex | None = None,
+        build_result: ViewSpecBuildResult | None = None,
+        placement_enum: TransformPlacement = TransformPlacement.TRANSFORM_PLACEMENT_SERVER,
+        selection_names: Sequence[str] | None = None,
+        key: str | None = None,
+        options: RegisterArtifactOptions | None = None,
+        ttl_ms: int | None = None,
+    ) -> StructuralContributionCommit:
+        if not assembly_id:
+            raise ArtifactError(
+                "assembly_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if build_result is None:
+            artifact = self._perform_registration(
+                tensors,
+                artifact_id=assembly_id,
+                key=key,
+                plan=PlanType.VRAM_COALESCED,
+                options_override=options,
+                ttl_override=ttl_ms,
+            )
+            return StructuralContributionCommit(
+                artifact=artifact,
+                contribution_kind="canonical_full",
+                view_id=None,
+                canonical_ranges=(),
+            )
+
+        if build_result.proto is None:
+            raise ArtifactError(
+                "View spec missing for structural contribution",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if canonical_index_bytes is None:
+            raise ArtifactError(
+                "canonical_index_bytes is required for piece contribution",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        resolved_canonical_index = canonical_index or canonical_index_from_bytes(
+            canonical_index_bytes
+        )
+        resolved_selection_names = tuple(str(name) for name in (selection_names or ()))
+        if resolved_selection_names and _view_spec_is_subset_identity(
+            build_result.proto,
+            resolved_canonical_index,
+            resolved_selection_names,
+        ):
+            view_ctx, upload_tensors = self._build_subset_piece_registration(
+                canonical_index_bytes=canonical_index_bytes,
+                canonical_index=resolved_canonical_index,
+                tensor_names=resolved_selection_names,
+                view_spec_proto=build_result.proto,
+                tensors=tensors,
+            )
+        else:
+            view_ctx, upload_tensors = self._build_view_registration(
+                canonical_index_bytes=canonical_index_bytes,
+                canonical_index=resolved_canonical_index,
+                build_result=build_result,
+                tensors=tensors,
+                placement_enum=placement_enum,
+                registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
+                selection_names=(),
+            )
+
+        artifact = self._perform_registration(
+            upload_tensors,
+            artifact_id=assembly_id,
+            key=key,
+            plan=PlanType.VRAM_COALESCED,
+            options_override=options,
+            ttl_override=ttl_ms,
+            view_registration=view_ctx,
+        )
+        reg_result = artifact.registration_result
+        if reg_result is None or not reg_result.view_id:
+            raise ArtifactError(
+                "piece contribution registration did not return a view_id",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return StructuralContributionCommit(
+            artifact=artifact,
+            contribution_kind="piece_partial",
+            view_id=str(reg_result.view_id),
+            canonical_ranges=tuple(reg_result.canonical_ranges),
+        )
 
     @staticmethod
     def _require_put_tensors(tensors: Mapping[str, torch.Tensor]) -> None:
@@ -610,11 +848,15 @@ class RegistrationPipeline:
                 retryable=False,
             )
         if view_registration is not None and plan is not PlanType.VRAM_COALESCED:
-            raise ArtifactError(
-                "View registration requires vram_coalesced plan",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
+            fake_cuda_enabled = (
+                os.environ.get("TENSORCAST_CUDA_BACKEND", "").strip() == "fake"
             )
+            if not (fake_cuda_enabled and plan is PlanType.DRAM_STABLE):
+                raise ArtifactError(
+                    "View registration requires vram_coalesced plan",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
         resolved_key = key
         options: RegisterArtifactOptions
         if options_override is not None:
@@ -771,6 +1013,7 @@ class RegistrationPipeline:
             registration_result=result,
             persistence_task_id=persistence_task_id,
             local_stable_tier=result.local_stable_tier,
+            _daemon_endpoint=self._runtime.daemon_endpoint,
         )
 
     @staticmethod

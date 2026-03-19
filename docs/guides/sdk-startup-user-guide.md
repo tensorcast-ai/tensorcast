@@ -52,7 +52,27 @@ If none is found, startup fails.
 |---|---|---|
 | `none` | No Global Store orchestration | Local-only or minimal setups |
 | `connect` | Connect to an existing Global Store | Production clusters with managed GS |
-| `start` | Reuse/start local Global Store first, then daemon | Local all-in-one workflows |
+| `start` | Start a new local Global Store first, then daemon; fail if one already exists locally | Local all-in-one workflows |
+
+### 3.3 Optional port overrides (`create` / `auto`)
+
+SDK-managed launch now accepts a structured `port_config` object so callers can
+override daemon / Global Store ports without writing ad-hoc config files.
+
+| Field | Meaning |
+|---|---|
+| `daemon_listen_port` | Daemon gRPC port |
+| `daemon_p2p_port` | Daemon P2P/data-plane port |
+| `global_store_listen_port` | Global Store gRPC port |
+| `global_store_metrics_port` | Global Store Prometheus metrics port |
+
+Rules:
+
+| Rule | Behavior |
+|---|---|
+| Port value `0` | Auto-pick a free port at launch |
+| `connect` mode | `port_config` is ignored because no local process is started |
+| `global_store_mode!="start"` | Global Store port overrides are ignored |
 
 ## 4. Integration Patterns
 
@@ -101,6 +121,31 @@ tc.init(
 
 tc.shutdown()
 ```
+
+### Pattern B1: SDK self-managed launch with explicit ports
+
+```python
+import tensorcast as tc
+
+tc.init(
+    mode="create",
+    daemon_config_path="examples/config/store_daemon_config.yaml",
+    global_store_mode="start",
+    global_store_config_path="examples/config/global_store_config.yaml",
+    port_config=tc.PortConfig(
+        daemon_listen_port=50052,
+        daemon_p2p_port=0,
+        global_store_listen_port=50051,
+        global_store_metrics_port=18008,
+    ),
+    show_daemon_logs=False,
+)
+```
+
+`global_store_mode="start"` is exclusive for the current runtime root. If a
+healthy local Global Store is already recorded under the same `TENSORCAST_HOME`,
+startup fails instead of borrowing that instance; stop the existing GS first or
+switch to `global_store_mode="connect"`.
 
 ### Pattern C: Concurrent local startup (`auto`)
 

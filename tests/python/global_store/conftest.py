@@ -5,22 +5,23 @@
 import os
 import tempfile
 import uuid
-from uuid import uuid4
 
-import pytest
 import duckdb
+import pytest
 
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto.global_store.v1 import global_store_pb2
-from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
-from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
+from tensorcast.global_store.db_utils import init_db
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.repositories import (
+    AssemblyAttemptRepository,
     AssemblyLayoutBindingRepository,
+    AssemblyReadinessCutRepository,
+    AssemblySlotOccupancyRepository,
     InstanceRepository,
-    LeafRepository,
     LayoutSpecRepository,
+    LeafRepository,
     PendingTransportRequestRepository,
     ProofRepository,
     ReplicaRepository,
@@ -36,12 +37,13 @@ from tensorcast.global_store.services import (
     ViewStateService,
     WorkerService,
 )
-from tensorcast.global_store.db_utils import init_db
-
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 # =============================================================================
 # Mock classes
 # =============================================================================
+
 
 class MockContext:
     """Enhanced mock gRPC ServicerContext for testing with full interface."""
@@ -49,9 +51,9 @@ class MockContext:
     def __init__(self):
         self.code = None
         self.details = None
-        self.invocation_metadata = [] #type: ignore
+        self.invocation_metadata = []  # type: ignore
         self._cancelled = False
-        self._time_remaining = float('inf')
+        self._time_remaining = float("inf")
         self._peer = "ipv4:127.0.0.1:50051"
         self._aborted = False
         self._abort_code = None
@@ -126,6 +128,7 @@ class MockContext:
 # Fixtures for gRPC service testing
 # =============================================================================
 
+
 @pytest.fixture
 def servicer():
     """Create an in-memory GlobalStoreServicer for testing"""
@@ -181,6 +184,7 @@ def registered_worker(servicer, test_context):
 # Fixtures for refactored components testing
 # =============================================================================
 
+
 @pytest.fixture
 def db_connection():
     """Create in-memory DuckDB connection for testing."""
@@ -203,7 +207,10 @@ def repositories(db_connection):
         "worker": WorkerRepository(db_connection),
         "instance": InstanceRepository(db_connection),
         "layout_spec": LayoutSpecRepository(db_connection),
+        "assembly_attempt": AssemblyAttemptRepository(db_connection),
         "assembly_layout_binding": AssemblyLayoutBindingRepository(db_connection),
+        "assembly_readiness_cut": AssemblyReadinessCutRepository(db_connection),
+        "assembly_slot_occupancy": AssemblySlotOccupancyRepository(db_connection),
         "proof": ProofRepository(db_connection),
     }
 
@@ -259,6 +266,7 @@ observability:
 # Utility fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def sample_worker():
     """Create a sample Worker instance for testing."""
@@ -304,39 +312,40 @@ def temp_db_file():
 # Test utilities
 # =============================================================================
 
+
 def create_test_replicas(num_replicas, artifact_id="test_artifact", memory_types=None):
     """Create multiple test replicas with varied configurations."""
     if memory_types is None:
         memory_types = [MemoryType.GPU, MemoryType.RAM, MemoryType.DISK]
 
-    replicas = []
-    for i in range(num_replicas):
-        replicas.append(Replica(
+    return [
+        Replica(
             artifact_id=artifact_id,
             node_id=f"node{i}",
-            node_address=f"192.168.1.{i+1}",
+            node_address=f"192.168.1.{i + 1}",
             node_port=8080 + i,
             memory_size=1024 * (i + 1),
             memory_type=memory_types[i % len(memory_types)],
             device_id=i if memory_types[i % len(memory_types)] == MemoryType.GPU else 0,
             worker_id=f"worker{i}",
             max_concurrency=5,
-        ))
-    return replicas
+        )
+        for i in range(num_replicas)
+    ]
 
 
 def create_test_workers(num_workers):
     """Create multiple test workers."""
-    workers = []
-    for i in range(num_workers):
-        workers.append(Worker(
+    return [
+        Worker(
             worker_id=f"worker{i}",
             daemon_id=f"daemon_worker{i}",
             node_id=f"node{i}",
-            node_address=f"192.168.1.{i+1}",
+            node_address=f"192.168.1.{i + 1}",
             grpc_port=50051 + i,
             p2p_port=50052 + i,
             mem_pool_total_size=10240 * (i + 1),
             mem_pool_available_size=8192 * (i + 1),
-        ))
-    return workers
+        )
+        for i in range(num_workers)
+    ]

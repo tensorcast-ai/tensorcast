@@ -69,6 +69,10 @@ struct ReplicaConfig {
   // Future runtime configurations can be added here:
   // - Variant residency metadata (view identifiers)
   std::optional<std::string> view_id = std::nullopt;
+  // - Collective disk-loading hint for same-host TP groups
+  std::optional<loading::CollectiveLoadGroupHint> collective_load_group;
+  // - Variant identity metadata for shared-window planning
+  std::optional<loading::VariantIdentity> variant_identity;
   // - View execution plan metadata for variant-aware replicas
   std::optional<loader::ViewPlan> view_plan;
   // - Canonical index bytes (for disk source canonicalization)

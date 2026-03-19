@@ -27,6 +27,59 @@ class LeafRow:
 class LeafRepository(BaseRepository):
     """Data access layer for `leaves` table."""
 
+    def delete_all_for_space(
+        self,
+        *,
+        artifact_id: str,
+        space_kind: str,
+        space_id: str,
+        cursor=None,
+    ) -> None:
+        normalized_kind = space_kind.upper()
+        if normalized_kind not in {"C", "V"}:
+            raise ValueError(f"Invalid space_kind: {space_kind}")
+        target = cursor if cursor is not None else self.get_cursor()
+        target.execute(
+            """
+            DELETE FROM leaves
+            WHERE artifact_id = ?
+              AND space_kind = ?
+              AND space_id = ?
+            """,
+            [artifact_id, normalized_kind, space_id],
+        )
+
+    def delete_indices(
+        self,
+        *,
+        artifact_id: str,
+        space_kind: str,
+        space_id: str,
+        leaf_idxs: Sequence[int],
+        cursor=None,
+    ) -> None:
+        normalized_kind = space_kind.upper()
+        if normalized_kind not in {"C", "V"}:
+            raise ValueError(f"Invalid space_kind: {space_kind}")
+        normalized_idxs = sorted({int(idx) for idx in leaf_idxs})
+        if not normalized_idxs:
+            return
+        target = cursor if cursor is not None else self.get_cursor()
+        chunk_size = 1000
+        for start in range(0, len(normalized_idxs), chunk_size):
+            chunk = normalized_idxs[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            target.execute(
+                f"""
+                DELETE FROM leaves
+                WHERE artifact_id = ?
+                  AND space_kind = ?
+                  AND space_id = ?
+                  AND leaf_idx IN ({placeholders})
+                """,
+                [artifact_id, normalized_kind, space_id, *chunk],
+            )
+
     def upsert_many(
         self,
         *,

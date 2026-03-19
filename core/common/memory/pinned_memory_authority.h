@@ -34,12 +34,14 @@ class PinnedMemoryAuthority {
     uint64_t total_bytes = 0;
     absl::Duration allocation_timeout = absl::Seconds(30);
     std::vector<ClassConfig> classes;
+    bool defer_host_registration = false;
   };
 
   static absl::StatusOr<std::shared_ptr<PinnedMemoryAuthority>> create(Config cfg);
 
   absl::StatusOr<std::shared_ptr<PinnedBufferPool>> get_class_pool(std::string_view name) const;
   absl::StatusOr<ClassConfig> get_class_config(std::string_view name) const;
+  absl::Status register_all_pools();
 
   uint64_t total_bytes() const {
     return cfg_.total_bytes;

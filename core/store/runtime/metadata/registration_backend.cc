@@ -9,9 +9,9 @@
 #include <limits>
 #include <map>
 #include <random>
-#include <unordered_map>
 #include <utility>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -28,6 +28,8 @@
 #include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
+#include "core/store/materialization/common/piece_view_state_utils.h"
+#include "core/store/materialization/common/view_registration_normalization_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
@@ -39,7 +41,6 @@
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/view_utils.h"
-#include "nlohmann/json.hpp"
 #include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::store::runtime::metadata {
@@ -55,40 +56,6 @@ uint64_t sum_view_write_bytes(const loader::ViewWritePlan& write_plan) {
     total += chunk.length;
   }
   return total;
-}
-
-std::vector<CanonicalRange> canonical_ranges_from_write_plan(const loader::ViewWritePlan& write_plan) {
-  std::vector<CanonicalRange> ranges;
-  ranges.reserve(write_plan.chunks.size());
-  for (const auto& chunk : write_plan.chunks) {
-    CanonicalRange range;
-    range.offset = chunk.canonical_offset;
-    range.length = chunk.length;
-    ranges.push_back(range);
-  }
-  std::sort(ranges.begin(), ranges.end(), [](const CanonicalRange& a, const CanonicalRange& b) {
-    return a.offset < b.offset;
-  });
-  std::vector<CanonicalRange> merged;
-  merged.reserve(ranges.size());
-  for (const auto& range : ranges) {
-    if (range.length == 0) {
-      continue;
-    }
-    if (merged.empty()) {
-      merged.push_back(range);
-      continue;
-    }
-    auto& last = merged.back();
-    const uint64_t last_end = last.offset + last.length;
-    if (range.offset <= last_end) {
-      const uint64_t new_end = std::max(last_end, range.offset + range.length);
-      last.length = new_end - last.offset;
-    } else {
-      merged.push_back(range);
-    }
-  }
-  return merged;
 }
 
 absl::Status add_non_overlapping_ingested_range(
@@ -224,6 +191,40 @@ std::vector<components::CanonicalRange> to_component_ranges(const std::vector<Ca
   return out;
 }
 
+ingestion::VerifiedContentDescriptor build_registration_verified_content_descriptor(
+    std::string_view index_multihash,
+    std::string_view data_multihash,
+    uint64_t size_bytes) {
+  ingestion::VerifiedContentDescriptor descriptor;
+  descriptor.content_identity.semantic_layout_identity.kind = ingestion::SemanticLayoutKind::kCanonicalIndexDigest;
+  descriptor.content_identity.semantic_layout_identity.value = std::string(index_multihash);
+  descriptor.content_identity.logical_size_bytes = size_bytes;
+  descriptor.content_identity.digest_alg = "multihash";
+  descriptor.content_identity.digest_bytes = std::string(data_multihash);
+  return descriptor;
+}
+
+ingestion::VerificationRecord build_registration_verification_record(std::string_view index_multihash) {
+  return ingestion::VerificationRecord{
+      .verification_method = ingestion::VerificationMethod::kRegistrationCommit,
+      .verified_at = absl::Now(),
+      .layout_proof_kind = ingestion::LayoutProofKind::kCanonicalIndexDigest,
+      .layout_proof_value = std::string(index_multihash),
+  };
+}
+
+void maybe_attach_registration_verification(
+    RegistrationCommitResult& result,
+    std::string_view index_multihash,
+    std::string_view data_multihash) {
+  if (result.id_kind != common::ArtifactIdKind::kMi2 || index_multihash.empty() || data_multihash.empty()) {
+    return;
+  }
+  result.verified_content_descriptor =
+      build_registration_verified_content_descriptor(index_multihash, data_multihash, result.size_bytes);
+  result.verification_record = build_registration_verification_record(index_multihash);
+}
+
 absl::Status zero_view_padding(
     const loader::ViewWritePlan& write_plan,
     uint64_t view_size_bytes,
@@ -320,49 +321,6 @@ absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::s
   return std::make_pair(std::string(index_mh), std::string(data_mh));
 }
 
-constexpr uint64_t kProofChunkBytesV1 = 4ULL * 1024 * 1024;
-constexpr std::string_view kProofSchemaV1 = "v1";
-
-struct TensorInterval {
-  std::string tensor_name;
-  uint64_t offset{0};
-  uint64_t size_bytes{0};
-};
-
-absl::StatusOr<std::vector<TensorInterval>> parse_tensor_intervals(std::string_view canonical_index_json) {
-  if (canonical_index_json.empty()) {
-    return absl::InvalidArgumentError("canonical_index_json must not be empty");
-  }
-  nlohmann::json j;
-  try {
-    j = nlohmann::json::parse(canonical_index_json, nullptr, true);
-  } catch (const std::exception& ex) {
-    return absl::InvalidArgumentError(absl::StrCat("Failed to parse canonical index JSON: ", ex.what()));
-  }
-  if (!j.is_object()) {
-    return absl::InvalidArgumentError("canonical index JSON must be an object");
-  }
-
-  std::vector<TensorInterval> out;
-  out.reserve(j.size());
-  for (auto it = j.begin(); it != j.end(); ++it) {
-    const std::string tensor_name = it.key();
-    const auto& arr = it.value();
-    if (!arr.is_array() || arr.size() < 2) {
-      continue;
-    }
-    TensorInterval interval;
-    interval.tensor_name = tensor_name;
-    interval.offset = arr[0].get<uint64_t>();
-    interval.size_bytes = arr[1].get<uint64_t>();
-    out.push_back(std::move(interval));
-  }
-
-  std::sort(
-      out.begin(), out.end(), [](const TensorInterval& a, const TensorInterval& b) { return a.offset < b.offset; });
-  return out;
-}
-
 bool ranges_cover_interval(const std::vector<CanonicalRange>& ranges, uint64_t start, uint64_t length) {
   if (length == 0) {
     return true;
@@ -387,89 +345,6 @@ bool ranges_cover_interval(const std::vector<CanonicalRange>& ranges, uint64_t s
     }
   }
   return cursor >= end;
-}
-
-absl::Status read_view_bytes(
-    common::memory::MemoryLocation location,
-    void* base_ptr,
-    int device_id,
-    uint64_t view_offset,
-    absl::Span<uint8_t> dst) {
-  if (dst.empty()) {
-    return absl::OkStatus();
-  }
-  if (base_ptr == nullptr) {
-    return absl::InvalidArgumentError("read_view_bytes requires non-null base_ptr");
-  }
-  auto* src = static_cast<uint8_t*>(base_ptr) + static_cast<std::ptrdiff_t>(view_offset);
-  switch (location) {
-    case common::memory::MemoryLocation::CPU:
-      std::memcpy(dst.data(), src, dst.size());
-      return absl::OkStatus();
-    case common::memory::MemoryLocation::GPU: {
-      if (!cuda::is_fake()) {
-        auto set_status = cuda::set_device(device_id);
-        if (!set_status.ok()) {
-          return set_status;
-        }
-      }
-      return cuda::memcpy(dst.data(), src, dst.size(), cudaMemcpyDeviceToHost);
-    }
-    default:
-      return absl::InvalidArgumentError("unsupported memory location for view reads");
-  }
-}
-
-struct CanonicalToViewSpan {
-  uint64_t canonical_offset{0};
-  uint64_t view_offset{0};
-  uint64_t length{0};
-};
-
-absl::StatusOr<std::vector<CanonicalToViewSpan>> canonical_spans_for_tensor(
-    const loader::ViewWritePlan& write_plan,
-    uint64_t tensor_offset,
-    uint64_t tensor_bytes,
-    uint64_t view_size_bytes) {
-  const uint64_t tensor_end = tensor_offset + tensor_bytes;
-  std::vector<CanonicalToViewSpan> spans;
-  spans.reserve(write_plan.chunks.size());
-
-  for (const auto& chunk : write_plan.chunks) {
-    const uint64_t chunk_end = chunk.canonical_offset + chunk.length;
-    if (chunk.length == 0 || chunk_end <= tensor_offset || chunk.canonical_offset >= tensor_end) {
-      continue;
-    }
-    const uint64_t start = std::max<uint64_t>(chunk.canonical_offset, tensor_offset);
-    const uint64_t end = std::min<uint64_t>(chunk_end, tensor_end);
-    CanonicalToViewSpan span;
-    span.canonical_offset = start;
-    span.view_offset = chunk.view_offset + (start - chunk.canonical_offset);
-    span.length = end - start;
-    if (span.view_offset > view_size_bytes || span.view_offset + span.length > view_size_bytes) {
-      return absl::OutOfRangeError("view offset out of bounds while building proof spans");
-    }
-    spans.push_back(std::move(span));
-  }
-
-  std::sort(spans.begin(), spans.end(), [](const CanonicalToViewSpan& a, const CanonicalToViewSpan& b) {
-    return a.canonical_offset < b.canonical_offset;
-  });
-
-  uint64_t cursor = tensor_offset;
-  for (const auto& span : spans) {
-    if (span.length == 0) {
-      continue;
-    }
-    if (span.canonical_offset != cursor) {
-      return absl::FailedPreconditionError("tensor canonical span coverage is not contiguous");
-    }
-    cursor = span.canonical_offset + span.length;
-  }
-  if (cursor != tensor_end) {
-    return absl::FailedPreconditionError("tensor canonical span coverage is incomplete");
-  }
-  return spans;
 }
 
 } // namespace
@@ -598,66 +473,41 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   uint64_t canonical_size = reg.total_size_bytes;
 
   std::optional<loader::BidirectionalViewPlan> view_plan;
+  std::optional<ViewRegistration> normalized_view_registration;
   uint64_t expected_view_bytes = 0;
   uint64_t view_size_bytes = 0;
   std::vector<CanonicalRange> canonical_ranges;
   if (reg.view.has_value()) {
-    const auto& view_opts = *reg.view;
     if (!reg.tensor_index_data.has_value() || reg.tensor_index_data->empty()) {
       return absl::InvalidArgumentError("view registration requires inline canonical index data");
     }
-    if (view_opts.view_id.empty()) {
-      return absl::InvalidArgumentError("view registration requires a non-empty view_id");
+    auto normalized_view_or = store::materialization::common::normalize_view_registration(
+        *reg.view, *reg.tensor_index_data, reg.total_size_bytes);
+    if (!normalized_view_or.ok()) {
+      return normalized_view_or.status();
     }
-    if (view_opts.placement == ViewPlacement::kUnspecified) {
-      return absl::InvalidArgumentError("view registration requires explicit placement");
-    }
-    if (view_opts.registration_kind == ViewRegistrationKind::kUnspecified) {
-      return absl::InvalidArgumentError("view.registration_kind must be specified");
-    }
-    if (view_opts.registration_kind == ViewRegistrationKind::kPiece) {
-      if (view_opts.canonical_size_bytes == 0) {
-        return absl::InvalidArgumentError("piece registration requires canonical_size_bytes");
-      }
-      canonical_size = view_opts.canonical_size_bytes;
+    const auto& normalized_view = *normalized_view_or;
+    const auto& normalized_registration = normalized_view.registration;
+    if (normalized_registration.registration_kind == ViewRegistrationKind::kPiece) {
+      canonical_size = normalized_view.canonical_size_bytes;
       if (!reg.client_artifact_id.has_value() || reg.client_artifact_id->empty()) {
         return absl::InvalidArgumentError("piece registration requires client_artifact_id (cgid)");
       }
     } else {
-      if (view_opts.canonical_size_bytes != 0 && view_opts.canonical_size_bytes != reg.total_size_bytes) {
-        return absl::InvalidArgumentError("view.canonical_size_bytes must match total_size_bytes");
-      }
-      canonical_size = view_opts.canonical_size_bytes != 0 ? view_opts.canonical_size_bytes : reg.total_size_bytes;
+      canonical_size = normalized_view.canonical_size_bytes;
     }
-    auto plan_or = loader::ViewPlanner::compute_bidirectional_view_plan(*reg.tensor_index_data, view_opts.spec);
-    if (!plan_or.ok()) {
-      return plan_or.status();
-    }
-    view_plan = std::move(*plan_or);
-    expected_view_bytes = sum_view_write_bytes(view_plan->write);
-    view_size_bytes = view_plan->forward.view_size_bytes;
-    canonical_ranges = canonical_ranges_from_write_plan(view_plan->write);
-    uint64_t covered_bytes = 0;
-    for (const auto& range : canonical_ranges) {
-      covered_bytes += range.length;
-    }
-    if (covered_bytes > canonical_size) {
-      return absl::InvalidArgumentError("view registration exceeds canonical byte space");
-    }
-    if (view_opts.registration_kind == ViewRegistrationKind::kPiece) {
+    view_plan = normalized_view.plan;
+    normalized_view_registration = normalized_registration;
+    expected_view_bytes = normalized_view.expected_view_bytes;
+    view_size_bytes = normalized_view.view_size_bytes;
+    canonical_ranges = normalized_view.canonical_ranges;
+    if (normalized_registration.registration_kind == ViewRegistrationKind::kPiece) {
       if (reg.total_size_bytes != view_size_bytes) {
         return absl::InvalidArgumentError("piece registration total_size_bytes must equal view_size_bytes");
       }
-      if (ranges_cover_interval(canonical_ranges, 0, canonical_size)) {
-        return absl::InvalidArgumentError(
-            "piece registration must not fully cover canonical bytes; use registration_kind=CANONICAL");
-      }
     } else {
-      if (covered_bytes != canonical_size) {
-        return absl::InvalidArgumentError(
-            "canonical view registration must fully cover canonical bytes; use registration_kind=PIECE for partial");
-      }
-      if (view_opts.placement == ViewPlacement::kServer && view_plan->inverse_transform.requires_materialization) {
+      if (normalized_registration.placement == ViewPlacement::kServer &&
+          view_plan->inverse_transform.requires_materialization) {
         auto info_or = device_manager_->get_gpu_info(reg.device_id);
         if (!info_or.ok()) {
           return absl::FailedPreconditionError(
@@ -826,9 +676,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
 
   if (view_plan.has_value()) {
     entry->view_state = std::make_unique<PendingRegistrationContext::ViewState>();
-    entry->view_state->options = *reg.view;
-    entry->view_state->options.canonical_size_bytes = canonical_size;
-    entry->view_state->options.canonical_ranges = canonical_ranges;
+    entry->view_state->options = *normalized_view_registration;
     entry->view_state->plan = *view_plan;
     entry->view_state->expected_view_bytes = expected_view_bytes;
     entry->view_state->view_size_bytes = view_size_bytes;
@@ -1184,9 +1032,13 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
   loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .view_id = view_id, .device = dev_key, .replica = 0};
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
+  const bool allow_cgid_view_replacement =
+      entry->view_state != nullptr && entry->id_kind == common::ArtifactIdKind::kCgid;
   bool reuse_existing = false;
+  bool mi2_inserted_new = false;
   bool stable_cache_admitted = false;
   bool key_already_exists = false;
+  std::optional<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>> replaced_existing_replica;
   if (allow_idempotent) {
     if (auto existing_or = replica_registry_->find(mi2_key); existing_or.ok()) {
       reuse_existing = true;
@@ -1199,11 +1051,30 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       key_already_exists = true;
       if (allow_idempotent) {
         reuse_existing = true;
+      } else if (allow_cgid_view_replacement) {
+        replaced_existing_replica = replica_registry_->erase(mi2_key);
+        if (!replaced_existing_replica.has_value()) {
+          return absl::FailedPreconditionError("existing replica disappeared during cgid view replacement");
+        }
+        emplace_status =
+            replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry->replica});
+        if (!emplace_status.ok()) {
+          auto restore_status = replica_registry_->emplace(
+              replaced_existing_replica->first, gsl::not_null{replaced_existing_replica->second});
+          if (!restore_status.ok()) {
+            LOG(WARNING) << "failed to restore prior replica after replacement emplace failure for " << mi2_key << ": "
+                         << restore_status;
+          }
+          return emplace_status;
+        }
+        mi2_inserted_new = true;
       } else {
         VLOG(1) << "mi2 mapping already present for artifact_id=" << entry->artifact_id;
       }
     } else if (!emplace_status.ok()) {
       return emplace_status;
+    } else {
+      mi2_inserted_new = true;
     }
   }
 
@@ -1230,86 +1101,70 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.schema_version = entry->schema_version;
     result.encoding = entry->encoding;
     result.id_kind = entry->id_kind;
+    maybe_attach_registration_verification(result, index_multihash, data_multihash);
     record_commit_latency(*entry, "existed");
     return result;
-  }
-
-  // Piece/view retries may hit an existing logical key. The newly ingested
-  // replica is transient in that case, so avoid publishing fresh transport
-  // keys that would become stale once this commit scope ends.
-  const bool skip_transport_publication = key_already_exists && entry->view_state != nullptr;
-
-  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
-      stable_cache_manager_) {
-    components::StableDramCacheManager::AdmissionRequest admit_request;
-    admit_request.key = mi2_key;
-    admit_request.replica = entry->replica;
-    admit_request.size_bytes = entry->size_bytes;
-    admit_request.policy = *entry->stable_cache_policy;
-    auto admit_or = stable_cache_manager_->admit(admit_request);
-    if (!admit_or.ok()) {
-      release_replica_memory(entry->replica, common::memory::MemoryLocation::CPU);
-      return admit_or.status();
-    }
-    stable_cache_admitted = admit_or->admitted && !admit_or->skipped;
   }
 
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
   std::optional<ExportRegistration> export_registration;
-  if (!skip_transport_publication && entry->enable_p2p && communication_manager_ &&
-      communication_manager_->is_enabled()) {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
-        ? common::memory::MemoryLocation::CPU
-        : common::memory::MemoryLocation::GPU;
-    auto reg_info_or = entry->replica->enable_remote_memory_access(location, communication_manager_->get_engine());
-    if (!reg_info_or.ok()) {
-      return reg_info_or.status();
-    }
-    export_registration = *reg_info_or;
-    remote_keys = reg_info_or->remote_memory_keys;
-    buffer_sizes.reserve(reg_info_or->buffer_sizes.size());
-    for (const auto& sz : reg_info_or->buffer_sizes) {
-      buffer_sizes.push_back(static_cast<uint64_t>(sz));
-    }
-  }
 
   DeviceKey device = entry->plan == PendingRegistrationContext::Plan::kStableDram
       ? DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""}
       : DeviceRegistry::instance().gpu_key(entry->device_id);
   std::optional<std::string> verification_json;
-  if (!remote_keys.empty()) {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
-        ? common::memory::MemoryLocation::CPU
-        : common::memory::MemoryLocation::GPU;
-    std::vector<void*> data_ptrs = entry->replica->get_memory_manager().get_pointer(location);
-    if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
-      std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
-      const int verify_device = (location == common::memory::MemoryLocation::GPU) ? entry->device_id : -1;
-      auto info_or = common::ArtifactVerifier::generate_verification_info(
-          data_ptrs, data_sizes, verify_device, common::VerificationLevel::KEY_POINTS);
-      if (info_or.ok()) {
-        verification_json = info_or->to_json();
-      }
-    }
-  }
-
-  if (promotion_manager_ && export_registration.has_value()) {
-    auto promotion_status =
-        promotion_manager_->record_export_registration(mi2_key, *export_registration, verification_json);
-    if (!promotion_status.ok()) {
-      LOG(WARNING) << "record_export_registration failed for " << mi2_key << ": " << promotion_status;
-    }
-  }
 
   std::optional<std::string> view_data_hash;
   std::optional<std::string> view_spec_json;
   std::vector<global_store::v1::LeafWrite> leaf_writes;
   std::vector<global_store::v1::PieceProofDigestWrite> proof_digests;
+  std::optional<std::vector<view::CanonicalRange>> committed_canonical_ranges;
+  std::optional<uint64_t> committed_canonical_size_bytes;
+  std::optional<uint64_t> committed_canonical_bytes_covered;
   std::vector<uint64_t> canonical_leaf_indices;
   std::optional<size_t> leaf_chunk_bytes;
+  const auto committed_location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+      ? common::memory::MemoryLocation::CPU
+      : common::memory::MemoryLocation::GPU;
+  auto rollback_inserted_replica = absl::MakeCleanup([&]() {
+    if (!mi2_inserted_new) {
+      return;
+    }
+    if (export_registration.has_value()) {
+      if (promotion_manager_) {
+        auto demote_status = promotion_manager_->finalize_replica_demotion(mi2_key);
+        if (!demote_status.ok()) {
+          LOG(WARNING) << "registration rollback demotion failed for " << mi2_key << ": " << demote_status;
+        }
+      } else if (communication_manager_ && communication_manager_->is_enabled()) {
+        auto disable_status =
+            entry->replica->disable_remote_memory_access(committed_location, communication_manager_->get_engine());
+        if (!disable_status.ok()) {
+          LOG(WARNING) << "registration rollback disable_remote_memory_access failed for " << mi2_key << ": "
+                       << disable_status;
+        }
+      }
+    }
+    if (stable_cache_admitted && stable_cache_manager_) {
+      stable_cache_manager_->on_replica_evicted(mi2_key, entry->replica, "registration_commit_failed");
+    }
+    auto removed = replica_registry_->erase(mi2_key);
+    if (!removed.has_value()) {
+      VLOG(1) << "registration rollback: committed key already absent " << mi2_key;
+    }
+    if (replaced_existing_replica.has_value()) {
+      auto restore_status = replica_registry_->emplace(
+          replaced_existing_replica->first, gsl::not_null{replaced_existing_replica->second});
+      if (!restore_status.ok()) {
+        LOG(WARNING) << "registration rollback restore failed for " << mi2_key << ": " << restore_status;
+      }
+    }
+    release_replica_memory(entry->replica, committed_location);
+  });
   if (entry->view_state) {
-    view_spec_json = view::build_view_spec_json(entry->view_state->options.spec);
+    view_spec_json =
+        view::build_view_spec_json(entry->view_state->options.spec, entry->view_state->options.tensor_names);
     leaf_chunk_bytes = artifact_chunk_bytes_ == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : artifact_chunk_bytes_;
 
     if (entry->view_state->options.registration_kind == ViewRegistrationKind::kPiece) {
@@ -1334,196 +1189,34 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       if (base_ptr == nullptr) {
         return absl::FailedPreconditionError("view buffer base pointer unavailable for hashing");
       }
-      absl::StatusOr<loader::verification::ViewHashResult> view_hash_or;
+      std::unique_ptr<loader::SeekableSource> piece_view_source;
       if (location == common::memory::MemoryLocation::CPU) {
-        loader::CpuMemorySource src(gsl::not_null<const void*>{base_ptr}, entry->view_state->view_size_bytes);
-        view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
-            src, entry->view_state->view_size_bytes, *leaf_chunk_bytes);
+        piece_view_source = std::make_unique<loader::CpuMemorySource>(
+            gsl::not_null<const void*>{base_ptr}, entry->view_state->view_size_bytes);
       } else {
-        loader::GpuMemorySource view_source(
+        piece_view_source = std::make_unique<loader::GpuMemorySource>(
             gsl::not_null<void*>{base_ptr}, entry->device_id, entry->view_state->view_size_bytes);
-        view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
-            view_source, entry->view_state->view_size_bytes, *leaf_chunk_bytes);
       }
-      if (!view_hash_or.ok()) {
-        return view_hash_or.status();
+      const std::string canonical_index_json = entry->tensor_index_data.value_or(std::string{});
+      auto piece_payload_or = store::materialization::common::build_piece_view_state_payload(
+          store::materialization::common::PieceViewStateRequest{
+              .canonical_index_json = canonical_index_json,
+              .view_id = entry->view_state->options.view_id,
+              .plan = entry->view_state->plan,
+              .view_source = *piece_view_source,
+              .leaf_chunk_bytes = *leaf_chunk_bytes,
+              .canonical_size_bytes = entry->view_state->options.canonical_size_bytes,
+          });
+      if (!piece_payload_or.ok()) {
+        return piece_payload_or.status();
       }
-      view_data_hash = view_hash_or->multihash;
-      const auto& digests = view_hash_or->leaf_digests;
-      leaf_writes.reserve(leaf_writes.size() + digests.size());
-      for (size_t idx = 0; idx < digests.size(); ++idx) {
-        global_store::v1::LeafWrite leaf;
-        auto* hash_space = leaf.mutable_hash_space();
-        hash_space->mutable_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
-        hash_space->mutable_byte_space()->set_id(entry->view_state->options.view_id);
-        leaf.set_leaf_idx(static_cast<uint64_t>(idx));
-        const auto& digest = digests[idx];
-        leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
-        leaf_writes.push_back(std::move(leaf));
-      }
-
-      if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty()) {
-        auto intervals_or = parse_tensor_intervals(*entry->tensor_index_data);
-        if (!intervals_or.ok()) {
-          return intervals_or.status();
-        }
-        std::unordered_map<std::string, uint64_t> transpose_view_offsets;
-        std::unordered_map<std::string, loader::TensorTransformPlan> transpose_inverse_plans;
-        if (entry->view_state->plan.forward.transform.requires_materialization) {
-          for (const auto& tensor_plan : entry->view_state->plan.forward.transform.tensors) {
-            transpose_view_offsets.emplace(tensor_plan.tensor_name, tensor_plan.dst_offset);
-          }
-          for (const auto& tensor_plan : entry->view_state->plan.inverse_transform.tensors) {
-            transpose_inverse_plans.emplace(tensor_plan.tensor_name, tensor_plan);
-          }
-        }
-        for (const auto& interval : *intervals_or) {
-          if (interval.size_bytes == 0) {
-            continue;
-          }
-          if (!ranges_cover_interval(
-                  entry->view_state->options.canonical_ranges, interval.offset, interval.size_bytes)) {
-            continue;
-          }
-          const auto inverse_it = transpose_inverse_plans.find(interval.tensor_name);
-          if (inverse_it != transpose_inverse_plans.end()) {
-            const auto offset_it = transpose_view_offsets.find(interval.tensor_name);
-            if (offset_it == transpose_view_offsets.end()) {
-              return absl::FailedPreconditionError("missing transpose tensor dst_offset for proof digests");
-            }
-            const uint64_t view_offset = offset_it->second;
-            if (view_offset + interval.size_bytes > entry->view_state->view_size_bytes) {
-              return absl::OutOfRangeError("transpose tensor view range exceeds view buffer size");
-            }
-            if (interval.size_bytes > std::numeric_limits<size_t>::max()) {
-              return absl::OutOfRangeError("transpose tensor exceeds host memory limits");
-            }
-            std::vector<uint8_t> view_bytes(static_cast<size_t>(interval.size_bytes));
-            auto read_status =
-                read_view_bytes(location, base_ptr, entry->device_id, view_offset, absl::MakeSpan(view_bytes));
-            if (!read_status.ok()) {
-              return read_status;
-            }
-            std::vector<uint8_t> canonical_bytes = view_bytes;
-            loader::ViewWritePlan write_plan;
-            loader::ViewWritePlan::Chunk write_chunk;
-            write_chunk.canonical_offset = 0;
-            write_chunk.view_offset = 0;
-            write_chunk.length = interval.size_bytes;
-            write_chunk.segment_aligned = false;
-            write_plan.chunks.push_back(std::move(write_chunk));
-
-            loader::TransformPlan inverse_transform;
-            inverse_transform.requires_materialization = true;
-            loader::TensorTransformPlan tensor_transform = inverse_it->second;
-            tensor_transform.dst_offset = 0;
-            tensor_transform.canonical_offset = 0;
-            tensor_transform.storage_offset_elements = 0;
-            inverse_transform.tensors.push_back(std::move(tensor_transform));
-
-            loader::ViewIngestExecutor executor(
-                std::move(write_plan),
-                std::move(inverse_transform),
-                loader::ViewIngestExecutor::IngestTarget::kCanonical);
-            absl::Status ingest_status = executor.ingest_chunk(
-                /*view_offset=*/0,
-                absl::Span<const std::byte>(reinterpret_cast<const std::byte*>(view_bytes.data()), view_bytes.size()),
-                common::memory::MemoryLocation::CPU,
-                canonical_bytes.data(),
-                /*device_id=*/-1);
-            if (!ingest_status.ok()) {
-              return ingest_status;
-            }
-            absl::Status finalize_status =
-                executor.finalize(common::memory::MemoryLocation::CPU, canonical_bytes.data(), /*device_id=*/-1);
-            if (!finalize_status.ok()) {
-              return finalize_status;
-            }
-
-            const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
-            for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
-              const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
-              const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
-              if (local_end <= local_start) {
-                continue;
-              }
-              if (local_end > std::numeric_limits<size_t>::max()) {
-                return absl::OutOfRangeError("proof chunk exceeds host memory limits");
-              }
-              const size_t chunk_bytes = static_cast<size_t>(local_end - local_start);
-              std::vector<uint8_t> digest = common::sha256_digest_bytes(
-                  absl::Span<const uint8_t>(canonical_bytes.data() + local_start, chunk_bytes));
-              if (digest.size() != 32) {
-                return absl::InternalError("sha256 digest size mismatch");
-              }
-              global_store::v1::PieceProofDigestWrite proof;
-              proof.set_view_id(entry->view_state->options.view_id);
-              proof.set_tensor_name(interval.tensor_name);
-              proof.set_proof_schema_version(std::string(kProofSchemaV1));
-              proof.set_proof_chunk_idx(proof_chunk_idx);
-              proof.set_digest(digest.data(), static_cast<int>(digest.size()));
-              proof_digests.push_back(std::move(proof));
-            }
-            continue;
-          }
-
-          auto spans_or = canonical_spans_for_tensor(
-              entry->view_state->plan.write, interval.offset, interval.size_bytes, entry->view_state->view_size_bytes);
-          if (!spans_or.ok()) {
-            return spans_or.status();
-          }
-          std::vector<CanonicalToViewSpan> spans = std::move(*spans_or);
-          size_t span_idx = 0;
-          const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
-          for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
-            const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
-            const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
-            const uint64_t abs_start = interval.offset + local_start;
-            const uint64_t abs_end = interval.offset + local_end;
-            if (abs_end <= abs_start) {
-              continue;
-            }
-            if (abs_end - abs_start > std::numeric_limits<size_t>::max()) {
-              return absl::OutOfRangeError("proof chunk exceeds host memory limits");
-            }
-            std::vector<uint8_t> buffer(static_cast<size_t>(abs_end - abs_start));
-            uint64_t cursor = abs_start;
-            while (cursor < abs_end) {
-              while (span_idx < spans.size() && spans[span_idx].canonical_offset + spans[span_idx].length <= cursor) {
-                ++span_idx;
-              }
-              if (span_idx >= spans.size()) {
-                return absl::FailedPreconditionError("missing canonical span while computing proof digests");
-              }
-              const auto& span = spans[span_idx];
-              if (span.canonical_offset > cursor) {
-                return absl::FailedPreconditionError("canonical span gap while computing proof digests");
-              }
-              const uint64_t take_end = std::min<uint64_t>(abs_end, span.canonical_offset + span.length);
-              const size_t take = static_cast<size_t>(take_end - cursor);
-              const uint64_t src_view_offset = span.view_offset + (cursor - span.canonical_offset);
-              auto dst = absl::MakeSpan(buffer).subspan(static_cast<size_t>(cursor - abs_start), take);
-              auto st = read_view_bytes(location, base_ptr, entry->device_id, src_view_offset, dst);
-              if (!st.ok()) {
-                return st;
-              }
-              cursor = take_end;
-            }
-            std::vector<uint8_t> digest =
-                common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), buffer.size()));
-            if (digest.size() != 32) {
-              return absl::InternalError("sha256 digest size mismatch");
-            }
-            global_store::v1::PieceProofDigestWrite proof;
-            proof.set_view_id(entry->view_state->options.view_id);
-            proof.set_tensor_name(interval.tensor_name);
-            proof.set_proof_schema_version(std::string(kProofSchemaV1));
-            proof.set_proof_chunk_idx(proof_chunk_idx);
-            proof.set_digest(digest.data(), static_cast<int>(digest.size()));
-            proof_digests.push_back(std::move(proof));
-          }
-        }
-      }
+      auto piece_payload = std::move(*piece_payload_or);
+      view_data_hash = piece_payload.view_data_hash;
+      committed_canonical_ranges = std::move(piece_payload.canonical_ranges);
+      committed_canonical_size_bytes = piece_payload.canonical_size_bytes;
+      committed_canonical_bytes_covered = piece_payload.canonical_bytes_covered;
+      leaf_writes = std::move(piece_payload.leaf_writes);
+      proof_digests = std::move(piece_payload.proof_digests);
     } else {
       ensure_canonical_map();
       const uint64_t view_total = entry->view_state->plan.forward.selection.map.total_bytes;
@@ -1586,12 +1279,6 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_dram.stage_on_gpu &&
-      entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
-    entry->staging_gpu.reset();
-    entry->gpu_ptr = nullptr;
-  }
-
   if (entry->id_kind == common::ArtifactIdKind::kMi2 && entry->view_state && leaf_chunk_bytes.has_value() &&
       !canonical_leaf_indices.empty() && !index_multihash.empty()) {
     loader::verification::MemoryView canonical_view;
@@ -1636,39 +1323,14 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  size_t pending_size_after = 0;
-  erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
-  erase_pending(registration_id, &pending_size_after);
-  record_pending_gauge(pending_size_after);
-
-  RegistrationCommitResult result;
-  result.registration_id = std::string(registration_id);
-  result.artifact_id = entry->artifact_id;
-  result.device_id = entry->device_id;
-  result.device = device;
-  result.size_bytes = entry->size_bytes;
-  result.existed = skip_transport_publication;
-  result.stable_cache_admitted = stable_cache_admitted;
-  result.index_multihash = index_multihash;
-  result.data_multihash = data_multihash;
-  result.schema_version = entry->schema_version;
-  result.encoding = entry->encoding;
-  result.id_kind = entry->id_kind;
   uint64_t covered_bytes = 0;
   if (entry->view_state) {
-    if (!entry->view_state->options.view_id.empty()) {
-      result.view_id = entry->view_state->options.view_id;
-    }
-    if (view_data_hash.has_value()) {
-      result.view_data_multihash = view_data_hash;
-    }
-    if (!entry->view_state->plan.forward.view_index_json.empty()) {
-      result.view_index_json = entry->view_state->plan.forward.view_index_json;
-    }
-    result.canonical_ranges = entry->view_state->options.canonical_ranges;
-    result.registration_kind = entry->view_state->options.registration_kind;
-    for (const auto& range : result.canonical_ranges) {
-      covered_bytes += range.length;
+    if (committed_canonical_bytes_covered.has_value()) {
+      covered_bytes = *committed_canonical_bytes_covered;
+    } else {
+      for (const auto& range : entry->view_state->options.canonical_ranges) {
+        covered_bytes += range.length;
+      }
     }
   }
 
@@ -1676,13 +1338,16 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     components::ViewStateUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
-    update.view_spec_json = view_spec_json.value_or(view::build_view_spec_json(entry->view_state->options.spec));
+    update.view_spec_json = view_spec_json.value_or(
+        view::build_view_spec_json(entry->view_state->options.spec, entry->view_state->options.tensor_names));
     update.view_size_bytes = entry->view_state->plan.forward.view_size_bytes;
     update.view_data_hash = view_data_hash;
     update.mark_verified = true;
-    update.canonical_size_bytes = entry->view_state->options.canonical_size_bytes;
+    update.canonical_size_bytes =
+        committed_canonical_size_bytes.value_or(entry->view_state->options.canonical_size_bytes);
     update.canonical_bytes_covered = covered_bytes;
-    update.canonical_ranges = to_component_ranges(entry->view_state->options.canonical_ranges);
+    update.canonical_ranges =
+        to_component_ranges(committed_canonical_ranges.value_or(entry->view_state->options.canonical_ranges));
     update.leaf_writes = std::move(leaf_writes);
     update.proof_digests = std::move(proof_digests);
     absl::Status update_status = publisher_->update_view_state(update);
@@ -1695,7 +1360,118 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  if (publisher_ && !skip_transport_publication) {
+  if (entry->view_state && !mi2_inserted_new) {
+    size_t pending_size_after = 0;
+    erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
+    release_replica_memory(entry->replica, committed_location);
+    erase_pending(registration_id, &pending_size_after);
+    record_pending_gauge(pending_size_after);
+
+    RegistrationCommitResult result;
+    result.registration_id = std::string(registration_id);
+    result.artifact_id = entry->artifact_id;
+    result.device_id = entry->device_id;
+    result.device = device;
+    result.size_bytes = entry->size_bytes;
+    result.existed = true;
+    result.stable_cache_admitted = false;
+    result.index_multihash = index_multihash;
+    result.data_multihash = data_multihash;
+    result.schema_version = entry->schema_version;
+    result.encoding = entry->encoding;
+    result.id_kind = entry->id_kind;
+    if (!entry->view_state->options.view_id.empty()) {
+      result.view_id = entry->view_state->options.view_id;
+    }
+    if (view_data_hash.has_value()) {
+      result.view_data_multihash = view_data_hash;
+    }
+    if (!entry->view_state->plan.forward.view_index_json.empty()) {
+      result.view_index_json = entry->view_state->plan.forward.view_index_json;
+    }
+    result.canonical_ranges = committed_canonical_ranges.value_or(entry->view_state->options.canonical_ranges);
+    result.registration_kind = entry->view_state->options.registration_kind;
+    maybe_attach_registration_verification(result, index_multihash, data_multihash);
+    record_commit_latency(*entry, "existed");
+    return result;
+  }
+
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
+      stable_cache_manager_) {
+    components::StableDramCacheManager::AdmissionRequest admit_request;
+    admit_request.key = mi2_key;
+    admit_request.replica = entry->replica;
+    admit_request.size_bytes = entry->size_bytes;
+    admit_request.policy = *entry->stable_cache_policy;
+    auto admit_or = stable_cache_manager_->admit(admit_request);
+    if (!admit_or.ok()) {
+      return admit_or.status();
+    }
+    stable_cache_admitted = admit_or->admitted && !admit_or->skipped;
+  }
+
+  RegistrationCommitResult result;
+  result.registration_id = std::string(registration_id);
+  result.artifact_id = entry->artifact_id;
+  result.device_id = entry->device_id;
+  result.device = device;
+  result.size_bytes = entry->size_bytes;
+  result.existed = false;
+  result.stable_cache_admitted = stable_cache_admitted;
+  result.index_multihash = index_multihash;
+  result.data_multihash = data_multihash;
+  result.schema_version = entry->schema_version;
+  result.encoding = entry->encoding;
+  result.id_kind = entry->id_kind;
+  if (entry->view_state) {
+    if (!entry->view_state->options.view_id.empty()) {
+      result.view_id = entry->view_state->options.view_id;
+    }
+    if (view_data_hash.has_value()) {
+      result.view_data_multihash = view_data_hash;
+    }
+    if (!entry->view_state->plan.forward.view_index_json.empty()) {
+      result.view_index_json = entry->view_state->plan.forward.view_index_json;
+    }
+    result.canonical_ranges = committed_canonical_ranges.value_or(entry->view_state->options.canonical_ranges);
+    result.registration_kind = entry->view_state->options.registration_kind;
+  }
+  maybe_attach_registration_verification(result, index_multihash, data_multihash);
+
+  if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
+    auto reg_info_or =
+        entry->replica->enable_remote_memory_access(committed_location, communication_manager_->get_engine());
+    if (!reg_info_or.ok()) {
+      return reg_info_or.status();
+    }
+    export_registration = *reg_info_or;
+    remote_keys = reg_info_or->remote_memory_keys;
+    buffer_sizes.reserve(reg_info_or->buffer_sizes.size());
+    for (const auto& sz : reg_info_or->buffer_sizes) {
+      buffer_sizes.push_back(static_cast<uint64_t>(sz));
+    }
+
+    std::vector<void*> data_ptrs = entry->replica->get_memory_manager().get_pointer(committed_location);
+    if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
+      std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
+      const int verify_device = (committed_location == common::memory::MemoryLocation::GPU) ? entry->device_id : -1;
+      auto info_or = common::ArtifactVerifier::generate_verification_info(
+          data_ptrs, data_sizes, verify_device, common::VerificationLevel::KEY_POINTS);
+      if (info_or.ok()) {
+        verification_json = info_or->to_json();
+      }
+    }
+  }
+
+  if (promotion_manager_ && export_registration.has_value()) {
+    auto promotion_status =
+        promotion_manager_->record_export_registration(mi2_key, *export_registration, verification_json);
+    if (!promotion_status.ok()) {
+      LOG(WARNING) << "record_export_registration failed for " << mi2_key << ": " << promotion_status;
+    }
+  }
+
+  if (publisher_) {
     RegistrationPublication publication{
         .artifact_id = entry->artifact_id,
         .device = device,
@@ -1711,6 +1487,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         .encoding = entry->encoding,
         .schema_version = entry->schema_version,
         .verification_json = verification_json,
+        .view_data_hash = view_data_hash,
         .index_multihash = index_multihash,
         .data_multihash = data_multihash,
         .id_kind = entry->id_kind};
@@ -1727,16 +1504,24 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_dram.stage_on_gpu &&
+      entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
+    entry->staging_gpu.reset();
+    entry->gpu_ptr = nullptr;
+  }
+
   {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
-        ? common::memory::MemoryLocation::CPU
-        : common::memory::MemoryLocation::GPU;
-    auto mark_status = entry->replica->mark_loaded(location);
+    auto mark_status = entry->replica->mark_loaded(committed_location);
     if (!mark_status.ok()) {
       return mark_status;
     }
-    entry->replica->set_ready_signal(location, absl::OkStatus());
+    entry->replica->set_ready_signal(committed_location, absl::OkStatus());
   }
+  size_t pending_size_after = 0;
+  erase_pending_registry_alias(*entry, /*keep_key=*/mi2_key);
+  erase_pending(registration_id, &pending_size_after);
+  record_pending_gauge(pending_size_after);
+  std::move(rollback_inserted_replica).Cancel();
   record_commit_latency(*entry, "ok");
   return result;
 }

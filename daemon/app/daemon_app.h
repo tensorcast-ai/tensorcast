@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,7 +15,10 @@
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/app/startup_coordinator.h"
 #include "daemon/ha/worker_lifecycle_manager.h"
+#include "daemon/service/controllers/byte_artifact_controller.h"
+#include "daemon/service/controllers/external_target_access_service.h"
 #include "daemon/service/grpc_service_impl.h"
 #include "daemon/state/daemon_kernel.h"
 #include "daemon/state/daemon_options.h"
@@ -48,6 +52,8 @@ class DaemonApp {
     GrpcOptions grpc;
     std::optional<WorkerLifecycleManager::Options> worker_lifecycle;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    std::shared_ptr<StartupCoordinator> startup_coordinator;
+    std::function<absl::Status()> deferred_startup_work;
   };
 
   static absl::StatusOr<std::unique_ptr<DaemonApp>> create(Options options);
@@ -71,6 +77,8 @@ class DaemonApp {
 
   Options options_;
   std::unique_ptr<DaemonKernel> kernel_;
+  std::unique_ptr<ExternalTargetAccessService> external_target_access_service_;
+  std::unique_ptr<ByteArtifactController> byte_artifact_controller_;
   std::unique_ptr<MaterializationController> materialization_controller_;
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
@@ -84,6 +92,7 @@ class DaemonApp {
   std::unique_ptr<WorkerLifecycleManager> worker_lifecycle_manager_;
   std::unique_ptr<grpc::Server> grpc_server_;
   std::atomic<bool> stop_called_{false};
+  std::shared_ptr<std::atomic<bool>> startup_failure_is_fatal_ = std::make_shared<std::atomic<bool>>(true);
 };
 
 } // namespace tensorcast::daemon

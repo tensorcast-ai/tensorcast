@@ -38,10 +38,20 @@ managing clients manually.
   artifacts via daemon `ImportArtifactFromPath` / `ImportArtifactFromPathStream`.
   The daemon returns `artifact_id`, `canonical_index_bytes`, `generation`, and
   `import_state=READY`, and the SDK seeds `ArtifactCache` with this metadata.
-  Import is **reference-only registration**: no payload copy/link/reflink, and
-  no source-directory mutation (no descriptor/index/verification backfill).
+  Import is **reference-only registration** for payload bytes: no payload
+  copy/link/reflink. On first import, the daemon may backfill metadata sidecars
+  such as `artifact_descriptor.json` (and `tensor_index.json` for safetensors
+  directories) so later imports can reuse trusted metadata and skip full data
+  hashing.
+  For one-off backfill on root-owned directories, use
+  `bash tools/backfill_from_disk_import.sh`, which starts an isolated temporary
+  daemon and can auto-escalate to `sudo`.
   Stream events are the canonical progress contract (`phase`, bytes, `percent`,
   terminal `done`, machine-readable `error_code`).
+  Same-host collective disk loading is now an explicit per-call contract:
+  set `ctx=CallContext(collective=CollectiveLoadGroup(...))` to request it.
+  TensorCast no longer auto-enables collective mode from ambient GPU
+  environment variables, and `replica_uuid` remains a pure operation/session id.
   Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
   checks for local development.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
@@ -72,51 +82,87 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   and require server placement.
 - Pass `canonical_index_bytes` to bootstrap a new assembly without needing
   Global Store state. `register_view(..., registration_kind="piece")` is
-  equivalent, while `allow_partial` is deprecated.
+  equivalent.
+- `Store.start_assembly_attempt(layout_id=..., requirements=...)` creates a
+  fresh assembly attempt bound to a `LayoutSpec` and returns an
+  `AssemblyAttemptRef` containing durable attempt scope plus the workspace
+  assembly id. Requirement truth must be explicit in the request; use
+  `AssemblyRequirementSetRef.pp_from_structural_views(...)`,
+  `AssemblyRequirementSetRef.ep_from_structural_views(...)`, or
+  `AssemblyRequirementSetRef.canonical_full()` for the current dependency-ready
+  carriers.
+- The dependency-ready requirement mapping is exact and deterministic:
+  - `PP`: dedupe + sort the structural view ids, then emit one requirement per
+    view with `slot_id = view_id`, `target = structural_view(view_id)`, and
+    `coverage_contract = "pp_structural_view"`.
+  - `EP`: dedupe + sort the structural view ids, then emit one requirement per
+    view with `slot_id = view_id`, `target = structural_view(view_id)`, and
+    `coverage_contract = "ep_structural_view"`.
+  - `canonical_full`: emit one requirement with
+    `slot_id = "__canonical_full__"`, `target = canonical_layout`, and
+    `coverage_contract = "canonical_full"`.
+  - `TP > 1` is not part of the current dependency-ready carrier set.
+- `Store.seal_assembly_attempt(attempt)` explicitly transitions an open attempt
+  onto its sealing workflow and returns `Operation[PublishedModelVersion]`.
+  - The daemon captures one durable readiness cut, persists full structural
+    evidence into that cut, and seals from the cut rather than rereading live
+    workspace view state.
+- `Store.wait_assembly_attempt(attempt)` observes an existing attempt workflow
+  and decodes the dependency-ready source publish lineage into a
+  `PublishedModelVersion`.
+  - In the current wave, `PublishedModelVersion` always carries real source
+    lineage and optional `source_version_key`.
+  - Serving lineage fields remain `None` until typed serving closeout contracts
+    exist; the daemon rejects serving-facing closeout input today instead of
+    returning placeholder values.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
-## Deferred Slice Materialization (vLLM)
-
-- `artifact.deferred_loader(device=..., packing="byte_space"|"append"|"plan", capacity_bytes=...)`
-  returns a `DeferredLoader` that issues no I/O until `commit()`.
-- `loader.tensor(name, slice=...)` returns a CUDA placeholder backed by a
-  client-owned arena; contents are undefined until `commit()` completes.
-- `packing="byte_space"` places tensors at their logical offsets in the selected
-  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
-  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
-  local-only in Phase 1.
-- `packing="append"` preserves call order; `packing="plan"` requires `plan(...)`
-  first to precompute a deterministic layout before calling `tensor(...)`. Both
-  modes are local-only layouts (not publishable).
-- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena and
-  returns an `InplaceSlot`. Use `slot.publish_replica()` to publish a routable
-  replica or `slot.swap(..., publish=True)` to retire → overwrite → publish.
-  `slot.swap(ref)` reuses the slot selection (including any `artifact.view(...)`
-  slices) so callers do not need to restate view parameters on every swap.
-- `capacity_bytes` bounds the arena size (defaults to the base canonical/view
-  total size); exceeding it raises `RESOURCE_EXHAUSTED`.
-- For most users, prefer the `Binding` API (`artifact.bind(...)` /
-  `artifact.bind_into(...)`) which hides the deferred-loader/slot mechanics.
-
 ## Binding (Preferred Inplace Updates)
 
+Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-contract.md`.
+
 - `artifact.bind(device=..., packing=\"byte_space\", publish=False)` allocates a
-  client-owned CUDA layout, fills it from the artifact, and returns a `Binding`
-  ready for swaps without extra ceremony.
+  daemon-owned CUDA target layout, maps shared tensor views into the client
+  process, and returns a `Binding` ready for pointer-stable swaps.
+- `artifact.bind(device=..., mapping=copy_plan, packing=\"byte_space\")` keeps
+  the same owner semantics while inferring the destination tensor layout from
+  the mapped copy plan.
 - `artifact.bind_into({name: tensor, ...}, packing=\"byte_space\", publish=False)`
   adopts **user-owned** CUDA tensors (already allocated in the current process),
   fills them once, and returns a `Binding`.
+- `artifact.subset(...).view(...).bind(...)` captures a rank-local selection once;
+  later `binding.swap("model:v2")` reapplies that same selection to the new
+  artifact version instead of materializing the whole model.
 - `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
-  executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
+  executes the same traced copy plan (`CopyPlanEntry`/`Range`) against
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
+- `Store.create_binding(layout, ownership=\"daemon\", device=\"cuda:0\")` creates a
+  layout-seeded binding before any artifact is installed. The binding starts with
+  `current_value is None` and becomes mutable via `begin_update(...)`.
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you
   still want routable replicas after a successful apply.
+- `binding.publish_replica_operation(ctx=...)` exposes the same publish path as
+  `Operation[T]`, so callers can attach, wait, and inspect status through the
+  unified public continuation surface.
+- `binding.current_value` is the authoritative sealed value handle for the local
+  binding. `binding.artifact_id` / `binding.selection` are convenience mirrors
+  and become `None` when the current value is absent or local-only.
+- `binding.begin_update(...)` retires any published replica, clears the current
+  sealed value, and returns a `BindingUpdateEpoch`.
+- `binding.seal_current(update_epoch=...)` closes the mutable window and produces
+  a local-only `SealedBindingValue`. Local seal does not mint a routable
+  artifact id; publish/key activation remain valid only for artifact-backed
+  current values created by bind/swap flows.
+- `sealed_value.contribute_to_assembly(attempt=...)` compiles the sealed binding
+  onto the existing assembly trunk:
+  piece/view-backed bindings satisfy structural-view slots, while
+  full-canonical bindings satisfy the canonical-layout slot.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
   enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
-  mint `target_write_token` for mapped writes, and publish routes through a VIEW
+  mint `target_publication_token` for mapped writes, and publish routes through a VIEW
   byte-space id derived from canonical index + source view identity + copy plan +
   target layout.
 - View compatibility for mapped binding is narrow-only: transpose/permutation views
@@ -163,10 +209,12 @@ binding.swap("model:v2")
   materialization (`wait_for_completion=False`) and returns an operation handle. Use `op.result(timeout_s=...)` (or
   `op.wait(...)`) to block and `op.cancel()` to best-effort release the operation record. Prefetch defaults to
   `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
-  GPU-only; CPU targets are rejected because they require PID-bound handle leases.
-- Prefetch idempotency fingerprints derive `selection_hash` via
-  `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan/Queue selection
-  identity semantics.
+  supported for both GPU VRAM (`"cuda:0"`/`0`) and daemon-owned host DRAM (`"cpu"`/`"dram"`/`-1`). Handle-exporting APIs
+  remain PID/lease-bound and are separate from daemon-owned warm replicas.
+- Prefetch idempotency derives a stable action fingerprint from selection identity (`artifact_id`,
+  `logical_layout_hash`, `selection_hash`) and target placement (daemon + device/tier). `selection_hash` is computed via
+  `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan selection identity
+  semantics.
 - `artifact.pin_device_residency(device=..., ttl_ms=..., ctx=...) -> Operation[PlacementPin]` creates a placement pin
   (process-independent device residency intent) backed by a daemon-scoped capability token; the returned `PlacementPin`
   supports `renew()` / `release()`.

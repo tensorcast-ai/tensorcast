@@ -32,6 +32,10 @@ class MaterializationBackend {
       const ReplicaTarget& target,
       const MaterializeHints& hints) = 0;
 
+  // Allow orchestrators to inject runtime-owned transport handles when they
+  // build P2PSource directly from control-plane metadata.
+  virtual void prepare_p2p_source(P2PSource* source) const {}
+
   virtual absl::StatusOr<ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const DiskSource& source,

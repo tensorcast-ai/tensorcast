@@ -66,6 +66,76 @@ flowchart TB
 * **PinnedBufferPool & StreamingPinnedBuffer** — Shared pinned pools sourced from the daemon-wide `pinned_memory` authority (or internal defaults when constructed standalone).
 * **MrCache** — Per-protection-domain cache that reuses RDMA MRs for staged buffers to avoid repeated registrations.
 
+### Topology Model (Pool / Endpoint / Link)
+
+The communicator now ships a topology model under `core/communicator/topology/` that captures *reachability* separately from the transport implementation:
+
+- **Pool** models a resource domain (CPU/GPU) and anchors endpoint affinity.
+- **Endpoint** models a transport endpoint with pool affinity constraints by type. Each endpoint carries a `pool_ids` list and validation enforces: **NIC**/**PCIE** endpoints must reference at least one CPU pool and one GPU pool, **NVLINK** endpoints must reference GPU pools only, and **Switch** endpoints have no pool affinity (used only for path search).
+- **Link** models a topology edge; **SW links** are the only links allowed to touch switch endpoints, and link endpoints must share the same `EndpointType` (e.g., NIC↔NIC, NVLINK↔NVLINK).
+
+The topology model is pure data (`Pool` / `Endpoint` / `Link`) and all validation still happens through `Topology::validate()`. Topology construction can now come from either:
+
+- explicit Simple NUMA-only inputs (`BuildSwitchTopologyFromSimpleNuma`), or
+- host discovery merge (`topology/discovery/host_topology_builder.cc`) that overlays LLDP rail mapping and optional NVLINK data (snapshot file or runtime probe) on top of the Simple NUMA baseline.
+
+`Topology::to_dot()` emits a minimal Graphviz view for debugging with DOT-safe escaped ids/labels.
+
+Topology modeling examples live in `core/communicator/topology/topology_test.cc`, including a rail-optimized 8-GPU/8-NIC/2-CPU NVLINK layout (separate NVSwitch and network switch components) and a no-rail 4-GPU/1-NIC/1-CPU layout where a single NIC (bound to CPU + all GPUs) links to one network switch without per-GPU PCIe endpoints. When running under Bazel, the tests emit DOT files into `TEST_UNDECLARED_OUTPUTS_DIR` as `topology_<label>.dot`; set `TENSORCAST_TOPOLOGY_DOT_STDOUT=1` to also print the graphs to stdout.
+
+### Routing Wrapper (Phase 2)
+
+Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the topology model and runtime endpoint bindings onto the existing engine:
+
+- **RoutingContext** owns a `Topology` plus `EndpointBinding` records (node id, IP/port, device ids) and returns a per `src_endpoint_id` → `dst_endpoint_id` communicator.
+- **RouteChannel** represents a path composed of `Connection` hops; Phase 2 supports direct 1-hop channels only (multi-hop returns `UNIMPLEMENTED`).
+- **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`; `PcieAdapter` is engine-backed; `NvlinkAdapter` is now engine-backed through local in-process datapath (`read_tensor_local`) and bypasses network transport when source tensor is registered in the same process.
+- **Stats/Health** are tracked per connection and per link (`ConnectionStats`, `LinkStats`, `HealthState`), recording success/failure counts, last latency, and last error.
+- **Protocol selection (same-node local fabric)** now follows deterministic precedence:
+  - NVLINK endpoint pair + `prefer_nvlink=true` + available NVLINK adapter => `NVLINK`
+  - PCIE endpoint pair + `prefer_pcie=true` + available PCIE adapter => `PCIE`
+  - otherwise => `AUTO` (engine path)
+- **Cross-node rail-matched fallback** is now supported for direct-channel construction: when no direct topology link exists and source/destination bindings are on different nodes, routing infers source/destination device hints (`gpu<id>` / `cpu<id>`) from endpoint ids or binding metadata. It then selects the local NIC by rail + pool affinity and picks a destination-node network binding by weighted scoring (preferred rail, destination rail, NIC topology presence, GPU/CPU pool affinity, endpoint-id/NIC heuristics, network address). This keeps fallback routing affinity-aware for GPU↔GPU, GPU↔CPU-memory, and CPU-memory↔CPU-memory traffic.
+- Routing tests now include a two-stage transfer scenario: `node0/dev/gpu/0 -> node1/dev/gpu/0` over cross-node rail fallback, followed by same-node fanout from `node1/dev/gpu/0` to `node1` GPUs and CPU memory via direct local links.
+- **Topology/bindings are immutable after setup**: `set_topology` and `set_endpoint_bindings` are one-shot; `update_endpoint_binding` returns `FAILED_PRECONDITION`. Create a new `RoutingContext` to change configuration.
+- **Channel caching** captures the topology generation used to build the channel and only reuses cached channels when the current generation matches, preventing stale channel reuse on mid-build changes.
+- **Connection reads** bound waits on adapter futures (default: 60s); timeouts return `DEADLINE_EXCEEDED` and are recorded as failures.
+- **Link directionality** is explicit: a reverse path requires a reverse `Link` entry in the topology.
+
+Store read paths now integrate this wrapper in routed-first mode when `local_endpoint_id`, `remote_endpoint_id`, and `RoutingContext` are all present. Any routed path failure (communicator lookup/channel/read status) immediately falls back to direct `engine::Communicator::read_tensor(ip, port, ...)` for compatibility.
+
+### Simple NUMA / Discovery -> DOT helper
+
+For quick validation, you can build a switch-based direct topology from `CommunicatorConfig.simple_numa` and emit a DOT graph. The helper loads either a **CommunicatorConfig** YAML/JSON directly or a daemon config that contains a top-level `communicator:` section.
+
+```bash
+bazel run //core/communicator:simple_numa_topology_tool -- path/to/comm_or_daemon.yaml > topology.dot
+```
+
+Behavior depends on `communicator.topology_discovery.enable`:
+
+- `false` (default): same as before, all NIC endpoints connect to a single virtual switch (`netsw0`).
+- `true`: topology is built via discovery merge:
+  - LLDP maps NICs to `netsw_rail_<rail_id>` switch endpoints.
+  - Missing LLDP rows degrade to `netsw_unknown` unless `lldp.required=true`.
+  - NIC/GPU affinity is inferred dynamically from PCI topology (longest common PCI path prefix):
+    - GPU PCI paths come from CUDA device properties + sysfs resolution.
+    - NIC PCI paths come from LLDP `pci_bdf` (or `/sys/class/infiniband/<nic>/device` fallback).
+    - When inferred successfully, NIC endpoint `pool_ids` are narrowed from `CPU + node GPUs` to `CPU + nearest GPU subset`.
+    - On partial probe failure, inference degrades and preserves baseline NIC `pool_ids`.
+  - NVLINK snapshot source (`SOURCE_SNAPSHOT_FILE`) can add `nvlink_<gpu_uuid>` endpoints plus bidirectional P2P links between discovered GPU pairs.
+  - NVLINK runtime probe source (`SOURCE_RUNTIME_PROBE`) runs:
+    - `nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits`
+    - `nvidia-smi topo -m`
+    - Runtime parser strips ANSI control sequences from `topo -m` rows (for drivers that emit underlined headers, e.g. `ESC[4mGPU0`).
+    and derives GPU pairs from `NV*` matrix cells.
+  - The builder also emits discovery observability fields: source selection (`lldp_source` / `nvlink_source`), parsed record counts (`lldp_records`, `nvlink_gpus`, `nvlink_edges`), NIC affinity counters (`affinity_nic_candidates`, `affinity_nic_scored`, `affinity_nic_narrowed`), and degrade reasons (`*_degrade_reason`, including `affinity_degrade_reason`) when fallback is taken.
+
+When discovery is enabled, `simple_numa_topology_tool` writes one summary line to stderr with these observability fields and still writes DOT graph output to stdout.
+For repeatable local checks, the repository includes `lldp-info.txt` and `nvlink-snapshot.txt` as sample discovery inputs.
+
+Validation remains strict: each node must list at least one NIC and one GPU, node IDs and GPU IDs must be unique across the config, NIC names must be non-empty/unique, and endpoint/link invariants are enforced by `Topology::Build(...)`.
+
 ---
 
 ## 2. Threading Replica
@@ -174,6 +244,8 @@ Recent instrumentation adds explicit logging around the control-plane receive lo
 - `[on_receive_response]` emits whether we reused an existing RDMA transport or created a new QP, and now records queued pending reads plus peer QP parameters when the handshake finishes.
 - `[rdma_transport]` traces QP readiness, segmented RDMA READ postings, and work completions (`IBV_WC_*` statuses); it refuses to post READ WRs until the peer's QP info has been applied, so the log clearly differentiates "handshake pending" from genuine RDMA failures.
 - `[on_receive_request]` VLOG entries annotate each step of the READ_REQUEST server flow, from tensor-store lookup through RDMA segmentation/staging or MTCP streaming headers, making it easier to pinpoint where a read stalls.
+- `[RdmaContext]` startup logs now print two-phase RNIC selection (`candidate accepted`, per-rail `primary/backup` role) after scanning all usable ports, which makes rail pinning and local failover behavior auditable.
+- `[routing]` logs now emit per-channel route resolution and connection creation with `path` (`cross_node_rail_fallback`, `cross_node_direct`, `local_fanout`), selected `protocol`, adapter (`ENGINE`/`NVLINK`/`PCIE`), link id/type, and endpoint bindings. This explicitly surfaces same-node fanout adapter behavior in logs.
 
 When debugging replica hangs with `enable_rdma=true`, start by verifying that these log lines appear on both peers. Absence of `[recv_func]` or `[on_receive_response]` indicates the control channel never processed the server’s response, while missing `[rdma_transport]` completions typically points to QP handshake or remote memory registration failures.
 
@@ -623,7 +695,7 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 - `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT` (default: disabled). Enable explicitly for multi-tenant deployments; keep it disabled in tests to force deterministic single-owner control sockets.
 - `stager.buffers_per_flow`: staging pipeline depth.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.
-- `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets).
+- `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets); node IDs and GPU IDs must be unique, and each node must list at least one NIC and one GPU.
 
 Pinned pool sizing and chunking are configured via `DaemonConfig.pinned_memory`:
 - `pinned_memory.classes[name=comm_gpu]`: GPU staging pool (slice size + min/max bytes).
@@ -778,6 +850,8 @@ sequenceDiagram
 - **Posting READs:** When the endpoint reaches `Ready`, the client builds `RdmaReadSeg` entries (remote `addr`/`rkey`, local destination based on `remote_offset_`) and invokes `transport->read_multi()`. The transport refuses to post READ WRs while `ready() == false`, so only the handshake path can transition the QP to RTS. Failures update the request status and drop it from `pending_requests_`.
 - **ACK and cleanup:** For staged responses the client installs an `ack_action` that batches all segment offsets into `ENGINE_OP_RDMA_READ_DONE_EX`. Once all RDMA completions fire, this ACK releases staged buffers, deregisters MRs when needed, and removes the corresponding `StageLease` entries from the registry so the channel credit ledger can refill.
 - **Staging backpressure:** If staging buffers are exhausted (for example, GPU tensors with chunked copies but an undersized `pinned_memory.classes[name=comm_gpu].pool_bytes`), the server does **not** block inside `MemoryStager::stage()`. Instead, staging attempts return `Unavailable/ResourceExhausted` and the MTCP staging loop retries with bounded backoff until the daemon-configured `pinned_memory.allocation_timeout` elapses; on expiry the request fails with a diagnosable `ResourceExhausted` error. Watch `[staging_credit]` WARN entries to confirm backpressure is cycling and to identify undersized pools.
+- **RDMA NIC selection resilience:** `RdmaContext::get_best_dev(...)` now handles sparse or asymmetric HCA visibility safely. If no RDMA devices are visible it returns `nullptr` with a warning (no divide-by-zero on hash/modulo paths). For GPU affinity selection, if no NIC satisfies both `max GID` and `max PCI-prefix` filters, selection degrades to a `max PCI-prefix` candidate with a warning instead of crashing.
+- **RDMA connect-fail protocol hardening:** The server now always emits `ENGINE_OP_RDMA_CONNECT_FAILED` (never `ENGINE_OP_RDMA_CONNECT_RESPONSE`) when RDMA QP setup fails, including transport-creation failures. The client side also validates payload size before decoding connect responses and treats legacy/misaligned failure payloads as connect-failed events instead of aborting.
 
 #### Operational Monitoring
 - `[staging_credit]` INFO logs emit whenever a window is staged or released; the log includes the request key, transport, window sequence, credit granted, and the current outstanding credit. Use these entries to verify that credit is cycling while transfers are in flight.
@@ -816,3 +890,7 @@ For manual multi-machine checks, use the communicator CPU/GPU CE binaries
 `//core/communicator:gpu_ce_test_binary`). See
 `docs/development/testing.md` for the server/client command lines and RDMA
 notes.
+
+For a repeatable two-node 8xH800 topology-guided routing smoke (automated
+worker launch + RNIC intersection filtering + affinity assertions), run
+`tools/testing/topology_guided_routing_2node_h800_smoke.sh`.

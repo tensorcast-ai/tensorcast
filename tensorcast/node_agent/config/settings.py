@@ -38,6 +38,7 @@ class NodeAgentConfig(BaseModel):
     engine: str
     worker_id: Optional[str] = None
     signals_endpoint: Optional[str] = None
+    execution_endpoint: Optional[str] = None
     labels: dict[str, str] = {}
     global_store_endpoints: list[str] = []
     heartbeat_interval_ms: int = 5000
@@ -116,6 +117,7 @@ class NodeAgentConfig(BaseModel):
             engine=engine,
             worker_id=pb.identity.worker_id or None,
             signals_endpoint=pb.identity.signals_endpoint or None,
+            execution_endpoint=pb.identity.execution_endpoint or None,
             labels=dict(pb.identity.labels) if pb.identity.labels else {},
             global_store_endpoints=endpoints,
             heartbeat_interval_ms=max(0, int(heartbeat_ms)),

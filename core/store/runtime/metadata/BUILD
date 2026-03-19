@@ -6,6 +6,7 @@ package(default_visibility = ["//visibility:public"])
 sc_header_only_library(
     name = "metadata_types",
     hdrs = ["metadata_types.h"],
+    visibility = ["//visibility:public"],
     deps = [
         "//core/common:artifact_identity_lib",
         "//core/common:memory_location_lib",
@@ -21,6 +22,7 @@ sc_header_only_library(
         "//core/store:store_engine_options",
         "//core/store/materialization/dataplane:view_planner",
         "//core/store/replica",
+        "//core/store/runtime/ingestion:artifact_truth",
         "//core/store/runtime/replica:replica_promotion_manager",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
@@ -46,6 +48,8 @@ sc_cc_library(
         "//core/store:eviction_service",
         "//core/store:stable_dram_cache_manager",
         "//core/store:view_utils",
+        "//core/store/materialization/common:piece_view_state_utils",
+        "//core/store/materialization/common:view_registration_normalization_utils",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:byte_range_map_builder",
         "//core/store/materialization/dataplane:byte_range_mapped_source",
@@ -58,6 +62,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/runtime/replica:replica_promotion_manager",
         "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",

@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-02-08
+last_updated: 2026-03-10
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py
@@ -60,7 +60,7 @@ links:
 
 This document proposes a **programmable** extension to the existing public Python SDK surface. The key design choice is:
 
-> **Weights, KVCache, checkpoints, etc. are all Artifacts (tensor dicts).**  
+> **Weights, byte artifacts (paged KV motivating case), checkpoints, etc. are all Artifacts (tensor dicts).**  
 > **Programmability must not introduce a parallel “data object” abstraction.**
 
 Instead, programmability is expressed by **composing existing Artifact primitives** (prefetch, into, register/put, persistence, view/subset) with a small set of new control-plane primitives:
@@ -71,8 +71,10 @@ Instead, programmability is expressed by **composing existing Artifact primitive
 
 This document prioritizes **What/Why** (semantics and rationale) and defines contracts/invariants that must hold from Phase-0.
 
-Planned advanced extensions (daemon-run plan execution from a single entry daemon, process runtime unification,
-signals, and engine-agnostic KV-cache integration) are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Planned advanced extensions for runtime, daemon ingress, and signals are specified in
+`docs/designs/0056-programmable-framework-adv.md`.
+Engine-specific manifest-oriented integration guidance is specified in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`.
 
 ---
 
@@ -147,7 +149,7 @@ vs what was true **before 0055** (historical motivation). This avoids ambiguity 
   - [Residency Pinning (Placement Pin)](#residency-pinning-placement-pin)
   - [Plan (Programmable Orchestration)](#plan-programmable-orchestration)
   - [Targets & Engine Adapter](#targets--engine-adapter)
-  - [Transforms (Reshard / KV Layout)](#transforms-reshard--kv-layout)
+  - [Transforms (Reshard / Cache Layout)](#transforms-reshard--cache-layout)
 - [Feature Mapping (Legacy → Programmable)](#feature-mapping-legacy--programmable)
 - [Contracts and Invariants](#contracts-and-invariants)
 - [Error, Retry, Deadline, Cancel Semantics](#error-retry-deadline-cancel-semantics)
@@ -175,7 +177,10 @@ vs what was true **before 0055** (historical motivation). This avoids ambiguity 
      - `Artifact.prefetch(...)`, `Artifact.tensor_dict_into(...)`
      - `Artifact.pin_device_residency(...)` (new)
      - `CallContext` (new) and `Plan` (new, advanced)
-   - Domain-specific data (e.g., weights, KV cache, checkpoints) is expressed as artifacts using stable key/view conventions; higher-level helper APIs are layered on top (see `docs/designs/0056-programmable-framework-adv.md`).
+   - Domain-specific data (e.g., weights, byte artifacts (paged KV motivating case), checkpoints) is expressed as
+     artifacts using stable key/view conventions; higher-level helper APIs are layered on top (see
+     `docs/designs/0056-programmable-framework-adv.md` and
+     `docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`).
 
 3. **Unified operation semantics (Phase-0: sync-only)**
    - Prefetch, persistence, and device residency pinning expose a unified `Operation[T]` interface with
@@ -321,8 +326,9 @@ introducing cross-talk between unrelated callers that happen to touch the same `
    - Created by `Artifact.prefetch(...)` (daemon materializes and owns VRAM/DRAM).
    - Optional: kept resident by `pin_device_residency(...)` (placement pin).
 
-2. **Caller-owned buffer (engine arena / KV buffers)**
-   - Filled by `Artifact.tensor_dict_into(...)` / `deferred_loader.commit(...)`.
+2. **Caller-owned buffer (engine arena / cache buffers)**
+   - Filled by `Artifact.tensor_dict_into(...)` / `Artifact.bind_into(...)`
+     (or `Artifact.bind(...)` when the SDK allocates the client-owned target).
    - Uses region-backed `MaterializeIntoTarget` when enabled.
    - Does **not** create daemon-owned VRAM replica.
 
@@ -380,6 +386,15 @@ A unified interface for long-tail workflows (Phase-0: sync/blocking only):
 
 This split keeps the **user-facing `Operation[T]` API uniform** while avoiding unnecessary Global Store load for
 high-frequency or local-only actions.
+
+Repo-wide continuation rule:
+
+- distributed owner-return, replay, attach, wait, cancel, and status flows should converge on `Operation[T]` or an
+  immediate family-defined result at the public SDK boundary,
+- daemon-internal routing or attachment carriers must not become a second public continuation model next to `Operation[T]`.
+- when a distributed authority flow projects to `Operation[T]`, the implementation must retain enough authority-scoped
+  recovery metadata to reattach honestly; bare `operation_id` alone is not a sufficient distributed continuation
+  contract.
 
 ### Plan (new orchestration IR)
 
@@ -519,6 +534,11 @@ Why this is the most consistent:
 
 Unified operation interface. New programmable control-plane actions should return an `Operation[T]`; existing long-tail surfaces (persistence task ids) should be adapted to this interface for consistency.
 
+Additional repo-wide rule:
+
+- when a distributed owner hands control back for later wait, replay, attach, or retry, the caller-visible surface should
+  still be `Operation[T]` unless a narrower family-specific public contract is explicitly defined.
+
 **Phase-0 design rule:** public APIs are sync/blocking only (no `async def`, no `await`).
 
 ```python
@@ -594,6 +614,8 @@ Notes (required):
 `Operation` is always scoped to an execution target (a specific daemon/worker for daemon-owned actions, or a specific
 engine instance for in-process actions). The SDK MUST retain enough target information to implement
 `status/wait/cancel` without assuming `operation_id` is globally unique.
+For distributed authority continuations, the SDK or backing runtime MUST also retain enough authority-scope and recovery
+information to reattach through the correct owner contract rather than assuming plain `operation_id` is sufficient.
 
 #### Operation is a system primitive (not just an SDK wrapper)
 
@@ -634,6 +656,8 @@ For correctness, daemon-owned actions MUST have daemon-side, operation-scoped st
   - re-submitting the same deterministic action with the same `ctx.idempotency_key` (joins the same operation id), or
   - using a fresh context/budget to query status (a dedicated “attach by operation_id” API may be added in future
     designs).
+- future distributed authority designs must preserve this public re-attach model rather than exposing raw daemon-internal
+  attachment carriers directly to callers.
 
 **Failure reporting (required)**
 
@@ -740,7 +764,7 @@ Canonicalization rules (required):
   `ctx.idempotency_key` is provided but `daemon_id` cannot be resolved.
 - `ctx.deadline_ms`, `ctx.qos`, and `ctx.tags` MUST NOT affect operation identity.
 
-#### Into (caller-owned buffers; engine arena / KV buffers)
+#### Into (caller-owned buffers; engine arena / cache buffers)
 
 This is the existing primary read surface (`tensor_dict_into`). Programmable extensions add optional per-call context and remote target indirection.
 
@@ -769,13 +793,11 @@ class Artifact:
         """
 ```
 
-For advanced usage, deferred loader remains the recommended path.
+For advanced usage, binding remains the recommended path.
 
 ```python
-with art.deferred_loader(device="cuda:0") as loader:
-    q = loader.tensor("layers.0.attn.q_proj.weight")
-    ...
-    loader.commit()
+binding = art.subset(["layers.0.attn.q_proj.weight"]).bind(device="cuda:0")
+q = binding.tensors["layers.0.attn.q_proj.weight"]
 ```
 
 #### Persistence (publish durability; existing)
@@ -1102,19 +1124,20 @@ Each engine instance exposes:
 - `mint_target(name, tensors, *, layout_hash=None, ttl_ms=None) -> TargetSpec`
 - `resolve_targets(spec: TargetSpec) -> Mapping[str, torch.Tensor]`
 
-Applications may layer domain-specific helpers (e.g., “mint targets for weights/KV”) on top of the base engine adapter,
-but those helpers are not part of the implemented core surface. Planned signals and engine-integration extensions are
-specified in `docs/designs/0056-programmable-framework-adv.md`.
+Applications may layer domain-specific helpers (e.g., “mint targets for weights/cache”) on top of the base engine
+adapter, but those helpers are not part of the implemented core surface. Planned signals are specified in
+`docs/designs/0056-programmable-framework-adv.md`. Planned engine-integration extensions are specified in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`.
 
 This preserves the “process context boundary”: no cross-process raw tensor pointers.
 
-### Transforms (Reshard / KV Layout)
+### Transforms (Reshard / Cache Layout)
 
 TensorCast already supports **view transforms** (subset/narrow/transpose/etc.) as part of the artifact/view model.
 However, some workflows require **compute transforms** that cannot be expressed as a pure view:
 
 - **Reshard** (checkpoint/weights): all-to-all/concat/reshape across parallelism.
-- **KV layout transform**: page/stride/schema changes that must execute compute.
+- **Cache layout transform** (paged KV motivating case): page/stride/schema changes that must execute compute.
 
 Design rule: compute transforms are **control-plane programmable** but MUST execute at the **node-local safety
 boundary** (Engine Adapter or node-local transform worker), never as a “central controller direct daemon RPC”.
@@ -1127,7 +1150,7 @@ from typing import Mapping
 
 @dataclass(frozen=True, slots=True)
 class TransformSpec:
-    name: str                      # e.g. "reshard.tp8_to_tp4.v1", "kvcache.layout_v1_to_v2.v1"
+    name: str                      # e.g. "reshard.tp8_to_tp4.v1", "byte_artifact.layout_v1_to_v2.v1"
     args: Mapping[str, str | int]  # small, JSON-serializable, versioned
     layout_hash: str | None = None
 ```
@@ -1152,7 +1175,7 @@ class InstanceStepBuilder:
     ) -> PlanStepRef["Artifact"]: ...
 ```
 
-2) **transform → into** (fills engine-owned buffers; used by KV delta + layout)
+2) **transform → into** (fills engine-owned buffers; used by cache delta + layout)
 
 ```python
 class InstanceStepBuilder:
@@ -1168,7 +1191,9 @@ class InstanceStepBuilder:
 
 The Engine Adapter owns the plugin registry and rejects unknown `spec.name` or incompatible `layout_hash`.
 
-Signals and engine integration extensions (including LLM KV-cache orchestration) are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Signals are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Engine integration extensions are specified in
+`docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md`.
 
 ---
 
@@ -1180,16 +1205,16 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
 |---|---|---|
 | `Artifact.prefetch()` | `Artifact.prefetch() -> Operation[PrefetchedReplica]` | Phase-0 is sync/blocking: use `op.result(...)` / `op.wait(...)`. |
 | warm pool | `prefetch + pin_device_residency` | Daemon-owned cache warm (shared). |
-| execute-while-load | `Artifact.view(...).tensor_dict_into(...)` / `DeferredLoader` | Caller-owned buffers; remote requires Engine Adapter. |
+| execute-while-load | `Artifact.view(...).tensor_dict_into(...)` / `Artifact.bind(...)` | Caller-owned buffers; remote requires Engine Adapter. |
 | persistence status polling | `Operation[PersistenceOutcome]` | Phase-0 wraps polling; Phase-1 adds `WaitPersistenceStatus`. |
 | weights broadcast | `Plan` over workers calling prefetch/pin | Source selection remains Global Store-owned. |
-| KV delta transfer | `Artifact.view(...)` (slice/subset) + `tensor_dict_into(...)` | Requires domain-specific tensor naming/layout conventions. |
+| Cache delta transfer (paged KV) | `Artifact.view(...)` (slice/subset) + `tensor_dict_into(...)` | Requires domain-specific tensor naming/layout conventions. |
 | reshard tasks | `transform_register(...)` | Produces a new artifact + versioned key; orchestrated via `Plan`. |
 
 ## Contracts and Invariants
 
 1. **Single-world artifact model**
-   - Weights/KVCache/checkpoints are artifacts (tensor dicts).
+   - Weights/byte artifacts/checkpoints are artifacts (tensor dicts).
    - All data-plane actions are performed via `Store`/`Artifact` primitives.
 
 2. **Selection identity is explicit (required)**
@@ -1476,7 +1501,7 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
   explicit PID-bound lease mode for IPC-handle export flows only.
 - **Placement pins are best-effort**: daemon restart loses pins; mitigate by treating pinning as rebuildable intent
   and making plan executors tolerant (reconcile + re-pin).
-- **Alias and KV catalog scale/availability**: linearizable alias reads and large KV catalogs can hurt availability;
+- **Alias and byte artifact catalog scale/availability**: linearizable alias reads and large byte artifact catalogs can hurt availability;
   mitigate with explicit fallback policy (fixed-version keys) + admission control + bounded candidate LPM.
 - **Transform plugins risk semantic drift**: mitigate with versioned `TransformSpec.name` + `layout_hash` gating and
   fail-fast on mismatch.
@@ -1567,7 +1592,7 @@ except tensorcast.PlanFailedError as exc:
 
 ## Compatibility & Migration
 
-- Existing artifact retrieval calls (`tensor_dict`, `tensor_dict_into`, `DeferredLoader`) continue to work.
+- Existing artifact retrieval calls (`tensor_dict`, `tensor_dict_into`, `bind`, `bind_into`) continue to work.
 - This design intentionally introduces **meaningful breaking changes** where needed to make programmability correct:
   - `Artifact.prefetch(...)` returns `Operation[PrefetchedReplica]` (instead of a `(handle, ticket)` tuple).
   - `Artifact.prefetch(...)` defaults to `NO_LEASE` so it does not create PID-bound UseLeases.

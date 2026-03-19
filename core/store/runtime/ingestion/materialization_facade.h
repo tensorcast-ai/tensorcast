@@ -17,11 +17,14 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/control/materialization_backend.h"
+#include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 #include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/ingestion_event_hub.h"
 #include "core/store/runtime/ingestion/materialization_service.h"
 #include "core/store/runtime/ingestion_events.h"
@@ -73,6 +76,11 @@ class MaterializationFacade : public materialization::control::MaterializationBa
  public:
   using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
 
+  struct SealAssemblyCutInput {
+    std::vector<components::ViewInfo> structural_views;
+    bool canonical_full{false};
+  };
+
   struct Config {
     gsl::not_null<RuntimeContext*> runtime_context;
     gsl::not_null<ReplicaRuntime*> replica_runtime;
@@ -122,6 +130,16 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       uint64_t generation,
       const loading::MaterializeHints& hints);
 
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+
+  absl::StatusOr<ArtifactLoweringResult> execute_artifact_lowering_plan(ArtifactLoweringPlan plan);
+
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const loading::DiskSource& source,
@@ -134,6 +152,7 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints) override;
 
+  void prepare_p2p_source(P2PSource* source) const override;
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
       std::string_view target_artifact_id,
@@ -168,6 +187,12 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       SealProgressCallback progress_cb = {},
       const std::vector<std::string>* allowed_view_ids = nullptr);
 
+  absl::StatusOr<store::SealAssemblyResult> seal_assembly_from_cut(
+      std::string_view assembly_id,
+      const SealAssemblyCutInput& cut_input,
+      bool publish_canonical,
+      SealProgressCallback progress_cb = {});
+
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
 
@@ -197,6 +222,16 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
+
+  absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
+      std::string_view logical_artifact_id,
+      std::string_view physical_artifact_id,
+      const DeviceKey& target_device,
+      const loading::ReplicaTarget& target,
+      std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
 
   std::string make_request_id(std::string_view prefix);
   [[nodiscard]] IngestionStartedEvent make_started_event(

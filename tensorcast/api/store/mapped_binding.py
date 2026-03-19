@@ -10,7 +10,11 @@ from typing import Mapping, Sequence
 import torch
 
 from tensorcast.api._view_ops import NarrowOp, ViewSpecBuildResult
-from tensorcast.api.store.types import ArtifactError, CanonicalIndex
+from tensorcast.api.store.types import (
+    ArtifactError,
+    CanonicalIndex,
+    CanonicalIndexEntry,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +134,21 @@ def compute_mapped_view_id(
     plan: CopyPlan,
     target_tensors: TargetTensors,
 ) -> str:
+    return compute_mapped_view_id_from_specs(
+        canonical_index_bytes=canonical_index_bytes,
+        source_view_id=source_view_id,
+        plan=plan,
+        target_specs=_target_spec_payloads_from_tensors(target_tensors),
+    )
+
+
+def compute_mapped_view_id_from_specs(
+    *,
+    canonical_index_bytes: bytes,
+    source_view_id: str | None,
+    plan: CopyPlan,
+    target_specs: Sequence[Mapping[str, object]],
+) -> str:
     canonical_bytes = bytes(canonical_index_bytes or b"")
     if not canonical_bytes:
         raise ArtifactError(
@@ -137,9 +156,9 @@ def compute_mapped_view_id(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    if not target_tensors:
+    if not target_specs:
         raise ArtifactError(
-            "target_tensors must be non-empty to compute mapped view_id",
+            "target_specs must be non-empty to compute mapped view_id",
             status_code="INVALID_ARGUMENT",
             retryable=False,
         )
@@ -159,39 +178,86 @@ def compute_mapped_view_id(
         ),
     )
 
-    target_specs: list[dict[str, object]] = []
-    normalized_targets = {str(name): tensor for name, tensor in target_tensors.items()}
-    for name in sorted(normalized_targets):
-        tensor = normalized_targets[name]
-        if not isinstance(tensor, torch.Tensor):
-            raise ArtifactError(
-                f"target_tensors['{name}'] must be a torch.Tensor",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
-        target_specs.append(
-            {
-                "name": name,
-                "dtype": str(tensor.dtype),
-                "shape": [int(v) for v in tensor.shape],
-                "stride": [int(v) for v in tensor.stride()],
-                "logical_length": int(tensor.numel()) * int(tensor.element_size()),
-            }
-        )
-
     payload = {
         "version": _MAPPED_VIEW_ID_VERSION,
         "kind": "mapped_binding",
         "canonical_index_sha256": hashlib.sha256(canonical_bytes).hexdigest(),
         "source_view_id": str(source_view_id or ""),
         "copy_plan": copy_plan_payload,
-        "targets": target_specs,
+        "targets": sorted(
+            (
+                {
+                    "name": str(spec["name"]),
+                    "dtype": str(spec["dtype"]),
+                    "shape": [int(v) for v in spec["shape"]],
+                    "stride": [int(v) for v in spec["stride"]],
+                    "logical_length": int(spec["logical_length"]),
+                }
+                for spec in target_specs
+            ),
+            key=lambda item: str(item["name"]),
+        ),
     }
     payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
     digest = hashlib.sha256(payload_bytes).hexdigest()
     return f"mapped:v{_MAPPED_VIEW_ID_VERSION}:{digest}"
+
+
+def infer_mapped_target_entries(
+    *,
+    plan: CopyPlan,
+    canonical_index: CanonicalIndex,
+    view_narrows: Mapping[str, Range] | None,
+) -> tuple[CanonicalIndexEntry, ...]:
+    normalized = normalize_copy_plan(plan)
+    if not normalized:
+        raise ArtifactError(
+            "mapping must include at least one entry",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    canonical_by_name = {entry.name: entry for entry in canonical_index.entries}
+    inferred: dict[str, CanonicalIndexEntry] = {}
+    synthetic_targets: dict[str, torch.Tensor] = {}
+    for dst_name, entries in _group_entries_by_dst(normalized).items():
+        inferred_entry = _infer_target_entry(
+            dst_name=dst_name,
+            entries=entries,
+            canonical_by_name=canonical_by_name,
+            view_narrows=view_narrows or {},
+        )
+        inferred[dst_name] = inferred_entry
+        synthetic_targets[dst_name] = torch.empty(
+            size=tuple(int(v) for v in inferred_entry.shape),
+            dtype=inferred_entry.dtype,
+        )
+    validate_copy_plan(
+        plan=normalized,
+        canonical_index=canonical_index,
+        target_tensors=synthetic_targets,
+        view_narrows=view_narrows,
+        require_full_coverage=True,
+    )
+    ordered_names = tuple(sorted(inferred))
+    cursor = 0
+    packed: list[CanonicalIndexEntry] = []
+    for name in ordered_names:
+        entry = inferred[name]
+        packed.append(
+            CanonicalIndexEntry(
+                name=name,
+                dtype=entry.dtype,
+                shape=entry.shape,
+                stride=entry.stride,
+                storage_offset=0,
+                segment_offset=int(cursor),
+                size_bytes=int(entry.size_bytes),
+            )
+        )
+        cursor += int(entry.size_bytes)
+    return tuple(packed)
 
 
 def validate_copy_plan(
@@ -419,6 +485,169 @@ def _coerce_range(value: object) -> Range | None:
         status_code="INVALID_ARGUMENT",
         retryable=False,
     )
+
+
+def _target_spec_payloads_from_tensors(
+    target_tensors: TargetTensors,
+) -> list[dict[str, object]]:
+    if not target_tensors:
+        return []
+    payloads: list[dict[str, object]] = []
+    normalized_targets = {str(name): tensor for name, tensor in target_tensors.items()}
+    for name in sorted(normalized_targets):
+        tensor = normalized_targets[name]
+        if not isinstance(tensor, torch.Tensor):
+            raise ArtifactError(
+                f"target_tensors['{name}'] must be a torch.Tensor",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        payloads.append(
+            {
+                "name": name,
+                "dtype": str(tensor.dtype),
+                "shape": tuple(int(v) for v in tensor.shape),
+                "stride": tuple(int(v) for v in tensor.stride()),
+                "logical_length": int(tensor.numel()) * int(tensor.element_size()),
+            }
+        )
+    return payloads
+
+
+def _group_entries_by_dst(
+    plan: Sequence[CopyPlanEntry],
+) -> dict[str, list[CopyPlanEntry]]:
+    grouped: dict[str, list[CopyPlanEntry]] = {}
+    for entry in plan:
+        grouped.setdefault(str(entry.dst_name), []).append(entry)
+    return grouped
+
+
+def _infer_target_entry(
+    *,
+    dst_name: str,
+    entries: Sequence[CopyPlanEntry],
+    canonical_by_name: Mapping[str, CanonicalIndexEntry],
+    view_narrows: Mapping[str, Range],
+) -> CanonicalIndexEntry:
+    if not entries:
+        raise ArtifactError(
+            f"mapping missing target '{dst_name}'",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    first_src = canonical_by_name.get(str(entries[0].ckpt_name))
+    if first_src is None:
+        raise ArtifactError(
+            f"mapping references unknown source '{entries[0].ckpt_name}'",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    if not _is_contiguous(
+        shape=tuple(int(v) for v in first_src.shape),
+        stride=tuple(int(v) for v in first_src.stride),
+    ):
+        raise ArtifactError(
+            f"mapping source '{entries[0].ckpt_name}' must be contiguous",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
+    base_shape = list(
+        _effective_source_shape(first_src, view_narrows.get(first_src.name))
+    )
+    if not base_shape:
+        logical_length = int(first_src.size_bytes)
+        return CanonicalIndexEntry(
+            name=str(dst_name),
+            dtype=first_src.dtype,
+            shape=(),
+            stride=(),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=logical_length,
+        )
+
+    resolved_dim: int | None = None
+    max_end = 0
+    for idx, plan_entry in enumerate(entries):
+        src_entry = canonical_by_name.get(str(plan_entry.ckpt_name))
+        if src_entry is None:
+            raise ArtifactError(
+                f"mapping entry {idx} references unknown source '{plan_entry.ckpt_name}'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        effective_shape = _effective_source_shape(
+            src_entry,
+            view_narrows.get(src_entry.name),
+        )
+        if tuple(int(v) for v in effective_shape) != tuple(int(v) for v in base_shape):
+            raise ArtifactError(
+                f"mapping target '{dst_name}' has ambiguous source shape",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if src_entry.dtype != first_src.dtype:
+            raise ArtifactError(
+                f"mapping target '{dst_name}' mixes dtypes",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        dim = _resolve_dim(plan_entry.ckpt_range, plan_entry.dst_range)
+        if dim is not None:
+            if resolved_dim is None:
+                resolved_dim = dim
+            elif resolved_dim != dim:
+                raise ArtifactError(
+                    f"mapping target '{dst_name}' mixes slice dims {resolved_dim} and {dim}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+        if plan_entry.dst_range is not None:
+            max_end = max(max_end, int(plan_entry.dst_range.end))
+    if resolved_dim is None:
+        resolved_dim = 0
+    if resolved_dim < 0 or resolved_dim >= len(base_shape):
+        raise ArtifactError(
+            f"mapping target '{dst_name}' dim {resolved_dim} out of range",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    inferred_shape = list(base_shape)
+    if max_end > 0:
+        inferred_shape[resolved_dim] = int(max_end)
+    stride = _compact_stride(tuple(int(v) for v in inferred_shape))
+    logical_length = int(torch.empty((), dtype=first_src.dtype).element_size())
+    for dim_size in inferred_shape:
+        logical_length *= int(dim_size)
+    return CanonicalIndexEntry(
+        name=str(dst_name),
+        dtype=first_src.dtype,
+        shape=tuple(int(v) for v in inferred_shape),
+        stride=tuple(int(v) for v in stride),
+        storage_offset=0,
+        segment_offset=0,
+        size_bytes=int(logical_length),
+    )
+
+
+def _effective_source_shape(
+    entry: CanonicalIndexEntry,
+    view_narrow: Range | None,
+) -> tuple[int, ...]:
+    shape = [int(v) for v in entry.shape]
+    if view_narrow is None or not shape:
+        return tuple(shape)
+    dim = int(view_narrow.dim)
+    if dim < 0 or dim >= len(shape):
+        raise ArtifactError(
+            f"view narrow dim {dim} out of range for '{entry.name}'",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    shape[dim] = int(view_narrow.length)
+    return tuple(shape)
 
 
 def _resolve_dim(src_range: Range | None, dst_range: Range | None) -> int | None:
@@ -671,8 +900,10 @@ __all__ = [
     "CopyPlanEntry",
     "Range",
     "TargetTensors",
+    "compute_mapped_view_id_from_specs",
     "copy_plan_from_json",
     "copy_plan_to_json",
+    "infer_mapped_target_entries",
     "normalize_copy_plan",
     "validate_copy_plan",
     "view_narrow_ranges",

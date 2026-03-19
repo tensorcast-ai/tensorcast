@@ -434,19 +434,33 @@ absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
 
 absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsigned int flags) {
   const std::string handle_hex = to_hex_string(handle);
-  // Detect the invalid same-process usage early and return a clear error.
-  // Opening a CUDA IPC memory handle in the same process that exported it is
-  // not a valid CUDA usage (IPC is cross-process only). Avoid surfacing
-  // misleading device/context errors from the runtime.
+  // For same-process open, optionally fall back to the original exported pointer
+  // instead of surfacing the CUDA runtime error. This is required for local
+  // daemon flows that route through IPC-shaped metadata even when export and
+  // open happen inside the same daemon process.
   {
     absl::MutexLock lock(&g_ipc_map_mu);
     auto it = g_exported_ipc_map.find(handle_hex);
     if (it != g_exported_ipc_map.end() && it->second.pid == getpid()) {
-      LOG(ERROR) << "cudaIpcOpenMemHandle called on a handle exported in the same process; this is invalid. "
-                 << "Use the original device pointer within the exporting process, or a non-IPC path.";
-      return absl::FailedPreconditionError(
-          "cudaIpcOpenMemHandle called on a handle exported in the same process; this is invalid. "
-          "Use the original device pointer within the exporting process, or a non-IPC path.");
+      if (!g_enable_same_process_ipc_fallback.load(std::memory_order_relaxed)) {
+        LOG(ERROR) << "cudaIpcOpenMemHandle called on a handle exported in the same process; this is invalid. "
+                   << "Use the original device pointer within the exporting process, or a non-IPC path.";
+        return absl::FailedPreconditionError(
+            "cudaIpcOpenMemHandle called on a handle exported in the same process; this is invalid. "
+            "Use the original device pointer within the exporting process, or a non-IPC path.");
+      }
+      int cur_dev = -1;
+      ABSL_CHECK_OK(get_device(&cur_dev));
+      cudaPointerAttributes attrs;
+      if (cudaPointerGetAttributes(&attrs, it->second.ptr) == cudaSuccess) {
+        if (cur_dev >= 0 && attrs.device != cur_dev) {
+          return absl::FailedPreconditionError("IPC fallback rejected: device mismatch with current device");
+        }
+      } else if (cur_dev >= 0 && it->second.device_id >= 0 && it->second.device_id != cur_dev) {
+        return absl::FailedPreconditionError("IPC fallback rejected: recorded device mismatch");
+      }
+      *dev_ptr = it->second.ptr;
+      return absl::OkStatus();
     }
   }
   SC_RETURN_IF_CUDA_ERROR(cudaIpcOpenMemHandle(dev_ptr, handle, flags));

@@ -107,6 +107,13 @@ path from LIP registration. The daemon writes directly into existing CUDA
 regions when the target layout is coalesced and matches the selected
 byte-space (canonical or view-indexed). No replica is allocated.
 
+Boundary note:
+
+- This API is a local external-target front-door only (caller/instance-agent ->
+  local daemon).
+- Cross-node cache routing must not bypass this boundary: remote/home daemons
+  never write directly into caller-owned CUDA regions.
+
 ### SDK preconditions
 
 The SDK enforces strict eligibility rules before invoking

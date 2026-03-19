@@ -32,7 +32,9 @@ if TYPE_CHECKING:
     import torch
 
     from tensorcast.api._config import StorePolicy
+    from tensorcast.proto.node_agent.v1 import node_agent_pb2
     from tensorcast.proto.operation.v1 import operation_pb2
+
 from tensorcast.error_reporting import debug_errors_enabled
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
@@ -43,9 +45,15 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
 )
+from tensorcast.proto.node_agent.v1 import node_agent_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
     ArtifactIdKind,
+    AssemblyAttemptRef,
+    AssemblyCloseoutContract,
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
     BeginRegisterArtifactResult,
     CanonicalRange,
     CoalescedHandshake,
@@ -978,6 +986,346 @@ class DaemonCtl:
             )
         return response
 
+    def create_owned_binding(
+        self,
+        *,
+        source_selection: common_pb2.ArtifactSelection,
+        target_layout: store_daemon_pb2.TargetLayout,
+        target_index_bytes: bytes,
+        device_uuid: str,
+        binding_layout_id: str,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
+        copy_plan: store_daemon_pb2.CopyPlan | None = None,
+        dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
+        pid: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.CreateOwnedBindingResponse:
+        if not isinstance(source_selection, common_pb2.ArtifactSelection):
+            raise ValueError("source_selection is required")
+        if not source_selection.artifact_id:
+            raise ValueError("source_selection.artifact_id is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        if not target_index_bytes:
+            raise ValueError("target_index_bytes is required")
+        if not binding_layout_id:
+            raise ValueError("binding_layout_id is required")
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/CreateOwnedBinding") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.CreateOwnedBindingRequest(
+                source_selection=source_selection,
+                target_layout=target_layout,
+                target_index_bytes=bytes(target_index_bytes),
+                device_uuid=device_uuid,
+                binding_layout_id=str(binding_layout_id),
+                pid=pid_value,
+                preference=preference_value,
+            )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
+            if placement is not None:
+                request.placement = placement
+            if copy_plan is not None:
+                request.copy_plan.CopyFrom(copy_plan)
+            if dst_specs is not None:
+                for spec in dst_specs:
+                    request.dst_tensors.add().CopyFrom(spec)
+            if operation_id:
+                request.operation_id = str(operation_id)
+            try:
+                response: store_daemon_pb2.CreateOwnedBindingResponse = (
+                    self._unary_call(
+                        self.stub_v2.CreateOwnedBinding,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CreateOwnedBinding RPC failed")
+                ) from e
+        return response
+
+    def create_binding(
+        self,
+        *,
+        ownership: store_daemon_pb2.BindingOwnership,
+        target_layout: store_daemon_pb2.TargetLayout,
+        target_index_bytes: bytes,
+        device_uuid: str,
+        binding_layout_id: str,
+        initial_selection: common_pb2.ArtifactSelection | None = None,
+        source_artifact_id: str | None = None,
+        target_publication_token: bytes | None = None,
+        copy_plan: store_daemon_pb2.CopyPlan | None = None,
+        dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
+        pid: int | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.CreateBindingResponse:
+        if ownership == store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_UNSPECIFIED:
+            raise ValueError("ownership is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        if not target_index_bytes:
+            raise ValueError("target_index_bytes is required")
+        if not binding_layout_id:
+            raise ValueError("binding_layout_id is required")
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/CreateBinding") as span:
+            request = store_daemon_pb2.CreateBindingRequest(
+                ownership=ownership,
+                target_layout=target_layout,
+                target_index_bytes=bytes(target_index_bytes),
+                device_uuid=device_uuid,
+                binding_layout_id=str(binding_layout_id),
+                pid=pid_value,
+            )
+            if initial_selection is not None:
+                request.initial_selection.CopyFrom(initial_selection)
+            if source_artifact_id:
+                request.source_artifact_id = str(source_artifact_id)
+            if target_publication_token:
+                request.target_publication_token = bytes(target_publication_token)
+            if copy_plan is not None:
+                request.copy_plan.CopyFrom(copy_plan)
+            if dst_specs is not None:
+                for spec in dst_specs:
+                    request.dst_tensors.add().CopyFrom(spec)
+            try:
+                response: store_daemon_pb2.CreateBindingResponse = self._unary_call(
+                    self.stub_v2.CreateBinding,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CreateBinding RPC failed")
+                ) from e
+        return response
+
+    def commit_binding_artifact(
+        self,
+        *,
+        binding_id: str,
+        selection: common_pb2.ArtifactSelection,
+        source_artifact_id: str | None = None,
+        target_publication_token: bytes | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.CommitBindingArtifactResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not isinstance(selection, common_pb2.ArtifactSelection):
+            raise ValueError("selection is required")
+        with self._client_span("Client/CommitBindingArtifact") as span:
+            request = store_daemon_pb2.CommitBindingArtifactRequest(
+                binding_id=str(binding_id),
+                selection=selection,
+            )
+            if source_artifact_id:
+                request.source_artifact_id = str(source_artifact_id)
+            if target_publication_token:
+                request.target_publication_token = bytes(target_publication_token)
+            try:
+                response: store_daemon_pb2.CommitBindingArtifactResponse = (
+                    self._unary_call(
+                        self.stub_v2.CommitBindingArtifact,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CommitBindingArtifact RPC failed")
+                ) from e
+        return response
+
+    def begin_binding_update(
+        self,
+        *,
+        binding_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.BeginBindingUpdateResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        with self._client_span("Client/BeginBindingUpdate") as span:
+            request = store_daemon_pb2.BeginBindingUpdateRequest(
+                binding_id=str(binding_id)
+            )
+            try:
+                response: store_daemon_pb2.BeginBindingUpdateResponse = (
+                    self._unary_call(
+                        self.stub_v2.BeginBindingUpdate,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BeginBindingUpdate RPC failed")
+                ) from e
+        return response
+
+    def seal_binding(
+        self,
+        *,
+        binding_id: str,
+        update_epoch: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.SealBindingResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not update_epoch:
+            raise ValueError("update_epoch is required")
+        with self._client_span("Client/SealBinding") as span:
+            request = store_daemon_pb2.SealBindingRequest(
+                binding_id=str(binding_id),
+                update_epoch=str(update_epoch),
+            )
+            try:
+                response: store_daemon_pb2.SealBindingResponse = self._unary_call(
+                    self.stub_v2.SealBinding,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="SealBinding RPC failed")
+                ) from e
+        return response
+
+    def refill_owned_binding(
+        self,
+        *,
+        binding_id: str,
+        artifact_id: str,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.RefillOwnedBindingResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        with self._client_span("Client/RefillOwnedBinding") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.RefillOwnedBindingRequest(
+                binding_id=str(binding_id),
+                artifact_id=str(artifact_id),
+                preference=preference_value,
+            )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
+            if placement is not None:
+                request.placement = placement
+            if operation_id:
+                request.operation_id = str(operation_id)
+            try:
+                response: store_daemon_pb2.RefillOwnedBindingResponse = (
+                    self._unary_call(
+                        self.stub_v2.RefillOwnedBinding,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="RefillOwnedBinding RPC failed")
+                ) from e
+        return response
+
+    def close_owned_binding(
+        self,
+        *,
+        binding_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.CloseOwnedBindingResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        with self._client_span("Client/CloseOwnedBinding") as span:
+            request = store_daemon_pb2.CloseOwnedBindingRequest(
+                binding_id=str(binding_id)
+            )
+            try:
+                response: store_daemon_pb2.CloseOwnedBindingResponse = self._unary_call(
+                    self.stub_v2.CloseOwnedBinding,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CloseOwnedBinding RPC failed")
+                ) from e
+        return response
+
     def query_replica_status(
         self, ticket: store_daemon_pb2.ReplicaTicket
     ) -> store_daemon_pb2.QueryReplicaStatusResponse:
@@ -996,6 +1344,259 @@ class DaemonCtl:
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
                 raise
+        return response
+
+    def batch_exists(
+        self,
+        *,
+        selections: Iterable[common_pb2.ArtifactSelection],
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.BatchExistsResponse:
+        request = store_daemon_pb2.BatchExistsRequest()
+        for selection in selections:
+            request.selections.add().CopyFrom(selection)
+        with self._client_span("Client/BatchExists") as span:
+            try:
+                response: store_daemon_pb2.BatchExistsResponse = self._unary_call(
+                    self.stub_v2.BatchExists,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchExists RPC failed")
+                ) from e
+        return response
+
+    def batch_get_into_region(
+        self,
+        *,
+        selections: Iterable[common_pb2.ArtifactSelection],
+        target_layout: store_daemon_pb2.TargetLayout,
+        pid: int,
+        device_uuid: str,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.BatchGetIntoRegionResponse:
+        request = store_daemon_pb2.BatchGetIntoRegionRequest(
+            target_layout=target_layout,
+            pid=int(pid),
+            device_uuid=str(device_uuid),
+        )
+        for selection in selections:
+            request.selections.add().CopyFrom(selection)
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/BatchGetIntoRegion") as span:
+            try:
+                response: store_daemon_pb2.BatchGetIntoRegionResponse = (
+                    self._unary_call(
+                        self.stub_v2.BatchGetIntoRegion,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchGetIntoRegion RPC failed")
+                ) from e
+        return response
+
+    def batch_put_if_absent_from_region(
+        self,
+        *,
+        items: Iterable[store_daemon_pb2.BatchPutIfAbsentFromRegionItem],
+        source_layout: store_daemon_pb2.TargetLayout,
+        pid: int,
+        device_uuid: str,
+        ttl_ms: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 600.0,
+    ) -> store_daemon_pb2.BatchPutIfAbsentFromRegionResponse:
+        request = store_daemon_pb2.BatchPutIfAbsentFromRegionRequest(
+            source_layout=source_layout,
+            pid=int(pid),
+            device_uuid=str(device_uuid),
+        )
+        for item in items:
+            request.items.add().CopyFrom(item)
+        if ttl_ms is not None:
+            request.ttl_ms = int(ttl_ms)
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/BatchPutIfAbsentFromRegion") as span:
+            try:
+                response: store_daemon_pb2.BatchPutIfAbsentFromRegionResponse = (
+                    self._unary_call(
+                        self.stub_v2.BatchPutIfAbsentFromRegion,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchPutIfAbsentFromRegion RPC failed")
+                ) from e
+        return response
+
+    def batch_touch_ttl(
+        self,
+        *,
+        artifact_ids: Iterable[str],
+        ttl_ms: int,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.BatchTouchTtlResponse:
+        request = store_daemon_pb2.BatchTouchTtlRequest(
+            artifact_ids=[
+                str(artifact_id) for artifact_id in artifact_ids if str(artifact_id)
+            ],
+            ttl_ms=int(ttl_ms),
+        )
+        with self._client_span("Client/BatchTouchTtl") as span:
+            try:
+                response: store_daemon_pb2.BatchTouchTtlResponse = self._unary_call(
+                    self.stub_v2.BatchTouchTtl,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="BatchTouchTtl RPC failed")
+                ) from e
+        return response
+
+    def home_batch_exists(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        artifact_ids: Iterable[str],
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchExistsResponse:
+        request = store_daemon_pb2.HomeBatchExistsRequest(
+            fence=fence,
+            artifact_ids=[str(item) for item in artifact_ids if str(item)],
+        )
+        with self._client_span("Client/HomeBatchExists") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchExistsResponse = self._unary_call(
+                    self.stub_v2.HomeBatchExists,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchExists RPC failed")
+                ) from e
+        return response
+
+    def home_batch_get(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        artifact_ids: Iterable[str],
+        operation_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchGetResponse:
+        request = store_daemon_pb2.HomeBatchGetRequest(
+            fence=fence,
+            artifact_ids=[str(item) for item in artifact_ids if str(item)],
+        )
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/HomeBatchGet") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchGetResponse = self._unary_call(
+                    self.stub_v2.HomeBatchGet,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchGet RPC failed")
+                ) from e
+        return response
+
+    def home_batch_put_if_absent(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        items: Iterable[store_daemon_pb2.HomeBatchPutIfAbsentItem],
+        ttl_ms: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchPutIfAbsentResponse:
+        request = store_daemon_pb2.HomeBatchPutIfAbsentRequest(
+            fence=fence,
+        )
+        for item in items:
+            request.items.add().CopyFrom(item)
+        if ttl_ms is not None:
+            request.ttl_ms = int(ttl_ms)
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/HomeBatchPutIfAbsent") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchPutIfAbsentResponse = (
+                    self._unary_call(
+                        self.stub_v2.HomeBatchPutIfAbsent,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchPutIfAbsent RPC failed")
+                ) from e
+        return response
+
+    def home_batch_touch_ttl(
+        self,
+        *,
+        fence: store_daemon_pb2.RouteFence,
+        artifact_ids: Iterable[str],
+        ttl_ms: int,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.HomeBatchTouchTtlResponse:
+        request = store_daemon_pb2.HomeBatchTouchTtlRequest(
+            fence=fence,
+            artifact_ids=[str(item) for item in artifact_ids if str(item)],
+            ttl_ms=int(ttl_ms),
+        )
+        with self._client_span("Client/HomeBatchTouchTtl") as span:
+            try:
+                response: store_daemon_pb2.HomeBatchTouchTtlResponse = self._unary_call(
+                    self.stub_v2.HomeBatchTouchTtl,
+                    request,
+                    timeout=float(timeout_s),
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(e, fallback="HomeBatchTouchTtl RPC failed")
+                ) from e
         return response
 
     def wait_replica_status(
@@ -1233,7 +1834,9 @@ class DaemonCtl:
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
@@ -1254,7 +1857,9 @@ class DaemonCtl:
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
@@ -1275,7 +1880,9 @@ class DaemonCtl:
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
 
     def materialize_by_artifact_id_v2(
@@ -1294,7 +1901,9 @@ class DaemonCtl:
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
         timeout_s: float | int | None = None,
+        timing_out: dict[str, float] | None = None,
     ) -> (
         store_daemon_pb2.MaterializeReplicaResponse
         | bytes
@@ -1339,6 +1948,8 @@ class DaemonCtl:
                 preference=preference_value,
                 lease_mode=lease_mode,
             )
+            if collective_load_group is not None:
+                request.collective_load_group.CopyFrom(collective_load_group)
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
@@ -1350,6 +1961,7 @@ class DaemonCtl:
             if placement is not None:
                 request.placement = placement
             try:
+                rpc_start = time.perf_counter()
                 response: store_daemon_pb2.MaterializeReplicaResponse = (
                     self._unary_call(
                         self.stub_v2.MaterializeReplica,
@@ -1359,6 +1971,8 @@ class DaemonCtl:
                         retries=1,
                     )
                 )
+                if timing_out is not None:
+                    timing_out["rpc_roundtrip_sec"] = time.perf_counter() - rpc_start
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
                 code = e.code()
@@ -1403,11 +2017,14 @@ class DaemonCtl:
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
+            confirm_start = time.perf_counter()
             success = self.confirm_replica_loaded(
                 response.disk_path or "",
                 replica_uuid,
                 target_device_type=target_device_type,
             )
+            if timing_out is not None:
+                timing_out["confirm_replica_sec"] = time.perf_counter() - confirm_start
             if not success:
                 raise RuntimeError(
                     "Failed to confirm artifact loading: "
@@ -1567,6 +2184,49 @@ class DaemonCtl:
                     cpu_shared_memory_enabled=cpu_shared_memory_enabled,
                 )
 
+    def execute_plan(
+        self,
+        *,
+        plan: Any,
+        execution_class: str = "terminal_only",
+        dry_run: bool = False,
+        timeout_s: float = 30.0,
+    ) -> "node_agent_pb2.ExecutePlanResponse":
+        execution_class_value = {
+            "terminal_only": store_daemon_pb2.PLAN_EXECUTION_CLASS_TERMINAL_ONLY,
+            "public_continuation_required": (
+                store_daemon_pb2.PLAN_EXECUTION_CLASS_PUBLIC_CONTINUATION_REQUIRED
+            ),
+        }.get(str(execution_class))
+        if execution_class_value is None:
+            raise ValueError(
+                "execution_class must be 'terminal_only' or 'public_continuation_required'"
+            )
+        request = store_daemon_pb2.ExecutePlanRequest(
+            execution_class=execution_class_value,
+            dry_run=bool(dry_run),
+        )
+        request.plan.CopyFrom(plan)
+        with self._client_span("Client/ExecutePlan") as span:
+            response: store_daemon_pb2.ExecutePlanResponse = self._unary_call(
+                self.stub.ExecutePlan,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+        if not response.terminal_result:
+            return node_agent_pb2.ExecutePlanResponse(
+                request_id=str(response.request_id),
+                ok=bool(response.ok),
+            )
+        terminal = node_agent_pb2.ExecutePlanResponse()
+        terminal.ParseFromString(response.terminal_result)
+        if not terminal.request_id:
+            terminal.request_id = str(response.request_id)
+        terminal.ok = bool(response.ok)
+        return terminal
+
     def get_worker_status(self) -> store_daemon_pb2.GetWorkerStatusResponse:
         with self._client_span("Client/GetWorkerStatus") as span:
             request = store_daemon_pb2.GetWorkerStatusRequest()
@@ -1577,6 +2237,94 @@ class DaemonCtl:
                     timeout=5.0,
                     span=span,
                     retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def list_directory_workers(
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        max_staleness_ms: int | None = None,
+        timeout_s: float = 5.0,
+    ) -> store_daemon_pb2.ListDirectoryWorkersResponse:
+        with self._client_span("Client/ListDirectoryWorkers") as span:
+            request = store_daemon_pb2.ListDirectoryWorkersRequest(
+                include_unavailable=bool(include_unavailable),
+                required_capability_flags=int(required_capability_flags),
+            )
+            if max_staleness_ms is not None:
+                request.max_staleness_ms = int(max_staleness_ms)
+            try:
+                response: store_daemon_pb2.ListDirectoryWorkersResponse = (
+                    self._unary_call(
+                        self.stub_v2.ListDirectoryWorkers,
+                        request,
+                        timeout=timeout_s,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def list_directory_instances(
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        max_staleness_ms: int | None = None,
+        timeout_s: float = 5.0,
+    ) -> store_daemon_pb2.ListDirectoryInstancesResponse:
+        with self._client_span("Client/ListDirectoryInstances") as span:
+            request = store_daemon_pb2.ListDirectoryInstancesRequest(
+                include_unavailable=bool(include_unavailable),
+                required_capability_flags=int(required_capability_flags),
+            )
+            if max_staleness_ms is not None:
+                request.max_staleness_ms = int(max_staleness_ms)
+            try:
+                response: store_daemon_pb2.ListDirectoryInstancesResponse = (
+                    self._unary_call(
+                        self.stub_v2.ListDirectoryInstances,
+                        request,
+                        timeout=timeout_s,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def resolve_instance_execution(
+        self,
+        *,
+        instance_id: str,
+        max_staleness_ms: int | None = None,
+        timeout_s: float = 5.0,
+    ) -> store_daemon_pb2.ResolveInstanceExecutionResponse:
+        with self._client_span("Client/ResolveInstanceExecution") as span:
+            request = store_daemon_pb2.ResolveInstanceExecutionRequest(
+                instance_id=str(instance_id)
+            )
+            if max_staleness_ms is not None:
+                request.max_staleness_ms = int(max_staleness_ms)
+            try:
+                response: store_daemon_pb2.ResolveInstanceExecutionResponse = (
+                    self._unary_call(
+                        self.stub_v2.ResolveInstanceExecution,
+                        request,
+                        timeout=timeout_s,
+                        span=span,
+                        retries=1,
+                    )
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
@@ -1826,7 +2574,12 @@ class DaemonCtl:
             )
             view_id = resp.view_id or None
             view_data_hash = resp.view_data_hash or None
-            registration_kind = "piece" if resp.allow_partial else "canonical"
+            registration_kind = (
+                "piece"
+                if resp.registration_kind
+                == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+                else "canonical"
+            )
             local_stable_tier = None
             if resp.HasField("local_stable_tier"):
                 status = resp.local_stable_tier.status
@@ -1848,7 +2601,6 @@ class DaemonCtl:
                 view_data_hash=view_data_hash,
                 canonical_ranges=canonical_ranges,
                 registration_kind=registration_kind,
-                allow_partial=bool(resp.allow_partial),
                 local_stable_tier=local_stable_tier,
             )
 
@@ -2181,19 +2933,19 @@ class DaemonCtl:
     def publish_target_replica(
         self,
         *,
-        target_write_token: bytes,
+        target_publication_token: bytes,
         byte_space: common_pb2.ByteSpaceRef,
         ttl_ms: int | None = None,
         owner_pid: int | None = None,
         operation_id: str | None = None,
         timeout_s: float = 60.0,
     ) -> store_daemon_pb2.PublishTargetReplicaResponse:
-        if not target_write_token:
-            raise ValueError("target_write_token is required")
+        if not target_publication_token:
+            raise ValueError("target_publication_token is required")
         if byte_space is None:
             raise ValueError("byte_space is required")
         req = store_daemon_pb2.PublishTargetReplicaRequest(
-            target_write_token=bytes(target_write_token),
+            target_publication_token=bytes(target_publication_token),
             byte_space=byte_space,
         )
         if ttl_ms is not None:
@@ -2224,6 +2976,59 @@ class DaemonCtl:
                     f"{_grpc_message(e, fallback='rpc failed')}"
                 ) from e
         return resp
+
+    def start_publish_target_replica(
+        self,
+        *,
+        target_publication_token: bytes,
+        byte_space: common_pb2.ByteSpaceRef,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.StartPublishTargetReplicaResponse:
+        if not target_publication_token:
+            raise ValueError("target_publication_token is required")
+        if byte_space is None:
+            raise ValueError("byte_space is required")
+        req = store_daemon_pb2.PublishTargetReplicaRequest(
+            target_publication_token=bytes(target_publication_token),
+            byte_space=byte_space,
+        )
+        if ttl_ms is not None:
+            req.ttl_ms = int(ttl_ms)
+        if owner_pid is not None:
+            req.owner_pid = int(owner_pid)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/StartPublishTargetReplica") as span:
+            try:
+                return self._unary_call(
+                    self.stub.StartPublishTargetReplica,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:
+                code = e.code()
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
+                if code == grpc.StatusCode.FAILED_PRECONDITION:
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="failed precondition")
+                    ) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    "StartPublishTargetReplica failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
     def retire_published_replica(
         self,
@@ -2683,6 +3488,108 @@ class DaemonCtl:
             )
             return resp.tensor_index_data
 
+    def start_assembly_attempt(
+        self,
+        *,
+        layout_id: str,
+        requirements: AssemblyRequirementSetRef | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        closeout_contract: AssemblyCloseoutContract | None = None,
+        timeout_s: float = 30.0,
+    ) -> AssemblyAttemptRef:
+        if not layout_id:
+            raise ValueError("layout_id is required")
+        if requirements is None:
+            raise ValueError(
+                "requirements are required; construct them explicitly with "
+                "AssemblyRequirementSetRef.pp_from_structural_views(...), "
+                "AssemblyRequirementSetRef.ep_from_structural_views(...), "
+                "or AssemblyRequirementSetRef.canonical_full()"
+            )
+        req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
+        req.requirements.CopyFrom(requirements.to_proto())
+        if readiness_policy is not None:
+            req.readiness_policy.CopyFrom(readiness_policy.to_proto())
+        if closeout_contract is not None:
+            req.closeout_contract.CopyFrom(closeout_contract.to_proto())
+        with self._client_span("Client/StartAssemblyAttempt") as span:
+            resp = self._unary_call(
+                self.stub.StartAssemblyAttempt,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+        attempt = resp.attempt
+        coordinator_operation = operation_pb2.OperationRef()
+        if attempt.HasField("coordinator_operation"):
+            coordinator_operation.CopyFrom(attempt.coordinator_operation)
+        elif attempt.coordinator_operation_id:
+            coordinator_operation.operation_id = str(attempt.coordinator_operation_id)
+        return AssemblyAttemptRef(
+            attempt_id=str(attempt.attempt_id or ""),
+            workspace_assembly_id=str(attempt.workspace_assembly_id),
+            layout_id=str(attempt.layout_id),
+            attempt_intent_digest=str(attempt.attempt_intent_digest),
+            coordinator_generation=int(attempt.coordinator_generation),
+            coordinator_operation=coordinator_operation,
+        )
+
+    def submit_binding_contribution(
+        self,
+        *,
+        attempt_id: str,
+        workspace_assembly_id: str,
+        binding_id: str,
+        binding_value_id: str,
+        coverage_plan_hash: str,
+        contribution_kind: store_daemon_pb2.BindingContributionKind,
+        coordinator_operation_id: str,
+        coordinator_generation: int,
+        attempt_intent_digest: str = "",
+        view_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.SubmitBindingContributionResponse:
+        req = store_daemon_pb2.SubmitBindingContributionRequest(
+            attempt_id=str(attempt_id),
+            workspace_assembly_id=str(workspace_assembly_id),
+            binding_id=str(binding_id),
+            binding_value_id=str(binding_value_id),
+            coverage_plan_hash=str(coverage_plan_hash),
+            contribution_kind=contribution_kind,
+            coordinator_operation_id=str(coordinator_operation_id),
+            coordinator_generation=int(coordinator_generation),
+            attempt_intent_digest=str(attempt_intent_digest),
+        )
+        if view_id:
+            req.view_id = str(view_id)
+        with self._client_span("Client/SubmitBindingContribution") as span:
+            return self._unary_call(
+                self.stub.SubmitBindingContribution,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+
+    def seal_assembly_attempt(
+        self,
+        *,
+        attempt_id: str,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.SealAssemblyAttemptResponse:
+        if not attempt_id:
+            raise ValueError("attempt_id is required")
+        req = store_daemon_pb2.SealAssemblyAttemptRequest(attempt_id=attempt_id)
+        with self._client_span("Client/SealAssemblyAttempt") as span:
+            return self._unary_call(
+                self.stub.SealAssemblyAttempt,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+
     def seal_assembly(
         self,
         assembly_id: str,
@@ -2767,13 +3674,19 @@ class DaemonCtl:
         return resp
 
     def get_operation(
-        self, operation_id: str, *, timeout_s: float = 10.0
+        self,
+        operation_id: str,
+        *,
+        operation_ref: "operation_pb2.OperationRef | None" = None,
+        timeout_s: float = 10.0,
     ) -> "operation_pb2.GetOperationResponse":
         if not operation_id:
             raise ValueError("operation_id is required")
         from tensorcast.proto.operation.v1 import operation_pb2
 
         req = operation_pb2.GetOperationRequest(operation_id=operation_id)
+        if operation_ref is not None:
+            req.ref.CopyFrom(operation_ref)
         with self._client_span("Client/GetOperation") as span:
             return self._unary_call(
                 self.stub.GetOperation,
@@ -2787,6 +3700,7 @@ class DaemonCtl:
         self,
         operation_id: str,
         *,
+        operation_ref: "operation_pb2.OperationRef | None" = None,
         timeout_ms: int,
         timeout_s: float,
     ) -> "operation_pb2.GetOperationResponse":
@@ -2800,6 +3714,8 @@ class DaemonCtl:
             operation_id=operation_id,
             timeout_ms=int(timeout_ms),
         )
+        if operation_ref is not None:
+            req.ref.CopyFrom(operation_ref)
         with self._client_span("Client/WaitOperation") as span:
             resp = self._unary_call(
                 self.stub.WaitOperation,

@@ -26,6 +26,7 @@
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/ingestion/artifact_truth.h"
 #include "core/store/runtime/replica/replica_promotion_manager.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/view_utils.h"
@@ -49,6 +50,7 @@ struct StableDramOptions {
 struct ViewRegistration {
   std::string view_id;
   loader::ViewSpec spec;
+  std::vector<std::string> tensor_names;
   ViewPlacement placement{ViewPlacement::kUnspecified};
   uint64_t canonical_size_bytes{0};
   std::vector<CanonicalRange> canonical_ranges;
@@ -108,6 +110,8 @@ struct RegistrationCommitResult {
   std::vector<CanonicalRange> canonical_ranges;
   ViewRegistrationKind registration_kind{ViewRegistrationKind::kUnspecified};
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
+  std::optional<ingestion::VerifiedContentDescriptor> verified_content_descriptor;
+  std::optional<ingestion::VerificationRecord> verification_record;
 };
 
 struct RegistrationResources {
@@ -139,6 +143,7 @@ struct RegistrationPublication {
   std::string encoding{"json"};
   std::string schema_version{"v3"};
   std::optional<std::string> verification_json;
+  std::optional<std::string> view_data_hash;
   std::string index_multihash;
   std::string data_multihash;
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};

@@ -9,9 +9,11 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/rpc_context.h"
@@ -27,6 +29,7 @@ class DiskArtifactService {
     store::StoreEngine& engine;
     ArtifactSourceRegistry& source_registry;
     ShutdownSignal& shutdown_signal;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     std::filesystem::path storage_path;
   };
 
@@ -77,6 +80,9 @@ class DiskArtifactService {
       const std::filesystem::path& normalized_path,
       bool verify_checksums,
       materialization_disk_resolve::ImportProgressCallback progress_cb = {});
+
+  absl::Status ensure_artifact_metadata_registered(
+      const materialization_disk_resolve::ImportArtifactFromPathResult& imported) const;
 
   Dep d_;
   std::filesystem::path storage_path_;

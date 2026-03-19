@@ -152,7 +152,7 @@ uint64_t elapsed_us(std::chrono::steady_clock::time_point start) {
 
 struct ByteRangeMappedSource::StridedBlockCache {
   absl::Mutex mutex;
-  std::shared_ptr<StridedBlock> block ABSL_GUARDED_BY(mutex);
+  std::shared_ptr<const StridedBlock> block ABSL_GUARDED_BY(mutex);
 };
 
 absl::StatusOr<std::unique_ptr<ByteRangeMappedSource>> ByteRangeMappedSource::Create(
@@ -509,9 +509,6 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
     flush_local_stats();
     return absl::InternalError("invalid strided run");
   }
-  constexpr uint64_t kDirectGatherMinRowLenBytes = 4 * 1024;
-  constexpr size_t kDirectGatherMinTotalBytes = 4 * 1024 * 1024;
-  constexpr uint64_t kDirectGatherMaxRowsTouched = 12 * 1024;
   const uint64_t first_row = run_offset / run.row_len;
   const uint64_t last_offset_exclusive = run_offset + static_cast<uint64_t>(bytes);
   const uint64_t last_row_exclusive = (last_offset_exclusive + run.row_len - 1) / run.row_len;
@@ -527,9 +524,11 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
           << " source_base_numa=" << addr_numa_node(cpu_source_base_ptr) << " first_src_addr_numa="
           << addr_numa_node(cpu_source_base_ptr != nullptr ? cpu_source_base_ptr + first_src_offset : nullptr)
           << " dst_numa=" << addr_numa_node(dst);
-  const bool direct_gather_candidate = run.stride > run.row_len && run.row_len >= kDirectGatherMinRowLenBytes &&
-      bytes >= kDirectGatherMinTotalBytes && rows_touched <= kDirectGatherMaxRowsTouched &&
-      cpu_source_base_ptr != nullptr;
+  const bool force_mmap_direct_gather = false;
+  const bool threshold_direct_gather = run.stride > run.row_len &&
+      run.row_len >= options_.direct_gather_min_row_len_bytes && bytes >= options_.direct_gather_min_total_bytes &&
+      rows_touched <= options_.direct_gather_max_rows_touched && cpu_source_base_ptr != nullptr;
+  const bool direct_gather_candidate = force_mmap_direct_gather || threshold_direct_gather;
   if (direct_gather_candidate) {
     const auto gather_start = std::chrono::steady_clock::now();
     const uint8_t* base_ptr = cpu_source_base_ptr;
@@ -571,8 +570,9 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
     stats_.base_read_calls.fetch_add(direct_gather_memcpy_calls, std::memory_order_relaxed);
     stats_.base_read_bytes.fetch_add(copied, std::memory_order_relaxed);
     VLOG(2) << "byte_range.strided.direct_gather run_index=" << run_index << " source_index=" << run.source_index
-            << " rows_touched=" << rows_touched << " bytes=" << copied << " memcpy_calls=" << direct_gather_memcpy_calls
-            << " duration_us=" << gather_us << " tid=" << current_tid() << " cpu=" << current_cpu()
+            << " forced=" << (force_mmap_direct_gather ? 1 : 0) << " rows_touched=" << rows_touched
+            << " bytes=" << copied << " memcpy_calls=" << direct_gather_memcpy_calls << " duration_us=" << gather_us
+            << " tid=" << current_tid() << " cpu=" << current_cpu()
             << " source_base_numa=" << addr_numa_node(cpu_source_base_ptr) << " first_src_addr_numa="
             << addr_numa_node(cpu_source_base_ptr != nullptr ? cpu_source_base_ptr + first_src_offset : nullptr)
             << " dst_numa=" << addr_numa_node(dst);
@@ -617,7 +617,7 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
       if (strided_cache_) {
         absl::MutexLock lock(&strided_cache_->mutex);
         if (strided_cache_->block && strided_cache_->block.use_count() == 1) {
-          block = strided_cache_->block;
+          block = std::const_pointer_cast<StridedBlock>(strided_cache_->block);
           strided_cache_->block.reset();
           reused_block = true;
         }
@@ -679,11 +679,12 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
               << " block_pick_us=" << local_block_pick_us_total << " block_resize_us=" << local_block_resize_us_total
               << " block_prepare_us=" << local_block_prepare_us_total << " block_load_us=" << block_read_us
               << " block_load_throughput_mib_s=" << throughput_mib_s;
+      const std::shared_ptr<const StridedBlock> immutable_block = block;
       if (strided_cache_) {
         absl::MutexLock lock(&strided_cache_->mutex);
-        strided_cache_->block = block;
+        strided_cache_->block = immutable_block;
       }
-      return block;
+      return immutable_block;
     }
 
     return absl::ResourceExhaustedError("unable to allocate strided block buffer");

@@ -61,6 +61,37 @@ class OperationRpcHandler:
             ttl_ms = self._default_ttl_ms
         return min(ttl_ms, self._max_ttl_ms)
 
+    @staticmethod
+    def _merge_ref(
+        target: operation_pb2.OperationRef, source: operation_pb2.OperationRef
+    ) -> None:
+        if not target.operation_id and source.operation_id:
+            target.operation_id = source.operation_id
+        if not target.kind and source.kind:
+            target.kind = source.kind
+        if not target.target_artifact_id and source.target_artifact_id:
+            target.target_artifact_id = source.target_artifact_id
+        if not target.authority_scope_kind and source.authority_scope_kind:
+            target.authority_scope_kind = source.authority_scope_kind
+        if not target.authority_scope_id and source.authority_scope_id:
+            target.authority_scope_id = source.authority_scope_id
+        if not target.attachment_kind and source.attachment_kind:
+            target.attachment_kind = source.attachment_kind
+        if not target.recovery_class and source.recovery_class:
+            target.recovery_class = source.recovery_class
+        if not target.fencing_digest and source.fencing_digest:
+            target.fencing_digest = source.fencing_digest
+
+    def _apply_continuation_metadata_from_snapshot(
+        self,
+        *,
+        ref: operation_pb2.OperationRef,
+        snapshot: any_pb2.Any,
+    ) -> None:
+        metadata = operation_pb2.OperationContinuationMetadata()
+        if snapshot.Unpack(metadata):
+            self._merge_ref(ref, metadata.ref)
+
     def acquire_operation_lease(
         self,
         request: operation_pb2.AcquireOperationLeaseRequest,
@@ -230,6 +261,11 @@ class OperationRpcHandler:
                 lease_generation=int(row["lease_generation"]),
                 lease_owner=str(row["lease_owner"] or ""),
             )
+            if row.get("snapshot_proto"):
+                self._apply_continuation_metadata_from_snapshot(
+                    ref=resp.ref,
+                    snapshot=snapshot,
+                )
             expires_ts = self._datetime_to_timestamp(
                 self._coerce_db_datetime(row.get("lease_expires_at"))
             )

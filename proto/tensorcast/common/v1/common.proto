@@ -152,3 +152,9 @@ message ArtifactSelection {
   ViewSpec view_spec = 6;
   repeated string tensor_names = 7;
 }
+
+message SelectionIdentity {
+  string artifact_id = 1;
+  bytes logical_layout_hash = 2;
+  bytes selection_hash = 3;
+}

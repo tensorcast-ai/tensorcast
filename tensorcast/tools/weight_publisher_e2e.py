@@ -56,7 +56,7 @@ RECEIVER_TENSOR_DICT_UNLOAD_RETRIES = 3
 RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S = 0.05
 TP_BIND_PER_RANK_TIMEOUT_MIN_S = 20.0
 TP_BIND_PER_RANK_TIMEOUT_FLOOR_S = 8.0
-TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR = 2.0
+TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR = 12.0
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -91,6 +91,18 @@ def _is_non_retryable_transport_group_error(exc: Exception) -> bool:
     return (
         "duplicate part_id in transport history" in msg
         or "artifact/view/total_parts mismatch" in msg
+    )
+
+
+def _should_clear_tp_pending_target_on_apply_failure(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    if "region is poisoned" in msg:
+        return True
+    if "deadline exceeded" in msg:
+        return True
+    return (
+        "already used with different payload" in msg
+        or "client_request_id already used with a different payload" in msg
     )
 
 
@@ -937,6 +949,7 @@ class WeightUpdatePublisher:
         model_name: str,
         key_template: str,
         keep_last: int,
+        pre_publish_trim_margin: int,
         history_path: Path,
         run_root: Path,
         check_poll_interval_s: float,
@@ -969,6 +982,7 @@ class WeightUpdatePublisher:
         self._config = WeightPublisherConfig(
             model_name=model_name,
             keep_last=keep_last,
+            pre_publish_trim_margin=pre_publish_trim_margin,
             history_path=str(history_path),
             policy="pinned",
             overflow_policy="reject",
@@ -1972,9 +1986,9 @@ class WeightUpdateReceiver:
             part_id = _sanitize_group_token(
                 f"rx{self._transport_group_receiver_index}:r{int(rank)}"
             )
-            request_id = _sanitize_group_token(
-                f"{group_id}:{part_id}:a{safe_attempt}"
-            )
+            # Keep request_id stable across retries so transport-group idempotency
+            # deduplicates replays for the same logical part.
+            request_id = _sanitize_group_token(f"{group_id}:{part_id}")
             tags = {
                 "tc.transport.group.kind": self._transport_group_kind,
                 "tc.transport.group.id": group_id,
@@ -1994,7 +2008,13 @@ class WeightUpdateReceiver:
             tags=tags,
         )
 
-    def _tp_rank_attempt_timeout_s(self, *, remaining_s: float) -> float:
+    def _tp_rank_attempt_timeout_s(
+        self,
+        *,
+        remaining_s: float,
+        attempt: int = 0,
+        completed_ranks_count: int = 0,
+    ) -> float:
         per_rank_gib = (
             float(max(0, int(self._tp_total_bytes))) / float(1024**3)
         ) / float(max(1, int(self._tp_world_size)))
@@ -2003,10 +2023,25 @@ class WeightUpdateReceiver:
             TP_BIND_PER_RANK_TIMEOUT_FLOOR_S
             + per_rank_gib * TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR,
         )
+        safe_attempt = max(0, int(attempt))
+        completed = max(0, int(completed_ranks_count))
+        if safe_attempt > 0 and completed > 0:
+            tp_world_size = max(1, int(self._tp_world_size))
+            tail_ratio = min(1.0, float(completed) / float(tp_world_size))
+            budget_s *= 1.0 + 0.75 * tail_ratio
+            if self._transport_group_mode == "tp_version":
+                budget_s *= 1.1
         return max(0.001, min(float(remaining_s), float(budget_s)))
 
-    def _reset_tp_bindings_after_apply_failure(self, *, version: int) -> None:
-        if not self._tp_bindings:
+    def _reset_tp_bindings_after_apply_failure(
+        self,
+        *,
+        version: int,
+        clear_pending_targets: bool = False,
+    ) -> None:
+        if not self._tp_bindings and (
+            not clear_pending_targets or not self._tp_pending_targets
+        ):
             return
         recycled = 0
         for rank, binding in list(self._tp_bindings.items()):
@@ -2018,11 +2053,56 @@ class WeightUpdateReceiver:
                 binding.close()
         self._tp_bindings.clear()
         self._tp_binding_ptrs.clear()
+        cleared_pending = 0
+        if clear_pending_targets and self._tp_pending_targets:
+            pending_targets = list(self._tp_pending_targets.values())
+            cleared_pending = len(pending_targets)
+            self._tp_pending_targets.clear()
+            for tensors in pending_targets:
+                tensors.clear()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         print(
             "[receiver][tp]",
             f"version={version}",
             "phase=reset_after_failure",
             f"recycled_ranks={recycled}",
+            f"cleared_pending_ranks={cleared_pending}",
+            flush=True,
+        )
+
+    def _reset_tp_rank_after_apply_failure(
+        self,
+        *,
+        version: int,
+        rank: int,
+        clear_pending_target: bool = False,
+    ) -> None:
+        binding = self._tp_bindings.pop(rank, None)
+        self._tp_binding_ptrs.pop(rank, None)
+        recycled = 0
+        if binding is not None:
+            tensors = getattr(binding, "tensors", None)
+            if isinstance(tensors, dict) and tensors:
+                self._tp_pending_targets[rank] = dict(tensors)
+                recycled = 1
+            with contextlib.suppress(Exception):
+                binding.close()
+        cleared_pending = 0
+        if clear_pending_target:
+            pending = self._tp_pending_targets.pop(rank, None)
+            if isinstance(pending, dict):
+                pending.clear()
+                cleared_pending = 1
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        print(
+            "[receiver][tp]",
+            f"version={version}",
+            "phase=reset_rank_after_failure",
+            f"rank={rank}",
+            f"recycled={recycled}",
+            f"cleared_pending_target={cleared_pending}",
             flush=True,
         )
 
@@ -2169,6 +2249,12 @@ class WeightUpdateReceiver:
         rank_attempt_seq: dict[int, int] = {
             rank: 0 for rank in range(self._tp_world_size)
         }
+        completed_ranks: set[int] = set()
+        active_rank: int | None = None
+        pointer_stable = True
+        operation = "swap"
+        cold_start_bindings = not self._tp_bindings
+        artifact_id: str | None = None
 
         while time.monotonic() < no_progress_deadline:
             try:
@@ -2187,11 +2273,22 @@ class WeightUpdateReceiver:
                     )
                     time.sleep(self._poll_interval_s)
                     continue
-                start = time.monotonic()
-                pointer_stable = True
-                operation = "swap"
-                artifact_id: str | None = None
                 for rank in range(self._tp_world_size):
+                    if rank in completed_ranks:
+                        binding = self._tp_bindings.get(rank)
+                        if binding is None:
+                            completed_ranks.discard(rank)
+                            continue
+                        current_artifact_id = str(binding.artifact_id)
+                        if artifact_id is None:
+                            artifact_id = current_artifact_id
+                        elif artifact_id != current_artifact_id:
+                            raise AssertionError(
+                                "tp4 ranks resolved different artifact ids: "
+                                f"first={artifact_id}, rank={rank}, current={current_artifact_id}"
+                            )
+                        continue
+                    active_rank = rank
                     rank_start = time.monotonic()
                     rank_remaining_s = max(
                         0.001, no_progress_deadline - time.monotonic()
@@ -2199,7 +2296,9 @@ class WeightUpdateReceiver:
                     rank_attempt = rank_attempt_seq.get(rank, 0)
                     rank_attempt_seq[rank] = rank_attempt + 1
                     rank_attempt_timeout_s = self._tp_rank_attempt_timeout_s(
-                        remaining_s=rank_remaining_s
+                        remaining_s=rank_remaining_s,
+                        attempt=rank_attempt,
+                        completed_ranks_count=len(completed_ranks),
                     )
                     rank_ctx = self._make_tp_materialize_ctx(
                         version=version,
@@ -2223,7 +2322,7 @@ class WeightUpdateReceiver:
                         artifact=artifact,
                         ctx=rank_ctx,
                     )
-                    if rank_operation == "bind_into":
+                    if rank_operation == "bind_into" and cold_start_bindings:
                         operation = "bind_into"
                     if not rank_pointer_stable:
                         pointer_stable = False
@@ -2231,6 +2330,7 @@ class WeightUpdateReceiver:
                     no_progress_deadline = (
                         last_progress_monotonic + self._per_version_timeout_s
                     )
+                    completed_ranks.add(rank)
                     binding = self._tp_bindings.get(rank)
                     if binding is None:
                         raise AssertionError(f"tp4 binding missing for rank={rank}")
@@ -2253,7 +2353,10 @@ class WeightUpdateReceiver:
                         f"pointer_stable={rank_pointer_stable}",
                         flush=True,
                     )
-                latency_s = time.monotonic() - start
+                    active_rank = None
+                if len(completed_ranks) != self._tp_world_size:
+                    continue
+                latency_s = time.monotonic() - start_monotonic
                 if artifact_id is None:
                     raise AssertionError("tp4 artifact_id is empty after apply")
                 return ReceiveEvent(
@@ -2268,25 +2371,40 @@ class WeightUpdateReceiver:
                 )
             except Exception as exc:  # noqa: BLE001
                 last_error = _compact_error_text(exc)
+                clear_pending_target = _should_clear_tp_pending_target_on_apply_failure(
+                    exc
+                )
                 if _is_cuda_oom_error(exc):
                     raise RuntimeError(
                         "receiver encountered CUDA OOM in tp_bind_into_swap path "
                         f"version={version}, key={key}, detail={last_error}"
                     ) from exc
-                self._maybe_raise_version_dropped(
-                    version=version,
-                    key=key,
-                    max_version=max_version,
-                    exc=exc,
-                    treat_apply_unavailable_error_as_dropped=True,
-                    prefer_resolved_newer_version=True,
-                )
+                try:
+                    self._maybe_raise_version_dropped(
+                        version=version,
+                        key=key,
+                        max_version=max_version,
+                        exc=exc,
+                        treat_apply_unavailable_error_as_dropped=True,
+                        prefer_resolved_newer_version=True,
+                    )
+                except VersionDroppedError:
+                    self._reset_tp_bindings_after_apply_failure(
+                        version=version,
+                        clear_pending_targets=True,
+                    )
+                    completed_ranks.clear()
+                    raise
                 if (
                     self._transport_group_mode == "tp_version"
                     and _is_non_retryable_transport_group_error(exc)
                 ):
                     artifact_id = self._resolve_artifact_id_for_key(key=key)
-                    self._reset_tp_bindings_after_apply_failure(version=version)
+                    self._reset_tp_bindings_after_apply_failure(
+                        version=version,
+                        clear_pending_targets=True,
+                    )
+                    completed_ranks.clear()
                     raise VersionDroppedError(
                         version=version,
                         key=key,
@@ -2298,7 +2416,32 @@ class WeightUpdateReceiver:
                         ),
                         newer_version=None,
                     ) from exc
-                self._reset_tp_bindings_after_apply_failure(version=version)
+                if active_rank is not None:
+                    self._reset_tp_rank_after_apply_failure(
+                        version=version,
+                        rank=active_rank,
+                        clear_pending_target=clear_pending_target,
+                    )
+                    completed_ranks.discard(active_rank)
+                    active_rank = None
+                if completed_ranks:
+                    print(
+                        "[receiver][tp]",
+                        f"version={version}",
+                        "phase=retry_preserve_completed_ranks",
+                        f"completed_ranks={sorted(completed_ranks)}",
+                        f"last_error={last_error}",
+                        flush=True,
+                    )
+                else:
+                    self._reset_tp_bindings_after_apply_failure(
+                        version=version,
+                        clear_pending_targets=clear_pending_target,
+                    )
+                    completed_ranks.clear()
+                    pointer_stable = True
+                    operation = "swap"
+                    artifact_id = None
                 last_state = "tp_binding_apply_failed"
                 next_log_at = self._maybe_log_wait_progress(
                     mode=self._apply_mode,
@@ -2435,6 +2578,10 @@ def _build_publisher_runner(
         model_name=model_name,
         key_template=str(args.key_template),
         keep_last=_ensure_non_negative("keep_last", int(args.keep_last)),
+        pre_publish_trim_margin=_ensure_non_negative(
+            "pre_publish_trim_margin",
+            int(args.pre_publish_trim_margin),
+        ),
         history_path=history_path,
         run_root=run_root,
         check_poll_interval_s=float(args.poll_interval_s),
@@ -2495,6 +2642,7 @@ def _run_publisher(args: argparse.Namespace) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "keep_last": int(args.keep_last),
+            "pre_publish_trim_margin": int(args.pre_publish_trim_margin),
             "strict_retention_drop_check": bool(args.strict_retention_drop_check),
             "payload_mode": str(args.payload_mode),
             "tp_world_size": int(args.tp_world_size),
@@ -2723,6 +2871,7 @@ def _run_single_host(args: argparse.Namespace) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "keep_last": int(args.keep_last),
+            "pre_publish_trim_margin": int(args.pre_publish_trim_margin),
             "strict_retention_drop_check": bool(args.strict_retention_drop_check),
             "receiver_apply_mode": str(args.receiver_apply_mode),
             "payload_mode": str(args.payload_mode),
@@ -2966,6 +3115,15 @@ def _add_common_stream_args(
 def _add_publisher_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--publish-interval-s", type=float, default=2.0)
     parser.add_argument("--keep-last", type=int, default=2)
+    parser.add_argument(
+        "--pre-publish-trim-margin",
+        type=int,
+        default=1,
+        help=(
+            "Pre-publish retention trim margin. "
+            "effective_pre_publish_keep = max(0, keep_last - margin)."
+        ),
+    )
     parser.add_argument("--retention-timeout-s", type=float, default=30.0)
     parser.add_argument(
         "--strict-retention-drop-check",

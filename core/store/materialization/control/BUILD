@@ -37,6 +37,7 @@ sc_cc_library(
         ":materialization_backend",
         "//core/common:memory_location_lib",
         "//core/store:device_types",
+        "//core/store:endpoint_id",
         "//core/store:global_store_client",
         "//core/store:worker_identity",
         "//core/store/materialization/contracts:loading_spec",

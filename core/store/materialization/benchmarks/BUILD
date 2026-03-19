@@ -1,6 +1,25 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
 cc_binary(
+    name = "collective_transform_microbench",
+    srcs = [
+        "collective_transform_microbench.cc",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:logging_init_lib",
+        "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@libtorch//:torch",
+        "@nccl",
+    ],
+)
+
+cc_binary(
     name = "safetensors_load_strategy_benchmark",
     srcs = [
         "safetensors_load_strategy_benchmark_main.cc",

@@ -17,15 +17,21 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
     ArtifactQueryRpcHandler,
 )
+from tensorcast.global_store.rpc.assembly_attempt_rpc_handler import (
+    AssemblyAttemptRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_readiness_cut_rpc_handler import (
+    AssemblyReadinessCutRpcHandler,
+)
+from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
+    AssemblySlotOccupancyRpcHandler,
+)
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
     LayoutBindingRpcHandler,
-)
-from tensorcast.global_store.rpc.layout_runtime_policy_rpc_handler import (
-    LayoutRuntimePolicyRpcHandler,
 )
 from tensorcast.global_store.rpc.layout_spec_rpc_handler import LayoutSpecRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
@@ -37,6 +43,9 @@ from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
 )
 from tensorcast.global_store.rpc.replica_registration_rpc_handler import (
     ReplicaRegistrationRpcHandler,
+)
+from tensorcast.global_store.rpc.shard_home_lease_rpc_handler import (
+    ShardHomeLeaseRpcHandler,
 )
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.view_proof_rpc_handler import ViewProofRpcHandler
@@ -52,8 +61,10 @@ class AssemblyViewRpcServicerMixin:
     artifact_query_rpc_handler: ArtifactQueryRpcHandler
     view_proof_rpc_handler: ViewProofRpcHandler
     layout_spec_rpc_handler: LayoutSpecRpcHandler
+    assembly_attempt_rpc_handler: AssemblyAttemptRpcHandler
     layout_binding_rpc_handler: LayoutBindingRpcHandler
-    layout_runtime_policy_rpc_handler: LayoutRuntimePolicyRpcHandler
+    assembly_readiness_cut_rpc_handler: AssemblyReadinessCutRpcHandler
+    assembly_slot_occupancy_rpc_handler: AssemblySlotOccupancyRpcHandler
 
     def GetArtifactInfoById(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.artifact_query_rpc_handler.get_artifact_info_by_id(request, context)
@@ -100,6 +111,56 @@ class AssemblyViewRpcServicerMixin:
             request, context
         )
 
+    def GetAssemblyAttempt(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.assembly_attempt_rpc_handler.get_assembly_attempt(request, context)
+
+    def UpsertAssemblyAttempt(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.assembly_attempt_rpc_handler.upsert_assembly_attempt(
+            request, context
+        )
+
+    def GetAssemblyReadinessCut(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_readiness_cut_rpc_handler.get_assembly_readiness_cut(
+            request, context
+        )
+
+    def UpsertAssemblyReadinessCut(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_readiness_cut_rpc_handler.upsert_assembly_readiness_cut(
+            request, context
+        )
+
+    def GetAssemblySlotOccupancy(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.get_assembly_slot_occupancy(
+            request, context
+        )
+
+    def UpsertAssemblySlotOccupancy(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.upsert_assembly_slot_occupancy(
+            request, context
+        )
+
+    def ListAssemblySlotOccupancies(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.list_assembly_slot_occupancies(
+            request, context
+        )
+
+    def UpdateAssemblySlotOccupancyState(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.assembly_slot_occupancy_rpc_handler.update_assembly_slot_occupancy_state(
+            request, context
+        )
+
     def AttachLayoutToArtifact(
         self, request: Any, context: grpc.ServicerContext
     ) -> Any:
@@ -109,20 +170,6 @@ class AssemblyViewRpcServicerMixin:
 
     def ListArtifactLayouts(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.layout_binding_rpc_handler.list_artifact_layouts(request, context)
-
-    def GetAssemblyRuntimePolicy(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.layout_runtime_policy_rpc_handler.get_assembly_runtime_policy(
-            request, context
-        )
-
-    def UpdateAssemblyRuntimePolicy(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.layout_runtime_policy_rpc_handler.update_assembly_runtime_policy(
-            request, context
-        )
 
 
 class WorkflowOrchestrationRpcServicerMixin:
@@ -175,6 +222,13 @@ class ArtifactCatalogRpcServicerMixin:
             request, context
         )
 
+    def UpsertArtifactMetadata(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.artifact_index_rpc_handler.upsert_artifact_metadata(
+            request, context
+        )
+
     def GetArtifactIndex(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.artifact_index_rpc_handler.get_artifact_index(request, context)
 
@@ -220,6 +274,7 @@ class ClusterRuntimeRpcServicerMixin:
     instance_rpc_handler: InstanceRpcHandler
     worker_state_sync_rpc_handler: WorkerStateSyncRpcHandler
     chunk_rpc_handler: ChunkRpcHandler
+    shard_home_lease_rpc_handler: ShardHomeLeaseRpcHandler
 
     def RegisterReplica(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.replica_registration_rpc_handler.register_replica(request, context)
@@ -304,3 +359,37 @@ class ClusterRuntimeRpcServicerMixin:
         self, request: Any, context: grpc.ServicerContext
     ) -> Any:
         return self.chunk_rpc_handler.batch_update_chunk_states(request, context)
+
+    def AcquireShardHomeLease(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.shard_home_lease_rpc_handler.acquire_shard_home_lease(
+            request, context
+        )
+
+    def KeepaliveShardHomeLease(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.shard_home_lease_rpc_handler.keepalive_shard_home_lease(
+            request, context
+        )
+
+    def BatchKeepaliveShardHomeLeases(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.shard_home_lease_rpc_handler.batch_keepalive_shard_home_leases(
+            request, context
+        )
+
+    def ReleaseShardHomeLease(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.shard_home_lease_rpc_handler.release_shard_home_lease(
+            request, context
+        )
+
+    def GetShardHomeLease(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.shard_home_lease_rpc_handler.get_shard_home_lease(request, context)
+
+    def BatchGetShardHomeLeases(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.shard_home_lease_rpc_handler.batch_get_shard_home_leases(
+            request, context
+        )

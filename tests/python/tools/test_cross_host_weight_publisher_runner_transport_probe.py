@@ -209,6 +209,142 @@ def test_validate_daemon_memfd_required_accepts_enabled_config(
     assert report["cpu_shared_memory_enabled"] is True
 
 
+def test_start_remote_daemon_retries_transient_startup_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    calls: list[tuple[str, float]] = []
+    stop_calls: list[tuple[str, str, str, float]] = []
+
+    def _fake_run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
+        calls.append((str(process_id), float(timeout_sec)))
+        _ = inner_cmd
+        if len(calls) == 1:
+            raise RuntimeError(
+                "remote command failed: process=p1 rc=1 run_as_user=u\n"
+                "stderr:\nError: Daemon exited with code 0 during startup"
+            )
+        return (
+            '{"daemon":{"pid":123,"address":"127.0.0.1:50052",'
+            '"p2p_address":"127.0.0.1:65090"},"started_at":1.0}'
+        )
+
+    def _fake_stop_remote_daemon(
+        *,
+        process_id: str,
+        repo_root: str,
+        daemon_session: str,
+        timeout_sec: float,
+    ) -> None:
+        stop_calls.append(
+            (
+                str(process_id),
+                str(repo_root),
+                str(daemon_session),
+                float(timeout_sec),
+            )
+        )
+
+    monkeypatch.setattr(runner, "run_remote", _fake_run_remote)
+    monkeypatch.setattr(runner, "stop_remote_daemon", _fake_stop_remote_daemon)
+
+    status = runner.start_remote_daemon(
+        process_id="p1",
+        repo_root="/repo",
+        daemon_config="cfg.yaml",
+        gs_addr="127.0.0.1:50051",
+        daemon_session="s1",
+        daemon_id="d1",
+        daemon_connect_address="127.0.0.1:50052",
+        daemon_p2p_port=65090,
+        advertise_host="127.0.0.1",
+        cluster_id="",
+        heartbeat_interval="5s",
+        periodic_sync_interval="5s",
+        max_concurrency=1,
+        cuda_backend="",
+        capability_token_secret="secret",
+        timeout_sec=60.0,
+    )
+
+    assert len(calls) == 2
+    assert len(stop_calls) == 1
+    assert status["daemon"]["pid"] == 123
+
+
+def test_start_remote_daemon_does_not_retry_non_startup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    calls = {"n": 0}
+    stop_calls = {"n": 0}
+
+    def _fake_run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
+        _ = process_id, inner_cmd, timeout_sec
+        calls["n"] += 1
+        raise RuntimeError(
+            "remote command failed: process=p1 rc=1 run_as_user=u\n"
+            "stderr:\nError: Invalid config override: Unknown config key"
+        )
+
+    def _fake_stop_remote_daemon(**_: object) -> None:
+        stop_calls["n"] += 1
+
+    monkeypatch.setattr(runner, "run_remote", _fake_run_remote)
+    monkeypatch.setattr(runner, "stop_remote_daemon", _fake_stop_remote_daemon)
+
+    with pytest.raises(RuntimeError, match="Unknown config key"):
+        runner.start_remote_daemon(
+            process_id="p1",
+            repo_root="/repo",
+            daemon_config="cfg.yaml",
+            gs_addr="127.0.0.1:50051",
+            daemon_session="s1",
+            daemon_id="d1",
+            daemon_connect_address="127.0.0.1:50052",
+            daemon_p2p_port=65090,
+            advertise_host="127.0.0.1",
+            cluster_id="",
+            heartbeat_interval="5s",
+            periodic_sync_interval="5s",
+            max_concurrency=1,
+            cuda_backend="",
+            capability_token_secret="secret",
+            timeout_sec=60.0,
+        )
+    assert calls["n"] == 1
+    assert stop_calls["n"] == 0
+
+
+def test_stop_remote_daemon_avoids_self_match_and_non_daemon_pids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    captured: dict[str, object] = {}
+
+    def _fake_run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
+        captured["process_id"] = str(process_id)
+        captured["inner_cmd"] = str(inner_cmd)
+        captured["timeout_sec"] = float(timeout_sec)
+        return ""
+
+    monkeypatch.setattr(runner, "run_remote", _fake_run_remote)
+
+    runner.stop_remote_daemon(
+        process_id="p1",
+        repo_root="/repo",
+        daemon_session="sess-1",
+        timeout_sec=5.0,
+    )
+
+    assert captured["process_id"] == "p1"
+    assert captured["timeout_sec"] == pytest.approx(20.0)
+    inner_cmd = str(captured["inner_cmd"])
+    assert 'if [[ "$pid" == "$$" || "$pid" == "$PPID" ]]; then continue; fi;' in inner_cmd
+    assert 'cmdline="$(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null || true)";' in inner_cmd
+    assert 'if [[ "${cmdline}" != *"tensorcast_daemon --config"* ]]; then continue; fi;' in inner_cmd
+
+
 def test_compute_transport_metrics_rejects_missing_bytes_on_completed_rows() -> None:
     runner = _load_runner_module()
     payload = {

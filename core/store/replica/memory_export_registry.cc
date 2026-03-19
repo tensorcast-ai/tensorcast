@@ -284,6 +284,9 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr.get()) + off);
       auto tensor_key = format_tensor_key(key, absl::StrCat("GPU_chunk_", range_idx++));
+      LOG(INFO) << "export_chunks(gpu): artifact_id=" << key.artifact_id
+                << " view_id=" << (key.view_id.has_value() ? *key.view_id : "") << " tensor_key=" << tensor_key
+                << " artifact_size=" << info.artifact_size << " off=" << off << " length=" << length;
       tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
       opts.register_mr = comm_engine.is_rdma_enabled();
       opts.needs_staging =

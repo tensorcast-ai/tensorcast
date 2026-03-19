@@ -12,6 +12,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
+#include "core/communicator/routing/routing_context.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 
 namespace tensorcast::store::loader {
@@ -24,6 +25,9 @@ class RemoteKeySource : public SeekableSource {
     std::vector<size_t> buffer_sizes; // Corresponding sizes for each key
     std::string ip; // Remote peer IP
     uint16_t port = 0; // Remote peer port
+    std::string local_endpoint_id;
+    std::string remote_endpoint_id;
+    std::shared_ptr<communicator::routing::RoutingContext> routing_context;
     uint64_t total_size = 0; // Aggregate size across all keys
     // Request-level budget propagated from RPC/request scope. When >0, all
     // remote read waits are bounded by this budget.
@@ -62,6 +66,13 @@ class RemoteKeySource : public SeekableSource {
       std::string_view key,
       uint64_t remote_offset,
       size_t bytes);
+  absl::StatusOr<communicator::transport::read_result_t> read_with_strict_fallback(
+      const std::string& key,
+      uint64_t local_addr,
+      size_t bytes,
+      uint64_t remote_offset,
+      int dev_type,
+      int dev_id);
   void abort_timed_out_channel(std::string_view key, uint64_t remote_offset, size_t bytes) const;
   std::chrono::milliseconds remaining_request_budget() const;
 
@@ -72,6 +83,7 @@ class RemoteKeySource : public SeekableSource {
   size_t current_key_index_ = 0;
   size_t current_key_offset_ = 0;
   size_t total_bytes_read_ = 0;
+  bool routed_path_enabled_ = true;
 };
 
 } // namespace tensorcast::store::loader
