@@ -23,7 +23,6 @@ related_code:
 links:
   plan: ../plans/0083-group-aware-transport-scheduling.md
   predecessors:
-    - ./0080-source-mode-policy-simplification.md
     - ./0082-cpu-memfd-zero-copy-publish.md
 ---
 
