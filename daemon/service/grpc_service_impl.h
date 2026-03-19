@@ -100,6 +100,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::RegisterVramRegionRequest* req,
       v2::RegisterVramRegionResponse* resp) override;
 
+  grpc::Status BeginReplicaFetch(
+      grpc::ServerContext* ctx,
+      const v2::BeginReplicaFetchRequest* req,
+      v2::BeginReplicaFetchResponse* resp) override;
+
+  grpc::Status EndReplicaFetch(
+      grpc::ServerContext* ctx,
+      const v2::EndReplicaFetchRequest* req,
+      v2::EndReplicaFetchResponse* resp) override;
+
   grpc::Status UnregisterVramRegion(
       grpc::ServerContext* ctx,
       const v2::UnregisterVramRegionRequest* req,

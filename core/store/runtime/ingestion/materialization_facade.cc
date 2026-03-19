@@ -59,6 +59,8 @@ namespace {
 constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
 constexpr uint32_t kViewTransportProbeTimeoutMs = 1000;
 
+enum class MappedSourceByteSpace : uint8_t { kCanonical = 0, kView = 1 };
+
 bool is_local_identity(const components::WorkerIdentity& local) {
   return !local.node_id.empty() || !local.node_address.empty();
 }
@@ -112,6 +114,23 @@ uint32_t resolve_view_transport_probe_timeout_ms(uint32_t wait_timeout_ms) {
     return 0;
   }
   return std::min(wait_timeout_ms, kViewTransportProbeTimeoutMs);
+}
+
+loader::ByteRangeMap build_identity_map(uint64_t bytes) {
+  loader::ByteRangeMap map;
+  map.total_bytes = bytes;
+  map.num_sources = 1;
+  if (bytes > 0) {
+    map.segments.push_back(
+        loader::ByteRangeSegment{
+            .kind = loader::ByteRangeSegment::Kind::kData,
+            .dst_offset = 0,
+            .length = bytes,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return map;
 }
 
 std::string make_materialize_into_target_pinned_wait_context(
@@ -1035,11 +1054,42 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
     return handle;
   };
 
+  auto maybe_publish_local_view_completion = [&]() {
+    if (request.hints().export_policy == loading::ExportPolicy::kNever) {
+      return;
+    }
+    const auto publish_state = config_.replica_runtime->get_replica_publish_state(key);
+    if (publish_state == ReplicaPublishState::kPublishPending || publish_state == ReplicaPublishState::kPublished) {
+      return;
+    }
+    IngestionCompletedEvent event;
+    event.request_id = make_request_id("local_view");
+    event.source = IngestionSource::kP2P;
+    event.materialize_mode = request.mode();
+    event.export_policy = request.hints().export_policy;
+    event.artifact_id = key.artifact_id;
+    event.target_device = request.target_device();
+    event.target_location = request.target_location();
+    event.bytes_transferred = local_map.total_bytes;
+    event.duration_seconds = 0.0;
+    event.status = absl::OkStatus();
+    event.replica_key = key;
+    event.view_id = request.requested_view_id();
+    event.publish_to_global_store = true;
+    event.publish_context_id = config_.runtime_context->mint_publish_context_id();
+    publish_completed_event(std::move(event));
+    // Source-side prepare must not return before the resident-view replica is visible
+    // to subsequent route selection on the requesting worker. The ingestion event hub
+    // dispatches asynchronously, so drain here to close that publication race.
+    config_.runtime_context->drain_events();
+  };
+
   auto existing_or = replica_registry.find(key);
   if (existing_or.ok()) {
     const auto& existing = existing_or.value();
     absl::Status reuse_status = validate_existing_replica_for_reuse(existing, request.target_location());
     if (reuse_status.ok()) {
+      maybe_publish_local_view_completion();
       LOG(INFO) << "materialize_view.local_canonical_reuse artifact_id=" << request.canonical_artifact_id()
                 << " view_id=" << view_id << " source_key=" << *selected_key;
       return build_local_view_handle(existing);
@@ -1065,6 +1115,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
     if (!rebuild_status.ok()) {
       return rebuild_status;
     }
+    maybe_publish_local_view_completion();
     LOG(INFO) << "materialize_view.local_canonical_rebuild artifact_id=" << request.canonical_artifact_id()
               << " view_id=" << view_id << " source_key=" << *selected_key;
     return build_local_view_handle(existing);
@@ -1127,6 +1178,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
     if (!reuse_status.ok()) {
       return reuse_status;
     }
+    maybe_publish_local_view_completion();
     LOG(INFO) << "materialize_view.local_canonical_raced artifact_id=" << request.canonical_artifact_id()
               << " view_id=" << view_id << " source_key=" << *selected_key;
     return build_local_view_handle(concurrent_replica);
@@ -1135,6 +1187,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
     return emplace_status;
   }
 
+  maybe_publish_local_view_completion();
   LOG(INFO) << "materialize_view.local_canonical_loaded artifact_id=" << request.canonical_artifact_id()
             << " view_id=" << view_id << " source_key=" << *selected_key
             << " source_location=" << static_cast<int>(selected_location) << " view_bytes=" << local_map.total_bytes;
@@ -1373,7 +1426,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
   auto run_source =
       [&](std::unique_ptr<IArtifactLoader> loader,
-          loading::MaterializationSource source_kind) -> absl::StatusOr<loading::MaterializeIntoTargetResult> {
+          loading::MaterializationSource source_kind,
+          MappedSourceByteSpace source_byte_space) -> absl::StatusOr<loading::MaterializeIntoTargetResult> {
     auto init_status = loader->initialize();
     if (!init_status.ok()) {
       return init_status;
@@ -1383,18 +1437,28 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return source_or.status();
     }
 
+    const bool source_is_view = source_byte_space == MappedSourceByteSpace::kView;
     const bool use_source_layout =
-        (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
-    auto map_ptr_or = get_map_ptr(use_source_layout);
-    if (!map_ptr_or.ok()) {
-      return map_ptr_or.status();
-    }
-    auto map_ptr = *map_ptr_or;
+        !source_is_view && (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
 
-    loader::ByteRangeMap effective_map = *map_ptr;
+    loader::ByteRangeMap effective_map;
+    if (source_is_view) {
+      effective_map = build_identity_map(total_size);
+    } else {
+      auto map_ptr_or = get_map_ptr(use_source_layout);
+      if (!map_ptr_or.ok()) {
+        return map_ptr_or.status();
+      }
+      effective_map = **map_ptr_or;
+    }
+
     bool composed_view = false;
-    if (view_plan.has_value() && !view_plan->is_identity && use_source_layout) {
-      auto composed_or = loader::compose_byte_range_maps(view_plan->selection.map, *map_ptr);
+    if (!source_is_view && view_plan.has_value() && !view_plan->is_identity && use_source_layout) {
+      auto map_ptr_or = get_map_ptr(true);
+      if (!map_ptr_or.ok()) {
+        return map_ptr_or.status();
+      }
+      auto composed_or = loader::compose_byte_range_maps(view_plan->selection.map, **map_ptr_or);
       if (!composed_or.ok()) {
         return composed_or.status();
       }
@@ -1424,7 +1488,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         return mapped_or.status();
       }
       plan_source = std::move(*mapped_or);
-      if (view_plan.has_value() && !view_plan->is_identity && !composed_view) {
+      if (!source_is_view && view_plan.has_value() && !view_plan->is_identity && !composed_view) {
         plan_source =
             loader::make_view_plan_source(std::move(plan_source), view_plan->selection, config_.options->byte_mapping);
       }
@@ -1560,7 +1624,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (prefer_disk && has_disk_source && allow_disk) {
     loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
-    auto disk_or = run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+    auto disk_or = run_source(
+        std::make_unique<DiskLoader>(disk_src),
+        loading::MaterializationSource::kDisk,
+        MappedSourceByteSpace::kCanonical);
     if (disk_or.ok()) {
       return disk_or;
     }
@@ -1618,6 +1685,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.buf_sizes = remote.buffer_sizes;
         p2p_src.verification_json = remote.verification_json;
         p2p_src.enable_checksum = false;
+        p2p_src.source_is_view = session.route_kind == tensorcast::global_store::v1::TRANSPORT_ROUTE_KIND_RESIDENT_VIEW;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
         p2p_src.request_budget = hints.request_budget;
@@ -1625,7 +1693,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (has_disk_source && allow_disk && !prefer_p2p) {
           p2p_src.fallback_disk_dir = disk_source->path.string();
         }
-        auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
+        auto p2p_or = run_source(
+            std::make_unique<P2PLoader>(p2p_src),
+            loading::MaterializationSource::kP2P,
+            p2p_src.source_is_view ? MappedSourceByteSpace::kView : MappedSourceByteSpace::kCanonical);
         auto complete_status = gs_client->complete_replica_transport(
             session.transport_id,
             p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
@@ -1649,7 +1720,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (allow_disk && has_disk_source) {
     loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
-    return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+    return run_source(
+        std::make_unique<DiskLoader>(disk_src),
+        loading::MaterializationSource::kDisk,
+        MappedSourceByteSpace::kCanonical);
   }
 
   if (!allow_p2p && !allow_disk) {
@@ -1734,25 +1808,6 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       ? std::optional<std::string_view>(*hints.disk_metadata->source_index_json)
       : std::nullopt;
 
-  enum class MappedSourceByteSpace : uint8_t { kCanonical = 0, kView = 1 };
-
-  auto build_identity_map = [](uint64_t bytes) -> loader::ByteRangeMap {
-    loader::ByteRangeMap map;
-    map.total_bytes = bytes;
-    map.num_sources = 1;
-    if (bytes > 0) {
-      map.segments.push_back(
-          loader::ByteRangeSegment{
-              .kind = loader::ByteRangeSegment::Kind::kData,
-              .dst_offset = 0,
-              .length = bytes,
-              .src_offset = 0,
-              .source_index = 0,
-          });
-    }
-    return map;
-  };
-
   auto get_map_ptr = [&](bool use_source_layout) -> absl::StatusOr<std::shared_ptr<loader::ByteRangeMap>> {
     const std::string canonical_hash = index_hash(canonical_index_json);
     std::string plan_key = absl::StrCat(generation, ":canon:", canonical_hash);
@@ -1804,8 +1859,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const bool use_source_layout =
         !source_is_view && (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
     loader::ByteRangeMap effective_map = mapping;
-    if (source_is_view && hints.variant && hints.variant->view_id.has_value() && !view_plan.has_value()) {
-      // Opaque mapped view_id routes already expose destination byte space layout.
+    if (source_is_view) {
+      // Resident-view transport already streams bytes in destination/view byte space.
+      // Reapplying the view selection on the receiver would double-transform the payload
+      // and can drive the mapped source out of bounds.
       effective_map = build_identity_map(total_size);
     }
     if (!source_is_view && view_plan.has_value() && !view_plan->is_identity) {
@@ -3212,7 +3269,8 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_disk(
     const loading::DiskSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  return run_disk_ingestion_internal(artifact_identifier, source, target, hints, /*publish_to_global_store=*/false);
+  const bool publish_to_global_store = hints.export_policy != loading::ExportPolicy::kNever;
+  return run_disk_ingestion_internal(artifact_identifier, source, target, hints, publish_to_global_store);
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_disk(
@@ -3229,7 +3287,8 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_p2p(
     const P2PSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  return run_p2p_ingestion_internal(artifact_identifier, source, target, hints, /*publish_to_global_store=*/false);
+  const bool publish_to_global_store = hints.export_policy != loading::ExportPolicy::kNever;
+  return run_p2p_ingestion_internal(artifact_identifier, source, target, hints, publish_to_global_store);
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_p2p(

@@ -595,6 +595,22 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "derived_view_export_manager_lib",
+    srcs = ["state/derived_view_export_manager.cc"],
+    hdrs = ["state/derived_view_export_manager.h"],
+    deps = [
+        ":session_lifecycle_lib",
+        ":types_hdr",
+        "//core/store:global_store_client",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+sc_cc_library(
     name = "session_lifecycle_lib",
     srcs = ["state/session_lifecycle.cc"],
     hdrs = ["state/session_lifecycle.h"],
@@ -658,6 +674,7 @@ sc_cc_library(
         ":artifact_source_registry_lib",
         ":background_scheduler_hdr",
         ":daemon_options_hdr",
+        ":derived_view_export_manager_lib",
         ":device_resolver_hdr",
         ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
@@ -834,6 +851,7 @@ sc_cc_library(
         ":artifact_source_registry_lib",
         ":assembly_operation_service_lib",
         ":daemon_options_hdr",
+        ":derived_view_export_manager_lib",
         ":device_resolver_hdr",
         ":disk_artifact_service_lib",
         ":handle_lease_registry_lib",
@@ -911,6 +929,7 @@ sc_cc_library(
     deps = [
         ":artifact_source_registry_lib",
         ":daemon_options_hdr",
+        ":derived_view_export_manager_lib",
         ":device_resolver_hdr",
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
@@ -1317,6 +1336,7 @@ sc_cc_library(
     srcs = ["service/controllers/transport_controller.cc"],
     hdrs = ["service/controllers/transport_controller.h"],
     deps = [
+        ":derived_view_export_manager_lib",
         ":lip_manager_lib",
         ":rpc_context_hdr",
         ":status_utils",
@@ -1359,6 +1379,38 @@ cc_test(
         "//core/store:device_registry",
         "//core/store:store_engine",
         "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "derived_view_export_manager_test",
+    srcs = ["state/derived_view_export_manager_test.cc"],
+    deps = [
+        ":derived_view_export_manager_lib",
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":session_lifecycle_lib",
+        "//core/store:device_registry",
+        "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
+        "//core/store/materialization/dataplane:view_identity",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "derived_view_export_manager_eviction_test",
+    srcs = ["state/derived_view_export_manager_eviction_test.cc"],
+    deps = [
+        ":derived_view_export_manager_lib",
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":session_lifecycle_lib",
+        "//core/store:device_registry",
+        "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
+        "//core/store/materialization/dataplane:view_identity",
         "@catch2//:catch2_main",
     ],
 )

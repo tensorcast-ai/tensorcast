@@ -631,12 +631,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     session.remote_replica.node_id = "stub-node";
     session.remote_replica.node_address = "127.0.0.1";
     session.remote_replica.node_port = 12345;
+    session.remote_replica.grpc_port = 12346;
     session.remote_replica.memory_size = 16;
     session.remote_replica.memory_type = common::memory::MemoryLocation::CPU;
     session.remote_replica.device_id = target_device.ordinal;
     session.remote_replica.remote_memory_keys = {"tensor.data_0"};
     session.remote_replica.buffer_sizes = {16};
     session.remote_replica.verification_json = "{}";
+    session.route_kind = tensorcast::global_store::v1::TRANSPORT_ROUTE_KIND_CANONICAL;
     return session;
   }
 
@@ -648,12 +650,19 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     session.remote_replica.node_id = remote_node_id;
     session.remote_replica.node_address = remote_node_address;
     session.remote_replica.node_port = remote_node_port;
+    session.remote_replica.grpc_port = remote_node_port + 1;
     session.remote_replica.memory_size = info.memory_size;
     session.remote_replica.memory_type = info.memory_type;
     session.remote_replica.device_id = info.device_id;
     session.remote_replica.remote_memory_keys = info.remote_memory_keys;
     session.remote_replica.buffer_sizes = info.buffer_sizes;
     session.remote_replica.verification_json = "{}";
+    session.route_kind = info.view_id.has_value() ? tensorcast::global_store::v1::TRANSPORT_ROUTE_KIND_RESIDENT_VIEW
+                                                  : tensorcast::global_store::v1::TRANSPORT_ROUTE_KIND_CANONICAL;
+    if (info.view_id.has_value()) {
+      session.view_transport_metadata = components::ViewTransportMetadata{
+          .view_id = *info.view_id, .view_size_bytes = info.memory_size, .view_data_hash = std::nullopt};
+    }
     return session;
   }
 };

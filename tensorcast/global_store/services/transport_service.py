@@ -94,6 +94,44 @@ class TransportService:
             diffusion_bonus=float(policy.diffusion_bonus_weight),
         )
 
+    def _has_any_transport_route(
+        self, *, artifact_id: str, view_id: str | None
+    ) -> bool:
+        if self.replica_repository.has_any_replica(artifact_id, view_id):
+            return True
+        if view_id is None:
+            return False
+        return self.replica_repository.has_any_replica(artifact_id, None)
+
+    def _select_transport_source(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        heartbeat_timeout_seconds: float,
+        scheduler_mode: str,
+        source_balance_weights: SourceBalanceWeights | None = None,
+        cursor=None,
+    ):
+        primary = self.replica_repository.find_available_for_transport(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            scheduler_mode=scheduler_mode,
+            source_balance_weights=source_balance_weights,
+            cursor=cursor,
+        )
+        if primary.replica is not None or view_id is None:
+            return primary
+        return self.replica_repository.find_available_for_transport(
+            artifact_id=artifact_id,
+            view_id=None,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            scheduler_mode=scheduler_mode,
+            source_balance_weights=source_balance_weights,
+            cursor=cursor,
+        )
+
     @staticmethod
     def _normalize_request_id(request_id: str) -> str:
         normalized = request_id.strip()
@@ -291,7 +329,7 @@ class TransportService:
         start_time = time.time()
         timeout_deadline = start_time + (max(0, wait_timeout_ms) / 1000.0)
 
-        if not self.replica_repository.has_any_replica(artifact_id, view_id):
+        if not self._has_any_transport_route(artifact_id=artifact_id, view_id=view_id):
             inc_transport_request(artifact_id, "not_found")
             observe_transport_wait(artifact_id, time.time() - start_time)
             raise NotFoundError(f"No replicas registered for artifact {artifact_id}")
@@ -317,7 +355,9 @@ class TransportService:
 
         try:
             with self.replica_repository.transaction() as tx:
-                self.pending_transport_request_repository.purge_malformed_rows(cursor=tx)
+                self.pending_transport_request_repository.purge_malformed_rows(
+                    cursor=tx
+                )
                 existing_pending = (
                     self.pending_transport_request_repository.find_by_request_id(
                         request_id, cursor=tx
@@ -756,7 +796,7 @@ class TransportService:
             if dispatched >= dispatch_limit:
                 break
 
-            selection = self.replica_repository.find_available_for_transport(
+            selection = self._select_transport_source(
                 artifact_id=pending_request.artifact_id,
                 view_id=pending_request.requested_view_id,
                 heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
@@ -869,7 +909,7 @@ class TransportService:
         except DatabaseError as exc:
             # Keep public contract stable for callers/tests.
             if isinstance(exc.__cause__, NotFoundError):
-                raise exc.__cause__
+                raise exc.__cause__ from None
             raise
 
         if released:
@@ -993,8 +1033,7 @@ class TransportService:
                     transport.transport_id,
                     outcome=TransportCompletionOutcome.EXPIRED,
                     outcome_detail=(
-                        "cleanup_malformed_inflight "
-                        f"status={transport.status}"
+                        f"cleanup_malformed_inflight status={transport.status}"
                     ),
                 )
                 malformed_cleaned += 1

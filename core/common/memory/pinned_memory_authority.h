@@ -25,6 +25,8 @@ class PinnedMemoryAuthority {
     // Phase 1 fixed-allocation: fully preallocated capacity of this class pool.
     uint64_t pool_bytes = 0;
     bool rdma_preregister = false;
+    int numa_node = -1;
+    bool numa_prefault = false;
   };
 
   struct Config {

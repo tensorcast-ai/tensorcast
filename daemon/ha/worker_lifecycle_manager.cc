@@ -1311,28 +1311,41 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
         case global_store::StateChange::CHANGE_TYPE_ADD_REPLICA: {
           // Proactively materialize the replica locally on the indicated memory.
           const auto& ri = ch.replica_info();
-          store::DeviceKey dev{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-          if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_GPU) {
-            dev = store::DeviceRegistry::instance().gpu_key(static_cast<int>(ri.memory_info().device_id()));
-          } else if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_RAM) {
-            dev = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-          } else {
+          auto selector_opt = replica_selector_from_memory_info(ri.ref().artifact_id(), ri.memory_info());
+          if (!selector_opt.has_value()) {
             // Ignore DISK-only add in daemon prefetch.
             break;
           }
-          std::string artifact_id = ri.ref().artifact_id();
+          const ReplicaSelector& selector = *selector_opt;
+          store::DeviceKey dev{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+          if (selector.memory_type == commonpb::MEMORY_TYPE_GPU) {
+            dev = store::DeviceRegistry::instance().gpu_key(selector.device_id);
+          }
+          std::string artifact_id = selector.artifact_id;
+          std::optional<std::string> view_id =
+              selector.view_id.empty() ? std::nullopt : std::optional<std::string>(selector.view_id);
           auto engine = engine_.get();
           auto& async_runtime = ports_.async_runtime;
           if (async_runtime.is_shutting_down()) {
             break;
           }
           auto executor = async_runtime.blocking_executor();
-          executor->add([engine = std::move(engine), dev, artifact_id = std::move(artifact_id)]() mutable {
+          executor->add([engine = std::move(engine),
+                         dev,
+                         artifact_id = std::move(artifact_id),
+                         view_id = std::move(view_id)]() mutable {
             store::loading::MaterializeHints hints;
             hints.artifact_id = artifact_id;
+            if (view_id.has_value()) {
+              store::loading::VariantIdentity variant;
+              variant.canonical_artifact_id = artifact_id;
+              variant.view_id = *view_id;
+              hints.variant = std::move(variant);
+            }
             auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints);
             if (!res.ok()) {
               VLOG(1) << "Prefetch materialize_replica failed: artifact_id=" << artifact_id
+                      << (view_id.has_value() ? absl::StrCat(" view_id=", *view_id) : std::string())
                       << " dev=" << dev.to_string() << ": " << res.status();
             }
           });

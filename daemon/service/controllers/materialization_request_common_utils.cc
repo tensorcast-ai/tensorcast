@@ -238,6 +238,9 @@ absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
   if (!cpu_target) {
     return lease_context;
   }
+  if (lease_context.no_lease) {
+    return lease_context;
+  }
   if (!lease_context.loopback_peer) {
     return absl::PermissionDeniedError("CPU shared-memory materialization is local-only");
   }

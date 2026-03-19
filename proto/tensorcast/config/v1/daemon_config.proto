@@ -71,6 +71,17 @@ message Lifecycle {
     uint32 max_mints_per_second = 3;
   }
   HandleLeases handle_leases = 20;
+
+  message DerivedViewExports {
+    // Sliding TTL for daemon-owned source-side derived view exports.
+    // This governs how long an idle derived view stays reusable before
+    // source-side retirement begins.
+    google.protobuf.Duration ttl = 1;
+    // Retry TTL used when an ordered retire attempt fails and the daemon
+    // needs a bounded backoff window before trying teardown again.
+    google.protobuf.Duration retry_retire_ttl = 2;
+  }
+  DerivedViewExports derived_view_exports = 21;
 }
 
 message HighAvailability {
@@ -163,6 +174,12 @@ message PinnedMemory {
     reserved 4;
     reserved "min_bytes", "max_bytes";
     bool rdma_preregister = 5;
+    // Best-effort NUMA node binding for the backing pinned slab before
+    // cudaHostRegister. Leave unset/-1 to keep the OS default policy.
+    int32 numa_node = 6;
+    // If true and numa_node >= 0, prefault the slab before cudaHostRegister so
+    // placement/fault cost is paid at daemon startup rather than on first use.
+    bool numa_prefault = 7;
   }
 
   reserved 1;

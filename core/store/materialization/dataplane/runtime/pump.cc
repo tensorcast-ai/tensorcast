@@ -4,10 +4,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <linux/mempolicy.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
@@ -29,6 +38,26 @@
 namespace tensorcast::store::loader {
 
 namespace {
+
+pid_t current_tid() {
+  return static_cast<pid_t>(::syscall(SYS_gettid));
+}
+
+int current_cpu() {
+  return ::sched_getcpu();
+}
+
+int addr_numa_node(const void* addr) {
+  if (addr == nullptr) {
+    return -1;
+  }
+  int node = -1;
+  long rc = ::syscall(SYS_get_mempolicy, &node, nullptr, 0, const_cast<void*>(addr), MPOL_F_NODE | MPOL_F_ADDR);
+  if (rc != 0) {
+    return -1;
+  }
+  return node;
+}
 
 struct PumpState {
   std::atomic<bool> should_stop{false};
@@ -93,7 +122,7 @@ class SlotLease {
 };
 
 static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
-  VLOG(1) << "Consumer thread started";
+  VLOG(1) << "Consumer thread started tid=" << current_tid() << " cpu=" << current_cpu();
   bool draining = false;
 
   struct AsyncSlot {
@@ -333,6 +362,7 @@ void run_range_producer(
     std::atomic<size_t>& range_index,
     PumpState& state) {
   const absl::Time producer_start = absl::Now();
+  VLOG(2) << "pump_producer_start tid=" << current_tid() << " cpu=" << current_cpu();
   uint64_t produced_chunks = 0;
   uint64_t produced_bytes = 0;
   uint64_t wait_free_chunk_us_total = 0;
@@ -446,14 +476,16 @@ void run_range_producer(
       VLOG(2) << "pump_producer_chunk range_index=" << idx << " chunk_id=" << chunk_id << " slot=" << slot_id
               << " src_offset=" << (current_offset - bytes_read) << " bytes=" << bytes_read
               << " wait_free_chunk_us=" << wait_free_us << " read_at_us=" << read_us
-              << " mark_chunk_ready_us=" << mark_ready_us << " remaining_in_range=" << remaining;
+              << " mark_chunk_ready_us=" << mark_ready_us << " remaining_in_range=" << remaining
+              << " tid=" << current_tid() << " cpu=" << current_cpu() << " buffer_numa=" << addr_numa_node(buffer);
     }
   }
   VLOG(2) << "pump_producer_summary ranges=" << ranges.size() << " produced_chunks=" << produced_chunks
           << " produced_bytes=" << produced_bytes << " wait_free_chunk_us_total=" << wait_free_chunk_us_total
           << " read_at_us_total=" << read_at_us_total << " mark_chunk_ready_us_total=" << mark_ready_us_total
           << " duration_us="
-          << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - producer_start)));
+          << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - producer_start)))
+          << " tid=" << current_tid() << " cpu=" << current_cpu();
 }
 
 } // namespace

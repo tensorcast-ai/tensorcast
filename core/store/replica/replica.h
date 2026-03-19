@@ -222,6 +222,7 @@ class Replica {
       std::shared_ptr<ReplicaLoadController> memory_manager,
       gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
       common::memory::MemoryLocation source_type,
+      bool source_is_view,
       std::optional<loader::ViewPlan> view_plan,
       std::optional<std::string> canonical_index_json,
       std::optional<std::string> source_index_json,
@@ -240,6 +241,7 @@ class Replica {
 
   // Store the original source type for reference (e.g., to know if RDMA registration makes sense)
   const common::memory::MemoryLocation original_source_type_;
+  const bool source_is_view_;
 
   // Optional view execution plan when this replica represents a variant byte space.
   const std::optional<loader::ViewPlan> view_plan_;

@@ -125,6 +125,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       kernel->persistence_manager()->set_global_store_client(global_store_client.get());
     }
     kernel->lip_manager().set_global_store_client(global_store_client);
+    kernel->derived_view_export_manager().set_global_store_client(global_store_client);
   }
 
   MaterializationController::Dep mdep{
@@ -141,6 +142,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .identity = kernel->worker_identity_store(),
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
+      .derived_view_exports = &kernel->derived_view_export_manager(),
       .handle_leases = kernel->handle_leases(),
       .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
@@ -162,7 +164,11 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   auto registration_controller = std::make_unique<RegistrationController>(rdep);
 
   TransportController::Dep tdep{
-      .engine = kernel->engine(), .locks = kernel->transport_lock_manager(), .lip = kernel->lip_manager()};
+      .engine = kernel->engine(),
+      .locks = kernel->transport_lock_manager(),
+      .lip = kernel->lip_manager(),
+      .derived_view_exports = &kernel->derived_view_export_manager(),
+  };
   auto transport_controller = std::make_unique<TransportController>(tdep);
 
   StatusController::Dep sdep{

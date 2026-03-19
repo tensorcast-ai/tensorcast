@@ -19,6 +19,7 @@
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/daemon_options.h"
+#include "daemon/state/derived_view_export_manager.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
@@ -50,6 +51,7 @@ class MaterializationController {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     uint32_t max_concurrency{4};
     SessionLifecycleManager* lifecycle{nullptr};
+    DerivedViewExportManager* derived_view_exports{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     common::CapabilityTokenManager* capability_tokens{nullptr};
     bool cpu_shared_memory_enabled{true};

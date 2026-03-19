@@ -87,9 +87,12 @@ absl::Status PinnedMemoryAuthority::validate_and_build_pools() {
   cfg_.total_bytes = sum_pool_bytes;
 
   for (const auto& cls : classes_) {
+    PinnedBufferPool::Options pool_opts;
+    pool_opts.name = cls.name;
+    pool_opts.numa_node = cls.numa_node;
+    pool_opts.prefault = cls.numa_prefault;
     pools_.push_back(
-        std::make_shared<PinnedBufferPool>(
-            static_cast<size_t>(cls.pool_bytes), cls.slice_bytes, /*name=*/std::string(cls.name)));
+        std::make_shared<PinnedBufferPool>(static_cast<size_t>(cls.pool_bytes), cls.slice_bytes, std::move(pool_opts)));
   }
 
   return absl::OkStatus();

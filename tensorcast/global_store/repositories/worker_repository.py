@@ -1315,6 +1315,25 @@ class WorkerRepository(BaseRepository):
             finally:
                 cursor.close()
 
+    def find_by_worker_id(self, worker_id: str) -> Worker | None:
+        """Find an active worker by worker_id."""
+        with self._write_lock:
+            cursor = self.get_cursor()
+            try:
+                row = cursor.execute(
+                    f"""
+                    {_WORKER_SELECT}
+                    WHERE workers.worker_id = ? AND workers.inactive_at IS NULL
+                    LIMIT 1
+                    """,
+                    [worker_id],
+                ).fetchone()
+                if row:
+                    return self._row_to_model(row)
+                return None
+            finally:
+                cursor.close()
+
     def list_active(self, accepting_only: bool = False) -> list[Worker]:
         """Return active workers, optionally filtering by accepting status."""
         # Map accepting_only flag to existing include_unavailable parameter

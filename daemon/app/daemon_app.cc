@@ -164,6 +164,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   }
   if (app->options_.global_store_client) {
     app->kernel_->lip_manager().set_global_store_client(app->options_.global_store_client);
+    app->kernel_->derived_view_export_manager().set_global_store_client(app->options_.global_store_client);
   }
 
   MaterializationController::Dep mdep{
@@ -181,6 +182,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .global_store_client = app->options_.global_store_client,
       .max_concurrency = app->options_.daemon_options.max_concurrency,
       .lifecycle = &app->kernel_->lifecycle_manager(),
+      .derived_view_exports = &app->kernel_->derived_view_export_manager(),
       .handle_leases = app->kernel_->handle_leases(),
       .capability_tokens = app->kernel_->capability_tokens(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
@@ -207,7 +209,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   TransportController::Dep tdep{
       .engine = app->kernel_->engine(),
       .locks = app->kernel_->transport_lock_manager(),
-      .lip = app->kernel_->lip_manager()};
+      .lip = app->kernel_->lip_manager(),
+      .derived_view_exports = &app->kernel_->derived_view_export_manager(),
+  };
   app->transport_controller_ = std::make_unique<TransportController>(tdep);
 
   StatusController::Dep sdep{

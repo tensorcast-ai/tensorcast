@@ -21,6 +21,8 @@ from tensorcast.global_store.models import (
     TransportCompletionOutcome,
     TransportSchedulingGroup,
 )
+from tensorcast.global_store.repositories.view_repository import ViewRepository
+from tensorcast.global_store.repositories.worker_repository import WorkerRepository
 from tensorcast.global_store.services.transport_service import TransportService
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.common.v1 import common_pb2
@@ -34,10 +36,14 @@ class TransportRpcHandler:
         self,
         *,
         transport_service: TransportService,
+        view_repository: ViewRepository,
+        worker_repository: WorkerRepository,
         replica_to_memory_info: Callable[[Replica], common_pb2.MemoryInfo],
         logger,
     ) -> None:
         self._transport_service = transport_service
+        self._view_repository = view_repository
+        self._worker_repository = worker_repository
         self._replica_to_memory_info = replica_to_memory_info
         self._logger = logger
 
@@ -138,17 +144,41 @@ class TransportRpcHandler:
             )
 
             remote_info = self._replica_to_memory_info(replica)
+            route_kind = self._route_kind_for_selection(
+                requested_view_id=requested_view_id,
+                replica=replica,
+            )
+            view_transport_metadata = self._build_view_transport_metadata(
+                artifact_id=request.artifact_id,
+                requested_view_id=requested_view_id,
+                replica=replica,
+            )
 
             from contextlib import suppress
 
             with suppress(Exception):
                 set_span_attributes({"tc.transport.id": str(transport_id)})
+                set_span_attributes({"tc.transport.route_kind": int(route_kind)})
+                if view_transport_metadata is not None:
+                    set_span_attributes(
+                        {
+                            "tc.transport.view_id": view_transport_metadata.view_id,
+                            "tc.transport.view_size_bytes": int(
+                                view_transport_metadata.view_size_bytes
+                            ),
+                        }
+                    )
 
-            return global_store_pb2.RequestReplicaTransportResponse(
+            response = global_store_pb2.RequestReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_OK,
                 remote_memory_info=remote_info,
                 transport_id=str(transport_id),
+                route_kind=route_kind,
+                source_grpc_port=self._resolve_source_grpc_port(replica),
             )
+            if view_transport_metadata is not None:
+                response.view_transport_metadata.CopyFrom(view_transport_metadata)
+            return response
 
         except NotFoundError:
             self._logger.info(
@@ -179,6 +209,63 @@ class TransportRpcHandler:
             return global_store_pb2.RequestReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
+
+    @staticmethod
+    def _route_kind_for_selection(
+        *, requested_view_id: str | None, replica: Replica
+    ) -> global_store_pb2.TransportRouteKind:
+        if (
+            requested_view_id
+            and replica.byte_space.kind.name == "VIEW"
+            and replica.byte_space.id == requested_view_id
+        ):
+            return (
+                global_store_pb2.TransportRouteKind.TRANSPORT_ROUTE_KIND_RESIDENT_VIEW
+            )
+        if requested_view_id:
+            return global_store_pb2.TransportRouteKind.TRANSPORT_ROUTE_KIND_DERIVED_VIEW_FROM_CANONICAL
+        return global_store_pb2.TransportRouteKind.TRANSPORT_ROUTE_KIND_CANONICAL
+
+    def _build_view_transport_metadata(
+        self, *, artifact_id: str, requested_view_id: str | None, replica: Replica
+    ) -> global_store_pb2.ViewTransportMetadata | None:
+        metadata_view_id = requested_view_id
+        if metadata_view_id is None and (
+            replica.byte_space.kind.name == "VIEW" and replica.byte_space.id is not None
+        ):
+            metadata_view_id = replica.byte_space.id
+        if metadata_view_id is None:
+            return None
+        view_row = self._view_repository.get(
+            artifact_id=artifact_id,
+            view_id=metadata_view_id,
+        )
+        if view_row is None:
+            if (
+                replica.byte_space.kind.name != "VIEW"
+                or replica.byte_space.id != metadata_view_id
+            ):
+                return None
+            return global_store_pb2.ViewTransportMetadata(
+                view_id=metadata_view_id,
+                view_size_bytes=int(replica.memory_size),
+            )
+        metadata = global_store_pb2.ViewTransportMetadata(
+            view_id=metadata_view_id,
+            view_size_bytes=int(view_row["view_size"]),
+        )
+        view_data_hash = view_row.get("view_data_hash")
+        if view_data_hash:
+            metadata.view_data_hash = str(view_data_hash)
+        return metadata
+
+    def _resolve_source_grpc_port(self, replica: Replica) -> int:
+        if replica.worker_id is None or not replica.worker_id:
+            return 0
+        worker = self._worker_repository.find_by_worker_id(replica.worker_id)
+        if worker is None:
+            return 0
+        return int(worker.grpc_port)
 
     def complete_replica_transport(
         self,

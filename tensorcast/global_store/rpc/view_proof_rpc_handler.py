@@ -136,8 +136,6 @@ class ViewProofRpcHandler:
                 view = request.view
                 if not view.view_id:
                     raise ValidationError("view.view_id is required")
-                if not view.view_spec_json:
-                    raise ValidationError("view.view_spec_json is required")
                 if view.view_size <= 0:
                     raise ValidationError("view.view_size must be positive")
                 verified_at = (

@@ -93,6 +93,13 @@ grpc::Status TransportController::lock(
   std::string token = d_.locks.mint_token();
   d_.locks.put(token, key, std::move(indices));
   resp.set_lock_token(token);
+  if (requested_view_id.has_value() && d_.derived_view_exports != nullptr) {
+    absl::Status begin_fetch_status = d_.derived_view_exports->begin_fetch(key, token);
+    if (!absl::IsNotFound(begin_fetch_status) && !begin_fetch_status.ok()) {
+      d_.locks.erase(token);
+      return to_grpc_status(begin_fetch_status);
+    }
+  }
   rctx.mark_success();
   return Status::OK;
 }
@@ -117,7 +124,82 @@ grpc::Status TransportController::unlock(
     return Status::OK;
   }
   // UMA V3: No engine-level unlock; treat daemon unlock as idempotent bookkeeping: just erase the token.
-  d_.locks.erase(req.lock_token());
+  auto removed = d_.locks.take(req.lock_token());
+  if (removed.has_value() && removed->key.view_id.has_value() && d_.derived_view_exports != nullptr) {
+    d_.derived_view_exports->end_fetch(req.lock_token(), "unlock");
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status TransportController::begin_replica_fetch(
+    RpcContext& rctx,
+    const v2::BeginReplicaFetchRequest& req,
+    v2::BeginReplicaFetchResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.artifact.id", req.artifact_id());
+  span->SetAttribute("tc.transport.id", req.transport_id());
+  if (req.view_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "view_id is required"};
+  }
+  if (req.transport_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "transport_id is required"};
+  }
+  if (d_.derived_view_exports == nullptr) {
+    resp.set_managed(false);
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  store::loading::ReplicaKey key;
+  key.artifact_id = req.artifact_id();
+  key.view_id = req.view_id();
+  key.replica = 0;
+  switch (req.device_type()) {
+    case v2::DEVICE_TYPE_CPU:
+      key.device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1};
+      break;
+    case v2::DEVICE_TYPE_GPU:
+      if (!req.has_device_id()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "GPU fetch requires device_id"};
+      }
+      key.device = store::DeviceRegistry::instance().gpu_key(req.device_id());
+      break;
+    default:
+      return {grpc::StatusCode::INVALID_ARGUMENT, "unsupported device_type"};
+  }
+
+  const absl::Status begin_status = d_.derived_view_exports->begin_fetch(key, req.transport_id());
+  if (absl::IsNotFound(begin_status)) {
+    resp.set_managed(false);
+    rctx.mark_success();
+    return Status::OK;
+  }
+  if (!begin_status.ok()) {
+    return to_grpc_status(begin_status);
+  }
+  resp.set_managed(true);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status TransportController::end_replica_fetch(
+    RpcContext& rctx,
+    const v2::EndReplicaFetchRequest& req,
+    v2::EndReplicaFetchResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.transport.id", req.transport_id());
+  if (req.transport_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "transport_id is required"};
+  }
+  if (d_.derived_view_exports == nullptr) {
+    resp.set_managed(false);
+    rctx.mark_success();
+    return Status::OK;
+  }
+  const auto reason = req.has_reason() ? std::string_view(req.reason()) : std::string_view("rpc_end_fetch");
+  d_.derived_view_exports->end_fetch(req.transport_id(), reason);
+  resp.set_managed(true);
   rctx.mark_success();
   return Status::OK;
 }
