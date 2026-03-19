@@ -11,6 +11,7 @@ This document explains how P2P transfers work in Global Store mode. It is code-d
 Related docs:
 - `docs/architecture/artifact-views-and-retrieval.md`
 - `docs/architecture/view-replicas-and-assembly.md`
+- `docs/designs/0086-source-side-remote-view-transport.md`
 
 ## Scope and terminology
 
@@ -211,6 +212,19 @@ Notes:
 - On commit, the backend computes view hash and optional leaf digests (when a canonical `ByteRangeMap` is available) and publishes a `ViewStateUpdate` via `RegistrationPublisher::update_view_state`.
 - `GlobalStoreRegistrationPublisher` calls `GlobalStoreClient::update_artifact_view_state` to persist view metadata; failures are logged and treated as best-effort when the server does not support the RPC.
 - For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_view_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
+
+## Proposed: Source-side Remote View Transport
+
+The forward-looking design for remote TP-slice transport now lives in `docs/designs/0086-source-side-remote-view-transport.md`.
+
+That design covers:
+
+- first-class view residency in Global Store;
+- lookup-or-derive routing for `request_view_transport(view)`;
+- source-side derived-view export from canonical local replicas;
+- compatibility, verification, and observability requirements for phased rollout.
+
+This architecture document remains focused on the current code path and its existing transport behavior.
 
 ## Observability
 
