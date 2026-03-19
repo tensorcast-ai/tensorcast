@@ -16,6 +16,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import hashlib
+import importlib
 import json
 import os
 import signal
@@ -27,7 +28,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from tensorcast import runtime
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
 from tensorcast.cli_utils.config import discover_daemon_config
 from tensorcast.cli_utils.health import ping_daemon, wait_for_daemon
@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.daemon_runtime_config import load_daemon_config
 from tensorcast.logger import init_logger, setup_logging
+
+runtime = importlib.import_module("tensorcast.runtime")
 
 _current_ctx: Context | None = None
 _atexit_registered = False

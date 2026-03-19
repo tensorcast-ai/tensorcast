@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -9,7 +10,6 @@ from typing import Literal
 
 import click
 
-from tensorcast import runtime
 from tensorcast.cli_utils import ServiceError, global_store_manager, service_manager
 from tensorcast.cli_utils.health import ping_global_store
 from tensorcast.cli_utils.network import resolve_connect_host
@@ -20,6 +20,8 @@ from tensorcast.cli_utils.paths import (
 )
 from tensorcast.cli_utils.process import read_json_default, read_runtime_state
 from tensorcast.logger import init_logger
+
+runtime = importlib.import_module("tensorcast.runtime")
 
 logger = init_logger(__name__)
 

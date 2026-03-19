@@ -145,8 +145,10 @@ class _DummyRuntime:
     def track_future(self, _future: Any) -> None:
         return None
 
-    def resolve_key_mapping_cached(self, key: str) -> str | None:
-        return self._key_cache.get(key)
+    def resolve_key_mapping_cached(
+        self, key: str
+    ) -> tuple[str | None, str | None]:
+        return self._key_cache.get(key), None
 
     def cache_key_mapping(self, key: str, artifact_id: str | None) -> None:
         self._key_cache[key] = artifact_id

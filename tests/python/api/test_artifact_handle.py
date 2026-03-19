@@ -141,8 +141,10 @@ class _RuntimeStub:
     ) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
 
-    def resolve_key_mapping_cached(self, *, key: str) -> str | None:
-        return self._key_cache.get(key)
+    def resolve_key_mapping_cached(
+        self, *, key: str
+    ) -> tuple[str | None, str | None]:
+        return self._key_cache.get(key), None
 
     def cache_key_mapping(
         self, key: str, *, artifact_id: str | None, ttl_override=None
