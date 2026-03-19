@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from tensorcast.api.context import CallContext
+from tensorcast.api.directory import TensorCastDirectory
 from tensorcast.api.plan.plan import (
     _PUBLIC_CONTINUATION_REQUIRED_EXECUTION_CLASS,
     _TERMINAL_ONLY_EXECUTION_CLASS,
@@ -42,6 +43,9 @@ class Runtime:
 
     def signals(self) -> TensorCastSignals:
         return TensorCastSignals(self._client)
+
+    def directory(self) -> TensorCastDirectory:
+        return TensorCastDirectory(self._client)
 
     def plan(
         self,

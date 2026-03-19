@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 
+#include "absl/time/time.h"
 #include "core/store/store_engine.h"
 #include "daemon/app/startup_coordinator.h"
 #include "daemon/service/controllers/byte_artifact_controller.h"
@@ -18,6 +19,7 @@
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
 #include "daemon/state/artifact_source_registry.h"
+#include "daemon/state/instance_execution_directory_cache.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/session_lifecycle.h"
@@ -35,6 +37,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     bool use_cursor_pagination{false};
     bool gateway_ingress_enabled{false};
     std::filesystem::path storage_path;
+    absl::Duration directory_staleness_budget{absl::Seconds(2)};
   };
 
   struct Deps {
@@ -45,6 +48,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     TransportController& transport_controller;
     StatusController& status_controller;
     WorkerIdentityStore& identity_store;
+    InstanceExecutionDirectoryCache& instance_execution_directory_cache;
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
@@ -141,6 +145,21 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::GetServerConfigRequest* req,
       v2::GetServerConfigResponse* resp) override;
+
+  grpc::Status ListDirectoryWorkers(
+      grpc::ServerContext* ctx,
+      const v2::ListDirectoryWorkersRequest* req,
+      v2::ListDirectoryWorkersResponse* resp) override;
+
+  grpc::Status ListDirectoryInstances(
+      grpc::ServerContext* ctx,
+      const v2::ListDirectoryInstancesRequest* req,
+      v2::ListDirectoryInstancesResponse* resp) override;
+
+  grpc::Status ResolveInstanceExecution(
+      grpc::ServerContext* ctx,
+      const v2::ResolveInstanceExecutionRequest* req,
+      v2::ResolveInstanceExecutionResponse* resp) override;
 
   grpc::Status WaitReplicaVerification(
       grpc::ServerContext* ctx,
@@ -397,6 +416,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   TransportController* transport_controller_;
   StatusController* status_controller_;
   WorkerIdentityStore* identity_store_;
+  InstanceExecutionDirectoryCache* instance_execution_directory_cache_;
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;

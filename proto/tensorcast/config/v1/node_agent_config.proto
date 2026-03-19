@@ -17,6 +17,7 @@ message NodeAgentIdentity {
   string worker_id = 4;
   string signals_endpoint = 5;
   map<string, string> labels = 6;
+  string execution_endpoint = 7;
 }
 
 message NodeAgentGlobalStore {

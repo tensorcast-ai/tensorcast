@@ -23,6 +23,7 @@
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
+#include "daemon/state/instance_execution_directory_cache.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_bridge.h"
@@ -169,6 +170,10 @@ class DaemonKernel {
     return *worker_directory_cache_;
   }
 
+  [[nodiscard]] InstanceExecutionDirectoryCache& instance_execution_directory_cache() const {
+    return *instance_execution_directory_cache_;
+  }
+
   [[nodiscard]] std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials() const {
     return inter_daemon_channel_credentials_;
   }
@@ -239,6 +244,7 @@ class DaemonKernel {
   std::unique_ptr<ByteArtifactRouteResolver> byte_artifact_route_resolver_;
   std::unique_ptr<PayloadTransportBroker> payload_transport_broker_;
   std::unique_ptr<WorkerDirectoryCache> worker_directory_cache_;
+  std::unique_ptr<InstanceExecutionDirectoryCache> instance_execution_directory_cache_;
   std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials_;
   std::unique_ptr<RetireGates> retire_gates_;
 

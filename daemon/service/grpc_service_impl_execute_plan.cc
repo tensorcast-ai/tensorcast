@@ -23,9 +23,14 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/selection_identity.h"
 #include "core/store/device_registry.h"
+#include "daemon/util/status_utils.h"
 #include "google/protobuf/io/coded_stream.h"
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "google/protobuf/timestamp.pb.h"
+#include "grpcpp/client_context.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
+#include "tensorcast/node_agent/v1/node_agent.grpc.pb.h"
 #include "tensorcast/node_agent/v1/node_agent.pb.h"
 
 namespace tensorcast::daemon {
@@ -206,6 +211,98 @@ std::optional<int64_t> remaining_deadline_ms(
   }
   const int64_t elapsed_ms = absl::ToUnixMillis(absl::Now()) - execution_started_ms;
   return static_cast<int64_t>(call_context.deadline_ms()) - elapsed_ms;
+}
+
+absl::Duration directory_staleness_budget_for_plan(
+    const tensorcast::plan::v1::PlanSpec& plan,
+    absl::Duration fallback_budget) {
+  if (plan.has_governance() && plan.governance().has_staleness_budget_ms()) {
+    return absl::Milliseconds(std::max<uint64_t>(1, plan.governance().staleness_budget_ms()));
+  }
+  return fallback_budget;
+}
+
+absl::StatusOr<std::string> single_instance_target_id(const tensorcast::plan::v1::PlanSpec& plan) {
+  std::optional<std::string> instance_id;
+  for (const auto& step : plan.steps()) {
+    if (step.target().target_type() != tensorcast::plan::v1::TARGET_TYPE_INSTANCE) {
+      continue;
+    }
+    if (step.target().target_id().empty()) {
+      return absl::InvalidArgumentError("instance target_id is required");
+    }
+    if (!instance_id.has_value()) {
+      instance_id = step.target().target_id();
+      continue;
+    }
+    if (*instance_id != step.target().target_id()) {
+      return absl::FailedPreconditionError(
+          "daemon ingress currently supports at most one routed instance target per request");
+    }
+  }
+  if (!instance_id.has_value()) {
+    return absl::NotFoundError("no instance target present");
+  }
+  return *instance_id;
+}
+
+absl::Status validate_forwardable_instance_plan(
+    const tensorcast::plan::v1::PlanSpec& plan,
+    std::string_view resolved_daemon_id) {
+  for (const auto& step : plan.steps()) {
+    switch (step.target().target_type()) {
+      case tensorcast::plan::v1::TARGET_TYPE_WORKER:
+        if (step.target().target_id() != resolved_daemon_id) {
+          return absl::FailedPreconditionError(
+              "worker targets in an instance-routed plan must match the resolved instance daemon");
+        }
+        break;
+      case tensorcast::plan::v1::TARGET_TYPE_INSTANCE:
+        break;
+      case tensorcast::plan::v1::TARGET_TYPE_CLUSTER:
+        return absl::FailedPreconditionError("cluster targets are not executable via daemon ingress");
+      case tensorcast::plan::v1::TARGET_TYPE_UNSPECIFIED:
+      default:
+        return absl::InvalidArgumentError("unknown target type");
+    }
+  }
+  return absl::OkStatus();
+}
+
+grpc::Status forward_plan_to_node_agent(
+    grpc::ServerContext* server_context,
+    const v2::ExecutePlanRequest& request,
+    std::string_view execution_endpoint,
+    v2::ExecutePlanResponse* response,
+    int64_t execution_started_ms) {
+  auto channel = grpc::CreateChannel(std::string(execution_endpoint), grpc::InsecureChannelCredentials());
+  auto stub = tensorcast::node_agent::v1::NodeAgentService::NewStub(channel);
+  grpc::ClientContext client_context;
+  if (const auto budget_or = remaining_deadline_ms(request.plan().context(), execution_started_ms);
+      budget_or.has_value()) {
+    if (*budget_or <= 0) {
+      return grpc::Status(StatusCode::DEADLINE_EXCEEDED, "CallContext deadline exceeded");
+    }
+    client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(*budget_or));
+  } else if (server_context->deadline() != std::chrono::system_clock::time_point::max()) {
+    client_context.set_deadline(server_context->deadline());
+  }
+  tensorcast::node_agent::v1::ExecutePlanRequest node_request;
+  node_request.mutable_plan()->CopyFrom(request.plan());
+  node_request.set_dry_run(request.dry_run());
+  tensorcast::node_agent::v1::ExecutePlanResponse node_response;
+  const auto status = stub->ExecutePlan(&client_context, node_request, &node_response);
+  if (!status.ok()) {
+    return grpc::Status(status.error_code(), status.error_message());
+  }
+  auto terminal_bytes_or = serialize_deterministic(node_response);
+  if (!terminal_bytes_or.ok()) {
+    return grpc::Status(StatusCode::INTERNAL, std::string(terminal_bytes_or.status().message()));
+  }
+  response->set_request_id(node_response.request_id());
+  response->set_ok(node_response.ok());
+  response->set_terminal_result(*terminal_bytes_or);
+  return grpc::Status::OK;
 }
 
 std::string derive_action_idempotency_key(
@@ -513,6 +610,31 @@ Status StoreDaemonServiceImpl::ExecutePlan(
   const auto& plan = req->plan();
   const std::string request_id = request_id_from_plan(plan);
   const int64_t execution_started_ms = absl::ToUnixMillis(absl::Now());
+
+  auto instance_target_or = single_instance_target_id(plan);
+  if (!instance_target_or.ok() && !absl::IsNotFound(instance_target_or.status())) {
+    return {StatusCode::FAILED_PRECONDITION, std::string(instance_target_or.status().message())};
+  }
+  const bool has_instance_target = instance_target_or.ok();
+  if (has_instance_target) {
+    if (instance_execution_directory_cache_ == nullptr) {
+      return {StatusCode::UNAVAILABLE, "instance execution directory cache is unavailable"};
+    }
+    const absl::Duration staleness_budget = directory_staleness_budget_for_plan(plan, opts_.directory_staleness_budget);
+    auto route_or = instance_execution_directory_cache_->resolve_instance_execution(
+        *instance_target_or, absl::Now(), staleness_budget);
+    if (!route_or.ok()) {
+      return status_utils::to_grpc_status(route_or.status());
+    }
+    if (route_or->execution_host_kind != "node_agent_grpc") {
+      return {StatusCode::UNIMPLEMENTED, "instance execution host kind is unsupported"};
+    }
+    if (const auto validation_status = validate_forwardable_instance_plan(plan, route_or->daemon_id);
+        !validation_status.ok()) {
+      return {StatusCode::FAILED_PRECONDITION, std::string(validation_status.message())};
+    }
+    return forward_plan_to_node_agent(ctx, *req, route_or->execution_endpoint, resp, execution_started_ms);
+  }
 
   absl::flat_hash_map<std::string, const tensorcast::plan::v1::PlanStep*> steps_by_id;
   steps_by_id.reserve(static_cast<size_t>(plan.steps_size()));

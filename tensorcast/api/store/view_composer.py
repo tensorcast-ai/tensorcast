@@ -20,7 +20,10 @@ from tensorcast.api._view_ops import (
     ViewSpecBuildResult,
     build_view_spec,
 )
-from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,

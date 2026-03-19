@@ -10,8 +10,14 @@ from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Instance
 from tensorcast.global_store.repositories import InstanceRepository, WorkerRepository
 from tensorcast.logger import init_logger
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 logger = init_logger(__name__)
+
+_NODE_AGENT_ENABLED_FLAG = (
+    1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED
+)
+_DEFAULT_EXECUTION_HOST_KIND = "node_agent_grpc"
 
 
 class InstanceService:
@@ -24,6 +30,26 @@ class InstanceService:
         self.worker_repository = worker_repository
         self.config = get_config()
 
+    @staticmethod
+    def _normalize_execution_route(instance: Instance) -> None:
+        instance.execution_endpoint = (
+            str(instance.execution_endpoint).strip() or None
+            if instance.execution_endpoint is not None
+            else None
+        )
+        instance.execution_host_kind = (
+            str(instance.execution_host_kind).strip() or None
+            if instance.execution_host_kind is not None
+            else None
+        )
+        if (int(instance.capability_flags) & _NODE_AGENT_ENABLED_FLAG) != 0:
+            if not instance.execution_endpoint:
+                raise ValidationError(
+                    "execution_endpoint is required when node agent capability is enabled"
+                )
+            if instance.execution_host_kind is None:
+                instance.execution_host_kind = _DEFAULT_EXECUTION_HOST_KIND
+
     def register_instance(self, instance: Instance) -> Instance:
         if not instance.instance_id:
             raise ValidationError("instance_id is required")
@@ -31,6 +57,7 @@ class InstanceService:
             raise ValidationError("daemon_id is required")
         if not instance.engine:
             raise ValidationError("engine is required")
+        self._normalize_execution_route(instance)
 
         if not instance.worker_id:
             worker = self.worker_repository.find_by_daemon_id(instance.daemon_id)
@@ -45,6 +72,8 @@ class InstanceService:
             existing.worker_id = instance.worker_id
             existing.engine = instance.engine
             existing.signals_endpoint = instance.signals_endpoint
+            existing.execution_endpoint = instance.execution_endpoint
+            existing.execution_host_kind = instance.execution_host_kind
             existing.labels = instance.labels
             existing.capability_flags = instance.capability_flags
             return self.instance_repository.update(existing)

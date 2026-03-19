@@ -17,12 +17,14 @@
 
 namespace tensorcast::daemon {
 
-class WorkerDirectoryCache {
+class InstanceExecutionDirectoryCache {
  public:
   struct Entry {
+    std::string instance_id;
     std::string daemon_id;
-    std::string worker_id;
-    std::string address;
+    std::string execution_host_kind;
+    std::string execution_endpoint;
+    std::string engine;
     uint64_t capability_flags{0};
   };
 
@@ -32,30 +34,23 @@ class WorkerDirectoryCache {
     uint64_t cache_epoch{0};
   };
 
-  explicit WorkerDirectoryCache(std::shared_ptr<store::components::IGlobalStoreClient> global_store_client);
+  explicit InstanceExecutionDirectoryCache(std::shared_ptr<store::components::IGlobalStoreClient> global_store_client);
 
-  [[nodiscard]] bool is_fresh(std::string_view daemon_id, absl::Time now, absl::Duration staleness_budget) const;
-
-  [[nodiscard]] absl::Status warm_for_daemons(
-      const std::vector<std::string>& daemon_ids,
-      absl::Time now,
-      absl::Duration staleness_budget);
-
-  [[nodiscard]] absl::StatusOr<Snapshot> list_workers(
+  [[nodiscard]] absl::StatusOr<Snapshot> list_instances(
       bool include_unavailable,
       uint64_t required_capability_flags,
       absl::Time now,
       absl::Duration staleness_budget);
 
-  [[nodiscard]] absl::StatusOr<std::string> resolve_daemon_address(
-      std::string_view daemon_id,
+  [[nodiscard]] absl::StatusOr<Entry> resolve_instance_execution(
+      std::string_view instance_id,
       absl::Time now,
       absl::Duration staleness_budget);
 
  private:
   struct CacheState {
     std::vector<Entry> entries;
-    absl::flat_hash_map<std::string, size_t> index_by_daemon_id;
+    absl::flat_hash_map<std::string, size_t> index_by_instance_id;
     absl::Time refreshed_at{absl::UnixEpoch()};
     uint64_t cache_epoch{0};
   };
@@ -66,8 +61,8 @@ class WorkerDirectoryCache {
   [[nodiscard]] CacheState& state_for(bool include_unavailable) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   [[nodiscard]] const CacheState& state_for(bool include_unavailable) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  void update_from_workers(
-      const std::vector<store::components::ActiveWorkerInfo>& workers,
+  void update_from_instances(
+      const std::vector<store::components::ActiveInstanceInfo>& instances,
       CacheState& state,
       absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 

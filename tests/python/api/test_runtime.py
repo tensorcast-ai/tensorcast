@@ -161,3 +161,79 @@ def test_runtime_signals_falls_back_when_daemon_omits_freshness_fields() -> None
     assert snapshot.cache_epoch is None
     assert snapshot.freshness_state == "current"
     runtime.close()
+
+
+def test_runtime_directory_reads_daemon_served_routes() -> None:
+    client = _FakeDaemonClient("127.0.0.1:50051")
+    client.list_directory_workers = (
+        lambda **_kwargs: store_daemon_pb2.ListDirectoryWorkersResponse(  # type: ignore[attr-defined]
+            workers=[
+                store_daemon_pb2.WorkerDirectoryRoute(
+                    daemon_id="daemon-a",
+                    worker_id="worker-a",
+                    daemon_address="10.0.0.1:50051",
+                    capability_flags=7,
+                )
+            ],
+            as_of_ms=123000,
+            staleness_ms=11,
+            cache_epoch=5,
+            freshness_state="current",
+            authority_mode="GLOBAL_STORE_BACKED",
+        )
+    )
+    client.list_directory_instances = (
+        lambda **_kwargs: store_daemon_pb2.ListDirectoryInstancesResponse(  # type: ignore[attr-defined]
+            instances=[
+                store_daemon_pb2.InstanceExecutionRoute(
+                    instance_id="inst-a",
+                    daemon_id="daemon-a",
+                    execution_host_kind="node_agent_grpc",
+                    execution_endpoint="10.0.0.1:7001",
+                    engine="test",
+                    capability_flags=9,
+                )
+            ],
+            as_of_ms=123100,
+            staleness_ms=13,
+            cache_epoch=6,
+            freshness_state="current",
+            authority_mode="GLOBAL_STORE_BACKED",
+        )
+    )
+    client.resolve_instance_execution = (
+        lambda **_kwargs: store_daemon_pb2.ResolveInstanceExecutionResponse(  # type: ignore[attr-defined]
+            route=store_daemon_pb2.InstanceExecutionRoute(
+                instance_id="inst-a",
+                daemon_id="daemon-a",
+                execution_host_kind="node_agent_grpc",
+                execution_endpoint="10.0.0.1:7001",
+                engine="test",
+                capability_flags=9,
+            ),
+            as_of_ms=123200,
+            staleness_ms=17,
+            cache_epoch=7,
+            freshness_state="current",
+            authority_mode="GLOBAL_STORE_BACKED",
+        )
+    )
+    runtime = connect(
+        daemon_address="127.0.0.1:50051",
+        client_factory=lambda address: client,
+    )
+
+    worker_snapshot = runtime.directory().list_workers()
+    instance_snapshot = runtime.directory().list_instances()
+    route_snapshot = runtime.directory().resolve_instance_execution("inst-a")
+    compat_worker_snapshot = runtime.signals().list_workers()
+
+    assert worker_snapshot.authority_mode == "GLOBAL_STORE_BACKED"
+    assert worker_snapshot.value[0].daemon_id == "daemon-a"
+    assert worker_snapshot.value[0].daemon_address == "10.0.0.1:50051"
+    assert instance_snapshot.value[0].instance_id == "inst-a"
+    assert instance_snapshot.value[0].execution_endpoint == "10.0.0.1:7001"
+    assert route_snapshot.value.execution_host_kind == "node_agent_grpc"
+    assert route_snapshot.cache_epoch == 7
+    assert compat_worker_snapshot.value[0].daemon_id == "daemon-a"
+    runtime.close()

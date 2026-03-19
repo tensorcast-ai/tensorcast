@@ -3,6 +3,7 @@
 #include "daemon/testing/daemon_service_harness.h"
 
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/time.h"
 
 namespace tensorcast::daemon {
 namespace {
@@ -224,6 +226,12 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .local_handle_socket_path = options.local_handle_socket_path,
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
       .startup_coordinator = startup_coordinator,
+      .worker_directory_cache = kernel->worker_directory_cache(),
+      .instance_execution_directory_cache = kernel->instance_execution_directory_cache(),
+      .global_store_client = global_store_client,
+      .directory_staleness_budget = absl::Milliseconds(
+          std::max<int64_t>(
+              1, static_cast<int64_t>(options.byte_artifact_routing.worker_directory_staleness_budget.count()))),
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
@@ -267,6 +275,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .transport_controller = *transport_controller,
       .status_controller = *status_controller,
       .identity_store = kernel->worker_identity_store(),
+      .instance_execution_directory_cache = kernel->instance_execution_directory_cache(),
       .region_registry = kernel->region_registry(),
       .lip_manager = kernel->lip_manager(),
       .global_store_client = global_store_client,
@@ -284,6 +293,9 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .use_cursor_pagination = options.use_cursor_pagination,
       .gateway_ingress_enabled = options.gateway_ingress_enabled,
       .storage_path = options.storage_path,
+      .directory_staleness_budget = absl::Milliseconds(
+          std::max<int64_t>(
+              1, static_cast<int64_t>(options.byte_artifact_routing.worker_directory_staleness_budget.count()))),
   };
   auto service = std::make_unique<StoreDaemonServiceImpl>(sdeps, svc_opts);
 

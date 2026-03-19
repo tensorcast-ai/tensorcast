@@ -94,6 +94,17 @@ struct ActiveWorkerInfo {
   uint64_t capability_flags{0};
 };
 
+struct ActiveInstanceInfo {
+  std::string instance_id;
+  std::string daemon_id;
+  std::string worker_id;
+  std::string engine;
+  std::string signals_endpoint;
+  std::string execution_endpoint;
+  std::string execution_host_kind;
+  uint64_t capability_flags{0};
+};
+
 // Information about a remote replica replica
 struct RemoteReplicaInfo {
   std::string node_id;
@@ -438,6 +449,10 @@ class IGlobalStoreClient {
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
 
   virtual absl::StatusOr<std::vector<ActiveWorkerInfo>> list_active_workers(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+  virtual absl::StatusOr<std::vector<ActiveInstanceInfo>> list_active_instances(
       bool include_unavailable = false,
       uint64_t required_capability_flags = 0,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
@@ -890,6 +905,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
 
   absl::StatusOr<std::vector<ActiveWorkerInfo>> list_active_workers(
+      bool include_unavailable = false,
+      uint64_t required_capability_flags = 0,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+  absl::StatusOr<std::vector<ActiveInstanceInfo>> list_active_instances(
       bool include_unavailable = false,
       uint64_t required_capability_flags = 0,
       const RpcOptions& rpc_options = RpcOptions{}) override;

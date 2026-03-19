@@ -2,6 +2,7 @@
 
 #include "daemon/app/daemon_app.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <thread>
 #include <utility>
@@ -266,6 +267,14 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .local_handle_socket_path = app->options_.daemon_options.local_handle_socket_path,
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
       .startup_coordinator = app->options_.startup_coordinator,
+      .worker_directory_cache = app->kernel_->worker_directory_cache(),
+      .instance_execution_directory_cache = app->kernel_->instance_execution_directory_cache(),
+      .global_store_client = app->options_.global_store_client,
+      .directory_staleness_budget = absl::Milliseconds(
+          std::max<int64_t>(
+              1,
+              static_cast<int64_t>(
+                  app->options_.daemon_options.byte_artifact_routing.worker_directory_staleness_budget.count()))),
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
@@ -309,6 +318,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .transport_controller = *app->transport_controller_,
       .status_controller = *app->status_controller_,
       .identity_store = app->kernel_->worker_identity_store(),
+      .instance_execution_directory_cache = app->kernel_->instance_execution_directory_cache(),
       .region_registry = app->kernel_->region_registry(),
       .lip_manager = app->kernel_->lip_manager(),
       .global_store_client = app->options_.global_store_client,
@@ -326,6 +336,11 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .use_cursor_pagination = app->options_.daemon_options.use_cursor_pagination,
       .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
+      .directory_staleness_budget = absl::Milliseconds(
+          std::max<int64_t>(
+              1,
+              static_cast<int64_t>(
+                  app->options_.daemon_options.byte_artifact_routing.worker_directory_staleness_budget.count()))),
   };
   app->service_ = std::make_unique<StoreDaemonServiceImpl>(sdeps, svc_opts);
 

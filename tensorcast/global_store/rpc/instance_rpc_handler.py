@@ -47,6 +47,8 @@ class InstanceRpcHandler:
                 worker_id=request.worker_id if request.HasField("worker_id") else None,
                 engine=request.engine,
                 signals_endpoint=request.signals_endpoint or None,
+                execution_endpoint=request.execution_endpoint or None,
+                execution_host_kind=request.execution_host_kind or None,
                 labels=dict(request.labels) if request.labels else {},
                 capability_flags=int(request.capability_flags),
             )
@@ -164,6 +166,8 @@ class InstanceRpcHandler:
                         worker_id=instance.worker_id or "",
                         engine=instance.engine,
                         signals_endpoint=instance.signals_endpoint or "",
+                        execution_endpoint=instance.execution_endpoint or "",
+                        execution_host_kind=instance.execution_host_kind or "",
                         last_heartbeat_ts=last_timestamp,
                         labels=dict(instance.labels) if instance.labels else {},
                         capability_flags=int(instance.capability_flags),

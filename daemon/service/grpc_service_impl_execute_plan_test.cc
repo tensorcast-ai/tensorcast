@@ -7,8 +7,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "core/store/store_engine.h"
+#include "core/store/testing/global_store_client_stub.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
+#include "tensorcast/node_agent/v1/node_agent.grpc.pb.h"
 #include "tensorcast/node_agent/v1/node_agent.pb.h"
 
 namespace {
@@ -21,12 +26,75 @@ tensorcast::store::StoreEngineOptions make_opts_small() {
   return opts;
 }
 
-std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness() {
+class DirectoryClient final : public tensorcast::store::testing::GlobalStoreClientStub {
+ public:
+  absl::StatusOr<std::vector<tensorcast::store::components::ActiveInstanceInfo>> list_active_instances(
+      bool,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return instances;
+  }
+
+  std::vector<tensorcast::store::components::ActiveInstanceInfo> instances;
+};
+
+class FakeNodeAgentService final : public tensorcast::node_agent::v1::NodeAgentService::Service {
+ public:
+  grpc::Status ExecutePlan(
+      grpc::ServerContext*,
+      const tensorcast::node_agent::v1::ExecutePlanRequest* request,
+      tensorcast::node_agent::v1::ExecutePlanResponse* response) override {
+    last_request.CopyFrom(*request);
+    response->set_request_id(request->plan().context().request_id());
+    response->set_ok(true);
+    auto* step = response->add_steps();
+    step->set_step_id("instance");
+    step->set_target_id("inst-1");
+    step->set_action("manifest");
+    step->mutable_status()->set_state(tensorcast::node_agent::v1::OPERATION_STATE_SUCCESS);
+    step->mutable_status()->set_message("forwarded");
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetAgentInfo(
+      grpc::ServerContext*,
+      const tensorcast::node_agent::v1::GetAgentInfoRequest*,
+      tensorcast::node_agent::v1::GetAgentInfoResponse* response) override {
+    response->set_agent_id("agent-1");
+    response->set_daemon_id("daemon-agent");
+    response->set_instance_id("inst-1");
+    response->set_version("test");
+    return grpc::Status::OK;
+  }
+
+  tensorcast::node_agent::v1::ExecutePlanRequest last_request;
+};
+
+struct RunningNodeAgentServer {
+  std::unique_ptr<FakeNodeAgentService> service;
+  std::unique_ptr<grpc::Server> server;
+  int port{0};
+};
+
+RunningNodeAgentServer start_node_agent_server() {
+  RunningNodeAgentServer running;
+  running.service = std::make_unique<FakeNodeAgentService>();
+  grpc::ServerBuilder builder;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &running.port);
+  builder.RegisterService(running.service.get());
+  running.server = builder.BuildAndStart();
+  REQUIRE(running.server != nullptr);
+  REQUIRE(running.port > 0);
+  return running;
+}
+
+std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
+    std::shared_ptr<tensorcast::store::components::IGlobalStoreClient> global_store_client = nullptr) {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_small());
   tensorcast::daemon::DaemonOptions options;
   options.daemon_id = "daemon-local";
   options.gateway_ingress_enabled = true;
-  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options);
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options, nullptr, global_store_client);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
@@ -120,16 +188,8 @@ TEST_CASE("ExecutePlan rejects instance and cluster targets in the first ingress
   tensorcast::daemon::v2::ExecutePlanRequest request;
   request.set_execution_class(tensorcast::daemon::v2::PLAN_EXECUTION_CLASS_TERMINAL_ONLY);
   request.mutable_plan()->mutable_context()->set_request_id("req-nonlocal-targets");
-
-  auto* instance_step = request.mutable_plan()->add_steps();
-  instance_step->set_step_id("instance");
-  instance_step->mutable_target()->set_target_type(tensorcast::plan::v1::TARGET_TYPE_INSTANCE);
-  instance_step->mutable_target()->set_target_id("inst-1");
-  instance_step->mutable_action()->mutable_manifest()->set_engine_request_id("eng-1");
-
   auto* cluster_step = request.mutable_plan()->add_steps();
   cluster_step->set_step_id("cluster");
-  cluster_step->add_depends_on("instance");
   cluster_step->mutable_target()->set_target_type(tensorcast::plan::v1::TARGET_TYPE_CLUSTER);
   cluster_step->mutable_target()->set_target_id("cluster-1");
   cluster_step->mutable_action()->mutable_cluster_action()->set_action_ref("wf-1");
@@ -142,13 +202,51 @@ TEST_CASE("ExecutePlan rejects instance and cluster targets in the first ingress
 
   const auto terminal = parse_terminal(response);
   REQUIRE_FALSE(terminal.ok());
-  REQUIRE(terminal.steps_size() == 2);
-  REQUIRE(terminal.steps(0).step_id() == "instance");
+  REQUIRE(terminal.steps_size() == 1);
+  REQUIRE(terminal.steps(0).step_id() == "cluster");
   REQUIRE(terminal.steps(0).status().state() == tensorcast::node_agent::v1::OPERATION_STATE_FAILED);
   REQUIRE(terminal.steps(0).status().error().status_code() == "FAILED_PRECONDITION");
-  REQUIRE(terminal.steps(0).status().message() == "instance target does not match this agent");
-  REQUIRE(terminal.steps(1).step_id() == "cluster");
-  REQUIRE(terminal.steps(1).status().state() == tensorcast::node_agent::v1::OPERATION_STATE_CANCELLED);
+  REQUIRE(terminal.steps(0).status().message() == "cluster targets are not executable via daemon ingress");
+}
+
+TEST_CASE("ExecutePlan forwards routed instance plans to node agent", "[daemon][ingress][plan]") {
+  auto node_agent = start_node_agent_server();
+  auto directory_client = std::make_shared<DirectoryClient>();
+  directory_client->connected = true;
+  directory_client->instances = {
+      tensorcast::store::components::ActiveInstanceInfo{
+          .instance_id = "inst-1",
+          .daemon_id = "daemon-agent",
+          .execution_endpoint = "127.0.0.1:" + std::to_string(node_agent.port),
+          .execution_host_kind = "node_agent_grpc",
+      },
+  };
+
+  auto harness = make_harness(directory_client);
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::ExecutePlanRequest request;
+  request.set_execution_class(tensorcast::daemon::v2::PLAN_EXECUTION_CLASS_TERMINAL_ONLY);
+  request.mutable_plan()->mutable_context()->set_request_id("req-instance-forward");
+  auto* step = request.mutable_plan()->add_steps();
+  step->set_step_id("instance");
+  step->mutable_target()->set_target_type(tensorcast::plan::v1::TARGET_TYPE_INSTANCE);
+  step->mutable_target()->set_target_id("inst-1");
+  step->mutable_action()->mutable_manifest()->set_engine_request_id("eng-1");
+
+  tensorcast::daemon::v2::ExecutePlanResponse response;
+  grpc::ServerContext ctx;
+  const auto status = svc.ExecutePlan(&ctx, &request, &response);
+  REQUIRE(status.ok());
+  REQUIRE(response.ok());
+
+  const auto terminal = parse_terminal(response);
+  REQUIRE(terminal.ok());
+  REQUIRE(terminal.steps_size() == 1);
+  REQUIRE(terminal.steps(0).status().state() == tensorcast::node_agent::v1::OPERATION_STATE_SUCCESS);
+  REQUIRE(node_agent.service->last_request.plan().context().request_id() == "req-instance-forward");
+  REQUIRE(node_agent.service->last_request.plan().steps_size() == 1);
+  REQUIRE(node_agent.service->last_request.plan().steps(0).target().target_id() == "inst-1");
 }
 
 TEST_CASE("ExecutePlan prefetch_set fails closed on mismatched set digest", "[daemon][ingress][plan]") {

@@ -950,6 +950,44 @@ absl::StatusOr<std::vector<ActiveWorkerInfo>> GlobalStoreClient::list_active_wor
   return out;
 }
 
+absl::StatusOr<std::vector<ActiveInstanceInfo>> GlobalStoreClient::list_active_instances(
+    bool include_unavailable,
+    uint64_t required_capability_flags,
+    const RpcOptions& rpc_options) {
+  global_store::ListActiveInstancesRequest request;
+  request.set_include_unavailable(include_unavailable);
+  request.set_required_capability_flags(required_capability_flags);
+
+  global_store::ListActiveInstancesResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->ListActiveInstances(ctx, req, resp);
+      },
+      "ListActiveInstances",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<ActiveInstanceInfo> out;
+  out.reserve(response.instances_size());
+  for (const auto& instance : response.instances()) {
+    ActiveInstanceInfo info;
+    info.instance_id = instance.instance_id();
+    info.daemon_id = instance.daemon_id();
+    info.worker_id = instance.worker_id();
+    info.engine = instance.engine();
+    info.signals_endpoint = instance.signals_endpoint();
+    info.execution_endpoint = instance.execution_endpoint();
+    info.execution_host_kind = instance.execution_host_kind();
+    info.capability_flags = instance.capability_flags();
+    out.push_back(std::move(info));
+  }
+  return out;
+}
+
 absl::StatusOr<std::vector<std::string>> GlobalStoreClient::list_active_worker_identities(bool include_unavailable) {
   auto workers_or = list_active_workers(include_unavailable, /*required_capability_flags=*/0, RpcOptions{});
   if (!workers_or.ok()) {

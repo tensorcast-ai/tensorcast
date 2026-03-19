@@ -626,6 +626,30 @@ Status StoreDaemonServiceImpl::GetWorkerStatus(
   return status_controller_->get_worker_status(rctx, *resp);
 }
 
+Status StoreDaemonServiceImpl::ListDirectoryWorkers(
+    grpc::ServerContext* ctx,
+    const v2::ListDirectoryWorkersRequest* req,
+    v2::ListDirectoryWorkersResponse* resp) {
+  RpcContext rctx{"ListDirectoryWorkers", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->list_directory_workers(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ListDirectoryInstances(
+    grpc::ServerContext* ctx,
+    const v2::ListDirectoryInstancesRequest* req,
+    v2::ListDirectoryInstancesResponse* resp) {
+  RpcContext rctx{"ListDirectoryInstances", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->list_directory_instances(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ResolveInstanceExecution(
+    grpc::ServerContext* ctx,
+    const v2::ResolveInstanceExecutionRequest* req,
+    v2::ResolveInstanceExecutionResponse* resp) {
+  RpcContext rctx{"ResolveInstanceExecution", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->resolve_instance_execution(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::GetDetailedStatus(
     grpc::ServerContext* ctx,
     const v2::GetDetailedStatusRequest* /*req*/,

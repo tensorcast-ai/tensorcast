@@ -28,6 +28,12 @@ from tensorcast.api.context import (
     SpanAttributeValue,
     context,
 )
+from tensorcast.api.directory import (
+    DirectorySnapshot,
+    InstanceExecutionRoute,
+    TensorCastDirectory,
+    WorkerRoute,
+)
 from tensorcast.api.operation import (
     Operation,
     OperationError,
@@ -106,7 +112,9 @@ __all__ = [
     "Artifact",
     "CallContext",
     "CollectiveLoadGroup",
+    "DirectorySnapshot",
     "GovernanceContext",
+    "InstanceExecutionRoute",
     "Operation",
     "OperationError",
     "OperationState",
@@ -128,9 +136,11 @@ __all__ = [
     "TargetSpec",
     "TransformSpec",
     "Worker",
+    "WorkerRoute",
     "plan",
     "Runtime",
     "SignalSnapshot",
+    "TensorCastDirectory",
     "TensorCastSignals",
     "WorkerStatus",
     "connect",

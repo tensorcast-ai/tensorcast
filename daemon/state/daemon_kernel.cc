@@ -149,6 +149,7 @@ DaemonKernel::DaemonKernel(
     byte_artifact_body_store_->invalidate_replica_visibility(payload->key, absl::Now(), "runtime_evicted");
   });
   worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client);
+  instance_execution_directory_cache_ = std::make_unique<InstanceExecutionDirectoryCache>(global_store_client);
   inter_daemon_channel_credentials_ = make_inter_daemon_channel_credentials(options_.inter_daemon_grpc_security);
   const std::string local_daemon_id = options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id;
   byte_artifact_route_resolver_ = std::make_unique<ByteArtifactRouteResolver>(

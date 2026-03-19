@@ -78,8 +78,10 @@ class Worker:
 @dataclass(frozen=True, slots=True)
 class Instance:
     instance_id: str
-    worker_id: str
-    engine: str
+    worker_id: str | None = None
+    engine: str = ""
+    daemon_id: str | None = None
+    execution_endpoint: str | None = None
     signals_endpoint: str | None = None
     labels: Mapping[str, str] | None = None
 

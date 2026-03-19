@@ -82,7 +82,9 @@ flowchart TB
   - MaterializationController: `Materialize*`, `Confirm`, `WaitVerification`, `Unload`, `GetArtifactIndexById`.
   - RegistrationController: `Begin`/`Feed`/`KeepAlive`/`Commit`/`Abort`/`Revoke` (unified feed path).
   - TransportController: `LockTransportChunks`/`UnlockTransportChunks`.
-  - StatusController: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`.
+  - StatusController: `GetServerConfig`, `GetWorkerStatus`, daemon-served directory RPCs
+    (`ListDirectoryWorkers`, `ListDirectoryInstances`, `ResolveInstanceExecution`),
+    `GetDetailedStatus`, `GetLoadedReplicasV2`.
 - State/Kernel:
   - DaemonKernel owns long-lived state (sessions, registries, lifecycle, persistence, identity) and wires background tasks.
   - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
@@ -98,12 +100,18 @@ flowchart TB
 - Disk fallbacks are daemon-owned: `ImportArtifactFromPathRequest.verify_checksums` controls import-time descriptor/index consistency checks, and disk materialization flows apply read-only source mutation policy for imported sources.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`, `SealAssembly`.
 - Plan ingress: `ExecutePlan` now serves the first `gateway_ingress_enabled`-gated `terminal_only` slice for local
-  worker-targeted plans and returns a terminal `node_agent.v1.ExecutePlanResponse` envelope. The first slice fails
-  closed on remote worker targets, instance targets, cluster targets, and non-terminal execution classes.
+  worker-targeted plans and returns a terminal `node_agent.v1.ExecutePlanResponse` envelope. Instance-targeted plans
+  now resolve `instance_id -> execution_endpoint` through the daemon-served directory and forward to the Node Agent
+  when the plan is compatible with one resolved instance target. The slice still fails closed on incompatible worker
+  mixes, cluster targets, and non-terminal execution classes.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated). `GetWorkerStatus`
   now carries daemon-side freshness metadata (`as_of_ms`, `staleness_ms`, `cache_epoch`, `freshness_state`), and
   `GetDetailedStatus.communication_info` reports cumulative P2P transfer counters (`total_transfers`,
   `total_bytes_transferred`, `total_transfer_errors`) sourced from daemon-side ingestion metrics.
+- Directory: `ListDirectoryWorkers`, `ListDirectoryInstances`, and `ResolveInstanceExecution` expose the daemon-served
+  routing contract for programmable callers. Responses carry `as_of_ms`, `staleness_ms`, `cache_epoch`,
+  `freshness_state`, and `authority_mode`; in `LOCAL_ONLY` mode the daemon exposes only daemon-local facts, and in
+  Global-Store-backed mode stale-beyond-budget reads fail closed.
 - Transport: `LockTransportChunks`, `UnlockTransportChunks`.
 - In-memory registration: `BeginRegisterArtifact`, `FeedRegisterArtifactStream`, `KeepAliveRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `RevokeRegisteredArtifact`.
 - Local stable tier: `CommitRegisteredArtifact` can synchronously satisfy `stable_dram(scope=local)` based on the resolved `StorePolicy` and returns `local_stable_tier` (`READY`/`DEGRADED`/`SKIPPED`). `must` failures fail the RPC; `should` failures degrade. Metrics: `tc_local_stable_tier_total{op,status,requirement}`, `tc_local_stable_tier_seconds{op,status}`. See `../docs/architecture/api/registration-flow.md#local-stable-tier`.

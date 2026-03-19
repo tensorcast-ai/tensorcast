@@ -25,6 +25,9 @@ Current repository role:
 - Enforce target identity checks (`daemon_id`, optional `instance_id`).
 - Propagate `CallContext.deadline_ms` to daemon RPC timeouts for worker steps.
 - Provide a gRPC surface (`NodeAgentService`) for plan execution and agent info.
+- Resolve local `worker_id` from the connected Store Daemon status path when
+  registering or heartbeating the instance into Global Store, instead of
+  reading worker-directory rows directly from Global Store.
 
 ## Current limitations
 

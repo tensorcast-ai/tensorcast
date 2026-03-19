@@ -75,12 +75,17 @@ CREATE TABLE IF NOT EXISTS instances (
     worker_id TEXT NULL,
     engine TEXT NOT NULL,
     signals_endpoint TEXT,
+    execution_endpoint TEXT,
+    execution_host_kind TEXT,
     labels_json TEXT NOT NULL DEFAULT '{}',
     capability_flags BIGINT NOT NULL DEFAULT 0,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE
 );
+
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS execution_endpoint TEXT;
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS execution_host_kind TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_instances_daemon_id ON instances (daemon_id);
 CREATE INDEX IF NOT EXISTS idx_instances_worker_id ON instances (worker_id);

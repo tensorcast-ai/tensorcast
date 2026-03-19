@@ -418,10 +418,11 @@ Normative rules:
 Required additions:
 
 - `DirectoryController` on the daemon front door,
-- `InstanceDirectoryCache` alongside existing `WorkerDirectoryCache`,
-- and SDK signal methods that resolve through the connected daemon:
-  - `runtime.signals().list_workers(...)`
-  - `runtime.signals().list_instances(...)`
+- `InstanceExecutionDirectoryCache` alongside existing `WorkerDirectoryCache`,
+- and SDK directory or signal methods that resolve through the connected daemon:
+  - `runtime.directory().list_workers(...)`
+  - `runtime.directory().list_instances(...)`
+  - `runtime.directory().resolve_instance_execution(...)`
   - `runtime.signals().get_worker_capacity(...)`
 
 Normative rules:
@@ -433,7 +434,7 @@ Normative rules:
 3. rollout compilation may resolve addresses from those caches, but addresses are
    transport details and must not become rollout identity.
 4. `0104` must not define a second target directory surface beside the `0056`
-   signals and directory model.
+   runtime directory and signals model.
 
 ## 3. Worker-local stable realization kernel
 

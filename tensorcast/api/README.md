@@ -76,8 +76,15 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 - `tensorcast.connect(daemon_address=...)` binds one process runtime to one daemon ingress endpoint. When an active
   runtime exists, `tensorcast.plan(ctx)` submits through that daemon using the same `PlanSpec`; without one, it keeps
   the local `Plan.run()` behavior for tests and in-cluster debugging.
+- `runtime.directory()` is the long-term programmable routing front door. It exposes daemon-served worker routes,
+  instance execution routes, and `resolve_instance_execution(...)` snapshots with explicit freshness and
+  `authority_mode` metadata.
+- For connected runtimes, instance-targeted `Plan.run()` calls now flow through daemon ingress and the daemon resolves
+  the instance execution endpoint from that same directory contract before forwarding to the Node Agent.
 - `runtime.signals().get_worker_status()` provides a daemon-backed low-cardinality snapshot for the connected worker
   with explicit snapshot metadata (`SignalSnapshot`).
+- `runtime.signals().list_workers()` and `runtime.signals().list_instances()` remain compatibility delegation shims
+  over `runtime.directory()` during the migration away from direct Global Store directory reads.
 
 ## Materialization v2 (descriptor streaming)
 

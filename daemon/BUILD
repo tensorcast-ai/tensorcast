@@ -31,6 +31,18 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "instance_execution_directory_cache_lib",
+    srcs = ["state/instance_execution_directory_cache.cc"],
+    hdrs = ["state/instance_execution_directory_cache.h"],
+    deps = [
+        "//core/store:global_store_client",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
     name = "grpc_peer_utils_lib",
     srcs = ["util/grpc_peer_utils.cc"],
     hdrs = ["util/grpc_peer_utils.h"],
@@ -148,6 +160,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:source_hash",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "//proto/tensorcast/node_agent/v1:node_agent_cc",
+        "//proto/tensorcast/node_agent/v1:node_agent_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/random:random",
@@ -886,6 +899,7 @@ sc_cc_library(
         ":device_resolver_hdr",
         ":grpc_daemon_transport_lib",
         ":handle_lease_registry_lib",
+        ":instance_execution_directory_cache_lib",
         ":ipc_region_registry_lib",
         ":lifecycle_kernel_lib",
         ":lip_bridge_lib",
@@ -904,6 +918,7 @@ sc_cc_library(
         ":sweep_tasks_hdr",
         ":transport_lock_manager_hdr",
         ":verification_tracker_hdr",
+        ":worker_directory_cache_lib",
         ":worker_identity_store_lib",
         "//core/common:async_runtime_lib",
         "//core/common:capability_token_lib",
@@ -967,14 +982,19 @@ sc_header_only_library(
         "service/controllers/status_controller.h",
     ],
     deps = [
+        ":instance_execution_directory_cache_lib",
         ":ref_tracker_hdr",
         ":replica_listing_hdr",
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
+        ":status_utils",
+        ":worker_directory_cache_lib",
         ":worker_identity_store_lib",
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/time:time",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -2078,6 +2098,18 @@ cc_test(
 )
 
 cc_test(
+    name = "instance_execution_directory_cache_test",
+    srcs = ["state/instance_execution_directory_cache_test.cc"],
+    deps = [
+        ":instance_execution_directory_cache_lib",
+        "//core/store:testing_global_store_client_stub",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_publish_replica_key_test",
     srcs = ["service/grpc_service_impl_publish_replica_key_test.cc"],
     deps = [
@@ -2461,12 +2493,17 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_execute_plan_test",
     srcs = ["service/grpc_service_impl_execute_plan_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "//proto/tensorcast/node_agent/v1:node_agent_cc",
+        "//proto/tensorcast/node_agent/v1:node_agent_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -2474,10 +2511,29 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_status_test",
     srcs = ["service/grpc_service_impl_status_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_directory_test",
+    srcs = ["service/grpc_service_impl_directory_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],

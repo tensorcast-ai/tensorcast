@@ -18,6 +18,8 @@ _INSTANCE_SELECT = """
         worker_id,
         engine,
         signals_endpoint,
+        execution_endpoint,
+        execution_host_kind,
         labels_json,
         capability_flags,
         registered_at,
@@ -82,9 +84,11 @@ class InstanceRepository(BaseRepository):
                         worker_id,
                         engine,
                         signals_endpoint,
+                        execution_endpoint,
+                        execution_host_kind,
                         labels_json,
                         capability_flags
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         instance.instance_id,
@@ -92,6 +96,8 @@ class InstanceRepository(BaseRepository):
                         instance.worker_id,
                         instance.engine,
                         instance.signals_endpoint,
+                        instance.execution_endpoint,
+                        instance.execution_host_kind,
                         json.dumps(dict(instance.labels or {})),
                         int(instance.capability_flags),
                     ],
@@ -111,6 +117,8 @@ class InstanceRepository(BaseRepository):
                         worker_id = ?,
                         engine = ?,
                         signals_endpoint = ?,
+                        execution_endpoint = ?,
+                        execution_host_kind = ?,
                         labels_json = ?,
                         capability_flags = ?,
                         last_heartbeat = CURRENT_TIMESTAMP,
@@ -122,6 +130,8 @@ class InstanceRepository(BaseRepository):
                         instance.worker_id,
                         instance.engine,
                         instance.signals_endpoint,
+                        instance.execution_endpoint,
+                        instance.execution_host_kind,
                         json.dumps(dict(instance.labels or {})),
                         int(instance.capability_flags),
                         instance.instance_id,
@@ -219,7 +229,7 @@ class InstanceRepository(BaseRepository):
 
     @staticmethod
     def _row_to_model(row) -> Instance:
-        labels_json = row[5] or "{}"
+        labels_json = row[7] or "{}"
         try:
             labels = json.loads(labels_json)
         except Exception:
@@ -230,11 +240,13 @@ class InstanceRepository(BaseRepository):
             worker_id=row[2],
             engine=row[3],
             signals_endpoint=row[4] or None,
+            execution_endpoint=row[5] or None,
+            execution_host_kind=row[6] or None,
             labels=labels if isinstance(labels, dict) else {},
-            capability_flags=row[6] or 0,
-            registered_at=row[7],
-            last_heartbeat=row[8],
-            inactive_at=row[9],
+            capability_flags=row[8] or 0,
+            registered_at=row[9],
+            last_heartbeat=row[10],
+            inactive_at=row[11],
         )
 
 

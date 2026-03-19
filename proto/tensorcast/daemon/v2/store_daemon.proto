@@ -33,6 +33,9 @@ service StoreDaemonService {
 
   // Worker健康检测
   rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse) {}
+  rpc ListDirectoryWorkers(ListDirectoryWorkersRequest) returns (ListDirectoryWorkersResponse) {}
+  rpc ListDirectoryInstances(ListDirectoryInstancesRequest) returns (ListDirectoryInstancesResponse) {}
+  rpc ResolveInstanceExecution(ResolveInstanceExecutionRequest) returns (ResolveInstanceExecutionResponse) {}
 
   // ------------------------------------------------------------------
   // Asynchronous artifact integrity verification support.  Each MaterializeReplica
@@ -1146,6 +1149,66 @@ message GetWorkerStatusResponse {
   uint64 staleness_ms = 10; // Freshness budget already consumed for this snapshot
   uint64 cache_epoch = 11; // Monotonic daemon-side freshness evidence for snapshots
   string freshness_state = 12; // current | degraded | stale
+}
+
+message ListDirectoryWorkersRequest {
+  bool include_unavailable = 1;
+  uint64 required_capability_flags = 2;
+  optional uint64 max_staleness_ms = 3;
+}
+
+message WorkerDirectoryRoute {
+  string daemon_id = 1;
+  string worker_id = 2;
+  string daemon_address = 3;
+  uint64 capability_flags = 4;
+}
+
+message ListDirectoryWorkersResponse {
+  repeated WorkerDirectoryRoute workers = 1;
+  int64 as_of_ms = 2;
+  uint64 staleness_ms = 3;
+  uint64 cache_epoch = 4;
+  string freshness_state = 5;
+  string authority_mode = 6;
+}
+
+message ListDirectoryInstancesRequest {
+  bool include_unavailable = 1;
+  uint64 required_capability_flags = 2;
+  optional uint64 max_staleness_ms = 3;
+}
+
+message InstanceExecutionRoute {
+  string instance_id = 1;
+  string daemon_id = 2;
+  string execution_host_kind = 3;
+  string execution_endpoint = 4;
+  string engine = 5;
+  uint64 capability_flags = 6;
+}
+
+message ListDirectoryInstancesResponse {
+  repeated InstanceExecutionRoute instances = 1;
+  int64 as_of_ms = 2;
+  uint64 staleness_ms = 3;
+  uint64 cache_epoch = 4;
+  string freshness_state = 5;
+  string authority_mode = 6;
+}
+
+message ResolveInstanceExecutionRequest {
+  string instance_id = 1;
+  optional uint64 max_staleness_ms = 2;
+}
+
+message ResolveInstanceExecutionResponse {
+  InstanceExecutionRoute route = 1;
+  int64 as_of_ms = 2;
+  uint64 staleness_ms = 3;
+  uint64 cache_epoch = 4;
+  string freshness_state = 5;
+  string authority_mode = 6;
 }
 
 // ----------------------------------------------------------------------

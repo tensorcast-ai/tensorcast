@@ -376,6 +376,8 @@ message RegisterInstanceRequest {
   string signals_endpoint = 5;
   map<string, string> labels = 6;
   uint64 capability_flags = 7; // Bitset of InstanceCapabilityFlag values
+  string execution_endpoint = 8;
+  string execution_host_kind = 9;
 }
 
 message RegisterInstanceResponse {
@@ -419,6 +421,8 @@ message ListActiveInstancesResponse {
     map<string, string> labels = 7;
     ConnectionStatus status = 8;
     uint64 capability_flags = 9; // Bitset of InstanceCapabilityFlag values
+    string execution_endpoint = 10;
+    string execution_host_kind = 11;
   }
   repeated InstanceInfo instances = 1;
 }

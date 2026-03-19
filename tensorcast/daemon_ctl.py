@@ -2243,6 +2243,94 @@ class DaemonCtl:
                 raise
         return response
 
+    def list_directory_workers(
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        max_staleness_ms: int | None = None,
+        timeout_s: float = 5.0,
+    ) -> store_daemon_pb2.ListDirectoryWorkersResponse:
+        with self._client_span("Client/ListDirectoryWorkers") as span:
+            request = store_daemon_pb2.ListDirectoryWorkersRequest(
+                include_unavailable=bool(include_unavailable),
+                required_capability_flags=int(required_capability_flags),
+            )
+            if max_staleness_ms is not None:
+                request.max_staleness_ms = int(max_staleness_ms)
+            try:
+                response: store_daemon_pb2.ListDirectoryWorkersResponse = (
+                    self._unary_call(
+                        self.stub_v2.ListDirectoryWorkers,
+                        request,
+                        timeout=timeout_s,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def list_directory_instances(
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        max_staleness_ms: int | None = None,
+        timeout_s: float = 5.0,
+    ) -> store_daemon_pb2.ListDirectoryInstancesResponse:
+        with self._client_span("Client/ListDirectoryInstances") as span:
+            request = store_daemon_pb2.ListDirectoryInstancesRequest(
+                include_unavailable=bool(include_unavailable),
+                required_capability_flags=int(required_capability_flags),
+            )
+            if max_staleness_ms is not None:
+                request.max_staleness_ms = int(max_staleness_ms)
+            try:
+                response: store_daemon_pb2.ListDirectoryInstancesResponse = (
+                    self._unary_call(
+                        self.stub_v2.ListDirectoryInstances,
+                        request,
+                        timeout=timeout_s,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def resolve_instance_execution(
+        self,
+        *,
+        instance_id: str,
+        max_staleness_ms: int | None = None,
+        timeout_s: float = 5.0,
+    ) -> store_daemon_pb2.ResolveInstanceExecutionResponse:
+        with self._client_span("Client/ResolveInstanceExecution") as span:
+            request = store_daemon_pb2.ResolveInstanceExecutionRequest(
+                instance_id=str(instance_id)
+            )
+            if max_staleness_ms is not None:
+                request.max_staleness_ms = int(max_staleness_ms)
+            try:
+                response: store_daemon_pb2.ResolveInstanceExecutionResponse = (
+                    self._unary_call(
+                        self.stub_v2.ResolveInstanceExecution,
+                        request,
+                        timeout=timeout_s,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     def get_detailed_status(self) -> store_daemon_pb2.GetDetailedStatusResponse:
         with self._client_span("Client/GetDetailedStatus") as span:
             request = store_daemon_pb2.GetDetailedStatusRequest()

@@ -358,6 +358,7 @@ class Runtime:
     daemon_id: str
 
     def store(self) -> "Store": ...
+    def directory(self) -> "TensorCastDirectory": ...
     def signals(self) -> "TensorCastSignals": ...
     def plan(self, ctx: "CallContext") -> "Plan": ...
     def close(self) -> None: ...
@@ -392,9 +393,9 @@ Normative rules:
 1. the NodeAgent or Instance Agent boundary remains the unique instance-scoped execution host in this phase,
 2. callers never address instance hosts directly,
 3. stable caller-facing instance identity remains `instance_id`, while the
-   dependency-ready execution directory resolves `instance_id -> {daemon_id,
-   node_agent_endpoint}` through the daemon-served bounded-staleness contract
-   frozen in `0106`,
+   dependency-ready execution directory resolves `instance_id -> execution
+   route facts` through the daemon-served bounded-staleness contract frozen in
+   `0106`,
 4. `TargetSpec` minting and resolution remain engine-adapter responsibilities outside `0056`; framework code may carry
    `TargetSpec`, but it does not own target-capability mint semantics,
 5. `0056` must not introduce a second config surface, registration flow, or heartbeat contract for instance hosting.
@@ -936,26 +937,35 @@ class WorkerCapacitySnapshot:
     preemptible_marked_bytes: int | None = None
     control_plane_inflight: int | None = None
 
+class TensorCastDirectory:
+    def list_workers(...) -> DirectorySnapshot[list[WorkerRoute]]: ...
+    def list_instances(...) -> DirectorySnapshot[list[InstanceExecutionRoute]]: ...
+    def resolve_instance_execution(...) -> DirectorySnapshot[InstanceExecutionRoute]: ...
+
 class TensorCastSignals:
-    def list_workers(...) -> SignalSnapshot[list[Worker]]: ...
     def get_worker_status(...) -> SignalSnapshot[WorkerStatus]: ...
     def get_worker_capacity(...) -> SignalSnapshot[WorkerCapacitySnapshot]: ...
-    def list_instances(...) -> SignalSnapshot[list[Instance]]: ...
 ```
 
 Normative rules:
 
-1. external callers query signals through the connected daemon, not Global Store,
-2. signals and directory data must come from daemon caches backed by watches or equivalent bounded-staleness inputs,
-3. low-cardinality worker capability bits and routing hints are part of the directory surface, not a new truth layer,
+1. external callers query directory and signals through the connected daemon,
+   not Global Store,
+2. directory and signals data must come from daemon caches backed by watches or
+   equivalent bounded-staleness inputs,
+3. low-cardinality worker capability bits and routing hints are part of the
+   directory surface, not a new truth layer,
 4. worker capacity and memory-tier snapshots are advisory only, bounded-staleness, and must not be treated as
    reservation or truth guarantees,
-5. public signal snapshots must expose enough freshness evidence to distinguish bounded-current from degraded or stale
-   answers,
+5. public directory and signal snapshots must expose enough freshness evidence
+   to distinguish bounded-current from degraded or stale answers,
 6. adapter-owned execution signals are advisory only and must not replace TensorCast truth or lifecycle state,
 7. `0056` owns the rule that programmable callers consume daemon-served
-   directory surfaces, while `0106` owns the exact worker, instance, and
-   `NodeAgentDirectory` contract plus the migration off SDK-direct GS reads.
+   directory surfaces, while `0106` owns the exact worker and instance
+   route-directory contract plus the migration off SDK-direct GS reads.
+8. `Runtime.directory()` is the long-term home of route discovery; placing
+   `list_*` compatibility shims on `Runtime.signals()` is acceptable only as a
+   migration step.
 
 Read-model boundary:
 

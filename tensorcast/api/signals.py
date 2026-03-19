@@ -6,6 +6,12 @@ import time
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from tensorcast.api.directory import (
+    DirectorySnapshot,
+    InstanceExecutionRoute,
+    TensorCastDirectory,
+    WorkerRoute,
+)
 from tensorcast.daemon_ctl import DaemonCtl
 
 T = TypeVar("T")
@@ -62,6 +68,32 @@ class TensorCastSignals:
             staleness_ms=staleness_ms,
             cache_epoch=cache_epoch_raw if cache_epoch_raw > 0 else None,
             freshness_state=freshness_state or "current",
+        )
+
+    def list_workers(
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        max_staleness_ms: int | None = None,
+    ) -> DirectorySnapshot[list[WorkerRoute]]:
+        return TensorCastDirectory(self._client).list_workers(
+            include_unavailable=include_unavailable,
+            required_capability_flags=required_capability_flags,
+            max_staleness_ms=max_staleness_ms,
+        )
+
+    def list_instances(
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        max_staleness_ms: int | None = None,
+    ) -> DirectorySnapshot[list[InstanceExecutionRoute]]:
+        return TensorCastDirectory(self._client).list_instances(
+            include_unavailable=include_unavailable,
+            required_capability_flags=required_capability_flags,
+            max_staleness_ms=max_staleness_ms,
         )
 
 
