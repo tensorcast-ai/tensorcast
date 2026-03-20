@@ -690,6 +690,19 @@ absl::Status run_initiator(const Options& options) {
     uint64_t batch_wall_us = 0;
     double avg_request_us = 0.0;
     uint64_t max_request_us = 0;
+    uint64_t request_count = 0;
+    uint64_t sum_request_first_response_us = 0;
+    uint64_t sum_rdma_first_post_us = 0;
+    uint64_t sum_rdma_post_to_last_completion_us = 0;
+    uint64_t sum_rdma_post_after_response_us = 0;
+    uint64_t sum_tail_after_last_completion_us = 0;
+    uint64_t sum_rdma_handshake_queue_wait_us = 0;
+    uint64_t sum_rdma_response_windows = 0;
+    uint64_t sum_rdma_response_segments = 0;
+    uint64_t sum_rdma_wr_posted = 0;
+    uint64_t sum_rdma_wc_completed = 0;
+    uint64_t sum_rdma_ack_windows = 0;
+    uint64_t sum_rdma_ack_segments = 0;
   };
 
   std::mutex io_mu;
@@ -726,6 +739,23 @@ absl::Status run_initiator(const Options& options) {
       }
       total_request_us += static_cast<double>(result.read_cost);
       batch_result.max_request_us = std::max(batch_result.max_request_us, result.read_cost);
+      batch_result.request_count += 1;
+      batch_result.sum_request_first_response_us += result.request_first_response_us;
+      batch_result.sum_rdma_first_post_us += result.rdma_first_post_us;
+      batch_result.sum_rdma_post_to_last_completion_us += result.rdma_post_to_last_completion_us;
+      if (result.rdma_first_post_us > result.request_first_response_us) {
+        batch_result.sum_rdma_post_after_response_us += (result.rdma_first_post_us - result.request_first_response_us);
+      }
+      if (result.rdma_last_completion_us > 0 && result.read_cost > result.rdma_last_completion_us) {
+        batch_result.sum_tail_after_last_completion_us += (result.read_cost - result.rdma_last_completion_us);
+      }
+      batch_result.sum_rdma_handshake_queue_wait_us += result.rdma_handshake_queue_wait_us;
+      batch_result.sum_rdma_response_windows += result.rdma_response_windows;
+      batch_result.sum_rdma_response_segments += result.rdma_response_segments;
+      batch_result.sum_rdma_wr_posted += result.rdma_wr_posted;
+      batch_result.sum_rdma_wc_completed += result.rdma_wc_completed;
+      batch_result.sum_rdma_ack_windows += result.rdma_ack_windows;
+      batch_result.sum_rdma_ack_segments += result.rdma_ack_segments;
       if (!saw_result) {
         batch_result.first_result = result;
         saw_result = true;
@@ -743,6 +773,12 @@ absl::Status run_initiator(const Options& options) {
       }
     }
     if (emit_result) {
+      auto avg_from_sum = [&](uint64_t sum) -> double {
+        if (batch_result.request_count == 0) {
+          return 0.0;
+        }
+        return static_cast<double>(sum) / static_cast<double>(batch_result.request_count);
+      };
       std::lock_guard<std::mutex> lock(io_mu);
       std::cout << "ITER"
                 << " thread=" << thread_id << " idx=" << iteration << " batch_size=" << options.batch_size
@@ -758,7 +794,31 @@ absl::Status run_initiator(const Options& options) {
                 << " request_us=" << batch_result.first_result.request_cost
                 << " rdma_queue_us=" << batch_result.first_result.rdma_queue_cost
                 << " rdma_regmr_us=" << batch_result.first_result.rdma_regmr_cost
+                << " request_first_response_us=" << batch_result.first_result.request_first_response_us
+                << " rdma_first_post_us=" << batch_result.first_result.rdma_first_post_us
+                << " rdma_first_completion_us=" << batch_result.first_result.rdma_first_completion_us
+                << " rdma_last_completion_us=" << batch_result.first_result.rdma_last_completion_us
+                << " rdma_post_to_last_completion_us=" << batch_result.first_result.rdma_post_to_last_completion_us
+                << " rdma_response_windows=" << batch_result.first_result.rdma_response_windows
+                << " rdma_response_segments=" << batch_result.first_result.rdma_response_segments
+                << " rdma_wr_posted=" << batch_result.first_result.rdma_wr_posted
+                << " rdma_wc_completed=" << batch_result.first_result.rdma_wc_completed
+                << " rdma_ack_windows=" << batch_result.first_result.rdma_ack_windows
+                << " rdma_ack_segments=" << batch_result.first_result.rdma_ack_segments
+                << " rdma_handshake_queue_wait_us=" << batch_result.first_result.rdma_handshake_queue_wait_us
                 << " batch_avg_request_us=" << batch_result.avg_request_us
+                << " batch_avg_response_wait_us=" << avg_from_sum(batch_result.sum_request_first_response_us)
+                << " batch_avg_post_after_response_us=" << avg_from_sum(batch_result.sum_rdma_post_after_response_us)
+                << " batch_avg_data_phase_us=" << avg_from_sum(batch_result.sum_rdma_post_to_last_completion_us)
+                << " batch_avg_tail_after_last_completion_us="
+                << avg_from_sum(batch_result.sum_tail_after_last_completion_us)
+                << " batch_avg_handshake_wait_us=" << avg_from_sum(batch_result.sum_rdma_handshake_queue_wait_us)
+                << " batch_avg_response_windows=" << avg_from_sum(batch_result.sum_rdma_response_windows)
+                << " batch_avg_response_segments=" << avg_from_sum(batch_result.sum_rdma_response_segments)
+                << " batch_avg_wr_posted=" << avg_from_sum(batch_result.sum_rdma_wr_posted)
+                << " batch_avg_wc_completed=" << avg_from_sum(batch_result.sum_rdma_wc_completed)
+                << " batch_avg_ack_windows=" << avg_from_sum(batch_result.sum_rdma_ack_windows)
+                << " batch_avg_ack_segments=" << avg_from_sum(batch_result.sum_rdma_ack_segments)
                 << " batch_max_request_us=" << batch_result.max_request_us << " total_us=" << batch_result.batch_wall_us
                 << std::endl;
     }
@@ -777,6 +837,22 @@ absl::Status run_initiator(const Options& options) {
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(0, options.duration_sec));
   std::vector<double> latencies_us;
+  struct SummaryProfile {
+    uint64_t requests = 0;
+    uint64_t sum_request_first_response_us = 0;
+    uint64_t sum_rdma_first_post_us = 0;
+    uint64_t sum_rdma_post_to_last_completion_us = 0;
+    uint64_t sum_rdma_post_after_response_us = 0;
+    uint64_t sum_tail_after_last_completion_us = 0;
+    uint64_t sum_rdma_handshake_queue_wait_us = 0;
+    uint64_t sum_rdma_response_windows = 0;
+    uint64_t sum_rdma_response_segments = 0;
+    uint64_t sum_rdma_wr_posted = 0;
+    uint64_t sum_rdma_wc_completed = 0;
+    uint64_t sum_rdma_ack_windows = 0;
+    uint64_t sum_rdma_ack_segments = 0;
+  };
+  SummaryProfile summary_profile;
   std::mutex stats_mu;
   std::mutex error_mu;
   absl::Status first_error = absl::OkStatus();
@@ -813,6 +889,19 @@ absl::Status run_initiator(const Options& options) {
         {
           std::lock_guard<std::mutex> stats_lock(stats_mu);
           latencies_us.push_back(static_cast<double>(result_or->batch_wall_us));
+          summary_profile.requests += result_or->request_count;
+          summary_profile.sum_request_first_response_us += result_or->sum_request_first_response_us;
+          summary_profile.sum_rdma_first_post_us += result_or->sum_rdma_first_post_us;
+          summary_profile.sum_rdma_post_to_last_completion_us += result_or->sum_rdma_post_to_last_completion_us;
+          summary_profile.sum_rdma_post_after_response_us += result_or->sum_rdma_post_after_response_us;
+          summary_profile.sum_tail_after_last_completion_us += result_or->sum_tail_after_last_completion_us;
+          summary_profile.sum_rdma_handshake_queue_wait_us += result_or->sum_rdma_handshake_queue_wait_us;
+          summary_profile.sum_rdma_response_windows += result_or->sum_rdma_response_windows;
+          summary_profile.sum_rdma_response_segments += result_or->sum_rdma_response_segments;
+          summary_profile.sum_rdma_wr_posted += result_or->sum_rdma_wr_posted;
+          summary_profile.sum_rdma_wc_completed += result_or->sum_rdma_wc_completed;
+          summary_profile.sum_rdma_ack_windows += result_or->sum_rdma_ack_windows;
+          summary_profile.sum_rdma_ack_segments += result_or->sum_rdma_ack_segments;
         }
         completed.fetch_add(1, std::memory_order_relaxed);
       }
@@ -847,12 +936,31 @@ absl::Status run_initiator(const Options& options) {
         latencies_us.size() - 1);
     return latencies_us[pos];
   };
+  auto avg_request_metric = [&](uint64_t sum) -> double {
+    if (summary_profile.requests == 0) {
+      return 0.0;
+    }
+    return static_cast<double>(sum) / static_cast<double>(summary_profile.requests);
+  };
   std::cout << "SUMMARY"
             << " iterations=" << completed_count << " requests=" << total_requests << " threads=" << options.threads
             << " batch_size=" << options.batch_size << " qp_count=" << options.qp_count
             << " outstanding_wr=" << options.outstanding_wr << " bytes=" << total_bytes << " wall_us=" << wall_us
             << " avg_us=" << avg_us << " p50_us=" << percentile(50.0) << " p95_us=" << percentile(95.0)
-            << " p99_us=" << percentile(99.0) << " bw_GBps=" << bw_GBps << " bw_gbps=" << bw_gbps << std::endl;
+            << " p99_us=" << percentile(99.0) << " bw_GBps=" << bw_GBps << " bw_gbps=" << bw_gbps
+            << " avg_response_wait_us=" << avg_request_metric(summary_profile.sum_request_first_response_us)
+            << " avg_first_post_us=" << avg_request_metric(summary_profile.sum_rdma_first_post_us)
+            << " avg_post_after_response_us=" << avg_request_metric(summary_profile.sum_rdma_post_after_response_us)
+            << " avg_data_phase_us=" << avg_request_metric(summary_profile.sum_rdma_post_to_last_completion_us)
+            << " avg_tail_after_last_completion_us="
+            << avg_request_metric(summary_profile.sum_tail_after_last_completion_us)
+            << " avg_handshake_wait_us=" << avg_request_metric(summary_profile.sum_rdma_handshake_queue_wait_us)
+            << " avg_response_windows=" << avg_request_metric(summary_profile.sum_rdma_response_windows)
+            << " avg_response_segments=" << avg_request_metric(summary_profile.sum_rdma_response_segments)
+            << " avg_wr_posted=" << avg_request_metric(summary_profile.sum_rdma_wr_posted)
+            << " avg_wc_completed=" << avg_request_metric(summary_profile.sum_rdma_wc_completed)
+            << " avg_ack_windows=" << avg_request_metric(summary_profile.sum_rdma_ack_windows)
+            << " avg_ack_segments=" << avg_request_metric(summary_profile.sum_rdma_ack_segments) << std::endl;
   return absl::OkStatus();
 }
 

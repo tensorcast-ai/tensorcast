@@ -294,6 +294,7 @@ misc::result_t RdmaTransport::do_post_send() {
     return misc::FAILED;
   }
 
+  req->note_rdma_posted_wr(1);
   // Push to per-QP queue for lock-free completion matching
   per_qp_inflight_queues_[qp_index].push(req);
   return misc::SUCCESS;
@@ -364,6 +365,7 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
       request->enqueue_completion_bytes(segs[indices[i]].length);
       per_qp_inflight_queues_[qp_index].push(request);
     }
+    request->note_rdma_posted_wr(static_cast<uint32_t>(posted_count));
     total_posted += posted_count;
 
     if (res != misc::SUCCESS) {
@@ -394,6 +396,7 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
     if (req == nullptr) {
       LOG(FATAL) << "abnormal queue state for qp_index=" << qp_index;
     }
+    req->note_rdma_completion();
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {
       if (req->mark_completion_and_is_done()) {

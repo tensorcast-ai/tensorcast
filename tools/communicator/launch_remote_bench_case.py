@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -18,7 +19,11 @@ REPO_ROOT = Path("/data/workspace/tensorcast-280")
 BENCH_BINARY = REPO_ROOT / "bazel-bin/core/communicator/communicator_bench_binary"
 NAMESPACE = "shai-core"
 NUMA_WRAPPER = REPO_ROOT / "tools/communicator/run_with_numa_policy.py"
-RUN_AS_USER = subprocess.check_output(["id", "-un"], text=True).strip()
+RUN_AS_USER = (
+    os.environ.get("TENSORCAST_RUN_AS_USER")
+    or os.environ.get("BRAINCTL_RUN_AS_USER")
+    or subprocess.check_output(["id", "-un"], text=True).strip()
+).strip()
 
 
 def parse_bench_output(stdout: str) -> dict:
@@ -149,6 +154,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--charged-group", default="tensorcast_dev")
     parser.add_argument("--require-target-host", default="")
     parser.add_argument("--require-initiator-host", default="")
+    parser.add_argument("--keep-workers", action="store_true")
+    parser.add_argument("--target-worker-id", default="")
+    parser.add_argument("--initiator-worker-id", default="")
     return parser.parse_args()
 
 
@@ -397,6 +405,10 @@ def main() -> int:
         print("refuse to run remote workload as root", file=sys.stderr)
         return 2
     args = parse_args()
+    reuse_workers = bool(args.target_worker_id or args.initiator_worker_id)
+    if reuse_workers and (not args.target_worker_id or not args.initiator_worker_id):
+        print("both --target-worker-id and --initiator-worker-id are required when reusing workers", file=sys.stderr)
+        return 2
     case_dir = Path(args.case_dir)
     case_dir.mkdir(parents=True, exist_ok=True)
     write_json(
@@ -421,6 +433,10 @@ def main() -> int:
             "strict_direct_rdma": args.strict_direct_rdma,
             "bind_numa": args.bind_numa,
             "verify": not args.no_verify,
+            "keep_workers": args.keep_workers,
+            "reuse_workers": reuse_workers,
+            "target_worker_id": args.target_worker_id,
+            "initiator_worker_id": args.initiator_worker_id,
         },
     )
 
@@ -429,18 +445,27 @@ def main() -> int:
         return 2
 
     worker_ids: list[str] = []
+    launched_worker_ids: list[str] = []
     try:
-        predict_target = predict_worker(args, "target", case_dir / "launch_target_predict.json")
-        predict_initiator = predict_worker(args, "initiator", case_dir / "launch_initiator_predict.json")
-        if predict_target.returncode != 0 or predict_initiator.returncode != 0:
-            raise RuntimeError("predict-only failed for target or initiator")
+        if reuse_workers:
+            target_worker = args.target_worker_id
+            initiator_worker = args.initiator_worker_id
+            worker_ids.extend([target_worker, initiator_worker])
+            wait_worker_running(target_worker, timeout_sec=600)
+            wait_worker_running(initiator_worker, timeout_sec=600)
+        else:
+            predict_target = predict_worker(args, "target", case_dir / "launch_target_predict.json")
+            predict_initiator = predict_worker(args, "initiator", case_dir / "launch_initiator_predict.json")
+            if predict_target.returncode != 0 or predict_initiator.returncode != 0:
+                raise RuntimeError("predict-only failed for target or initiator")
 
-        target_worker = launch_worker(args, "target", case_dir / "launch_target.json")
-        initiator_worker = launch_worker(args, "initiator", case_dir / "launch_initiator.json")
-        worker_ids.extend([target_worker, initiator_worker])
+            target_worker = launch_worker(args, "target", case_dir / "launch_target.json")
+            initiator_worker = launch_worker(args, "initiator", case_dir / "launch_initiator.json")
+            worker_ids.extend([target_worker, initiator_worker])
+            launched_worker_ids.extend([target_worker, initiator_worker])
 
-        wait_worker_running(target_worker, timeout_sec=600)
-        wait_worker_running(initiator_worker, timeout_sec=600)
+            wait_worker_running(target_worker, timeout_sec=600)
+            wait_worker_running(initiator_worker, timeout_sec=600)
 
         target_host = remote_stdout(target_worker, "hostname", case_dir / "target_hostname_exec.json")
         initiator_host = remote_stdout(initiator_worker, "hostname", case_dir / "initiator_hostname_exec.json")
@@ -539,30 +564,58 @@ def main() -> int:
                 "batch_size": args.batch_size,
                 "qp_count": args.qp_count,
                 "outstanding_wr": args.outstanding_wr,
+                "reused_workers": reuse_workers,
                 "parsed": parsed,
             },
         )
         return initiator_result.returncode
     finally:
-        for worker_id, log_name in (
-            (worker_ids[0], "cleanup_target_worker.json") if len(worker_ids) > 0 else (None, None),
-            (worker_ids[1], "cleanup_initiator_worker.json") if len(worker_ids) > 1 else (None, None),
-        ):
-            if worker_id is None or log_name is None:
-                continue
+        if len(worker_ids) > 0:
             try:
                 brainctl_exec(
-                    worker_id,
+                    worker_ids[0],
                     (
                         f"if [ -f {shlex.quote(str(case_dir / 'target.pid'))} ]; then "
                         f"kill $(cat {shlex.quote(str(case_dir / 'target.pid'))}) >/dev/null 2>&1 || true; "
                         "fi"
                     ),
-                    case_dir / f"pre_{log_name}",
+                    case_dir / "pre_cleanup_target_process.json",
                 )
             except Exception:
                 pass
-            delete_worker(worker_id, case_dir / log_name)
+        if args.keep_workers:
+            write_json(
+                case_dir / "kept_workers.json",
+                {
+                    "target_worker": worker_ids[0] if len(worker_ids) > 0 else "",
+                    "initiator_worker": worker_ids[1] if len(worker_ids) > 1 else "",
+                },
+            )
+        else:
+            for worker_id, log_name in (
+                (launched_worker_ids[0], "cleanup_target_worker.json") if len(launched_worker_ids) > 0 else (None, None),
+                (
+                    launched_worker_ids[1],
+                    "cleanup_initiator_worker.json",
+                )
+                if len(launched_worker_ids) > 1
+                else (None, None),
+            ):
+                if worker_id is None or log_name is None:
+                    continue
+                try:
+                    brainctl_exec(
+                        worker_id,
+                        (
+                            f"if [ -f {shlex.quote(str(case_dir / 'target.pid'))} ]; then "
+                            f"kill $(cat {shlex.quote(str(case_dir / 'target.pid'))}) >/dev/null 2>&1 || true; "
+                            "fi"
+                        ),
+                        case_dir / f"pre_{log_name}",
+                    )
+                except Exception:
+                    pass
+                delete_worker(worker_id, case_dir / log_name)
 
 
 if __name__ == "__main__":

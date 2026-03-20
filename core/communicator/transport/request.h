@@ -4,6 +4,7 @@
 #define CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -27,6 +28,18 @@ using read_result_t = struct ReadResult {
   uint64_t read_cost = 0;
   uint64_t rdma_queue_cost = 0;
   uint64_t rdma_regmr_cost = 0;
+  uint64_t request_first_response_us = 0;
+  uint64_t rdma_first_post_us = 0;
+  uint64_t rdma_first_completion_us = 0;
+  uint64_t rdma_last_completion_us = 0;
+  uint64_t rdma_post_to_last_completion_us = 0;
+  uint64_t rdma_response_windows = 0;
+  uint64_t rdma_response_segments = 0;
+  uint64_t rdma_wr_posted = 0;
+  uint64_t rdma_wc_completed = 0;
+  uint64_t rdma_ack_windows = 0;
+  uint64_t rdma_ack_segments = 0;
+  uint64_t rdma_handshake_queue_wait_us = 0;
   bool transport_is_rdma = false;
   bool rdma_staged_response = false;
   bool rdma_zero_copy_response = false;
@@ -87,6 +100,11 @@ class ReadRequest {
   void record_rdma_regmr();
   void record_rdma_queue_done();
   void record_read_done();
+  void note_rdma_response_window(uint32_t segment_count);
+  void note_rdma_posted_wr(uint32_t wr_count);
+  void note_rdma_completion();
+  void note_rdma_ack_window(uint32_t segment_count);
+  void note_rdma_handshake_queue_wait_us(uint64_t wait_us);
 
   void add_expected_completions(int n) {
     expected_completions_.fetch_add(n);
@@ -201,6 +219,18 @@ class ReadRequest {
 
   misc::Timer timer_;
   read_result_t status_;
+  const std::chrono::steady_clock::time_point created_at_;
+  std::atomic<uint64_t> request_first_response_us_{0};
+  std::atomic<uint64_t> rdma_first_post_us_{0};
+  std::atomic<uint64_t> rdma_first_completion_us_{0};
+  std::atomic<uint64_t> rdma_last_completion_us_{0};
+  std::atomic<uint64_t> rdma_response_windows_{0};
+  std::atomic<uint64_t> rdma_response_segments_{0};
+  std::atomic<uint64_t> rdma_wr_posted_{0};
+  std::atomic<uint64_t> rdma_wc_completed_{0};
+  std::atomic<uint64_t> rdma_ack_windows_{0};
+  std::atomic<uint64_t> rdma_ack_segments_{0};
+  std::atomic<uint64_t> rdma_handshake_queue_wait_us_{0};
   uint64_t remote_offset_;
   uint64_t request_id_;
   int16_t rail_id_;
@@ -231,6 +261,9 @@ class ReadRequest {
   absl::Mutex progress_mu_;
   std::function<void(uint64_t, uint64_t)> progress_callback_ ABSL_GUARDED_BY(progress_mu_);
   std::function<void(const absl::Status&)> completion_callback_ ABSL_GUARDED_BY(progress_mu_);
+
+  [[nodiscard]] uint64_t elapsed_since_create_us() const;
+  void finalize_rdma_profile_status();
 };
 
 using read_request_t = std::shared_ptr<ReadRequest>;

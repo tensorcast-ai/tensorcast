@@ -2984,6 +2984,12 @@ misc::result_t Communicator::on_receive_response(
 
       auto ready_reads = drain_pending_reads_for_generation(endpoint, generation);
       for (auto& pending : ready_reads) {
+        if (pending.enqueued_at != absl::InfinitePast()) {
+          const auto wait_us = absl::ToInt64Microseconds(absl::Now() - pending.enqueued_at);
+          if (wait_us > 0) {
+            pending.request->note_rdma_handshake_queue_wait_us(static_cast<uint64_t>(wait_us));
+          }
+        }
         auto res = transport->read_multi(pending.request, pending.segments);
         if (res != misc::SUCCESS) {
           pending_requests_.erase_if_present(pending.request->get_key());
@@ -3033,6 +3039,7 @@ misc::result_t Communicator::on_receive_response(
       read_request->record_request_response();
 
       if (enable_rdma_ && hdr->transport_type == ENGINE_TRANSPORT_RDMA) {
+        read_request->note_rdma_response_window(hdr->num_segments);
         CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
 
         auto tensor = read_request->get_local_tensor();
@@ -3068,9 +3075,13 @@ misc::result_t Communicator::on_receive_response(
           const std::string staged_key = tensor_key;
           const uint64_t request_offset = read_request->remote_offset_;
           const uint64_t request_id = read_request->request_id();
+          std::weak_ptr<transport::ReadRequest> weak_read_request(read_request);
           read_request->set_ack_sender(
-              [ctrl, staged_key, request_offset, request_id](
+              [ctrl, staged_key, request_offset, request_id, weak_read_request](
                   uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
+                if (auto ack_request = weak_read_request.lock(); ack_request != nullptr) {
+                  ack_request->note_rdma_ack_window(static_cast<uint32_t>(offsets.size()));
+                }
                 auto ack = std::make_shared<EngineMessage>(
                     ENGINE_OP_RDMA_READ_DONE_EX,
                     static_cast<uint32_t>(
