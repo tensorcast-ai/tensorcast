@@ -50,6 +50,18 @@ RangeSpec build_range(const v2::CopyPlanRange& range) {
   };
 }
 
+std::vector<int64_t> effective_slice_shape(const std::vector<int64_t>& shape, const RangeSpec& range, int32_t dim) {
+  if (shape.empty()) {
+    return {};
+  }
+  std::vector<int64_t> result = shape;
+  if (dim >= 0 && dim < static_cast<int32_t>(result.size()) && range.has_range) {
+    result[static_cast<size_t>(dim)] = range.end - range.start;
+  }
+  result.erase(std::remove_if(result.begin(), result.end(), [](int64_t size) { return size == 1; }), result.end());
+  return result;
+}
+
 absl::Status validate_and_build_segments(
     int idx,
     const v2::CopyPlanEntry& entry,
@@ -179,14 +191,8 @@ absl::Status validate_and_build_segments(
       return st;
     }
   }
-
-  for (size_t i = 0; i < src_shape.size(); ++i) {
-    if (static_cast<int32_t>(i) == dim) {
-      continue;
-    }
-    if (i >= dst_shape.size() || src_shape[i] != dst_shape[i]) {
-      return absl::InvalidArgumentError(std::format("copy_plan entry {} shape mismatch for {}", idx, entry.dst_name()));
-    }
+  if (effective_slice_shape(src_shape, src_range, dim) != effective_slice_shape(dst_shape, dst_range, dim)) {
+    return absl::InvalidArgumentError(std::format("copy_plan entry {} shape mismatch for {}", idx, entry.dst_name()));
   }
 
   auto src_count_or = product_dims(src_shape);

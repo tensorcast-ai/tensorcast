@@ -9,6 +9,7 @@ from typing import Sequence
 import grpc
 import pytest
 import torch
+from safetensors.torch import save_file as st_save
 
 from tensorcast import FallbackOptions, from_disk, startup
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
@@ -229,6 +230,80 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
         loaded["weights"].cpu() if loaded["weights"].is_cuda else loaded["weights"]
     )
     assert torch.equal(loaded_cpu, expected["weights"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
+    tmp_path,
+):
+    tmp_path = Path(tmp_path)
+    storage_root = tmp_path / "daemon-storage"
+    save_path = storage_root / "artifact"
+    save_path.mkdir(parents=True, exist_ok=True)
+    expected = torch.arange(32, dtype=torch.bfloat16)
+    st_save({"weights": expected}, str(save_path / "weights.safetensors"))
+    compat_libs = [
+        "/data/cuda/compat",
+        "/data/cuda/cuda-12.8/lib64",
+        "/usr/local/nvidia/lib64",
+    ]
+    available_compat_libs = [path for path in compat_libs if Path(path).exists()]
+    if available_compat_libs:
+        current_ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+        compat_ld_library_path = ":".join(available_compat_libs)
+        if current_ld_library_path:
+            os.environ["LD_LIBRARY_PATH"] = (
+                f"{compat_ld_library_path}:{current_ld_library_path}"
+            )
+        else:
+            os.environ["LD_LIBRARY_PATH"] = compat_ld_library_path
+
+    listen = f"127.0.0.1:{get_free_port()}"
+    local_handle_dir = tmp_path / "local-handle"
+    local_handle_dir.mkdir(parents=True, exist_ok=True)
+    daemon_proc = start_daemon_binary(
+        listen,
+        storage_root,
+        stable_bytes=64 * 1024 * 1024,
+        local_handle_socket_path=str(local_handle_dir / "local_handle.sock"),
+    )
+    try:
+        startup.init(mode="connect", address=listen)
+        try:
+            artifact_handle = from_disk(
+                str(save_path), verify_checksums=False
+            ).with_fallback(
+                FallbackOptions(prefer="disk", allow_p2p=False, verify_checksums=False)
+            )
+            ref = artifact_handle.tensor_dict(device="cuda:0")["weights"]
+
+            binding = artifact_handle.bind(device="cuda:0", packing="byte_space")
+            try:
+                bound = dict(binding.tensors)["weights"]
+                torch.cuda.synchronize()
+                assert torch.equal(bound.cpu(), expected)
+                assert torch.equal(bound, ref)
+            finally:
+                binding.close()
+
+            target = torch.empty_like(ref)
+            binding = artifact_handle.bind_into(
+                {"weights": target}, packing="byte_space"
+            )
+            try:
+                torch.cuda.synchronize()
+                assert torch.equal(target.cpu(), expected)
+                assert torch.equal(target, ref)
+            finally:
+                binding.close()
+        finally:
+            startup.shutdown()
+    finally:
+        try:
+            daemon_proc.terminate()
+            daemon_proc.wait(timeout=3)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

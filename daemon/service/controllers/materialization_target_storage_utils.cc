@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "absl/status/status.h"
+#include "core/cuda/cuda_api.h"
 #include "gsl/pointers"
 
 namespace tensorcast::daemon::materialization_target_storage {
@@ -96,6 +97,13 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
           *error = AcquireTargetStoragesError::kRegionMissing;
         }
         return handle_or.status();
+      }
+      auto set_device_status = cuda::set_device(storage.device_id());
+      if (!set_device_status.ok()) {
+        if (error != nullptr) {
+          *error = AcquireTargetStoragesError::kMapFailed;
+        }
+        return set_device_status;
       }
       auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
       if (!map_or.ok()) {
