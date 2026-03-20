@@ -33,10 +33,36 @@ struct CollectiveDiskLoadResult {
   absl::Status status{absl::OkStatus()};
 };
 
+struct CollectiveMappedTargetLoadOptions {
+  uint64_t chunk_bytes{128ULL * 1024ULL * 1024ULL};
+  uint64_t merge_max_gap_bytes{256ULL * 1024ULL};
+  uint64_t merge_max_amplification{4};
+};
+
+struct CollectiveMappedTargetLoadRequest {
+  std::string artifact_id;
+  loading::CollectiveLoadGroupHint group;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  loader::ByteRangeMap map;
+  loading::IntoTargetLayout target_layout;
+  int device_id{-1};
+};
+
+struct CollectiveMappedTargetLoadResult {
+  bool handled{false};
+  absl::Status status{absl::OkStatus()};
+};
+
 CollectiveDiskLoadResult try_collective_disk_load(
     const CollectiveDiskLoadRequest& request,
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout);
+
+CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
+    const CollectiveMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options);
 
 absl::Status warm_collective_clique_cache(const std::vector<int>& device_ids);
 

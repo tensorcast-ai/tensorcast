@@ -94,6 +94,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/materialization/dataplane:view_transform_executor",
         "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
+        "//core/store/replica:collective_disk_loader",
         "//core/store/runtime:ingestion_events",
         "//core/store/runtime/context:runtime_context",
         "//core/store/runtime/context:runtime_context_events",

@@ -249,7 +249,7 @@ def test_tensor_subset_materialization_and_release():
     assert pipeline.released == []
 
 
-def test_subset_derives_view_metadata_lazily():
+def test_subset_derives_view_metadata_eagerly():
     canonical_bytes, payload = _build_payload(
         {"foo": torch.ones(1), "bar": torch.zeros(1)}
     )
@@ -267,13 +267,16 @@ def test_subset_derives_view_metadata_lazily():
 
     assert derived._view_metadata is not None
     assert derived._view_metadata.tensor_names == ("bar",)
-    assert derived._view_metadata.selected_index is None
+    assert derived._view_metadata.selected_index is not None
+    assert tuple(entry.name for entry in derived._view_metadata.selected_index.entries) == (
+        "bar",
+    )
     assert derived._view_metadata.view_index_bytes
-    assert derived._view_metadata.view_data_hash == ""
+    assert derived._view_metadata.view_data_hash is None
     assert derived._view_metadata.view_id == ""
 
 
-def test_selection_materializes_lazy_view_metadata_on_demand():
+def test_selection_reuses_eager_view_metadata():
     canonical_bytes, payload = _build_payload(
         {"foo": torch.ones(2, 3), "bar": torch.zeros(2, 3)}
     )
@@ -290,14 +293,14 @@ def test_selection_materializes_lazy_view_metadata_on_demand():
     derived = artifact.view(transpose={"foo": [(0, 1)]})
     assert derived._view_metadata is not None
     assert derived._view_metadata.view_index_bytes
-    assert derived._view_metadata.view_id == ""
+    assert derived._view_metadata.view_id
 
     selection = derived._build_artifact_selection()
 
-    assert selection.view_id
+    assert selection.view_id == derived._view_metadata.view_id
     assert derived._view_metadata is not None
     assert derived._view_metadata.view_index_bytes
-    assert derived._view_metadata.view_id
+    assert derived._view_metadata.selected_index is not None
 
 
 def test_tensor_dict_with_diagnostics_reports_source_and_bytes():
@@ -390,7 +393,7 @@ def test_prefetch_returns_operation():
     )
 
 
-def test_prefetch_rejects_cpu_device() -> None:
+def test_prefetch_accepts_cpu_device() -> None:
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
     pipeline = _PipelineStub(payload)
@@ -401,9 +404,15 @@ def test_prefetch_rejects_cpu_device() -> None:
         canonical_index_bytes=canonical_bytes,
     )
 
-    with pytest.raises(ArtifactError) as excinfo:
-        artifact.prefetch(device="cpu")
-    assert excinfo.value.status_code == "INVALID_ARGUMENT"
+    op = artifact.prefetch(device="cpu")
+
+    assert op.operation_id == "replica-1"
+    assert pipeline.calls
+    assert str(pipeline.calls[0]["device"]) == "cpu"
+    assert (
+        pipeline.calls[0]["lease_mode"]
+        == store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE
+    )
 
 
 def test_release_blocks_materialization():

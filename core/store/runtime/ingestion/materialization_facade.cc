@@ -48,6 +48,7 @@
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
+#include "core/store/replica/collective_disk_loader.h"
 #include "core/store/replica/replica.h"
 #include "core/store/view_utils.h"
 #include "nlohmann/json.hpp"
@@ -1891,14 +1892,17 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return loading::MaterializeIntoTargetResult{.source = source_kind};
   };
 
-  auto local_source_or = make_local_canonical_source(
-      config_.replica_runtime->registry(), hints.artifact_id, target_device, canonical_total_size);
-  if (local_source_or.ok()) {
-    return run_source(
-        std::make_unique<SharedSourceLoader>(*local_source_or), loading::MaterializationSource::kLocalReplica);
-  }
-  if (!absl::IsNotFound(local_source_or.status())) {
-    return local_source_or.status();
+  const bool requires_source_layout_remap = source_index_json.has_value();
+  if (!requires_source_layout_remap) {
+    auto local_source_or = make_local_canonical_source(
+        config_.replica_runtime->registry(), hints.artifact_id, target_device, canonical_total_size);
+    if (local_source_or.ok()) {
+      return run_source(
+          std::make_unique<SharedSourceLoader>(*local_source_or), loading::MaterializationSource::kLocalReplica);
+    }
+    if (!absl::IsNotFound(local_source_or.status())) {
+      return local_source_or.status();
+    }
   }
 
   auto gs_client = config_.runtime_context->global_store_client();
@@ -2253,6 +2257,43 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return absl::InvalidArgumentError("materialize_mapped_into_target storage ranges do not span total_size");
     }
 
+    if (source_kind == loading::MaterializationSource::kDisk && hints.collective_load_group.has_value()) {
+      if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
+        auto shared_or = disk_loader->shared_context();
+        if (!shared_or.ok()) {
+          LOG(WARNING) << "materialize_mapped_into_target collective path unavailable: shared_context error="
+                       << shared_or.status();
+        } else {
+          const replica::CollectiveMappedTargetLoadOptions collective_options{
+              .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+              .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+          };
+          auto collective_result = replica::try_collective_mapped_target_load(
+              replica::CollectiveMappedTargetLoadRequest{
+                  .artifact_id = hints.artifact_id,
+                  .group = *hints.collective_load_group,
+                  .disk_context = *shared_or,
+                  .map = effective_map,
+                  .target_layout = target_layout,
+                  .device_id = target_device.ordinal,
+              },
+              config_.runtime_context->pinned_buffer_pool(),
+              timeout,
+              collective_options);
+          if (collective_result.handled) {
+            if (!collective_result.status.ok()) {
+              return absl::DataLossError(
+                  absl::StrCat(
+                      "materialize_mapped_into_target collective execution failed: ",
+                      collective_result.status.message()));
+            }
+            return loading::MaterializeIntoTargetResult{.source = source_kind};
+          }
+        }
+      }
+    }
+
     loader::TargetLayoutGpuSink::Options sink_opts{
         .storages = std::move(storages),
         .chunk_size = config_.artifact_chunk_bytes,
@@ -2311,16 +2352,19 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return loading::MaterializeIntoTargetResult{.source = source_kind};
   };
 
-  auto local_source_or = make_local_canonical_source(
-      config_.replica_runtime->registry(), hints.artifact_id, target_device, canonical_total_size);
-  if (local_source_or.ok()) {
-    return run_source(
-        std::make_unique<SharedSourceLoader>(*local_source_or),
-        loading::MaterializationSource::kLocalReplica,
-        MappedSourceByteSpace::kCanonical);
-  }
-  if (!absl::IsNotFound(local_source_or.status())) {
-    return local_source_or.status();
+  const bool requires_source_layout_remap = source_index_json.has_value();
+  if (!requires_source_layout_remap) {
+    auto local_source_or = make_local_canonical_source(
+        config_.replica_runtime->registry(), hints.artifact_id, target_device, canonical_total_size);
+    if (local_source_or.ok()) {
+      return run_source(
+          std::make_unique<SharedSourceLoader>(*local_source_or),
+          loading::MaterializationSource::kLocalReplica,
+          MappedSourceByteSpace::kCanonical);
+    }
+    if (!absl::IsNotFound(local_source_or.status())) {
+      return local_source_or.status();
+    }
   }
 
   auto gs_client = config_.runtime_context->global_store_client();

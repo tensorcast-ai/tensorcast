@@ -343,6 +343,34 @@ def _cleanup_region_ids_best_effort(
                 )
 
 
+def _bind_region_registration_error(
+    *,
+    exc: Exception,
+    requested_regions: int,
+    registered_regions: int,
+) -> ArtifactError:
+    detail = str(exc).strip() or exc.__class__.__name__
+    lowered = detail.lower()
+    if "capacity reached" in lowered or isinstance(exc, MemoryError):
+        return ArtifactError(
+            "bind_into region registration exhausted daemon registry capacity: "
+            f"requested_regions={requested_regions}, "
+            f"registered_before_failure={registered_regions}, "
+            f"cause={detail}. Increase the daemon max_vram_regions limit "
+            "for source-bind workloads.",
+            status_code="RESOURCE_EXHAUSTED",
+            retryable=False,
+        )
+    return ArtifactError(
+        "bind_into failed to register target CUDA regions: "
+        f"requested_regions={requested_regions}, "
+        f"registered_before_failure={registered_regions}, "
+        f"cause={detail}. bind_into requires user-owned CUDA memory.",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
+
+
 _TRANSPORT_GROUP_OPID_MARKER = "#tcg:"
 _TRANSPORT_GROUP_KIND_TAG = "tc.transport.group.kind"
 _TRANSPORT_GROUP_ID_TAG = "tc.transport.group.id"
@@ -351,6 +379,9 @@ _TRANSPORT_GROUP_PART_ID_TAG = "tc.transport.group.part_id"
 _TRANSPORT_GROUP_PRIORITY_TAG = "tc.transport.group.priority"
 _TRANSPORT_GROUP_EPOCH_TAG = "tc.transport.group.epoch"
 _TRANSPORT_REQUEST_ID_TAG = "tc.transport.request_id"
+_COLLECTIVE_GROUP_ID_OPID_KEY = "clid"
+_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY = "clws"
+_COLLECTIVE_GROUP_RANK_OPID_KEY = "clrk"
 _ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
 )
@@ -419,18 +450,55 @@ def _build_transport_operation_id(
         default=0,
     )
     request_id = _read_context_tag_str(tags, _TRANSPORT_REQUEST_ID_TAG)
+    collective_group_id = ""
+    collective_world_size = 0
+    collective_rank = 0
+    collective = ctx.collective
+    if collective is not None:
+        collective_group_id = _sanitize_operation_token(collective.group_id)
+        try:
+            collective_world_size = int(collective.world_size)
+            collective_rank = int(collective.rank)
+        except (TypeError, ValueError):
+            collective_group_id = ""
+            collective_world_size = 0
+            collective_rank = 0
 
+    metadata_parts: list[str] = []
     if group_kind and group_id and part_id and total_parts > 0:
         if not request_id:
             request_id = _sanitize_operation_token(f"{group_id}:{part_id}")
-        metadata = (
-            f"kind={group_kind};gid={group_id};tot={int(total_parts)};"
-            f"part={part_id};pri={int(priority)};ep={int(epoch)};rid={request_id}"
+        metadata_parts.extend(
+            [
+                f"kind={group_kind}",
+                f"gid={group_id}",
+                f"tot={int(total_parts)}",
+                f"part={part_id}",
+                f"pri={int(priority)}",
+                f"ep={int(epoch)}",
+            ]
         )
-        return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}{metadata}"
+    if (
+        collective_group_id
+        and collective_world_size > 1
+        and 0 <= collective_rank < collective_world_size
+    ):
+        metadata_parts.extend(
+            [
+                f"{_COLLECTIVE_GROUP_ID_OPID_KEY}={collective_group_id}",
+                f"{_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY}={int(collective_world_size)}",
+                f"{_COLLECTIVE_GROUP_RANK_OPID_KEY}={int(collective_rank)}",
+            ]
+        )
 
     if request_id:
-        return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}rid={request_id}"
+        metadata_parts.append(f"rid={request_id}")
+
+    if metadata_parts:
+        return (
+            f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}"
+            f"{';'.join(metadata_parts)}"
+        )
 
     return base_operation_id
 
@@ -1156,10 +1224,10 @@ class Artifact:
                     region_ids=tuple(region_ids),
                     context="bind_into.register_regions",
                 )
-                raise ArtifactError(
-                    "bind_into requires user-owned CUDA memory (daemon-owned tensors cannot be used)",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=False,
+                raise _bind_region_registration_error(
+                    exc=exc,
+                    requested_regions=len(bases),
+                    registered_regions=len(region_ids),
                 ) from exc
             return tuple(region_ids)
 
@@ -1357,6 +1425,7 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
+        total_start = time.perf_counter()
         mode = str(packing).strip().lower()
         if mode != "byte_space":
             raise ArtifactError(
@@ -1439,14 +1508,16 @@ class Artifact:
                     region_ids=tuple(region_ids),
                     context="bind_into_mapped.register_regions",
                 )
-                raise ArtifactError(
-                    "bind_into requires user-owned CUDA memory (daemon-owned tensors cannot be used)",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=False,
+                raise _bind_region_registration_error(
+                    exc=exc,
+                    requested_regions=len(bases),
+                    registered_regions=len(region_ids),
                 ) from exc
             return tuple(region_ids)
 
+        stage_start = time.perf_counter()
         region_ids = _register_regions()
+        region_register_sec = time.perf_counter() - stage_start
         selection_order = tuple(sorted(str(name) for name in target_tensors))
 
         view_spec_proto = None
@@ -1505,11 +1576,14 @@ class Artifact:
             plan=copy_plan,
             target_tensors=target_tensors,
         )
+        region_layout_build_sec = 0.0
+        materialize_rpc_sec = 0.0
         try:
             response = None
             region_layout = None
             attempt = 0
             while attempt < 2:
+                stage_start = time.perf_counter()
                 region_layout = pipeline._build_mapped_region_backed_layout(
                     target=target_tensors,
                     device_id=device_id,
@@ -1517,11 +1591,13 @@ class Artifact:
                     mapped_view_id=mapped_view_id,
                     selection_index_bytes=selection_index_bytes,
                 )
+                region_layout_build_sec += time.perf_counter() - stage_start
                 try:
                     selection = self._build_region_layout_selection(
                         region_layout=region_layout,
                         view_spec_proto=view_spec_proto,
                     )
+                    stage_start = time.perf_counter()
                     response = client.materialize_into_mapped_target(
                         selection=selection,
                         target_layout=region_layout.layout,
@@ -1533,6 +1609,7 @@ class Artifact:
                         operation_id=operation_id,
                         timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
+                    materialize_rpc_sec += time.perf_counter() - stage_start
                 except Exception as exc:  # noqa: BLE001
                     message = str(exc)
                     if (
@@ -1603,6 +1680,7 @@ class Artifact:
             )
             raise
 
+        stage_start = time.perf_counter()
         binding_id, binding_layout, current_value_metadata = _register_client_binding(
             runtime=runtime,
             device_id=device_id,
@@ -1619,6 +1697,7 @@ class Artifact:
             ),
             ctx=ctx,
         )
+        binding_register_sec = time.perf_counter() - stage_start
 
         slot = InplaceSlot(
             store=store,
@@ -1640,6 +1719,22 @@ class Artifact:
                 response, "target_publication_token", None
             ),
             copy_plan=copy_plan,
+        )
+        logger.info(
+            "TensorCast bind_into_mapped timings: artifact_id=%s, targets=%d, "
+            "copy_entries=%d, regions=%d, collective=%s, region_register=%.3fs, "
+            "layout_build=%.3fs, materialize_rpc=%.3fs, binding_register=%.3fs, "
+            "total=%.3fs",
+            self._ensure_identified(),
+            len(target_tensors),
+            len(copy_plan),
+            len(region_ids),
+            bool(ctx is not None and ctx.collective is not None),
+            region_register_sec,
+            region_layout_build_sec,
+            materialize_rpc_sec,
+            binding_register_sec,
+            time.perf_counter() - total_start,
         )
         return Binding(slot, publish=publish, ctx=ctx)
 
@@ -1748,6 +1843,7 @@ class Artifact:
                 logical_layout_hash=None,
                 view_id=mapped_view_id,
                 dst_specs=dst_specs,
+                separate_storages=True,
             )
             copy_plan_proto = store_daemon_pb2.CopyPlan(version=1)
             for entry in normalized_plan:
@@ -2561,6 +2657,13 @@ class Artifact:
                     tensor_names=selection_names,
                 )
 
+        selection_view_id = str(region_layout.view_id or "")
+        if selection_view_id.startswith("mapped:v1:") and view_spec_proto is not None:
+            # For mapped materialization the selection still refers to the source
+            # artifact view. The mapped target view id belongs to the target
+            # layout/publication contract, not the source selection identity.
+            selection_view_id = ""
+
         try:
             return build_artifact_selection(
                 artifact_id=artifact_id,
@@ -2569,9 +2672,9 @@ class Artifact:
                 view_spec=view_spec_proto,
                 tensor_names=selection_names,
                 view_subset_hash=subset_hash if subset_hash else None,
-                view_id=str(region_layout.view_id or ""),
+                view_id=selection_view_id,
                 allow_view_id_without_spec=bool(
-                    region_layout.view_id and view_spec_proto is None
+                    selection_view_id and view_spec_proto is None
                 ),
             )
         except ValueError as exc:

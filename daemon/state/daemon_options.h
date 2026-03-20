@@ -44,7 +44,7 @@ struct DaemonOptions {
   std::chrono::milliseconds eviction_check_interval{std::chrono::milliseconds(1000)};
 
   // Region registry limits
-  size_t max_vram_regions{2048};
+  size_t max_vram_regions{16384};
   absl::Duration max_region_ttl{absl::Minutes(10)};
 
   // Observability
