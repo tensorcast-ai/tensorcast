@@ -15,7 +15,9 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <string>
+#include <syncstream>
 #include <thread>
 #include <vector>
 
@@ -36,6 +38,17 @@ namespace transport = tensorcast::communicator::transport;
 namespace cuda = tensorcast::cuda;
 
 namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+
+uint64_t elapsed_us(SteadyClock::time_point start, SteadyClock::time_point end) {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+}
+
+void emit_machine_line(const std::string& line) {
+  std::osyncstream synced(std::cout);
+  synced << line << '\n';
+}
 
 struct Options {
   std::string role = "inspect";
@@ -73,6 +86,26 @@ struct RdmPreflight {
   int gpu_device = -1;
 };
 
+struct AllocationProfile {
+  uint64_t total_us = 0;
+  uint64_t set_device_us = 0;
+  uint64_t allocate_call_us = 0;
+};
+
+struct PatternFillProfile {
+  uint64_t total_us = 0;
+  uint64_t buffer_alloc_us = 0;
+  uint64_t pattern_fill_us = 0;
+  uint64_t copy_us = 0;
+};
+
+struct VerifyProfile {
+  uint64_t total_us = 0;
+  uint64_t buffer_alloc_us = 0;
+  uint64_t copy_us = 0;
+  uint64_t checksum_us = 0;
+};
+
 std::string tensor_key_for_thread(const std::string& base_key, int thread_id, int threads) {
   if (threads <= 1) {
     return base_key;
@@ -88,26 +121,48 @@ class Buffer {
     reset();
   }
 
-  absl::Status allocate(const Options& options) {
+  absl::Status allocate(const Options& options, AllocationProfile* profile = nullptr) {
+    const auto total_start = SteadyClock::now();
+    auto record_profile = [&](uint64_t set_device_us, uint64_t allocate_call_us) {
+      if (profile == nullptr) {
+        return;
+      }
+      profile->set_device_us = set_device_us;
+      profile->allocate_call_us = allocate_call_us;
+      profile->total_us = elapsed_us(total_start, SteadyClock::now());
+    };
+
     auto total_bytes_or = get_total_buffer_bytes(options);
     if (!total_bytes_or.ok()) {
       return total_bytes_or.status();
     }
     bytes_ = static_cast<size_t>(*total_bytes_or);
     if (options.memory == "cpu") {
+      const auto alloc_start = SteadyClock::now();
       cpu_ptr_ = static_cast<uint8_t*>(std::malloc(bytes_));
+      const auto alloc_us = elapsed_us(alloc_start, SteadyClock::now());
       if (cpu_ptr_ == nullptr) {
         return absl::ResourceExhaustedError("malloc failed");
       }
+      record_profile(/*set_device_us=*/0, alloc_us);
       return absl::OkStatus();
     }
 
+    const auto set_device_start = SteadyClock::now();
     auto set_status = cuda::set_device(options.gpu_id);
+    const auto set_device_us = elapsed_us(set_device_start, SteadyClock::now());
     if (!set_status.ok()) {
       return set_status;
     }
     gpu_id_ = options.gpu_id;
-    return cuda::malloc(reinterpret_cast<void**>(&gpu_ptr_), bytes_);
+    const auto alloc_start = SteadyClock::now();
+    auto alloc_status = cuda::malloc(reinterpret_cast<void**>(&gpu_ptr_), bytes_);
+    const auto alloc_us = elapsed_us(alloc_start, SteadyClock::now());
+    if (!alloc_status.ok()) {
+      return alloc_status;
+    }
+    record_profile(set_device_us, alloc_us);
+    return absl::OkStatus();
   }
 
   void reset() {
@@ -133,55 +188,118 @@ class Buffer {
     return bytes_;
   }
 
-  absl::Status fill_pattern(const Options& options, uint8_t seed) {
+  absl::Status fill_pattern(const Options& options, uint8_t seed, PatternFillProfile* profile = nullptr) {
+    const auto total_start = SteadyClock::now();
+    auto record_profile = [&](uint64_t buffer_alloc_us, uint64_t pattern_fill_us, uint64_t copy_us) {
+      if (profile == nullptr) {
+        return;
+      }
+      profile->buffer_alloc_us = buffer_alloc_us;
+      profile->pattern_fill_us = pattern_fill_us;
+      profile->copy_us = copy_us;
+      profile->total_us = elapsed_us(total_start, SteadyClock::now());
+    };
+
+    const auto alloc_start = SteadyClock::now();
     std::vector<uint8_t> pattern(bytes_);
+    const auto pattern_alloc_us = elapsed_us(alloc_start, SteadyClock::now());
+    const auto fill_start = SteadyClock::now();
     for (size_t i = 0; i < bytes_; ++i) {
       pattern[i] = static_cast<uint8_t>((i + seed) % 251);
     }
+    const auto pattern_fill_us = elapsed_us(fill_start, SteadyClock::now());
+    uint64_t copy_us = 0;
     if (options.memory == "cpu") {
+      const auto copy_start = SteadyClock::now();
       std::memcpy(cpu_ptr_, pattern.data(), bytes_);
+      copy_us = elapsed_us(copy_start, SteadyClock::now());
+      record_profile(pattern_alloc_us, pattern_fill_us, copy_us);
       return absl::OkStatus();
     }
+    const auto set_device_start = SteadyClock::now();
     auto set_status = cuda::set_device(options.gpu_id);
+    copy_us = elapsed_us(set_device_start, SteadyClock::now());
     if (!set_status.ok()) {
+      record_profile(pattern_alloc_us, pattern_fill_us, copy_us);
       return set_status;
     }
-    return cuda::memcpy(gpu_ptr_, pattern.data(), bytes_, cudaMemcpyHostToDevice);
+    const auto copy_start = SteadyClock::now();
+    auto copy_status = cuda::memcpy(gpu_ptr_, pattern.data(), bytes_, cudaMemcpyHostToDevice);
+    copy_us += elapsed_us(copy_start, SteadyClock::now());
+    record_profile(pattern_alloc_us, pattern_fill_us, copy_us);
+    return copy_status;
   }
 
-  absl::Status clear(const Options& options) {
+  absl::Status clear(const Options& options, uint64_t* clear_us = nullptr) {
+    const auto clear_start = SteadyClock::now();
+    auto record_clear_us = [&]() {
+      if (clear_us != nullptr) {
+        *clear_us = elapsed_us(clear_start, SteadyClock::now());
+      }
+    };
     if (options.memory == "cpu") {
       std::memset(cpu_ptr_, 0, bytes_);
+      record_clear_us();
       return absl::OkStatus();
     }
     auto set_status = cuda::set_device(options.gpu_id);
     if (!set_status.ok()) {
+      record_clear_us();
       return set_status;
     }
-    return cuda::memset(gpu_ptr_, 0, bytes_);
+    auto clear_status = cuda::memset(gpu_ptr_, 0, bytes_);
+    record_clear_us();
+    return clear_status;
   }
 
-  absl::Status verify_pattern(const Options& options, uint8_t seed) const {
+  absl::Status verify_pattern(const Options& options, uint8_t seed, VerifyProfile* profile = nullptr) const {
+    const auto total_start = SteadyClock::now();
+    auto record_profile = [&](uint64_t buffer_alloc_us, uint64_t copy_us, uint64_t checksum_us) {
+      if (profile == nullptr) {
+        return;
+      }
+      profile->buffer_alloc_us = buffer_alloc_us;
+      profile->copy_us = copy_us;
+      profile->checksum_us = checksum_us;
+      profile->total_us = elapsed_us(total_start, SteadyClock::now());
+    };
+
+    const auto alloc_start = SteadyClock::now();
     std::vector<uint8_t> data(bytes_);
+    const auto data_alloc_us = elapsed_us(alloc_start, SteadyClock::now());
+    uint64_t copy_us = 0;
     if (options.memory == "cpu") {
+      const auto copy_start = SteadyClock::now();
       std::memcpy(data.data(), cpu_ptr_, bytes_);
+      copy_us = elapsed_us(copy_start, SteadyClock::now());
     } else {
+      const auto set_device_start = SteadyClock::now();
       auto set_status = cuda::set_device(options.gpu_id);
+      copy_us = elapsed_us(set_device_start, SteadyClock::now());
       if (!set_status.ok()) {
+        record_profile(data_alloc_us, copy_us, /*checksum_us=*/0);
         return set_status;
       }
+      const auto copy_start = SteadyClock::now();
       auto copy_status = cuda::memcpy(data.data(), gpu_ptr_, bytes_, cudaMemcpyDeviceToHost);
+      copy_us += elapsed_us(copy_start, SteadyClock::now());
       if (!copy_status.ok()) {
+        record_profile(data_alloc_us, copy_us, /*checksum_us=*/0);
         return copy_status;
       }
     }
+    const auto checksum_start = SteadyClock::now();
     for (size_t i = 0; i < bytes_; ++i) {
       const auto expected = static_cast<uint8_t>((i + seed) % 251);
       if (data[i] != expected) {
+        const auto checksum_us = elapsed_us(checksum_start, SteadyClock::now());
+        record_profile(data_alloc_us, copy_us, checksum_us);
         return absl::DataLossError(
             absl::StrCat("data mismatch at offset=", i, " expected=", expected, " actual=", data[i]));
       }
     }
+    const auto checksum_us = elapsed_us(checksum_start, SteadyClock::now());
+    record_profile(data_alloc_us, copy_us, checksum_us);
     return absl::OkStatus();
   }
 
@@ -550,53 +668,77 @@ absl::Status probe_gpu_mr_registration(const Options& options, const RdmPrefligh
         absl::StrCat("gpu MR probe failed for nic=", probe_nic, " bytes=", probe_buffer.bytes(), " res=", res));
   }
   tc::misc::wrap_ibv_dereg_mr(mr);
-  std::cout << "GPU_MR_PROBE"
-            << " nic=" << probe_nic << " rail=" << dev->get_rail_id() << " bytes=" << probe_buffer.bytes()
-            << " status=ok" << std::endl;
+  std::ostringstream line;
+  line << "GPU_MR_PROBE"
+       << " nic=" << probe_nic << " rail=" << dev->get_rail_id() << " bytes=" << probe_buffer.bytes()
+       << " status=ok";
+  emit_machine_line(line.str());
   return absl::OkStatus();
 }
 
 void print_preflight(const Options& options, const RdmPreflight& preflight) {
-  std::cout << "PRECHECK"
-            << " role=" << options.role << " memory=" << options.memory << " rdma=" << (options.enable_rdma ? 1 : 0)
-            << " requested_nic=" << (options.rdma_nic.empty() ? "-" : options.rdma_nic) << " visible_nics=";
+  std::ostringstream line;
+  line << "PRECHECK"
+       << " role=" << options.role << " memory=" << options.memory << " rdma=" << (options.enable_rdma ? 1 : 0)
+       << " requested_nic=" << (options.rdma_nic.empty() ? "-" : options.rdma_nic) << " visible_nics=";
   if (preflight.visible_nics.empty()) {
-    std::cout << "-";
+    line << "-";
   } else {
     for (size_t i = 0; i < preflight.visible_nics.size(); ++i) {
       if (i > 0) {
-        std::cout << ",";
+        line << ",";
       }
-      std::cout << preflight.visible_nics[i];
+      line << preflight.visible_nics[i];
     }
   }
-  std::cout << " selected_nic=" << (preflight.selected_nic.empty() ? "-" : preflight.selected_nic)
-            << " selected_rail=" << preflight.selected_rail_id;
+  line << " selected_nic=" << (preflight.selected_nic.empty() ? "-" : preflight.selected_nic)
+       << " selected_rail=" << preflight.selected_rail_id;
   if (!preflight.gpu_name.empty()) {
-    std::cout << " gpu=" << preflight.gpu_name << " gpu_bus=" << preflight.gpu_bus
-              << " gpu_device=" << preflight.gpu_device;
+    line << " gpu=" << preflight.gpu_name << " gpu_bus=" << preflight.gpu_bus
+         << " gpu_device=" << preflight.gpu_device;
   }
-  std::cout << std::endl;
+  emit_machine_line(line.str());
 }
 
-absl::Status prepare_buffer(Buffer* buffer, const Options& options, bool fill_pattern) {
+struct PrepareBufferProfile {
+  AllocationProfile allocation;
+  PatternFillProfile pattern_fill;
+  uint64_t clear_us = 0;
+};
+
+absl::Status prepare_buffer(Buffer* buffer, const Options& options, bool fill_pattern, PrepareBufferProfile* profile) {
   if (buffer == nullptr) {
     return absl::InvalidArgumentError("buffer is null");
   }
-  auto alloc_status = buffer->allocate(options);
+  auto alloc_status = buffer->allocate(options, profile == nullptr ? nullptr : &profile->allocation);
   if (!alloc_status.ok()) {
     return alloc_status;
   }
   if (fill_pattern) {
-    return buffer->fill_pattern(options, /*seed=*/0x5A);
+    return buffer->fill_pattern(options, /*seed=*/0x5A, profile == nullptr ? nullptr : &profile->pattern_fill);
   }
-  return buffer->clear(options);
+  return buffer->clear(options, profile == nullptr ? nullptr : &profile->clear_us);
 }
 
 absl::Status run_target(const Options& options) {
+  struct TargetStartupProfile {
+    uint64_t communicator_init_us = 0;
+    uint64_t buffer_alloc_us = 0;
+    uint64_t buffer_alloc_set_device_us = 0;
+    uint64_t buffer_alloc_call_us = 0;
+    uint64_t buffer_fill_us = 0;
+    uint64_t buffer_fill_alloc_us = 0;
+    uint64_t buffer_fill_pattern_us = 0;
+    uint64_t buffer_fill_copy_us = 0;
+    uint64_t register_tensor_us = 0;
+  };
+  TargetStartupProfile startup;
+
   auto cfg = make_config(options);
   engine::Communicator communicator(cfg);
+  const auto init_start = SteadyClock::now();
   auto init_status = communicator.init(options.listen_ip, options.listen_port);
+  startup.communicator_init_us = elapsed_us(init_start, SteadyClock::now());
   if (!init_status.ok()) {
     return init_status;
   }
@@ -607,10 +749,18 @@ absl::Status run_target(const Options& options) {
   const int dev_id = options.memory == "gpu" ? options.gpu_id : -1;
   for (int thread_id = 0; thread_id < options.threads; ++thread_id) {
     auto buffer = std::make_unique<Buffer>();
-    auto buffer_status = prepare_buffer(buffer.get(), options, /*fill_pattern=*/true);
+    PrepareBufferProfile profile;
+    auto buffer_status = prepare_buffer(buffer.get(), options, /*fill_pattern=*/true, &profile);
     if (!buffer_status.ok()) {
       return buffer_status;
     }
+    startup.buffer_alloc_us += profile.allocation.total_us;
+    startup.buffer_alloc_set_device_us += profile.allocation.set_device_us;
+    startup.buffer_alloc_call_us += profile.allocation.allocate_call_us;
+    startup.buffer_fill_us += profile.pattern_fill.total_us;
+    startup.buffer_fill_alloc_us += profile.pattern_fill.buffer_alloc_us;
+    startup.buffer_fill_pattern_us += profile.pattern_fill.pattern_fill_us;
+    startup.buffer_fill_copy_us += profile.pattern_fill.copy_us;
 
     engine::Communicator::RegisterTensorOptions register_options;
     register_options.register_mr = options.enable_rdma;
@@ -618,6 +768,7 @@ absl::Status run_target(const Options& options) {
     register_options.async = false;
     register_options.direct_rdma_enabled = options.direct_rdma;
     register_options.direct_rdma_required = options.strict_direct_rdma;
+    const auto register_start = SteadyClock::now();
     auto register_status = communicator.register_tensor_ex(
         tensor_key_for_thread(options.tensor_key, thread_id, options.threads),
         buffer->addr(),
@@ -625,20 +776,34 @@ absl::Status run_target(const Options& options) {
         dev_type,
         dev_id,
         register_options);
+    startup.register_tensor_us += elapsed_us(register_start, SteadyClock::now());
     if (!register_status.ok()) {
       return register_status;
     }
     buffers.push_back(std::move(buffer));
   }
 
-  std::cout << "READY"
-            << " role=target"
-            << " listen_ip=" << options.listen_ip << " listen_port=" << communicator.listening_port()
-            << " tensor_key=" << options.tensor_key << " bytes=" << options.bytes
-            << " batch_size=" << options.batch_size << " threads=" << options.threads
-            << " qp_count=" << options.qp_count << " outstanding_wr=" << options.outstanding_wr
-            << " memory=" << options.memory << " direct_rdma=" << (options.direct_rdma ? 1 : 0)
-            << " strict_direct_rdma=" << (options.strict_direct_rdma ? 1 : 0) << std::endl;
+  std::ostringstream ready_line;
+  ready_line << "READY"
+             << " role=target"
+             << " listen_ip=" << options.listen_ip << " listen_port=" << communicator.listening_port()
+             << " tensor_key=" << options.tensor_key << " bytes=" << options.bytes
+             << " batch_size=" << options.batch_size << " threads=" << options.threads
+             << " qp_count=" << options.qp_count << " outstanding_wr=" << options.outstanding_wr
+             << " memory=" << options.memory << " direct_rdma=" << (options.direct_rdma ? 1 : 0)
+             << " strict_direct_rdma=" << (options.strict_direct_rdma ? 1 : 0)
+             << " init_communicator_us=" << startup.communicator_init_us
+             << " init_buffer_alloc_us=" << startup.buffer_alloc_us
+             << " init_buffer_alloc_set_device_us=" << startup.buffer_alloc_set_device_us
+             << " init_buffer_alloc_call_us=" << startup.buffer_alloc_call_us
+             << " init_buffer_fill_us=" << startup.buffer_fill_us
+             << " init_buffer_fill_alloc_us=" << startup.buffer_fill_alloc_us
+             << " init_buffer_fill_pattern_us=" << startup.buffer_fill_pattern_us
+             << " init_buffer_fill_copy_us=" << startup.buffer_fill_copy_us
+             << " init_register_tensor_us=" << startup.register_tensor_us
+             << " init_total_us="
+             << (startup.communicator_init_us + startup.buffer_alloc_us + startup.buffer_fill_us + startup.register_tensor_us);
+  emit_machine_line(ready_line.str());
 
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -664,9 +829,21 @@ absl::Status validate_result(const Options& options, const transport::read_resul
 }
 
 absl::Status run_initiator(const Options& options) {
+  struct InitiatorStartupProfile {
+    uint64_t communicator_init_us = 0;
+    uint64_t buffer_alloc_us = 0;
+    uint64_t buffer_alloc_set_device_us = 0;
+    uint64_t buffer_alloc_call_us = 0;
+    uint64_t buffer_initial_clear_us = 0;
+    uint64_t warmup_total_us = 0;
+  };
+  InitiatorStartupProfile startup;
+
   auto cfg = make_config(options);
   engine::Communicator communicator(cfg);
+  const auto init_start = SteadyClock::now();
   auto init_status = communicator.init(options.listen_ip, options.listen_port);
+  startup.communicator_init_us = elapsed_us(init_start, SteadyClock::now());
   if (!init_status.ok()) {
     return init_status;
   }
@@ -675,10 +852,15 @@ absl::Status run_initiator(const Options& options) {
   buffers.reserve(static_cast<size_t>(options.threads));
   for (int thread_id = 0; thread_id < options.threads; ++thread_id) {
     auto buffer = std::make_unique<Buffer>();
-    auto buffer_status = prepare_buffer(buffer.get(), options, /*fill_pattern=*/false);
+    PrepareBufferProfile profile;
+    auto buffer_status = prepare_buffer(buffer.get(), options, /*fill_pattern=*/false, &profile);
     if (!buffer_status.ok()) {
       return buffer_status;
     }
+    startup.buffer_alloc_us += profile.allocation.total_us;
+    startup.buffer_alloc_set_device_us += profile.allocation.set_device_us;
+    startup.buffer_alloc_call_us += profile.allocation.allocate_call_us;
+    startup.buffer_initial_clear_us += profile.clear_us;
     buffers.push_back(std::move(buffer));
   }
 
@@ -688,8 +870,17 @@ absl::Status run_initiator(const Options& options) {
   struct BatchResult {
     transport::read_result_t first_result;
     uint64_t batch_wall_us = 0;
+    uint64_t batch_total_us = 0;
+    uint64_t clear_us = 0;
+    uint64_t issue_us = 0;
+    uint64_t wait_us = 0;
+    uint64_t verify_total_us = 0;
+    uint64_t verify_buffer_alloc_us = 0;
+    uint64_t verify_copy_us = 0;
+    uint64_t verify_checksum_us = 0;
     double avg_request_us = 0.0;
     uint64_t max_request_us = 0;
+    uint64_t sum_request_us = 0;
     uint64_t request_count = 0;
     uint64_t sum_request_first_response_us = 0;
     uint64_t sum_rdma_first_post_us = 0;
@@ -708,11 +899,13 @@ absl::Status run_initiator(const Options& options) {
   std::mutex io_mu;
   auto run_single =
       [&](Buffer& buffer, int iteration, int thread_id, bool verify, bool emit_result) -> absl::StatusOr<BatchResult> {
-    auto clear_status = buffer.clear(options);
+    BatchResult batch_result;
+    const auto iteration_start = SteadyClock::now();
+    auto clear_status = buffer.clear(options, &batch_result.clear_us);
     if (!clear_status.ok()) {
       return clear_status;
     }
-    const auto wall_start = std::chrono::steady_clock::now();
+    const auto issue_start = SteadyClock::now();
     std::vector<transport::future_read_result_t> futures;
     futures.reserve(static_cast<size_t>(options.batch_size));
     for (int batch_idx = 0; batch_idx < options.batch_size; ++batch_idx) {
@@ -728,16 +921,18 @@ absl::Status run_initiator(const Options& options) {
           options.peer_port,
           remote_offset));
     }
-    BatchResult batch_result;
-    double total_request_us = 0.0;
+    const auto issue_end = SteadyClock::now();
+    batch_result.issue_us = elapsed_us(issue_start, issue_end);
+
     bool saw_result = false;
+    const auto wait_start = SteadyClock::now();
     for (auto& future : futures) {
       auto result = future.get();
       auto validate_status = validate_result(options, result);
       if (!validate_status.ok()) {
         return validate_status;
       }
-      total_request_us += static_cast<double>(result.read_cost);
+      batch_result.sum_request_us += result.read_cost;
       batch_result.max_request_us = std::max(batch_result.max_request_us, result.read_cost);
       batch_result.request_count += 1;
       batch_result.sum_request_first_response_us += result.request_first_response_us;
@@ -761,17 +956,27 @@ absl::Status run_initiator(const Options& options) {
         saw_result = true;
       }
     }
-    const auto wall_end = std::chrono::steady_clock::now();
-    const auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(wall_end - wall_start).count();
-    batch_result.batch_wall_us = static_cast<uint64_t>(wall_us);
-    batch_result.avg_request_us = total_request_us / static_cast<double>(options.batch_size);
-    batch_result.first_result.read_cost = batch_result.batch_wall_us;
+    const auto wait_end = SteadyClock::now();
+    batch_result.wait_us = elapsed_us(wait_start, wait_end);
+    batch_result.batch_wall_us = elapsed_us(issue_start, wait_end);
+    if (batch_result.request_count > 0) {
+      batch_result.avg_request_us =
+          static_cast<double>(batch_result.sum_request_us) / static_cast<double>(batch_result.request_count);
+    }
+
     if (verify) {
-      auto verify_status = buffer.verify_pattern(options, /*seed=*/0x5A);
+      VerifyProfile verify_profile;
+      auto verify_status = buffer.verify_pattern(options, /*seed=*/0x5A, &verify_profile);
       if (!verify_status.ok()) {
         return verify_status;
       }
+      batch_result.verify_total_us = verify_profile.total_us;
+      batch_result.verify_buffer_alloc_us = verify_profile.buffer_alloc_us;
+      batch_result.verify_copy_us = verify_profile.copy_us;
+      batch_result.verify_checksum_us = verify_profile.checksum_us;
     }
+    batch_result.batch_total_us = elapsed_us(iteration_start, SteadyClock::now());
+
     if (emit_result) {
       auto avg_from_sum = [&](uint64_t sum) -> double {
         if (batch_result.request_count == 0) {
@@ -779,8 +984,8 @@ absl::Status run_initiator(const Options& options) {
         }
         return static_cast<double>(sum) / static_cast<double>(batch_result.request_count);
       };
-      std::lock_guard<std::mutex> lock(io_mu);
-      std::cout << "ITER"
+      std::ostringstream iter_line;
+      iter_line << "ITER"
                 << " thread=" << thread_id << " idx=" << iteration << " batch_size=" << options.batch_size
                 << " status=" << static_cast<int>(batch_result.first_result.status.code()) << " local_nic="
                 << (batch_result.first_result.local_nic.empty() ? "-" : batch_result.first_result.local_nic)
@@ -819,12 +1024,24 @@ absl::Status run_initiator(const Options& options) {
                 << " batch_avg_wc_completed=" << avg_from_sum(batch_result.sum_rdma_wc_completed)
                 << " batch_avg_ack_windows=" << avg_from_sum(batch_result.sum_rdma_ack_windows)
                 << " batch_avg_ack_segments=" << avg_from_sum(batch_result.sum_rdma_ack_segments)
-                << " batch_max_request_us=" << batch_result.max_request_us << " total_us=" << batch_result.batch_wall_us
-                << std::endl;
+                << " clear_us=" << batch_result.clear_us << " issue_us=" << batch_result.issue_us
+                << " wait_us=" << batch_result.wait_us << " verify_total_us=" << batch_result.verify_total_us
+                << " verify_buffer_alloc_us=" << batch_result.verify_buffer_alloc_us
+                << " verify_copy_us=" << batch_result.verify_copy_us
+                << " verify_checksum_us=" << batch_result.verify_checksum_us
+                << " batch_avg_clear_per_request_us=" << avg_from_sum(batch_result.clear_us)
+                << " batch_avg_verify_per_request_us=" << avg_from_sum(batch_result.verify_total_us)
+                << " batch_avg_verify_copy_per_request_us=" << avg_from_sum(batch_result.verify_copy_us)
+                << " batch_avg_verify_checksum_per_request_us=" << avg_from_sum(batch_result.verify_checksum_us)
+                << " iteration_total_us=" << batch_result.batch_total_us
+                << " batch_max_request_us=" << batch_result.max_request_us << " total_us=" << batch_result.batch_wall_us;
+      std::lock_guard<std::mutex> lock(io_mu);
+      emit_machine_line(iter_line.str());
     }
     return batch_result;
   };
 
+  const auto warmup_start = SteadyClock::now();
   for (int thread_id = 0; thread_id < options.threads; ++thread_id) {
     for (int i = 0; i < options.warmup_iterations; ++i) {
       auto warmup_or = run_single(
@@ -834,11 +1051,21 @@ absl::Status run_initiator(const Options& options) {
       }
     }
   }
+  startup.warmup_total_us = elapsed_us(warmup_start, SteadyClock::now());
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(0, options.duration_sec));
   std::vector<double> latencies_us;
   struct SummaryProfile {
+    uint64_t iterations = 0;
     uint64_t requests = 0;
+    uint64_t sum_batch_total_us = 0;
+    uint64_t sum_clear_us = 0;
+    uint64_t sum_issue_us = 0;
+    uint64_t sum_wait_us = 0;
+    uint64_t sum_verify_total_us = 0;
+    uint64_t sum_verify_buffer_alloc_us = 0;
+    uint64_t sum_verify_copy_us = 0;
+    uint64_t sum_verify_checksum_us = 0;
     uint64_t sum_request_first_response_us = 0;
     uint64_t sum_rdma_first_post_us = 0;
     uint64_t sum_rdma_post_to_last_completion_us = 0;
@@ -889,7 +1116,16 @@ absl::Status run_initiator(const Options& options) {
         {
           std::lock_guard<std::mutex> stats_lock(stats_mu);
           latencies_us.push_back(static_cast<double>(result_or->batch_wall_us));
+          summary_profile.iterations += 1;
           summary_profile.requests += result_or->request_count;
+          summary_profile.sum_batch_total_us += result_or->batch_total_us;
+          summary_profile.sum_clear_us += result_or->clear_us;
+          summary_profile.sum_issue_us += result_or->issue_us;
+          summary_profile.sum_wait_us += result_or->wait_us;
+          summary_profile.sum_verify_total_us += result_or->verify_total_us;
+          summary_profile.sum_verify_buffer_alloc_us += result_or->verify_buffer_alloc_us;
+          summary_profile.sum_verify_copy_us += result_or->verify_copy_us;
+          summary_profile.sum_verify_checksum_us += result_or->verify_checksum_us;
           summary_profile.sum_request_first_response_us += result_or->sum_request_first_response_us;
           summary_profile.sum_rdma_first_post_us += result_or->sum_rdma_first_post_us;
           summary_profile.sum_rdma_post_to_last_completion_us += result_or->sum_rdma_post_to_last_completion_us;
@@ -942,25 +1178,68 @@ absl::Status run_initiator(const Options& options) {
     }
     return static_cast<double>(sum) / static_cast<double>(summary_profile.requests);
   };
-  std::cout << "SUMMARY"
-            << " iterations=" << completed_count << " requests=" << total_requests << " threads=" << options.threads
-            << " batch_size=" << options.batch_size << " qp_count=" << options.qp_count
-            << " outstanding_wr=" << options.outstanding_wr << " bytes=" << total_bytes << " wall_us=" << wall_us
-            << " avg_us=" << avg_us << " p50_us=" << percentile(50.0) << " p95_us=" << percentile(95.0)
-            << " p99_us=" << percentile(99.0) << " bw_GBps=" << bw_GBps << " bw_gbps=" << bw_gbps
-            << " avg_response_wait_us=" << avg_request_metric(summary_profile.sum_request_first_response_us)
-            << " avg_first_post_us=" << avg_request_metric(summary_profile.sum_rdma_first_post_us)
-            << " avg_post_after_response_us=" << avg_request_metric(summary_profile.sum_rdma_post_after_response_us)
-            << " avg_data_phase_us=" << avg_request_metric(summary_profile.sum_rdma_post_to_last_completion_us)
-            << " avg_tail_after_last_completion_us="
-            << avg_request_metric(summary_profile.sum_tail_after_last_completion_us)
-            << " avg_handshake_wait_us=" << avg_request_metric(summary_profile.sum_rdma_handshake_queue_wait_us)
-            << " avg_response_windows=" << avg_request_metric(summary_profile.sum_rdma_response_windows)
-            << " avg_response_segments=" << avg_request_metric(summary_profile.sum_rdma_response_segments)
-            << " avg_wr_posted=" << avg_request_metric(summary_profile.sum_rdma_wr_posted)
-            << " avg_wc_completed=" << avg_request_metric(summary_profile.sum_rdma_wc_completed)
-            << " avg_ack_windows=" << avg_request_metric(summary_profile.sum_rdma_ack_windows)
-            << " avg_ack_segments=" << avg_request_metric(summary_profile.sum_rdma_ack_segments) << std::endl;
+  auto avg_iteration_metric = [&](uint64_t sum) -> double {
+    if (summary_profile.iterations == 0) {
+      return 0.0;
+    }
+    return static_cast<double>(sum) / static_cast<double>(summary_profile.iterations);
+  };
+  const uint64_t amortizable_init_total_us =
+      startup.communicator_init_us + startup.buffer_alloc_us + startup.buffer_initial_clear_us;
+  const uint64_t amortizable_total_us = amortizable_init_total_us + startup.warmup_total_us;
+  const auto amortized_per_iteration_us =
+      summary_profile.iterations == 0
+          ? 0.0
+          : static_cast<double>(amortizable_total_us) / static_cast<double>(summary_profile.iterations);
+  const auto amortized_per_request_us =
+      total_requests == 0 ? 0.0 : static_cast<double>(amortizable_total_us) / static_cast<double>(total_requests);
+  std::ostringstream summary_line;
+  summary_line << "SUMMARY"
+               << " iterations=" << completed_count << " requests=" << total_requests << " threads=" << options.threads
+               << " batch_size=" << options.batch_size << " qp_count=" << options.qp_count
+               << " outstanding_wr=" << options.outstanding_wr << " bytes=" << total_bytes << " wall_us=" << wall_us
+               << " avg_us=" << avg_us << " p50_us=" << percentile(50.0) << " p95_us=" << percentile(95.0)
+               << " p99_us=" << percentile(99.0) << " bw_GBps=" << bw_GBps << " bw_gbps=" << bw_gbps
+               << " amortizable_init_communicator_us=" << startup.communicator_init_us
+               << " amortizable_init_buffer_alloc_us=" << startup.buffer_alloc_us
+               << " amortizable_init_buffer_alloc_set_device_us=" << startup.buffer_alloc_set_device_us
+               << " amortizable_init_buffer_alloc_call_us=" << startup.buffer_alloc_call_us
+               << " amortizable_init_buffer_clear_us=" << startup.buffer_initial_clear_us
+               << " amortizable_warmup_total_us=" << startup.warmup_total_us
+               << " amortizable_init_total_us=" << amortizable_init_total_us
+               << " amortizable_total_us=" << amortizable_total_us
+               << " amortized_per_iteration_us=" << amortized_per_iteration_us
+               << " amortized_per_request_us=" << amortized_per_request_us
+               << " recurring_avg_iteration_total_us=" << avg_iteration_metric(summary_profile.sum_batch_total_us)
+               << " recurring_avg_clear_us=" << avg_iteration_metric(summary_profile.sum_clear_us)
+               << " recurring_avg_issue_us=" << avg_iteration_metric(summary_profile.sum_issue_us)
+               << " recurring_avg_wait_us=" << avg_iteration_metric(summary_profile.sum_wait_us)
+               << " recurring_avg_verify_total_us=" << avg_iteration_metric(summary_profile.sum_verify_total_us)
+               << " recurring_avg_verify_buffer_alloc_us="
+               << avg_iteration_metric(summary_profile.sum_verify_buffer_alloc_us)
+               << " recurring_avg_verify_copy_us=" << avg_iteration_metric(summary_profile.sum_verify_copy_us)
+               << " recurring_avg_verify_checksum_us=" << avg_iteration_metric(summary_profile.sum_verify_checksum_us)
+               << " recurring_avg_clear_per_request_us=" << avg_request_metric(summary_profile.sum_clear_us)
+               << " recurring_avg_verify_per_request_us=" << avg_request_metric(summary_profile.sum_verify_total_us)
+               << " recurring_avg_verify_buffer_alloc_per_request_us="
+               << avg_request_metric(summary_profile.sum_verify_buffer_alloc_us)
+               << " recurring_avg_verify_copy_per_request_us=" << avg_request_metric(summary_profile.sum_verify_copy_us)
+               << " recurring_avg_verify_checksum_per_request_us="
+               << avg_request_metric(summary_profile.sum_verify_checksum_us)
+               << " avg_response_wait_us=" << avg_request_metric(summary_profile.sum_request_first_response_us)
+               << " avg_first_post_us=" << avg_request_metric(summary_profile.sum_rdma_first_post_us)
+               << " avg_post_after_response_us=" << avg_request_metric(summary_profile.sum_rdma_post_after_response_us)
+               << " avg_data_phase_us=" << avg_request_metric(summary_profile.sum_rdma_post_to_last_completion_us)
+               << " avg_tail_after_last_completion_us="
+               << avg_request_metric(summary_profile.sum_tail_after_last_completion_us)
+               << " avg_handshake_wait_us=" << avg_request_metric(summary_profile.sum_rdma_handshake_queue_wait_us)
+               << " avg_response_windows=" << avg_request_metric(summary_profile.sum_rdma_response_windows)
+               << " avg_response_segments=" << avg_request_metric(summary_profile.sum_rdma_response_segments)
+               << " avg_wr_posted=" << avg_request_metric(summary_profile.sum_rdma_wr_posted)
+               << " avg_wc_completed=" << avg_request_metric(summary_profile.sum_rdma_wc_completed)
+               << " avg_ack_windows=" << avg_request_metric(summary_profile.sum_rdma_ack_windows)
+               << " avg_ack_segments=" << avg_request_metric(summary_profile.sum_rdma_ack_segments);
+  emit_machine_line(summary_line.str());
   return absl::OkStatus();
 }
 

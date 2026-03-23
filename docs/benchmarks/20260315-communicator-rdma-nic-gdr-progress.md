@@ -136,7 +136,17 @@ The communicator bench prints:
 
 1. `ITER ... total_us=...`
 2. `SUMMARY ... wall_us=... avg_us=... p50/p95/p99 ... bw_GBps=...`
-3. legacy compatibility:
+3. amortizable profiling fields:
+   - `amortizable_init_*`
+   - `amortizable_warmup_total_us`
+   - `amortized_per_iteration_us`
+   - `amortized_per_request_us`
+4. recurring profiling fields:
+   - `recurring_avg_clear_us`
+   - `recurring_avg_issue_us`
+   - `recurring_avg_wait_us`
+   - `recurring_avg_verify_*`
+5. legacy compatibility:
    - `bw_gbps=...`
 
 The important implementation detail is that the bench computes:
@@ -144,6 +154,13 @@ The important implementation detail is that the bench computes:
 1. `total_bytes` from completed requests
 2. `wall_us` from the whole measured interval
 3. `bw_GBps = (total_bytes / 1e9) / (wall_us / 1e6)`
+
+And the new profiling classification is:
+
+1. amortizable:
+   - startup/initialization costs that can be spread over many transfers
+2. recurring:
+   - costs paid repeatedly for each measured transfer iteration
 
 New runs now emit the explicit field `bw_GBps`. The historical field name
 `bw_gbps` is still emitted as a legacy alias for compatibility with older

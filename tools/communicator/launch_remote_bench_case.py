@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 REPO_ROOT = Path("/data/workspace/tensorcast-280")
 BENCH_BINARY = REPO_ROOT / "bazel-bin/core/communicator/communicator_bench_binary"
@@ -152,6 +153,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--worker-max-wait-duration", default="20m")
     parser.add_argument("--charged-group", default="tensorcast_dev")
+    parser.add_argument("--worker-gpu", type=int, default=8)
+    parser.add_argument("--worker-cpu", type=int, default=8)
+    parser.add_argument("--worker-memory-mib", type=int, default=32768)
+    parser.add_argument("--private-machine", default="group")
+    parser.add_argument("--pool", default="")
+    parser.add_argument("--positive-tags", default="")
+    parser.add_argument("--negative-tags", default="")
     parser.add_argument("--require-target-host", default="")
     parser.add_argument("--require-initiator-host", default="")
     parser.add_argument("--keep-workers", action="store_true")
@@ -161,19 +169,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
-    return [
+    flags = [
         "brainctl",
         "launch",
         "--charged-group",
         args.charged_group,
         "--gpu",
-        "8",
+        str(args.worker_gpu),
         "--cpu",
-        "8",
+        str(args.worker_cpu),
         "--memory",
-        "32768",
-        "--private-machine",
-        "group",
+        str(args.worker_memory_mib),
         "--host-network=true",
         "--custom-resources",
         "rdma/mlnx_shared=8",
@@ -184,6 +190,19 @@ def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
         "--comment",
         comment,
     ]
+    if args.private_machine:
+        flags.extend(["--private-machine", args.private_machine])
+    if args.pool:
+        flags.extend(["--pool", args.pool])
+    if args.positive_tags:
+        flags.extend(["--positive-tags", args.positive_tags])
+    if args.negative_tags:
+        flags.extend(["--negative-tags", args.negative_tags])
+    return flags
+
+
+def predict_reports_no_capacity(proc: subprocess.CompletedProcess[str]) -> bool:
+    return "no machine available" in proc.stdout.lower()
 
 
 def predict_worker(args: argparse.Namespace, role: str, log_path: Path) -> subprocess.CompletedProcess[str]:
@@ -415,6 +434,7 @@ def main() -> int:
         case_dir / "case_config.json",
         {
             "case_name": args.case_name,
+            "charged_group": args.charged_group,
             "memory": args.memory,
             "bytes": args.bytes,
             "target_gpu_id": args.target_gpu_id,
@@ -433,6 +453,13 @@ def main() -> int:
             "strict_direct_rdma": args.strict_direct_rdma,
             "bind_numa": args.bind_numa,
             "verify": not args.no_verify,
+            "worker_gpu": args.worker_gpu,
+            "worker_cpu": args.worker_cpu,
+            "worker_memory_mib": args.worker_memory_mib,
+            "private_machine": args.private_machine,
+            "pool": args.pool,
+            "positive_tags": args.positive_tags,
+            "negative_tags": args.negative_tags,
             "keep_workers": args.keep_workers,
             "reuse_workers": reuse_workers,
             "target_worker_id": args.target_worker_id,
@@ -458,6 +485,11 @@ def main() -> int:
             predict_initiator = predict_worker(args, "initiator", case_dir / "launch_initiator_predict.json")
             if predict_target.returncode != 0 or predict_initiator.returncode != 0:
                 raise RuntimeError("predict-only failed for target or initiator")
+            if predict_reports_no_capacity(predict_target) or predict_reports_no_capacity(predict_initiator):
+                raise RuntimeError(
+                    "predict-only reported no machine available for target or initiator; "
+                    "adjust scheduler constraints (private-machine/pool/positive-tags) or wait for capacity"
+                )
 
             target_worker = launch_worker(args, "target", case_dir / "launch_target.json")
             initiator_worker = launch_worker(args, "initiator", case_dir / "launch_initiator.json")
@@ -571,7 +603,7 @@ def main() -> int:
         return initiator_result.returncode
     finally:
         if len(worker_ids) > 0:
-            try:
+            with contextlib.suppress(Exception):
                 brainctl_exec(
                     worker_ids[0],
                     (
@@ -581,8 +613,6 @@ def main() -> int:
                     ),
                     case_dir / "pre_cleanup_target_process.json",
                 )
-            except Exception:
-                pass
         if args.keep_workers:
             write_json(
                 case_dir / "kept_workers.json",
@@ -603,7 +633,7 @@ def main() -> int:
             ):
                 if worker_id is None or log_name is None:
                     continue
-                try:
+                with contextlib.suppress(Exception):
                     brainctl_exec(
                         worker_id,
                         (
@@ -613,8 +643,6 @@ def main() -> int:
                         ),
                         case_dir / f"pre_{log_name}",
                     )
-                except Exception:
-                    pass
                 delete_worker(worker_id, case_dir / log_name)
 
 

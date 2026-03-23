@@ -22,7 +22,7 @@ related_code:
 
 # Objective
 
-围绕 `0105` 设计落地一套“小包/中包性能优化执行路径”，目标是在不破坏 `256 MiB+` 现有吞吐水平的前提下，系统性缩小 communicator 在 `32 MiB`、`64 MiB` 单次逻辑请求上的性能差距，并把优化过程做成可观测、可灰度、可回滚。
+围绕 `0105` 设计落地一套“非数据传输代价量化 + 定向优化”执行路径。第一目标不是直接追求单一带宽数字，而是把任务过程中的非数据面成本拆分清楚：哪些属于一次性可均摊成本，哪些是每次传输都要重复支付的成本；在此基础上再推进小包/中包优化，同时保持 `256 MiB+` 吞吐不回退。
 
 # Current State & Grounding
 
@@ -66,14 +66,14 @@ related_code:
 
 - [ ] Phase 0: 基线冻结与观测口径统一
   - [ ] Milestone 0.1: 固化本轮优化对比口径（`32/64/256 MiB`, `threads=1`, `batch_size=1`，单 NIC strict direct RDMA）。
-  - [ ] Milestone 0.2: 固化 benchmark 产出字段和解析规则（优先 `bw_GBps`，兼容 legacy `bw_gbps`）。
+  - [ ] Milestone 0.2: 固化 benchmark 产出字段和解析规则（优先 `amortizable_*` 与 `recurring_*`，并保留 `bw_GBps`/`bw_gbps` 兼容）。
   - [ ] Milestone 0.3: 记录基线 case 元数据（host pair、GPU/NIC 对应、qp/outstanding 配置）。
 
 - [ ] Phase 1: Instrumentation First（先观测后优化）
   - [ ] Milestone 1.1: 在 `ReadRequest` 增加 request 级统计快照容器（不改变现有完成语义）。
-  - [ ] Milestone 1.2: 在 engine/transport 关键路径补齐统计埋点（queue wait、control send、window/ack 轮次、WR posted/completion、MTCP 等待时间）。
-  - [ ] Milestone 1.3: 默认仅聚合统计，不输出逐请求 `INFO`；支持采样调试输出。
-  - [ ] Milestone 1.4: 产出“固定开销分解报表”作为 Phase 2 输入门槛。
+  - [ ] Milestone 1.2: 在 benchmark/engine/transport 关键路径补齐统计埋点（queue wait、control send、window/ack 轮次、WR posted/completion、MTCP 等待时间）。
+  - [ ] Milestone 1.3: benchmark 输出提供 amortizable（init/warmup）与 recurring（clear/issue/wait/verify）字段，并支持 per-iteration/per-request 均摊视角。
+  - [ ] Milestone 1.4: `verify` 开销拆分为内存分配、数据拷贝、校验计算三个子项，形成“可均摊/不可均摊”归因报表。
 
 - [ ] Phase 2: 控制路径与窗口粒度优化
   - [ ] Milestone 2.1: 把单请求线程演进为“按 peer 分片 + 固定 worker 池”，默认 `worker_count=1` 保持旧行为。
@@ -120,9 +120,10 @@ related_code:
 | --- | --- | --- |
 | 单元/组件回归 | `//core/communicator:request_test`, `:rdma_engine_test`, `:staging_flow_controller_test`, `:mtcp_transport_lane_test`, `:mtcp_transfer_completion_tracker_test`, `:tcp_engine_test` | 全通过，无新增 flaky |
 | 配置回归 | `//core/communicator:config_io_test` + 新增配置字段读写/默认值测试 | 新字段默认值等价旧行为 |
-| 小包性能 | `32 MiB`、`64 MiB` strict direct RDMA 单请求对比 baseline | 达到设计阈值（`>=21.0 GB/s`、`>=22.0 GB/s`） |
+| 归因完整性 | `ITER`/`SUMMARY` 同时产出 amortizable + recurring 字段；`verify` 拆分 alloc/copy/checksum | 字段齐全，可稳定解析 |
+| 小包结构性指标 | `32 MiB`、`64 MiB` strict direct RDMA 单请求对比 baseline | 能量化 recurring 主项并识别 top bottleneck |
 | 大包非退化 | `256 MiB`、`1 GiB` 同口径复测 | 相对 baseline 回退不超过 `3%` |
-| 结构性指标 | `rdma_ack_rounds_total`、每请求 `rdma_wr_posted_total`、控制面耗时项 | 小包场景相对 baseline 显著下降 |
+| 成本分类 | `amortized_per_iteration_us`、`amortized_per_request_us` 与 recurring per-request 指标 | 可判断一次性成本是否可被后续传输均摊 |
 | 稳定性 | 长时压测 + error path（ACK 延迟、部分 post 失败、MTCP fallback） | 无死锁/泄漏/静默失败 |
 
 ## 执行命令（示例）

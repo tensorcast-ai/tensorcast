@@ -4,7 +4,7 @@ title: Communicator Small-Packet Latency and Throughput Optimization (Design)
 status: draft
 areas: ["core", "proto", "docs", "benchmarks"]
 created: 2026-03-18
-last_updated: 2026-03-18
+last_updated: 2026-03-22
 related_code:
   - docs/benchmarks/20260316-communicator-vs-transfer-engine-comparison.md
   - docs/benchmarks/20260315-communicator-rdma-nic-gdr-progress.md
@@ -27,11 +27,17 @@ links:
 
 `2026-03-16` 对比数据显示，communicator 在单次逻辑请求规模较小（`32 MiB`、`64 MiB`）时，仍明显落后于相关工作（Mooncake Transfer Engine），而在 `256 MiB+` 时已进入同一性能等级。
 
-当前结论是：瓶颈主要来自“小包/中包下固定开销与控制粒度”，而不是大块 direct RDMA 数据面带宽上限。
+在 `0105` 的复盘中，发现此前“带宽下降”有一部分来自测量区间内非数据传输成本（如初始化、buffer clear/verify、校验拷贝等）抬高了分母；这与最初想回答的“任务过程中非数据面成本占比”不完全一致。
+
+因此本设计将目标调整为：
+
+1. 优先量化任务过程中的非数据传输代价。
+2. 区分“一次性可均摊成本”与“每次传输重复成本”。
+3. 在上述可归因前提下，再推进控制面/数据面优化决策。
 
 本设计给出一个分阶段方案：
 
-1. 先补齐可归因观测，量化每个固定开销项。
+1. 先补齐可归因观测，量化每个开销项，并明确 amortizable vs recurring 分类。
 2. 优化控制路径与窗口/ACK 粒度，降低每个逻辑请求的控制往返成本。
 3. 优化 RDMA/MTCP 热路径中的每 WR bookkeeping、future/wait 和日志噪声。
 4. 在严格回归和可回滚前提下渐进上线。
@@ -100,11 +106,12 @@ MTCP transport 侧存在大量 `std::async` 与 `future.get()/wait()` 等待链�
 
 ## Goals
 
-1. 缩小 communicator 在 `32 MiB`、`64 MiB` logical request 下与 related work 的性能差距。
-2. 降低每个逻辑请求的固定控制开销与 WR bookkeeping 成本。
-3. 保持 `256 MiB+` direct RDMA 路径无明显回退。
-4. 方案默认可控、可回滚，不引入隐式环境变量开关。
-5. 所有新调优项进入统一 runtime 配置（`communicator_config.proto`），遵循 [0004-unified-runtime-config.md](./0004-unified-runtime-config.md)。
+1. 量化 communicator benchmark 中非数据传输代价，并提供可复现的字段化输出。
+2. 将开销拆分为“一次性可均摊成本”（初始化、预热）与“每次传输重复成本”（clear、enqueue、wait、verify）。
+3. 显式覆盖用户关注项：数据拷贝成本、内存分配成本、校验成本。
+4. 在保持 `256 MiB+` direct RDMA 路径无明显回退的前提下，为后续优化提供归因基线。
+5. 方案默认可控、可回滚，不引入隐式环境变量开关。
+6. 所有新调优项进入统一 runtime 配置（`communicator_config.proto`），遵循 [0004-unified-runtime-config.md](./0004-unified-runtime-config.md)。
 
 ## Non-Goals
 
@@ -126,7 +133,7 @@ flowchart LR
 
 ## Phase 1: 观测与归因基线
 
-新增 request 级小包性能快照（以统计为主，不在默认热路径打印）：
+新增 request/batch 级性能快照（以统计为主，不在默认热路径打印）：
 
 - `control_queue_wait_us`
 - `control_send_us`
@@ -137,17 +144,26 @@ flowchart LR
 - `rdma_cq_completion_total`
 - `mtcp_staging_wait_us`
 - `mtcp_future_wait_us`
+- `amortizable_init_*`（init / buffer allocation / warmup）
+- `recurring_*`（clear / issue / wait / verify）
+- `verify_buffer_alloc_us`
+- `verify_copy_us`
+- `verify_checksum_us`
+- `amortized_per_iteration_us`
+- `amortized_per_request_us`
 
 落点：
 
 - request 生命周期：`core/communicator/transport/request.h`
 - engine 控制路径：`core/communicator/engine/engine.cc`
 - transport 数据路径：`core/communicator/transport/rdma_transport.cc`、`core/communicator/transport/mtcp_transport.cc`
+- benchmark 输出层：`core/communicator/bench/communicator_bench.cc`
 
 原则：
 
 1. 默认仅聚合指标，不逐请求 `INFO` 输出。
-2. 允许按采样率输出 debug 详情，避免常态噪声。
+2. `ITER` 输出用于定位单轮瓶颈，`SUMMARY` 输出用于 amortizable/recurring 归因。
+3. 允许按采样率输出 debug 详情，避免常态噪声。
 
 ## Phase 2: 控制路径与窗口/ACK 粒度
 
@@ -264,10 +280,11 @@ flowchart LR
 
 在与 [20260316 baseline](../benchmarks/20260316-communicator-vs-transfer-engine-comparison.md) 同口径的单 NIC 严格 direct RDMA 读测下：
 
-1. `32 MiB` 从 `18.56 GB/s` 提升到 `>= 21.00 GB/s`。
-2. `64 MiB` 从 `20.56 GB/s` 提升到 `>= 22.00 GB/s`。
-3. `256 MiB+` 相对 baseline 不回退超过 `3%`。
-4. 新增指标显示 `rdma_ack_rounds_total` 与 `rdma_wr_posted_total / request` 在小包场景下降低。
+1. `ITER` 与 `SUMMARY` 必须同时给出 amortizable 与 recurring 字段，且覆盖 clear/issue/wait/verify 子项。
+2. `verify` 需明确拆分 `buffer_alloc`、`copy`、`checksum`，可判断是否每轮重复发生。
+3. 必须给出 `amortized_per_iteration_us` 与 `amortized_per_request_us`，支持“一次性成本均摊后”的读法。
+4. `256 MiB+` 相对 baseline 吞吐不回退超过 `3%`（带宽保留为护栏指标，而非唯一目标）。
+5. 新增指标可用于判定小包瓶颈是否主要落在控制面与重复开销，而非纯数据面极限。
 
 ## 可运维性
 
