@@ -33,6 +33,11 @@ using common::memory::MemoryLocation;
 
 namespace {
 
+struct DiskExecutionMetadata {
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  std::string view_index_json;
+};
+
 std::optional<uint64_t> compute_total_size_from_index(std::string_view index_json) {
   if (index_json.empty()) {
     return std::nullopt;
@@ -116,6 +121,29 @@ loader::ByteRangeMappedSource::Options make_mmap_aware_map_options(
           << " min_total_bytes=" << options.direct_gather_min_total_bytes
           << " max_rows_touched=" << options.direct_gather_max_rows_touched;
   return options;
+}
+
+absl::StatusOr<std::optional<DiskExecutionMetadata>> build_disk_execution_metadata(
+    const IArtifactLoader* loader,
+    const std::optional<std::string>& canonical_index_json,
+    const std::optional<loader::ViewPlan>& view_plan) {
+  auto* disk_loader = dynamic_cast<const DiskLoader*>(loader);
+  if (disk_loader == nullptr) {
+    return std::nullopt;
+  }
+  auto shared_or = disk_loader->shared_context();
+  if (!shared_or.ok()) {
+    return shared_or.status();
+  }
+  const std::string view_index_json =
+      view_plan.has_value() ? view_plan->view_index_json : canonical_index_json.value_or(std::string());
+  if (view_index_json.empty()) {
+    return std::nullopt;
+  }
+  return DiskExecutionMetadata{
+      .disk_context = *shared_or,
+      .view_index_json = std::move(view_index_json),
+  };
 }
 
 } // namespace
@@ -272,7 +300,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       std::move(config.collective_load_group),
       std::move(config.variant_identity),
       config.transform_placement,
-      config.byte_mapping_config));
+      config.byte_mapping_config,
+      config.materialization_strategy));
   return replica_ptr;
 }
 
@@ -292,7 +321,8 @@ Replica::Replica(
     std::optional<loading::CollectiveLoadGroupHint> collective_load_group,
     std::optional<loading::VariantIdentity> variant_identity,
     loading::TransformPlacement transform_placement,
-    StoreEngineOptions::ByteMappingConfig byte_mapping_config)
+    StoreEngineOptions::ByteMappingConfig byte_mapping_config,
+    StoreEngineOptions::MaterializationStrategyConfig materialization_strategy)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
@@ -304,7 +334,8 @@ Replica::Replica(
       collective_load_group_(std::move(collective_load_group)),
       variant_identity_(std::move(variant_identity)),
       transform_placement_(transform_placement),
-      byte_mapping_config_(std::move(byte_mapping_config)) {}
+      byte_mapping_config_(std::move(byte_mapping_config)),
+      materialization_strategy_(std::move(materialization_strategy)) {}
 
 //--------------------------------------------------------------------------
 // Destructor
@@ -446,6 +477,8 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     std::optional<ReplicaLoadController::CollectiveDiskLoadInput> collective_disk_load;
+    std::optional<ReplicaLoadController::LocalBatchedDiskLoadInput> local_batched_disk_load;
+    std::optional<DiskExecutionMetadata> disk_execution_metadata;
     if (collective_load_group_.has_value()) {
       if (target_location != MemoryLocation::GPU || source_location != MemoryLocation::DISK) {
         LOG(INFO) << "Replica(" << key_.artifact_id
@@ -461,45 +494,70 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
       } else if (view_plan_.has_value() && view_plan_->transform.requires_materialization) {
         LOG(INFO) << "Replica(" << key_.artifact_id
                   << "): collective disk load skipped because view transform requires materialization";
-      } else if (auto* disk_loader = dynamic_cast<const DiskLoader*>(loader_.get().get()); disk_loader != nullptr) {
-        auto shared_or = disk_loader->shared_context();
-        if (shared_or.ok()) {
-          const std::string view_index_json =
-              view_plan_.has_value() ? view_plan_->view_index_json : *canonical_index_json_;
-          if (!view_index_json.empty()) {
-            collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
-                .group = *collective_load_group_,
-                .disk_context = *shared_or,
-                .source_index_json = *source_index_json_,
-                .view_index_json = view_index_json,
-                .variant_identity = variant_identity_,
-            };
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
-                      << " rank=" << collective_load_group_->rank
-                      << " world_size=" << collective_load_group_->world_size;
-          } else {
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): collective disk load skipped because view_index_json is empty";
-          }
-        } else {
+      } else {
+        auto disk_metadata_or = build_disk_execution_metadata(loader_.get().get(), canonical_index_json_, view_plan_);
+        if (!disk_metadata_or.ok()) {
           LOG(WARNING) << "Replica(" << key_.artifact_id
                        << "): collective disk load disabled because shared_context is unavailable: "
-                       << shared_or.status();
+                       << disk_metadata_or.status();
+        } else if (!disk_metadata_or->has_value()) {
+          LOG(INFO) << "Replica(" << key_.artifact_id
+                    << "): collective disk load skipped because loader is not DiskLoader or view_index_json is empty";
+        } else {
+          disk_execution_metadata = std::move(*disk_metadata_or);
+          collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
+              .group = *collective_load_group_,
+              .disk_context = disk_execution_metadata->disk_context,
+              .source_index_json = *source_index_json_,
+              .view_index_json = disk_execution_metadata->view_index_json,
+              .variant_identity = variant_identity_,
+              .materialization_strategy = materialization_strategy_,
+          };
+          LOG(INFO) << "Replica(" << key_.artifact_id
+                    << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
+                    << " rank=" << collective_load_group_->rank << " world_size=" << collective_load_group_->world_size;
         }
-      } else {
-        LOG(INFO) << "Replica(" << key_.artifact_id
-                  << "): collective disk load skipped because loader is not DiskLoader";
       }
     }
     const StoreEngineOptions::ByteMappingConfig effective_byte_mapping_config =
         maybe_relax_mmap_strided_thresholds(byte_mapping_config_, *source_ptr, source_location, key_.artifact_id);
     if (collective_disk_load.has_value()) {
       op = memory_manager_->load_async_from_source(
-          std::move(source_ptr), target_location, concurrency, std::nullopt, {}, std::move(collective_disk_load));
+          std::move(source_ptr),
+          target_location,
+          concurrency,
+          std::nullopt,
+          {},
+          std::move(collective_disk_load),
+          std::nullopt);
     } else {
+      if (materialization_strategy_.enable_local_batched_disk_load && target_location == MemoryLocation::GPU &&
+          canonical_index_json_.has_value() && source_index_json_.has_value() && variant_identity_.has_value()) {
+        if (!disk_execution_metadata.has_value()) {
+          auto disk_metadata_or = build_disk_execution_metadata(loader_.get().get(), canonical_index_json_, view_plan_);
+          if (!disk_metadata_or.ok()) {
+            LOG(WARNING) << "Replica(" << key_.artifact_id
+                         << "): local batched disk load disabled because shared_context is unavailable: "
+                         << disk_metadata_or.status();
+          } else if (disk_metadata_or->has_value()) {
+            disk_execution_metadata = std::move(*disk_metadata_or);
+          }
+        }
+        if (disk_execution_metadata.has_value()) {
+          // This executor is best-effort: unsupported view shapes must fall
+          // back to the generic byte-range path below without changing
+          // materialization semantics.
+          local_batched_disk_load = ReplicaLoadController::LocalBatchedDiskLoadInput{
+              .disk_context = disk_execution_metadata->disk_context,
+              .source_index_json = *source_index_json_,
+              .view_index_json = disk_execution_metadata->view_index_json,
+              .variant_identity = variant_identity_,
+              .materialization_strategy = materialization_strategy_,
+          };
+        }
+      }
       bool composed_view = false;
-      if (canonical_index_json_.has_value() && source_index_json_.has_value()) {
+      if (!local_batched_disk_load.has_value() && canonical_index_json_.has_value() && source_index_json_.has_value()) {
         auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
         if (!canonical_total_size.has_value()) {
           ready_signal->set_value(absl::FailedPreconditionError("canonical index total_size is unavailable"));
@@ -543,7 +601,7 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
         }
         source_ptr = std::move(*mapped_or);
       }
-      if (view_plan_.has_value() && !view_plan_->is_identity) {
+      if (!local_batched_disk_load.has_value() && view_plan_.has_value() && !view_plan_->is_identity) {
         if (!composed_view) {
           source_ptr = loader::make_view_plan_source(
               std::move(source_ptr), view_plan_->selection, effective_byte_mapping_config);
@@ -564,7 +622,13 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
         };
       }
       op = memory_manager_->load_async_from_source(
-          std::move(source_ptr), target_location, concurrency, std::nullopt, std::move(post_load_fn));
+          std::move(source_ptr),
+          target_location,
+          concurrency,
+          std::nullopt,
+          std::move(post_load_fn),
+          std::nullopt,
+          std::move(local_batched_disk_load));
     }
   } else {
     op = folly::makeSemiFuture<absl::Status>(absl::InternalError("Invalid source/target combination."));

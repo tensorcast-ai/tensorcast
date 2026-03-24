@@ -12,7 +12,28 @@ Related docs:
 - `docs/architecture/artifact-views-and-retrieval.md`
 - `docs/architecture/api/materialization-flow.md`
 - `docs/internals/byte-range-mapping-and-execution.md`
+- `docs/internals/disk-load-strategy.md`
 - `docs/designs/0084-binding-unified-model-and-contract.md`
+- `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`
+
+## 0108 Strategy Plane
+
+The loading stack now has an explicit strategy-lowering seam between semantic
+resolution and executor choice.
+
+- controller code resolves semantic truth first:
+  - `ArtifactSelection`
+  - resolved `view_id` / `ViewPlan`
+  - target layout
+  - mapped copy contract
+- the common runtime then lowers that semantic plan plus source facts into
+  executor strategy inside `MaterializationFacade`
+- internal contracts for this seam live in
+  `core/store/runtime/ingestion/materialization_strategy_types.h`:
+  - `ResolvedMaterializationPlan`
+  - `MappedCopyContract`
+  - `ResolvedSourceBinding`
+  - `ExecutionCommitReport`
 
 ## System Components
 
@@ -38,6 +59,16 @@ All client processes call `tensorcast.init(mode=...)` to establish the daemon se
 the daemon endpoint and constructs the shared Store used by the module-level helpers. The Store owns
 retry policy, lease keepalive, and fallback orchestration for the process. Advanced integrations can
 access it via `tensorcast.store()`, but day-to-day usage goes through the functional helpers.
+
+Typed runtime rollout for the 0108 strategy plane now comes from daemon config
+under `engine.materialization_strategy`, not from ambient process environment.
+That config is lowered into `StoreEngineOptions::MaterializationStrategyConfig`
+and shared by the common runtime plus replica-side loaders.
+
+For a path-by-path summary of current disk-backed loading decisions, including
+TP-aware rank-local slicing, local SSD vs shared filesystem behavior, and
+collective/local-batched/generic fallback selection, see
+`docs/internals/disk-load-strategy.md`.
 
 ## Artifact Loading Sequence
 

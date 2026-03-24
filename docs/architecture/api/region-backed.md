@@ -15,6 +15,7 @@ Related docs:
 - Region-backed `get_into` (different mechanism, same motivation): [Materialization Flow](./materialization-flow.md#region-backed-get_into-materializeintotarget-v2)
 - View semantics and identity: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 - Failure semantics: [Error, Retry, Observability](./error-retry-observability.md)
+- Strategy-plane design: [0108 Tensor-Aware Materialization Strategy Plane](../../designs/0108-tensor-aware-materialization-strategy-plane.md)
 
 ## What is a “VRAM region”?
 
@@ -160,6 +161,24 @@ Once validated, the daemon:
    when enabled, the daemon hashes the target ByteSpace and compares against the
    expected mi2/view hash, poisoning the region on mismatch and emitting metrics
    for enabled/skipped verification.
+
+For mapped-target region-backed writes, controller validation still owns all
+local-only and poison/publication boundaries, but the runtime now lowers the
+resolved copy contract through the `0108` strategy plane before falling back to
+generic byte-range execution.
+
+## Typed Strategy Config
+
+Region-backed and mapped-target execution now share the same typed strategy
+config under `engine.materialization_strategy`. In particular:
+
+- `enable_tensor_aware_mapped_executor` controls whether the mapped strategy
+  plane may choose tensor-aware executor ops,
+- `enable_owner_file_collective` controls whether owner-file collective
+  execution is eligible,
+- `allow_mixed_execution` controls whether the runtime may mix specialized ops
+  with residual byte-range fallback,
+- `diagnostics_verbosity` controls strategy-plane observability in daemon logs.
 
 On transfer `DataLoss`, the daemon marks the region as poisoned to prevent
 reuse. The client then unregisters the region from its cache.

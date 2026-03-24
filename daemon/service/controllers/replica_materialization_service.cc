@@ -475,6 +475,11 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   }
   const bool selection_requests_view = selection.has_view_spec() || !selection.view_id().empty();
   const bool selection_requests_subset = !selection_names.empty() || !view_subset_hash.empty();
+  LOG(INFO) << "materialize_replica.selection"
+            << " artifact_id=" << resolved_artifact_id << " request_tensor_names=" << selection.tensor_names_size()
+            << " parsed_selection_names=" << selection_names.size()
+            << " has_view_spec=" << (selection.has_view_spec() ? 1 : 0) << " request_view_id=" << selection.view_id()
+            << " request_subset_hash_len=" << selection.view_subset_hash().size();
   if (has_artifact && dev.type == DeviceType::GPU && !selection_requests_view && !selection_requests_subset &&
       d_.lip.has_active_on_device(resolved_artifact_id, dev.ordinal)) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
@@ -593,7 +598,12 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     span->SetAttribute("tc.view.id", *resolved_view_id);
   } else {
     if (!selection.view_id().empty()) {
-      return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires a non-identity view spec"};
+      if (selection_names.empty()) {
+        return {
+            StatusCode::INVALID_ARGUMENT, "selection.view_id requires a non-identity view spec or tensor_names subset"};
+      }
+      resolved_view_id = selection.view_id();
+      span->SetAttribute("tc.view.id", *resolved_view_id);
     }
     view_spec.reset();
     view_spec_proto.reset();
@@ -746,6 +756,13 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       }
     }
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
+    LOG(INFO) << "materialize_replica.variant"
+              << " artifact_id=" << resolved_artifact_id << " selection_names=" << selection_names.size()
+              << " has_view_spec=" << (view_spec.has_value() ? 1 : 0)
+              << " resolved_view_id=" << (resolved_view_id.has_value() ? *resolved_view_id : std::string())
+              << " cached_plan=" << (view_plan.has_value() ? 1 : 0)
+              << " cached_plan_identity=" << (view_plan.has_value() ? (view_plan->is_identity ? 1 : 0) : -1)
+              << " cached_plan_view_bytes=" << (view_plan.has_value() ? view_plan->view_size_bytes : 0);
     hints.variant = std::move(variant);
   }
 

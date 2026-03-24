@@ -115,6 +115,7 @@ TEST_CASE("IngestionPipeline P2P Loader TCP end-to-end", "[pipeline][p2p][gpu]")
   opts.tx_slice_bytes = artifact_size;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   opts.artifact_chunk_bytes = artifact_size;
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
   const int comm_port = find_available_port(9300);
   REQUIRE(comm_port > 0);
   auto comm_manager = std::make_shared<CommunicationManager>();
@@ -141,6 +142,11 @@ TEST_CASE("IngestionPipeline P2P Loader TCP end-to-end", "[pipeline][p2p][gpu]")
   REQUIRE(handle_or.ok());
   auto& handle = handle_or.value();
   REQUIRE(handle.wait_ready(std::chrono::milliseconds(30000)).ok());
+  const auto replica_keys = harness.replica_runtime->registry().find_by_artifact("remote_artifact");
+  REQUIRE(replica_keys.size() == 1);
+  auto replica_or = harness.replica_runtime->registry().find(replica_keys.front());
+  REQUIRE(replica_or.ok());
+  REQUIRE(replica_or.value()->materialization_strategy().enable_local_batched_disk_load);
 
   auto gpu_ptr_result = harness.replica_runtime->get_replica_gpu_ptr(handle.replica_key);
   REQUIRE(gpu_ptr_result.ok());

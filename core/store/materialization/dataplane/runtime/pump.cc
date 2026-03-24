@@ -481,6 +481,8 @@ absl::Status pump_ranges(
   if (src.supports_direct_write_at()) {
     if (auto* cap = dynamic_cast<DirectWriteCapable*>(&dst)) {
       const size_t window_bytes = pool.chunk_size();
+      LOG(INFO) << "pump_ranges using direct-write path"
+                << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes;
       if (!g_meter) {
         g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       }
@@ -615,6 +617,13 @@ absl::Status pump_ranges(
       }
       return dst.close();
     }
+    LOG(INFO) << "pump_ranges direct-write unavailable: destination is not DirectWriteCapable"
+              << " ranges=" << ranges.size() << " concurrency=" << concurrency;
+  }
+
+  if (!src.supports_direct_write_at()) {
+    LOG(INFO) << "pump_ranges staged path: source does not support direct-write"
+              << " ranges=" << ranges.size() << " concurrency=" << concurrency << " chunk_bytes=" << pool.chunk_size();
   }
 
   PumpState state;

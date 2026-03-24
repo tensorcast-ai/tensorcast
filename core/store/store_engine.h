@@ -29,6 +29,7 @@
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/metadata/metadata_types.h"
 #include "core/store/runtime/replica/replica_info.h"
@@ -95,19 +96,13 @@ class StoreEngine {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
       const loading::MaterializeHints& hints = {});
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(

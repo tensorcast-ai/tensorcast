@@ -35,6 +35,9 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
     auto ipc_or = ctx.replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
       handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
+    } else {
+      LOG(WARNING) << "HandleStage: get_ipc_handle failed for key=" << handle.replica_key
+                   << " gpu_state=" << static_cast<int>(handle.gpu_state) << " status=" << ipc_or.status();
     }
   } else {
     auto uma = ctx.replica->get_memory_manager().memory_authority();

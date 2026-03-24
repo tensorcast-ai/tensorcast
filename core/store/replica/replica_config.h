@@ -80,6 +80,8 @@ struct ReplicaConfig {
   std::optional<std::string> source_index_json;
   // - Byte-range mapping config (strided thresholds, cache sizing)
   StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
+  // - Materialization strategy config (typed rollout and executor selection)
+  StoreEngineOptions::MaterializationStrategyConfig materialization_strategy{};
   // - Transform placement preference (server/client)
   loading::TransformPlacement transform_placement = loading::TransformPlacement::kServer;
   // - Tensor compression strategies

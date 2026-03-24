@@ -36,6 +36,7 @@ flowchart LR
 - Clear separation of concerns: Designs (why/what) vs. optional Plans (temporary how) vs. Guides (how‑to/tutorials).
 - Localized guidance: README.md and AGENTS.md provide precise, directory‑scoped instructions.
 - Canonical data source: `schema.sql` is the single source of truth for data structures.
+- Continuous correction: Treat each new design as a chance to detect where earlier accepted constraints no longer satisfy the real need, and adjust the documented rules so the system keeps moving in the globally correct direction.
 - Guardrails: CI enforces metadata, cross‑linking, and the “doc sync” rule for code changes.
 
 # Information Architecture (What)
@@ -59,11 +60,14 @@ flowchart LR
 
 Design (docs/designs/<slug>.md)
 - Problem statement, scope, goals/non‑goals
+- Whole-system analysis of the problem and proposal, not only local-module impact
 - Interfaces and schemas (include diffs against `schema.sql` when applicable)
 - Invariants and error model
 - Alternatives and rationale
+- Constraint review: identify the prior designs, rules, or assumptions this design inherits; if an earlier accepted design no longer satisfies the need, say so explicitly, explain why strict adherence would produce poor system-level outcomes, and record what is kept, narrowed, revised, or superseded
 - Any new interface/API proposed in a design (or its paired plan) must document how it adheres to the repository’s language-specific style guides (C++ rules in `AGENTS.md` and `core/` READMEs, Python rules in `tensorcast/` docs). For C++ APIs, include a short `Naming Compliance` call-out (table or bullet list) that explicitly proves each function/method is `snake_case`, each class/struct is `PascalCase`, and constants/macros are `ALL_CAPS`. Designs that skip this check or knowingly violate the conventions must be rejected. Do not introduce interfaces whose naming, error handling, or packaging violates those standards.
 - Risks, success criteria, and compatibility
+- Documentation impact: when the correct solution changes design principles, authoring rules, or governing constraints, update the relevant documentation-system guidance in the same change instead of leaving that logic implicit
 - Cross‑links: owning code, related plans, and guides
  - Visualization: Prefer Mermaid diagrams for structured, graphical, flow, and hierarchical information (e.g., flowcharts, sequence diagrams, class diagrams, state diagrams, ER/graph diagrams).
   - Mermaid guidance:
@@ -152,6 +156,7 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 - Linkage: every plan points to exactly one design; a design may have zero, one, or multiple plans over its lifetime.
 - Link hygiene: CI link checker passes.
 - Doc Sync: PRs that change code touching an owned area must update the relevant design and localized README/AGENTS.md; add or update a plan when phased execution tracking is useful.
+- Constraint evolution is explicit: accepted designs are authoritative but not immutable; when new evidence shows an older constraint is misaligned with system goals, the newer design must document the adjustment or supersession instead of silently working around it.
 - Schema discipline: designs referencing data models must link `schema.sql`; plans must include migration/testing steps.
 - Local `AGENTS.md` include the repository’s Software Design Philosophy anchors (Complexity Reduction, Comment‑First Development, Error Handling Philosophy).
 
@@ -160,6 +165,13 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 - Indexes: `docs/README.md` lists designs, plans, and guides by area and status with short descriptions.
 - Stable slugs and IDs for deep links; filenames mirror `<slug>.md`.
 - Cross-linking: designs link to owning code and related docs; plans, when present, link back to their design and tests.
+
+# How to Write a Design
+
+- Start from the whole system: evaluate user impact, operator feedback, architecture direction, and cross-module effects before optimizing a local component.
+- Read the relevant accepted designs first, but do not treat them as fixed law. A new design may exist precisely because an earlier design did not satisfy the real need.
+- Review inherited constraints one by one: keep them when they still help the system, and explicitly revise or supersede them when strict adherence would harm correctness, operability, simplicity, or long-term direction.
+- If the new reasoning changes how future documents should be written, linked, or reviewed, update the governing documentation in the same change so the improved logic becomes part of the standard process.
 
 # How to Write a Plan
 
@@ -186,6 +198,8 @@ links:
 # Summary
 
 # Goals / Non‑Goals
+
+# Prior Constraints Reviewed
 
 # Architecture & Interfaces
 
