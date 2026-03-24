@@ -86,7 +86,7 @@ from tensorcast.common.selection_contract import (
     compute_selected_index_bytes,
 )
 from tensorcast.common.selection_identity import (
-    compute_logical_layout_hash,
+    compute_view_subset_hash,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -172,18 +172,10 @@ def _build_subset_view_spec_proto(
     for name in ordered_names:
         entry = entry_by_name[name]
         if not entry.shape:
-            raise ArtifactError(
-                "subset view identity requires tensors with at least one dimension",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
+            return None
         dim0 = int(entry.shape[0])
         if dim0 <= 0:
-            raise ArtifactError(
-                "subset view identity requires non-empty leading dimensions",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
+            return None
         op = proto.tensors[name].ops.add()
         op.narrow.dim = 0
         op.narrow.start = 0
@@ -230,6 +222,16 @@ class MaterializationDiagnostics:
 class TensorDictMaterializationResult:
     tensors: dict[str, torch.Tensor]
     diagnostics: MaterializationDiagnostics
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectionMaterializationInputs:
+    requested_names: tuple[str, ...] | None
+    view_spec_proto: common_pb2.ViewSpec | None
+    view_data_hash: str | None
+    view_index_hint: bytes | None
+    view_id_hint: str | None
+    view_subset_hash: bytes | None
 
 
 def _materialization_source_label(
@@ -816,22 +818,18 @@ class Artifact:
         artifact_id = self._ensure_identified()
         selection_breakdown: dict[str, float] = {}
         selection_prepare_start = time.perf_counter()
-        view_metadata = self._ensure_view_metadata_cache(
+        self._ensure_view_metadata_cache(
             require_index_bytes=True,
             timing_out=selection_breakdown,
         )
+        selection_inputs = self._resolve_selection_materialization_inputs()
         selection_prepare_sec = time.perf_counter() - selection_prepare_start
-        requested_names = (
-            tuple(view_metadata.tensor_names)
-            if view_metadata is not None and view_metadata.tensor_names
-            else None
-        )
+        requested_names = selection_inputs.requested_names
         _, runtime, pipeline = self._require_components()
-        view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = view_metadata.view_data_hash or None if view_metadata else None
-        view_index_hint = (
-            view_metadata.view_index_bytes or None if view_metadata else None
-        )
+        view_spec_proto = selection_inputs.view_spec_proto
+        view_data_hash = selection_inputs.view_data_hash
+        view_index_hint = selection_inputs.view_index_hint
+        view_id_hint = selection_inputs.view_id_hint
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
         materialize_start = time.perf_counter()
         payload, _ = pipeline.materialize_subset(
@@ -840,6 +838,7 @@ class Artifact:
             device=device,
             fallback=self._fallback,
             tensor_names=requested_names,
+            view_id=view_id_hint,
             canonical_index_hint=self._canonical_index_bytes,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
@@ -1007,6 +1006,8 @@ class Artifact:
         view_index_hint = (
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
+        if view_spec_proto is not None:
+            view_index_hint = None
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
         resolved_device = device if device is not None else target_tensor.device
         pipeline.get_into(
@@ -2091,13 +2092,12 @@ class Artifact:
                 retryable=False,
             )
 
-        view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = (
-            self._view_metadata.view_data_hash if self._view_metadata else None
-        )
-        view_index_hint = (
-            self._view_metadata.view_index_bytes if self._view_metadata else None
-        )
+        selection_inputs = self._resolve_selection_materialization_inputs()
+        requested_names = selection_inputs.requested_names
+        view_spec_proto = selection_inputs.view_spec_proto
+        view_data_hash = selection_inputs.view_data_hash
+        view_index_hint = selection_inputs.view_index_hint
+        view_id_hint = selection_inputs.view_id_hint
 
         if ctx is not None and ctx.idempotency_key:
             # Deterministic operation ids require stable index bytes for logical layout hashing.
@@ -2134,72 +2134,20 @@ class Artifact:
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
         selection = self._build_artifact_selection()
-        view_id = selection.view_id
+        view_id = view_id_hint or selection.view_id
         selection_hash = bytes(selection.selection_hash).hex()
 
         deterministic_replica_uuid: str | None = None
         if ctx is not None and ctx.idempotency_key:
-            canonical_index_bytes = self._canonical_index_bytes
-            if canonical_index_bytes is None:
-                raise ArtifactError(
-                    "Canonical index bytes unavailable for deterministic prefetch",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=True,
-                )
-
-            needs_view_index = bool(view_id)
-            index_bytes = canonical_index_bytes
-            if needs_view_index:
-                if view_index_hint is not None:
-                    index_bytes = view_index_hint
-                else:
-                    if view_spec_proto is None:
-                        raise ArtifactError(
-                            "View index bytes unavailable for deterministic prefetch",
-                            status_code="FAILED_PRECONDITION",
-                            retryable=True,
-                        )
-                    from tensorcast._c_ext import compute_view_index_bytes
-
-                    normalized_ops: dict[str, list[dict[str, int | str]]] = {}
-                    if view_spec_proto.tensors:
-                        for name, ops in view_spec_proto.tensors.items():
-                            op_list: list[dict[str, int | str]] = []
-                            for op in ops.ops:
-                                if op.HasField("narrow"):
-                                    op_list.append(
-                                        {
-                                            "type": "narrow",
-                                            "dim": int(op.narrow.dim),
-                                            "start": int(op.narrow.start),
-                                            "length": int(op.narrow.length),
-                                        }
-                                    )
-                                elif op.HasField("transpose"):
-                                    op_list.append(
-                                        {
-                                            "type": "transpose",
-                                            "dim0": int(op.transpose.dim0),
-                                            "dim1": int(op.transpose.dim1),
-                                        }
-                                    )
-                            if op_list:
-                                normalized_ops[str(name)] = op_list
-                    payload = compute_view_index_bytes(
-                        canonical_index_bytes, normalized_ops
-                    )
-                    index_bytes = bytes(payload["view_index_bytes"])
-
-            logical_layout_hash = compute_logical_layout_hash(
-                index_bytes=index_bytes, needs_view_index=needs_view_index
-            ).hex()
+            logical_layout_hash = bytes(selection.logical_layout_hash).hex()
+            device_uuid = device_uuid_for(device_id)
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
             idempotency_key_hex = hashlib.sha256(
                 ctx.idempotency_key.encode("utf-8")
             ).hexdigest()
             action_fingerprint = (
                 f"prefetch|daemon={daemon_id}|artifact={artifact_id}|layout={logical_layout_hash}"
-                f"|selection={selection_hash}|device={device_id}|lease=NO_LEASE|v1"
+                f"|selection={selection_hash}|device={device_id}|device_uuid={device_uuid}|lease=NO_LEASE|v2"
             )
             deterministic_replica_uuid = str(
                 uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
@@ -2224,7 +2172,8 @@ class Artifact:
             key=None,
             device=device_obj,
             fallback=self._fallback,
-            tensor_names=None,
+            tensor_names=requested_names,
+            view_id=view_id_hint,
             canonical_index_hint=self._canonical_index_bytes,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
@@ -2552,33 +2501,53 @@ class Artifact:
             return str(view_metadata.view_id)
         return self._control_plane_view_id(runtime)
 
+    def _resolve_selection_materialization_inputs(
+        self,
+    ) -> _SelectionMaterializationInputs:
+        view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
+        requested_names = (
+            tuple(view_metadata.tensor_names)
+            if view_metadata is not None and view_metadata.tensor_names
+            else None
+        )
+        view_spec_proto = self._view_spec.proto if self._view_spec else None
+        if view_spec_proto is None and requested_names:
+            canonical_index = self._ensure_metadata()
+            subset_view_proto = _build_subset_view_spec_proto(
+                canonical_index=canonical_index,
+                tensor_names=requested_names,
+            )
+            if subset_view_proto is not None:
+                view_spec_proto = subset_view_proto
+        view_data_hash = view_metadata.view_data_hash or None if view_metadata else None
+        view_index_hint = (
+            view_metadata.view_index_bytes or None if view_metadata else None
+        )
+        view_id_hint = (
+            str(view_metadata.view_id)
+            if view_metadata is not None
+            and view_metadata.view_id
+            and view_spec_proto is None
+            else None
+        )
+        view_subset_hash = (
+            compute_view_subset_hash(requested_names) if requested_names else None
+        )
+        return _SelectionMaterializationInputs(
+            requested_names=requested_names,
+            view_spec_proto=view_spec_proto,
+            view_data_hash=view_data_hash,
+            view_index_hint=view_index_hint,
+            view_id_hint=view_id_hint,
+            view_subset_hash=view_subset_hash,
+        )
+
     def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
         artifact_id = self._ensure_identified()
         runtime = self._runtime_if_available()
-        view_metadata = self._ensure_view_metadata_cache(
-            require_index_bytes=True,
-            require_view_id=True,
-        )
-
-        view_spec_proto: common_pb2.ViewSpec | None = None
-        if self._view_spec is not None and not self._view_spec.is_identity:
-            view_spec_proto = self._view_spec.proto
-            if view_spec_proto is None:
-                raise ArtifactError(
-                    "View spec proto missing while building selection",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=False,
-                )
-
-        selection_names: tuple[str, ...] = ()
-        if view_metadata is not None and view_metadata.tensor_names:
-            selection_names = tuple(view_metadata.tensor_names)
-
-        if view_spec_proto is None and selection_names:
-            view_spec_proto = _build_subset_view_spec_proto(
-                canonical_index=self._ensure_metadata(),
-                tensor_names=selection_names,
-            )
+        inputs = self._resolve_selection_materialization_inputs()
+        view_spec_proto = inputs.view_spec_proto
+        selection_names = inputs.requested_names or ()
 
         canonical_index_bytes = self._canonical_index_bytes
         if canonical_index_bytes is None and runtime is not None:
@@ -2595,8 +2564,8 @@ class Artifact:
         has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
         has_subset = bool(selection_names)
         layout_index_bytes: bytes | None = None
-        if view_metadata is not None and view_metadata.view_index_bytes:
-            layout_index_bytes = bytes(view_metadata.view_index_bytes)
+        if inputs.view_index_hint:
+            layout_index_bytes = bytes(inputs.view_index_hint)
         elif has_transform or has_subset:
             layout_index_bytes = compute_selected_index_bytes(
                 canonical_index_bytes=canonical_index_bytes,
@@ -2611,6 +2580,11 @@ class Artifact:
                 layout_index_bytes=layout_index_bytes,
                 view_spec=view_spec_proto,
                 tensor_names=selection_names,
+                view_subset_hash=inputs.view_subset_hash,
+                view_id=inputs.view_id_hint,
+                allow_view_id_without_spec=bool(
+                    inputs.view_id_hint and not has_transform
+                ),
             )
         except ValueError as exc:
             raise ArtifactError(
@@ -3006,6 +2980,24 @@ class Artifact:
             slices=slices,
             transpose=transpose,
         )
+        if (
+            subset is None
+            and not typed_slices
+            and not normalized_transpose
+            and self._view_metadata is not None
+        ):
+            return Artifact(
+                store_ref=self._store_ref,
+                artifact_id=self._artifact_id,
+                key=self._key_hint,
+                fallback=self._fallback,
+                canonical_index_bytes=self._canonical_index_bytes,
+                canonical_index=self._canonical_index,
+                generation=self._generation,
+                view_spec=self._view_spec,
+                view_metadata=self._view_metadata,
+                view_depth=self._view_depth,
+            )
         base_index = self._effective_index()
         entry_shapes = {entry.name: tuple(entry.shape) for entry in base_index.entries}
         child_spec: ViewSpecBuildResult | None = None
