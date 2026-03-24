@@ -1190,6 +1190,7 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
   REQUIRE(gpu_handle.gpu_base_ptr != nullptr);
 
   DeviceKey gpu0 = make_gpu_key(0);
+  REQUIRE(gpu_handle.replica_key.device == gpu0);
   ReplicaKey key{.artifact_id = artifact_id, .view_id = std::nullopt, .device = gpu0, .replica = 0};
   REQUIRE(store.wait_replica_ready(key) == 0);
 

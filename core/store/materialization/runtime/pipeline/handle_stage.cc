@@ -14,16 +14,11 @@ namespace tensorcast::store::materialization::runtime::pipeline {
 absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx) {
   loading::ReplicaHandle handle;
 
-  DeviceKey dev_key = ctx.target_device;
-  if (!ctx.target_is_gpu) {
-    dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  }
-
-  handle.replica_key = loading::ReplicaKey{
-      .artifact_id = ctx.artifact_identifier,
-      .view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::optional<std::string>(),
-      .device = dev_key,
-      .replica = 0};
+  // The replica already carries the canonicalized device identity chosen by
+  // the engine. Reuse that key verbatim so later session joins (for example
+  // prefetch followed by tensor_dict on the same replica_uuid) see identical
+  // ReplicaKeys instead of mixing normalized and non-normalized DeviceKeys.
+  handle.replica_key = ctx.replica->replica_key();
   handle.ready_signal = ctx.load_signal;
   handle.cpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::CPU);
   handle.gpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::GPU);
