@@ -1356,7 +1356,8 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
     int concurrency,
     std::optional<absl::Span<const uint32_t>> chunk_indices,
     std::function<absl::Status()> post_load_fn,
-    std::optional<CollectiveDiskLoadInput> collective_disk_load) {
+    std::optional<CollectiveDiskLoadInput> collective_disk_load,
+    std::optional<LocalBatchedDiskLoadInput> local_batched_disk_load) {
   // Phase 1: capture state under lock and ensure allocation + LOADING
   bool need_allocate = false;
   {
@@ -1408,6 +1409,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
            chunk_indices,
            post_load_fn = std::move(post_load_fn),
            collective_disk_load = std::move(collective_disk_load),
+           local_batched_disk_load = std::move(local_batched_disk_load),
            local_device_id](auto&&) mutable -> absl::Status {
             std::optional<GpuTransferGateLease> lease;
             if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
@@ -1474,6 +1476,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                       .source_index_json = collective_disk_load->source_index_json,
                       .view_index_json = collective_disk_load->view_index_json,
                       .variant_identity = collective_disk_load->variant_identity,
+                      .strategy_config = collective_disk_load->materialization_strategy,
                       .gpu_ptr = gpu_ptr,
                       .device_id = device_id,
                       .gpu_allocation = gpu_allocation,
@@ -1483,6 +1486,36 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
               if (collective_result.handled) {
                 exec_status = collective_result.status;
               } else {
+                exec_status = self->transfer_service_->execute(
+                    plan,
+                    target_location,
+                    *source,
+                    concurrency,
+                    self->async_runtime_->blocking_executor(),
+                    gpu_ptr,
+                    gpu_allocation,
+                    device_id);
+              }
+            } else if (local_batched_disk_load.has_value()) {
+              auto local_result = try_local_batched_disk_load(
+                  LocalBatchedDiskLoadRequest{
+                      .replica_key = self->replica_key_,
+                      .disk_context = local_batched_disk_load->disk_context,
+                      .source_index_json = local_batched_disk_load->source_index_json,
+                      .view_index_json = local_batched_disk_load->view_index_json,
+                      .variant_identity = local_batched_disk_load->variant_identity,
+                      .strategy_config = local_batched_disk_load->materialization_strategy,
+                      .gpu_ptr = gpu_ptr,
+                      .device_id = device_id,
+                      .gpu_allocation = gpu_allocation,
+                  },
+                  self->pinned_pool_,
+                  self->pinned_memory_timeout_);
+              if (local_result.handled) {
+                exec_status = local_result.status;
+              } else {
+                LOG(WARNING) << "ReplicaLoadController(" << self->replica_key_.artifact_id
+                             << "): LOCAL_BATCHED_DISK_LOAD_FALLBACK handing off to generic transfer path";
                 exec_status = self->transfer_service_->execute(
                     plan,
                     target_location,

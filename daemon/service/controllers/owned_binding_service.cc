@@ -69,6 +69,7 @@ using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_mapped_target_materialization_plan;
+using materialization_target_plan::build_resolved_mapped_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
@@ -1478,15 +1479,25 @@ grpc::Status OwnedBindingService::create_owned_binding(
     hints.variant = std::move(variant);
   }
 
+  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
+  if (mapped) {
+    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+        resolution.resolved_artifact_id,
+        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
+        storage_layout.into_target,
+        mapped_plan,
+        hints.variant,
+        disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
+            ? std::optional<std::string_view>(*disk_metadata->source_index_json)
+            : std::nullopt);
+    if (!resolved_plan_or.ok()) {
+      return to_grpc_status(resolved_plan_or.status());
+    }
+    resolved_plan = std::move(*resolved_plan_or);
+  }
+
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
-      ? d_.engine.materialize_mapped_into_target(
-            device,
-            storage_layout.into_target,
-            mapped_plan.copy_plan.map,
-            mapped_plan.canonical_index_json,
-            materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
-            hints,
-            disk_source)
+      ? d_.engine.materialize_mapped_into_target(device, *resolved_plan, hints, disk_source)
       : d_.engine.materialize_into_target(
             device,
             storage_layout.into_target,
@@ -2297,15 +2308,25 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     hints.variant = std::move(variant);
   }
 
+  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
+  if (mapped) {
+    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+        resolution.resolved_artifact_id,
+        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
+        storage_layout.into_target,
+        mapped_plan,
+        hints.variant,
+        disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
+            ? std::optional<std::string_view>(*disk_metadata->source_index_json)
+            : std::nullopt);
+    if (!resolved_plan_or.ok()) {
+      return to_grpc_status(resolved_plan_or.status());
+    }
+    resolved_plan = std::move(*resolved_plan_or);
+  }
+
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
-      ? d_.engine.materialize_mapped_into_target(
-            device,
-            storage_layout.into_target,
-            mapped_plan.copy_plan.map,
-            mapped_plan.canonical_index_json,
-            materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
-            hints,
-            disk_source)
+      ? d_.engine.materialize_mapped_into_target(device, *resolved_plan, hints, disk_source)
       : d_.engine.materialize_into_target(
             device,
             storage_layout.into_target,

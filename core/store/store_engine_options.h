@@ -125,6 +125,40 @@ struct StoreEngineOptions {
 
   ByteMappingConfig byte_mapping{};
 
+  struct MaterializationStrategyConfig {
+    enum class ExecutorPreference : std::uint8_t {
+      kAuto = 0,
+      kGenericByteRange = 1,
+      kTensorAwareLocal = 2,
+      kOwnerFileCollective = 3,
+    };
+
+    enum class DiagnosticsVerbosity : std::uint8_t {
+      kOff = 0,
+      kBasic = 1,
+      kVerbose = 2,
+    };
+
+    bool enable_tensor_aware_mapped_executor{true};
+    bool enable_local_batched_disk_load{false};
+    bool enable_owner_file_collective{false};
+    bool allow_mixed_execution{true};
+    bool prefer_local_canonical_for_mapped{false};
+    bool allow_source_ordered_for_mapped{true};
+    bool enable_mapped_dim0_tensor_jobs{true};
+    bool enable_mapped_dim1_tensor_jobs{true};
+    bool enable_mapped_concat_jobs{true};
+    bool enable_mapped_concat_execution{true};
+    bool enable_mapped_single_range_concat_jobs{true};
+    bool enable_mapped_multirange_concat_jobs{true};
+    bool sync_after_single_range_concat_job{false};
+    bool use_dedicated_single_range_concat_stream{false};
+    ExecutorPreference executor_preference{ExecutorPreference::kAuto};
+    DiagnosticsVerbosity diagnostics_verbosity{DiagnosticsVerbosity::kBasic};
+  };
+
+  MaterializationStrategyConfig materialization_strategy{};
+
   enum class PromotionPolicy : std::uint8_t {
     kUnspecified = 0,
     kNever = 1,

@@ -2,18 +2,22 @@
 
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
@@ -52,6 +56,37 @@ using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
 using store::loader::ViewSpec;
+
+absl::StatusOr<std::string> build_mapped_target_selected_index_json(const ValidatedMappedTargetLayout& mapped_layout) {
+  std::vector<std::string> ordered_names;
+  ordered_names.reserve(mapped_layout.dst_specs.size());
+  std::unordered_map<std::string, uint64_t> offsets;
+  std::unordered_map<std::string, uint64_t> sizes;
+  std::unordered_map<std::string, store::loader::CanonicalTensorMeta> metas;
+  offsets.reserve(mapped_layout.dst_specs.size());
+  sizes.reserve(mapped_layout.dst_specs.size());
+  metas.reserve(mapped_layout.dst_specs.size());
+
+  for (const auto& [name, spec] : mapped_layout.dst_specs) {
+    auto offset_it = mapped_layout.dst_base_offsets.find(name);
+    if (offset_it == mapped_layout.dst_base_offsets.end()) {
+      return absl::InvalidArgumentError("mapped target layout missing dst base offset");
+    }
+    ordered_names.push_back(name);
+    offsets.emplace(name, offset_it->second);
+    sizes.emplace(name, spec.logical_length);
+    metas.emplace(
+        name,
+        store::loader::CanonicalTensorMeta{
+            .shape = spec.shape,
+            .stride = spec.stride,
+            .dtype = spec.dtype,
+            .storage_offset = spec.storage_offset,
+        });
+  }
+  std::sort(ordered_names.begin(), ordered_names.end());
+  return store::loader::build_canonical_index_json(ordered_names, offsets, sizes, metas);
+}
 
 void record_error(RecordMaterializeResultFn record_result, std::string_view reason) {
   if (record_result == nullptr) {
@@ -810,7 +845,10 @@ Status build_mapped_target_materialization_plan(
       resolved_view_id = *view_id_or;
     }
   } else if (request_view_id.has_value()) {
-    // selection.view_id without metadata-backed view_spec is treated as opaque mapped byte space identity.
+    // For mapped targets, selection.view_id may identify the target byte-space
+    // even when the source artifact has no metadata-backed view spec. Runtime
+    // source selection still decides whether those bytes arrive directly from a
+    // view-capable source or are reconstructed from canonical/disk fallback.
     resolved_view_id = *request_view_id;
   }
 
@@ -818,7 +856,21 @@ Status build_mapped_target_materialization_plan(
   if (plan.view_plan.has_value() && !plan.view_plan->is_identity) {
     source_index_json = plan.view_plan->view_index_json;
   }
-  plan.selected_index_json = source_index_json;
+  auto target_index_json_or = build_mapped_target_selected_index_json(mapped_layout);
+  if (!target_index_json_or.ok()) {
+    record_error(record_result, "layout_mismatch");
+    return to_grpc_status(target_index_json_or.status());
+  }
+  // Mapped copy-plan execution reads from source_index_json above, but
+  // resolved_selection must describe the packed target byte-space that this RPC
+  // materializes and later publishes.
+  plan.selected_index_json = std::move(*target_index_json_or);
+  auto canonical_source_table_or = parse_canonical_index(plan.canonical_index_json);
+  if (!canonical_source_table_or.ok()) {
+    record_error(record_result, "index_parse_failed");
+    return to_grpc_status(canonical_source_table_or.status());
+  }
+  const CanonicalIndexTable& canonical_source_table = *canonical_source_table_or;
   auto source_table_or = parse_canonical_index(source_index_json);
   if (!source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
@@ -827,13 +879,32 @@ Status build_mapped_target_materialization_plan(
   const CanonicalIndexTable& source_table = *source_table_or;
 
   auto copy_plan_or = build_copy_plan(
-      req.copy_plan(), source_table, mapped_layout.dst_specs, mapped_layout.dst_base_offsets, view_narrows);
+      req.copy_plan(),
+      source_table,
+      canonical_source_table,
+      mapped_layout.dst_specs,
+      mapped_layout.dst_base_offsets,
+      view_narrows);
   if (!copy_plan_or.ok()) {
     record_error(record_result, "mapping_invalid");
     return to_grpc_status(copy_plan_or.status());
   }
   plan.copy_plan = std::move(*copy_plan_or);
   plan.copy_plan.map.total_bytes = plan.logical_total_size;
+  LOG(INFO) << "MaterializeIntoMappedTarget tensor-job compatibility"
+            << " copy_entries=" << req.copy_plan().entries_size() << " dst_tensors=" << mapped_layout.dst_specs.size()
+            << " compatible_candidates=" << plan.copy_plan.tensor_job_candidates.size()
+            << " compatible_bytes=" << plan.copy_plan.compatibility_stats.compatible_bytes
+            << " concat_candidates=" << plan.copy_plan.concat_job_candidates.size()
+            << " concat_bytes=" << plan.copy_plan.compatibility_stats.concat_bytes
+            << " rejected_mixed_src_or_dim=" << plan.copy_plan.compatibility_stats.rejected_mixed_src_or_dim
+            << " rejected_mixed_src_or_dim_bytes=" << plan.copy_plan.compatibility_stats.rejected_mixed_src_or_dim_bytes
+            << " rejected_non_contiguous=" << plan.copy_plan.compatibility_stats.rejected_non_contiguous
+            << " rejected_non_contiguous_bytes=" << plan.copy_plan.compatibility_stats.rejected_non_contiguous_bytes
+            << " rejected_unsupported_distribution="
+            << plan.copy_plan.compatibility_stats.rejected_unsupported_distribution
+            << " rejected_unsupported_distribution_bytes="
+            << plan.copy_plan.compatibility_stats.rejected_unsupported_distribution_bytes;
 
   PreparedTargetStorageLayout prepared_storage_layout;
   auto storage_layout_status = build_target_storage_layout(req.target_layout(), record_result, prepared_storage_layout);
@@ -868,6 +939,142 @@ Status build_mapped_target_materialization_plan(
   plan.publish_storages = std::move(prepared_storage_layout.publish_storages);
   plan.publish_segments = std::move(prepared_storage_layout.publish_segments);
   return Status::OK;
+}
+
+absl::StatusOr<store::runtime::ingestion::strategy::ResolvedMaterializationPlan>
+build_resolved_mapped_materialization_plan(
+    std::string_view resolved_artifact_id,
+    uint64_t generation,
+    const store::loading::IntoTargetLayout& target_layout,
+    const MappedTargetMaterializationPlan& mapped_plan,
+    const std::optional<store::loading::VariantIdentity>& variant,
+    std::optional<std::string_view> source_index_json) {
+  using StrategyConcatJobCandidate = store::runtime::ingestion::strategy::ConcatJobCandidate;
+  using StrategyConcatSourceFragment = store::runtime::ingestion::strategy::ConcatSourceFragment;
+  using StrategyMappedCopyContract = store::runtime::ingestion::strategy::MappedCopyContract;
+  using StrategyPlan = store::runtime::ingestion::strategy::ResolvedMaterializationPlan;
+  using StrategyTensorJobCandidate = store::runtime::ingestion::strategy::TensorJobCandidate;
+  using StrategyTensorJobDistribution = store::runtime::ingestion::strategy::TensorJobDistribution;
+
+  std::optional<CanonicalIndexTable> physical_source_table;
+  if (source_index_json.has_value()) {
+    auto physical_source_table_or = parse_canonical_index(*source_index_json);
+    if (!physical_source_table_or.ok()) {
+      return physical_source_table_or.status();
+    }
+    physical_source_table = std::move(*physical_source_table_or);
+  }
+
+  StrategyMappedCopyContract mapped_copy_contract;
+  mapped_copy_contract.fallback_map = mapped_plan.copy_plan.map;
+  mapped_copy_contract.tensor_job_candidates.reserve(mapped_plan.copy_plan.tensor_job_candidates.size());
+  for (const auto& candidate : mapped_plan.copy_plan.tensor_job_candidates) {
+    const auto* src_entry = [&]() -> const CanonicalIndexEntry* {
+      if (!physical_source_table.has_value()) {
+        return nullptr;
+      }
+      auto it = physical_source_table->entries.find(candidate.src_name);
+      if (it == physical_source_table->entries.end()) {
+        return nullptr;
+      }
+      return &it->second;
+    }();
+
+    StrategyTensorJobDistribution distribution = StrategyTensorJobDistribution::kUnknown;
+    switch (candidate.distribution) {
+      case materialization_mapped_copy_plan::TensorJobDistribution::kReplicated:
+        distribution = StrategyTensorJobDistribution::kReplicated;
+        break;
+      case materialization_mapped_copy_plan::TensorJobDistribution::kDim0Partitioned:
+        distribution = StrategyTensorJobDistribution::kDim0Partitioned;
+        break;
+      case materialization_mapped_copy_plan::TensorJobDistribution::kDim1Partitioned:
+        distribution = StrategyTensorJobDistribution::kDim1Partitioned;
+        break;
+      case materialization_mapped_copy_plan::TensorJobDistribution::kUnknown:
+        distribution = StrategyTensorJobDistribution::kUnknown;
+        break;
+    }
+
+    mapped_copy_contract.tensor_job_candidates.push_back(
+        StrategyTensorJobCandidate{
+            .src_name = candidate.src_name,
+            .dst_name = candidate.dst_name,
+            .distribution = distribution,
+            .src_shape = candidate.src_shape,
+            .src_stride = candidate.src_stride,
+            .dst_shape = candidate.dst_shape,
+            .dst_stride = candidate.dst_stride,
+            .dtype = candidate.dtype,
+            .src_logical_offset = src_entry != nullptr ? src_entry->logical_offset : candidate.src_logical_offset,
+            .src_storage_offset = src_entry != nullptr ? src_entry->storage_offset : candidate.src_storage_offset,
+            .src_size_bytes = src_entry != nullptr ? src_entry->logical_length : candidate.src_size_bytes,
+            .dst_base_offset = candidate.dst_base_offset,
+            .dst_size_bytes = candidate.dst_size_bytes,
+            .element_size = candidate.element_size,
+            .dim = candidate.dim,
+            .src_start = candidate.src_start,
+            .src_end = candidate.src_end,
+            .dst_start = candidate.dst_start,
+            .dst_end = candidate.dst_end,
+        });
+  }
+
+  mapped_copy_contract.concat_job_candidates.reserve(mapped_plan.copy_plan.concat_job_candidates.size());
+  for (const auto& candidate : mapped_plan.copy_plan.concat_job_candidates) {
+    StrategyConcatJobCandidate strategy_candidate;
+    strategy_candidate.dst_name = candidate.dst_name;
+    strategy_candidate.dst_shape = candidate.dst_shape;
+    strategy_candidate.dst_stride = candidate.dst_stride;
+    strategy_candidate.dtype = candidate.dtype;
+    strategy_candidate.dst_base_offset = candidate.dst_base_offset;
+    strategy_candidate.dst_size_bytes = candidate.dst_size_bytes;
+    strategy_candidate.element_size = candidate.element_size;
+    strategy_candidate.prefix_count = candidate.prefix_count;
+    strategy_candidate.dst_block_stride_bytes = candidate.dst_block_stride_bytes;
+    strategy_candidate.sources.reserve(candidate.sources.size());
+    for (const auto& source : candidate.sources) {
+      const auto* src_entry = [&]() -> const CanonicalIndexEntry* {
+        if (!physical_source_table.has_value()) {
+          return nullptr;
+        }
+        auto it = physical_source_table->entries.find(source.src_name);
+        if (it == physical_source_table->entries.end()) {
+          return nullptr;
+        }
+        return &it->second;
+      }();
+
+      strategy_candidate.sources.push_back(
+          StrategyConcatSourceFragment{
+              .src_name = source.src_name,
+              .src_shape = source.src_shape,
+              .src_stride = source.src_stride,
+              .dtype = source.dtype,
+              .src_logical_offset = src_entry != nullptr ? src_entry->logical_offset : source.src_logical_offset,
+              .src_storage_offset = src_entry != nullptr ? src_entry->storage_offset : source.src_storage_offset,
+              .src_size_bytes = src_entry != nullptr ? src_entry->logical_length : source.src_size_bytes,
+              .element_size = source.element_size,
+              .dim = source.dim,
+              .src_start = source.src_start,
+              .src_end = source.src_end,
+              .prefix_count = source.prefix_count,
+              .dst_block_offset_bytes = source.dst_block_offset_bytes,
+              .dst_block_stride_bytes = source.dst_block_stride_bytes,
+              .dst_block_bytes = source.dst_block_bytes,
+          });
+    }
+    mapped_copy_contract.concat_job_candidates.push_back(std::move(strategy_candidate));
+  }
+
+  StrategyPlan resolved_plan;
+  resolved_plan.artifact_id = std::string(resolved_artifact_id);
+  resolved_plan.generation = generation;
+  resolved_plan.variant = variant;
+  resolved_plan.canonical_index_json = mapped_plan.canonical_index_json;
+  resolved_plan.target_layout = target_layout;
+  resolved_plan.mapped_copy_contract = std::move(mapped_copy_contract);
+  return resolved_plan;
 }
 
 } // namespace tensorcast::daemon::materialization_target_plan

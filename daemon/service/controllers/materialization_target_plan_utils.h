@@ -69,4 +69,13 @@ grpc::Status build_mapped_target_materialization_plan(
     RecordMaterializeResultFn record_result,
     MappedTargetMaterializationPlan& plan);
 
+absl::StatusOr<store::runtime::ingestion::strategy::ResolvedMaterializationPlan>
+build_resolved_mapped_materialization_plan(
+    std::string_view resolved_artifact_id,
+    uint64_t generation,
+    const store::loading::IntoTargetLayout& target_layout,
+    const MappedTargetMaterializationPlan& mapped_plan,
+    const std::optional<store::loading::VariantIdentity>& variant,
+    std::optional<std::string_view> source_index_json = std::nullopt);
+
 } // namespace tensorcast::daemon::materialization_target_plan

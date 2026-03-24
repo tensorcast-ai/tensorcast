@@ -215,6 +215,10 @@ class Replica {
     return collective_load_group_;
   }
 
+  [[nodiscard]] const StoreEngineOptions::MaterializationStrategyConfig& materialization_strategy() const {
+    return materialization_strategy_;
+  }
+
  private:
   // Immutable identifier for multi-device binding.
   const loading::ReplicaKey key_{};
@@ -232,7 +236,8 @@ class Replica {
       std::optional<loading::CollectiveLoadGroupHint> collective_load_group,
       std::optional<loading::VariantIdentity> variant_identity,
       loading::TransformPlacement transform_placement,
-      StoreEngineOptions::ByteMappingConfig byte_mapping_config);
+      StoreEngineOptions::ByteMappingConfig byte_mapping_config,
+      StoreEngineOptions::MaterializationStrategyConfig materialization_strategy);
 
   // Helper to determine the optimal source location for loading `target_location`
   absl::StatusOr<common::memory::MemoryLocation> find_best_source_for_target(
@@ -255,6 +260,7 @@ class Replica {
   const std::optional<loading::VariantIdentity> variant_identity_;
   const loading::TransformPlacement transform_placement_;
   const StoreEngineOptions::ByteMappingConfig byte_mapping_config_;
+  const StoreEngineOptions::MaterializationStrategyConfig materialization_strategy_;
 
   // Producer-side completion signals for in-flight load/copy operations.
   std::shared_ptr<common::ReadySignal<absl::Status>> cpu_ready_signal_ ABSL_GUARDED_BY(mutex_);

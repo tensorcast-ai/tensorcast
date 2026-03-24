@@ -28,6 +28,7 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
@@ -64,6 +65,7 @@ using materialization_policy::validate_source_policy;
 using materialization_request_common::resolve_artifact_binding;
 using materialization_request_common::resolve_managed_disk_path;
 using materialization_target_plan::build_mapped_target_materialization_plan;
+using materialization_target_plan::build_resolved_mapped_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
@@ -935,6 +937,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
       d_.global_store_client,
       d_.disk_imports,
       storage_path_);
+  const auto common_done = std::chrono::steady_clock::now();
   if (!common_or.ok()) {
     return to_grpc_status(common_or.status());
   }
@@ -974,6 +977,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
 
   auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
       rctx.server_context().peer(), "MaterializeIntoMappedTarget", layout, req.pid(), req.device_uuid());
+  const auto target_validate_done = std::chrono::steady_clock::now();
   if (!validated_target_or.ok()) {
     record_materialize_into_target(
         "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -983,6 +987,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   const auto device = validated_target.device;
 
   auto offsets_or = resolve_target_offsets(layout);
+  const auto offsets_done = std::chrono::steady_clock::now();
   if (!offsets_or.ok()) {
     record_materialize_into_target(
         "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -997,6 +1002,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
 
   auto canonical_json_or = load_canonical_index_with_disk_fallback(
       d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
+  const auto canonical_done = std::chrono::steady_clock::now();
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -1012,6 +1018,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
       std::move(*canonical_json_or),
       record_materialize_into_target,
       mapped_plan);
+  const auto mapped_plan_done = std::chrono::steady_clock::now();
   if (!build_mapped_plan_status.ok()) {
     return build_mapped_plan_status;
   }
@@ -1036,6 +1043,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
   auto disk_metadata_or =
       build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
+  const auto disk_metadata_done = std::chrono::steady_clock::now();
   if (!disk_metadata_or.ok()) {
     return to_grpc_status(disk_metadata_or.status());
   }
@@ -1071,7 +1079,6 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
-
   if (view_plan.has_value() && view_plan->transform.requires_materialization) {
     return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
   }
@@ -1091,16 +1098,41 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
-
   store::loading::IntoTargetLayout target_layout;
   target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
-
   const uint64_t generation = compute_generation_from_index(canonical_index_json);
+  auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+      resolved_artifact_id,
+      generation,
+      target_layout,
+      materialization_target_plan::MappedTargetMaterializationPlan{
+          .view_spec = view_spec,
+          .view_plan = view_plan,
+          .resolved_selection = resolved_selection,
+          .copy_plan = copy_plan,
+          .canonical_index_json = canonical_index_json,
+          .selected_index_json = {},
+          .publish_storages = {},
+          .publish_segments = {},
+          .logical_total_size = logical_total_size,
+      },
+      hints.variant,
+      disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
+          ? std::optional<std::string_view>(*disk_metadata->source_index_json)
+          : std::nullopt);
+  if (!resolved_plan_or.ok()) {
+    return to_grpc_status(resolved_plan_or.status());
+  }
+  auto resolved_plan = std::move(*resolved_plan_or);
   const auto materialize_start = std::chrono::steady_clock::now();
-  auto result_or = d_.engine.materialize_mapped_into_target(
-      device, target_layout, copy_plan.map, canonical_index_json, generation, hints, disk_source);
+  auto result_or = d_.engine.materialize_mapped_into_target(device, resolved_plan, hints, disk_source);
+  const auto engine_done = std::chrono::steady_clock::now();
   if (!result_or.ok()) {
+    LOG(ERROR) << "MaterializeIntoMappedTarget engine failure"
+               << " artifact_id=" << resolved_artifact_id << " copy_entries=" << req.copy_plan().entries_size()
+               << " dst_tensors=" << req.dst_tensors_size() << " storages=" << layout.storages_size()
+               << " status=" << result_or.status();
     if (absl::IsDataLoss(result_or.status())) {
       for (const auto& region_id : storage_lease.acquired_region_ids()) {
         d_.regions.mark_poisoned(region_id).IgnoreError();
@@ -1217,6 +1249,17 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   const double materialize_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - materialize_start).count();
   const double total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "MaterializeIntoMappedTarget controller timings"
+            << " artifact_id=" << resolved_artifact_id << " copy_entries=" << req.copy_plan().entries_size()
+            << " dst_tensors=" << req.dst_tensors_size() << " storages=" << layout.storages_size()
+            << " common_sec=" << std::chrono::duration<double>(common_done - total_start).count()
+            << " target_validate_sec=" << std::chrono::duration<double>(target_validate_done - common_done).count()
+            << " offsets_sec=" << std::chrono::duration<double>(offsets_done - target_validate_done).count()
+            << " canonical_sec=" << std::chrono::duration<double>(canonical_done - offsets_done).count()
+            << " mapped_plan_sec=" << std::chrono::duration<double>(mapped_plan_done - canonical_done).count()
+            << " disk_metadata_sec=" << std::chrono::duration<double>(disk_metadata_done - mapped_plan_done).count()
+            << " engine_sec=" << std::chrono::duration<double>(engine_done - disk_metadata_done).count()
+            << " materialize_sec=" << materialize_sec << " total_sec=" << total_sec;
   LOG(INFO) << "MaterializeIntoMappedTarget completed"
             << " artifact_id=" << resolved_artifact_id
             << " source_layout=" << (disk_metadata.has_value() && disk_metadata->source_index_json.has_value())

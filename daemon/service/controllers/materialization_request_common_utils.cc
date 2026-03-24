@@ -238,6 +238,12 @@ absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
   if (!cpu_target) {
     return lease_context;
   }
+  if (lease_context.no_lease) {
+    // CPU prefetch / daemon-owned DRAM materialization intentionally avoids
+    // issuing local handle leases. In that mode there is no client-owned CPU
+    // handle to bind to a PID, so loopback-only CPU eligibility is sufficient.
+    return lease_context;
+  }
   if (!lease_context.loopback_peer) {
     return absl::PermissionDeniedError("CPU shared-memory materialization is local-only");
   }

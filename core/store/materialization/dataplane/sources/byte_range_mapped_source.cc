@@ -14,6 +14,7 @@
 #include "absl/base/thread_annotations.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_join.h"
 #include "absl/synchronization/mutex.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
@@ -146,6 +147,13 @@ absl::StatusOr<std::unique_ptr<ByteRangeMappedSource>> ByteRangeMappedSource::Cr
     return absl::InvalidArgumentError("ByteRangeMappedSource missing sources for map");
   }
   bool direct_write_supported = options.enable_direct_write_at && !program->has_strided_runs;
+  std::vector<std::string> direct_write_disable_reasons;
+  if (!options.enable_direct_write_at) {
+    direct_write_disable_reasons.emplace_back("option_disabled");
+  }
+  if (program->has_strided_runs) {
+    direct_write_disable_reasons.emplace_back("strided_runs");
+  }
   if (direct_write_supported) {
     for (const auto& run : program->runs) {
       if (run.kind != ByteRangeRun::Kind::kContiguous) {
@@ -153,14 +161,24 @@ absl::StatusOr<std::unique_ptr<ByteRangeMappedSource>> ByteRangeMappedSource::Cr
       }
       if (run.source_index >= sources.size()) {
         direct_write_supported = false;
+        direct_write_disable_reasons.emplace_back("source_index_out_of_range");
         break;
       }
       if (!sources[run.source_index]->supports_direct_write_at()) {
         direct_write_supported = false;
+        direct_write_disable_reasons.emplace_back(
+            std::string("source_") + std::to_string(run.source_index) + "_no_direct_write");
         break;
       }
     }
   }
+
+  LOG(INFO) << "ByteRangeMappedSource::Create path=" << options.path << " total_bytes=" << map.total_bytes
+            << " segments=" << map.segments.size() << " runs=" << program->runs.size()
+            << " has_strided_runs=" << program->has_strided_runs << " direct_write_supported=" << direct_write_supported
+            << " disable_reasons="
+            << (direct_write_disable_reasons.empty() ? std::string("none")
+                                                     : absl::StrJoin(direct_write_disable_reasons, ","));
 
   auto source = std::unique_ptr<ByteRangeMappedSource>(new ByteRangeMappedSource(
       std::move(map), std::move(program), std::move(sources), std::move(options), direct_write_supported));

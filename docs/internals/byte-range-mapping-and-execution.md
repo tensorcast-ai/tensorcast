@@ -17,6 +17,7 @@ In scope:
 - Normalization, compilation, and execution (`ByteRangeProgram`).
 - Strided coalescing and direct-write gating.
 - Integration points across the data plane.
+- Residual fallback role after the `0108` strategy plane.
 
 Out of scope:
 - Canonical index schema details (see `docs/internals/canonical-index.md`).
@@ -30,6 +31,9 @@ Out of scope:
 - PAD bytes are explicit segments; they are never inferred at execution time.
 - Gaps in destination coverage are invalid; normalization rejects them.
 - Missing source coverage is reported upstream as `UNAVAILABLE` with `PartialCoverageDetail` and no map is produced.
+- After `0108`, `ByteRangeMap` remains the generic fallback IR and
+  explainability surface, but it is no longer the mandatory primary planner IR
+  for every materialization request.
 
 ## ByteRangeProgram
 
@@ -54,6 +58,21 @@ and `read_into_at`. Execution assumes total byte length is stable and known at c
 4) **Execute**: `ByteRangeMappedSource` runs the program against sized sources and writes into sinks or hashing.
 
 Missing coverage is detected before compilation. The executor never invents bytes to hide missing coverage.
+
+## Relationship To The 0108 Strategy Plane
+
+The materialization runtime now uses a higher-level strategy seam before
+falling back to byte-range execution:
+
+1. controller/runtime resolve semantic truth and source facts,
+2. `MaterializationFacade` chooses executor strategy,
+3. residual bytes lower to `ByteRangeMap` and `ByteRangeProgram`.
+
+That means:
+
+- tensor-aware local or collective ops may consume part of a request directly,
+- residual bytes still lower through the exact byte-range engine,
+- byte-range execution remains authoritative for fallback correctness.
 
 # Source-Aware Scheduling (Canonical → Source)
 
