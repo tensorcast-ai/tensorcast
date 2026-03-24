@@ -149,6 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--case-timeout-sec", type=int, default=600)
     parser.add_argument("--direct-rdma", action="store_true")
     parser.add_argument("--strict-direct-rdma", action="store_true")
+    parser.add_argument("--rdma-profile", action="store_true")
     parser.add_argument("--bind-numa", action="store_true")
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--worker-max-wait-duration", default="20m")
@@ -393,6 +394,8 @@ def bench_shell_command(
         cmd.append("--direct-rdma")
     if args.strict_direct_rdma:
         cmd.append("--strict-direct-rdma")
+    if args.rdma_profile:
+        cmd.append("--rdma-profile")
 
     bench_cmd = shlex.join(cmd)
     nic_path = shlex.quote(nic)
@@ -408,12 +411,18 @@ def bench_shell_command(
     return shell
 
 
+def target_ready_from_log(content: str) -> bool:
+    has_structured_ready = "role=target" in content and "listen_port=" in content
+    has_rdma_register = "register done:" in content
+    return has_structured_ready or has_rdma_register
+
+
 def wait_for_ready_line(log_path: Path, timeout_sec: int) -> None:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if log_path.exists():
             content = log_path.read_text(encoding="utf-8", errors="ignore")
-            if "role=target" in content and "listen_port=" in content:
+            if target_ready_from_log(content):
                 return
         time.sleep(1)
     raise RuntimeError(f"target log did not reach READY before timeout: {log_path}")
@@ -451,6 +460,7 @@ def main() -> int:
             "case_timeout_sec": args.case_timeout_sec,
             "direct_rdma": args.direct_rdma,
             "strict_direct_rdma": args.strict_direct_rdma,
+            "rdma_profile": args.rdma_profile,
             "bind_numa": args.bind_numa,
             "verify": not args.no_verify,
             "worker_gpu": args.worker_gpu,
@@ -587,6 +597,7 @@ def main() -> int:
                 "bytes": args.bytes,
                 "direct_rdma": args.direct_rdma,
                 "strict_direct_rdma": args.strict_direct_rdma,
+                "rdma_profile": args.rdma_profile,
                 "bind_numa": args.bind_numa,
                 "verify": not args.no_verify,
                 "duration_sec": args.duration_sec,

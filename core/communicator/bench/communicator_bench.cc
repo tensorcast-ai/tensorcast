@@ -29,6 +29,7 @@
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/transport/rdma_context.h"
+#include "core/communicator/transport/request.h"
 #include "core/cuda/cuda_api.h"
 
 namespace tc = tensorcast::communicator;
@@ -67,6 +68,7 @@ struct Options {
   bool direct_rdma = false;
   bool strict_direct_rdma = false;
   bool probe_gpu_mr = false;
+  bool rdma_profile = false;
   bool verify = true;
   int iterations = 1;
   int warmup_iterations = 0;
@@ -341,6 +343,7 @@ void print_usage(const char* argv0) {
             << "  --strict-nic                fail if selected NIC does not match requested NIC\n"
             << "  --direct-rdma               request direct GPU RDMA\n"
             << "  --strict-direct-rdma        fail instead of falling back when direct RDMA is unavailable\n"
+            << "  --rdma-profile              enable per-request RDMA profiling fields\n"
             << "  --iterations <n>            measured iterations\n"
             << "  --warmup-iterations <n>     warmup iterations\n"
             << "  --threads <n>               concurrent initiator threads\n"
@@ -402,6 +405,7 @@ absl::Status parse_options(int argc, char** argv, Options* options) {
       {"direct-rdma", no_argument, nullptr, 'x'},
       {"strict-direct-rdma", no_argument, nullptr, 'X'},
       {"probe-gpu-mr", no_argument, nullptr, 'P'},
+      {"rdma-profile", no_argument, nullptr, 'R'},
       {"iterations", required_argument, nullptr, 't'},
       {"warmup-iterations", required_argument, nullptr, 'w'},
       {"threads", required_argument, nullptr, 'T'},
@@ -415,7 +419,7 @@ absl::Status parse_options(int argc, char** argv, Options* options) {
   };
 
   int opt = 0;
-  while ((opt = getopt_long(argc, argv, "r:l:p:i:q:k:m:b:g:dn:e:sxXPt:w:T:B:Q:W:u:vh", long_options, nullptr)) != -1) {
+  while ((opt = getopt_long(argc, argv, "r:l:p:i:q:k:m:b:g:dn:e:sxXPRt:w:T:B:Q:W:u:vh", long_options, nullptr)) != -1) {
     switch (opt) {
       case 'r':
         options->role = optarg;
@@ -481,6 +485,9 @@ absl::Status parse_options(int argc, char** argv, Options* options) {
         break;
       case 'P':
         options->probe_gpu_mr = true;
+        break;
+      case 'R':
+        options->rdma_profile = true;
         break;
       case 't': {
         auto st = parse_int(optarg, &options->iterations);
@@ -1254,6 +1261,7 @@ int main(int argc, char** argv) {
     print_usage(argv[0]);
     return 2;
   }
+  transport::ReadRequest::set_rdma_profile_enabled_for_process(options.rdma_profile);
 
   apply_rdm_nic_filter(options);
   auto preflight_or = inspect_rdma_selection(options);

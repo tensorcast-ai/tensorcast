@@ -14,6 +14,24 @@
 using tensorcast::communicator::transport::PartitionTensor;
 using tensorcast::communicator::transport::ReadRequest;
 
+namespace {
+
+class ScopedRdmaProfileSetting {
+ public:
+  explicit ScopedRdmaProfileSetting(bool enabled) : previous_(ReadRequest::rdma_profile_enabled_for_process()) {
+    ReadRequest::set_rdma_profile_enabled_for_process(enabled);
+  }
+
+  ~ScopedRdmaProfileSetting() {
+    ReadRequest::set_rdma_profile_enabled_for_process(previous_);
+  }
+
+ private:
+  bool previous_;
+};
+
+} // namespace
+
 TEST_CASE("ReadRequest emits window ACKs as segments complete", "[request]") {
   auto local = std::make_shared<PartitionTensor>(
       "key",
@@ -85,6 +103,67 @@ TEST_CASE("ReadRequest reports byte progress and completion status", "[request]"
 
   req.set_result(absl::OkStatus());
   REQUIRE(completed);
+}
+
+TEST_CASE("ReadRequest RDMA profiling is opt-in", "[request][profiling]") {
+  ScopedRdmaProfileSetting scoped_profile(/*enabled=*/false);
+  auto local = std::make_shared<PartitionTensor>(
+      "rdma_profile_off",
+      /*addr*/ 0,
+      /*bytes*/ 1024,
+      tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      nullptr);
+
+  ReadRequest req("rdma_profile_off", "127.0.0.1", 12345, local, /*remote_offset*/ 0, /*request_id=*/4);
+  auto future = req.get_future();
+  req.record_request_response();
+  req.note_rdma_response_window(3);
+  req.note_rdma_posted_wr(2);
+  req.note_rdma_completion();
+  req.note_rdma_ack_window(3);
+  req.note_rdma_handshake_queue_wait_us(17);
+  req.set_result(absl::OkStatus());
+
+  const auto result = future.get();
+  REQUIRE(result.status.ok());
+  REQUIRE(result.rdma_response_windows == 0);
+  REQUIRE(result.rdma_response_segments == 0);
+  REQUIRE(result.rdma_wr_posted == 0);
+  REQUIRE(result.rdma_wc_completed == 0);
+  REQUIRE(result.rdma_ack_windows == 0);
+  REQUIRE(result.rdma_ack_segments == 0);
+  REQUIRE(result.rdma_handshake_queue_wait_us == 0);
+}
+
+TEST_CASE("ReadRequest RDMA profiling records counters when enabled", "[request][profiling]") {
+  ScopedRdmaProfileSetting scoped_profile(/*enabled=*/true);
+  auto local = std::make_shared<PartitionTensor>(
+      "rdma_profile_on",
+      /*addr*/ 0,
+      /*bytes*/ 1024,
+      tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      nullptr);
+
+  ReadRequest req("rdma_profile_on", "127.0.0.1", 12345, local, /*remote_offset*/ 0, /*request_id=*/5);
+  auto future = req.get_future();
+  req.record_request_response();
+  req.note_rdma_response_window(4);
+  req.note_rdma_posted_wr(3);
+  req.note_rdma_completion();
+  req.note_rdma_completion();
+  req.note_rdma_ack_window(4);
+  req.note_rdma_handshake_queue_wait_us(23);
+  req.set_result(absl::OkStatus());
+
+  const auto result = future.get();
+  REQUIRE(result.status.ok());
+  REQUIRE(result.rdma_response_windows == 1);
+  REQUIRE(result.rdma_response_segments == 4);
+  REQUIRE(result.rdma_wr_posted == 3);
+  REQUIRE(result.rdma_wc_completed == 2);
+  REQUIRE(result.rdma_ack_windows == 1);
+  REQUIRE(result.rdma_ack_segments == 4);
+  REQUIRE(result.rdma_handshake_queue_wait_us == 23);
 }
 
 TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurrency]") {

@@ -66,6 +66,9 @@ static inline std::string get_request_instance_key(std::string key, uint64_t off
 
 class ReadRequest {
  public:
+  static bool rdma_profile_enabled_for_process();
+  static void set_rdma_profile_enabled_for_process(bool enabled);
+
   ReadRequest(
       std::string tensor_key,
       std::string dst_ip,
@@ -94,6 +97,10 @@ class ReadRequest {
 
   int16_t get_rail_id() const {
     return rail_id_;
+  }
+
+  [[nodiscard]] bool rdma_profile_enabled() const {
+    return rdma_profile_enabled_;
   }
 
   void record_request_response();
@@ -234,6 +241,7 @@ class ReadRequest {
   uint64_t remote_offset_;
   uint64_t request_id_;
   int16_t rail_id_;
+  bool rdma_profile_enabled_ = false;
   std::atomic<uint64_t> mtcp_stage_unit_hint_bytes_{0};
 
   // Number of expected RDMA READ completions for this request
