@@ -91,6 +91,54 @@ def compute_view_id(
     return str(compute_view_id_cpp(canonical_index_bytes, normalized_ops))
 
 
+def _ordered_subset_entry_names(
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> tuple[str, ...]:
+    requested = tuple(str(name) for name in tensor_names)
+    if not requested:
+        return ()
+    requested_set = set(requested)
+    ordered = tuple(
+        str(entry.name)
+        for entry in canonical_index.entries
+        if str(entry.name) in requested_set
+    )
+    if len(ordered) != len(requested_set):
+        known = {str(entry.name) for entry in canonical_index.entries}
+        unknown = sorted(requested_set - known)
+        raise ArtifactError(
+            f"View references unknown tensor(s): {', '.join(unknown)}",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    return ordered
+
+
+def _build_subset_identity_view_spec_proto(
+    *,
+    canonical_index: CanonicalIndex,
+    tensor_names: Sequence[str],
+) -> common_pb2.ViewSpec | None:
+    ordered_names = _ordered_subset_entry_names(canonical_index, tensor_names)
+    if not ordered_names:
+        return None
+    entry_by_name = {str(entry.name): entry for entry in canonical_index.entries}
+    proto = common_pb2.ViewSpec()
+    for name in ordered_names:
+        entry = entry_by_name[name]
+        if not entry.shape:
+            return None
+        dim0 = int(entry.shape[0])
+        if dim0 <= 0:
+            return None
+        op = proto.tensors[name].ops.add()
+        op.narrow.dim = 0
+        op.narrow.start = 0
+        op.narrow.length = dim0
+    return proto
+
+
 def _compose_narrow(
     *,
     base_shape: tuple[int, ...],
@@ -335,14 +383,15 @@ class ViewSpecComposer:
             view_index_bytes = bytes(view_payload["view_index_bytes"])
             resolved_selected_index = canonical_index_from_bytes(view_index_bytes)
             view_id: str | None = None
+            view_proto: common_pb2.ViewSpec | None = None
             if composed_spec is not None and not composed_spec.is_identity:
                 view_proto = composed_spec.proto
-                if view_proto is None:
-                    raise ArtifactError(
-                        "View spec proto missing while computing view_id",
-                        status_code="FAILED_PRECONDITION",
-                        retryable=False,
-                    )
+            elif subset_names is not None:
+                view_proto = _build_subset_identity_view_spec_proto(
+                    canonical_index=canonical_index,
+                    tensor_names=tensor_names,
+                )
+            if view_proto is not None:
                 view_id = compute_view_id(view_proto, canonical_bytes)
             view_cache = ViewMetadataCache(
                 view_id=view_id or "",

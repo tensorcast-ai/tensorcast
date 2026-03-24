@@ -61,6 +61,19 @@ def _make_three_dim_index() -> CanonicalIndex:
     return CanonicalIndex(entries=(entry,), total_size_bytes=entry.size_bytes, avbs_hash="")
 
 
+def _make_scalar_index() -> CanonicalIndex:
+    entry = CanonicalIndexEntry(
+        name="bias",
+        dtype=torch.float32,
+        shape=(),
+        stride=(),
+        storage_offset=0,
+        segment_offset=0,
+        size_bytes=4,
+    )
+    return CanonicalIndex(entries=(entry,), total_size_bytes=entry.size_bytes, avbs_hash="")
+
+
 def _make_payload(
     tensors: dict[str, torch.Tensor],
     *,
@@ -123,6 +136,7 @@ class _DummyExecutor:
 class _DummyRuntime:
     def __init__(self, client: Any | None = None) -> None:
         self._client = client or SimpleNamespace(get_artifact_index_by_id=lambda _: b"{}")
+        self.closed = False
         self.daemon_endpoint = "dummy"
         self.session_id = "sess"
         self.opts = StoreOptions()
@@ -132,6 +146,16 @@ class _DummyRuntime:
 
     def ensure_client(self) -> Any:
         return self._client
+
+    def get_artifact_index_cached(self, _artifact_id: str) -> None:
+        return None
+
+    def invalidate_artifact(self, _artifact_id: str, *, reason: str) -> None:
+        del reason
+        return None
+
+    def cache_artifact_index(self, _entry: Any) -> None:
+        return None
 
     def operation_span(self, *_args, **_kwargs):
         span = SimpleNamespace(
@@ -383,6 +407,46 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
     assert torch.allclose(target["weights"], torch.ones(16))
     assert captured_index["shapes"] == [(16,)]
     assert released.get("called") is True
+
+
+def test_tensor_dict_subset_scalar_falls_back_to_tensor_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scalar_index = _make_scalar_index()
+    runtime = _DummyRuntime(
+        client=SimpleNamespace(
+            get_artifact_index_by_id=lambda _artifact_id: json.dumps(
+                {"bias": [0, 4, [], [], "torch.float32", 0]},
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    )
+    store = Store("dummy:0", runtime=runtime)
+    artifact = store.artifact(artifact_id="artifact-123").subset(["bias"])
+
+    payload = _make_payload({"bias": torch.tensor(1.25, dtype=torch.float32)})
+    captured: dict[str, Any] = {}
+
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializationPayload, int]:
+        del self
+        captured.update(kwargs)
+        return payload, 0
+
+    monkeypatch.setattr(
+        store._materialization,
+        "_perform_get_with_retry",
+        fake_perform.__get__(store._materialization, MaterializationPipeline),
+    )
+
+    result = artifact.tensor_dict(device="cpu")
+    assert torch.equal(result["bias"], payload.state_dict["bias"])
+    assert captured["tensor_names"] == ("bias",)
+    assert captured["view_id"] is None
+    assert captured["view"] is None
+    assert artifact._view_metadata is not None
+    assert artifact._view_metadata.view_id == ""
+    assert artifact._view_metadata.tensor_names == ("bias",)
+    assert scalar_index.entries[0].shape == ()
 
 
 def test_compute_view_registration_plan_binding_narrow() -> None:
