@@ -1532,6 +1532,36 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                     gpu_allocation,
                     device_id);
               }
+            } else if (local_batched_disk_load.has_value()) {
+              auto local_result = try_local_batched_disk_load(
+                  LocalBatchedDiskLoadRequest{
+                      .replica_key = self->replica_key_,
+                      .disk_context = local_batched_disk_load->disk_context,
+                      .source_index_json = local_batched_disk_load->source_index_json,
+                      .view_index_json = local_batched_disk_load->view_index_json,
+                      .variant_identity = local_batched_disk_load->variant_identity,
+                      .strategy_config = local_batched_disk_load->materialization_strategy,
+                      .gpu_ptr = gpu_ptr,
+                      .device_id = device_id,
+                      .gpu_allocation = gpu_allocation,
+                  },
+                  self->pinned_pool_,
+                  self->pinned_memory_timeout_);
+              if (local_result.handled) {
+                exec_status = local_result.status;
+              } else {
+                LOG(WARNING) << "ReplicaLoadController(" << self->replica_key_.artifact_id
+                             << "): LOCAL_BATCHED_DISK_LOAD_FALLBACK handing off to generic transfer path";
+                exec_status = self->transfer_service_->execute(
+                    plan,
+                    target_location,
+                    *source,
+                    concurrency,
+                    self->async_runtime_->blocking_executor(),
+                    gpu_ptr,
+                    gpu_allocation,
+                    device_id);
+              }
             } else {
               exec_status = self->transfer_service_->execute(
                   plan,
