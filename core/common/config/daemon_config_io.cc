@@ -439,6 +439,53 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     bm->set_disk_source_prefetch_depth(2);
   }
 
+  const bool missing_materialization_strategy = !e->has_materialization_strategy();
+  if (missing_materialization_strategy) {
+    auto* defaults = e->mutable_materialization_strategy();
+    defaults->set_enable_local_batched_disk_load(true);
+    defaults->set_enable_owner_file_collective(false);
+  }
+  auto* ms = e->mutable_materialization_strategy();
+  if (!ms->has_enable_local_batched_disk_load()) {
+    ms->set_enable_local_batched_disk_load(true);
+  }
+  if (!ms->has_enable_owner_file_collective()) {
+    ms->set_enable_owner_file_collective(false);
+  }
+  if (!ms->has_enable_tensor_aware_mapped_executor()) {
+    ms->set_enable_tensor_aware_mapped_executor(true);
+  }
+  if (!ms->has_allow_mixed_execution()) {
+    ms->set_allow_mixed_execution(true);
+  }
+  if (!ms->has_allow_source_ordered_for_mapped()) {
+    ms->set_allow_source_ordered_for_mapped(true);
+  }
+  if (!ms->has_enable_mapped_dim0_tensor_jobs()) {
+    ms->set_enable_mapped_dim0_tensor_jobs(true);
+  }
+  if (!ms->has_enable_mapped_dim1_tensor_jobs()) {
+    ms->set_enable_mapped_dim1_tensor_jobs(true);
+  }
+  if (!ms->has_enable_mapped_concat_jobs()) {
+    ms->set_enable_mapped_concat_jobs(true);
+  }
+  if (!ms->has_enable_mapped_concat_execution()) {
+    ms->set_enable_mapped_concat_execution(true);
+  }
+  if (!ms->has_enable_mapped_single_range_concat_jobs()) {
+    ms->set_enable_mapped_single_range_concat_jobs(true);
+  }
+  if (!ms->has_enable_mapped_multirange_concat_jobs()) {
+    ms->set_enable_mapped_multirange_concat_jobs(true);
+  }
+  if (ms->executor_preference() == tcfg::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_UNSPECIFIED) {
+    ms->set_executor_preference(tcfg::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO);
+  }
+  if (ms->diagnostics_verbosity() == tcfg::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_UNSPECIFIED) {
+    ms->set_diagnostics_verbosity(tcfg::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_BASIC);
+  }
+
   if (cfg->has_pinned_memory()) {
     auto* pm = cfg->mutable_pinned_memory();
     if (!pm->has_allocation_timeout()) {

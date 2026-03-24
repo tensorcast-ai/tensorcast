@@ -79,6 +79,14 @@ engine:
   streaming_buffer_chunks: 16
   # Enable external target verification for MaterializeIntoTarget (off by default).
   enable_external_target_verification: false
+  # Default 0108 materialization strategy: prefer local batched disk loads and
+  # keep the tensor-aware mapped executor available for eligible paths.
+  materialization_strategy:
+    enable_local_batched_disk_load: true
+    enable_tensor_aware_mapped_executor: true
+    allow_mixed_execution: true
+    enable_owner_file_collective: false
+    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
   cpu_shared_memory:
     enabled: true
