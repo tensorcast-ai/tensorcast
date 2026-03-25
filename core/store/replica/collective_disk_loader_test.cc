@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
-#include "core/store/materialization/contracts/view/view_spec.h"
 
 namespace tensorcast::store::replica {
 
@@ -27,19 +26,10 @@ std::shared_ptr<const loader::DiskArtifactContext> make_disk_context() {
       std::vector<loader::SharedSafetensorsSegment>{});
 }
 
-loading::VariantIdentity make_transpose_variant() {
-  loading::VariantIdentity variant;
-  variant.view_spec.emplace();
-  materialization::view::TensorViewOps ops;
-  ops.ops.push_back(materialization::view::ViewOp::Transpose(materialization::view::TransposeOp{.dim0 = 0, .dim1 = 1}));
-  variant.view_spec->tensors.emplace("tensor", std::move(ops));
-  return variant;
-}
-
 } // namespace
 
 TEST_CASE(
-    "try_local_batched_disk_load falls back on unsupported view ops",
+    "try_local_batched_disk_load falls back when representation work is unavailable",
     "[collective_disk_loader][local_batched][fallback]") {
   StoreEngineOptions::MaterializationStrategyConfig strategy;
   strategy.enable_local_batched_disk_load = true;
@@ -47,9 +37,6 @@ TEST_CASE(
   LocalBatchedDiskLoadRequest request{
       .replica_key = loading::ReplicaKey{.artifact_id = "artifact_local_batched"},
       .disk_context = make_disk_context(),
-      .source_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
-      .view_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
-      .variant_identity = make_transpose_variant(),
       .strategy_config = strategy,
       .gpu_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(1)),
       .device_id = 0,

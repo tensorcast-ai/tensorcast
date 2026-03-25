@@ -1451,11 +1451,12 @@ sc_cc_library(
     hdrs = ["service/controllers/materialization_target_plan_utils.h"],
     deps = [
         ":materialization_layout_utils_lib",
-        ":materialization_mapped_copy_plan_utils_lib",
         ":materialization_mapped_target_layout_utils_lib",
         ":materialization_mapped_view_narrow_utils_lib",
         ":materialization_mapped_view_spec_utils_lib",
         ":materialization_policy_utils_lib",
+        ":representation_layout_types",
+        ":representation_transform_builder_lib",
         ":selection_validation_utils_lib",
         ":status_utils",
         ":types_hdr",
@@ -1466,6 +1467,22 @@ sc_cc_library(
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
+    name = "representation_transform_builder_lib",
+    srcs = ["service/controllers/representation_transform_builder.cc"],
+    hdrs = ["service/controllers/representation_transform_builder.h"],
+    deps = [
+        ":materialization_layout_utils_lib",
+        ":representation_layout_types",
+        "//core/store/materialization/contracts:representation_contract",
+        "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
     ],
@@ -1514,17 +1531,9 @@ sc_cc_library(
     ],
 )
 
-sc_cc_library(
-    name = "materialization_mapped_copy_plan_utils_lib",
-    srcs = ["service/controllers/materialization_mapped_copy_plan_utils.cc"],
-    hdrs = ["service/controllers/materialization_mapped_copy_plan_utils.h"],
-    deps = [
-        ":materialization_layout_utils_lib",
-        "//core/store/materialization/contracts:byte_range_map",
-        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/types:span",
-    ],
+sc_header_only_library(
+    name = "representation_layout_types",
+    hdrs = ["service/controllers/representation_layout_types.h"],
 )
 
 sc_cc_library(
@@ -1533,7 +1542,7 @@ sc_cc_library(
     hdrs = ["service/controllers/materialization_mapped_target_layout_utils.h"],
     deps = [
         ":materialization_layout_utils_lib",
-        ":materialization_mapped_copy_plan_utils_lib",
+        ":representation_layout_types",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -1545,7 +1554,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_mapped_view_narrow_utils.cc"],
     hdrs = ["service/controllers/materialization_mapped_view_narrow_utils.h"],
     deps = [
-        ":materialization_mapped_copy_plan_utils_lib",
+        ":representation_layout_types",
         "//core/store/materialization/dataplane:view_planner",
         "@abseil-cpp//absl/container:flat_hash_map",
     ],
@@ -1757,6 +1766,15 @@ cc_test(
     srcs = ["service/controllers/materialization_layout_utils_test.cc"],
     deps = [
         ":materialization_layout_utils_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_target_plan_utils_test",
+    srcs = ["service/controllers/materialization_target_plan_utils_test.cc"],
+    deps = [
+        ":materialization_target_plan_utils_lib",
         "@catch2//:catch2_main",
     ],
 )

@@ -34,6 +34,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
 #include "core/store/replica/unified_memory_authority.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::replica {
@@ -50,17 +51,13 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
   struct CollectiveDiskLoadInput {
     loading::CollectiveLoadGroupHint group;
     std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-    std::string source_index_json;
-    std::string view_index_json;
-    std::optional<loading::VariantIdentity> variant_identity;
+    materialization::contracts::RepresentationWorkPlan representation_work_plan;
     StoreEngineOptions::MaterializationStrategyConfig materialization_strategy;
   };
 
   struct LocalBatchedDiskLoadInput {
     std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-    std::string source_index_json;
-    std::string view_index_json;
-    std::optional<loading::VariantIdentity> variant_identity;
+    materialization::contracts::RepresentationWorkPlan representation_work_plan;
     StoreEngineOptions::MaterializationStrategyConfig materialization_strategy;
   };
 

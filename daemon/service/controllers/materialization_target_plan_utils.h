@@ -11,7 +11,7 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
-#include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
+#include "daemon/service/controllers/representation_transform_builder.h"
 #include "daemon/state/types.h"
 #include "grpcpp/support/status.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
@@ -42,7 +42,7 @@ struct MappedTargetMaterializationPlan {
   std::optional<store::loader::ViewSpec> view_spec;
   std::optional<store::loader::ViewPlan> view_plan;
   tensorcast::common::v1::ArtifactSelection resolved_selection;
-  materialization_mapped_copy_plan::BuildCopyPlanResult copy_plan;
+  representation_transform_builder::BuildRepresentationTransformResult representation;
   std::string canonical_index_json;
   std::string selected_index_json;
   std::vector<RegisterStorageMeta> publish_storages;
