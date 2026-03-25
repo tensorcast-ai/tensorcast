@@ -1158,6 +1158,17 @@ class TransformSpec:
 Note: `TransformSpec.layout_hash` is a transform-specific **output layout contract hash** (used for validation/debug).
 It is not selection identity and MUST NOT be substituted for `logical_layout_hash` / `selection_hash`.
 
+Lowering rule:
+
+- `TransformSpec` remains the public request shape only.
+- Common runtime or builder code must first resolve it into one normalized
+  internal representation-transform semantic contract before executor choice.
+- That semantic resolution is distinct from later physical topology, routing, or
+  communicator planning.
+- This keeps source-to-serving build and future topology-scoped reshard
+  execution on the same control-plane request family without forcing them to
+  share one executor design.
+
 Two common execution shapes:
 
 1) **transform → register** (produces a new Artifact)
@@ -1209,7 +1220,7 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
 | persistence status polling | `Operation[PersistenceOutcome]` | Phase-0 wraps polling; Phase-1 adds `WaitPersistenceStatus`. |
 | weights broadcast | `Plan` over workers calling prefetch/pin | Source selection remains Global Store-owned. |
 | Cache delta transfer (paged KV) | `Artifact.view(...)` (slice/subset) + `tensor_dict_into(...)` | Requires domain-specific tensor naming/layout conventions. |
-| reshard tasks | `transform_register(...)` | Produces a new artifact + versioned key; orchestrated via `Plan`. |
+| reshard tasks | `transform_register(...)` | Produces a new artifact + versioned key; semantic resolution happens before executor choice; orchestrated via `Plan`. |
 
 ## Contracts and Invariants
 
@@ -1503,8 +1514,8 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
   and making plan executors tolerant (reconcile + re-pin).
 - **Alias and byte artifact catalog scale/availability**: linearizable alias reads and large byte artifact catalogs can hurt availability;
   mitigate with explicit fallback policy (fixed-version keys) + admission control + bounded candidate LPM.
-- **Transform plugins risk semantic drift**: mitigate with versioned `TransformSpec.name` + `layout_hash` gating and
-  fail-fast on mismatch.
+- **Transform plugins risk semantic drift**: mitigate with versioned `TransformSpec.name`, `layout_hash` gating,
+  canonical lowering into repository-defined representation-transform contracts, and fail-fast on mismatch.
 
 ---
 

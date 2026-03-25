@@ -284,16 +284,27 @@ CUDA region registered by the client:
 `MaterializeIntoMappedTarget` now follows the same layered model as replica and
 region-backed materialization:
 
-1. controller resolves target layout and mapped copy-plan semantics,
-2. controller builds `ResolvedMaterializationPlan` and `MappedCopyContract`,
-3. runtime resolves source binding,
+1. controller resolves target layout and representation-transform semantics,
+2. controller builds `ResolvedMaterializationPlan` with
+   `RepresentationTransformContract`,
+3. runtime resolves source binding and derives `RepresentationWorkPlan`,
 4. `MaterializationFacade` selects execution:
    - tensor-aware local executor,
    - owner-file collective executor,
    - residual generic byte-range executor.
 
-Mapped executor candidates no longer travel through `MaterializeHints`. They
-are internal runtime contracts only.
+Executor-private tensor or concat candidates no longer travel through
+`MaterializeHints` or shared runtime contracts. Shared semantic truth is the
+representation contract plus derived work plan.
+
+Current execution rule:
+
+- mixed execution must already be explicit in `RepresentationWorkPlan` before
+  any executor runs,
+- runtime execution must not implicitly widen back to generic fallback after a
+  partial executor attempt,
+- owner-file collective is only eligible for zero-residual work plans in the
+  current phase.
 
 ## Typed Runtime Strategy Config
 

@@ -14,8 +14,11 @@ related_code:
   - core/store/materialization/dataplane/view/view_plan_source.cc
   - core/store/materialization/benchmarks/safetensors_load_strategy_benchmark_main.cc
   - core/store/replica/collective_disk_loader.cc
+  - core/store/replica/replica.cc
   - daemon/service/controllers/materialization_target_plan_utils.cc
-  - daemon/service/controllers/materialization_mapped_copy_plan_utils.cc
+  - daemon/service/controllers/owned_binding_service.cc
+  - daemon/service/controllers/representation_layout_types.h
+  - daemon/service/controllers/representation_transform_builder.cc
   - daemon/service/controllers/target_materialization_service.cc
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/materialization.py
@@ -56,7 +59,7 @@ The final model is:
   `MaterializeIntoMappedTarget` keep the same public API shapes.
 - semantic truth remains separate from execution strategy:
   - resolved selection and view identity,
-  - resolved copy contract,
+  - resolved representation-transform contract,
   - target layout and verification or publication requirements.
 - source acquisition remains separate from execution strategy:
   - existing replica or local alias,
@@ -85,13 +88,17 @@ Partially implemented in this repository:
 - core-owned internal strategy-plane contracts now live in
   `core/store/runtime/ingestion/materialization_strategy_types.h`:
   - `ResolvedMaterializationPlan`
-  - `MappedCopyContract`
+  - `RepresentationTransformContract`
+  - `RepresentationWorkPlan`
   - `ResolvedSourceBinding`
   - `ExecutionCommitReport`
 - mapped-target controller lowering now builds the internal resolved plan and
   passes it directly into the common runtime as the authoritative semantic
   contract, with the runtime validating request hints against that plan instead
   of accepting duplicate semantic inputs.
+- source-bound binding startup/refill and ordinary `into_target` lowering now
+  reuse the same semantic-core family instead of carrying a separate
+  mapped-only builder path.
 - typed rollout config now lives under
   `engine.materialization_strategy` in
   `proto/tensorcast/config/v1/daemon_config.proto` and is mapped into
@@ -102,11 +109,13 @@ Partially implemented in this repository:
   0108 defaults instead of silently disabling local batched disk load.
 - the common-runtime mapped-target path currently lands:
   - source acquisition selection,
+  - shared `RepresentationWorkPlan` derivation,
   - owner-file collective handoff,
   - residual generic byte-range fallback.
-- the dedicated common-runtime local tensor-aware executor described by this
-  design remains follow-up work; the current implementation does not yet route
-  mapped-target requests into a distinct local tensor-aware executor.
+- ordinary replica local-batched and collective executors now consume shared
+  work-plan items instead of recovering semantic truth in executor-local code.
+- ordinary non-collective `into_target` still executes through the generic
+  byte-range backend after shared lowering.
 - public SDK retrieval APIs remain unchanged.
 
 Remaining follow-up work after this implementation is operational validation on
@@ -234,8 +243,8 @@ Important current sites:
 
 - selection-first and target-layout resolution:
   - `daemon/service/controllers/materialization_target_plan_utils.cc`
-- mapped copy-plan shaping:
-  - `daemon/service/controllers/materialization_mapped_copy_plan_utils.cc`
+- representation-transform shaping:
+  - `daemon/service/controllers/representation_transform_builder.cc`
 - source acquisition for replica materialization:
   - `core/store/runtime/ingestion/materialization_service.cc`
 - generic lowering and mapped-target execution:
@@ -318,14 +327,14 @@ Normative rules:
 - semantic truth remains separate from source acquisition,
 - semantic truth remains separate from rollout policy.
 
-## 2. Copy-contract boundary
+## 2. Representation-transform boundary
 
-This design aligns with `0087`, which treats copy contract as distinct from
-selection and placement.
+This design aligns with `0087`, which treats transform semantics as distinct
+from selection and placement.
 
 ### 2.1 Canonical or view into-target
 
-For `MaterializeIntoTarget`, the copy contract is:
+For `MaterializeIntoTarget`, the semantic contract may be trivial:
 
 - resolved selected ByteSpace,
 - coalesced `IntoTargetLayout`,
@@ -333,14 +342,12 @@ For `MaterializeIntoTarget`, the copy contract is:
 
 ### 2.2 Mapped-target
 
-For `MaterializeIntoMappedTarget`, the copy contract must preserve more than
+For `MaterializeIntoMappedTarget`, the semantic contract must preserve more than
 flat target storage spans.
 
-Introduce one core-owned internal copy-contract family:
+- `RepresentationTransformContract`
 
-- `MappedCopyContract`
-
-`MappedCopyContract` must preserve:
+The long-term semantic family must preserve:
 
 - source and destination tensor specs,
 - range and dim semantics,
@@ -361,10 +368,17 @@ Required migration interpretation:
   `MappedTargetMaterializationPlan` are useful prototypes of semantic
   resolution,
 - current `BuildCopyPlanResult` is a useful prototype but mixes two concerns:
-  - semantic copy contract,
+  - semantic transform contract,
   - executor compatibility analysis,
-- long term, semantic copy contract belongs in a core-owned internal contract
-  library, while executor compatibility analysis belongs in the strategy plane.
+- long term, normalized representation-transform semantics belong in a
+  core-owned internal contract library, while executor compatibility analysis
+  belongs in the strategy plane.
+
+Phase boundary rule:
+
+- physical topology, participant assignment, communicator routing, and
+  topology-scoped reshard execution remain follow-on work above this semantic
+  seam rather than part of the first `0108` convergence wave.
 
 ## 3. Source acquisition plane
 
@@ -421,7 +435,7 @@ Normative rule:
 
 ## 5. Execution model
 
-### 5.1 Mixed execution is allowed
+### 5.1 Mixed execution is allowed, but it must be explicit
 
 This design rejects the assumption that every request must choose exactly one
 executor for all bytes.
@@ -435,6 +449,15 @@ One request may use mixed execution:
 
 This is the preferred long-term model because it preserves correctness while
 allowing near-optimal execution on irregular workloads.
+
+Current phase rule:
+
+- mixed execution is only valid when the strategy plane emits explicit generic
+  fallback ops or residual accounting before execution begins,
+- executors must not partially execute a request and then implicitly reconstruct
+  the remaining generic fallback ranges at runtime,
+- if a current executor cannot consume a request without such implicit widening,
+  that executor is not eligible for that request.
 
 ### 5.2 Internal execution ops
 
@@ -461,6 +484,10 @@ The common runtime may still expose dominant executor labels for diagnostics:
 
 But those labels are diagnostic summaries, not an architectural requirement that
 all bytes in a request use only one executor.
+
+A future topology-scoped or group-reshard executor may later be added to this
+family, but it must still consume the same normalized semantic contract rather
+than recreate a second semantic stack.
 
 ## 6. Single semantic truth and residual coverage
 
@@ -493,14 +520,16 @@ Introduce one internal reporting contract:
 - committed ranges,
 - residual fallback ranges,
 - executor path actually used,
-- failure reason for ranges that had to widen back to fallback.
+- explicit fallback work chosen during planning.
 
 Required interpretation:
 
 - feature gating or rollout gating may change executor candidacy,
 - feature gating may not change requested byte semantics,
-- disabling one executor path must only increase residual fallback work, never
-  suppress required bytes.
+- disabling one executor path must only increase explicitly planned fallback
+  work, never suppress required bytes,
+- runtime execution must not invent new fallback ranges that were not already
+  present in the emitted execution plan.
 
 ## 7. Relationship to `ByteRangeMap`
 
@@ -624,7 +653,9 @@ repository style rules.
 
 - Classes or structs:
   - `ResolvedMaterializationPlan`
-  - `MappedCopyContract`
+  - `RepresentationDescriptor`
+  - `RepresentationTensorBinding`
+  - `RepresentationTransformContract`
   - `ResolvedSourceBinding`
   - `ExecutionStrategyPlan`
   - `ExecutionCommitReport`
@@ -634,7 +665,7 @@ repository style rules.
   - `MaterializationStrategy`
 - Functions or methods:
   - `build_resolved_materialization_plan`
-  - `build_mapped_copy_contract`
+  - `build_representation_transform_contract`
   - `acquire_resolved_source_binding`
   - `build_execution_strategy_plan`
   - `emit_execution_commit_report`
@@ -654,13 +685,16 @@ permanent interface.
 Required migration order:
 
 1. define core-owned internal semantic contracts,
-2. split mapped-target semantic copy contract from executor compatibility
-   analysis,
-3. make source-acquisition inputs explicit,
-4. add strategy-plane lowering in `MaterializationFacade`,
-5. keep `ByteRangeMap` fallback exact and always available,
-6. re-express current useful fast-path ideas as internal executor behavior,
-7. remove executor-private request hints from shared runtime contracts.
+2. replace mapped-target prototype copy-contract naming with normalized
+   representation-transform semantics,
+3. split executor compatibility analysis out of the shared semantic contract,
+4. make source-acquisition inputs explicit,
+5. add strategy-plane lowering in `MaterializationFacade`,
+6. keep `ByteRangeMap` fallback exact and always available,
+7. re-express current useful fast-path ideas as internal executor behavior,
+8. remove executor-private request hints from shared runtime contracts,
+9. defer topology-scoped participant execution to a follow-on design until the
+   semantic core is authoritative.
 
 ### 13.1 Mapped-target specific rules
 
@@ -736,8 +770,8 @@ Required cleanup sequence:
 
 Mitigations:
 
-- planner must be expressed purely in terms of metadata, copy-contract, and
-  topology semantics, not model names,
+- planner must be expressed purely in terms of metadata, normalized
+  representation-transform semantics, and source facts, not model names,
 - semantic contract extraction must precede hint cleanup,
 - planner must emit explicit fallback ops for anything not proven safe,
 - executor coverage reporting must be derived from actual committed plan items,
@@ -812,4 +846,4 @@ Mitigations:
 - [`core/store/runtime/ingestion/materialization_facade.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_facade.cc)
 - [`core/store/runtime/ingestion/materialization_service.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_service.cc)
 - [`daemon/service/controllers/materialization_target_plan_utils.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/materialization_target_plan_utils.cc)
-- [`daemon/service/controllers/materialization_mapped_copy_plan_utils.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/materialization_mapped_copy_plan_utils.cc)
+- [`daemon/service/controllers/representation_transform_builder.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/representation_transform_builder.cc)

@@ -60,6 +60,13 @@ Important boundary:
 - the daemon and common runtime still treat collective as an explicit request
   hint plus typed strategy config.
 
+Executor note:
+
+- local-batched disk load and owner-file collective now consume prebuilt
+  `RepresentationWorkPlan` inputs,
+- executor-local code no longer reconstructs semantic tensor-job truth from
+  source/view index JSON at execution time.
+
 ## Typed Daemon Defaults
 
 The default `0108` strategy entry point is daemon config, not ad-hoc environment
@@ -354,7 +361,7 @@ used by `MaterializeIntoTarget`, `bind(...)`, and `bind_into(...)` flows.
 
 ```mermaid
 flowchart TD
-    A["disk-backed mapped into-target request"] --> B{"disk + collective hint + mapped copy contract?"}
+    A["disk-backed mapped into-target request"] --> B{"disk + collective hint + representation work plan?"}
     B -- "yes" --> C["try collective mapped executor"]
     B -- "no" --> D{"source-ordered path available?"}
     D -- "yes" --> E["GenericByteRangeExecutor(source_ordered)"]
@@ -365,8 +372,13 @@ The key differences from ordinary `tensor_dict` startup are:
 
 - the request already arrives as a mapped target layout,
 - the runtime considers source-ordered execution using source layout metadata,
-- collective mapped execution is only possible when a mapped copy contract and
+- collective mapped execution is only possible when a derived representation
+  work plan and
   collective group are both present,
+- owner-file or collective mapped execution is only eligible when the emitted
+  work plan already has zero residual generic fallback,
+- runtime execution must not partially execute mapped work and then implicitly
+  derive new residual fallback at execution time,
 - otherwise the residual executor is still the generic byte-range engine.
 
 ## Runtime Binding And Ordinary Disk Startup
