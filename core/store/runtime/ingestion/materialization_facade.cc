@@ -58,6 +58,12 @@ namespace tensorcast::store::runtime::ingestion {
 namespace {
 
 using StrategyConfig = StoreEngineOptions::MaterializationStrategyConfig;
+using RepresentationTensorSpec = materialization::contracts::RepresentationTensorSpec;
+using RepresentationWorkItem = materialization::contracts::RepresentationWorkItem;
+using RepresentationWorkItemKind = materialization::contracts::RepresentationWorkItemKind;
+using RepresentationWorkPlan = materialization::contracts::RepresentationWorkPlan;
+using TensorAxisRange = materialization::contracts::TensorAxisRange;
+using TensorCoordinateSpec = materialization::contracts::TensorCoordinateSpec;
 
 bool prefer_local_canonical_source_for_mapped(const StrategyConfig& strategy_config) {
   return strategy_config.prefer_local_canonical_for_mapped;
@@ -82,6 +88,10 @@ bool allow_collective_mapped_executor(const StrategyConfig& strategy_config) {
   return true;
 }
 
+bool allow_collective_tensor_executor(const StrategyConfig& strategy_config) {
+  return allow_collective_mapped_executor(strategy_config);
+}
+
 absl::StatusOr<loading::MaterializeHints> build_effective_mapped_hints(
     const strategy::ResolvedMaterializationPlan& resolved_plan,
     const loading::MaterializeHints& hints) {
@@ -91,10 +101,13 @@ absl::StatusOr<loading::MaterializeHints> build_effective_mapped_hints(
   if (resolved_plan.canonical_index_json.empty()) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires resolved_plan.canonical_index_json");
   }
-  if (!resolved_plan.mapped_copy_contract.has_value()) {
-    return absl::InvalidArgumentError("materialize_mapped_into_target requires resolved_plan.mapped_copy_contract");
+  if (!resolved_plan.representation_transform_contract.has_value()) {
+    return absl::InvalidArgumentError(
+        "materialize_mapped_into_target requires resolved_plan.representation_transform_contract");
   }
-
+  if (!resolved_plan.representation_work_plan.has_value()) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires resolved_plan.representation_work_plan");
+  }
   loading::MaterializeHints effective_hints = hints;
   if (effective_hints.artifact_id.empty()) {
     effective_hints.artifact_id = resolved_plan.artifact_id;
@@ -166,6 +179,242 @@ bool byte_range_map_crosses_target_storage_boundaries(
     }
   }
   return false;
+}
+
+tensorcast::common::v1::ByteSpaceRef canonical_byte_space_ref() {
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  return byte_space;
+}
+
+struct ByteSpan {
+  uint64_t offset{0};
+  uint64_t length{0};
+};
+
+bool is_row_major_contiguous(const RepresentationTensorSpec& spec) {
+  if (spec.shape.empty()) {
+    return spec.stride.empty();
+  }
+  if (spec.shape.size() != spec.stride.size()) {
+    return false;
+  }
+  int64_t expected = 1;
+  for (int64_t index = static_cast<int64_t>(spec.shape.size()) - 1; index >= 0; --index) {
+    if (spec.stride[static_cast<size_t>(index)] != expected) {
+      return false;
+    }
+    expected *= spec.shape[static_cast<size_t>(index)];
+  }
+  return true;
+}
+
+std::optional<TensorAxisRange> single_axis_range(const TensorCoordinateSpec& spec) {
+  if (spec.selects_scalar || spec.axes.size() != 1) {
+    return std::nullopt;
+  }
+  return spec.axes.front();
+}
+
+bool coordinate_selects_single_element(const TensorCoordinateSpec& spec, const RepresentationTensorSpec& tensor) {
+  if (spec.selects_scalar) {
+    return tensor.shape.empty();
+  }
+  if (tensor.shape.empty()) {
+    return spec.axes.empty();
+  }
+  if (spec.axes.size() != tensor.shape.size()) {
+    return false;
+  }
+  std::vector<bool> seen(tensor.shape.size(), false);
+  for (const auto& axis : spec.axes) {
+    if (axis.dim < 0 || axis.dim >= static_cast<int32_t>(tensor.shape.size())) {
+      return false;
+    }
+    if (seen[static_cast<size_t>(axis.dim)]) {
+      return false;
+    }
+    seen[static_cast<size_t>(axis.dim)] = true;
+    if (axis.end - axis.start != 1) {
+      return false;
+    }
+  }
+  return std::all_of(seen.begin(), seen.end(), [](bool value) { return value; });
+}
+
+bool work_plan_has_fill_items(const RepresentationWorkPlan& plan) {
+  return std::any_of(plan.items.begin(), plan.items.end(), [](const RepresentationWorkItem& item) {
+    return item.kind == RepresentationWorkItemKind::kConstFill ||
+        item.kind == RepresentationWorkItemKind::kScalarBroadcastFill;
+  });
+}
+
+bool work_plan_has_scalar_fill_items(const RepresentationWorkPlan& plan) {
+  return std::any_of(plan.items.begin(), plan.items.end(), [](const RepresentationWorkItem& item) {
+    return item.kind == RepresentationWorkItemKind::kScalarBroadcastFill;
+  });
+}
+
+absl::StatusOr<std::vector<ByteSpan>> build_destination_byte_spans(
+    const RepresentationTensorSpec& spec,
+    const TensorCoordinateSpec& coordinate) {
+  if (spec.element_size == 0 && spec.logical_length == 0) {
+    return absl::InvalidArgumentError("destination tensor requires non-zero element_size or logical_length");
+  }
+  if (coordinate.selects_scalar || coordinate_selects_single_element(coordinate, spec)) {
+    uint64_t element_offset = 0;
+    for (const auto& axis : coordinate.axes) {
+      element_offset +=
+          static_cast<uint64_t>(axis.start) * static_cast<uint64_t>(spec.stride[static_cast<size_t>(axis.dim)]);
+    }
+    const uint64_t scalar_bytes = spec.element_size == 0 ? spec.logical_length : spec.element_size;
+    return std::vector<ByteSpan>{
+        {.offset = spec.logical_offset + element_offset * scalar_bytes, .length = scalar_bytes}};
+  }
+  if (coordinate.axes.empty()) {
+    return std::vector<ByteSpan>{{.offset = spec.logical_offset, .length = spec.logical_length}};
+  }
+  if (!is_row_major_contiguous(spec)) {
+    return absl::UnimplementedError("fill work requires row-major contiguous destination tensor");
+  }
+  const auto axis = single_axis_range(coordinate);
+  if (!axis.has_value()) {
+    return absl::UnimplementedError("fill work only supports full, scalar, dim0, or 2D dim1 destinations");
+  }
+  if (axis->dim == 0) {
+    uint64_t tail = 1;
+    for (size_t index = 1; index < spec.shape.size(); ++index) {
+      tail *= static_cast<uint64_t>(spec.shape[index]);
+    }
+    return std::vector<ByteSpan>{{
+        .offset = spec.logical_offset + static_cast<uint64_t>(axis->start) * tail * spec.element_size,
+        .length = static_cast<uint64_t>(axis->end - axis->start) * tail * spec.element_size,
+    }};
+  }
+  if (axis->dim == 1 && spec.shape.size() == 2) {
+    std::vector<ByteSpan> spans;
+    spans.reserve(static_cast<size_t>(spec.shape[0]));
+    const uint64_t row_stride_bytes = static_cast<uint64_t>(spec.stride[0]) * spec.element_size;
+    const uint64_t col_offset_bytes = static_cast<uint64_t>(axis->start) * spec.element_size;
+    const uint64_t col_bytes = static_cast<uint64_t>(axis->end - axis->start) * spec.element_size;
+    for (int64_t row = 0; row < spec.shape[0]; ++row) {
+      spans.push_back(
+          ByteSpan{
+              .offset = spec.logical_offset + static_cast<uint64_t>(row) * row_stride_bytes + col_offset_bytes,
+              .length = col_bytes,
+          });
+    }
+    return spans;
+  }
+  return absl::UnimplementedError("fill work only supports dim0 or 2D dim1 destinations");
+}
+
+absl::StatusOr<std::vector<std::uint8_t>> read_scalar_source_value(
+    loader::SeekableSource& source,
+    const RepresentationWorkItem& item) {
+  if (item.sources.size() != 1) {
+    return absl::InvalidArgumentError("scalar-from-source work item requires exactly one source");
+  }
+  const auto& fragment = item.sources.front().fragment;
+  const auto& source_spec = fragment.source_spec;
+  if (!coordinate_selects_single_element(fragment.source_range, source_spec)) {
+    return absl::InvalidArgumentError("scalar-from-source work item requires a single source element");
+  }
+  const uint64_t scalar_bytes = source_spec.element_size == 0 ? source_spec.logical_length : source_spec.element_size;
+  uint64_t element_offset = 0;
+  for (const auto& axis : fragment.source_range.axes) {
+    element_offset +=
+        static_cast<uint64_t>(axis.start) * static_cast<uint64_t>(source_spec.stride[static_cast<size_t>(axis.dim)]);
+  }
+  std::vector<std::uint8_t> value(scalar_bytes);
+  const uint64_t byte_offset =
+      source_spec.logical_offset + source_spec.storage_offset * scalar_bytes + element_offset * scalar_bytes;
+  size_t got = 0;
+  auto got_or = source.read_at(byte_offset, value.data(), value.size());
+  if (!got_or.ok()) {
+    return got_or.status();
+  }
+  got = *got_or;
+  if (got != value.size()) {
+    return absl::OutOfRangeError("short read while reading scalar source value");
+  }
+  return value;
+}
+
+absl::Status write_pattern_to_sink(
+    loader::TargetLayoutGpuSink& sink,
+    uint64_t offset,
+    uint64_t length,
+    absl::Span<const std::uint8_t> pattern,
+    size_t chunk_bytes) {
+  if (pattern.empty()) {
+    return absl::InvalidArgumentError("fill pattern must not be empty");
+  }
+  const size_t buffer_bytes = std::max<size_t>(pattern.size(), std::min<uint64_t>(length, chunk_bytes));
+  std::vector<std::uint8_t> buffer(buffer_bytes);
+  for (size_t cursor = 0; cursor < buffer.size(); cursor += pattern.size()) {
+    const size_t copy_bytes = std::min<size_t>(pattern.size(), buffer.size() - cursor);
+    std::memcpy(buffer.data() + cursor, pattern.data(), copy_bytes);
+  }
+  uint64_t remaining = length;
+  uint64_t dst_offset = offset;
+  while (remaining > 0) {
+    const size_t take = static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
+    auto write_status = sink.write_at(dst_offset, buffer.data(), take);
+    if (!write_status.ok()) {
+      return write_status;
+    }
+    remaining -= take;
+    dst_offset += take;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status execute_fill_work_items(
+    absl::Span<const RepresentationWorkItem> items,
+    loader::TargetLayoutGpuSink& sink,
+    loader::SeekableSource* source,
+    size_t chunk_bytes) {
+  for (const auto& item : items) {
+    if (item.kind != RepresentationWorkItemKind::kConstFill &&
+        item.kind != RepresentationWorkItemKind::kScalarBroadcastFill) {
+      continue;
+    }
+    std::vector<ByteSpan> spans;
+    std::vector<std::uint8_t> pattern;
+    if (item.kind == RepresentationWorkItemKind::kConstFill) {
+      if (!item.fill_rule.has_value() || item.fill_rule->constant_value.empty()) {
+        return absl::InvalidArgumentError("const fill work item requires a non-empty fill_rule");
+      }
+      pattern = item.fill_rule->constant_value;
+      auto spans_or = build_destination_byte_spans(item.dst_spec, TensorCoordinateSpec{});
+      if (!spans_or.ok()) {
+        return spans_or.status();
+      }
+      spans = std::move(*spans_or);
+    } else {
+      if (source == nullptr) {
+        return absl::FailedPreconditionError("scalar-from-source work item requires a source");
+      }
+      auto pattern_or = read_scalar_source_value(*source, item);
+      if (!pattern_or.ok()) {
+        return pattern_or.status();
+      }
+      pattern = std::move(*pattern_or);
+      auto spans_or = build_destination_byte_spans(item.dst_spec, item.sources.front().fragment.destination_range);
+      if (!spans_or.ok()) {
+        return spans_or.status();
+      }
+      spans = std::move(*spans_or);
+    }
+    for (const auto& span : spans) {
+      auto status = write_pattern_to_sink(sink, span.offset, span.length, pattern, chunk_bytes);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+  }
+  return absl::OkStatus();
 }
 
 } // namespace
@@ -1848,6 +2097,40 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       ? std::optional<std::string_view>(*hints.disk_metadata->source_index_json)
       : std::nullopt;
 
+  std::optional<materialization::contracts::RepresentationWorkPlan> ordinary_representation_work_plan;
+  if (!(view_plan.has_value() && view_plan->transform.requires_materialization)) {
+    const std::string_view semantic_source_index_json =
+        source_index_json.has_value() ? *source_index_json : canonical_index_json;
+    const std::string_view semantic_target_index_json = (view_plan.has_value() && !view_plan->is_identity)
+        ? std::string_view(view_plan->view_index_json)
+        : canonical_index_json;
+    auto representation_or = materialization::contracts::build_index_backed_representation_work(
+        semantic_source_index_json,
+        semantic_target_index_json,
+        hints.variant,
+        canonical_byte_space_ref(),
+        "ephemeral_into_target");
+    if (representation_or.ok()) {
+      size_t work_item_count = 0;
+      uint64_t committed_bytes = 0;
+      auto work_plan_or =
+          materialization::contracts::build_representation_work_plan(representation_or->transform_contract);
+      if (!work_plan_or.ok()) {
+        VLOG(1) << "materialize_into_target shared work-plan lowering unavailable: " << work_plan_or.status();
+      } else {
+        work_item_count = work_plan_or->items.size();
+        committed_bytes = work_plan_or->committed_bytes;
+        ordinary_representation_work_plan = std::move(*work_plan_or);
+      }
+      VLOG(1) << "materialize_into_target representation_work"
+              << " items=" << work_item_count << " committed_bytes=" << committed_bytes
+              << " representation_contract_hash="
+              << representation_or->transform_contract.target_representation.representation_contract_hash;
+    } else {
+      VLOG(1) << "materialize_into_target shared work-plan lowering unavailable: " << representation_or.status();
+    }
+  }
+
   auto get_map_ptr = [&](bool use_source_layout) -> absl::StatusOr<std::shared_ptr<loader::ByteRangeMap>> {
     const std::string canonical_hash = index_hash(canonical_index_json);
     std::string plan_key = absl::StrCat(generation, ":canon:", canonical_hash);
@@ -1921,8 +2204,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         byte_range_map_crosses_target_storage_boundaries(effective_map, target_layout);
     const bool source_ordered = use_source_layout && config_.options->byte_mapping.disk_source_ordered_read &&
         allow_source_ordered_for_mapped(config_.options->materialization_strategy) && !map_crosses_storage_boundaries;
+    const bool collective_eligible = source_kind == loading::MaterializationSource::kDisk &&
+        hints.collective_load_group.has_value() && ordinary_representation_work_plan.has_value() &&
+        allow_collective_tensor_executor(config_.options->materialization_strategy) &&
+        !work_plan_has_fill_items(*ordinary_representation_work_plan) &&
+        ordinary_representation_work_plan->residual_fallback_map.total_bytes == 0;
     if (use_source_layout && config_.options->byte_mapping.disk_source_ordered_read && map_crosses_storage_boundaries) {
-      LOG(INFO) << "materialize_mapped_into_target disabling source-ordered fast path because byte-range segments "
+      LOG(INFO) << "materialize_into_target disabling source-ordered fast path because byte-range segments "
                    "cross target storage boundaries"
                 << " map_segments=" << effective_map.segments.size()
                 << " target_storages=" << target_layout.storages.size();
@@ -1978,6 +2266,43 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
     if (range_cursor != total_size) {
       return absl::InvalidArgumentError("materialize_into_target storage ranges do not span total_size");
+    }
+
+    if (collective_eligible) {
+      if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
+        auto shared_or = disk_loader->shared_context();
+        if (!shared_or.ok()) {
+          LOG(WARNING) << "materialize_into_target collective path unavailable: shared_context error="
+                       << shared_or.status();
+        } else {
+          const replica::CollectiveMappedTargetLoadOptions collective_options{
+              .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+              .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+              .strategy_config = config_.options->materialization_strategy,
+          };
+          auto collective_result = replica::try_collective_mapped_target_load(
+              replica::CollectiveMappedTargetLoadRequest{
+                  .artifact_id = hints.artifact_id,
+                  .group = *hints.collective_load_group,
+                  .disk_context = *shared_or,
+                  .representation_work_plan = *ordinary_representation_work_plan,
+                  .target_layout = target_layout,
+                  .device_id = target_device.ordinal,
+              },
+              config_.runtime_context->pinned_buffer_pool(),
+              timeout,
+              collective_options);
+          if (collective_result.handled) {
+            if (!collective_result.status.ok()) {
+              return absl::DataLossError(
+                  absl::StrCat(
+                      "materialize_into_target collective execution failed: ", collective_result.status.message()));
+            }
+            return loading::MaterializeIntoTargetResult{.source = source_kind};
+          }
+        }
+      }
     }
 
     loader::TargetLayoutGpuSink::Options sink_opts{
@@ -2205,10 +2530,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   }
   const loading::MaterializeHints& request_hints = *effective_hints_or;
   const loading::IntoTargetLayout& target_layout = resolved_plan.target_layout;
-  const loader::ByteRangeMap& mapping = resolved_plan.mapped_copy_contract->fallback_map;
+  const loader::ByteRangeMap& mapping = resolved_plan.representation_work_plan->residual_fallback_map;
   const std::string_view canonical_index_json = resolved_plan.canonical_index_json;
   const uint64_t generation = resolved_plan.generation;
-  const strategy::MappedCopyContract& mapped_copy_contract = *resolved_plan.mapped_copy_contract;
+  const auto& representation_work_plan = *resolved_plan.representation_work_plan;
+  const bool has_fill_items = work_plan_has_fill_items(representation_work_plan);
 
   if (target_device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires GPU target device");
@@ -2216,7 +2542,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (target_layout.storages.empty()) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires at least one target storage");
   }
-  if (mapping.num_sources != 1) {
+  if (mapping.total_bytes > 0 && mapping.num_sources != 1) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires mapping.num_sources == 1");
   }
 
@@ -2239,8 +2565,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (total_size == 0) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires total_size > 0");
   }
-  if (mapping.total_bytes != total_size) {
-    return absl::InvalidArgumentError("materialize_mapped_into_target mapping total_bytes mismatch");
+  if (mapping.total_bytes > total_size) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target mapping total_bytes exceeds target size");
   }
 
   auto canonical_total_or = compute_logical_total_size(canonical_index_json);
@@ -2271,6 +2597,43 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       ? std::optional<std::string_view>(*request_hints.disk_metadata->source_index_json)
       : std::nullopt;
   const auto& strategy_config = config_.options->materialization_strategy;
+
+  if (mapping.total_bytes == 0 && has_fill_items && !work_plan_has_scalar_fill_items(representation_work_plan)) {
+    std::vector<loader::TargetStorage> storages;
+    storages.reserve(target_layout.storages.size());
+    uint64_t range_cursor = 0;
+    for (const auto& storage : target_layout.storages) {
+      if (storage.length == 0) {
+        return absl::InvalidArgumentError("materialize_mapped_into_target requires non-empty storage length");
+      }
+      if (storage.length > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("materialize_mapped_into_target storage length exceeds host limits");
+      }
+      storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
+      range_cursor += storage.length;
+    }
+    if (range_cursor != total_size) {
+      return absl::InvalidArgumentError("materialize_mapped_into_target storage ranges do not span total_size");
+    }
+    loader::TargetLayoutGpuSink sink(
+        loader::TargetLayoutGpuSink::Options{
+            .storages = std::move(storages),
+            .chunk_size = config_.artifact_chunk_bytes,
+            .device_id = target_device.ordinal,
+        });
+    auto fill_status = execute_fill_work_items(
+        absl::MakeSpan(representation_work_plan.items), sink, /*source=*/nullptr, config_.artifact_chunk_bytes);
+    if (!fill_status.ok()) {
+      return absl::DataLossError(
+          absl::StrCat("materialize_mapped_into_target fill execution failed: ", fill_status.message()));
+    }
+    auto close_status = sink.close();
+    if (!close_status.ok()) {
+      return absl::DataLossError(
+          absl::StrCat("materialize_mapped_into_target fill sink close failed: ", close_status.message()));
+    }
+    return loading::MaterializeIntoTargetResult{.source = loading::MaterializationSource::kUnspecified};
+  }
 
   auto build_identity_map = [](uint64_t bytes) -> loader::ByteRangeMap {
     loader::ByteRangeMap map;
@@ -2416,7 +2779,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .source_layout_available = use_source_layout,
         .direct_write_capable = direct_write_supported,
         .collective_eligible = source_kind == loading::MaterializationSource::kDisk &&
-            request_hints.collective_load_group.has_value() && allow_collective_mapped_executor(strategy_config),
+            request_hints.collective_load_group.has_value() && allow_collective_mapped_executor(strategy_config) &&
+            !has_fill_items && representation_work_plan.residual_fallback_map.total_bytes == 0,
     };
 
     const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
@@ -2464,8 +2828,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                   .artifact_id = request_hints.artifact_id,
                   .group = *request_hints.collective_load_group,
                   .disk_context = *shared_or,
-                  .map = effective_map,
-                  .mapped_copy_contract = mapped_copy_contract,
+                  .representation_work_plan = representation_work_plan,
                   .target_layout = target_layout,
                   .device_id = target_device.ordinal,
               },
@@ -2478,6 +2841,28 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                   absl::StrCat(
                       "materialize_mapped_into_target collective execution failed: ",
                       collective_result.status.message()));
+            }
+            if (has_fill_items) {
+              loader::TargetLayoutGpuSink fill_sink(
+                  loader::TargetLayoutGpuSink::Options{
+                      .storages = storages,
+                      .chunk_size = config_.artifact_chunk_bytes,
+                      .device_id = target_device.ordinal,
+                  });
+              auto fill_status = execute_fill_work_items(
+                  absl::MakeSpan(representation_work_plan.items),
+                  fill_sink,
+                  base_source.get(),
+                  config_.artifact_chunk_bytes);
+              if (!fill_status.ok()) {
+                return absl::DataLossError(
+                    absl::StrCat("materialize_mapped_into_target fill execution failed: ", fill_status.message()));
+              }
+              auto close_status = fill_sink.close();
+              if (!close_status.ok()) {
+                return absl::DataLossError(
+                    absl::StrCat("materialize_mapped_into_target fill sink close failed: ", close_status.message()));
+              }
             }
             const strategy::ExecutionCommitReport collective_report{
                 .source = source_kind,
@@ -2509,7 +2894,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     loader::TargetLayoutGpuSink sink(std::move(sink_opts));
 
     const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, request_hints);
-    if (source_ordered) {
+    if (source_ordered && effective_map.total_bytes > 0 && !effective_map.segments.empty()) {
       const uint64_t max_window_bytes = std::min<uint64_t>(request_hints.max_buffer_bytes, 64ULL * 1024 * 1024);
       const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
       loader::SourceWindowScheduler::Options sched_opts{
@@ -2537,7 +2922,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         return absl::DataLossError(
             absl::StrCat("materialize_mapped_into_target source-ordered execution failed: ", exec_status.message()));
       }
-    } else {
+    } else if (effective_map.total_bytes > 0 && !effective_map.segments.empty()) {
       const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
@@ -2561,6 +2946,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                    << " map_segments=" << effective_map.segments.size()
                    << " target_storages=" << target_layout.storages.size() << " status=" << pump_status;
         return absl::DataLossError(absl::StrCat("materialize_mapped_into_target pump failed: ", pump_status.message()));
+      }
+    }
+    if (has_fill_items) {
+      auto fill_status = execute_fill_work_items(
+          absl::MakeSpan(representation_work_plan.items), sink, base_source.get(), config_.artifact_chunk_bytes);
+      if (!fill_status.ok()) {
+        return absl::DataLossError(
+            absl::StrCat("materialize_mapped_into_target fill execution failed: ", fill_status.message()));
       }
     }
     const auto exec_done = std::chrono::steady_clock::now();

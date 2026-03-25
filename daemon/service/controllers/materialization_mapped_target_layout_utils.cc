@@ -17,8 +17,8 @@ namespace {
 
 using materialization_layout::dtype_element_size;
 using materialization_layout::product_dims;
-using materialization_mapped_copy_plan::is_contiguous;
-using materialization_mapped_copy_plan::MappedTensorSpec;
+using representation_layout::is_contiguous;
+using representation_layout::TensorLayoutSpec;
 
 void set_reason(ValidationErrorReason* reason, ValidationErrorReason value) {
   if (reason != nullptr) {
@@ -129,7 +129,7 @@ absl::StatusOr<ValidatedMappedTargetLayout> validate_mapped_target_layout(
 
     result.dst_specs.emplace(
         spec.name(),
-        MappedTensorSpec{
+        TensorLayoutSpec{
             .shape = std::move(shape),
             .stride = std::move(stride),
             .dtype = spec.dtype(),

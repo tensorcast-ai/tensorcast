@@ -49,6 +49,7 @@ sc_header_only_library(
     deps = [
         "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:representation_contract",
         "//core/store/materialization/contracts:view_plan",
     ],
 )

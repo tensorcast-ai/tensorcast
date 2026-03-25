@@ -1029,7 +1029,6 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   auto& view_plan = mapped_plan.view_plan;
   auto publish_storages = std::move(mapped_plan.publish_storages);
   auto publish_segments = std::move(mapped_plan.publish_segments);
-  auto copy_plan = std::move(mapped_plan.copy_plan);
 
   auto storage_lease = std::move(validated_target.storage_lease);
 
@@ -1110,7 +1109,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
           .view_spec = view_spec,
           .view_plan = view_plan,
           .resolved_selection = resolved_selection,
-          .copy_plan = copy_plan,
+          .representation = mapped_plan.representation,
           .canonical_index_json = canonical_index_json,
           .selected_index_json = {},
           .publish_storages = {},
@@ -1244,7 +1243,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));
-    span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(copy_plan.total_bytes_copied));
+    span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(mapped_plan.representation.total_bytes_copied));
   }
   const double materialize_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - materialize_start).count();

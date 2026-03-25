@@ -1091,6 +1091,250 @@ v2::MaterializeIntoMappedTargetRequest build_mapped_request(
   return request;
 }
 
+struct SourceBoundMaterializationRequest {
+  bool mapped{false};
+  int owner_pid{0};
+  std::string_view device_uuid;
+  const tensorcast::common::v1::ArtifactSelection* source_selection{nullptr};
+  const v2::TargetLayout* target_layout{nullptr};
+  std::string_view target_index_json;
+  const v2::CopyPlan* copy_plan{nullptr};
+  const std::vector<v2::MappedTensorSpec>* dst_tensors{nullptr};
+  v2::SourcePreference legacy_preference{v2::SourcePreference::SOURCE_PREFERENCE_AUTO};
+  const v2::SourcePolicy* source_policy{nullptr};
+  std::optional<std::string_view> operation_id;
+  v2::TransformPlacement placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
+};
+
+struct PreparedSourceBoundPlan {
+  std::string resolved_artifact_id;
+  tensorcast::common::v1::ArtifactSelection current_selection;
+  std::string canonical_index_json;
+  uint64_t logical_total_size{0};
+  v2::TransformPlacement requested_placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
+  materialization_policy::ResolvedSourcePolicy effective_policy;
+  std::optional<store::loading::DiskSource> disk_source;
+  std::optional<store::loading::DiskMetadata> disk_metadata;
+  std::optional<MappedTargetMaterializationPlan> mapped_plan;
+  std::optional<TargetMaterializationPlan> unmapped_plan;
+};
+
+struct PreparedSourceBoundExecution {
+  store::loading::MaterializeHints hints;
+  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
+};
+
+grpc::Status prepare_source_bound_plan(
+    const OwnedBindingService::Dep& d,
+    RpcContext& rctx,
+    const store::DeviceKey& device,
+    const SourceBoundMaterializationRequest& request,
+    PreparedSourceBoundPlan& out) {
+  if (request.source_selection == nullptr || request.target_layout == nullptr) {
+    return {StatusCode::INVALID_ARGUMENT, "source-bound materialization request is incomplete"};
+  }
+  if (request.mapped && (request.copy_plan == nullptr || request.dst_tensors == nullptr)) {
+    return {StatusCode::INVALID_ARGUMENT, "mapped source-bound materialization request is incomplete"};
+  }
+
+  out = PreparedSourceBoundPlan{};
+  out.requested_placement = request.placement;
+  out.effective_policy = resolve_source_policy(request.source_policy, request.legacy_preference);
+  if (auto policy_status = validate_source_policy(out.effective_policy); !policy_status.ok()) {
+    return to_grpc_status(policy_status);
+  }
+
+  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
+  auto resolution_or = resolve_artifact_and_disk_source(
+      d.global_store_client,
+      &d.disk_imports,
+      d.storage_path,
+      request.source_selection->artifact_id(),
+      out.effective_policy.allow_disk,
+      /*allow_local_import_fallback=*/true,
+      loopback_peer);
+  if (!resolution_or.ok()) {
+    return to_grpc_status(resolution_or.status());
+  }
+  auto resolution = std::move(*resolution_or);
+  out.resolved_artifact_id = resolution.resolved_artifact_id;
+  out.disk_source = resolution.disk_source;
+
+  auto canonical_json_or = load_canonical_index_with_disk_fallback(
+      d.engine, out.resolved_artifact_id, resolution.normalized_disk_path, device.ordinal, resolution.gs_connected);
+  if (!canonical_json_or.ok()) {
+    return to_grpc_status(canonical_json_or.status());
+  }
+
+  auto offsets_or = resolve_target_offsets(*request.target_layout);
+  if (!offsets_or.ok()) {
+    return to_grpc_status(offsets_or.status());
+  }
+
+  if (request.mapped) {
+    BindingRegistry::Record replay_record;
+    replay_record.owner_pid = request.owner_pid;
+    replay_record.device_uuid = std::string(request.device_uuid);
+    replay_record.source_selection = *request.source_selection;
+    replay_record.target_layout = *request.target_layout;
+    replay_record.copy_plan = *request.copy_plan;
+    replay_record.dst_tensors = *request.dst_tensors;
+    v2::MaterializeIntoMappedTargetRequest mapped_request = build_mapped_request(
+        replay_record,
+        out.resolved_artifact_id,
+        out.effective_policy.preference,
+        request.source_policy,
+        request.operation_id,
+        request.placement);
+    MappedTargetMaterializationPlan mapped_plan;
+    auto plan_status = build_mapped_target_materialization_plan(
+        d.engine,
+        mapped_request,
+        out.resolved_artifact_id,
+        *offsets_or,
+        std::move(*canonical_json_or),
+        /*record_result=*/nullptr,
+        mapped_plan);
+    if (!plan_status.ok()) {
+      return plan_status;
+    }
+    out.logical_total_size = mapped_plan.logical_total_size;
+    out.current_selection =
+        build_mapped_bound_selection(out.resolved_artifact_id, *request.target_layout, request.target_index_json);
+    out.canonical_index_json = mapped_plan.canonical_index_json;
+    out.mapped_plan = std::move(mapped_plan);
+  } else {
+    v2::MaterializeIntoTargetRequest unmapped_request = build_unmapped_request(
+        *request.source_selection,
+        out.resolved_artifact_id,
+        *request.target_layout,
+        request.owner_pid,
+        request.device_uuid,
+        out.effective_policy.preference,
+        request.source_policy,
+        request.operation_id,
+        request.placement);
+    TargetMaterializationPlan unmapped_plan;
+    auto plan_status = build_target_materialization_plan(
+        d.engine,
+        out.resolved_artifact_id,
+        unmapped_request,
+        *request.target_layout,
+        *offsets_or,
+        std::move(*canonical_json_or),
+        /*record_result=*/nullptr,
+        unmapped_plan);
+    if (!plan_status.ok()) {
+      return plan_status;
+    }
+    out.logical_total_size = unmapped_plan.logical_total_size;
+    out.current_selection = unmapped_plan.resolved_selection;
+    out.canonical_index_json = unmapped_plan.canonical_index_json;
+    out.unmapped_plan = std::move(unmapped_plan);
+  }
+
+  auto disk_metadata_or = build_binding_disk_metadata(
+      resolution.normalized_disk_path, out.resolved_artifact_id, device.ordinal, d.disk_imports);
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  out.disk_metadata = std::move(*disk_metadata_or);
+  return Status::OK;
+}
+
+grpc::Status prepare_source_bound_execution(
+    const OwnedBindingService::Dep& d,
+    RpcContext& rctx,
+    const v2::TargetLayout& target_layout,
+    const OwnedStorageLayout& storage_layout,
+    const PreparedSourceBoundPlan& prepared_plan,
+    PreparedSourceBoundExecution& out) {
+  out = PreparedSourceBoundExecution{};
+
+  const std::chrono::milliseconds request_budget = resolve_owner_request_budget(rctx.server_context());
+  out.hints.request_budget = request_budget;
+  out.hints.transport_wait_timeout = request_budget;
+  out.hints.artifact_id = prepared_plan.resolved_artifact_id;
+  const std::string requester_worker_id = d.identity.worker_id();
+  if (!requester_worker_id.empty()) {
+    out.hints.transport_requester_worker_id = requester_worker_id;
+  }
+  const bool prefer_direct_disk_for_source_layout = prepared_plan.disk_source.has_value() &&
+      prepared_plan.disk_metadata.has_value() && prepared_plan.disk_metadata->source_index_json.has_value();
+  out.hints.source_preference = prefer_direct_disk_for_source_layout
+      ? store::loading::SourcePreference::kPreferDisk
+      : to_hint_preference(prepared_plan.effective_policy.preference);
+  out.hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : prepared_plan.effective_policy.allow_p2p;
+  out.hints.allow_disk = prepared_plan.effective_policy.allow_disk;
+  out.hints.verify = store::loading::MaterializeHints::Verify::NONE;
+  out.hints.export_policy = store::loading::ExportPolicy::kForce;
+  if (prepared_plan.disk_metadata.has_value()) {
+    out.hints.disk_metadata = *prepared_plan.disk_metadata;
+  }
+  if (prepared_plan.disk_source.has_value()) {
+    out.hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
+  }
+
+  if (prepared_plan.mapped_plan.has_value()) {
+    const auto& mapped_plan = *prepared_plan.mapped_plan;
+    if (mapped_plan.view_plan.has_value() && mapped_plan.view_plan->transform.requires_materialization) {
+      return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
+    }
+    if (!mapped_plan.resolved_selection.view_id().empty() || mapped_plan.view_spec.has_value() ||
+        mapped_plan.view_plan.has_value()) {
+      store::loading::VariantIdentity variant;
+      variant.canonical_artifact_id = prepared_plan.resolved_artifact_id;
+      if (!mapped_plan.resolved_selection.view_id().empty()) {
+        variant.view_id = mapped_plan.resolved_selection.view_id();
+      }
+      if (mapped_plan.view_spec.has_value()) {
+        variant.view_spec = mapped_plan.view_spec;
+      }
+      if (mapped_plan.view_plan.has_value()) {
+        variant.cached_plan = mapped_plan.view_plan;
+      }
+      variant.canonical_index_json = mapped_plan.canonical_index_json;
+      variant.placement = resolve_transform_placement(prepared_plan.requested_placement, mapped_plan.view_spec);
+      out.hints.variant = std::move(variant);
+    }
+
+    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+        prepared_plan.resolved_artifact_id,
+        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
+        storage_layout.into_target,
+        mapped_plan,
+        out.hints.variant,
+        prepared_plan.disk_metadata.has_value() && prepared_plan.disk_metadata->source_index_json.has_value()
+            ? std::optional<std::string_view>(*prepared_plan.disk_metadata->source_index_json)
+            : std::nullopt);
+    if (!resolved_plan_or.ok()) {
+      return to_grpc_status(resolved_plan_or.status());
+    }
+    out.resolved_plan = std::move(*resolved_plan_or);
+    return Status::OK;
+  }
+
+  if (!prepared_plan.unmapped_plan.has_value()) {
+    return {StatusCode::FAILED_PRECONDITION, "source-bound materialization plan is missing execution state"};
+  }
+  const auto& unmapped_plan = *prepared_plan.unmapped_plan;
+  if (unmapped_plan.view_plan.has_value() && target_layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    store::loading::VariantIdentity variant;
+    variant.canonical_artifact_id = prepared_plan.resolved_artifact_id;
+    if (unmapped_plan.resolved_view_id.has_value()) {
+      variant.view_id = *unmapped_plan.resolved_view_id;
+    }
+    if (unmapped_plan.view_spec.has_value()) {
+      variant.view_spec = unmapped_plan.view_spec;
+    }
+    variant.cached_plan = unmapped_plan.view_plan;
+    variant.canonical_index_json = unmapped_plan.canonical_index_json;
+    variant.placement = resolve_transform_placement(prepared_plan.requested_placement, unmapped_plan.view_spec);
+    out.hints.variant = std::move(variant);
+  }
+  return Status::OK;
+}
+
 } // namespace
 
 OwnedBindingService::OwnedBindingService(Dep d)
@@ -1297,108 +1541,34 @@ grpc::Status OwnedBindingService::create_owned_binding(
     return {StatusCode::INVALID_ARGUMENT, "bind() requires a CUDA device"};
   }
 
-  auto effective_policy =
-      resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  if (auto policy_status = validate_source_policy(effective_policy); !policy_status.ok()) {
-    return to_grpc_status(policy_status);
-  }
-
-  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
-  auto resolution_or = resolve_artifact_and_disk_source(
-      d_.global_store_client,
-      &d_.disk_imports,
-      d_.storage_path,
-      req.source_selection().artifact_id(),
-      effective_policy.allow_disk,
-      /*allow_local_import_fallback=*/true,
-      loopback_peer);
-  if (!resolution_or.ok()) {
-    return to_grpc_status(resolution_or.status());
-  }
-  auto resolution = std::move(*resolution_or);
-
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      d_.engine,
-      resolution.resolved_artifact_id,
-      resolution.normalized_disk_path,
-      device.ordinal,
-      resolution.gs_connected);
-  if (!canonical_json_or.ok()) {
-    return to_grpc_status(canonical_json_or.status());
-  }
-
-  auto offsets_or = resolve_target_offsets(req.target_layout());
-  if (!offsets_or.ok()) {
-    return to_grpc_status(offsets_or.status());
-  }
-
-  TargetMaterializationPlan unmapped_plan;
-  MappedTargetMaterializationPlan mapped_plan;
-  tensorcast::common::v1::ArtifactSelection current_selection;
-  uint64_t logical_total_size = 0;
-  v2::TransformPlacement placement = req.placement();
-  std::optional<store::loading::DiskSource> disk_source = resolution.disk_source;
-
-  if (mapped) {
-    BindingRegistry::Record replay_record;
-    replay_record.owner_pid = req.pid();
-    replay_record.device_uuid = req.device_uuid();
-    replay_record.source_selection = req.source_selection();
-    replay_record.target_layout = req.target_layout();
-    replay_record.copy_plan = req.copy_plan();
-    replay_record.dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
-    v2::MaterializeIntoMappedTargetRequest request = build_mapped_request(
-        replay_record,
-        resolution.resolved_artifact_id,
-        effective_policy.preference,
-        req.has_source_policy() ? &req.source_policy() : nullptr,
-        req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
-        placement);
-    auto plan_status = build_mapped_target_materialization_plan(
-        d_.engine,
-        request,
-        resolution.resolved_artifact_id,
-        *offsets_or,
-        std::move(*canonical_json_or),
-        /*record_result=*/nullptr,
-        mapped_plan);
-    if (!plan_status.ok()) {
-      return plan_status;
-    }
-    logical_total_size = mapped_plan.logical_total_size;
-    current_selection = build_mapped_bound_selection(
-        resolution.resolved_artifact_id,
-        req.target_layout(),
-        std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()));
-  } else {
-    v2::MaterializeIntoTargetRequest request = build_unmapped_request(
-        req.source_selection(),
-        resolution.resolved_artifact_id,
-        req.target_layout(),
-        req.pid(),
-        req.device_uuid(),
-        effective_policy.preference,
-        req.has_source_policy() ? &req.source_policy() : nullptr,
-        req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
-        placement);
-    auto plan_status = build_target_materialization_plan(
-        d_.engine,
-        resolution.resolved_artifact_id,
-        request,
-        req.target_layout(),
-        *offsets_or,
-        std::move(*canonical_json_or),
-        /*record_result=*/nullptr,
-        unmapped_plan);
-    if (!plan_status.ok()) {
-      return plan_status;
-    }
-    logical_total_size = unmapped_plan.logical_total_size;
-    current_selection = unmapped_plan.resolved_selection;
+  std::vector<v2::MappedTensorSpec> mapped_dst_tensors(req.dst_tensors().begin(), req.dst_tensors().end());
+  PreparedSourceBoundPlan prepared_plan;
+  auto prepare_status = prepare_source_bound_plan(
+      d_,
+      rctx,
+      device,
+      SourceBoundMaterializationRequest{
+          .mapped = mapped,
+          .owner_pid = req.pid(),
+          .device_uuid = req.device_uuid(),
+          .source_selection = &req.source_selection(),
+          .target_layout = &req.target_layout(),
+          .target_index_json = std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
+          .copy_plan = mapped ? &req.copy_plan() : nullptr,
+          .dst_tensors = mapped ? &mapped_dst_tensors : nullptr,
+          .legacy_preference = req.preference(),
+          .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
+          .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
+          .placement = req.placement(),
+      },
+      prepared_plan);
+  if (!prepare_status.ok()) {
+    return prepare_status;
   }
 
   auto allocation = std::make_unique<common::memory::GpuDeviceMemory>();
-  if (auto allocate_status = allocation->allocate(logical_total_size, device.ordinal); !allocate_status.ok()) {
+  if (auto allocate_status = allocation->allocate(prepared_plan.logical_total_size, device.ordinal);
+      !allocate_status.ok()) {
     return to_grpc_status(allocate_status);
   }
   const cuda::IpcHandleBytes handle_bytes = cuda::IpcHandleBytes::from_native(allocation->get_handle());
@@ -1413,98 +1583,23 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
   OwnedStorageLayout storage_layout = std::move(*storage_layout_or);
 
-  store::loading::MaterializeHints hints;
-  const std::chrono::milliseconds request_budget = resolve_owner_request_budget(rctx.server_context());
-  hints.request_budget = request_budget;
-  hints.transport_wait_timeout = request_budget;
-  hints.artifact_id = resolution.resolved_artifact_id;
-  const std::string requester_worker_id = d_.identity.worker_id();
-  if (!requester_worker_id.empty()) {
-    hints.transport_requester_worker_id = requester_worker_id;
-  }
-  auto disk_metadata_or = build_binding_disk_metadata(
-      resolution.normalized_disk_path, resolution.resolved_artifact_id, device.ordinal, d_.disk_imports);
-  if (!disk_metadata_or.ok()) {
-    return to_grpc_status(disk_metadata_or.status());
-  }
-  auto disk_metadata = std::move(*disk_metadata_or);
-  const bool prefer_direct_disk_for_source_layout =
-      disk_source.has_value() && disk_metadata.has_value() && disk_metadata->source_index_json.has_value();
-  hints.source_preference = prefer_direct_disk_for_source_layout ? store::loading::SourcePreference::kPreferDisk
-                                                                 : to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : effective_policy.allow_p2p;
-  hints.allow_disk = effective_policy.allow_disk;
-  hints.verify = store::loading::MaterializeHints::Verify::NONE;
-  hints.export_policy = store::loading::ExportPolicy::kForce;
-  if (disk_metadata.has_value()) {
-    hints.disk_metadata = *disk_metadata;
-  }
-  if (disk_source.has_value()) {
-    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
-  }
-  if (mapped) {
-    if (mapped_plan.view_plan.has_value() && mapped_plan.view_plan->transform.requires_materialization) {
-      return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
-    }
-    if (!mapped_plan.resolved_selection.view_id().empty() || mapped_plan.view_spec.has_value() ||
-        mapped_plan.view_plan.has_value()) {
-      store::loading::VariantIdentity variant;
-      variant.canonical_artifact_id = resolution.resolved_artifact_id;
-      if (!mapped_plan.resolved_selection.view_id().empty()) {
-        variant.view_id = mapped_plan.resolved_selection.view_id();
-      }
-      if (mapped_plan.view_spec.has_value()) {
-        variant.view_spec = mapped_plan.view_spec;
-      }
-      if (mapped_plan.view_plan.has_value()) {
-        variant.cached_plan = mapped_plan.view_plan;
-      }
-      variant.canonical_index_json = mapped_plan.canonical_index_json;
-      variant.placement = resolve_transform_placement(req.placement(), mapped_plan.view_spec);
-      hints.variant = std::move(variant);
-    }
-  } else if (
-      unmapped_plan.view_plan.has_value() && req.target_layout().index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
-    store::loading::VariantIdentity variant;
-    variant.canonical_artifact_id = resolution.resolved_artifact_id;
-    if (unmapped_plan.resolved_view_id.has_value()) {
-      variant.view_id = *unmapped_plan.resolved_view_id;
-    }
-    if (unmapped_plan.view_spec.has_value()) {
-      variant.view_spec = unmapped_plan.view_spec;
-    }
-    variant.cached_plan = unmapped_plan.view_plan;
-    variant.canonical_index_json = unmapped_plan.canonical_index_json;
-    variant.placement = resolve_transform_placement(req.placement(), unmapped_plan.view_spec);
-    hints.variant = std::move(variant);
-  }
-
-  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
-  if (mapped) {
-    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
-        resolution.resolved_artifact_id,
-        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
-        storage_layout.into_target,
-        mapped_plan,
-        hints.variant,
-        disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
-            ? std::optional<std::string_view>(*disk_metadata->source_index_json)
-            : std::nullopt);
-    if (!resolved_plan_or.ok()) {
-      return to_grpc_status(resolved_plan_or.status());
-    }
-    resolved_plan = std::move(*resolved_plan_or);
+  PreparedSourceBoundExecution prepared_execution;
+  auto execution_status =
+      prepare_source_bound_execution(d_, rctx, req.target_layout(), storage_layout, prepared_plan, prepared_execution);
+  if (!execution_status.ok()) {
+    return execution_status;
   }
 
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
-      ? d_.engine.materialize_mapped_into_target(device, *resolved_plan, hints, disk_source)
+      ? d_.engine.materialize_mapped_into_target(
+            device, *prepared_execution.resolved_plan, prepared_execution.hints, prepared_plan.disk_source)
       : d_.engine.materialize_into_target(
             device,
             storage_layout.into_target,
-            unmapped_plan.canonical_index_json,
-            materialization_payload::compute_generation_from_index(unmapped_plan.canonical_index_json),
-            hints,
-            disk_source);
+            prepared_plan.canonical_index_json,
+            materialization_payload::compute_generation_from_index(prepared_plan.canonical_index_json),
+            prepared_execution.hints,
+            prepared_plan.disk_source);
   if (!result_or.ok()) {
     return to_grpc_status(result_or.status());
   }
@@ -1537,11 +1632,12 @@ grpc::Status OwnedBindingService::create_owned_binding(
     record->allocation = std::move(allocation);
     record->handle_bytes = handle_bytes;
     record->source_selection = req.source_selection();
-    record->source_selection.set_artifact_id(resolution.resolved_artifact_id);
+    record->source_selection.set_artifact_id(prepared_plan.resolved_artifact_id);
     record->target_layout = req.target_layout();
     record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
     record->target_layout_hash = target_layout_hash;
-    mark_ready_artifact(record.get(), resolution.resolved_artifact_id, current_selection, std::string());
+    mark_ready_artifact(
+        record.get(), prepared_plan.resolved_artifact_id, prepared_plan.current_selection, std::string());
     if (mapped) {
       record->copy_plan = req.copy_plan();
       record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
@@ -1574,8 +1670,8 @@ grpc::Status OwnedBindingService::create_owned_binding(
       d_.identity,
       d_.target_materialization_service,
       req.target_layout(),
-      current_selection,
-      mapped ? mapped_plan.canonical_index_json : unmapped_plan.canonical_index_json,
+      prepared_plan.current_selection,
+      prepared_plan.canonical_index_json,
       device.ordinal,
       req.device_uuid(),
       req.pid(),
@@ -1588,7 +1684,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
 
   resp.set_binding_id(binding_id);
-  resp.set_artifact_id(resolution.resolved_artifact_id);
+  resp.set_artifact_id(prepared_plan.resolved_artifact_id);
   resp.mutable_mem_handle()->set_cuda_ipc_handle(
       handle_bytes.as_string_view().data(), handle_bytes.as_string_view().size());
   resp.mutable_mem_handle()->set_lease_token(*token_or);
@@ -1599,7 +1695,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (target_publication_token_or.ok() && !target_publication_token_or->empty()) {
     resp.set_target_publication_token(*target_publication_token_or);
   }
-  resp.mutable_resolved_selection()->CopyFrom(current_selection);
+  resp.mutable_resolved_selection()->CopyFrom(prepared_plan.current_selection);
   resp.set_source(to_proto_source(result_or->source));
   resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
   fill_binding_value(*record, *resp.mutable_current_value());
@@ -2138,98 +2234,29 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     return to_grpc_status(contribution_status);
   }
 
-  auto effective_policy =
-      resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  if (auto policy_status = validate_source_policy(effective_policy); !policy_status.ok()) {
-    return to_grpc_status(policy_status);
-  }
-
   const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, device_uuid, std::nullopt);
-  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
-  auto resolution_or = resolve_artifact_and_disk_source(
-      d_.global_store_client,
-      &d_.disk_imports,
-      d_.storage_path,
-      req.artifact_id(),
-      effective_policy.allow_disk,
-      /*allow_local_import_fallback=*/true,
-      loopback_peer);
-  if (!resolution_or.ok()) {
-    return to_grpc_status(resolution_or.status());
-  }
-  auto resolution = std::move(*resolution_or);
-
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      d_.engine,
-      resolution.resolved_artifact_id,
-      resolution.normalized_disk_path,
-      device.ordinal,
-      resolution.gs_connected);
-  if (!canonical_json_or.ok()) {
-    return to_grpc_status(canonical_json_or.status());
-  }
-
-  auto offsets_or = resolve_target_offsets(target_layout);
-  if (!offsets_or.ok()) {
-    return to_grpc_status(offsets_or.status());
-  }
-
-  tensorcast::common::v1::ArtifactSelection current_selection;
-  MappedTargetMaterializationPlan mapped_plan;
-  TargetMaterializationPlan unmapped_plan;
-  std::optional<store::loading::DiskSource> disk_source = resolution.disk_source;
-  if (mapped) {
-    BindingRegistry::Record replay_record;
-    replay_record.owner_pid = owner_pid;
-    replay_record.device_uuid = device_uuid;
-    replay_record.source_selection = source_selection;
-    replay_record.target_layout = target_layout;
-    replay_record.copy_plan = copy_plan;
-    replay_record.dst_tensors = dst_tensors;
-    v2::MaterializeIntoMappedTargetRequest request = build_mapped_request(
-        replay_record,
-        resolution.resolved_artifact_id,
-        effective_policy.preference,
-        req.has_source_policy() ? &req.source_policy() : nullptr,
-        req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
-        req.placement());
-    auto plan_status = build_mapped_target_materialization_plan(
-        d_.engine,
-        request,
-        resolution.resolved_artifact_id,
-        *offsets_or,
-        std::move(*canonical_json_or),
-        /*record_result=*/nullptr,
-        mapped_plan);
-    if (!plan_status.ok()) {
-      return plan_status;
-    }
-    current_selection = build_mapped_bound_selection(
-        resolution.resolved_artifact_id, target_layout, std::string_view(target_index_json));
-  } else {
-    v2::MaterializeIntoTargetRequest request = build_unmapped_request(
-        source_selection,
-        resolution.resolved_artifact_id,
-        target_layout,
-        owner_pid,
-        device_uuid,
-        effective_policy.preference,
-        req.has_source_policy() ? &req.source_policy() : nullptr,
-        req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
-        req.placement());
-    auto plan_status = build_target_materialization_plan(
-        d_.engine,
-        resolution.resolved_artifact_id,
-        request,
-        target_layout,
-        *offsets_or,
-        std::move(*canonical_json_or),
-        /*record_result=*/nullptr,
-        unmapped_plan);
-    if (!plan_status.ok()) {
-      return plan_status;
-    }
-    current_selection = unmapped_plan.resolved_selection;
+  PreparedSourceBoundPlan prepared_plan;
+  auto prepare_status = prepare_source_bound_plan(
+      d_,
+      rctx,
+      device,
+      SourceBoundMaterializationRequest{
+          .mapped = mapped,
+          .owner_pid = owner_pid,
+          .device_uuid = device_uuid,
+          .source_selection = &source_selection,
+          .target_layout = &target_layout,
+          .target_index_json = target_index_json,
+          .copy_plan = mapped ? &copy_plan : nullptr,
+          .dst_tensors = mapped ? &dst_tensors : nullptr,
+          .legacy_preference = req.preference(),
+          .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
+          .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
+          .placement = req.placement(),
+      },
+      prepared_plan);
+  if (!prepare_status.ok()) {
+    return prepare_status;
   }
 
   OwnedStorageLayout storage_layout;
@@ -2243,97 +2270,23 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     storage_layout = std::move(*storage_layout_or);
   }
 
-  store::loading::MaterializeHints hints;
-  const std::chrono::milliseconds request_budget = resolve_owner_request_budget(rctx.server_context());
-  hints.request_budget = request_budget;
-  hints.transport_wait_timeout = request_budget;
-  hints.artifact_id = resolution.resolved_artifact_id;
-  const std::string requester_worker_id = d_.identity.worker_id();
-  if (!requester_worker_id.empty()) {
-    hints.transport_requester_worker_id = requester_worker_id;
-  }
-  auto disk_metadata_or = build_binding_disk_metadata(
-      resolution.normalized_disk_path, resolution.resolved_artifact_id, device.ordinal, d_.disk_imports);
-  if (!disk_metadata_or.ok()) {
-    return to_grpc_status(disk_metadata_or.status());
-  }
-  auto disk_metadata = std::move(*disk_metadata_or);
-  const bool prefer_direct_disk_for_source_layout =
-      disk_source.has_value() && disk_metadata.has_value() && disk_metadata->source_index_json.has_value();
-  hints.source_preference = prefer_direct_disk_for_source_layout ? store::loading::SourcePreference::kPreferDisk
-                                                                 : to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : effective_policy.allow_p2p;
-  hints.allow_disk = effective_policy.allow_disk;
-  hints.verify = store::loading::MaterializeHints::Verify::NONE;
-  hints.export_policy = store::loading::ExportPolicy::kForce;
-  if (disk_metadata.has_value()) {
-    hints.disk_metadata = *disk_metadata;
-  }
-  if (disk_source.has_value()) {
-    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
-  }
-  if (mapped) {
-    if (mapped_plan.view_plan.has_value() && mapped_plan.view_plan->transform.requires_materialization) {
-      return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
-    }
-    if (!mapped_plan.resolved_selection.view_id().empty() || mapped_plan.view_spec.has_value() ||
-        mapped_plan.view_plan.has_value()) {
-      store::loading::VariantIdentity variant;
-      variant.canonical_artifact_id = resolution.resolved_artifact_id;
-      if (!mapped_plan.resolved_selection.view_id().empty()) {
-        variant.view_id = mapped_plan.resolved_selection.view_id();
-      }
-      if (mapped_plan.view_spec.has_value()) {
-        variant.view_spec = mapped_plan.view_spec;
-      }
-      if (mapped_plan.view_plan.has_value()) {
-        variant.cached_plan = mapped_plan.view_plan;
-      }
-      variant.canonical_index_json = mapped_plan.canonical_index_json;
-      variant.placement = resolve_transform_placement(req.placement(), mapped_plan.view_spec);
-      hints.variant = std::move(variant);
-    }
-  } else if (unmapped_plan.view_plan.has_value() && target_layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
-    store::loading::VariantIdentity variant;
-    variant.canonical_artifact_id = resolution.resolved_artifact_id;
-    if (unmapped_plan.resolved_view_id.has_value()) {
-      variant.view_id = *unmapped_plan.resolved_view_id;
-    }
-    if (unmapped_plan.view_spec.has_value()) {
-      variant.view_spec = unmapped_plan.view_spec;
-    }
-    variant.cached_plan = unmapped_plan.view_plan;
-    variant.canonical_index_json = unmapped_plan.canonical_index_json;
-    variant.placement = resolve_transform_placement(req.placement(), unmapped_plan.view_spec);
-    hints.variant = std::move(variant);
-  }
-
-  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
-  if (mapped) {
-    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
-        resolution.resolved_artifact_id,
-        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
-        storage_layout.into_target,
-        mapped_plan,
-        hints.variant,
-        disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
-            ? std::optional<std::string_view>(*disk_metadata->source_index_json)
-            : std::nullopt);
-    if (!resolved_plan_or.ok()) {
-      return to_grpc_status(resolved_plan_or.status());
-    }
-    resolved_plan = std::move(*resolved_plan_or);
+  PreparedSourceBoundExecution prepared_execution;
+  auto execution_status =
+      prepare_source_bound_execution(d_, rctx, target_layout, storage_layout, prepared_plan, prepared_execution);
+  if (!execution_status.ok()) {
+    return execution_status;
   }
 
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
-      ? d_.engine.materialize_mapped_into_target(device, *resolved_plan, hints, disk_source)
+      ? d_.engine.materialize_mapped_into_target(
+            device, *prepared_execution.resolved_plan, prepared_execution.hints, prepared_plan.disk_source)
       : d_.engine.materialize_into_target(
             device,
             storage_layout.into_target,
-            unmapped_plan.canonical_index_json,
-            materialization_payload::compute_generation_from_index(unmapped_plan.canonical_index_json),
-            hints,
-            disk_source);
+            prepared_plan.canonical_index_json,
+            materialization_payload::compute_generation_from_index(prepared_plan.canonical_index_json),
+            prepared_execution.hints,
+            prepared_plan.disk_source);
   if (!result_or.ok()) {
     {
       absl::MutexLock lock(&record->mu);
@@ -2347,8 +2300,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       d_.identity,
       d_.target_materialization_service,
       target_layout,
-      current_selection,
-      mapped ? mapped_plan.canonical_index_json : unmapped_plan.canonical_index_json,
+      prepared_plan.current_selection,
+      prepared_plan.canonical_index_json,
       device.ordinal,
       device_uuid,
       owner_pid,
@@ -2360,17 +2313,17 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     absl::MutexLock lock(&record->mu);
     mark_ready_artifact(
         record.get(),
-        resolution.resolved_artifact_id,
-        current_selection,
+        prepared_plan.resolved_artifact_id,
+        prepared_plan.current_selection,
         target_publication_token_or.ok() ? *target_publication_token_or : std::string());
   }
 
-  resp.set_artifact_id(resolution.resolved_artifact_id);
+  resp.set_artifact_id(prepared_plan.resolved_artifact_id);
   resp.set_source(to_proto_source(result_or->source));
   if (target_publication_token_or.ok() && !target_publication_token_or->empty()) {
     resp.set_target_publication_token(*target_publication_token_or);
   }
-  resp.mutable_resolved_selection()->CopyFrom(current_selection);
+  resp.mutable_resolved_selection()->CopyFrom(prepared_plan.current_selection);
   resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
   fill_binding_value(*record, *resp.mutable_current_value());
   rctx.mark_success();

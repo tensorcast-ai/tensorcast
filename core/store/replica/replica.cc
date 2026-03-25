@@ -15,6 +15,7 @@
 #include "absl/strings/str_cat.h"
 
 #include "core/store/device_registry.h"
+#include "core/store/materialization/contracts/representation_contract.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
@@ -30,6 +31,7 @@
 namespace tensorcast::store::replica {
 
 using common::memory::MemoryLocation;
+using materialization::contracts::RepresentationWorkPlan;
 
 namespace {
 
@@ -37,6 +39,24 @@ struct DiskExecutionMetadata {
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
   std::string view_index_json;
 };
+
+tensorcast::common::v1::ByteSpaceRef canonical_byte_space() {
+  tensorcast::common::v1::ByteSpaceRef out;
+  out.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  return out;
+}
+
+absl::StatusOr<RepresentationWorkPlan> build_disk_representation_work_plan(
+    std::string_view source_index_json,
+    std::string_view view_index_json,
+    const loading::VariantIdentity& variant_identity) {
+  auto result_or = materialization::contracts::build_index_backed_representation_work(
+      source_index_json, view_index_json, variant_identity, canonical_byte_space(), "ephemeral_into_target");
+  if (!result_or.ok()) {
+    return result_or.status();
+  }
+  return std::move(result_or->work_plan);
+}
 
 std::optional<uint64_t> compute_total_size_from_index(std::string_view index_json) {
   if (index_json.empty()) {
@@ -479,6 +499,32 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     std::optional<ReplicaLoadController::CollectiveDiskLoadInput> collective_disk_load;
     std::optional<ReplicaLoadController::LocalBatchedDiskLoadInput> local_batched_disk_load;
     std::optional<DiskExecutionMetadata> disk_execution_metadata;
+    std::optional<RepresentationWorkPlan> disk_representation_work_plan;
+    std::optional<absl::Status> disk_representation_work_plan_error;
+    bool disk_representation_work_plan_attempted = false;
+    auto ensure_disk_representation_work_plan = [&]() -> bool {
+      if (disk_representation_work_plan_attempted) {
+        return disk_representation_work_plan.has_value();
+      }
+      disk_representation_work_plan_attempted = true;
+      if (!source_index_json_.has_value() || !variant_identity_.has_value() || !disk_execution_metadata.has_value()) {
+        disk_representation_work_plan_error =
+            absl::FailedPreconditionError("representation work prerequisites missing");
+        return false;
+      }
+      auto work_plan_or = build_disk_representation_work_plan(
+          *source_index_json_, disk_execution_metadata->view_index_json, *variant_identity_);
+      if (!work_plan_or.ok()) {
+        disk_representation_work_plan_error = work_plan_or.status();
+        return false;
+      }
+      if (work_plan_or->items.empty()) {
+        disk_representation_work_plan_error = absl::FailedPreconditionError("representation work plan is empty");
+        return false;
+      }
+      disk_representation_work_plan = std::move(*work_plan_or);
+      return true;
+    };
     if (collective_load_group_.has_value()) {
       if (target_location != MemoryLocation::GPU || source_location != MemoryLocation::DISK) {
         LOG(INFO) << "Replica(" << key_.artifact_id
@@ -505,17 +551,22 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
                     << "): collective disk load skipped because loader is not DiskLoader or view_index_json is empty";
         } else {
           disk_execution_metadata = std::move(*disk_metadata_or);
-          collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
-              .group = *collective_load_group_,
-              .disk_context = disk_execution_metadata->disk_context,
-              .source_index_json = *source_index_json_,
-              .view_index_json = disk_execution_metadata->view_index_json,
-              .variant_identity = variant_identity_,
-              .materialization_strategy = materialization_strategy_,
-          };
-          LOG(INFO) << "Replica(" << key_.artifact_id
-                    << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
-                    << " rank=" << collective_load_group_->rank << " world_size=" << collective_load_group_->world_size;
+          if (ensure_disk_representation_work_plan()) {
+            collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
+                .group = *collective_load_group_,
+                .disk_context = disk_execution_metadata->disk_context,
+                .representation_work_plan = *disk_representation_work_plan,
+                .materialization_strategy = materialization_strategy_,
+            };
+            LOG(INFO) << "Replica(" << key_.artifact_id
+                      << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
+                      << " rank=" << collective_load_group_->rank
+                      << " world_size=" << collective_load_group_->world_size;
+          } else {
+            LOG(INFO) << "Replica(" << key_.artifact_id
+                      << "): collective disk load skipped because shared representation lowering is unavailable: "
+                      << disk_representation_work_plan_error->message();
+          }
         }
       }
     }
@@ -544,16 +595,20 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
           }
         }
         if (disk_execution_metadata.has_value()) {
-          // This executor is best-effort: unsupported view shapes must fall
-          // back to the generic byte-range path below without changing
-          // materialization semantics.
-          local_batched_disk_load = ReplicaLoadController::LocalBatchedDiskLoadInput{
-              .disk_context = disk_execution_metadata->disk_context,
-              .source_index_json = *source_index_json_,
-              .view_index_json = disk_execution_metadata->view_index_json,
-              .variant_identity = variant_identity_,
-              .materialization_strategy = materialization_strategy_,
-          };
+          if (ensure_disk_representation_work_plan()) {
+            // This executor is best-effort: unsupported view shapes must fall
+            // back to the generic byte-range path below without changing
+            // materialization semantics.
+            local_batched_disk_load = ReplicaLoadController::LocalBatchedDiskLoadInput{
+                .disk_context = disk_execution_metadata->disk_context,
+                .representation_work_plan = *disk_representation_work_plan,
+                .materialization_strategy = materialization_strategy_,
+            };
+          } else {
+            LOG(INFO) << "Replica(" << key_.artifact_id
+                      << "): local batched disk load skipped because shared representation lowering is unavailable: "
+                      << disk_representation_work_plan_error->message();
+          }
         }
       }
       bool composed_view = false;
