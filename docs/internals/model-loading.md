@@ -25,15 +25,24 @@ resolution and executor choice.
   - `ArtifactSelection`
   - resolved `view_id` / `ViewPlan`
   - target layout
-  - mapped copy contract
+  - `RepresentationTransformContract`
 - the common runtime then lowers that semantic plan plus source facts into
   executor strategy inside `MaterializationFacade`
 - internal contracts for this seam live in
   `core/store/runtime/ingestion/materialization_strategy_types.h`:
   - `ResolvedMaterializationPlan`
-  - `MappedCopyContract`
+  - `RepresentationTransformContract`
+  - `RepresentationWorkPlan`
   - `ResolvedSourceBinding`
   - `ExecutionCommitReport`
+
+Current rule:
+
+- residual generic byte-range work must be explicit in `RepresentationWorkPlan`,
+- executors do not rediscover semantic truth from source/view metadata during
+  execution,
+- executors must not implicitly reconstruct fallback work after a partial fast
+  path attempt.
 
 ## System Components
 
@@ -149,10 +158,16 @@ region-backed data plane:
 - `Artifact.subset(...).view(...).bind(...)` captures a rank-local source
   selection once; later `binding.swap("model:v2")` reuses that same selection
   against the new full artifact version.
-- `bind_into(..., mapping=copy_plan)` captures a copy plan for mapped binding;
-  later `binding.swap(...)` reuses the same plan without Python copy loops.
+- `bind_into(..., mapping=copy_plan)` captures mapped binding intent once; the
+  daemon lowers it into the shared `RepresentationTransformContract` family,
+  and later `binding.swap(...)` reuses that same lowered semantic shape without
+  Python copy loops.
 - `binding.publish_replica()` or `binding.swap(..., publish=True)` publishes the
   current bound layout once the local overwrite succeeds.
+
+This publish path is the ordinary artifact-backed replica path from `0084`. It
+is not the serving-artifact publication or `representation_publish` closeout
+path used by source-to-serving builder work.
 
 ### Lease-In-Place Fast Path & Use Leases
 
