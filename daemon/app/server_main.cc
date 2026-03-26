@@ -1190,17 +1190,24 @@ int main(int argc, char** argv) {
   auto to_ms = [](const google::protobuf::Duration& d) -> int {
     return static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
   };
+  auto assign_grpc_duration_if_enabled = [&to_ms](
+                                             const google::protobuf::Duration& duration, std::optional<int>* target) {
+    const int duration_ms = to_ms(duration);
+    if (duration_ms > 0) {
+      *target = duration_ms;
+    }
+  };
   if (cfg.server().grpc().has_keepalive_time()) {
-    grpc_opts.keepalive_time_ms = to_ms(cfg.server().grpc().keepalive_time());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().keepalive_time(), &grpc_opts.keepalive_time_ms);
   }
   if (cfg.server().grpc().has_keepalive_timeout()) {
-    grpc_opts.keepalive_timeout_ms = to_ms(cfg.server().grpc().keepalive_timeout());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().keepalive_timeout(), &grpc_opts.keepalive_timeout_ms);
   }
   if (cfg.server().grpc().has_max_connection_idle()) {
-    grpc_opts.max_connection_idle_ms = to_ms(cfg.server().grpc().max_connection_idle());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().max_connection_idle(), &grpc_opts.max_connection_idle_ms);
   }
   if (cfg.server().grpc().has_max_connection_age()) {
-    grpc_opts.max_connection_age_ms = to_ms(cfg.server().grpc().max_connection_age());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().max_connection_age(), &grpc_opts.max_connection_age_ms);
   }
   grpc_opts.tcp_nodelay = cfg.server().grpc().tcp_nodelay();
   grpc_opts.so_reuseport = cfg.server().grpc().so_reuseport();

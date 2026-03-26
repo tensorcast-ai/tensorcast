@@ -7,8 +7,14 @@
 #include "daemon/util/grpc_peer_utils.h"
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
+#include "grpcpp/support/channel_arguments.h"
 
 namespace tensorcast::daemon {
+namespace {
+
+constexpr int kInterDaemonGrpcMaxMessageLength = 64 * 1024 * 1024;
+
+} // namespace
 
 std::shared_ptr<grpc::ChannelCredentials> make_inter_daemon_channel_credentials(
     const DaemonOptions::InterDaemonGrpcSecurity& security) {
@@ -25,8 +31,13 @@ std::shared_ptr<grpc::ChannelCredentials> make_inter_daemon_channel_credentials(
 std::shared_ptr<grpc::Channel> create_inter_daemon_channel(
     std::string_view address,
     const std::shared_ptr<grpc::ChannelCredentials>& credentials) {
-  return grpc::CreateChannel(
-      std::string(address), credentials != nullptr ? credentials : grpc::InsecureChannelCredentials());
+  grpc::ChannelArguments args;
+  // Keep inter-daemon client limits aligned with daemon server defaults so
+  // payload transport chunk sizing is not silently capped by gRPC defaults.
+  args.SetMaxSendMessageSize(kInterDaemonGrpcMaxMessageLength);
+  args.SetMaxReceiveMessageSize(kInterDaemonGrpcMaxMessageLength);
+  return grpc::CreateCustomChannel(
+      std::string(address), credentials != nullptr ? credentials : grpc::InsecureChannelCredentials(), args);
 }
 
 DaemonHopAuthClass inter_daemon_hop_auth_class(
