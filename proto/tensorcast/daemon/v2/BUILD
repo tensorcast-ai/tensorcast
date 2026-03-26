@@ -11,6 +11,7 @@ proto_library(
         "//proto/tensorcast/common/v1:common_proto",
         "//proto/tensorcast/operation/v1:operation_proto",
         "//proto/tensorcast/plan/v1:plan_proto",
+        "//proto/tensorcast/publication/v1:publication_proto",
         "@protobuf//:timestamp_proto",
     ],
 )
@@ -23,6 +24,7 @@ cpp_grpc_library(
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/operation/v1:operation_cc",
         "//proto/tensorcast/plan/v1:plan_cc",
+        "//proto/tensorcast/publication/v1:publication_cc",
     ],
 )
 

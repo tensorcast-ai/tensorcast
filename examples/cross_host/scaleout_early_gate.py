@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, TensorCast Team.
+#  Copyright (c) 2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -185,9 +185,7 @@ def _build_markdown(
     iperf_single_link_ref_gibps: float | None,
 ) -> str:
     lines: list[str] = []
-    lines.append(
-        f"# Scaleout Early Gate ({datetime.now(tz=timezone.utc).isoformat()})"
-    )
+    lines.append(f"# Scaleout Early Gate ({datetime.now(tz=timezone.utc).isoformat()})")
     lines.append("")
     lines.append(f"- verdict={'PASS' if passed else 'FAIL'}")
     lines.append(f"- round_workers={','.join(str(w) for w in round_workers)}")
@@ -200,8 +198,7 @@ def _build_markdown(
     )
     lines.append(f"- baseline_source={baseline_source}")
     lines.append(
-        "- iperf_single_link_ref_gibps="
-        f"{_render_float(iperf_single_link_ref_gibps)}"
+        f"- iperf_single_link_ref_gibps={_render_float(iperf_single_link_ref_gibps)}"
     )
     lines.append("")
     lines.append("## Wave Analysis")

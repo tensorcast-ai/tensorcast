@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package tensorcast.publication.v1;
+
+enum BuilderMode {
+  BUILDER_MODE_UNSPECIFIED = 0;
+  BUILDER_MODE_PURE_TRANSFORM = 1;
+  BUILDER_MODE_BINDING_FINALIZE = 2;
+}
+
+message ServingBuildIntent {
+  string representation_contract_hash = 1;
+  BuilderMode builder_mode = 2;
+  string framework_name = 3;
+  string adapter_version = 4;
+  string serving_abi_version = 5;
+  string build_pipeline_version = 6;
+  string source_artifact_ref = 7;
+}
+
+enum AssemblyTargetKind {
+  ASSEMBLY_TARGET_KIND_UNSPECIFIED = 0;
+  ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW = 1;
+  ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT = 2;
+}
+
+message AssemblyTargetRef {
+  AssemblyTargetKind kind = 1;
+  string structural_view_id = 2;
+}
+
+message AssemblyRequirement {
+  string slot_id = 1;
+  AssemblyTargetRef target = 2;
+  string coverage_contract = 3;
+}
+
+message AssemblyRequirementSetRef {
+  string requirements_digest = 1;
+  uint64 requirement_count = 2;
+  string carrier_form = 3;
+  repeated AssemblyRequirement inline_requirements = 4;
+}
+
+enum AssemblyContributorLivenessMode {
+  ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_UNSPECIFIED = 0;
+  ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT = 1;
+  ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY = 2;
+}
+
+message AssemblyReadinessPolicy {
+  AssemblyContributorLivenessMode contributor_liveness_mode = 1;
+}
+
+message PureTransformPublicationSpec {
+  ServingBuildIntent build_intent = 1;
+  string contract_family = 2;
+  string source_version_key = 3;
+  string serving_version_key = 4;
+  string logical_topology_json = 5;
+  string serving_manifest_ref = 6;
+  string layout_id = 7;
+  AssemblyRequirementSetRef requirements = 8;
+  AssemblyReadinessPolicy readiness_policy = 9;
+  repeated string structural_view_ids = 10;
+}
+
+message RepresentationPublishContract {
+  string serving_artifact_id = 1;
+  string serving_manifest_ref = 2;
+  string representation_contract_hash = 3;
+  string serving_build_digest = 4;
+}
+
+message RepresentationPublishSpec {
+  string layout_id = 1;
+  AssemblyRequirementSetRef requirements = 2;
+  AssemblyReadinessPolicy readiness_policy = 3;
+  string source_version_key = 4;
+  string serving_version_key = 5;
+  RepresentationPublishContract representation_publish_contract = 6;
+  bytes serving_manifest_bytes = 7;
+  string source_artifact_ref = 8;
+  string contract_family = 9;
+  repeated string structural_view_ids = 10;
+}

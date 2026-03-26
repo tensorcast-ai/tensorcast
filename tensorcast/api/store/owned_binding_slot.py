@@ -37,6 +37,7 @@ from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError, FallbackOptions
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import ServingRuntimePolicy
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -534,6 +535,7 @@ class OwnedBindingSlot:
         artifact: "Artifact | str",
         *,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicy | None = None,
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
@@ -564,6 +566,7 @@ class OwnedBindingSlot:
                 artifact_id=resolved._ensure_identified(),
                 preference=preference,
                 source_policy=source_policy,
+                serving_runtime_policy=serving_runtime_policy,
                 operation_id=operation_id,
                 timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
             )

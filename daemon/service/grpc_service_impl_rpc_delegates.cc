@@ -329,6 +329,17 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::ListArtifactLayouts(
+    grpc::ServerContext* ctx,
+    const v2::ListArtifactLayoutsRequest* req,
+    v2::ListArtifactLayoutsResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"ListArtifactLayouts", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->list_artifact_layouts(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::BatchExists(
     grpc::ServerContext* ctx,
     const v2::BatchExistsRequest* req,

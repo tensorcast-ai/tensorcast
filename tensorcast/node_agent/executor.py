@@ -26,6 +26,7 @@ from tensorcast.api.plan.artifact_set import (
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
+from tensorcast.api.store.serving_builder import PureTransformPublicationBundle
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.engine_adapter import (
     BatchResult,
@@ -39,7 +40,13 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
-ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
+ArtifactActionResult = (
+    ManifestResult
+    | PublishResult
+    | HydrateResult
+    | BatchResult
+    | PureTransformPublicationBundle
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,7 +683,7 @@ class NodeAgentExecutor:
                 extra=spec.fingerprint(),
                 call_ctx=call_ctx,
             )
-            engine_adapter.execute_transform_register(
+            register_result = engine_adapter.execute_transform_register(
                 spec=spec,
                 source=artifact,
                 out_key=action.out_key,
@@ -701,6 +708,11 @@ class NodeAgentExecutor:
             target_id=target_id,
             action="transform_register",
             status=_status_success("transform_register completed"),
+            artifact_result=(
+                register_result
+                if isinstance(register_result, PureTransformPublicationBundle)
+                else None
+            ),
         )
 
     def _manifest(

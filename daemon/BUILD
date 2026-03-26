@@ -1140,6 +1140,21 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "serving_artifact_manifest_utils_lib",
+    srcs = ["service/controllers/serving_artifact_manifest_utils.cc"],
+    hdrs = ["service/controllers/serving_artifact_manifest_utils.h"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
     name = "owned_binding_service_lib",
     srcs = ["service/controllers/owned_binding_service.cc"],
     hdrs = ["service/controllers/owned_binding_service.h"],
@@ -1160,6 +1175,7 @@ sc_cc_library(
         ":registration_manager_lib",
         ":registration_storage_mapping_utils_lib",
         ":rpc_context_hdr",
+        ":serving_artifact_manifest_utils_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
         ":target_materialization_service_lib",
@@ -1192,6 +1208,7 @@ sc_cc_library(
         ":materialization_policy_utils_lib",
         ":materialization_post_seal_utils_lib",
         ":rpc_context_hdr",
+        ":serving_artifact_manifest_utils_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
         ":worker_identity_store_lib",
@@ -1249,6 +1266,7 @@ sc_cc_library(
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
         ":selection_validation_utils_lib",
+        ":serving_artifact_manifest_utils_lib",
         ":session_lifecycle_lib",
         ":sessions_service_hdr",
         ":shutdown_signal_hdr",
@@ -1285,6 +1303,7 @@ sc_cc_library(
         ":materialization_target_plan_utils_lib",
         ":materialization_target_storage_utils_lib",
         ":rpc_context_hdr",
+        ":serving_artifact_manifest_utils_lib",
         ":session_lifecycle_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
@@ -2187,8 +2206,10 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
         "//core/store:testing_recording_global_store_client",
+        "//core/store/materialization/dataplane:disk_dir_hash",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",

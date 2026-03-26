@@ -292,6 +292,28 @@ grpc::Status MaterializationController::get_artifact_index_by_id(
   return disk_artifact_service_.get_artifact_index_by_id(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::list_artifact_layouts(
+    RpcContext& rctx,
+    const v2::ListArtifactLayoutsRequest& req,
+    v2::ListArtifactLayoutsResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.artifact.id", req.artifact_id());
+  if (req.artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+  auto layouts_or = global_store_client_->list_artifact_layouts(req.artifact_id());
+  if (!layouts_or.ok()) {
+    return to_grpc_status(layouts_or.status());
+  }
+  for (const auto& layout_id : *layouts_or) {
+    resp.add_layout_ids(layout_id);
+  }
+  return grpc::Status::OK;
+}
+
 grpc::Status MaterializationController::seal_assembly(
     RpcContext& rctx,
     const v2::SealAssemblyRequest& req,

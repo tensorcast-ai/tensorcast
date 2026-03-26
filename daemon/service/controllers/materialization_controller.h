@@ -163,6 +163,11 @@ class MaterializationController {
       const v2::GetArtifactIndexByIdRequest& req,
       v2::GetArtifactIndexByIdResponse& resp);
 
+  grpc::Status list_artifact_layouts(
+      RpcContext& rctx,
+      const v2::ListArtifactLayoutsRequest& req,
+      v2::ListArtifactLayoutsResponse& resp);
+
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 
   grpc::Status start_assembly_attempt(

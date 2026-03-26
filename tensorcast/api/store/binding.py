@@ -22,7 +22,12 @@ from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.types import ArtifactError
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import AssemblyAttemptRef, PartialSealResult
+from tensorcast.types import (
+    AssemblyAttemptRef,
+    PartialSealResult,
+    ServingRuntimePolicyInput,
+    coerce_serving_runtime_policy,
+)
 
 if TYPE_CHECKING:
     from tensorcast.api.store.artifact import Artifact
@@ -570,6 +575,7 @@ class Binding:
         artifact: "Artifact | str",
         *,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         activate_key: str | None = None,
         expected_active_artifact_id: str | None = None,
         expected_active_generation: int | None = None,
@@ -586,6 +592,9 @@ class Binding:
             self._slot.swap(
                 artifact,
                 publish=publish,
+                serving_runtime_policy=coerce_serving_runtime_policy(
+                    serving_runtime_policy
+                ),
                 wait=wait,
                 drain_timeout_s=drain_timeout_s,
                 ctx=ctx,

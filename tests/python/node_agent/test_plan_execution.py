@@ -8,11 +8,22 @@ import pytest
 import torch
 
 import tensorcast.node_agent.executor as executor_mod
+from tensorcast.api._config import PlanType
 from tensorcast.api._errors import DeviceMismatch
 from tensorcast.api.context import CallContext
 from tensorcast.api.plan import ArtifactSetRef, Plan, Worker
+from tensorcast.api.store import (
+    BuilderMode,
+    PureTransformPublicationBundle,
+    ServingBuildIntent,
+    build_pure_transform_publication_bundle_from_registered_artifact,
+    build_pure_transform_transform_spec,
+    compute_pure_transform_representation_contract_hash,
+)
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.types import ReplicaInfo
 from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
@@ -27,6 +38,7 @@ from tensorcast.node_agent.server import NodeAgentServicer
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import ServingArtifactManifest, build_serving_manifest_ref
 
 
 class _DaemonStub:
@@ -72,6 +84,23 @@ def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
 
 
+def _registered_artifact_stub(
+    artifact_id: str = "mi2:test:serving",
+) -> RegisteredArtifact:
+    return RegisteredArtifact(
+        artifact_id=artifact_id,
+        replica=ReplicaInfo(
+            replica_id=artifact_id,
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=4,
+        ),
+        canonical_index=canonical_index_from_bytes(_canonical_index_bytes()),
+        lease=None,
+    )
+
+
 def test_node_agent_executes_instance_transform_into() -> None:
     adapter = EngineAdapter(
         instance_id="inst-1", engine="test", register_identity_transform=False
@@ -108,6 +137,79 @@ def test_node_agent_executes_instance_transform_into() -> None:
     assert result.ok
     assert result.steps["s1"].status.state == "success"
     assert called["into"] is True
+
+
+def test_engine_adapter_identity_transform_register_can_return_pure_transform_bundle() -> (
+    None
+):
+    adapter = EngineAdapter(instance_id="inst-1", engine="test")
+    source_index = canonical_index_from_bytes(_canonical_index_bytes())
+
+    class _SourceStub:
+        def subset(self, _names):  # noqa: ANN001
+            return self
+
+        _canonical_index = source_index
+        _canonical_index_bytes = _canonical_index_bytes()
+
+        def _ensure_metadata(self):  # noqa: ANN001
+            return self._canonical_index
+
+        def _ensure_view_metadata_cache(self, **_kwargs):  # noqa: ANN001
+            return None
+
+        def tensor_dict(self, *, device, ctx):  # noqa: ANN001
+            assert device == "cpu"
+            assert ctx is None
+            return {"w": torch.tensor([1.0], dtype=torch.float32)}
+
+        def _ensure_identified(self) -> str:
+            return "mi2:test:source"
+
+    class _StoreStub:
+        def register(self, tensors, key, policy):  # noqa: ANN001
+            assert key == "models/demo/serving/v1"
+            assert policy is None
+            assert "w" in tensors
+            assert "__tensorcast_meta__.manifest_json" in tensors
+            manifest_tensor = tensors["__tensorcast_meta__.manifest_json"]
+            assert manifest_tensor.dtype == torch.uint8
+            assert manifest_tensor.ndim == 1
+            manifest = ServingArtifactManifest.from_bytes(
+                bytes(manifest_tensor.tolist())
+            )
+            assert manifest.framework_name == "torch"
+            return _registered_artifact_stub()
+
+    result = adapter.execute_transform_register(
+        spec=build_pure_transform_transform_spec(
+            transform_name="identity.v1",
+            build_intent=ServingBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+            ),
+            source_version_key="models/demo/source/v1",
+            serving_version_key="models/demo/serving/v1",
+        ),
+        source=_SourceStub(),  # type: ignore[arg-type]
+        out_key="models/demo/serving/v1",
+        store=_StoreStub(),  # type: ignore[arg-type]
+    )
+
+    assert isinstance(result, PureTransformPublicationBundle)
+    assert result.serving_artifact_id == "mi2:test:serving"
+    assert result.serving_manifest_ref == build_serving_manifest_ref()
+    assert result.closeout_contract.kind == "representation_publish"
+    assert (
+        result.representation_publish_contract.representation_contract_hash
+        == compute_pure_transform_representation_contract_hash(
+            source_artifact=source_index,
+            serving_artifact=_registered_artifact_stub(),
+        )
+    )
 
 
 def test_node_agent_marks_dependents_cancelled_on_failure() -> None:
@@ -599,6 +701,74 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
     )
     assert (
         response.steps[1].artifact_result.publish.put_outcomes[0].message == "created"
+    )
+
+
+def test_node_agent_servicer_serializes_pure_transform_publication_result() -> None:
+    adapter = EngineAdapter(
+        instance_id="inst-1", engine="test", register_identity_transform=False
+    )
+    bundle = build_pure_transform_publication_bundle_from_registered_artifact(
+        build_intent=ServingBuildIntent(
+            representation_contract_hash="bafkrepresentation",
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v1",
+            serving_abi_version="abi-v1",
+            build_pipeline_version="pipeline-v1",
+            source_artifact_ref="mi2:test:source",
+        ),
+        serving_artifact=_registered_artifact_stub(),
+        source_version_key="models/demo/source/v1",
+        serving_version_key="models/demo/serving/v1",
+    ).model_copy(update={"contract_family": "canonical_full"})
+
+    adapter.register_transform_fn(
+        "return_bundle.v1",
+        register=lambda _ctx: bundle,
+    )
+
+    spec = plan_pb2.PlanSpec(plan_id="plan-node-agent-pure-transform")
+    spec.context.request_id = "req-node-agent-pure-transform"
+
+    step = spec.steps.add()
+    step.step_id = "s1"
+    step.target.target_type = plan_pb2.TARGET_TYPE_INSTANCE
+    step.target.target_id = "inst-1"
+    action = step.action.transform_register
+    action.selection.CopyFrom(_selection())
+    action.spec.name = "return_bundle.v1"
+    action.out_key = "models/demo/serving/v1"
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=adapter,
+        client_factory=lambda _addr: _DaemonStub(),
+    )
+    servicer = NodeAgentServicer(executor)
+    response = servicer.ExecutePlan(
+        node_agent_pb2.ExecutePlanRequest(plan=spec),
+        None,  # type: ignore[arg-type]
+    )
+
+    assert response.ok is True
+    assert response.steps[0].HasField("artifact_result")
+    pure_result = response.steps[0].artifact_result.representation_publish
+    assert (
+        pure_result.representation_publish_contract.serving_artifact_id
+        == "mi2:test:serving"
+    )
+    assert (
+        pure_result.representation_publish_contract.serving_manifest_ref
+        == build_serving_manifest_ref()
+    )
+    assert pure_result.source_artifact_ref == "mi2:test:source"
+    assert pure_result.contract_family == "canonical_full"
+    assert (
+        pure_result.representation_publish_contract.representation_contract_hash
+        == "bafkrepresentation"
     )
 
 

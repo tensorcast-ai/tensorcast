@@ -65,8 +65,10 @@ from tensorcast.types import (
     Plan,
     RegisterStorage,
     RegisterTensorAlias,
+    RepresentationPublishSpec,
     SealAssemblyResult,
     ServerConfig,
+    ServingRuntimePolicy,
     StableDramHandshake,
     VramRegionHandle,
 )
@@ -806,6 +808,7 @@ class DaemonCtl:
         device_uuid: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -841,6 +844,10 @@ class DaemonCtl:
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -885,6 +892,7 @@ class DaemonCtl:
         dst_tensors: Mapping[str, torch.Tensor],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -951,6 +959,10 @@ class DaemonCtl:
                 request.dst_tensors.append(spec)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -999,6 +1011,7 @@ class DaemonCtl:
         binding_layout_id: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         copy_plan: store_daemon_pb2.CopyPlan | None = None,
         dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
@@ -1041,6 +1054,10 @@ class DaemonCtl:
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if copy_plan is not None:
@@ -1243,6 +1260,7 @@ class DaemonCtl:
         artifact_id: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         operation_id: str | None = None,
         timeout_s: float = 600.0,
@@ -1271,6 +1289,10 @@ class DaemonCtl:
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -1833,6 +1855,7 @@ class DaemonCtl:
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1856,6 +1879,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1900,6 +1924,7 @@ class DaemonCtl:
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1957,6 +1982,10 @@ class DaemonCtl:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if export_policy is not None:
                 request.export_policy = export_policy
             if not need_view_data_hash:
@@ -3494,30 +3523,56 @@ class DaemonCtl:
             )
             return resp.tensor_index_data
 
+    def list_artifact_layouts(
+        self, artifact_id: str, *, timeout_s: float = 10.0
+    ) -> list[str]:
+        """Fetch layout ids currently attached to an artifact via daemon."""
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        with self._client_span("Client/ListArtifactLayouts") as span:
+            request = store_daemon_pb2.ListArtifactLayoutsRequest(
+                artifact_id=artifact_id
+            )
+            resp = self._unary_call(
+                self.stub.ListArtifactLayouts,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+            return [str(item) for item in resp.layout_ids]
+
     def start_assembly_attempt(
         self,
         *,
-        layout_id: str,
+        layout_id: str | None = None,
         requirements: AssemblyRequirementSetRef | None = None,
         readiness_policy: AssemblyReadinessPolicy | None = None,
         closeout_contract: AssemblyCloseoutContract | None = None,
+        representation_publish_spec: RepresentationPublishSpec | None = None,
         timeout_s: float = 30.0,
     ) -> AssemblyAttemptRef:
-        if not layout_id:
-            raise ValueError("layout_id is required")
-        if requirements is None:
-            raise ValueError(
-                "requirements are required; construct them explicitly with "
-                "AssemblyRequirementSetRef.pp_from_structural_views(...), "
-                "AssemblyRequirementSetRef.ep_from_structural_views(...), "
-                "or AssemblyRequirementSetRef.canonical_full()"
+        if representation_publish_spec is not None:
+            req = store_daemon_pb2.StartAssemblyAttemptRequest()
+            req.representation_publish_spec.CopyFrom(
+                representation_publish_spec.to_proto()
             )
-        req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
-        req.requirements.CopyFrom(requirements.to_proto())
-        if readiness_policy is not None:
-            req.readiness_policy.CopyFrom(readiness_policy.to_proto())
-        if closeout_contract is not None:
-            req.closeout_contract.CopyFrom(closeout_contract.to_proto())
+        else:
+            if not layout_id:
+                raise ValueError("layout_id is required")
+            if requirements is None:
+                raise ValueError(
+                    "requirements are required; construct them explicitly with "
+                    "AssemblyRequirementSetRef.pp_from_structural_views(...), "
+                    "AssemblyRequirementSetRef.ep_from_structural_views(...), "
+                    "or AssemblyRequirementSetRef.canonical_full()"
+                )
+            req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
+            req.requirements.CopyFrom(requirements.to_proto())
+            if readiness_policy is not None:
+                req.readiness_policy.CopyFrom(readiness_policy.to_proto())
+            if closeout_contract is not None:
+                req.closeout_contract.CopyFrom(closeout_contract.to_proto())
         with self._client_span("Client/StartAssemblyAttempt") as span:
             resp = self._unary_call(
                 self.stub.StartAssemblyAttempt,

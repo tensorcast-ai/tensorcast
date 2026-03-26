@@ -90,6 +90,11 @@ from tensorcast.common.selection_identity import (
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import (
+    ServingRuntimePolicy,
+    ServingRuntimePolicyInput,
+    coerce_serving_runtime_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +364,7 @@ def _bind_region_registration_error(
             f"requested_regions={requested_regions}, "
             f"registered_before_failure={registered_regions}, "
             f"cause={detail}. Increase the daemon max_vram_regions limit "
-            "for source-bind workloads.",
+            "for large bind_into workloads.",
             status_code="RESOURCE_EXHAUSTED",
             retryable=False,
         )
@@ -1061,6 +1066,7 @@ class Artifact:
         packing: str = "byte_space",
         capacity_bytes: int | None = None,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Allocate daemon-owned target tensors, fill from this artifact, and return a Binding."""
@@ -1114,6 +1120,9 @@ class Artifact:
             mapping=mapping,
             packing=packing,
             publish=publish,
+            serving_runtime_policy=coerce_serving_runtime_policy(
+                serving_runtime_policy
+            ),
             ctx=ctx,
         )
 
@@ -1124,6 +1133,7 @@ class Artifact:
         mapping: CopyPlan | None = None,
         packing: str = "byte_space",
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Adopt user-owned CUDA tensors, fill once, and return a Binding."""
@@ -1133,6 +1143,9 @@ class Artifact:
                 mapping=mapping,
                 packing=packing,
                 publish=publish,
+                serving_runtime_policy=coerce_serving_runtime_policy(
+                    serving_runtime_policy
+                ),
                 ctx=ctx,
             )
         store, runtime, pipeline = self._require_components()
@@ -1308,6 +1321,9 @@ class Artifact:
                         device_uuid=device_uuid_for(device_id),
                         preference=preference,
                         source_policy=source_policy,
+                        serving_runtime_policy=coerce_serving_runtime_policy(
+                            serving_runtime_policy
+                        ),
                         operation_id=operation_id,
                         timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
@@ -1417,6 +1433,7 @@ class Artifact:
         mapping: CopyPlan,
         packing: str,
         publish: bool,
+        serving_runtime_policy: ServingRuntimePolicy | None,
         ctx: CallContext | None,
     ) -> Binding:
         store, runtime, pipeline = self._require_components()
@@ -1605,6 +1622,7 @@ class Artifact:
                         device_uuid=device_uuid_for(device_id),
                         preference=preference,
                         source_policy=source_policy,
+                        serving_runtime_policy=serving_runtime_policy,
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
                         operation_id=operation_id,
@@ -1746,6 +1764,7 @@ class Artifact:
         mapping: CopyPlan | None,
         packing: str,
         publish: bool,
+        serving_runtime_policy: ServingRuntimePolicy | None,
         ctx: CallContext | None,
     ) -> Binding:
         store, runtime, _ = self._require_components()
@@ -1894,6 +1913,7 @@ class Artifact:
                 binding_layout_id=owner_layout.binding_layout_id,
                 preference=preference,
                 source_policy=source_policy,
+                serving_runtime_policy=serving_runtime_policy,
                 copy_plan=copy_plan_proto,
                 dst_specs=dst_specs,
                 operation_id=_build_transport_operation_id(

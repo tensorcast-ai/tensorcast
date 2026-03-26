@@ -382,6 +382,7 @@ class StoreEngine {
       std::string_view new_artifact_id,
       std::optional<std::string_view> expected_artifact_id = std::nullopt,
       std::optional<uint64_t> expected_generation = std::nullopt);
+  absl::StatusOr<tensorcast::common::v1::ArtifactDescriptor> get_artifact_descriptor(std::string_view artifact_id);
   absl::StatusOr<std::string> get_canonical_index_by_id(std::string_view artifact_id);
   absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id);
   absl::Status revoke_key_mapping(std::string_view key);

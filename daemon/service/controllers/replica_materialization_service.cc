@@ -32,6 +32,7 @@
 #include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/service/controllers/selection_validation_utils.h"
+#include "daemon/service/controllers/serving_artifact_manifest_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/status_utils.h"
 
@@ -918,6 +919,26 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
+  auto preflight_canonical_index_or = d_.engine.get_canonical_index_by_id(handle.replica_key.artifact_id);
+  if (!preflight_canonical_index_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(preflight_canonical_index_or.status());
+  }
+  std::optional<store::loading::DiskSource> preflight_disk_source;
+  if (disk_source_artifact_id.has_value() && *disk_source_artifact_id == handle.replica_key.artifact_id) {
+    preflight_disk_source = disk_source;
+  }
+  auto preflight_or = serving_artifact_manifest::preflight_serving_artifact(
+      &d_.engine,
+      serving_artifact_manifest::build_preflight_request(
+          handle.replica_key.artifact_id,
+          *preflight_canonical_index_or,
+          preflight_disk_source,
+          req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
+  if (!preflight_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(preflight_or.status());
+  }
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   if (normalized_disk_path.has_value()) {
