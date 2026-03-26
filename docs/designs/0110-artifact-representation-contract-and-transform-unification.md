@@ -1,7 +1,7 @@
 ---
 slug: artifact-representation-contract-and-transform-unification
 title: Artifact Representation Semantic Core and Materialization Transform Unification
-status: draft
+status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
 last_updated: 2026-03-25
@@ -25,7 +25,8 @@ related_code:
   - core/store/runtime/ingestion/materialization_strategy_types.h
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/replica/collective_disk_loader.cc
-  - daemon/service/controllers/materialization_mapped_copy_plan_utils.cc
+  - daemon/service/controllers/representation_transform_builder.cc
+  - daemon/service/controllers/representation_layout_types.h
   - daemon/service/controllers/materialization_target_plan_utils.cc
 links:
   plan: ../plans/0110-artifact-representation-contract-and-transform-unification.md
@@ -797,7 +798,8 @@ This design is accepted only when all of the following are true:
 - `tensorcast/api/store/mapped_binding.py`
 - `tensorcast/types.py`
 - `proto/tensorcast/daemon/v2/store_daemon.proto`
-- `daemon/service/controllers/materialization_mapped_copy_plan_utils.cc`
+- `daemon/service/controllers/representation_transform_builder.cc`
+- `daemon/service/controllers/representation_layout_types.h`
 - `core/store/replica/collective_disk_loader.cc`
 - external integration grounding:
   - `/data/workspace/internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
