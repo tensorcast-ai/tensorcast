@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from tensorcast import runtime
+import tensorcast.runtime as runtime_service
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
 from tensorcast.cli_utils.config import discover_daemon_config
 from tensorcast.cli_utils.health import ping_daemon, wait_for_daemon
@@ -141,7 +141,7 @@ class Context:
         if self.is_owner and self.session_id:
             # Stop daemon session we launched.
             try:
-                runtime.stop(session_id=self.session_id)
+                runtime_service.stop(session_id=self.session_id)
             finally:
                 _clear_auto_state_if_matches(self.session_id, self.address)
         self._closed = True
@@ -190,7 +190,7 @@ class Context:
 
 
 def _current_session_address() -> str | None:
-    session = runtime.status()
+    session = runtime_service.status()
     if session and session.daemon_address:
         return session.daemon_address
     from tensorcast.cli_utils.service_manager import get_session_address
@@ -513,7 +513,7 @@ def _start_context(
     logger,
 ) -> Context:
     global _current_ctx
-    session_obj = runtime.start(
+    session_obj = runtime_service.start(
         daemon_config=cfg_path,
         session_id=session_id,
         global_store_mode=global_store_mode,
@@ -615,7 +615,7 @@ def _init_auto_mode(
     )
     timeout_s = _auto_wait_timeout_seconds()
     while True:
-        existing = runtime.status()
+        existing = runtime_service.status()
         existing_address = (
             existing.daemon_address
             if existing
