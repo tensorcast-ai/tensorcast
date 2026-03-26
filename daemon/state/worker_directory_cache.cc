@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "absl/strings/str_cat.h"
+#include "core/communicator/misc/utils.h"
 
 namespace tensorcast::daemon {
 
@@ -18,6 +19,22 @@ bool address_is_routable(const store::components::ActiveWorkerInfo& worker) {
 
 absl::Duration rpc_timeout(absl::Duration staleness_budget) {
   return std::max(absl::Milliseconds(1), staleness_budget);
+}
+
+std::string canonicalize_same_host_address(std::string_view address) {
+  const std::string local_default_ip = communicator::misc::get_default_ip();
+  if (local_default_ip.empty()) {
+    return std::string(address);
+  }
+  const std::size_t port_sep = address.rfind(':');
+  if (port_sep == std::string_view::npos) {
+    return std::string(address);
+  }
+  const std::string_view host = address.substr(0, port_sep);
+  if (host != local_default_ip) {
+    return std::string(address);
+  }
+  return absl::StrCat("127.0.0.1", address.substr(port_sep));
 }
 
 } // namespace
@@ -148,7 +165,7 @@ absl::StatusOr<std::string> WorkerDirectoryCache::resolve_daemon_address(
     if (is_state_fresh(state, now, staleness_budget)) {
       const auto it = state.index_by_daemon_id.find(std::string(daemon_id));
       if (it != state.index_by_daemon_id.end() && !state.entries[it->second].address.empty()) {
-        return state.entries[it->second].address;
+        return canonicalize_same_host_address(state.entries[it->second].address);
       }
     }
   }
@@ -167,7 +184,7 @@ absl::StatusOr<std::string> WorkerDirectoryCache::resolve_daemon_address(
       state.entries[it->second].address.empty()) {
     return absl::NotFoundError("daemon endpoint not found");
   }
-  return state.entries[it->second].address;
+  return canonicalize_same_host_address(state.entries[it->second].address);
 }
 
 void WorkerDirectoryCache::update_from_workers(
