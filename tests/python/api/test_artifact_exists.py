@@ -9,8 +9,8 @@ import torch
 
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache
-from tensorcast.api.store.types import StoreOptions
 from tensorcast.api.store.retry import build_retry_policies
+from tensorcast.api.store.types import StoreOptions
 
 
 def _canonical_index_bytes() -> bytes:
@@ -23,9 +23,11 @@ class _ClientStub:
     def __init__(self, canonical_index_bytes: bytes) -> None:
         self.canonical_index_bytes = canonical_index_bytes
         self.calls = 0
+        self.requested_artifact_ids: list[str] = []
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         self.calls += 1
+        self.requested_artifact_ids.append(artifact_id)
         return self.canonical_index_bytes
 
 
@@ -91,3 +93,16 @@ def test_exists_populates_cache_and_id():
     cached = runtime.get_artifact_index_cached("aid")
     assert cached is not None
     assert cached.canonical_index_bytes == canonical_bytes
+
+
+def test_exists_handles_tuple_key_mapping_cache_result():
+    canonical_bytes = _canonical_index_bytes()
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    store = _StoreStub(runtime)
+    runtime._key_cache["mapped"] = ("aid", "/tmp/cached.index")
+    artifact = Artifact(store_ref=weakref.ref(store), key="mapped")
+
+    assert artifact.exists() is True
+    assert artifact.artifact_id == "aid"
+    assert client.requested_artifact_ids == ["aid"]
