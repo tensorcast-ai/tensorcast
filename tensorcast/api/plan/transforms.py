@@ -7,18 +7,26 @@ import json
 from dataclasses import dataclass
 from typing import Mapping
 
+from tensorcast.types import PureTransformPublicationSpec
+
 
 @dataclass(frozen=True, slots=True)
 class TransformSpec:
     name: str
     args: Mapping[str, str | int]
     layout_hash: str | None = None
+    publication_spec: PureTransformPublicationSpec | None = None
 
     def fingerprint(self) -> str:
         payload = {
             "name": self.name,
             "args": {k: self.args[k] for k in sorted(self.args)},
             "layout_hash": self.layout_hash or "",
+            "publication_spec": (
+                self.publication_spec.to_proto().SerializeToString().hex()
+                if self.publication_spec is not None
+                else ""
+            ),
         }
         digest = hashlib.sha256(
             json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -39,6 +47,8 @@ class TransformSpec:
                 arg.int_value = int(value)
             else:
                 arg.string_value = str(value)
+        if self.publication_spec is not None:
+            proto.publication_spec.CopyFrom(self.publication_spec.to_proto())
         return proto
 
     @staticmethod
@@ -51,7 +61,17 @@ class TransformSpec:
             else:
                 args[str(arg.key)] = str(arg.string_value)
         layout_hash = str(proto.layout_hash) if proto.layout_hash else None
-        return TransformSpec(name=str(proto.name), args=args, layout_hash=layout_hash)
+        publication_spec = (
+            PureTransformPublicationSpec.from_proto(proto.publication_spec)
+            if proto.HasField("publication_spec")
+            else None
+        )
+        return TransformSpec(
+            name=str(proto.name),
+            args=args,
+            layout_hash=layout_hash,
+            publication_spec=publication_spec,
+        )
 
 
 __all__ = [

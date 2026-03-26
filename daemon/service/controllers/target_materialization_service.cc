@@ -37,6 +37,7 @@
 #include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
+#include "daemon/service/controllers/serving_artifact_manifest_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
@@ -794,6 +795,21 @@ grpc::Status TargetMaterializationService::materialize_into_target(
           "error", "transfer_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     }
     return to_grpc_status(result_or.status());
+  }
+  auto preflight_or = serving_artifact_manifest::preflight_serving_artifact(
+      &d_.engine,
+      serving_artifact_manifest::build_preflight_request(
+          resolved_artifact_id,
+          canonical_index_json,
+          disk_source,
+          req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
+  if (!preflight_or.ok()) {
+    for (const auto& region_id : storage_lease.acquired_region_ids()) {
+      d_.regions.mark_poisoned(region_id).IgnoreError();
+    }
+    record_materialize_into_target(
+        "error", "serving_manifest_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(preflight_or.status());
   }
 
   if (verify_external_target) {

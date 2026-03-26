@@ -35,6 +35,7 @@
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 #include "daemon/service/controllers/registration_controller.h"
 #include "daemon/service/controllers/registration_storage_mapping_utils.h"
+#include "daemon/service/controllers/serving_artifact_manifest_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
 
@@ -1603,6 +1604,16 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (!result_or.ok()) {
     return to_grpc_status(result_or.status());
   }
+  auto preflight_or = serving_artifact_manifest::preflight_serving_artifact(
+      &d_.engine,
+      serving_artifact_manifest::build_preflight_request(
+          prepared_plan.resolved_artifact_id,
+          prepared_plan.canonical_index_json,
+          prepared_plan.disk_source,
+          req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
+  if (!preflight_or.ok()) {
+    return to_grpc_status(preflight_or.status());
+  }
 
   google::protobuf::RepeatedPtrField<std::string> no_tensor_filter;
   auto descriptors_or = build_descriptors_from_index(
@@ -2228,6 +2239,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     dst_tensors = record->dst_tensors;
     current_binding_value_id = record->current_binding_value_id;
   }
+  source_selection.set_artifact_id(req.artifact_id());
   if (auto contribution_status =
           ensure_no_live_binding_contributions(d_.global_store_client, record->binding_id, current_binding_value_id);
       !contribution_status.ok()) {
@@ -2293,6 +2305,20 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       mark_dirty(record.get());
     }
     return to_grpc_status(result_or.status());
+  }
+  auto preflight_or = serving_artifact_manifest::preflight_serving_artifact(
+      &d_.engine,
+      serving_artifact_manifest::build_preflight_request(
+          prepared_plan.resolved_artifact_id,
+          prepared_plan.canonical_index_json,
+          prepared_plan.disk_source,
+          req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
+  if (!preflight_or.ok()) {
+    {
+      absl::MutexLock lock(&record->mu);
+      mark_dirty(record.get());
+    }
+    return to_grpc_status(preflight_or.status());
   }
 
   auto target_publication_token_or = maybe_mint_target_publication_token(

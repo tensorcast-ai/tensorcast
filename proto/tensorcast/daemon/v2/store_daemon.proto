@@ -6,6 +6,7 @@ import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
 import "tensorcast/operation/v1/operation.proto";
 import "tensorcast/plan/v1/plan.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 service StoreDaemonService {
   // First dependency-ready ingress slice:
@@ -109,6 +110,8 @@ service StoreDaemonService {
   rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+  // List layout ids currently attached to an artifact.
+  rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
   // Create a fresh assembly workspace bound to a layout contract.
   rpc StartAssemblyAttempt(StartAssemblyAttemptRequest) returns (StartAssemblyAttemptResponse) {}
   // Explicitly transition an assembly attempt from open to sealing.
@@ -238,6 +241,13 @@ message SourcePolicy {
   SourcePreference preference = 1;
   optional bool allow_p2p = 2;
   optional bool allow_disk = 3;
+}
+
+message ServingArtifactRuntimePolicy {
+  bool require_manifest = 1;
+  string serving_manifest_ref = 2;
+  string expected_representation_contract_hash = 3;
+  string expected_serving_build_digest = 4;
 }
 
 // Actual source used to serve a materialization request.
@@ -520,6 +530,7 @@ message MaterializeReplicaRequest {
   optional bool need_view_data_hash = 18;
   // Explicit collective group hint for same-host coordinated disk->GPU loads.
   optional CollectiveLoadGroup collective_load_group = 19;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 20;
 }
 
 message CollectiveLoadGroup {
@@ -602,6 +613,7 @@ message MaterializeIntoMappedTargetRequest {
   reserved "key", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 13;
 }
 
 message MaterializeIntoTargetRequest {
@@ -621,6 +633,7 @@ message MaterializeIntoTargetRequest {
   reserved "key", "tensor_names", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 13;
 }
 
 message MaterializeIntoTargetResponse {
@@ -1162,6 +1175,7 @@ message CreateOwnedBindingRequest {
   CopyPlan copy_plan = 10;
   repeated MappedTensorSpec dst_tensors = 11;
   string binding_layout_id = 12;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 13;
 }
 
 message CreateOwnedBindingResponse {
@@ -1215,6 +1229,7 @@ message RefillOwnedBindingRequest {
   SourcePolicy source_policy = 4;
   optional string operation_id = 5;
   TransformPlacement placement = 6;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 7;
 }
 
 message RefillOwnedBindingResponse {
@@ -2045,6 +2060,13 @@ message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
 }
 
+message ListArtifactLayoutsRequest {
+  string artifact_id = 1;
+}
+message ListArtifactLayoutsResponse {
+  repeated string layout_ids = 1;
+}
+
 message AssemblyAttemptRef {
   string attempt_id = 1;
   string workspace_assembly_id = 2;
@@ -2059,6 +2081,7 @@ message StartAssemblyAttemptRequest {
   AssemblyRequirementSetRef requirements = 2;
   AssemblyReadinessPolicy readiness_policy = 3;
   AssemblyCloseoutContract closeout_contract = 4;
+  tensorcast.publication.v1.RepresentationPublishSpec representation_publish_spec = 5;
 }
 
 message StartAssemblyAttemptResponse {
@@ -2104,6 +2127,13 @@ message SealAssemblyResponse {
   bool already_sealed = 3;
 }
 
+message RepresentationPublishContract {
+  string serving_artifact_id = 1;
+  string serving_manifest_ref = 2;
+  string representation_contract_hash = 3;
+  string serving_build_digest = 4;
+}
+
 message SealAssemblyResult {
   tensorcast.common.v1.ArtifactDescriptor artifact = 1;
   string representation_contract_hash = 2;
@@ -2111,6 +2141,7 @@ message SealAssemblyResult {
   string source_version_key = 4;
   string serving_version_key = 5;
   string serving_manifest_ref = 6;
+  string serving_build_digest = 7;
 }
 
 message StartSealAssemblyRequest {
@@ -2179,6 +2210,7 @@ message AssemblyCloseoutContract {
   string serving_version_key = 4;
   string serving_artifact_id = 5;
   string serving_manifest_ref = 6;
+  RepresentationPublishContract representation_publish_contract = 7;
 }
 
 message AssemblyAttemptIntent {

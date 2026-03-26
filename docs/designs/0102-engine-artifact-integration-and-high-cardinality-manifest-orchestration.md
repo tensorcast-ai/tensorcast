@@ -9,7 +9,7 @@ areas:
   - integrations
   - docs
 created: 2026-03-17
-last_updated: 2026-03-19
+last_updated: 2026-03-25
 related_code:
   - tensorcast/engine_adapter/kvcache_adapter.py
   - tensorcast/node_agent/executor.py
@@ -23,6 +23,7 @@ related_docs:
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
   - docs/designs/0104-artifact-realization-and-cluster-rollout.md
+  - docs/designs/0111-source-to-serving-builder-and-representation-publication.md
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
 links:
@@ -74,12 +75,17 @@ Long-term convergence rule:
 - NodeAgent or the in-process Instance Agent boundary remains the unique instance-scoped execution host in this phase,
 - and `0102` owns only engine-side projection into that spine, including the explicit bridge from engine manifests into
   `0056` `ArtifactSetRef` orchestration.
+- serving-representation publication lineage, serving-artifact manifests used
+  for external closeout, and typed representation-publish child contracts remain
+  outside `0102` and belong to `0111` / `0105`.
 
 `0102` is therefore not:
 
 - a second front door,
 - a second instance-hosting model,
-- or a place to define workflow, continuation, or lifecycle semantics already owned by `0096`, `0100`, and `0094`.
+- a place to define workflow, continuation, or lifecycle semantics already owned by `0096`, `0100`, and `0094`,
+- or a place to define the serving-representation closeout contract consumed by
+  `representation_publish`.
 
 # Problem Statement
 
@@ -226,7 +232,10 @@ Normative rules:
 
 1. new generic plan, NodeAgent, or proto surfaces must use the canonical action names above,
 2. metrics, audit logs, and idempotency fingerprints must use the canonical action names above,
-3. integration-specific aliases must not become the canonical framework vocabulary.
+3. integration-specific aliases must not become the canonical framework vocabulary,
+4. the canonical action name `publish` in this design names the engine- or
+   instance-side source publication step only; it does not replace the
+   `0111` / `0105` serving-representation closeout vocabulary.
 
 ## Frozen projection bridge, not repeated rescan
 

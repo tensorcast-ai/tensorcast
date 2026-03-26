@@ -289,7 +289,88 @@ TEST_CASE("StartAssemblyAttempt rejects missing requirements", "[daemon][assembl
   REQUIRE(st.error_message().find("requirements are required") != std::string::npos);
 }
 
-TEST_CASE("StartAssemblyAttempt rejects non dependency-ready closeout kinds", "[daemon][assembly][attempt]") {
+TEST_CASE(
+    "StartAssemblyAttempt accepts representation_publish with typed child contract",
+    "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  req.set_layout_id("layout-1");
+  add_requirement_family(&req, {"view-a", "view-b"});
+  auto* closeout = req.mutable_closeout_contract();
+  closeout->set_kind(tensorcast::daemon::v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH);
+  closeout->set_source_version_key("models/demo/source/v1");
+  closeout->set_serving_version_key("models/demo/serving/v1");
+  closeout->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
+  closeout->mutable_representation_publish_contract()->set_serving_manifest_ref(
+      "tensor:__tensorcast_meta__.manifest_json");
+  closeout->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
+  closeout->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE(st.ok());
+  REQUIRE_FALSE(resp.attempt().attempt_id().empty());
+  REQUIRE(gs_client->last_attempt.attempt_id == resp.attempt().attempt_id());
+}
+
+TEST_CASE("StartAssemblyAttempt accepts representation_publish_spec carrier", "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  auto* spec = req.mutable_representation_publish_spec();
+  spec->set_layout_id("layout-1");
+  auto* requirement = spec->mutable_requirements()->add_inline_requirements();
+  requirement->set_slot_id("__canonical_full__");
+  requirement->mutable_target()->set_kind(tensorcast::publication::v1::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+  requirement->set_coverage_contract("canonical_full");
+  spec->mutable_readiness_policy()->set_contributor_liveness_mode(
+      tensorcast::publication::v1::ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT);
+  spec->set_source_version_key("models/demo/source/v1");
+  spec->set_serving_version_key("models/demo/serving/v1");
+  spec->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
+  spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
+  spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
+  spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE(st.ok());
+  REQUIRE_FALSE(resp.attempt().attempt_id().empty());
+  REQUIRE(gs_client->last_attempt.layout_id == "layout-1");
+}
+
+TEST_CASE(
+    "StartAssemblyAttempt rejects representation_publish without typed child contract",
+    "[daemon][assembly][attempt]") {
   auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
   engine->set_global_store_client_for_testing(gs_client);
@@ -314,8 +395,8 @@ TEST_CASE("StartAssemblyAttempt rejects non dependency-ready closeout kinds", "[
   const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
 
   REQUIRE_FALSE(st.ok());
-  REQUIRE(st.error_code() == grpc::StatusCode::UNIMPLEMENTED);
-  REQUIRE(st.error_message().find("source_publish_only") != std::string::npos);
+  REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(st.error_message().find("representation_publish_contract") != std::string::npos);
 }
 
 TEST_CASE("StartAssemblyAttempt rejects serving fields for source_publish_only", "[daemon][assembly][attempt]") {

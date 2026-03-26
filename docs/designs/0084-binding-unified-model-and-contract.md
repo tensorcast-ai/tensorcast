@@ -3,7 +3,7 @@ slug: binding-unified-model-and-contract
 title: Binding Unified Model and Contract
 status: accepted
 created: 2026-03-12
-last_updated: 2026-03-19
+last_updated: 2026-03-27
 areas: ["sdk", "daemon", "core", "proto"]
 related_code:
   - tensorcast/api/store/artifact.py
@@ -582,6 +582,16 @@ Normative rule:
 - local binding APIs may surface the contributor identity needed by assembly,
   but they must not redefine attempt truth or closeout truth
 
+Clarification for builder-hosted serving realization:
+
+- a layout-seeded binding may host the future canonical serving representation
+  before any artifact-backed current value exists,
+- a later successful assembly / closeout action may upgrade that same current
+  sealed value from local-only to artifact-backed without requiring a second
+  local byte copy,
+- this remains an assembly / closeout transition, not a binding-local publish
+  shortcut and not a second artifact-plane truth inside `0084`.
+
 ## Wait-Event Barrier
 
 Both `begin_update(...)` and `seal_current(...)` may accept `wait_events`.
@@ -782,6 +792,9 @@ The design is accepted when:
   is local-only or absent
 - publish and key activation remain daemon-mediated and valid only for
   artifact-backed current values
+- assembly / closeout may upgrade one local sealed current into an
+  artifact-backed current without introducing a second local byte copy or a
+  binding-local publish shortcut
 - successful create/refill/commit/seal responses return daemon-authored
   authoritative current-value identity rather than relying on SDK synthesis
 - `BindingUpdateEpoch` is binding-scoped and wrong-binding token reuse fails

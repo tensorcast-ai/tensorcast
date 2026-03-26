@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Iterable, Literal, Union
@@ -11,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
+from tensorcast.proto.publication.v1 import publication_pb2
 
 # ---------------------------------------------------------------------------
 # Canonical typed models used across the Python SDK in place of raw dicts
@@ -246,6 +250,101 @@ _ASSEMBLY_CANONICAL_SLOT_ID = "__canonical_full__"
 _ASSEMBLY_PP_PIECE_COVERAGE_CONTRACT = "pp_structural_view"
 _ASSEMBLY_EP_PIECE_COVERAGE_CONTRACT = "ep_structural_view"
 _ASSEMBLY_CANONICAL_COVERAGE_CONTRACT = "canonical_full"
+SERVING_MANIFEST_TENSOR_NAME = "__tensorcast_meta__.manifest_json"
+
+
+def _canonical_json_bytes(payload: object) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _multibase_multihash_sha256(digest: bytes) -> str:
+    if len(digest) != 32:
+        raise ValueError("SHA256 digest must be 32 bytes")
+    multihash = b"\x12\x20" + digest
+    encoded = base64.b32encode(multihash).decode("ascii").lower().rstrip("=")
+    return f"b{encoded}"
+
+
+def _hash_payload_to_multihash(payload: object) -> str:
+    return _multibase_multihash_sha256(
+        hashlib.sha256(_canonical_json_bytes(payload)).digest()
+    )
+
+
+def build_serving_manifest_ref(
+    tensor_name: str = SERVING_MANIFEST_TENSOR_NAME,
+) -> str:
+    name = str(tensor_name).strip()
+    if not name:
+        raise ValueError("tensor_name must not be empty")
+    return f"tensor:{name}"
+
+
+def parse_serving_manifest_ref(ref: str) -> str:
+    value = str(ref).strip()
+    prefix = "tensor:"
+    if not value.startswith(prefix):
+        raise ValueError("serving_manifest_ref must use the tensor:<name> carrier")
+    tensor_name = value[len(prefix) :].strip()
+    if not tensor_name:
+        raise ValueError("serving_manifest_ref tensor carrier requires a tensor name")
+    return tensor_name
+
+
+class BuilderMode(str, Enum):
+    PURE_TRANSFORM = "pure_transform"
+    BINDING_FINALIZE = "binding_finalize"
+
+
+class FinalizeClass(str, Enum):
+    RUNTIME_ONLY = "runtime_only"
+    REPRESENTATION_CHANGING = "representation_changing"
+    UNKNOWN_BLOCKED = "unknown_blocked"
+
+
+class ServingSupportLevel(str, Enum):
+    BLOCKED = "blocked"
+    SOURCE_BIND_BOOTSTRAP_ONLY = "source_bind_bootstrap_only"
+    BUILDER_PUBLICATION_READY = "builder_publication_ready"
+    RUNTIME_BIND_SWAP_READY = "runtime_bind_swap_ready"
+
+
+_PUBLICATION_BUILDER_MODE_TO_PROTO: dict[BuilderMode, int] = {
+    BuilderMode.PURE_TRANSFORM: int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM),
+    BuilderMode.BINDING_FINALIZE: int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE),
+}
+_PUBLICATION_BUILDER_MODE_FROM_PROTO: dict[int, BuilderMode] = {
+    int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM): BuilderMode.PURE_TRANSFORM,
+    int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE): BuilderMode.BINDING_FINALIZE,
+}
+_PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[AssemblyTargetKind, int] = {
+    "structural_view": int(publication_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW),
+    "canonical_layout": int(publication_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT),
+}
+_PUBLICATION_ASSEMBLY_TARGET_KIND_FROM_PROTO: dict[int, AssemblyTargetKind] = {
+    int(publication_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW): "structural_view",
+    int(publication_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT): "canonical_layout",
+}
+_PUBLICATION_ASSEMBLY_LIVENESS_MODE_TO_PROTO: dict[
+    AssemblyContributorLivenessMode, int
+] = {
+    "require_live_until_cut": int(
+        publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT
+    ),
+    "allow_durable_occupancy": int(
+        publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
+    ),
+}
+_PUBLICATION_ASSEMBLY_LIVENESS_MODE_FROM_PROTO: dict[
+    int, AssemblyContributorLivenessMode
+] = {
+    int(
+        publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT
+    ): "require_live_until_cut",
+    int(
+        publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
+    ): "allow_durable_occupancy",
+}
 
 
 class AssemblyTargetRef(BaseModel):
@@ -279,6 +378,24 @@ class AssemblyTargetRef(BaseModel):
             structural_view_id=str(proto.structural_view_id or "") or None,
         )
 
+    def to_publication_proto(self) -> publication_pb2.AssemblyTargetRef:
+        proto = publication_pb2.AssemblyTargetRef(
+            kind=_PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO[self.kind]
+        )
+        if self.structural_view_id:
+            proto.structural_view_id = str(self.structural_view_id)
+        return proto
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.AssemblyTargetRef,
+    ) -> "AssemblyTargetRef":
+        return cls(
+            kind=_PUBLICATION_ASSEMBLY_TARGET_KIND_FROM_PROTO[int(proto.kind)],
+            structural_view_id=str(proto.structural_view_id or "") or None,
+        )
+
 
 class AssemblyRequirement(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -302,6 +419,25 @@ class AssemblyRequirement(BaseModel):
         return cls(
             slot_id=str(proto.slot_id),
             target=AssemblyTargetRef.from_proto(proto.target),
+            coverage_contract=str(proto.coverage_contract),
+        )
+
+    def to_publication_proto(self) -> publication_pb2.AssemblyRequirement:
+        proto = publication_pb2.AssemblyRequirement(
+            slot_id=str(self.slot_id),
+            coverage_contract=str(self.coverage_contract),
+        )
+        proto.target.CopyFrom(self.target.to_publication_proto())
+        return proto
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.AssemblyRequirement,
+    ) -> "AssemblyRequirement":
+        return cls(
+            slot_id=str(proto.slot_id),
+            target=AssemblyTargetRef.from_publication_proto(proto.target),
             coverage_contract=str(proto.coverage_contract),
         )
 
@@ -340,6 +476,37 @@ class AssemblyRequirementSetRef(BaseModel):
             carrier_form=str(proto.carrier_form or "inline"),
             inline_requirements=tuple(
                 AssemblyRequirement.from_proto(requirement)
+                for requirement in proto.inline_requirements
+            ),
+        )
+
+    def to_publication_proto(self) -> publication_pb2.AssemblyRequirementSetRef:
+        proto = publication_pb2.AssemblyRequirementSetRef(
+            requirements_digest=str(self.requirements_digest),
+            requirement_count=int(
+                self.requirement_count
+                if self.requirement_count > 0
+                else len(self.inline_requirements)
+            ),
+            carrier_form=str(self.carrier_form),
+        )
+        proto.inline_requirements.extend(
+            requirement.to_publication_proto()
+            for requirement in self.inline_requirements
+        )
+        return proto
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.AssemblyRequirementSetRef,
+    ) -> "AssemblyRequirementSetRef":
+        return cls(
+            requirements_digest=str(proto.requirements_digest),
+            requirement_count=int(proto.requirement_count),
+            carrier_form=str(proto.carrier_form or "inline"),
+            inline_requirements=tuple(
+                AssemblyRequirement.from_publication_proto(requirement)
                 for requirement in proto.inline_requirements
             ),
         )
@@ -471,6 +638,428 @@ class AssemblyReadinessPolicy(BaseModel):
             ]
         )
 
+    def to_publication_proto(self) -> publication_pb2.AssemblyReadinessPolicy:
+        return publication_pb2.AssemblyReadinessPolicy(
+            contributor_liveness_mode=_PUBLICATION_ASSEMBLY_LIVENESS_MODE_TO_PROTO[
+                self.contributor_liveness_mode
+            ]
+        )
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.AssemblyReadinessPolicy,
+    ) -> "AssemblyReadinessPolicy":
+        if int(proto.contributor_liveness_mode) == int(
+            publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_UNSPECIFIED
+        ):
+            return cls()
+        return cls(
+            contributor_liveness_mode=_PUBLICATION_ASSEMBLY_LIVENESS_MODE_FROM_PROTO[
+                int(proto.contributor_liveness_mode)
+            ]
+        )
+
+
+class ServingBuildIntent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    representation_contract_hash: str | None = None
+    builder_mode: BuilderMode
+    framework_name: str
+    adapter_version: str
+    serving_abi_version: str
+    build_pipeline_version: str
+    source_artifact_ref: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "ServingBuildIntent":
+        if (
+            self.representation_contract_hash is not None
+            and not self.representation_contract_hash
+        ):
+            raise ValueError("representation_contract_hash must not be empty")
+        if not self.framework_name:
+            raise ValueError("framework_name must not be empty")
+        if not self.adapter_version:
+            raise ValueError("adapter_version must not be empty")
+        if not self.serving_abi_version:
+            raise ValueError("serving_abi_version must not be empty")
+        if not self.build_pipeline_version:
+            raise ValueError("build_pipeline_version must not be empty")
+        return self
+
+    def compute_serving_build_digest(self) -> str:
+        payload = {
+            "builder_mode": self.builder_mode.value,
+            "framework_name": self.framework_name,
+            "adapter_version": self.adapter_version,
+            "serving_abi_version": self.serving_abi_version,
+            "build_pipeline_version": self.build_pipeline_version,
+        }
+        return _hash_payload_to_multihash(payload)
+
+    def to_publication_proto(self) -> publication_pb2.ServingBuildIntent:
+        proto = publication_pb2.ServingBuildIntent(
+            builder_mode=_PUBLICATION_BUILDER_MODE_TO_PROTO[self.builder_mode],
+            framework_name=str(self.framework_name),
+            adapter_version=str(self.adapter_version),
+            serving_abi_version=str(self.serving_abi_version),
+            build_pipeline_version=str(self.build_pipeline_version),
+        )
+        if self.representation_contract_hash is not None:
+            proto.representation_contract_hash = str(self.representation_contract_hash)
+        if self.source_artifact_ref is not None:
+            proto.source_artifact_ref = str(self.source_artifact_ref)
+        return proto
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.ServingBuildIntent,
+    ) -> "ServingBuildIntent":
+        builder_mode = BuilderMode.PURE_TRANSFORM
+        if int(proto.builder_mode) != int(publication_pb2.BUILDER_MODE_UNSPECIFIED):
+            builder_mode = _PUBLICATION_BUILDER_MODE_FROM_PROTO[int(proto.builder_mode)]
+        return cls(
+            representation_contract_hash=(
+                str(proto.representation_contract_hash or "") or None
+            ),
+            builder_mode=builder_mode,
+            framework_name=str(proto.framework_name),
+            adapter_version=str(proto.adapter_version),
+            serving_abi_version=str(proto.serving_abi_version),
+            build_pipeline_version=str(proto.build_pipeline_version),
+            source_artifact_ref=str(proto.source_artifact_ref or "") or None,
+        )
+
+
+class PureTransformPublicationSpec(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    build_intent: ServingBuildIntent
+    contract_family: AssemblyContractFamily | None = None
+    source_version_key: str | None = None
+    serving_version_key: str | None = None
+    logical_topology_json: str | None = None
+    serving_manifest_ref: str | None = None
+    layout_id: str | None = None
+    requirements: AssemblyRequirementSetRef | None = None
+    readiness_policy: AssemblyReadinessPolicy | None = None
+    structural_view_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_publication_spec(self) -> "PureTransformPublicationSpec":
+        if self.contract_family is not None and self.contract_family not in {
+            "pp",
+            "ep",
+            "canonical_full",
+        }:
+            raise ValueError("contract_family must be one of: pp, ep, canonical_full")
+        if self.serving_manifest_ref is not None:
+            parse_serving_manifest_ref(self.serving_manifest_ref)
+        return self
+
+    def to_proto(self) -> publication_pb2.PureTransformPublicationSpec:
+        proto = publication_pb2.PureTransformPublicationSpec()
+        proto.build_intent.CopyFrom(self.build_intent.to_publication_proto())
+        if self.contract_family is not None:
+            proto.contract_family = str(self.contract_family)
+        if self.source_version_key is not None:
+            proto.source_version_key = str(self.source_version_key)
+        if self.serving_version_key is not None:
+            proto.serving_version_key = str(self.serving_version_key)
+        if self.logical_topology_json is not None:
+            proto.logical_topology_json = str(self.logical_topology_json)
+        if self.serving_manifest_ref is not None:
+            proto.serving_manifest_ref = str(self.serving_manifest_ref)
+        if self.layout_id is not None:
+            proto.layout_id = str(self.layout_id)
+        if self.requirements is not None:
+            proto.requirements.CopyFrom(self.requirements.to_publication_proto())
+        if self.readiness_policy is not None:
+            proto.readiness_policy.CopyFrom(
+                self.readiness_policy.to_publication_proto()
+            )
+        proto.structural_view_ids.extend(str(item) for item in self.structural_view_ids)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: publication_pb2.PureTransformPublicationSpec,
+    ) -> "PureTransformPublicationSpec":
+        return cls(
+            build_intent=ServingBuildIntent.from_publication_proto(proto.build_intent),
+            contract_family=str(proto.contract_family or "") or None,
+            source_version_key=str(proto.source_version_key or "") or None,
+            serving_version_key=str(proto.serving_version_key or "") or None,
+            logical_topology_json=str(proto.logical_topology_json or "") or None,
+            serving_manifest_ref=str(proto.serving_manifest_ref or "") or None,
+            layout_id=str(proto.layout_id or "") or None,
+            requirements=(
+                AssemblyRequirementSetRef.from_publication_proto(proto.requirements)
+                if proto.HasField("requirements")
+                else None
+            ),
+            readiness_policy=(
+                AssemblyReadinessPolicy.from_publication_proto(proto.readiness_policy)
+                if proto.HasField("readiness_policy")
+                else None
+            ),
+            structural_view_ids=tuple(str(item) for item in proto.structural_view_ids),
+        )
+
+
+class ServingArtifactManifest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: int = 1
+    artifact_kind: str = "serving"
+    framework_name: str
+    adapter_version: str
+    serving_abi_version: str
+    representation_contract_hash: str
+    serving_build_digest: str
+    tensor_schema_hash: str
+    canonical_tensor_count: int
+    serving_manifest_ref: str = Field(default_factory=build_serving_manifest_ref)
+    source_artifact_ref: str | None = None
+    builder_mode: BuilderMode
+    build_pipeline_version: str
+    logical_topology_json: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_manifest(self) -> "ServingArtifactManifest":
+        if self.schema_version <= 0:
+            raise ValueError("schema_version must be positive")
+        if self.artifact_kind != "serving":
+            raise ValueError("artifact_kind must be 'serving'")
+        if not self.framework_name:
+            raise ValueError("framework_name must not be empty")
+        if not self.adapter_version:
+            raise ValueError("adapter_version must not be empty")
+        if not self.serving_abi_version:
+            raise ValueError("serving_abi_version must not be empty")
+        if not self.representation_contract_hash:
+            raise ValueError("representation_contract_hash must not be empty")
+        if not self.serving_build_digest:
+            raise ValueError("serving_build_digest must not be empty")
+        if not self.tensor_schema_hash:
+            raise ValueError("tensor_schema_hash must not be empty")
+        if self.canonical_tensor_count < 0:
+            raise ValueError("canonical_tensor_count must be non-negative")
+        parse_serving_manifest_ref(self.serving_manifest_ref)
+        if not self.build_pipeline_version:
+            raise ValueError("build_pipeline_version must not be empty")
+        return self
+
+    @classmethod
+    def from_build_intent(
+        cls,
+        *,
+        intent: ServingBuildIntent,
+        representation_contract_hash: str | None = None,
+        tensor_schema_hash: str,
+        canonical_tensor_count: int,
+        serving_manifest_ref: str | None = None,
+        logical_topology_json: str | None = None,
+    ) -> "ServingArtifactManifest":
+        resolved_representation_contract_hash = (
+            representation_contract_hash or intent.representation_contract_hash
+        )
+        if not resolved_representation_contract_hash:
+            raise ValueError(
+                "representation_contract_hash must be resolved before building a serving manifest"
+            )
+        return cls(
+            framework_name=intent.framework_name,
+            adapter_version=intent.adapter_version,
+            serving_abi_version=intent.serving_abi_version,
+            representation_contract_hash=resolved_representation_contract_hash,
+            serving_build_digest=intent.compute_serving_build_digest(),
+            tensor_schema_hash=str(tensor_schema_hash),
+            canonical_tensor_count=int(canonical_tensor_count),
+            serving_manifest_ref=(
+                build_serving_manifest_ref()
+                if serving_manifest_ref is None
+                else str(serving_manifest_ref)
+            ),
+            source_artifact_ref=intent.source_artifact_ref,
+            builder_mode=intent.builder_mode,
+            build_pipeline_version=intent.build_pipeline_version,
+            logical_topology_json=logical_topology_json,
+        )
+
+    def to_bytes(self) -> bytes:
+        return _canonical_json_bytes(self.model_dump(mode="json"))
+
+    @classmethod
+    def from_bytes(cls, payload: bytes | bytearray | str) -> "ServingArtifactManifest":
+        raw = (
+            payload.decode("utf-8")
+            if isinstance(payload, (bytes, bytearray))
+            else str(payload)
+        )
+        return cls.model_validate_json(raw)
+
+    def to_runtime_policy(
+        self,
+        *,
+        require_manifest: bool = True,
+    ) -> "ServingRuntimePolicy":
+        return ServingRuntimePolicy(
+            require_manifest=bool(require_manifest),
+            serving_manifest_ref=str(self.serving_manifest_ref),
+            expected_representation_contract_hash=str(
+                self.representation_contract_hash
+            ),
+            expected_serving_build_digest=str(self.serving_build_digest),
+        )
+
+
+class ServingRuntimePolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    require_manifest: bool = True
+    serving_manifest_ref: str | None = None
+    expected_representation_contract_hash: str | None = None
+    expected_serving_build_digest: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "ServingRuntimePolicy":
+        if self.serving_manifest_ref is not None:
+            parse_serving_manifest_ref(self.serving_manifest_ref)
+        return self
+
+    def to_proto(self) -> store_daemon_pb2.ServingArtifactRuntimePolicy:
+        proto = store_daemon_pb2.ServingArtifactRuntimePolicy(
+            require_manifest=bool(
+                self.require_manifest
+                or self.serving_manifest_ref is not None
+                or self.expected_representation_contract_hash is not None
+                or self.expected_serving_build_digest is not None
+            )
+        )
+        if self.serving_manifest_ref is not None:
+            proto.serving_manifest_ref = str(self.serving_manifest_ref)
+        if self.expected_representation_contract_hash is not None:
+            proto.expected_representation_contract_hash = str(
+                self.expected_representation_contract_hash
+            )
+        if self.expected_serving_build_digest is not None:
+            proto.expected_serving_build_digest = str(
+                self.expected_serving_build_digest
+            )
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.ServingArtifactRuntimePolicy,
+    ) -> "ServingRuntimePolicy":
+        return cls(
+            require_manifest=bool(proto.require_manifest),
+            serving_manifest_ref=str(proto.serving_manifest_ref or "") or None,
+            expected_representation_contract_hash=(
+                str(proto.expected_representation_contract_hash or "") or None
+            ),
+            expected_serving_build_digest=(
+                str(proto.expected_serving_build_digest or "") or None
+            ),
+        )
+
+
+class RepresentationPublishContract(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    serving_artifact_id: str
+    serving_manifest_ref: str
+    representation_contract_hash: str
+    serving_build_digest: str
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> "RepresentationPublishContract":
+        if not self.serving_artifact_id:
+            raise ValueError("serving_artifact_id must not be empty")
+        parse_serving_manifest_ref(self.serving_manifest_ref)
+        if not self.representation_contract_hash:
+            raise ValueError("representation_contract_hash must not be empty")
+        if not self.serving_build_digest:
+            raise ValueError("serving_build_digest must not be empty")
+        return self
+
+    def to_proto(self) -> store_daemon_pb2.RepresentationPublishContract:
+        return store_daemon_pb2.RepresentationPublishContract(
+            serving_artifact_id=str(self.serving_artifact_id),
+            serving_manifest_ref=str(self.serving_manifest_ref),
+            representation_contract_hash=str(self.representation_contract_hash),
+            serving_build_digest=str(self.serving_build_digest),
+        )
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.RepresentationPublishContract,
+    ) -> "RepresentationPublishContract":
+        return cls(
+            serving_artifact_id=str(proto.serving_artifact_id),
+            serving_manifest_ref=str(proto.serving_manifest_ref),
+            representation_contract_hash=str(proto.representation_contract_hash),
+            serving_build_digest=str(proto.serving_build_digest),
+        )
+
+    def validate_against_manifest(
+        self,
+        manifest: ServingArtifactManifest,
+    ) -> None:
+        if manifest.serving_manifest_ref != self.serving_manifest_ref:
+            raise ValueError(
+                "RepresentationPublishContract.serving_manifest_ref does not match the serving manifest"
+            )
+        if manifest.representation_contract_hash != self.representation_contract_hash:
+            raise ValueError(
+                "RepresentationPublishContract.representation_contract_hash does not match the serving manifest"
+            )
+        if manifest.serving_build_digest != self.serving_build_digest:
+            raise ValueError(
+                "RepresentationPublishContract.serving_build_digest does not match the serving manifest"
+            )
+
+    def to_runtime_policy(
+        self,
+        *,
+        require_manifest: bool = True,
+    ) -> ServingRuntimePolicy:
+        return ServingRuntimePolicy(
+            require_manifest=bool(require_manifest),
+            serving_manifest_ref=str(self.serving_manifest_ref),
+            expected_representation_contract_hash=str(
+                self.representation_contract_hash
+            ),
+            expected_serving_build_digest=str(self.serving_build_digest),
+        )
+
+    def to_publication_proto(self) -> publication_pb2.RepresentationPublishContract:
+        return publication_pb2.RepresentationPublishContract(
+            serving_artifact_id=str(self.serving_artifact_id),
+            serving_manifest_ref=str(self.serving_manifest_ref),
+            representation_contract_hash=str(self.representation_contract_hash),
+            serving_build_digest=str(self.serving_build_digest),
+        )
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.RepresentationPublishContract,
+    ) -> "RepresentationPublishContract":
+        return cls(
+            serving_artifact_id=str(proto.serving_artifact_id),
+            serving_manifest_ref=str(proto.serving_manifest_ref),
+            representation_contract_hash=str(proto.representation_contract_hash),
+            serving_build_digest=str(proto.serving_build_digest),
+        )
+
 
 class AssemblyCloseoutContract(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -481,6 +1070,51 @@ class AssemblyCloseoutContract(BaseModel):
     serving_version_key: str | None = None
     serving_artifact_id: str | None = None
     serving_manifest_ref: str | None = None
+    representation_publish_contract: RepresentationPublishContract | None = None
+
+    @model_validator(mode="after")
+    def _validate_closeout_fields(self) -> "AssemblyCloseoutContract":
+        if self.kind == "source_publish_only":
+            if self.serving_version_key is not None:
+                raise ValueError(
+                    "source_publish_only closeout contracts may not set serving_version_key"
+                )
+            if self.serving_artifact_id is not None:
+                raise ValueError(
+                    "source_publish_only closeout contracts may not set serving_artifact_id"
+                )
+            if self.serving_manifest_ref is not None:
+                raise ValueError(
+                    "source_publish_only closeout contracts may not set serving_manifest_ref"
+                )
+            if self.representation_publish_contract is not None:
+                raise ValueError(
+                    "source_publish_only closeout contracts may not set representation_publish_contract"
+                )
+            return self
+
+        if self.kind == "representation_publish":
+            if self.representation_publish_contract is None:
+                raise ValueError(
+                    "representation_publish closeout contracts require representation_publish_contract"
+                )
+            if (
+                self.serving_artifact_id is not None
+                and self.serving_artifact_id
+                != self.representation_publish_contract.serving_artifact_id
+            ):
+                raise ValueError(
+                    "serving_artifact_id must match representation_publish_contract.serving_artifact_id"
+                )
+            if (
+                self.serving_manifest_ref is not None
+                and self.serving_manifest_ref
+                != self.representation_publish_contract.serving_manifest_ref
+            ):
+                raise ValueError(
+                    "serving_manifest_ref must match representation_publish_contract.serving_manifest_ref"
+                )
+        return self
 
     def to_proto(self) -> store_daemon_pb2.AssemblyCloseoutContract:
         proto = store_daemon_pb2.AssemblyCloseoutContract(
@@ -495,6 +1129,10 @@ class AssemblyCloseoutContract(BaseModel):
             proto.serving_artifact_id = str(self.serving_artifact_id)
         if self.serving_manifest_ref:
             proto.serving_manifest_ref = str(self.serving_manifest_ref)
+        if self.representation_publish_contract is not None:
+            proto.representation_publish_contract.CopyFrom(
+                self.representation_publish_contract.to_proto()
+            )
         return proto
 
     @classmethod
@@ -505,13 +1143,194 @@ class AssemblyCloseoutContract(BaseModel):
         kind = "source_publish_only"
         if int(proto.kind) != int(store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED):
             kind = _ASSEMBLY_CLOSEOUT_KIND_FROM_PROTO[int(proto.kind)]
+        representation_publish_contract = (
+            RepresentationPublishContract.from_proto(
+                proto.representation_publish_contract
+            )
+            if proto.HasField("representation_publish_contract")
+            else None
+        )
         return cls(
             kind=kind,
             closeout_contract_digest=str(proto.closeout_contract_digest),
             source_version_key=str(proto.source_version_key or "") or None,
             serving_version_key=str(proto.serving_version_key or "") or None,
-            serving_artifact_id=str(proto.serving_artifact_id or "") or None,
-            serving_manifest_ref=str(proto.serving_manifest_ref or "") or None,
+            serving_artifact_id=(
+                str(proto.serving_artifact_id or "") or None
+                if not representation_publish_contract
+                else representation_publish_contract.serving_artifact_id
+            ),
+            serving_manifest_ref=(
+                str(proto.serving_manifest_ref or "") or None
+                if not representation_publish_contract
+                else representation_publish_contract.serving_manifest_ref
+            ),
+            representation_publish_contract=representation_publish_contract,
+        )
+
+
+class RepresentationPublishSpec(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    serving_artifact_id: str
+    serving_manifest_ref: str
+    serving_manifest: ServingArtifactManifest
+    serving_manifest_bytes: bytes
+    representation_publish_contract: RepresentationPublishContract
+    closeout_contract: AssemblyCloseoutContract
+    source_artifact_ref: str | None = None
+    contract_family: AssemblyContractFamily | None = None
+    structural_view_ids: tuple[str, ...] = ()
+    layout_id: str | None = None
+    requirements: AssemblyRequirementSetRef | None = None
+    readiness_policy: AssemblyReadinessPolicy | None = None
+
+    @model_validator(mode="after")
+    def _validate_representation_publish_spec(self) -> "RepresentationPublishSpec":
+        if not self.serving_artifact_id:
+            raise ValueError("serving_artifact_id must not be empty")
+        parse_serving_manifest_ref(self.serving_manifest_ref)
+        if self.contract_family is not None and self.contract_family not in {
+            "pp",
+            "ep",
+            "canonical_full",
+        }:
+            raise ValueError("contract_family must be one of: pp, ep, canonical_full")
+        manifest_from_bytes = ServingArtifactManifest.from_bytes(
+            self.serving_manifest_bytes
+        )
+        if manifest_from_bytes != self.serving_manifest:
+            raise ValueError(
+                "serving_manifest_bytes must round-trip to serving_manifest"
+            )
+        self.representation_publish_contract.validate_against_manifest(
+            self.serving_manifest
+        )
+        if self.serving_manifest_ref != self.serving_manifest.serving_manifest_ref:
+            raise ValueError(
+                "serving_manifest_ref must match serving_manifest.serving_manifest_ref"
+            )
+        if (
+            self.serving_manifest_ref
+            != self.representation_publish_contract.serving_manifest_ref
+        ):
+            raise ValueError(
+                "serving_manifest_ref must match representation_publish_contract.serving_manifest_ref"
+            )
+        if (
+            self.serving_artifact_id
+            != self.representation_publish_contract.serving_artifact_id
+        ):
+            raise ValueError(
+                "serving_artifact_id must match representation_publish_contract.serving_artifact_id"
+            )
+        if self.closeout_contract.kind != "representation_publish":
+            raise ValueError(
+                "RepresentationPublishSpec.closeout_contract must use kind='representation_publish'"
+            )
+        if (
+            self.closeout_contract.representation_publish_contract
+            != self.representation_publish_contract
+        ):
+            raise ValueError(
+                "RepresentationPublishSpec.closeout_contract must carry the same representation_publish_contract"
+            )
+        return self
+
+    @property
+    def manifest_tensor_name(self) -> str:
+        return parse_serving_manifest_ref(self.serving_manifest_ref)
+
+    def to_proto(self) -> publication_pb2.RepresentationPublishSpec:
+        proto = publication_pb2.RepresentationPublishSpec(
+            serving_manifest_bytes=bytes(self.serving_manifest_bytes)
+        )
+        if self.layout_id is not None:
+            proto.layout_id = str(self.layout_id)
+        if self.requirements is not None:
+            proto.requirements.CopyFrom(self.requirements.to_publication_proto())
+        if self.readiness_policy is not None:
+            proto.readiness_policy.CopyFrom(
+                self.readiness_policy.to_publication_proto()
+            )
+        if self.closeout_contract.source_version_key is not None:
+            proto.source_version_key = str(self.closeout_contract.source_version_key)
+        if self.closeout_contract.serving_version_key is not None:
+            proto.serving_version_key = str(self.closeout_contract.serving_version_key)
+        proto.representation_publish_contract.CopyFrom(
+            self.representation_publish_contract.to_publication_proto()
+        )
+        if self.source_artifact_ref is not None:
+            proto.source_artifact_ref = str(self.source_artifact_ref)
+        if self.contract_family is not None:
+            proto.contract_family = str(self.contract_family)
+        proto.structural_view_ids.extend(str(item) for item in self.structural_view_ids)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: publication_pb2.RepresentationPublishSpec,
+    ) -> "RepresentationPublishSpec":
+        representation_publish_contract = (
+            RepresentationPublishContract.from_publication_proto(
+                proto.representation_publish_contract
+            )
+        )
+        closeout_contract = AssemblyCloseoutContract(
+            kind="representation_publish",
+            source_version_key=str(proto.source_version_key or "") or None,
+            serving_version_key=str(proto.serving_version_key or "") or None,
+            serving_artifact_id=representation_publish_contract.serving_artifact_id,
+            serving_manifest_ref=representation_publish_contract.serving_manifest_ref,
+            representation_publish_contract=representation_publish_contract,
+        )
+        manifest_bytes = bytes(proto.serving_manifest_bytes)
+        manifest = ServingArtifactManifest.from_bytes(manifest_bytes)
+        return cls(
+            serving_artifact_id=representation_publish_contract.serving_artifact_id,
+            serving_manifest_ref=representation_publish_contract.serving_manifest_ref,
+            serving_manifest=manifest,
+            serving_manifest_bytes=manifest_bytes,
+            representation_publish_contract=representation_publish_contract,
+            closeout_contract=closeout_contract,
+            source_artifact_ref=str(proto.source_artifact_ref or "") or None,
+            contract_family=str(proto.contract_family or "") or None,
+            structural_view_ids=tuple(str(item) for item in proto.structural_view_ids),
+            layout_id=str(proto.layout_id or "") or None,
+            requirements=(
+                AssemblyRequirementSetRef.from_publication_proto(proto.requirements)
+                if proto.HasField("requirements")
+                else None
+            ),
+            readiness_policy=(
+                AssemblyReadinessPolicy.from_publication_proto(proto.readiness_policy)
+                if proto.HasField("readiness_policy")
+                else None
+            ),
+        )
+
+    def with_attempt_inputs(
+        self,
+        *,
+        layout_id: str | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+    ) -> "RepresentationPublishSpec":
+        return self.model_copy(
+            update={
+                "layout_id": (
+                    self.layout_id if layout_id is None else str(layout_id) or None
+                ),
+                "requirements": (
+                    self.requirements if requirements is None else requirements
+                ),
+                "readiness_policy": (
+                    self.readiness_policy
+                    if readiness_policy is None
+                    else readiness_policy
+                ),
+            }
         )
 
 
@@ -564,7 +1383,57 @@ class PublishedModelVersion(BaseModel):
     source_version_key: str | None = None
     serving_version_key: str | None = None
     representation_contract_hash: str | None = None
+    serving_build_digest: str | None = None
     serving_manifest_ref: str | None = None
+
+    def require_serving_runtime_policy(self) -> ServingRuntimePolicy:
+        if not self.serving_manifest_ref:
+            raise ValueError(
+                "PublishedModelVersion does not carry serving_manifest_ref"
+            )
+        if not self.representation_contract_hash:
+            raise ValueError(
+                "PublishedModelVersion does not carry representation_contract_hash"
+            )
+        if not self.serving_build_digest:
+            raise ValueError(
+                "PublishedModelVersion does not carry serving_build_digest"
+            )
+        return ServingRuntimePolicy(
+            require_manifest=True,
+            serving_manifest_ref=str(self.serving_manifest_ref),
+            expected_representation_contract_hash=str(
+                self.representation_contract_hash
+            ),
+            expected_serving_build_digest=str(self.serving_build_digest),
+        )
+
+
+ServingRuntimePolicyInput = Union[
+    ServingRuntimePolicy,
+    ServingArtifactManifest,
+    RepresentationPublishContract,
+    PublishedModelVersion,
+]
+
+
+def coerce_serving_runtime_policy(
+    value: ServingRuntimePolicyInput | None,
+) -> ServingRuntimePolicy | None:
+    if value is None:
+        return None
+    if isinstance(value, ServingRuntimePolicy):
+        return value
+    if isinstance(value, ServingArtifactManifest):
+        return value.to_runtime_policy()
+    if isinstance(value, RepresentationPublishContract):
+        return value.to_runtime_policy()
+    if isinstance(value, PublishedModelVersion):
+        return value.require_serving_runtime_policy()
+    raise TypeError(
+        "serving runtime policy requires ServingRuntimePolicy, ServingArtifactManifest, "
+        "RepresentationPublishContract, or PublishedModelVersion"
+    )
 
 
 # ------------------------------ Plan models --------------------------------
@@ -769,6 +1638,7 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "BuilderMode",
     "AssemblyCloseoutContract",
     "AssemblyAttemptRef",
     "AssemblyContractFamily",
@@ -776,12 +1646,22 @@ __all__ = [
     "AssemblyRequirement",
     "AssemblyRequirementSetRef",
     "AssemblyTargetRef",
+    "FinalizeClass",
     "PartialSealResult",
     "CanonicalRange",
     "CommitResult",
     "PublishedModelVersion",
+    "PureTransformPublicationSpec",
+    "RepresentationPublishContract",
+    "RepresentationPublishSpec",
     "ViewRegistrationKind",
     "SealAssemblyResult",
+    "ServingArtifactManifest",
+    "ServingBuildIntent",
+    "ServingRuntimePolicy",
+    "ServingRuntimePolicyInput",
+    "ServingSupportLevel",
+    "SERVING_MANIFEST_TENSOR_NAME",
     "PlanBase",
     "CoalescedPlan",
     "LeasePlan",
@@ -796,4 +1676,7 @@ __all__ = [
     "LocalRegionHandle",
     "VramRegionHandle",
     "DeregisterArtifactOutcome",
+    "build_serving_manifest_ref",
+    "coerce_serving_runtime_policy",
+    "parse_serving_manifest_ref",
 ]

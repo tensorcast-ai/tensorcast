@@ -169,6 +169,56 @@ This publish path is the ordinary artifact-backed replica path from `0084`. It
 is not the serving-artifact publication or `representation_publish` closeout
 path used by source-to-serving builder work.
 
+## Serving-Artifact Runtime Preflight
+
+When runtime consumes a serving artifact, TensorCast now performs a serving
+artifact preflight before accepting it into the steady-state loading path.
+
+Phase-1 rules:
+
+- the phase-1 manifest carrier is
+  `tensor:__tensorcast_meta__.manifest_json`
+- artifacts without that reserved manifest tensor continue to load as ordinary
+  non-serving artifacts
+- strict serving runtime is now explicit rather than inferred from every
+  generic materialization request:
+  `PublishedModelVersion.require_serving_runtime_policy()`,
+  `RepresentationPublishContract.to_runtime_policy()`, and
+  `ServingArtifactManifest.to_runtime_policy()` produce a
+  `ServingRuntimePolicy` that callers can pass into
+  `artifact.bind(...)`, `artifact.bind_into(...)`, and `binding.swap(...)`
+- artifacts with that reserved manifest tensor must pass:
+  - manifest JSON parseability
+  - `schema_version == 1`
+  - `artifact_kind == "serving"`
+  - non-empty `framework_name`, `adapter_version`,
+    `serving_abi_version`, `representation_contract_hash`,
+    `serving_build_digest`, `tensor_schema_hash`, `builder_mode`, and
+    `build_pipeline_version`
+  - `serving_manifest_ref` agreement between the manifest and the runtime
+    policy when strict serving runtime is requested
+  - canonical tensor count equality between manifest and canonical index
+  - tensor schema hash equality between manifest and the canonical index with
+    the reserved manifest tensor excluded
+
+Current daemon coverage:
+
+- `MaterializeReplica`
+- `MaterializeIntoTarget`
+- source-bound owned-binding create/refill paths
+
+This keeps serving-artifact publication-time validation and runtime acceptance
+validation on the same contract, so runtime no longer silently accepts a
+manifest-bearing serving artifact whose self-description is inconsistent with
+its canonical tensor layout.
+
+Important distinction:
+
+- generic artifact load remains fail-open for ordinary non-serving artifacts
+- strict serving runtime is opt-in through `ServingRuntimePolicy`
+- this lets serving startup and reload fail closed without turning the whole
+  artifact runtime into a serving-only surface
+
 ### Lease-In-Place Fast Path & Use Leases
 
 `MaterializeReplica` consumes `ArtifactSelection` and uses `selection.artifact_id` as the request identity. Key workflows resolve key mapping first through `ResolveKeyMapping`, then issue `MaterializeReplica`. Before coordinating transport, the controller asks `LipManager::try_satisfy_from_lip` for a replica that already lives on the requested GPU. When this fast path hits, the daemon reuses the existing CUDA IPC handle, marks the status as `ALLOCATED`, and returns immediately (plus optional daemon-selected `used_disk_path`) without invoking the bulk materialization pipeline. If the fast path misses, the controller immediately falls through to the engine-backed path described below.

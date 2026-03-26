@@ -110,11 +110,103 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
 - `Store.wait_assembly_attempt(attempt)` observes an existing attempt workflow
   and decodes the dependency-ready source publish lineage into a
   `PublishedModelVersion`.
-  - In the current wave, `PublishedModelVersion` always carries real source
-    lineage and optional `source_version_key`.
-  - Serving lineage fields remain `None` until typed serving closeout contracts
-    exist; the daemon rejects serving-facing closeout input today instead of
-    returning placeholder values.
+  - `source_publish_only` attempts carry real source lineage and optional
+    `source_version_key`.
+  - `representation_publish` attempts now require a typed
+    `RepresentationPublishContract` child contract on
+    `AssemblyCloseoutContract`.
+  - When the serving artifact exists, the manifest carrier is readable, and the
+    serving manifest agrees with the typed child contract, the returned
+    `PublishedModelVersion` also carries:
+    `serving_artifact_id`, `serving_descriptor`, `serving_version_key`,
+    `representation_contract_hash`, `serving_build_digest`, and
+    `serving_manifest_ref`.
+  - Phase 1 currently supports the reserved manifest-tensor carrier
+    `tensor:__tensorcast_meta__.manifest_json`.
+  - `ServingArtifactManifest` now self-describes its phase-1 carrier through
+    `serving_manifest_ref`, and the typed serving-lineage models can derive a
+    strict runtime gate:
+    `RepresentationPublishContract.to_runtime_policy()`,
+    `ServingArtifactManifest.to_runtime_policy()`, and
+    `PublishedModelVersion.require_serving_runtime_policy()`.
+  - For integrations that already have a transformed serving artifact in hand,
+    `build_pure_transform_publication_bundle_from_registered_artifact(...)`
+    assembles a typed `RepresentationPublishSpec`
+    (`PureTransformPublicationBundle` compatibility alias) containing the
+    repo-owned phase-1 serving manifest bytes,
+    `RepresentationPublishContract`, and
+    `AssemblyCloseoutContract(kind="representation_publish", ...)` for
+    `PURE_TRANSFORM` publication.
+  - `Store.start_representation_publish_attempt(...)` can now consume that
+    spec directly and forward it into `start_assembly_attempt(...)` through the
+    typed `representation_publish_spec` daemon ingress instead of re-authoring
+    the generic closeout shell at each call site.
+  - `Store.complete_representation_publish_attempt(...)` runs the same repo-owned
+    spec path through `start -> seal -> wait` and returns the final
+    `PublishedModelVersion`.
+  - `Store.list_artifact_layouts(artifact_id)` exposes the daemon-owned
+    artifact-layout attachment query path.
+  - If `layout_id` is omitted for the representation-publish helpers, TensorCast
+    now tries to infer a unique attached layout from the bundle's source or
+    serving artifact lineage. `requirements` still stay explicit and are not
+    re-derived from layout metadata.
+  - For the current single-rank canonical publish shape, use
+    `Store.start_canonical_representation_publish_attempt(...)` or
+    `Store.complete_canonical_representation_publish_attempt(...)` to bind the
+    same bundle path to `AssemblyRequirementSetRef.canonical_full()`.
+  - For structural publish shapes, use
+    `build_representation_publish_requirements(...)`,
+    `Store.start_structural_representation_publish_attempt(...)`, or
+    `Store.complete_structural_representation_publish_attempt(...)` with an
+    explicit `contract_family`. `pp`/`ep` lowering can consume deterministic
+    source `view_id` lineage when the source artifact already carries it.
+  - If the bundle already carries `contract_family`, use
+    `Store.start_repo_owned_representation_publish_attempt(...)` or
+    `Store.complete_repo_owned_representation_publish_attempt(...)` to route
+    between canonical and structural lowering without selecting a second helper
+    at the call site.
+  - If the publication came back through `PlanResult`, use
+    `PlanResult.require_representation_publish_spec(...)` or the compatibility
+    alias `PlanResult.require_pure_transform_publication(...)` to extract the
+    typed publish spec, or call
+    `Store.start_plan_repo_owned_representation_publish_attempt(...)` /
+    `Store.complete_plan_repo_owned_representation_publish_attempt(...)`
+    directly to bridge `transform_register_pure_transform(...)` into the same
+    repo-owned publish path without manual `artifact_result` inspection.
+  - For offline or pipeline-style `PURE_TRANSFORM` builders that already have
+    finalized tensors in memory, use
+    `Store.register_pure_transform_publication(...)` to inject the reserved
+    manifest tensor and register a durable serving artifact plus typed
+    publication bundle, or
+    `Store.complete_pure_transform_publication(...)` to run the same
+    repo-owned register + `representation_publish` closeout path in one call.
+    When the publish attempt also needs a canonical source contribution, pass
+    `source_contribution_device=...` and TensorCast will bind the source
+    artifact, seal the current value, and contribute it into the attempt before
+    sealing. For structural `pp` / `ep` shapes, pass
+    `source_contribution_artifacts=(view_a, view_b, ...)` and TensorCast will
+    derive structural view ids from those handles and contribute them one by
+    one before sealing.
+  - If that publication runs through `transform_register`, prefer
+    `build_pure_transform_publication_spec(...)` or
+    `build_pure_transform_transform_spec(...)`. These helpers now attach typed
+    publish intent on `TransformSpec.publication_spec` rather than asking
+    callers to hand-author internal `tc_serving_*` keys. The legacy string-arg
+    path remains as a compatibility fallback. `representation_contract_hash`
+    can still be provided explicitly, but the repo-owned `PURE_TRANSFORM` path
+    can auto-derive it from source and serving canonical indexes when the
+    source artifact metadata is available. The default identity
+    `transform_register` path now also prepares the reserved manifest tensor
+    before registration, so the resulting serving artifact can already carry
+    `tensor:__tensorcast_meta__.manifest_json`.
+  - For steady-state serving bind or swap, pass
+    `serving_runtime_policy=...` to `artifact.bind(...)`,
+    `artifact.bind_into(...)`, or `binding.swap(...)`.
+    This keeps generic artifact load permissive while giving serving runtime an
+    explicit strict gate. When the policy is present, the daemon requires a
+    serving manifest and validates `serving_manifest_ref`,
+    `representation_contract_hash`, and `serving_build_digest` before the
+    artifact is accepted into the serving path.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
@@ -140,12 +232,22 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - `Store.create_binding(layout, ownership=\"daemon\", device=\"cuda:0\")` creates a
   layout-seeded binding before any artifact is installed. The binding starts with
   `current_value is None` and becomes mutable via `begin_update(...)`.
+- Builder-side serving realization may use that same layout-seeded binding as the
+  host of the future serving representation: attach framework tensor views onto
+  the binding-backed storage, perform one builder-owned update into that
+  storage, then `seal_current(...)` and route the sealed value through
+  `representation_publish` closeout. In that shape, the binding is the local
+  realization host and the serving artifact identity still arrives only after
+  closeout.
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you
   still want routable replicas after a successful apply.
 - `binding.publish_replica_operation(ctx=...)` exposes the same publish path as
   `Operation[T]`, so callers can attach, wait, and inspect status through the
   unified public continuation surface.
+- This publish path is for ordinary artifact-backed replica routing only. It is
+  not the source-to-serving `representation_publish` closeout path for new
+  serving-artifact lineage.
 - `binding.current_value` is the authoritative sealed value handle for the local
   binding. `binding.artifact_id` / `binding.selection` are convenience mirrors
   and become `None` when the current value is absent or local-only.
@@ -161,10 +263,19 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
   full-canonical bindings satisfy the canonical-layout slot.
 - Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
   enforces full dst coverage with no overlaps, and is local-only for materialization RPC.
+- Packed/subset selections become publishable when TensorCast can derive a
+  stable `view_id`; publish routing is then scoped to that derived byte-space
+  instead of the canonical artifact id.
 - Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
   mint `target_publication_token` for mapped writes, and publish routes through a VIEW
   byte-space id derived from canonical index + source view identity + copy plan +
   target layout.
+- Because mapped binding retains the copy plan for future `swap(...)`, it is not
+  the preferred steady-state host object when mapped source semantics are needed
+  only for one bootstrap fill. In that case, prefer a layout-seeded serving
+  binding as the long-lived local slot and treat the source-to-target mapped
+  write as a builder-side realization step rather than as the binding's
+  persistent overwrite contract.
 - View compatibility for mapped binding is narrow-only: transpose/permutation views
   are rejected and copy-plan ranges are expressed in canonical coordinates.
 - `binding.swap(artifact_or_ref, publish=False, activate_key=None, ...)` performs

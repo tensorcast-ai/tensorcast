@@ -23,7 +23,13 @@ from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
-from tensorcast.types import VramRegionHandle
+from tensorcast.types import (
+    ArtifactDescriptor,
+    PublishedModelVersion,
+    ServingRuntimePolicy,
+    VramRegionHandle,
+    build_serving_manifest_ref,
+)
 
 artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
 inplace_slot_mod = importlib.import_module("tensorcast.api.store.inplace_slot")
@@ -540,12 +546,17 @@ def test_binding_view_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert selection_before.selection_hash == selection_after.selection_hash
 
 
-def test_binding_publishability_gating(monkeypatch: pytest.MonkeyPatch) -> None:
-    store, _runtime, _client = _setup_store(monkeypatch)
+def test_binding_append_publish_uses_view_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
     artifact = store.artifact(artifact_id="artifact-1")
-    with pytest.raises(ArtifactError) as excinfo:
-        _ = artifact.bind(device="cuda:0", packing="append", publish=True)
-    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+
+    binding = artifact.bind(device="cuda:0", packing="append", publish=True)
+
+    assert binding.selection is not None
+    assert binding.selection.view_id
+    assert client.publish_calls
 
 
 def test_binding_activation_cas(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1121,6 +1132,37 @@ def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:
     assert "tot=16" in operation_id
     assert "part=rx1:r0" in operation_id
     assert "rid=case-a1:v2:rx1:r0" in operation_id
+
+
+def test_binding_swap_coerces_published_model_version_into_runtime_policy() -> None:
+    slot = _FakeBindingSlot()
+    binding = Binding(slot)
+    version = PublishedModelVersion(
+        assembly_id="cgid:test-assembly",
+        source_artifact_id="mi2:test:source",
+        source_descriptor=ArtifactDescriptor(
+            artifact_id="mi2:test:source",
+            total_size=16,
+        ),
+        serving_artifact_id="mi2:test:serving",
+        serving_descriptor=ArtifactDescriptor(
+            artifact_id="mi2:test:serving",
+            total_size=32,
+        ),
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+        serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
+    )
+
+    binding.swap("artifact-2", serving_runtime_policy=version)
+
+    assert len(slot.swap_calls) == 1
+    assert slot.swap_calls[0]["serving_runtime_policy"] == ServingRuntimePolicy(
+        require_manifest=True,
+        serving_manifest_ref="tensor:__alt_manifest__.json",
+        expected_representation_contract_hash="bafkrepresentation",
+        expected_serving_build_digest="bafkbuilddigest",
+    )
 
 
 def test_bind_does_not_delegate_to_bind_into(monkeypatch: pytest.MonkeyPatch) -> None:

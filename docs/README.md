@@ -16,6 +16,8 @@ Understand how TensorCast works:
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[Binding Unified Model](designs/0084-binding-unified-model-and-contract.md)** - Canonical binding semantics, lifecycle, mapped binding, and publishability
+- **[Representation Semantic Core](designs/0110-artifact-representation-contract-and-transform-unification.md)** - Shared tensor-semantic transform core for mapped binding, mapped-target, builder lowering, and strategy convergence
+- **[Source-to-Serving Builder and Publication](designs/0111-source-to-serving-builder-and-representation-publication.md)** - Builder modes, serving-artifact identity and manifests, `serving_build_digest`, and typed `representation_publish` handoff into `PublishedModelVersion`
 - **[Assembly Attempt Seal Remediation Handoff Plan](plans/0105-01-assembly-attempt-cut-driven-seal-remediation-handoff.md)** - Ordered execution handoff for finishing cut-driven seal, contract-family enforcement, and validation closure
 - **[Daemon-Served Directory and Target Resolution](designs/0106-daemon-served-directory-and-target-resolution.md)** - Stable worker or instance identity, bounded-staleness directory reads, and NodeAgentDirectory contract
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive

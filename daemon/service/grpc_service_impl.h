@@ -323,6 +323,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetArtifactIndexByIdRequest* req,
       v2::GetArtifactIndexByIdResponse* resp) override;
 
+  grpc::Status ListArtifactLayouts(
+      grpc::ServerContext* ctx,
+      const v2::ListArtifactLayoutsRequest* req,
+      v2::ListArtifactLayoutsResponse* resp) override;
+
   grpc::Status SealAssembly(
       grpc::ServerContext* ctx,
       const v2::SealAssemblyRequest* req,

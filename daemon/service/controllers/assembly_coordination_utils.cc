@@ -65,6 +65,16 @@ absl::StatusOr<std::string_view> expected_coverage_contract_for_binding_contribu
   }
 }
 
+v2::RepresentationPublishContract canonicalize_representation_publish_contract(
+    const v2::RepresentationPublishContract& contract) {
+  v2::RepresentationPublishContract canonical;
+  canonical.set_serving_artifact_id(contract.serving_artifact_id());
+  canonical.set_serving_manifest_ref(contract.serving_manifest_ref());
+  canonical.set_representation_contract_hash(contract.representation_contract_hash());
+  canonical.set_serving_build_digest(contract.serving_build_digest());
+  return canonical;
+}
+
 } // namespace
 
 std::string contribution_slot_key(v2::BindingContributionKind contribution_kind, std::string_view structural_view_id) {
@@ -157,26 +167,44 @@ v2::AssemblyReadinessPolicy canonicalize_readiness_policy(const v2::AssemblyRead
 
 v2::AssemblyCloseoutContract canonicalize_closeout_contract(const v2::AssemblyCloseoutContract& contract) {
   v2::AssemblyCloseoutContract canonical;
-  canonical.set_kind(
-      contract.kind() == v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED ? v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY
-                                                                : contract.kind());
+  const auto kind = contract.kind() == v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED
+      ? v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY
+      : contract.kind();
+  canonical.set_kind(kind);
   canonical.set_source_version_key(contract.source_version_key());
   canonical.set_serving_version_key(contract.serving_version_key());
-  canonical.set_serving_artifact_id(contract.serving_artifact_id());
-  canonical.set_serving_manifest_ref(contract.serving_manifest_ref());
+  if (kind == v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH && contract.has_representation_publish_contract()) {
+    const auto representation_publish =
+        canonicalize_representation_publish_contract(contract.representation_publish_contract());
+    canonical.set_serving_artifact_id(representation_publish.serving_artifact_id());
+    canonical.set_serving_manifest_ref(representation_publish.serving_manifest_ref());
+    *canonical.mutable_representation_publish_contract() = representation_publish;
+  } else {
+    canonical.set_serving_artifact_id(contract.serving_artifact_id());
+    canonical.set_serving_manifest_ref(contract.serving_manifest_ref());
+  }
   canonical.set_closeout_contract_digest(compute_closeout_contract_digest(canonical));
   return canonical;
 }
 
 std::string compute_closeout_contract_digest(const v2::AssemblyCloseoutContract& contract) {
   v2::AssemblyCloseoutContract canonical;
-  canonical.set_kind(
-      contract.kind() == v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED ? v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY
-                                                                : contract.kind());
+  const auto kind = contract.kind() == v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED
+      ? v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY
+      : contract.kind();
+  canonical.set_kind(kind);
   canonical.set_source_version_key(contract.source_version_key());
   canonical.set_serving_version_key(contract.serving_version_key());
-  canonical.set_serving_artifact_id(contract.serving_artifact_id());
-  canonical.set_serving_manifest_ref(contract.serving_manifest_ref());
+  if (kind == v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH && contract.has_representation_publish_contract()) {
+    const auto representation_publish =
+        canonicalize_representation_publish_contract(contract.representation_publish_contract());
+    canonical.set_serving_artifact_id(representation_publish.serving_artifact_id());
+    canonical.set_serving_manifest_ref(representation_publish.serving_manifest_ref());
+    *canonical.mutable_representation_publish_contract() = representation_publish;
+  } else {
+    canonical.set_serving_artifact_id(contract.serving_artifact_id());
+    canonical.set_serving_manifest_ref(contract.serving_manifest_ref());
+  }
   canonical.clear_closeout_contract_digest();
 
   std::string payload;
@@ -188,17 +216,49 @@ std::string compute_closeout_contract_digest(const v2::AssemblyCloseoutContract&
 
 absl::Status validate_dependency_ready_closeout_contract(const v2::AssemblyCloseoutContract& contract) {
   const auto canonical = canonicalize_closeout_contract(contract);
-  if (canonical.kind() != v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY) {
-    return absl::UnimplementedError(
-        "only source_publish_only closeout contracts are dependency-ready in the current execution wave");
+  switch (canonical.kind()) {
+    case v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY:
+      if (!canonical.serving_version_key().empty() || !canonical.serving_artifact_id().empty() ||
+          !canonical.serving_manifest_ref().empty() || canonical.has_representation_publish_contract()) {
+        return absl::InvalidArgumentError(
+            "source_publish_only closeout contracts may not set serving_version_key, serving_artifact_id, "
+            "serving_manifest_ref, or representation_publish_contract");
+      }
+      return absl::OkStatus();
+    case v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH:
+      if (!contract.has_representation_publish_contract()) {
+        return absl::InvalidArgumentError(
+            "representation_publish closeout contracts require representation_publish_contract");
+      }
+      if (!contract.serving_artifact_id().empty() &&
+          contract.serving_artifact_id() != contract.representation_publish_contract().serving_artifact_id()) {
+        return absl::InvalidArgumentError(
+            "serving_artifact_id must match representation_publish_contract.serving_artifact_id");
+      }
+      if (!contract.serving_manifest_ref().empty() &&
+          contract.serving_manifest_ref() != contract.representation_publish_contract().serving_manifest_ref()) {
+        return absl::InvalidArgumentError(
+            "serving_manifest_ref must match representation_publish_contract.serving_manifest_ref");
+      }
+      if (canonical.serving_artifact_id().empty() || canonical.serving_manifest_ref().empty()) {
+        return absl::InvalidArgumentError(
+            "representation_publish closeout contracts require serving_artifact_id and serving_manifest_ref");
+      }
+      if (canonical.representation_publish_contract().representation_contract_hash().empty()) {
+        return absl::InvalidArgumentError(
+            "representation_publish closeout contracts require representation_contract_hash");
+      }
+      if (canonical.representation_publish_contract().serving_build_digest().empty()) {
+        return absl::InvalidArgumentError("representation_publish closeout contracts require serving_build_digest");
+      }
+      return absl::OkStatus();
+    case v2::ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH:
+      return absl::UnimplementedError(
+          "rollout_gated_publish closeout contracts are not dependency-ready in the current execution wave");
+    case v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED:
+    default:
+      return absl::InternalError("unexpected assembly closeout contract kind");
   }
-  if (!canonical.serving_version_key().empty() || !canonical.serving_artifact_id().empty() ||
-      !canonical.serving_manifest_ref().empty()) {
-    return absl::InvalidArgumentError(
-        "source_publish_only closeout contracts may not set serving_version_key, serving_artifact_id, or "
-        "serving_manifest_ref");
-  }
-  return absl::OkStatus();
 }
 
 v2::AssemblyAttemptIntent canonicalize_attempt_intent(const v2::AssemblyAttemptIntent& intent) {
