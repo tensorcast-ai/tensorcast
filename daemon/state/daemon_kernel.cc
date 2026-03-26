@@ -313,6 +313,17 @@ void DaemonKernel::configure_scheduler_tasks_() {
           t->run_once();
         });
   }
+
+  {
+    const auto keepalive_interval =
+        std::chrono::duration_cast<milliseconds>(options_.byte_artifact_routing.keepalive_interval);
+    scheduler_->add_task(TaskKind::kByteArtifactLeaseKeepalive, keepalive_interval, [this]() {
+      if (this->byte_artifact_route_resolver_ == nullptr) {
+        return;
+      }
+      this->byte_artifact_route_resolver_->keepalive_owned_shard_leases_once(absl::Now());
+    });
+  }
 }
 
 } // namespace tensorcast::daemon

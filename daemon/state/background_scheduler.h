@@ -27,6 +27,7 @@ enum class TaskKind : std::uint8_t {
   // Unified lifecycle task replaces SessionTTL, RegJoinTTL, and PidWatch
   kSessionLifecycle,
   kPersistence,
+  kByteArtifactLeaseKeepalive,
 };
 
 class BackgroundScheduler {
@@ -114,6 +115,8 @@ class BackgroundScheduler {
         return "SessionLifecycle";
       case TaskKind::kPersistence:
         return "Persistence";
+      case TaskKind::kByteArtifactLeaseKeepalive:
+        return "ByteArtifactLeaseKeepalive";
       default:
         return "Unknown";
     }

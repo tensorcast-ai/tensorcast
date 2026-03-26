@@ -172,6 +172,51 @@ void link_authority_to_backing_locked(
   state->backing_authority_index[identity].insert(std::string(artifact_id));
 }
 
+void increment_shard_authority_refcount_locked(std::uint64_t shard_id, ByteArtifactRuntimeState* state)
+    ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (state == nullptr) {
+    return;
+  }
+  ++state->shard_authority_refcounts[shard_id];
+}
+
+void decrement_shard_authority_refcount_locked(std::uint64_t shard_id, ByteArtifactRuntimeState* state)
+    ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (state == nullptr) {
+    return;
+  }
+  auto it = state->shard_authority_refcounts.find(shard_id);
+  if (it == state->shard_authority_refcounts.end()) {
+    return;
+  }
+  if (it->second <= 1) {
+    state->shard_authority_refcounts.erase(it);
+    return;
+  }
+  --it->second;
+}
+
+void upsert_authority_entry_locked(
+    std::string_view artifact_id,
+    const AuthorityEntry& entry,
+    ByteArtifactRuntimeState* state) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (state == nullptr) {
+    return;
+  }
+  const std::string key(artifact_id);
+  auto it = state->authority_entries.find(key);
+  if (it == state->authority_entries.end()) {
+    state->authority_entries.emplace(key, entry);
+    increment_shard_authority_refcount_locked(entry.shard_id, state);
+    return;
+  }
+  if (it->second.shard_id != entry.shard_id) {
+    decrement_shard_authority_refcount_locked(it->second.shard_id, state);
+    increment_shard_authority_refcount_locked(entry.shard_id, state);
+  }
+  it->second = entry;
+}
+
 void unlink_authority_from_backing_locked(
     std::string_view artifact_id,
     const store::runtime::ingestion::BackingIdentity& identity,
@@ -349,6 +394,7 @@ void erase_claim_locked(std::string_view artifact_id, ByteArtifactRuntimeState* 
   entry_it->second.visibility_kind = AuthorityVisibilityKind::kNone;
   entry_it->second.policy_visibility_ref.reset();
   retire_authority_backing_locked(artifact_id, &entry_it->second, state, reason);
+  decrement_shard_authority_refcount_locked(entry_it->second.shard_id, state);
   state->authority_entries.erase(entry_it);
   prune_orphan_backings_locked(state, reason);
 }
@@ -804,7 +850,6 @@ ByteArtifactBodyStore::PutResult ByteArtifactBodyStore::put_if_absent(
     return PutResult{.outcome = PutOutcome::kJoined};
   }
 
-  const std::string key(artifact_id);
   auto entry = make_authority_entry(
       descriptor,
       verified_content_descriptor,
@@ -814,10 +859,10 @@ ByteArtifactBodyStore::PutResult ByteArtifactBodyStore::put_if_absent(
       lease_generation,
       routing_epoch,
       resolve_expiry(now, ttl_ms));
-  state_.authority_entries[key] = entry;
+  upsert_authority_entry_locked(artifact_id, entry, &state_);
   install_or_rebind_backing_locked(
       artifact_id,
-      &state_.authority_entries[key],
+      &state_.authority_entries[std::string(artifact_id)],
       descriptor,
       verified_content_descriptor,
       verification_record,
