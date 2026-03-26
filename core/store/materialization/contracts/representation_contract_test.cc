@@ -104,6 +104,60 @@ TEST_CASE("representation contract normalization is order stable", "[representat
       reordered_or->target_representation.representation_contract_hash);
 }
 
+TEST_CASE(
+    "representation contract hash normalizes logical topology ordering and keeps topology semantic",
+    "[representation_contract]") {
+  RepresentationTransformContract contract;
+  contract.source_byte_space = canonical_byte_space();
+  contract.target_representation.family = "runtime_serving";
+  contract.target_representation.realization_kind = RealizationKind::kArtifactPublishable;
+  contract.target_representation.logical_topology = TopologyContract{
+      .family = "tp",
+      .version = "v1",
+      .dimensions =
+          {
+              TopologyDimension{.name = "rank", .size = 1},
+              TopologyDimension{.name = "world", .size = 8},
+          },
+  };
+  contract.tensor_bindings = {
+      RepresentationTensorBinding{
+          .dst_name = "weights",
+          .dst_spec = make_tensor_spec("weights", 0, 16, {8}, {1}),
+          .op_kind = BindingOpKind::kExactCopy,
+          .sources = {SourceFragment{
+              .source_spec = make_tensor_spec("weights", 0, 16, {8}, {1}),
+              .source_range = full_range(),
+              .destination_range = full_range(),
+              .role = SourceFragmentRole::kDefault,
+          }},
+      },
+  };
+
+  RepresentationTransformContract reordered = contract;
+  std::swap(
+      reordered.target_representation.logical_topology->dimensions[0],
+      reordered.target_representation.logical_topology->dimensions[1]);
+
+  RepresentationTransformContract changed = contract;
+  changed.target_representation.logical_topology->dimensions[1].size = 4;
+
+  auto normalized_or = normalize_representation_transform_contract(std::move(contract));
+  REQUIRE(normalized_or.ok());
+  auto reordered_or = normalize_representation_transform_contract(std::move(reordered));
+  REQUIRE(reordered_or.ok());
+  auto changed_or = normalize_representation_transform_contract(std::move(changed));
+  REQUIRE(changed_or.ok());
+
+  CHECK(normalized_or->target_representation.logical_topology == reordered_or->target_representation.logical_topology);
+  CHECK(
+      normalized_or->target_representation.representation_contract_hash ==
+      reordered_or->target_representation.representation_contract_hash);
+  CHECK(
+      normalized_or->target_representation.representation_contract_hash !=
+      changed_or->target_representation.representation_contract_hash);
+}
+
 TEST_CASE("representation work plan derives copy and concat items", "[representation_contract]") {
   RepresentationTransformContract contract;
   contract.source_byte_space = canonical_byte_space();
@@ -251,6 +305,73 @@ TEST_CASE("representation work plan lowers scalar broadcast fill items", "[repre
   CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kScalarBroadcastFill);
   REQUIRE(plan_or->items.front().sources.size() == 1);
   CHECK(plan_or->items.front().sources.front().fragment.source_range.axes.size() == 1);
+}
+
+TEST_CASE("representation work plan preserves normalized residual fallback accounting", "[representation_contract]") {
+  RepresentationTransformContract contract;
+  contract.source_byte_space = canonical_byte_space();
+  contract.target_representation.family = "ephemeral_into_target";
+  contract.tensor_bindings = {
+      RepresentationTensorBinding{
+          .dst_name = "copied",
+          .dst_spec = make_tensor_spec("copied", 0, 8, {4}, {1}),
+          .op_kind = BindingOpKind::kExactCopy,
+          .sources = {SourceFragment{
+              .source_spec = make_tensor_spec("copied", 0, 8, {4}, {1}),
+              .source_range = full_range(),
+              .destination_range = full_range(),
+              .role = SourceFragmentRole::kDefault,
+          }},
+      },
+  };
+  contract.residual_fallback_map = loader::ByteRangeMap{
+      .total_bytes = 8,
+      .num_sources = 1,
+      .segments =
+          {
+              loader::ByteRangeSegment{
+                  .kind = loader::ByteRangeSegment::Kind::kData,
+                  .dst_offset = 4,
+                  .length = 4,
+                  .src_offset = 4,
+                  .source_index = 0,
+              },
+              loader::ByteRangeSegment{
+                  .kind = loader::ByteRangeSegment::Kind::kData,
+                  .dst_offset = 0,
+                  .length = 4,
+                  .src_offset = 0,
+                  .source_index = 0,
+              },
+          },
+  };
+
+  RepresentationTransformContract reordered = contract;
+  std::swap(reordered.residual_fallback_map.segments[0], reordered.residual_fallback_map.segments[1]);
+
+  RepresentationTransformContract changed = contract;
+  changed.residual_fallback_map.segments[1].src_offset = 8;
+
+  auto normalized_or = normalize_representation_transform_contract(std::move(contract));
+  REQUIRE(normalized_or.ok());
+  auto reordered_or = normalize_representation_transform_contract(std::move(reordered));
+  REQUIRE(reordered_or.ok());
+  auto changed_or = normalize_representation_transform_contract(std::move(changed));
+  REQUIRE(changed_or.ok());
+
+  CHECK(
+      normalized_or->target_representation.representation_contract_hash ==
+      reordered_or->target_representation.representation_contract_hash);
+  CHECK(
+      normalized_or->target_representation.representation_contract_hash !=
+      changed_or->target_representation.representation_contract_hash);
+
+  auto plan_or = build_representation_work_plan(*normalized_or);
+  REQUIRE(plan_or.ok());
+  REQUIRE(plan_or->items.size() == 2);
+  CHECK(plan_or->items.back().kind == RepresentationWorkItemKind::kResidualByteRange);
+  CHECK(plan_or->items.back().committed_bytes == 8);
+  CHECK(plan_or->committed_bytes == 8);
 }
 
 } // namespace tensorcast::store::materialization::contracts
