@@ -417,8 +417,8 @@ def _artifact_result_from_proto(
         )
     if kind == "pure_transform_publication":
         return RepresentationPublishSpec(
-            serving_artifact_id=str(
-                result.pure_transform_publication.serving_artifact_id
+            serving_artifact_id=(
+                str(result.pure_transform_publication.serving_artifact_id) or None
             ),
             serving_manifest_ref=str(
                 result.pure_transform_publication.serving_manifest_ref

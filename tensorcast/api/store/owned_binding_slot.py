@@ -33,11 +33,12 @@ from tensorcast.api.store.inplace_slot import (
 )
 from tensorcast.api.store.materialization import _build_source_policy
 from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.realization_plan import binding_realization_plan_to_proto
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError, FallbackOptions
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import ServingRuntimePolicy
+from tensorcast.types import PublicDiskSourceHandle, ServingRuntimePolicy
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -530,6 +531,151 @@ class OwnedBindingSlot:
         self._target_publication_token = None
         self._dirty = False
 
+    def promote_current_value(
+        self,
+        *,
+        binding_value_id: str,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
+        self._ensure_open()
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().promote_binding_current_value(
+                binding_id=self._binding_id,
+                binding_value_id=str(binding_value_id),
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="PromoteBindingCurrentValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            raise ArtifactError(
+                "PromoteBindingCurrentValue returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._selection = clone_selection(metadata.selection)
+        self._contribution_selection = clone_selection(metadata.selection)
+        self._contribution_source_artifact_id = metadata.source_artifact_id
+        self._target_publication_token = None
+        self._dirty = False
+        return response
+
+    def realize_from(
+        self,
+        artifact: "Artifact | PublicDiskSourceHandle | str",
+        *,
+        realization_plan: object,
+        ctx: CallContext | None = None,
+        operation_id: str | None = None,
+    ) -> None:
+        self._ensure_open()
+        public_disk_source = (
+            artifact if isinstance(artifact, PublicDiskSourceHandle) else None
+        )
+        resolved = (
+            None if public_disk_source is not None else self._resolve_artifact(artifact)
+        )
+        if resolved is not None:
+            store, _, _ = resolved._require_components()
+            if store is not self._store:
+                raise ArtifactError(
+                    "Realization source artifact must come from the same Store",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            preference, source_policy = self._resolve_source_policy(resolved._fallback)
+        else:
+            preference, source_policy = self._resolve_source_policy(None)
+        rpc_timeout_s = _ctx_timeout_s(ctx)
+        try:
+            source_selection = None
+            if resolved is not None and hasattr(
+                resolved, "_build_owner_source_selection"
+            ):
+                ensure_metadata = getattr(resolved, "_ensure_metadata", None)
+                if callable(ensure_metadata):
+                    ensure_metadata()
+                canonical_index_bytes = getattr(
+                    resolved, "_canonical_index_bytes", None
+                )
+                if canonical_index_bytes is not None:
+                    view_spec_proto = (
+                        resolved._view_spec.proto
+                        if getattr(resolved, "_view_spec", None) is not None
+                        else None
+                    )
+                    source_selection = resolved._build_owner_source_selection(
+                        packing="byte_space",
+                        view_spec_proto=view_spec_proto,
+                        canonical_index_bytes=canonical_index_bytes,
+                    )
+            response = self._runtime.ensure_client().refill_owned_binding(
+                binding_id=self._binding_id,
+                artifact_id=(
+                    ""
+                    if public_disk_source is None
+                    else str(public_disk_source.artifact_id or "")
+                )
+                if resolved is None
+                else resolved._ensure_identified(),
+                public_disk_source=(
+                    None
+                    if public_disk_source is None
+                    else public_disk_source.to_proto()
+                ),
+                source_selection=source_selection,
+                realization_plan=binding_realization_plan_to_proto(
+                    realization_plan,
+                    target_index_bytes=self._layout.target_index_bytes,
+                ),
+                preference=preference,
+                source_policy=source_policy,
+                operation_id=operation_id,
+                timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = map_materialization_error(exc)
+            if error.status_code == "DATA_LOSS":
+                self._enter_dirty_state()
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=False,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="RefillOwnedBinding",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "RefillOwnedBinding returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._dirty = False
+        self._selection = None
+        self._contribution_selection = None
+        self._contribution_source_artifact_id = None
+        self._target_publication_token = None
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+
     def swap(
         self,
         artifact: "Artifact | str",
@@ -561,9 +707,29 @@ class OwnedBindingSlot:
         preference, source_policy = self._resolve_source_policy(resolved._fallback)
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
+            source_selection = None
+            if hasattr(resolved, "_build_owner_source_selection"):
+                ensure_metadata = getattr(resolved, "_ensure_metadata", None)
+                if callable(ensure_metadata):
+                    ensure_metadata()
+                canonical_index_bytes = getattr(
+                    resolved, "_canonical_index_bytes", None
+                )
+                if canonical_index_bytes is not None:
+                    view_spec_proto = (
+                        resolved._view_spec.proto
+                        if getattr(resolved, "_view_spec", None) is not None
+                        else None
+                    )
+                    source_selection = resolved._build_owner_source_selection(
+                        packing="byte_space",
+                        view_spec_proto=view_spec_proto,
+                        canonical_index_bytes=canonical_index_bytes,
+                    )
             response = self._runtime.ensure_client().refill_owned_binding(
                 binding_id=self._binding_id,
                 artifact_id=resolved._ensure_identified(),
+                source_selection=source_selection,
                 preference=preference,
                 source_policy=source_policy,
                 serving_runtime_policy=serving_runtime_policy,

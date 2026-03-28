@@ -46,6 +46,12 @@ TensorCoordinateSpec dim0_range(int64_t start, int64_t end) {
   return out;
 }
 
+TensorCoordinateSpec multi_range(std::initializer_list<TensorAxisRange> axes) {
+  TensorCoordinateSpec out;
+  out.axes.assign(axes.begin(), axes.end());
+  return out;
+}
+
 TensorCoordinateSpec scalar_index(std::initializer_list<int64_t> indices) {
   TensorCoordinateSpec out;
   int32_t dim = 0;
@@ -280,6 +286,34 @@ TEST_CASE("representation work plan lowers const fill items", "[representation_c
   CHECK(plan_or->items.front().committed_bytes == 16);
 }
 
+TEST_CASE("representation work plan preserves partial const fill destination ranges", "[representation_contract]") {
+  RepresentationTransformContract contract;
+  contract.source_byte_space = canonical_byte_space();
+  contract.target_representation.family = "ephemeral_into_target";
+  contract.tensor_bindings = {
+      RepresentationTensorBinding{
+          .dst_name = "filled",
+          .dst_spec = make_tensor_spec("filled", 0, 16, {8}, {1}),
+          .op_kind = BindingOpKind::kConstFill,
+          .fill_rule =
+              FillRule{
+                  .constant_value = {0x34, 0x12},
+                  .destination_range = dim0_range(2, 6),
+              },
+      },
+  };
+
+  auto normalized_or = normalize_representation_transform_contract(std::move(contract));
+  REQUIRE(normalized_or.ok());
+  auto plan_or = build_representation_work_plan(*normalized_or);
+  REQUIRE(plan_or.ok());
+  REQUIRE(plan_or->items.size() == 1);
+  CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kConstFill);
+  REQUIRE(plan_or->items.front().fill_rule.has_value());
+  CHECK(plan_or->items.front().fill_rule->destination_range == dim0_range(2, 6));
+  CHECK(plan_or->items.front().committed_bytes == 8);
+}
+
 TEST_CASE("representation work plan lowers scalar broadcast fill items", "[representation_contract]") {
   RepresentationTransformContract contract;
   contract.source_byte_space = canonical_byte_space();
@@ -305,6 +339,37 @@ TEST_CASE("representation work plan lowers scalar broadcast fill items", "[repre
   CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kScalarBroadcastFill);
   REQUIRE(plan_or->items.front().sources.size() == 1);
   CHECK(plan_or->items.front().sources.front().fragment.source_range.axes.size() == 1);
+}
+
+TEST_CASE("representation work plan accepts multi-axis slice copy coordinates", "[representation_contract]") {
+  RepresentationTransformContract contract;
+  contract.source_byte_space = canonical_byte_space();
+  contract.target_representation.family = "ephemeral_into_target";
+  contract.tensor_bindings = {
+      RepresentationTensorBinding{
+          .dst_name = "dst",
+          .dst_spec = make_tensor_spec("dst", 0, 46080, {36, 20, 32}, {640, 32, 1}),
+          .op_kind = BindingOpKind::kSliceCopy,
+          .sources = {SourceFragment{
+              .source_spec = make_tensor_spec("src", 0, 184320, {288, 10, 32}, {320, 32, 1}),
+              .source_range = dim0_range(180, 181),
+              .destination_range = multi_range({
+                  TensorAxisRange{.dim = 0, .start = 0, .end = 1},
+                  TensorAxisRange{.dim = 1, .start = 0, .end = 10},
+              }),
+              .role = SourceFragmentRole::kDefault,
+          }},
+      },
+  };
+
+  auto normalized_or = normalize_representation_transform_contract(std::move(contract));
+  REQUIRE(normalized_or.ok());
+  auto plan_or = build_representation_work_plan(*normalized_or);
+  REQUIRE(plan_or.ok());
+  REQUIRE(plan_or->items.size() == 1);
+  CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kTensorCopy);
+  CHECK(plan_or->items.front().committed_bytes == 640);
+  CHECK(plan_or->items.front().partition_kind == WorkPartitionKind::kUnknown);
 }
 
 TEST_CASE("representation work plan preserves normalized residual fallback accounting", "[representation_contract]") {

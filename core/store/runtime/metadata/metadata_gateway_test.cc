@@ -890,6 +890,21 @@ TEST_CASE(
   CHECK(harness.replica_registry->find_by_artifact("cgid:piece-conflict").size() == 1);
 }
 
+TEST_CASE("RegistrationBackend rejects stable_dram stage_on_gpu=true", "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = true;
+  reg.stable_dram.release_gpu_on_commit = true;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE_FALSE(begin_or.ok());
+  CHECK(begin_or.status().code() == absl::StatusCode::kInvalidArgument);
+  CHECK(begin_or.status().message().find("stage_on_gpu is disabled") != std::string::npos);
+}
+
 TEST_CASE(
     "RegistrationBackend stable_dram stage_on_gpu=false supports streamed CPU ingestion",
     "[registration_backend][stable_dram]") {

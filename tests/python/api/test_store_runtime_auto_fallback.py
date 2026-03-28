@@ -10,14 +10,43 @@ import pytest
 
 from tensorcast import startup as startup_mod
 from tensorcast.api.store import runtime as store_runtime
+from tensorcast.types import ServerConfig
 
 
 class _FakeClient:
     def get_server_config(self):
-        return SimpleNamespace(
+        return ServerConfig(
             mem_pool_size=1,
             tx_slice_bytes=2,
             artifact_chunk_bytes=3,
+            local_handle_socket_path="/tmp/local-handle.sock",
+            cpu_shared_memory_enabled=True,
+        )
+
+    def close(self) -> None:
+        return None
+
+
+class _RetryingConfigClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_server_config(self):
+        self.calls += 1
+        if self.calls < 3:
+            return ServerConfig(
+                mem_pool_size=1,
+                tx_slice_bytes=2,
+                artifact_chunk_bytes=3,
+                local_handle_socket_path="",
+                cpu_shared_memory_enabled=True,
+            )
+        return ServerConfig(
+            mem_pool_size=1,
+            tx_slice_bytes=2,
+            artifact_chunk_bytes=3,
+            local_handle_socket_path="/tmp/retry-ready.sock",
+            cpu_shared_memory_enabled=True,
         )
 
     def close(self) -> None:
@@ -61,3 +90,25 @@ def test_get_context_falls_back_to_auto(monkeypatch: pytest.MonkeyPatch) -> None
         assert startup_calls == ["connect", "auto"]
     finally:
         store_runtime.shutdown_context()
+
+
+def test_store_runtime_retries_server_config_until_local_handle_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _RetryingConfigClient()
+    monkeypatch.setattr(store_runtime.StoreRuntimeContext,
+                        "_SERVER_CONFIG_RETRY_INTERVAL_S", 0.0)
+    monkeypatch.setattr(store_runtime.StoreRuntimeContext,
+                        "_SERVER_CONFIG_READY_TIMEOUT_S", 1.0)
+
+    ctx = store_runtime.StoreRuntimeContext(
+        "127.0.0.1:61010",
+        client_factory=lambda _addr: client,
+    )
+    try:
+        assert client.calls == 3
+        assert ctx.capabilities.server_config is not None
+        assert ctx.capabilities.server_config.local_handle_socket_path == \
+            "/tmp/retry-ready.sock"
+    finally:
+        ctx.close()

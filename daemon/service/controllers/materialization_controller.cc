@@ -64,7 +64,10 @@ MaterializationController::MaterializationController(Dep d)
               .shutdown_signal = d.shutdown_signal,
               .async_runtime = d.async_runtime,
               .identity = d.identity,
+              .bindings = d.binding_registry,
               .global_store_client = d.global_store_client,
+              .lip_manager = &d.lip_manager,
+              .lifecycle = d.lifecycle,
               .post_seal_policy = d.post_seal_policy,
           }),
       disk_artifact_service_(
@@ -217,6 +220,13 @@ grpc::Status MaterializationController::seal_binding(
   return owner_binding_service_.seal_binding(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::promote_binding_current_value(
+    RpcContext& rctx,
+    const v2::PromoteBindingCurrentValueRequest& req,
+    v2::PromoteBindingCurrentValueResponse& resp) {
+  return owner_binding_service_.promote_binding_current_value(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::refill_owned_binding(
     RpcContext& rctx,
     const v2::RefillOwnedBindingRequest& req,
@@ -276,6 +286,13 @@ grpc::Status MaterializationController::import_artifact_from_path(
     const v2::ImportArtifactFromPathRequest& req,
     v2::ImportArtifactFromPathResponse& resp) {
   return disk_artifact_service_.import_artifact_from_path(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::resolve_public_disk_source(
+    RpcContext& rctx,
+    const v2::ResolvePublicDiskSourceRequest& req,
+    v2::ResolvePublicDiskSourceResponse& resp) {
+  return disk_artifact_service_.resolve_public_disk_source(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::import_artifact_from_path_stream(

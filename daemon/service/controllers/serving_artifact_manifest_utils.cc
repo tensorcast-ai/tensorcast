@@ -199,44 +199,89 @@ absl::StatusOr<std::string> read_manifest_tensor_payload(
   return std::string(base_ptr + manifest_tensor.logical_offset, manifest_tensor.logical_length);
 }
 
-absl::StatusOr<ServingArtifactManifestRecord> parse_serving_manifest_payload(std::string_view payload) {
-  json root;
-  try {
-    root = json::parse(payload, nullptr, true);
-  } catch (const std::exception& e) {
-    return absl::InvalidArgumentError(absl::StrCat("failed to parse serving artifact manifest: ", e.what()));
-  }
-  if (!root.is_object()) {
-    return absl::InvalidArgumentError("serving artifact manifest must be a JSON object");
+absl::Status validate_manifest_record(
+    const ServingArtifactManifestRecord& manifest,
+    std::string_view actual_serving_manifest_ref,
+    bool require_self_describing_manifest,
+    uint64_t canonical_tensor_count,
+    std::string_view computed_tensor_schema_hash,
+    const std::optional<std::string>& expected_representation_contract_hash,
+    const std::optional<std::string>& expected_serving_build_digest,
+    const std::optional<std::string>& expected_serving_build_digest_version);
+
+absl::StatusOr<ServingArtifactPreflightResult> preflight_manifest_payload_common(
+    std::string_view canonical_index_json,
+    std::string_view manifest_payload,
+    const std::optional<std::string>& serving_manifest_ref_override,
+    const std::optional<std::string>& expected_representation_contract_hash,
+    const std::optional<std::string>& expected_serving_build_digest,
+    const std::optional<std::string>& expected_serving_build_digest_version,
+    bool require_manifest) {
+  auto parsed_index_or = parse_canonical_index_json(canonical_index_json);
+  if (!parsed_index_or.ok()) {
+    return parsed_index_or.status();
   }
 
-  ServingArtifactManifestRecord manifest;
-  try {
-    manifest.schema_version = root.at("schema_version").get<int64_t>();
-    manifest.artifact_kind = root.at("artifact_kind").get<std::string>();
-    manifest.framework_name = root.at("framework_name").get<std::string>();
-    manifest.adapter_version = root.at("adapter_version").get<std::string>();
-    manifest.serving_abi_version = root.at("serving_abi_version").get<std::string>();
-    manifest.representation_contract_hash = root.at("representation_contract_hash").get<std::string>();
-    manifest.serving_build_digest = root.at("serving_build_digest").get<std::string>();
-    manifest.tensor_schema_hash = root.at("tensor_schema_hash").get<std::string>();
-    manifest.canonical_tensor_count = root.at("canonical_tensor_count").get<uint64_t>();
-    manifest.builder_mode = root.at("builder_mode").get<std::string>();
-    manifest.build_pipeline_version = root.at("build_pipeline_version").get<std::string>();
-    if (root.contains("serving_manifest_ref") && !root.at("serving_manifest_ref").is_null()) {
-      manifest.serving_manifest_ref = root.at("serving_manifest_ref").get<std::string>();
-    }
-    if (root.contains("source_artifact_ref") && !root.at("source_artifact_ref").is_null()) {
-      manifest.source_artifact_ref = root.at("source_artifact_ref").get<std::string>();
-    }
-    if (root.contains("logical_topology_json") && !root.at("logical_topology_json").is_null()) {
-      manifest.logical_topology_json = root.at("logical_topology_json").get<std::string>();
-    }
-  } catch (const std::exception& e) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("serving artifact manifest missing or malformed fields: ", e.what()));
+  const std::string serving_manifest_ref =
+      serving_manifest_ref_override.value_or(std::string(kPhase1ServingManifestRef));
+  auto manifest_tensor_name_or = parse_tensor_manifest_ref(serving_manifest_ref);
+  if (!manifest_tensor_name_or.ok()) {
+    return manifest_tensor_name_or.status();
   }
-  return manifest;
+  const std::string& manifest_tensor_name = *manifest_tensor_name_or;
+
+  auto manifest_tensor_or = find_manifest_tensor(parsed_index_or->tensors, manifest_tensor_name);
+  if (!manifest_tensor_or.ok()) {
+    if (absl::IsNotFound(manifest_tensor_or.status()) && !require_manifest) {
+      return ServingArtifactPreflightResult{};
+    }
+    if (absl::IsNotFound(manifest_tensor_or.status())) {
+      return absl::DataLossError(
+          absl::StrCat(
+              "serving artifact is missing manifest tensor referenced by serving_manifest_ref: ",
+              manifest_tensor_name));
+    }
+    return manifest_tensor_or.status();
+  }
+
+  auto tensor_schema_hash_or = compute_tensor_schema_hash(parsed_index_or->tensors, manifest_tensor_name);
+  if (!tensor_schema_hash_or.ok()) {
+    return tensor_schema_hash_or.status();
+  }
+
+  uint64_t canonical_tensor_count = 0;
+  for (const auto& tensor : parsed_index_or->tensors) {
+    if (tensor.name != manifest_tensor_name) {
+      ++canonical_tensor_count;
+    }
+  }
+
+  auto manifest_or = parse_serving_manifest_payload(manifest_payload);
+  if (!manifest_or.ok()) {
+    return manifest_or.status();
+  }
+  auto validate_status = validate_manifest_record(
+      *manifest_or,
+      serving_manifest_ref,
+      require_manifest,
+      canonical_tensor_count,
+      *tensor_schema_hash_or,
+      expected_representation_contract_hash,
+      expected_serving_build_digest,
+      expected_serving_build_digest_version);
+  if (!validate_status.ok()) {
+    return validate_status;
+  }
+
+  ServingArtifactPreflightResult result;
+  result.serving_manifest_present = true;
+  result.serving_manifest_ref = serving_manifest_ref;
+  result.representation_contract_hash = manifest_or->representation_contract_hash;
+  result.serving_build_digest = manifest_or->serving_build_digest;
+  result.tensor_schema_hash = *tensor_schema_hash_or;
+  result.canonical_tensor_count = canonical_tensor_count;
+  result.manifest = std::move(*manifest_or);
+  return result;
 }
 
 absl::Status validate_manifest_record(
@@ -246,7 +291,8 @@ absl::Status validate_manifest_record(
     uint64_t canonical_tensor_count,
     std::string_view computed_tensor_schema_hash,
     const std::optional<std::string>& expected_representation_contract_hash,
-    const std::optional<std::string>& expected_serving_build_digest) {
+    const std::optional<std::string>& expected_serving_build_digest,
+    const std::optional<std::string>& expected_serving_build_digest_version) {
   if (manifest.schema_version != 1) {
     return absl::FailedPreconditionError("serving artifact manifest schema_version must be 1 in phase 1");
   }
@@ -262,6 +308,17 @@ absl::Status validate_manifest_record(
   }
   if (manifest.serving_build_digest.empty()) {
     return absl::FailedPreconditionError("serving artifact manifest requires serving_build_digest");
+  }
+  const std::string resolved_serving_build_digest_version =
+      manifest.serving_build_digest_version.value_or(std::string(kPhase1ServingBuildDigestVersion));
+  if (resolved_serving_build_digest_version.empty()) {
+    return absl::FailedPreconditionError("serving artifact manifest requires serving_build_digest_version");
+  }
+  if (resolved_serving_build_digest_version != kPhase1ServingBuildDigestVersion) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "unsupported serving artifact manifest serving_build_digest_version: ",
+            resolved_serving_build_digest_version));
   }
   if (manifest.tensor_schema_hash.empty()) {
     return absl::FailedPreconditionError("serving artifact manifest requires tensor_schema_hash");
@@ -310,10 +367,58 @@ absl::Status validate_manifest_record(
     return absl::FailedPreconditionError(
         "serving artifact manifest serving_build_digest does not match the expected lineage");
   }
+  if (expected_serving_build_digest_version.has_value() &&
+      resolved_serving_build_digest_version != *expected_serving_build_digest_version) {
+    return absl::FailedPreconditionError(
+        "serving artifact manifest serving_build_digest_version does not match the expected lineage");
+  }
   return absl::OkStatus();
 }
 
 } // namespace
+
+absl::StatusOr<ServingArtifactManifestRecord> parse_serving_manifest_payload(std::string_view payload) {
+  json root;
+  try {
+    root = json::parse(payload, nullptr, true);
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(absl::StrCat("failed to parse serving artifact manifest: ", e.what()));
+  }
+  if (!root.is_object()) {
+    return absl::InvalidArgumentError("serving artifact manifest must be a JSON object");
+  }
+
+  ServingArtifactManifestRecord manifest;
+  try {
+    manifest.schema_version = root.at("schema_version").get<int64_t>();
+    manifest.artifact_kind = root.at("artifact_kind").get<std::string>();
+    manifest.framework_name = root.at("framework_name").get<std::string>();
+    manifest.adapter_version = root.at("adapter_version").get<std::string>();
+    manifest.serving_abi_version = root.at("serving_abi_version").get<std::string>();
+    manifest.representation_contract_hash = root.at("representation_contract_hash").get<std::string>();
+    manifest.serving_build_digest = root.at("serving_build_digest").get<std::string>();
+    manifest.tensor_schema_hash = root.at("tensor_schema_hash").get<std::string>();
+    manifest.canonical_tensor_count = root.at("canonical_tensor_count").get<uint64_t>();
+    manifest.builder_mode = root.at("builder_mode").get<std::string>();
+    manifest.build_pipeline_version = root.at("build_pipeline_version").get<std::string>();
+    if (root.contains("serving_build_digest_version") && !root.at("serving_build_digest_version").is_null()) {
+      manifest.serving_build_digest_version = root.at("serving_build_digest_version").get<std::string>();
+    }
+    if (root.contains("serving_manifest_ref") && !root.at("serving_manifest_ref").is_null()) {
+      manifest.serving_manifest_ref = root.at("serving_manifest_ref").get<std::string>();
+    }
+    if (root.contains("source_artifact_ref") && !root.at("source_artifact_ref").is_null()) {
+      manifest.source_artifact_ref = root.at("source_artifact_ref").get<std::string>();
+    }
+    if (root.contains("logical_topology_json") && !root.at("logical_topology_json").is_null()) {
+      manifest.logical_topology_json = root.at("logical_topology_json").get<std::string>();
+    }
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("serving artifact manifest missing or malformed fields: ", e.what()));
+  }
+  return manifest;
+}
 
 absl::StatusOr<std::string> parse_tensor_manifest_ref(std::string_view serving_manifest_ref) {
   constexpr std::string_view kTensorRefPrefix = "tensor:";
@@ -350,7 +455,8 @@ ServingArtifactPreflightRequest build_preflight_request(
     request.expected_serving_build_digest = runtime_policy->expected_serving_build_digest();
   }
   request.require_manifest = runtime_policy->require_manifest() || request.serving_manifest_ref.has_value() ||
-      request.expected_representation_contract_hash.has_value() || request.expected_serving_build_digest.has_value();
+      request.expected_representation_contract_hash.has_value() || request.expected_serving_build_digest.has_value() ||
+      request.expected_serving_build_digest_version.has_value();
   return request;
 }
 
@@ -366,76 +472,51 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
   if (request.canonical_index_json.empty()) {
     return absl::InvalidArgumentError("preflight_serving_artifact requires canonical_index_json");
   }
-
   auto parsed_index_or = parse_canonical_index_json(request.canonical_index_json);
   if (!parsed_index_or.ok()) {
     return parsed_index_or.status();
   }
-
   const std::string serving_manifest_ref =
       request.serving_manifest_ref.value_or(std::string(kPhase1ServingManifestRef));
   auto manifest_tensor_name_or = parse_tensor_manifest_ref(serving_manifest_ref);
   if (!manifest_tensor_name_or.ok()) {
     return manifest_tensor_name_or.status();
   }
-  const std::string& manifest_tensor_name = *manifest_tensor_name_or;
-
-  auto manifest_tensor_or = find_manifest_tensor(parsed_index_or->tensors, manifest_tensor_name);
+  auto manifest_tensor_or = find_manifest_tensor(parsed_index_or->tensors, *manifest_tensor_name_or);
   if (!manifest_tensor_or.ok()) {
-    if (absl::IsNotFound(manifest_tensor_or.status()) && !request.require_manifest) {
-      return ServingArtifactPreflightResult{};
-    }
-    if (absl::IsNotFound(manifest_tensor_or.status())) {
-      return absl::DataLossError(
-          absl::StrCat(
-              "serving artifact is missing manifest tensor referenced by serving_manifest_ref: ",
-              manifest_tensor_name));
-    }
     return manifest_tensor_or.status();
   }
-
-  auto tensor_schema_hash_or = compute_tensor_schema_hash(parsed_index_or->tensors, manifest_tensor_name);
-  if (!tensor_schema_hash_or.ok()) {
-    return tensor_schema_hash_or.status();
-  }
-
-  uint64_t canonical_tensor_count = 0;
-  for (const auto& tensor : parsed_index_or->tensors) {
-    if (tensor.name != manifest_tensor_name) {
-      ++canonical_tensor_count;
-    }
-  }
-
   auto payload_or = read_manifest_tensor_payload(
       engine, request.artifact_id, **manifest_tensor_or, parsed_index_or->total_size, request.disk_source);
   if (!payload_or.ok()) {
     return payload_or.status();
   }
-  auto manifest_or = parse_serving_manifest_payload(*payload_or);
-  if (!manifest_or.ok()) {
-    return manifest_or.status();
-  }
-  auto validate_status = validate_manifest_record(
-      *manifest_or,
-      serving_manifest_ref,
-      request.require_manifest,
-      canonical_tensor_count,
-      *tensor_schema_hash_or,
+  return preflight_manifest_payload_common(
+      request.canonical_index_json,
+      *payload_or,
+      request.serving_manifest_ref,
       request.expected_representation_contract_hash,
-      request.expected_serving_build_digest);
-  if (!validate_status.ok()) {
-    return validate_status;
-  }
+      request.expected_serving_build_digest,
+      request.expected_serving_build_digest_version,
+      request.require_manifest);
+}
 
-  ServingArtifactPreflightResult result;
-  result.serving_manifest_present = true;
-  result.serving_manifest_ref = serving_manifest_ref;
-  result.representation_contract_hash = manifest_or->representation_contract_hash;
-  result.serving_build_digest = manifest_or->serving_build_digest;
-  result.tensor_schema_hash = *tensor_schema_hash_or;
-  result.canonical_tensor_count = canonical_tensor_count;
-  result.manifest = std::move(*manifest_or);
-  return result;
+absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_manifest_payload(
+    const ServingManifestPayloadPreflightRequest& request) {
+  if (request.canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("preflight_serving_manifest_payload requires canonical_index_json");
+  }
+  if (request.manifest_payload.empty() && request.require_manifest) {
+    return absl::InvalidArgumentError("preflight_serving_manifest_payload requires manifest_payload");
+  }
+  return preflight_manifest_payload_common(
+      request.canonical_index_json,
+      request.manifest_payload,
+      request.serving_manifest_ref,
+      request.expected_representation_contract_hash,
+      request.expected_serving_build_digest,
+      request.expected_serving_build_digest_version,
+      request.require_manifest);
 }
 
 } // namespace tensorcast::daemon::serving_artifact_manifest

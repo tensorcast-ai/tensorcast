@@ -27,6 +27,7 @@
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
+#include "core/common/trace/trace_macros.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/components/endpoint_id.h"
 #include "core/store/components/global_store_client.h"
@@ -387,7 +388,7 @@ absl::Status execute_fill_work_items(
         return absl::InvalidArgumentError("const fill work item requires a non-empty fill_rule");
       }
       pattern = item.fill_rule->constant_value;
-      auto spans_or = build_destination_byte_spans(item.dst_spec, TensorCoordinateSpec{});
+      auto spans_or = build_destination_byte_spans(item.dst_spec, item.fill_rule->destination_range);
       if (!spans_or.ok()) {
         return spans_or.status();
       }
@@ -947,6 +948,135 @@ class SharedSourceLoader final : public IArtifactLoader {
  private:
   std::shared_ptr<loader::SeekableSource> source_;
 };
+
+class BoundCanonicalSource final : public loader::SeekableSource {
+ public:
+  explicit BoundCanonicalSource(
+      std::vector<MaterializationFacade::SealAssemblyCutInput::BoundCanonicalSpan> spans,
+      uint64_t total_bytes)
+      : spans_(std::move(spans)), total_bytes_(total_bytes) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_bytes_;
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(cursor_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or;
+    }
+    cursor_ += *read_or;
+    return read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= total_bytes_) {
+      return static_cast<size_t>(0);
+    }
+    uint64_t cursor = offset;
+    size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_bytes_ - offset));
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    while (remaining > 0) {
+      const auto* span = find_span(cursor);
+      if (span == nullptr) {
+        return absl::FailedPreconditionError("bound canonical source is missing byte coverage");
+      }
+      const uint64_t local_offset = cursor - span->logical_offset;
+      const size_t take = static_cast<size_t>(std::min<uint64_t>(remaining, span->logical_length - local_offset));
+      cuda::CudaDeviceGuard guard(span->device_id);
+      if (!guard.status().ok()) {
+        return guard.status();
+      }
+      const auto src_addr =
+          static_cast<uintptr_t>(span->base_ptr + span->mapping_base_offset + span->storage_offset + local_offset);
+      auto memcpy_status = cuda::memcpy(out, reinterpret_cast<const void*>(src_addr), take, cudaMemcpyDeviceToHost);
+      if (!memcpy_status.ok()) {
+        LOG(ERROR) << "bound canonical source memcpy failed"
+                   << " cursor=" << cursor << " local_offset=" << local_offset << " take=" << take
+                   << " span.logical_offset=" << span->logical_offset << " span.logical_length=" << span->logical_length
+                   << " span.base_ptr=0x" << std::hex << span->base_ptr << " span.mapping_base_offset=0x"
+                   << span->mapping_base_offset << " span.storage_offset=0x" << span->storage_offset << " src_addr=0x"
+                   << src_addr << std::dec;
+        return memcpy_status;
+      }
+      if (auto sync_status = cuda::device_synchronize(); !sync_status.ok()) {
+        return sync_status;
+      }
+      out += take;
+      cursor += take;
+      remaining -= take;
+    }
+    return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
+  }
+
+ private:
+  const MaterializationFacade::SealAssemblyCutInput::BoundCanonicalSpan* find_span(uint64_t logical_offset) const {
+    for (const auto& span : spans_) {
+      if (logical_offset >= span.logical_offset && logical_offset < span.logical_offset + span.logical_length) {
+        return &span;
+      }
+    }
+    return nullptr;
+  }
+
+  std::vector<MaterializationFacade::SealAssemblyCutInput::BoundCanonicalSpan> spans_;
+  uint64_t total_bytes_{0};
+  uint64_t cursor_{0};
+};
+
+struct ContiguousBoundCanonicalGpuRange {
+  int device_id{-1};
+  uintptr_t base_addr{0};
+  uint64_t total_bytes{0};
+};
+
+absl::StatusOr<std::optional<ContiguousBoundCanonicalGpuRange>> resolve_contiguous_bound_canonical_gpu_range(
+    const MaterializationFacade::SealAssemblyCutInput& cut_input,
+    uint64_t canonical_total_size) {
+  if (cut_input.bound_canonical_spans.empty()) {
+    return std::nullopt;
+  }
+  const auto& first = cut_input.bound_canonical_spans.front();
+  const uintptr_t first_addr =
+      static_cast<uintptr_t>(first.base_ptr + first.mapping_base_offset + first.storage_offset);
+  int device_id = first.device_id;
+  uint64_t expected_logical_offset = 0;
+  uintptr_t expected_addr = first_addr;
+  uint64_t covered = 0;
+  for (const auto& span : cut_input.bound_canonical_spans) {
+    if (span.device_id != device_id) {
+      return std::nullopt;
+    }
+    if (span.logical_offset != expected_logical_offset) {
+      return std::nullopt;
+    }
+    const uintptr_t span_addr = static_cast<uintptr_t>(span.base_ptr + span.mapping_base_offset + span.storage_offset);
+    if (span_addr != expected_addr) {
+      return std::nullopt;
+    }
+    expected_logical_offset += span.logical_length;
+    expected_addr += span.logical_length;
+    covered += span.logical_length;
+  }
+  if (covered != canonical_total_size) {
+    return absl::FailedPreconditionError("bound canonical gpu range size does not match canonical total size");
+  }
+  return ContiguousBoundCanonicalGpuRange{
+      .device_id = device_id,
+      .base_addr = first_addr,
+      .total_bytes = canonical_total_size,
+  };
+}
+
+absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_bound_canonical_source(
+    const MaterializationFacade::SealAssemblyCutInput& cut_input,
+    uint64_t canonical_total_size) {
+  if (cut_input.bound_canonical_spans.empty()) {
+    return absl::FailedPreconditionError("bound canonical source spans are missing");
+  }
+  return std::shared_ptr<loader::SeekableSource>(
+      std::make_shared<BoundCanonicalSource>(cut_input.bound_canonical_spans, canonical_total_size));
+}
 
 absl::StatusOr<uint64_t> compute_logical_total_size(std::string_view canonical_index_json) {
   if (canonical_index_json.empty()) {
@@ -1601,6 +1731,42 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_canonical_sou
     return absl::NotFoundError(absl::StrCat("local canonical replica missing for artifact_id=", artifact_id));
   }
   return LocalReplicaSource::Create(std::move(selected_replica), selected_location, selected_device_id, source_size);
+}
+
+absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_canonical_source_from_ready_handle(
+    components::ReplicaRegistry& registry,
+    const loading::ReplicaHandle& handle,
+    const DeviceKey& target_device,
+    uint64_t source_size) {
+  const absl::Status ready_status = handle.wait_ready(std::chrono::milliseconds(0));
+  if (!ready_status.ok()) {
+    return ready_status;
+  }
+
+  auto replica_or = registry.find(handle.replica_key);
+  if (replica_or.ok()) {
+    const auto& replica = *replica_or;
+    auto candidate_size_or = replica->get_artifact_size();
+    if (candidate_size_or.ok() && source_size <= *candidate_size_or) {
+      if (handle.replica_key.device.type == DeviceType::GPU &&
+          replica->get_memory_state(common::memory::MemoryLocation::GPU) == replica::MemoryState::LOADED) {
+        const auto gpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
+        if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
+          return LocalReplicaSource::Create(
+              replica, common::memory::MemoryLocation::GPU, handle.replica_key.device.ordinal, source_size);
+        }
+      }
+      if (handle.replica_key.device.type == DeviceType::CPU &&
+          replica->get_memory_state(common::memory::MemoryLocation::CPU) == replica::MemoryState::LOADED) {
+        const auto cpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::CPU);
+        if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
+          return LocalReplicaSource::Create(replica, common::memory::MemoryLocation::CPU, -1, source_size);
+        }
+      }
+    }
+  }
+
+  return make_local_canonical_source(registry, handle.replica_key.artifact_id, target_device, source_size);
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_from_local_canonical(
@@ -2314,6 +2480,31 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
     const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, hints);
     if (source_ordered) {
+      uint64_t max_dst_end = 0;
+      uint64_t max_src_end = 0;
+      size_t max_dst_index = 0;
+      for (size_t idx = 0; idx < effective_map.segments.size(); ++idx) {
+        const auto& segment = effective_map.segments[idx];
+        max_dst_end = std::max<uint64_t>(max_dst_end, segment.dst_offset + segment.length);
+        max_src_end = std::max<uint64_t>(max_src_end, segment.src_offset + segment.length);
+        if (max_dst_end == segment.dst_offset + segment.length) {
+          max_dst_index = idx;
+        }
+      }
+      if (max_dst_end > total_size) {
+        return absl::InvalidArgumentError(
+            absl::StrCat(
+                "materialize_into_target source-ordered map exceeds target size: total_size=",
+                total_size,
+                " max_dst_end=",
+                max_dst_end,
+                " max_src_end=",
+                max_src_end,
+                " segment_index=",
+                max_dst_index,
+                " segment_count=",
+                effective_map.segments.size()));
+      }
       const uint64_t max_window_bytes = std::min<uint64_t>(hints.max_buffer_bytes, 64ULL * 1024 * 1024);
       const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
       loader::SourceWindowScheduler::Options sched_opts{
@@ -2453,53 +2644,40 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
-      if (is_local_replica(remote, local_identity)) {
-        LOG(WARNING) << "Global Store returned local replica for artifact_id=" << hints.artifact_id
-                     << "; treating route as stale";
-        auto complete_status = gs_client->complete_replica_transport(
-            session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
-        if (!complete_status.ok()) {
-          LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
-        }
-        if (!has_disk_source) {
-          return stale_local_route_status(hints.artifact_id);
-        }
-      } else {
-        P2PSource p2p_src;
-        p2p_src.comm_engine = gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-            comm_manager->get_shared_engine()};
-        p2p_src.size_bytes = remote.memory_size;
-        p2p_src.ip = remote.node_address;
-        p2p_src.port = static_cast<uint16_t>(remote.node_port);
-        p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
-        p2p_src.remote_endpoint_id = remote.endpoint_id;
-        p2p_src.memory_keys = remote.remote_memory_keys;
-        p2p_src.buf_sizes = remote.buffer_sizes;
-        p2p_src.verification_json = remote.verification_json;
-        p2p_src.enable_checksum = false;
-        p2p_src.location.type = remote.memory_type;
-        p2p_src.location.device_id = remote.device_id;
-        fill_runtime_p2p_bindings(comm_manager, &p2p_src);
-        p2p_src.request_budget = hints.request_budget;
-        p2p_src.artifact_id = hints.artifact_id;
-        if (has_disk_source && allow_disk && !prefer_p2p) {
-          p2p_src.fallback_disk_dir = disk_source->path.string();
-        }
-        auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
-        auto complete_status = gs_client->complete_replica_transport(
-            session.transport_id,
-            p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
-                        : components::TransportCompletionOutcome::kFailed,
-            p2p_or.ok() ? std::string_view{} : std::string_view(p2p_or.status().ToString()));
-        if (!complete_status.ok()) {
-          LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
-        }
-        if (p2p_or.ok()) {
-          return p2p_or;
-        }
-        if (!allow_disk || !has_disk_source || prefer_p2p) {
-          return p2p_or.status();
-        }
+      P2PSource p2p_src;
+      p2p_src.comm_engine = gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+          comm_manager->get_shared_engine()};
+      p2p_src.size_bytes = remote.memory_size;
+      p2p_src.ip = remote.node_address;
+      p2p_src.port = static_cast<uint16_t>(remote.node_port);
+      p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
+      p2p_src.remote_endpoint_id = remote.endpoint_id;
+      p2p_src.memory_keys = remote.remote_memory_keys;
+      p2p_src.buf_sizes = remote.buffer_sizes;
+      p2p_src.verification_json = remote.verification_json;
+      p2p_src.enable_checksum = false;
+      p2p_src.location.type = remote.memory_type;
+      p2p_src.location.device_id = remote.device_id;
+      fill_runtime_p2p_bindings(comm_manager, &p2p_src);
+      p2p_src.request_budget = hints.request_budget;
+      p2p_src.artifact_id = hints.artifact_id;
+      if (has_disk_source && allow_disk && !prefer_p2p) {
+        p2p_src.fallback_disk_dir = disk_source->path.string();
+      }
+      auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
+      auto complete_status = gs_client->complete_replica_transport(
+          session.transport_id,
+          p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
+                      : components::TransportCompletionOutcome::kFailed,
+          p2p_or.ok() ? std::string_view{} : std::string_view(p2p_or.status().ToString()));
+      if (!complete_status.ok()) {
+        LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
+      }
+      if (p2p_or.ok()) {
+        return p2p_or;
+      }
+      if (!allow_disk || !has_disk_source || prefer_p2p) {
+        return p2p_or.status();
       }
     } else if (!allow_disk || !has_disk_source) {
       return transport_or.status();
@@ -2779,8 +2957,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .source_layout_available = use_source_layout,
         .direct_write_capable = direct_write_supported,
         .collective_eligible = source_kind == loading::MaterializationSource::kDisk &&
-            request_hints.collective_load_group.has_value() && allow_collective_mapped_executor(strategy_config) &&
-            !has_fill_items && representation_work_plan.residual_fallback_map.total_bytes == 0,
+            request_hints.collective_load_group.has_value() && allow_collective_mapped_executor(strategy_config),
     };
 
     const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
@@ -3144,57 +3321,44 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
-      if (is_local_replica(remote, local_identity)) {
-        LOG(WARNING) << "Global Store returned local replica for artifact_id=" << request_hints.artifact_id
-                     << "; treating route as stale";
-        auto complete_status = gs_client->complete_replica_transport(
-            session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
-        if (!complete_status.ok()) {
-          LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
-        }
-        if (!has_disk_source) {
-          return stale_local_route_status(request_hints.artifact_id);
-        }
-      } else {
-        P2PSource p2p_src;
-        const bool source_is_view = requested_view_id.has_value() && !used_canonical_transport_fallback;
-        p2p_src.comm_engine = gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
-            comm_manager->get_shared_engine()};
-        p2p_src.size_bytes = remote.memory_size;
-        p2p_src.ip = remote.node_address;
-        p2p_src.port = static_cast<uint16_t>(remote.node_port);
-        p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
-        p2p_src.remote_endpoint_id = remote.endpoint_id;
-        p2p_src.memory_keys = remote.remote_memory_keys;
-        p2p_src.buf_sizes = remote.buffer_sizes;
-        p2p_src.verification_json = remote.verification_json;
-        p2p_src.enable_checksum = false;
-        p2p_src.location.type = remote.memory_type;
-        p2p_src.location.device_id = remote.device_id;
-        fill_runtime_p2p_bindings(comm_manager, &p2p_src);
-        p2p_src.request_budget = request_hints.request_budget;
-        p2p_src.artifact_id = request_hints.artifact_id;
-        if (has_disk_source && allow_disk && !prefer_p2p) {
-          p2p_src.fallback_disk_dir = disk_source->path.string();
-        }
-        auto p2p_or = run_source(
-            std::make_unique<P2PLoader>(p2p_src),
-            loading::MaterializationSource::kP2P,
-            source_is_view ? strategy::SourceByteSpace::kView : strategy::SourceByteSpace::kCanonical);
-        auto complete_status = gs_client->complete_replica_transport(
-            session.transport_id,
-            p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
-                        : components::TransportCompletionOutcome::kFailed,
-            p2p_or.ok() ? std::string_view{} : std::string_view(p2p_or.status().ToString()));
-        if (!complete_status.ok()) {
-          LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
-        }
-        if (p2p_or.ok()) {
-          return p2p_or;
-        }
-        if (!allow_disk || !has_disk_source || prefer_p2p) {
-          return p2p_or.status();
-        }
+      P2PSource p2p_src;
+      const bool source_is_view = requested_view_id.has_value() && !used_canonical_transport_fallback;
+      p2p_src.comm_engine = gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+          comm_manager->get_shared_engine()};
+      p2p_src.size_bytes = remote.memory_size;
+      p2p_src.ip = remote.node_address;
+      p2p_src.port = static_cast<uint16_t>(remote.node_port);
+      p2p_src.local_endpoint_id = components::derive_endpoint_id(local_identity, target_device);
+      p2p_src.remote_endpoint_id = remote.endpoint_id;
+      p2p_src.memory_keys = remote.remote_memory_keys;
+      p2p_src.buf_sizes = remote.buffer_sizes;
+      p2p_src.verification_json = remote.verification_json;
+      p2p_src.enable_checksum = false;
+      p2p_src.location.type = remote.memory_type;
+      p2p_src.location.device_id = remote.device_id;
+      fill_runtime_p2p_bindings(comm_manager, &p2p_src);
+      p2p_src.request_budget = request_hints.request_budget;
+      p2p_src.artifact_id = request_hints.artifact_id;
+      if (has_disk_source && allow_disk && !prefer_p2p) {
+        p2p_src.fallback_disk_dir = disk_source->path.string();
+      }
+      auto p2p_or = run_source(
+          std::make_unique<P2PLoader>(p2p_src),
+          loading::MaterializationSource::kP2P,
+          source_is_view ? strategy::SourceByteSpace::kView : strategy::SourceByteSpace::kCanonical);
+      auto complete_status = gs_client->complete_replica_transport(
+          session.transport_id,
+          p2p_or.ok() ? components::TransportCompletionOutcome::kSuccess
+                      : components::TransportCompletionOutcome::kFailed,
+          p2p_or.ok() ? std::string_view{} : std::string_view(p2p_or.status().ToString()));
+      if (!complete_status.ok()) {
+        LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
+      }
+      if (p2p_or.ok()) {
+        return p2p_or;
+      }
+      if (!allow_disk || !has_disk_source || prefer_p2p) {
+        return p2p_or.status();
       }
     } else if (!allow_disk || !has_disk_source) {
       return transport_or.status();
@@ -4213,7 +4377,8 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
           loading::MaterializeMode::AUTO,
           canonical_hints);
       if (canonical_handle_or.ok()) {
-        local_source_or = make_local_canonical_source(*registry, assembly_id, target_device, canonical_total_size);
+        local_source_or = make_local_canonical_source_from_ready_handle(
+            *registry, *canonical_handle_or, target_device, canonical_total_size);
       }
     }
     if (!local_source_or.ok()) {
@@ -4505,6 +4670,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     const SealAssemblyCutInput& cut_input,
     bool publish_canonical,
     SealProgressCallback progress_cb) {
+  SC_TRACE_SCOPE("seal_from_cut.total");
   if (assembly_id.empty()) {
     return absl::InvalidArgumentError("seal_assembly_from_cut requires non-empty assembly_id");
   }
@@ -4525,11 +4691,13 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   result.schema_version = "v3";
   result.encoding = "json";
 
-  const auto id_kind = common::infer_artifact_id_kind(assembly_id);
+  const std::string source_artifact_id =
+      !cut_input.canonical_artifact_id.empty() ? cut_input.canonical_artifact_id : std::string(assembly_id);
+  const auto id_kind = common::infer_artifact_id_kind(source_artifact_id);
   if (id_kind == common::ArtifactIdKind::kMi2) {
-    result.sealed_artifact_id = std::string(assembly_id);
+    result.sealed_artifact_id = source_artifact_id;
     result.already_sealed = true;
-    auto parse_or = parse_mi2_multihashes(assembly_id);
+    auto parse_or = parse_mi2_multihashes(source_artifact_id);
     if (!parse_or.ok()) {
       return parse_or.status();
     }
@@ -4538,7 +4706,11 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   }
 
   if (result.sealed_artifact_id.empty()) {
-    auto binding_or = gs_client->get_artifact_binding(assembly_id);
+    absl::StatusOr<components::ArtifactBinding> binding_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("seal_from_cut.get_artifact_binding");
+      binding_or = gs_client->get_artifact_binding(source_artifact_id);
+    }
     if (binding_or.ok()) {
       result.sealed_artifact_id = binding_or->to_artifact_id;
       result.already_sealed = true;
@@ -4557,11 +4729,20 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     return absl::InvalidArgumentError(R"(seal_assembly_from_cut requires "cgid:" or "mi2:" artifact id)");
   }
 
-  auto index_or = gs_client->get_artifact_index_by_id(assembly_id);
-  if (!index_or.ok()) {
-    return index_or.status();
+  std::string canonical_index_json;
+  if (!cut_input.canonical_index_json.empty()) {
+    canonical_index_json = cut_input.canonical_index_json;
+  } else {
+    absl::StatusOr<std::string> index_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("seal_from_cut.get_artifact_index");
+      index_or = gs_client->get_artifact_index_by_id(source_artifact_id);
+    }
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    canonical_index_json = std::move(*index_or);
   }
-  std::string canonical_index_json = std::move(*index_or);
 
   auto canonical_total_or = compute_logical_total_size(canonical_index_json);
   if (!canonical_total_or.ok()) {
@@ -4570,8 +4751,11 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   const uint64_t canonical_total_size = *canonical_total_or;
   result.total_size = canonical_total_size;
 
-  auto index_mh_or =
-      common::compute_index_multihash(std::optional<std::string>(canonical_index_json), std::string_view());
+  absl::StatusOr<std::string> index_mh_or = absl::UnknownError("uninitialized");
+  {
+    SC_TRACE_SCOPE("seal_from_cut.compute_index_multihash");
+    index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), std::string_view());
+  }
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
@@ -4587,7 +4771,11 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   const DeviceKey target_device = *target_device_or;
   auto registry = &config_.replica_runtime->registry();
 
-  auto target_ranges_or = build_target_ranges_for_canonical(canonical_index_json, canonical_total_size);
+  absl::StatusOr<std::vector<AssemblyTargetRange>> target_ranges_or = absl::UnknownError("uninitialized");
+  {
+    SC_TRACE_SCOPE("seal_from_cut.build_target_ranges");
+    target_ranges_or = build_target_ranges_for_canonical(canonical_index_json, canonical_total_size);
+  }
   if (!target_ranges_or.ok()) {
     return target_ranges_or.status();
   }
@@ -4596,34 +4784,47 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   AssemblyPlan plan;
   std::shared_ptr<loader::SeekableSource> canonical_source;
   if (cut_input.canonical_full) {
-    auto local_source_or = make_local_canonical_source(*registry, assembly_id, target_device, canonical_total_size);
-    if (!local_source_or.ok() && absl::IsNotFound(local_source_or.status())) {
-      loading::MaterializeHints canonical_hints;
-      canonical_hints.artifact_id = std::string(assembly_id);
-      auto canonical_handle_or = materialize_replica(
-          DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-          loading::MaterializeMode::AUTO,
-          canonical_hints);
-      if (!canonical_handle_or.ok()) {
-        return canonical_handle_or.status();
+    if (!cut_input.bound_canonical_spans.empty()) {
+      {
+        SC_TRACE_SCOPE("seal_from_cut.resolve_bound_canonical_source");
+        auto source_or = make_bound_canonical_source(cut_input, canonical_total_size);
+        if (!source_or.ok()) {
+          return source_or.status();
+        }
+        canonical_source = *source_or;
       }
-      local_source_or = make_local_canonical_source(*registry, assembly_id, target_device, canonical_total_size);
+    } else {
+      absl::StatusOr<std::shared_ptr<loader::SeekableSource>> local_source_or = absl::UnknownError("uninitialized");
+      {
+        SC_TRACE_SCOPE("seal_from_cut.resolve_local_canonical_source");
+        local_source_or =
+            make_local_canonical_source(*registry, source_artifact_id, target_device, canonical_total_size);
+      }
+      if (!local_source_or.ok()) {
+        if (absl::IsNotFound(local_source_or.status())) {
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "canonical_full seal invariant violated: local canonical source not found for ", source_artifact_id));
+        }
+        return local_source_or.status();
+      }
+      canonical_source = *local_source_or;
     }
-    if (!local_source_or.ok()) {
-      return local_source_or.status();
-    }
-    canonical_source = *local_source_or;
   } else {
-    auto plan_or = build_assembly_plan_from_views(
-        *gs_client,
-        assembly_id,
-        canonical_index_json,
-        canonical_total_size,
-        absl::MakeSpan(target_ranges),
-        canonical_total_size,
-        target_device,
-        config_.runtime_context->worker_identity(),
-        cut_input.structural_views);
+    absl::StatusOr<AssemblyPlan> plan_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("seal_from_cut.build_plan_from_views");
+      plan_or = build_assembly_plan_from_views(
+          *gs_client,
+          assembly_id,
+          canonical_index_json,
+          canonical_total_size,
+          absl::MakeSpan(target_ranges),
+          canonical_total_size,
+          target_device,
+          config_.runtime_context->worker_identity(),
+          cut_input.structural_views);
+    }
     if (!plan_or.ok()) {
       return plan_or.status();
     }
@@ -4648,22 +4849,27 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     piece_sources.reserve(plan.sources.size());
     canonicalized_sources.reserve(plan.sources.size());
     for (auto& source : plan.sources) {
-      auto source_or = resolve_assembly_piece_source(
-          *registry,
-          assembly_id,
-          source,
-          local_identity,
-          target_device,
-          local_endpoint_id,
-          comm_manager,
-          std::chrono::milliseconds(0),
-          assembly_id);
+      absl::StatusOr<std::shared_ptr<loader::SeekableSource>> source_or = absl::UnknownError("uninitialized");
+      {
+        SC_TRACE_SCOPE("seal_from_cut.resolve_piece_source");
+        source_or = resolve_assembly_piece_source(
+            *registry,
+            assembly_id,
+            source,
+            local_identity,
+            target_device,
+            local_endpoint_id,
+            comm_manager,
+            std::chrono::milliseconds(0),
+            assembly_id);
+      }
       if (!source_or.ok()) {
         return source_or.status();
       }
       const auto& remote = source.session.remote_replica;
       std::shared_ptr<loader::SeekableSource> source_ptr = *source_or;
       if (source.inverse_transform.requires_materialization && !source.inverse_transform.tensors.empty()) {
+        SC_TRACE_SCOPE("seal_from_cut.canonicalize_piece");
         const uint64_t total_bytes = source.view_size_bytes > 0 ? source.view_size_bytes : remote.memory_size;
         if (total_bytes == 0) {
           return absl::FailedPreconditionError(absl::StrCat("view size missing for view_id=", source.view_id));
@@ -4723,7 +4929,10 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "seal_assembly_from_cut");
   absl::StatusOr<std::shared_ptr<const loader::ByteRangeProgram>> program_or = absl::InvalidArgumentError("not used");
   if (!cut_input.canonical_full) {
-    program_or = compiler.Compile(plan.map);
+    {
+      SC_TRACE_SCOPE("seal_from_cut.compile_byte_range_program");
+      program_or = compiler.Compile(plan.map);
+    }
     if (!program_or.ok()) {
       return program_or.status();
     }
@@ -4732,23 +4941,40 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   const size_t leaf_chunk_bytes =
       config_.artifact_chunk_bytes == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : config_.artifact_chunk_bytes;
   if (result.sealed_artifact_id.empty()) {
-    absl::StatusOr<std::string> data_mh_or = [&]() -> absl::StatusOr<std::string> {
-      if (cut_input.canonical_full) {
+    absl::StatusOr<std::string> data_mh_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("seal_from_cut.compute_data_multihash");
+      data_mh_or = [&]() -> absl::StatusOr<std::string> {
+        if (cut_input.canonical_full) {
+          auto contiguous_gpu_or = resolve_contiguous_bound_canonical_gpu_range(cut_input, canonical_total_size);
+          if (!contiguous_gpu_or.ok()) {
+            return contiguous_gpu_or.status();
+          }
+          if (contiguous_gpu_or->has_value()) {
+            const auto& contiguous_gpu = **contiguous_gpu_or;
+            const size_t gpu_leaf_chunk_bytes = std::min<size_t>(leaf_chunk_bytes, 64ULL * 1024ULL * 1024ULL);
+            return loader::compute_data_multihash_from_gpu_memory(
+                gsl::not_null<void*>{reinterpret_cast<void*>(contiguous_gpu.base_addr)},
+                contiguous_gpu.total_bytes,
+                contiguous_gpu.device_id,
+                gpu_leaf_chunk_bytes);
+          }
+          return loader::compute_data_multihash_from_seekable_source(
+              *canonical_source, canonical_total_size, leaf_chunk_bytes, std::move(progress_cb));
+        }
+        loader::ByteRangeMappedSource::Options map_opts{
+            .path = "seal_assembly_from_cut",
+            .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+        };
+        auto hash_source_or =
+            loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+        if (!hash_source_or.ok()) {
+          return hash_source_or.status();
+        }
         return loader::compute_data_multihash_from_seekable_source(
-            *canonical_source, canonical_total_size, leaf_chunk_bytes, std::move(progress_cb));
-      }
-      loader::ByteRangeMappedSource::Options map_opts{
-          .path = "seal_assembly_from_cut",
-          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-      };
-      auto hash_source_or =
-          loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
-      if (!hash_source_or.ok()) {
-        return hash_source_or.status();
-      }
-      return loader::compute_data_multihash_from_seekable_source(
-          *hash_source_or.value(), plan_total_bytes, leaf_chunk_bytes, std::move(progress_cb));
-    }();
+            *hash_source_or.value(), plan_total_bytes, leaf_chunk_bytes, std::move(progress_cb));
+      }();
+    }
     if (!data_mh_or.ok()) {
       return data_mh_or.status();
     }
@@ -4759,7 +4985,11 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     binding.from_artifact_id = std::string(assembly_id);
     binding.to_artifact_id = result.sealed_artifact_id;
     binding.kind = tensorcast::global_store::v1::ARTIFACT_BINDING_KIND_SEAL;
-    auto upsert_or = gs_client->upsert_artifact_binding(binding);
+    absl::StatusOr<components::ArtifactBindingResult> upsert_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("seal_from_cut.upsert_artifact_binding");
+      upsert_or = gs_client->upsert_artifact_binding(binding);
+    }
     if (!upsert_or.ok()) {
       return upsert_or.status();
     }
@@ -4803,6 +5033,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     return loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
   };
   if (!existing_or.ok()) {
+    SC_TRACE_SCOPE("seal_from_cut.load_gpu_replica");
     loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan_total_bytes};
     replica::ReplicaConfig cfg{
         .source = inline_source,
@@ -4859,6 +5090,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     return cpu_existing_or.status();
   }
   if (!cpu_existing_or.ok()) {
+    SC_TRACE_SCOPE("seal_from_cut.load_cpu_replica");
     loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan_total_bytes};
     replica::ReplicaConfig cpu_cfg{
         .source = inline_source,
@@ -4904,7 +5136,11 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
     }
   }
 
-  absl::Status publish_status = register_replica_with_global_store(key, {});
+  absl::Status publish_status = absl::UnknownError("uninitialized");
+  {
+    SC_TRACE_SCOPE("seal_from_cut.register_replica_with_global_store");
+    publish_status = register_replica_with_global_store(key, {});
+  }
   if (!publish_status.ok()) {
     return publish_status;
   }

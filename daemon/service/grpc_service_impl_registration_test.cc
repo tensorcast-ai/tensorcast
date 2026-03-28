@@ -182,7 +182,7 @@ TEST_CASE("CommitRegisteredArtifact fails when pinned local stable cannot be sat
 }
 
 TEST_CASE(
-    "CommitRegisteredArtifact pinned does not double-count stable lease during CPU export",
+    "CommitRegisteredArtifact pinned fails when local stable tier hits banned GPU staging",
     "[daemon][registration][stable_budget]") {
   auto opts = make_opts();
   opts.memory_tier_config = tensorcast::store::MemoryTierConfig{.stable_bytes = 32};
@@ -210,9 +210,8 @@ TEST_CASE(
   creq.set_registration_id(bresp.registration_id());
   tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
-  REQUIRE(st.ok());
-  REQUIRE(cresp.has_local_stable_tier());
-  REQUIRE(cresp.local_stable_tier().status() == tensorcast::daemon::v2::LOCAL_STABLE_TIER_STATUS_READY);
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_message().find("stage_on_gpu is disabled") != std::string::npos);
 }
 
 TEST_CASE("CommitRegisteredArtifact accepts CGID", "[daemon][registration]") {

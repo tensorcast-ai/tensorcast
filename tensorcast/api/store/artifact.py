@@ -88,6 +88,10 @@ from tensorcast.common.selection_contract import (
 from tensorcast.common.selection_identity import (
     compute_view_subset_hash,
 )
+from tensorcast.profile_utils import (
+    emit_tensorcast_profile_event,
+    tensorcast_profile_stage,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
@@ -922,6 +926,31 @@ class Artifact:
                     "tc.store.ticket_status": diagnostics.ticket_status or "",
                     "tc.store.materialize_sec": diagnostics.materialize_sec,
                     "tc.store.total_sec": diagnostics.total_sec,
+                },
+            )
+            emit_tensorcast_profile_event(
+                "tensorcast",
+                "artifact.tensor_dict_with_diagnostics",
+                logger=logger,
+                payload={
+                    "artifact_id": artifact_id,
+                    "source": diagnostics.source,
+                    "source_code": diagnostics.source_code,
+                    "ticket_status": diagnostics.ticket_status,
+                    "disk_path": diagnostics.disk_path,
+                    "tensor_count": diagnostics.tensor_count,
+                    "total_bytes": diagnostics.total_bytes,
+                    "generation": diagnostics.generation,
+                    "materialize_sec": diagnostics.materialize_sec,
+                    "tensor_bind_sec": diagnostics.tensor_bind_sec,
+                    "total_sec": diagnostics.total_sec,
+                    "retry_attempts": diagnostics.retry_attempts,
+                    "retry_reason_buckets": diagnostics.retry_reason_buckets,
+                    "budget_deadline_sec": diagnostics.budget_deadline_sec,
+                    "budget_elapsed_sec": diagnostics.budget_elapsed_sec,
+                    "budget_remaining_sec": diagnostics.budget_remaining_sec,
+                    "budget_exit_reason": diagnostics.budget_exit_reason,
+                    "breakdown": diagnostics.breakdown,
                 },
             )
             return TensorDictMaterializationResult(
@@ -1791,93 +1820,112 @@ class Artifact:
             else None
         )
 
-        source_selection = self._build_owner_source_selection(
-            packing=mode if mapping is None else "byte_space",
-            view_spec_proto=view_spec_proto,
-            canonical_index_bytes=canonical_index_bytes,
-        )
-        index_kind = (
-            store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
-            if source_selection.view_id or source_selection.tensor_names
-            else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
-        )
-        view_id = str(source_selection.view_id or "")
-        logical_layout_hash = bytes(source_selection.logical_layout_hash)
-
-        copy_plan_proto: store_daemon_pb2.CopyPlan | None = None
-        dst_specs: tuple[store_daemon_pb2.MappedTensorSpec, ...] = ()
-        if mapping is None:
-            owner_layout = build_owned_layout(
-                entries=self._effective_index().entries,
-                device_id=device_id,
-                index_kind=index_kind,
-                logical_layout_hash=logical_layout_hash,
-                view_id=view_id or None,
-                ordered_names=tuple(source_selection.tensor_names)
-                if source_selection.tensor_names
-                else None,
-            )
-        else:
-            if mode != "byte_space":
-                raise ArtifactError(
-                    "mapped binding requires packing='byte_space'",
-                    status_code="INVALID_ARGUMENT",
-                    retryable=False,
-                )
-            normalized_plan = normalize_copy_plan(mapping)
-            inferred_entries = infer_mapped_target_entries(
-                plan=normalized_plan,
-                canonical_index=canonical_index,
-                view_narrows=view_narrow_ranges(self._view_spec),
-            )
-            target_spec_payloads = [
-                {
-                    "name": entry.name,
-                    "dtype": str(entry.dtype),
-                    "shape": tuple(int(v) for v in entry.shape),
-                    "stride": tuple(int(v) for v in entry.stride),
-                    "logical_length": int(entry.size_bytes),
-                }
-                for entry in inferred_entries
-            ]
-            mapped_view_id = compute_mapped_view_id_from_specs(
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "artifact.bind_owned.prepare",
+            logger=logger,
+            extra={
+                "artifact_id": self._artifact_id,
+                "device": str(device),
+                "mapping_provided": mapping is not None,
+                "packing": mode,
+            },
+        ) as profile:
+            source_selection = self._build_owner_source_selection(
+                packing=mode if mapping is None else "byte_space",
+                view_spec_proto=view_spec_proto,
                 canonical_index_bytes=canonical_index_bytes,
-                source_view_id=self._mapped_source_view_id(runtime),
-                plan=normalized_plan,
-                target_specs=target_spec_payloads,
             )
-            dst_specs = tuple(
-                build_mapped_tensor_spec(
-                    name=entry.name,
-                    shape=entry.shape,
-                    stride=entry.stride,
-                    dtype=str(entry.dtype),
-                    logical_length=int(entry.size_bytes),
+            index_kind = (
+                store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
+                if source_selection.view_id or source_selection.tensor_names
+                else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
+            )
+            view_id = str(source_selection.view_id or "")
+            logical_layout_hash = bytes(source_selection.logical_layout_hash)
+
+            copy_plan_proto: store_daemon_pb2.CopyPlan | None = None
+            dst_specs: tuple[store_daemon_pb2.MappedTensorSpec, ...] = ()
+            target_tensor_count = 0
+            if mapping is None:
+                target_tensor_count = len(self._effective_index().entries)
+                owner_layout = build_owned_layout(
+                    entries=self._effective_index().entries,
+                    device_id=device_id,
+                    index_kind=index_kind,
+                    logical_layout_hash=logical_layout_hash,
+                    view_id=view_id or None,
+                    ordered_names=tuple(source_selection.tensor_names)
+                    if source_selection.tensor_names
+                    else None,
                 )
-                for entry in inferred_entries
-            )
-            owner_layout = build_owned_layout(
-                entries=inferred_entries,
-                device_id=device_id,
-                index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW,
-                logical_layout_hash=None,
-                view_id=mapped_view_id,
-                dst_specs=dst_specs,
-                separate_storages=True,
-            )
-            copy_plan_proto = store_daemon_pb2.CopyPlan(version=1)
-            for entry in normalized_plan:
-                entry_proto = copy_plan_proto.entries.add()
-                entry_proto.ckpt_name = str(entry.ckpt_name)
-                entry_proto.dst_name = str(entry.dst_name)
-                if entry.ckpt_range is not None:
-                    entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
-                    entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
-                    entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
-                if entry.dst_range is not None:
-                    entry_proto.dst_range.dim = int(entry.dst_range.dim)
-                    entry_proto.dst_range.start = int(entry.dst_range.start)
-                    entry_proto.dst_range.end = int(entry.dst_range.end)
+            else:
+                if mode != "byte_space":
+                    raise ArtifactError(
+                        "mapped binding requires packing='byte_space'",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+                normalized_plan = normalize_copy_plan(mapping)
+                inferred_entries = infer_mapped_target_entries(
+                    plan=normalized_plan,
+                    canonical_index=canonical_index,
+                    view_narrows=view_narrow_ranges(self._view_spec),
+                )
+                target_tensor_count = len(inferred_entries)
+                target_spec_payloads = [
+                    {
+                        "name": entry.name,
+                        "dtype": str(entry.dtype),
+                        "shape": tuple(int(v) for v in entry.shape),
+                        "stride": tuple(int(v) for v in entry.stride),
+                        "logical_length": int(entry.size_bytes),
+                    }
+                    for entry in inferred_entries
+                ]
+                mapped_view_id = compute_mapped_view_id_from_specs(
+                    canonical_index_bytes=canonical_index_bytes,
+                    source_view_id=self._mapped_source_view_id(runtime),
+                    plan=normalized_plan,
+                    target_specs=target_spec_payloads,
+                )
+                dst_specs = tuple(
+                    build_mapped_tensor_spec(
+                        name=entry.name,
+                        shape=entry.shape,
+                        stride=entry.stride,
+                        dtype=str(entry.dtype),
+                        logical_length=int(entry.size_bytes),
+                    )
+                    for entry in inferred_entries
+                )
+                owner_layout = build_owned_layout(
+                    entries=inferred_entries,
+                    device_id=device_id,
+                    index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW,
+                    logical_layout_hash=None,
+                    view_id=mapped_view_id,
+                    dst_specs=dst_specs,
+                    separate_storages=True,
+                )
+                copy_plan_proto = store_daemon_pb2.CopyPlan(version=1)
+                for entry in normalized_plan:
+                    entry_proto = copy_plan_proto.entries.add()
+                    entry_proto.ckpt_name = str(entry.ckpt_name)
+                    entry_proto.dst_name = str(entry.dst_name)
+                    if entry.ckpt_range is not None:
+                        entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
+                        entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
+                        entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
+                    if entry.dst_range is not None:
+                        entry_proto.dst_range.dim = int(entry.dst_range.dim)
+                        entry_proto.dst_range.start = int(entry.dst_range.start)
+                        entry_proto.dst_range.end = int(entry.dst_range.end)
+            if profile is not None:
+                profile["source_tensor_count"] = len(source_selection.tensor_names)
+                profile["binding_layout_id"] = owner_layout.binding_layout_id
+                profile["target_index_bytes_len"] = len(owner_layout.target_index_bytes)
+                profile["target_tensor_count"] = target_tensor_count
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         effective_prefer = (
@@ -1905,23 +1953,37 @@ class Artifact:
         )
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
-            response = runtime.ensure_client().create_owned_binding(
-                source_selection=source_selection,
-                target_layout=owner_layout.target_layout,
-                target_index_bytes=owner_layout.target_index_bytes,
-                device_uuid=device_uuid_for(device_id),
-                binding_layout_id=owner_layout.binding_layout_id,
-                preference=preference,
-                source_policy=source_policy,
-                serving_runtime_policy=serving_runtime_policy,
-                copy_plan=copy_plan_proto,
-                dst_specs=dst_specs,
-                operation_id=_build_transport_operation_id(
-                    base_operation_id=uuid.uuid4().hex,
-                    ctx=ctx,
-                ),
-                timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "artifact.bind_owned.create_owned_binding_rpc",
+                logger=logger,
+                extra={
+                    "artifact_id": self._artifact_id,
+                    "device": str(device),
+                    "binding_layout_id": owner_layout.binding_layout_id,
+                    "target_tensor_count": target_tensor_count,
+                    "target_index_bytes_len": len(owner_layout.target_index_bytes),
+                },
+            ) as profile:
+                response = runtime.ensure_client().create_owned_binding(
+                    source_selection=source_selection,
+                    target_layout=owner_layout.target_layout,
+                    target_index_bytes=owner_layout.target_index_bytes,
+                    device_uuid=device_uuid_for(device_id),
+                    binding_layout_id=owner_layout.binding_layout_id,
+                    preference=preference,
+                    source_policy=source_policy,
+                    serving_runtime_policy=serving_runtime_policy,
+                    copy_plan=copy_plan_proto,
+                    dst_specs=dst_specs,
+                    operation_id=_build_transport_operation_id(
+                        base_operation_id=uuid.uuid4().hex,
+                        ctx=ctx,
+                    ),
+                    timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
+                )
+                if profile is not None:
+                    profile["binding_id"] = getattr(response, "binding_id", None)
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             if any(
@@ -1946,11 +2008,27 @@ class Artifact:
             ) from exc
 
         try:
-            tensors = restore_owned_binding_tensors(
-                response=response,
-                runtime=runtime,
-                device_id=device_id,
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "artifact.bind_owned.restore_binding_tensors",
+                logger=logger,
+                extra={
+                    "artifact_id": self._artifact_id,
+                    "device": str(device),
+                    "binding_id": str(response.binding_id),
+                },
+            ) as profile:
+                tensors = restore_owned_binding_tensors(
+                    response=response,
+                    runtime=runtime,
+                    device_id=device_id,
+                )
+                if profile is not None:
+                    profile["restored_tensor_count"] = len(tensors)
+                    profile["restored_tensor_bytes"] = sum(
+                        int(tensor.numel() * tensor.element_size())
+                        for tensor in tensors.values()
+                    )
         except Exception:
             with contextlib.suppress(Exception):
                 runtime.ensure_client().close_owned_binding(
@@ -1959,12 +2037,27 @@ class Artifact:
             raise
 
         try:
-            current_value_metadata = parse_binding_value_or_raise(
-                response.current_value if hasattr(response, "current_value") else None,
-                rpc_name="CreateOwnedBinding",
-                expected_binding_id=str(response.binding_id),
-                expected_binding_layout_id=owner_layout.binding_layout_id,
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "artifact.bind_owned.parse_current_value",
+                logger=logger,
+                extra={
+                    "artifact_id": self._artifact_id,
+                    "binding_id": str(response.binding_id),
+                },
+            ) as profile:
+                current_value_metadata = parse_binding_value_or_raise(
+                    response.current_value
+                    if hasattr(response, "current_value")
+                    else None,
+                    rpc_name="CreateOwnedBinding",
+                    expected_binding_id=str(response.binding_id),
+                    expected_binding_layout_id=owner_layout.binding_layout_id,
+                )
+                if profile is not None and current_value_metadata is not None:
+                    profile["sealed_artifact_id"] = getattr(
+                        current_value_metadata, "artifact_id", None
+                    )
         except ArtifactError:
             with contextlib.suppress(Exception):
                 runtime.ensure_client().close_owned_binding(

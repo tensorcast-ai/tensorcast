@@ -69,6 +69,18 @@ grpc::Status build_mapped_target_materialization_plan(
     RecordMaterializeResultFn record_result,
     MappedTargetMaterializationPlan& plan);
 
+grpc::Status build_binding_realization_materialization_plan(
+    store::StoreEngine& engine,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const v2::BindingRealizationPlan& realization_plan,
+    std::string_view resolved_artifact_id,
+    const v2::TargetLayout& target_layout,
+    std::string_view target_index_json,
+    const std::vector<materialization_layout::TargetOffsetEntry>& offsets,
+    std::string canonical_index_json,
+    RecordMaterializeResultFn record_result,
+    MappedTargetMaterializationPlan& plan);
+
 absl::StatusOr<store::runtime::ingestion::strategy::ResolvedMaterializationPlan>
 build_resolved_mapped_materialization_plan(
     std::string_view resolved_artifact_id,

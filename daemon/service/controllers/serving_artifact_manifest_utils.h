@@ -17,6 +17,7 @@ namespace tensorcast::daemon::serving_artifact_manifest {
 
 inline constexpr std::string_view kPhase1ServingManifestTensorName = "__tensorcast_meta__.manifest_json";
 inline constexpr std::string_view kPhase1ServingManifestRef = "tensor:__tensorcast_meta__.manifest_json";
+inline constexpr std::string_view kPhase1ServingBuildDigestVersion = "tensorcast.serving_build_digest.v1";
 
 struct ServingArtifactManifestRecord {
   int64_t schema_version{0};
@@ -26,6 +27,7 @@ struct ServingArtifactManifestRecord {
   std::string serving_abi_version;
   std::string representation_contract_hash;
   std::string serving_build_digest;
+  std::optional<std::string> serving_build_digest_version;
   std::string tensor_schema_hash;
   uint64_t canonical_tensor_count{0};
   std::optional<std::string> serving_manifest_ref;
@@ -42,6 +44,7 @@ struct ServingArtifactPreflightRequest {
   std::optional<std::string> serving_manifest_ref;
   std::optional<std::string> expected_representation_contract_hash;
   std::optional<std::string> expected_serving_build_digest;
+  std::optional<std::string> expected_serving_build_digest_version;
   bool require_manifest{false};
 };
 
@@ -55,7 +58,19 @@ struct ServingArtifactPreflightResult {
   ServingArtifactManifestRecord manifest;
 };
 
+struct ServingManifestPayloadPreflightRequest {
+  std::string canonical_index_json;
+  std::string manifest_payload;
+  std::optional<std::string> serving_manifest_ref;
+  std::optional<std::string> expected_representation_contract_hash;
+  std::optional<std::string> expected_serving_build_digest;
+  std::optional<std::string> expected_serving_build_digest_version;
+  bool require_manifest{false};
+};
+
 absl::StatusOr<std::string> parse_tensor_manifest_ref(std::string_view serving_manifest_ref);
+
+absl::StatusOr<ServingArtifactManifestRecord> parse_serving_manifest_payload(std::string_view payload);
 
 ServingArtifactPreflightRequest build_preflight_request(
     std::string artifact_id,
@@ -66,5 +81,8 @@ ServingArtifactPreflightRequest build_preflight_request(
 absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
     store::StoreEngine* engine,
     const ServingArtifactPreflightRequest& request);
+
+absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_manifest_payload(
+    const ServingManifestPayloadPreflightRequest& request);
 
 } // namespace tensorcast::daemon::serving_artifact_manifest

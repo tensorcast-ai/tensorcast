@@ -23,6 +23,7 @@ service StoreDaemonService {
   rpc CommitBindingArtifact(CommitBindingArtifactRequest) returns (CommitBindingArtifactResponse) {}
   rpc BeginBindingUpdate(BeginBindingUpdateRequest) returns (BeginBindingUpdateResponse) {}
   rpc SealBinding(SealBindingRequest) returns (SealBindingResponse) {}
+  rpc PromoteBindingCurrentValue(PromoteBindingCurrentValueRequest) returns (PromoteBindingCurrentValueResponse) {}
   rpc RefillOwnedBinding(RefillOwnedBindingRequest) returns (RefillOwnedBindingResponse) {}
   rpc CloseOwnedBinding(CloseOwnedBindingRequest) returns (CloseOwnedBindingResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
@@ -91,6 +92,7 @@ service StoreDaemonService {
   // ========== Key mapping and publish ==========
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
+  rpc ResolvePublicDiskSource(ResolvePublicDiskSourceRequest) returns (ResolvePublicDiskSourceResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
@@ -538,6 +540,41 @@ message CopyPlanEntry {
 message CopyPlan {
   uint32 version = 1;
   repeated CopyPlanEntry entries = 2;
+}
+
+message PublicDiskSourceHandle {
+  string path = 1;
+  bytes canonical_index_bytes = 2;
+  string artifact_id = 3;
+  uint64 generation = 4;
+  bool verify_checksums = 5;
+}
+
+message BindingRealizationRange {
+  int32 dim = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+enum BindingRealizationOpKind {
+  BINDING_REALIZATION_OP_KIND_UNSPECIFIED = 0;
+  BINDING_REALIZATION_OP_KIND_COPY = 1;
+  BINDING_REALIZATION_OP_KIND_CONST_FILL = 2;
+  BINDING_REALIZATION_OP_KIND_SCALAR_FILL = 3;
+}
+
+message BindingRealizationEntry {
+  BindingRealizationOpKind op_kind = 1;
+  string source_name = 2;
+  repeated BindingRealizationRange source_ranges = 3;
+  string dst_name = 4;
+  repeated BindingRealizationRange dst_ranges = 5;
+  bytes fill_value = 6;
+}
+
+message BindingRealizationPlan {
+  uint32 version = 1;
+  repeated BindingRealizationEntry entries = 2;
 }
 
 message MappedTensorSpec {
@@ -1093,6 +1130,18 @@ message SealBindingResponse {
   BindingValue current_value = 2;
 }
 
+message PromoteBindingCurrentValueRequest {
+  string binding_id = 1;
+  string binding_value_id = 2;
+}
+
+message PromoteBindingCurrentValueResponse {
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 1;
+  BindingState state = 2;
+  BindingValue current_value = 3;
+  bool existed = 4;
+}
+
 message RefillOwnedBindingRequest {
   string binding_id = 1;
   string artifact_id = 2;
@@ -1101,6 +1150,9 @@ message RefillOwnedBindingRequest {
   optional string operation_id = 5;
   TransformPlacement placement = 6;
   ServingArtifactRuntimePolicy serving_artifact_policy = 7;
+  tensorcast.common.v1.ArtifactSelection source_selection = 8;
+  BindingRealizationPlan realization_plan = 9;
+  PublicDiskSourceHandle public_disk_source = 10;
 }
 
 message RefillOwnedBindingResponse {
@@ -1713,6 +1765,15 @@ message ImportArtifactFromPathResponse {
   ImportArtifactState import_state = 4;
 }
 
+message ResolvePublicDiskSourceRequest {
+  string path = 1;
+  bool verify_checksums = 2;
+}
+
+message ResolvePublicDiskSourceResponse {
+  PublicDiskSourceHandle source = 1;
+}
+
 enum ImportArtifactPhase {
   IMPORT_ARTIFACT_PHASE_UNSPECIFIED = 0;
   IMPORT_ARTIFACT_PHASE_PREPARE = 1;
@@ -1968,6 +2029,8 @@ message RepresentationPublishContract {
   string serving_manifest_ref = 2;
   string representation_contract_hash = 3;
   string serving_build_digest = 4;
+  string serving_build_digest_version = 5;
+  tensorcast.publication.v1.ServingPublicationSubject subject = 6;
 }
 
 message SealAssemblyResult {

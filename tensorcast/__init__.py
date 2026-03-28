@@ -110,7 +110,12 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "ArtifactError": ("tensorcast.api", "ArtifactError"),
     "ArtifactFuture": ("tensorcast.api", "ArtifactFuture"),
     "AssemblyAttemptRef": ("tensorcast.api", "AssemblyAttemptRef"),
+    "BindingValueRef": ("tensorcast.api", "BindingValueRef"),
+    "BindingRealizationEntry": ("tensorcast.api", "BindingRealizationEntry"),
+    "BindingRealizationPlan": ("tensorcast.api", "BindingRealizationPlan"),
     "BuilderMode": ("tensorcast.api", "BuilderMode"),
+    "CanonicalIndex": ("tensorcast.api", "CanonicalIndex"),
+    "CanonicalIndexEntry": ("tensorcast.api", "CanonicalIndexEntry"),
     "FallbackOptions": ("tensorcast.api", "FallbackOptions"),
     "FinalizeClass": ("tensorcast.api", "FinalizeClass"),
     "GetArtifactOptions": ("tensorcast.api", "GetArtifactOptions"),
@@ -162,6 +167,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "PlanStepRef": ("tensorcast.api", "PlanStepRef"),
     "PlanStepResult": ("tensorcast.api", "PlanStepResult"),
     "PartialSealResult": ("tensorcast.api", "PartialSealResult"),
+    "PublicDiskSourceHandle": ("tensorcast.api", "PublicDiskSourceHandle"),
     "PreparedServingRegistration": (
         "tensorcast.api",
         "PreparedServingRegistration",
@@ -175,6 +181,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "PureTransformPublicationBundle",
     ),
+    "RealizationProtocol": ("tensorcast.api", "RealizationProtocol"),
     "RepresentationPublishContract": (
         "tensorcast.api",
         "RepresentationPublishContract",
@@ -183,7 +190,13 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "RepresentationPublishSpec",
     ),
+    "ServingPublicationSubject": ("tensorcast.api", "ServingPublicationSubject"),
+    "ServingAdmissionFacts": ("tensorcast.api", "ServingAdmissionFacts"),
     "ServingArtifactManifest": ("tensorcast.api", "ServingArtifactManifest"),
+    "SERVING_BUILD_DIGEST_VERSION": (
+        "tensorcast.api",
+        "SERVING_BUILD_DIGEST_VERSION",
+    ),
     "ServingBuildIntent": ("tensorcast.api", "ServingBuildIntent"),
     "ServingPublicationBundle": ("tensorcast.api", "ServingPublicationBundle"),
     "ServingRuntimePolicy": ("tensorcast.api", "ServingRuntimePolicy"),
@@ -209,9 +222,18 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "release_retention_handle": ("tensorcast.retention", "release_retention_handle"),
     "artifact": ("tensorcast.api.store", "artifact"),
     "artifact_async": ("tensorcast.api.store", "artifact_async"),
+    "binding_realization_plan_to_proto": (
+        "tensorcast.api.store",
+        "binding_realization_plan_to_proto",
+    ),
     "deregister_artifact": ("tensorcast.api.store", "deregister_artifact"),
     "from_disk": ("tensorcast.api.store", "from_disk"),
+    "realize_into_binding": ("tensorcast.api.store", "realize_into_binding"),
     "put": ("tensorcast.api.store", "put"),
+    "normalize_binding_realization_plan": (
+        "tensorcast.api.store",
+        "normalize_binding_realization_plan",
+    ),
     "put_async": ("tensorcast.api.store", "put_async"),
     "persistence_operation": ("tensorcast.api.store", "persistence_operation"),
     "query_persistence_status": ("tensorcast.api.store", "query_persistence_status"),
@@ -219,11 +241,19 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "register_async": ("tensorcast.api.store", "register_async"),
     "register_view": ("tensorcast.api.store", "register_view"),
     "register_piece": ("tensorcast.api.store", "register_piece"),
-    "register_pure_transform_publication": (
+    "register_binding_finalize_publication_bridge": (
         "tensorcast.api.store",
-        "register_pure_transform_publication",
+        "register_binding_finalize_publication_bridge",
+    ),
+    "register_pure_transform_publication_bridge": (
+        "tensorcast.api.store",
+        "register_pure_transform_publication_bridge",
     ),
     "register_vram_region": ("tensorcast.api.store", "register_vram_region"),
+    "resolve_public_disk_source": (
+        "tensorcast.api.store",
+        "resolve_public_disk_source",
+    ),
     "list_artifact_layouts": ("tensorcast.api.store", "list_artifact_layouts"),
     "seal_assembly": ("tensorcast.api.store", "seal_assembly"),
     "start_canonical_representation_publish_attempt": (
@@ -253,6 +283,18 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "build_pure_transform_publication_bundle": (
         "tensorcast.api.store",
         "build_pure_transform_publication_bundle",
+    ),
+    "build_binding_finalize_admission_facts": (
+        "tensorcast.api.store",
+        "build_binding_finalize_admission_facts",
+    ),
+    "build_binding_finalize_publication_bundle": (
+        "tensorcast.api.store",
+        "build_binding_finalize_publication_bundle",
+    ),
+    "build_binding_finalize_publication_bundle_from_registered_artifact": (
+        "tensorcast.api.store",
+        "build_binding_finalize_publication_bundle_from_registered_artifact",
     ),
     "build_serving_publication_bundle": (
         "tensorcast.api.store",
@@ -286,9 +328,21 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api.store",
         "complete_canonical_representation_publish_attempt",
     ),
-    "complete_pure_transform_publication": (
+    "complete_binding_finalize_publication_bridge": (
         "tensorcast.api.store",
-        "complete_pure_transform_publication",
+        "complete_binding_finalize_publication_bridge",
+    ),
+    "complete_binding_finalize_publication_from_binding": (
+        "tensorcast.api.store",
+        "complete_binding_finalize_publication_from_binding",
+    ),
+    "complete_pure_transform_publication_bridge": (
+        "tensorcast.api.store",
+        "complete_pure_transform_publication_bridge",
+    ),
+    "complete_pure_transform_publication_from_binding": (
+        "tensorcast.api.store",
+        "complete_pure_transform_publication_from_binding",
     ),
     "complete_representation_publish_attempt": (
         "tensorcast.api.store",
@@ -329,6 +383,10 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "prepare_pure_transform_serving_registration": (
         "tensorcast.api.store",
         "prepare_pure_transform_serving_registration",
+    ),
+    "prepare_binding_finalize_serving_registration": (
+        "tensorcast.api.store",
+        "prepare_binding_finalize_serving_registration",
     ),
     "prepare_serving_registration": (
         "tensorcast.api.store",
@@ -420,7 +478,7 @@ if TYPE_CHECKING:
         artifact_async,
         build_serving_publication_bundle,
         build_serving_publication_bundle_from_registered_artifact,
-        complete_pure_transform_publication,
+        complete_pure_transform_publication_bridge,
         deregister_artifact,
         from_disk,
         persistence_operation,
@@ -430,7 +488,7 @@ if TYPE_CHECKING:
         query_persistence_status,
         register,
         register_async,
-        register_pure_transform_publication,
+        register_pure_transform_publication_bridge,
         register_view,
         register_vram_region,
         store,
@@ -455,6 +513,11 @@ __all__ = [
     "RegisteredPureTransformPublication",
     "ArtifactError",
     "ArtifactFuture",
+    "BindingValueRef",
+    "BindingRealizationEntry",
+    "BindingRealizationPlan",
+    "CanonicalIndex",
+    "CanonicalIndexEntry",
     "FallbackOptions",
     "RegisteredLease",
     "RegistrationResult",
@@ -463,6 +526,7 @@ __all__ = [
     "GetArtifactOptions",
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
+    "binding_realization_plan_to_proto",
     "CallContext",
     "CollectiveLoadGroup",
     "Operation",
@@ -479,10 +543,15 @@ __all__ = [
     "TargetSpec",
     "TransformSpec",
     "context",
+    "normalize_binding_realization_plan",
     "plan",
     "from_disk",
+    "realize_into_binding",
+    "resolve_public_disk_source",
     "Artifact",
     "ArtifactDescriptor",
+    "PublicDiskSourceHandle",
+    "ServingPublicationSubject",
     "store",
     "register",
     "register_async",

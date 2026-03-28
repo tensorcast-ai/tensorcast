@@ -66,6 +66,26 @@ void add_requirement_family(
   requirements->set_requirement_count(requirements->inline_requirements_size());
 }
 
+std::string representation_publish_manifest_payload(std::string_view builder_mode) {
+  return std::string("{") +
+      "\"schema_version\":1,"
+      "\"artifact_kind\":\"serving\","
+      "\"framework_name\":\"torch\","
+      "\"adapter_version\":\"adapter-v1\","
+      "\"serving_abi_version\":\"abi-v1\","
+      "\"representation_contract_hash\":\"bafkrepresentation\","
+      "\"serving_build_digest\":\"bafkbuilddigest\","
+      "\"serving_build_digest_version\":\"tensorcast.serving_build_digest.v1\","
+      "\"tensor_schema_hash\":\"bafktensorschema\","
+      "\"canonical_tensor_count\":1,"
+      "\"serving_manifest_ref\":\"tensor:__tensorcast_meta__.manifest_json\","
+      "\"builder_mode\":\"" +
+      std::string(builder_mode) +
+      "\","
+      "\"build_pipeline_version\":\"pipeline-v1\""
+      "}";
+}
+
 class StartSealLeaseReleaseClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
   std::string expected_lease_token{"lease-token-test"};
@@ -354,10 +374,17 @@ TEST_CASE("StartAssemblyAttempt accepts representation_publish_spec carrier", "[
       tensorcast::publication::v1::ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT);
   spec->set_source_version_key("models/demo/source/v1");
   spec->set_serving_version_key("models/demo/serving/v1");
+  spec->set_serving_manifest_bytes(representation_publish_manifest_payload("pure_transform"));
   spec->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
   spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
   spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
   spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+  spec->mutable_representation_publish_contract()->set_serving_build_digest_version(
+      "tensorcast.serving_build_digest.v1");
+  auto* admission = spec->mutable_admission_facts();
+  admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_RUNTIME_ONLY);
+  admission->set_realization_protocol(tensorcast::publication::v1::REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT);
+  admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY);
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
@@ -366,6 +393,93 @@ TEST_CASE("StartAssemblyAttempt accepts representation_publish_spec carrier", "[
   REQUIRE(st.ok());
   REQUIRE_FALSE(resp.attempt().attempt_id().empty());
   REQUIRE(gs_client->last_attempt.layout_id == "layout-1");
+}
+
+TEST_CASE(
+    "StartAssemblyAttempt rejects representation_publish_spec admission facts inconsistent with manifest builder mode",
+    "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  auto* spec = req.mutable_representation_publish_spec();
+  spec->set_layout_id("layout-1");
+  auto* requirement = spec->mutable_requirements()->add_inline_requirements();
+  requirement->set_slot_id("__canonical_full__");
+  requirement->mutable_target()->set_kind(tensorcast::publication::v1::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+  requirement->set_coverage_contract("canonical_full");
+  spec->set_serving_manifest_bytes(representation_publish_manifest_payload("binding_finalize"));
+  spec->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
+  spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
+  spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
+  spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+  auto* admission = spec->mutable_admission_facts();
+  admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_RUNTIME_ONLY);
+  admission->set_realization_protocol(tensorcast::publication::v1::REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT);
+  admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(st.error_message().find("binding_finalize") != std::string::npos);
+}
+
+TEST_CASE(
+    "StartAssemblyAttempt rejects serving_version_key activation when admission facts are not runtime ready",
+    "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  auto* spec = req.mutable_representation_publish_spec();
+  spec->set_layout_id("layout-1");
+  auto* requirement = spec->mutable_requirements()->add_inline_requirements();
+  requirement->set_slot_id("__canonical_full__");
+  requirement->mutable_target()->set_kind(tensorcast::publication::v1::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+  requirement->set_coverage_contract("canonical_full");
+  spec->set_serving_manifest_bytes(representation_publish_manifest_payload("binding_finalize"));
+  spec->set_serving_version_key("models/demo/serving/v1");
+  spec->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
+  spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
+  spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
+  spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+  auto* admission = spec->mutable_admission_facts();
+  admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING);
+  admission->set_realization_protocol(tensorcast::publication::v1::REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT);
+  admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(st.error_message().find("serving_version_key") != std::string::npos);
 }
 
 TEST_CASE(

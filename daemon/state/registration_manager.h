@@ -33,7 +33,7 @@ class RegistrationManager {
     int device_id{0};
     int owner_pid{0};
     bool lease_in_place{false};
-    bool stage_on_gpu{true};
+    bool stage_on_gpu{false};
     bool release_gpu_on_commit{true};
     std::string stable_dram_publish_lease_token;
     std::string index_key_hex;

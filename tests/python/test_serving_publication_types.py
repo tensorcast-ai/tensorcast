@@ -2,34 +2,47 @@
 
 from __future__ import annotations
 
-import tensorcast as tc
+import pytest
 import torch
 
+import tensorcast as tc
 from tensorcast.api._config import PlanType
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import (
     PureTransformPublicationBundle,
-    build_serving_publication_bundle_from_registered_artifact,
+    build_binding_finalize_admission_facts,
+    build_binding_finalize_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
     build_pure_transform_serving_args,
     build_pure_transform_transform_spec,
+    build_serving_publication_bundle_from_registered_artifact,
     compute_pure_transform_representation_contract_hash,
     compute_serving_tensor_schema_hash,
     count_canonical_serving_tensors,
-    prepare_serving_registration,
+    prepare_binding_finalize_serving_registration,
     prepare_pure_transform_serving_registration,
+    prepare_serving_registration,
 )
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry, ReplicaInfo
 from tensorcast.types import (
+    SERVING_BUILD_DIGEST_VERSION,
     SERVING_MANIFEST_TENSOR_NAME,
+    AssemblyCloseoutContract,
+    BindingValueRef,
     BuilderMode,
+    FinalizeClass,
     PublishedModelVersion,
+    RealizationProtocol,
     RepresentationPublishContract,
+    RepresentationPublishSpec,
+    ServingAdmissionFacts,
     ServingArtifactManifest,
     ServingBuildIntent,
+    ServingPublicationSubject,
     ServingRuntimePolicy,
+    ServingSupportLevel,
     build_serving_manifest_ref,
     coerce_serving_runtime_policy,
     parse_serving_manifest_ref,
@@ -81,12 +94,23 @@ def test_serving_build_digest_ignores_source_and_semantic_hash_inputs() -> None:
 def test_tensorcast_top_level_exports_cover_vllm_serving_contract() -> None:
     assert tc.prepare_serving_registration is prepare_serving_registration
     assert (
+        tc.prepare_binding_finalize_serving_registration
+        is prepare_binding_finalize_serving_registration
+    )
+    assert (
         tc.build_serving_publication_bundle_from_registered_artifact
         is build_serving_publication_bundle_from_registered_artifact
     )
+    assert (
+        tc.build_binding_finalize_publication_bundle_from_registered_artifact
+        is build_binding_finalize_publication_bundle_from_registered_artifact
+    )
     assert tc.PublishedModelVersion is PublishedModelVersion
+    assert tc.RealizationProtocol is RealizationProtocol
     assert tc.RepresentationPublishContract is RepresentationPublishContract
+    assert tc.ServingAdmissionFacts is ServingAdmissionFacts
     assert tc.ServingArtifactManifest is ServingArtifactManifest
+    assert tc.SERVING_BUILD_DIGEST_VERSION == SERVING_BUILD_DIGEST_VERSION
     assert tc.ServingRuntimePolicy is ServingRuntimePolicy
 
 
@@ -111,6 +135,7 @@ def test_serving_artifact_manifest_round_trips_via_json_payload() -> None:
     assert restored == manifest
     assert restored.serving_manifest_ref == build_serving_manifest_ref()
     assert restored.serving_build_digest == intent.compute_serving_build_digest()
+    assert restored.serving_build_digest_version == SERVING_BUILD_DIGEST_VERSION
 
 
 def test_representation_publish_contract_matches_serving_manifest() -> None:
@@ -128,7 +153,9 @@ def test_representation_publish_contract_matches_serving_manifest() -> None:
         canonical_tensor_count=9,
     )
     contract = RepresentationPublishContract(
-        serving_artifact_id="mi2:test:serving",
+        subject=ServingPublicationSubject(
+            serving_artifact_id="mi2:test:serving",
+        ),
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_contract_hash=manifest.representation_contract_hash,
         serving_build_digest=manifest.serving_build_digest,
@@ -146,6 +173,71 @@ def test_representation_publish_contract_matches_serving_manifest() -> None:
         runtime_policy.expected_representation_contract_hash
         == manifest.representation_contract_hash
     )
+
+
+def test_serving_admission_facts_require_fast_path_validation() -> None:
+    with pytest.raises(ValueError, match="fast_path_validated=True"):
+        ServingAdmissionFacts(
+            finalize_class=FinalizeClass.RUNTIME_ONLY,
+            realization_protocol=RealizationProtocol.SAME_BINDING_FAST_PATH,
+            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            fast_path_validated=False,
+        )
+
+
+def test_representation_publish_contract_accepts_binding_value_subject() -> None:
+    contract = RepresentationPublishContract(
+        subject=ServingPublicationSubject(
+            binding_value_ref=BindingValueRef(
+                binding_id="binding-1",
+                binding_layout_id="layout-1",
+                binding_value_id="value-1",
+                seal_generation=7,
+            )
+        ),
+        serving_manifest_ref=build_serving_manifest_ref(),
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+    )
+
+    assert contract.serving_artifact_id is None
+    assert contract.binding_value_ref is not None
+    restored = RepresentationPublishContract.from_publication_proto(
+        contract.to_publication_proto()
+    )
+    assert restored.binding_value_ref is not None
+    assert restored.binding_value_ref.binding_id == "binding-1"
+
+
+def test_binding_subject_contract_rejects_runtime_policy_until_promoted() -> None:
+    contract = RepresentationPublishContract(
+        subject=ServingPublicationSubject(
+            binding_value_ref=BindingValueRef(
+                binding_id="binding-2",
+                binding_layout_id="layout-2",
+                binding_value_id="value-2",
+                seal_generation=3,
+            )
+        ),
+        serving_manifest_ref=build_serving_manifest_ref(),
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+    )
+
+    with pytest.raises(ValueError, match="binding publication subjects"):
+        contract.to_runtime_policy()
+
+
+def test_build_binding_finalize_admission_facts_defaults_to_scratch_then_commit() -> (
+    None
+):
+    facts = build_binding_finalize_admission_facts(
+        support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY
+    )
+
+    assert facts.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
+    assert facts.realization_protocol == RealizationProtocol.SCRATCH_THEN_COMMIT
+    assert facts.support_level == ServingSupportLevel.BUILDER_PUBLICATION_READY
 
 
 def test_compute_serving_tensor_schema_hash_excludes_reserved_manifest_tensor() -> None:
@@ -302,6 +394,10 @@ def test_build_pure_transform_publication_bundle_from_registered_artifact() -> N
     assert (
         ServingArtifactManifest.from_bytes(bundle.serving_manifest_bytes)
         == bundle.serving_manifest
+    )
+    assert (
+        bundle.representation_publish_contract.serving_build_digest_version
+        == SERVING_BUILD_DIGEST_VERSION
     )
 
 
@@ -521,6 +617,69 @@ def test_prepare_serving_registration_supports_binding_finalize() -> None:
     assert prepared.representation_contract_hash == "bafkbindingrepr"
 
 
+def test_prepare_binding_finalize_serving_registration_requires_binding_finalize() -> (
+    None
+):
+    intent = ServingBuildIntent(
+        builder_mode=BuilderMode.PURE_TRANSFORM,
+        framework_name="torch",
+        adapter_version="adapter-v4-wrong",
+        serving_abi_version="abi-v4-wrong",
+        build_pipeline_version="pipeline-v4-wrong",
+        source_artifact_ref="mi2:test:binding-source",
+    )
+
+    with pytest.raises(Exception, match="builder_mode=BINDING_FINALIZE"):
+        prepare_binding_finalize_serving_registration(
+            build_intent=intent,
+            tensors={"weights": torch.ones(8, dtype=torch.float16)},
+            representation_contract_hash="bafkbindingrepr",
+        )
+
+
+def test_prepare_binding_finalize_serving_registration_supports_binding_finalize() -> (
+    None
+):
+    intent = ServingBuildIntent(
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-v4-binding-helper",
+        serving_abi_version="abi-v4-binding-helper",
+        build_pipeline_version="pipeline-v4-binding-helper",
+        source_artifact_ref="mi2:test:binding-source",
+    )
+
+    prepared = prepare_binding_finalize_serving_registration(
+        build_intent=intent,
+        tensors={"weights": torch.ones(8, dtype=torch.float16)},
+        representation_contract_hash="bafkbindingrepr",
+    )
+
+    assert prepared.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+
+
+def test_prepare_serving_registration_keeps_manifest_on_tensor_device() -> None:
+    device = torch.device("cuda:0") if torch.cuda.is_available() else \
+        torch.device("cpu")
+    intent = ServingBuildIntent(
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-v4-device",
+        serving_abi_version="abi-v4-device",
+        build_pipeline_version="pipeline-v4-device",
+        source_artifact_ref="mi2:test:binding-source",
+    )
+
+    prepared = prepare_serving_registration(
+        build_intent=intent,
+        tensors={"weights": torch.ones(8, dtype=torch.float16, device=device)},
+        representation_contract_hash="bafkbindingrepr",
+    )
+
+    assert prepared.tensors["weights"].device == device
+    assert prepared.tensors["__tensorcast_meta__.manifest_json"].device == device
+
+
 def test_build_serving_publication_bundle_from_registered_artifact_supports_binding_finalize() -> (
     None
 ):
@@ -577,9 +736,132 @@ def test_build_serving_publication_bundle_from_registered_artifact_supports_bind
     assert bundle.serving_artifact_id == "mi2:test:serving-binding-finalize"
     assert bundle.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
     assert bundle.serving_manifest.canonical_tensor_count == 1
-    assert bundle.representation_publish_contract.representation_contract_hash == \
-        "bafkbindingrepr"
+    assert (
+        bundle.representation_publish_contract.representation_contract_hash
+        == "bafkbindingrepr"
+    )
     assert bundle.closeout_contract.kind == "representation_publish"
+
+
+def test_build_binding_finalize_publication_bundle_from_registered_artifact_uses_admission_facts() -> (
+    None
+):
+    canonical_index = _canonical_index(
+        CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ),
+        CanonicalIndexEntry(
+            name="__tensorcast_meta__.manifest_json",
+            dtype=torch.uint8,
+            shape=(64,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=16,
+            size_bytes=64,
+        ),
+        total_size_bytes=80,
+    )
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:serving-binding-finalize-helper",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:serving-binding-finalize-helper",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=80,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    intent = ServingBuildIntent(
+        representation_contract_hash="bafkbindingrepr",
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-v4-bundle-helper",
+        serving_abi_version="abi-v4-bundle-helper",
+        build_pipeline_version="pipeline-v4-bundle-helper",
+        source_artifact_ref="mi2:test:binding-source",
+    )
+    admission_facts = build_binding_finalize_admission_facts(
+        support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+        realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+        topology_admission_digest="bafktopology",
+    )
+
+    bundle = build_binding_finalize_publication_bundle_from_registered_artifact(
+        build_intent=intent,
+        serving_artifact=registered_artifact,
+        source_version_key="models/demo/source/v4",
+        serving_version_key="models/demo/serving/v4",
+        admission_facts=admission_facts,
+    )
+
+    assert bundle.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+    assert bundle.admission_facts == admission_facts
+
+
+def test_build_binding_finalize_publication_bundle_rejects_serving_key_without_runtime_ready() -> (
+    None
+):
+    canonical_index = _canonical_index(
+        CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ),
+        CanonicalIndexEntry(
+            name="__tensorcast_meta__.manifest_json",
+            dtype=torch.uint8,
+            shape=(64,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=16,
+            size_bytes=64,
+        ),
+        total_size_bytes=80,
+    )
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:serving-binding-finalize-helper",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:serving-binding-finalize-helper",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=80,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    intent = ServingBuildIntent(
+        representation_contract_hash="bafkbindingrepr",
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-v4-bundle-helper",
+        serving_abi_version="abi-v4-bundle-helper",
+        build_pipeline_version="pipeline-v4-bundle-helper",
+        source_artifact_ref="mi2:test:binding-source",
+    )
+
+    with pytest.raises(ValueError, match="serving_version_key activation"):
+        build_binding_finalize_publication_bundle_from_registered_artifact(
+            build_intent=intent,
+            serving_artifact=registered_artifact,
+            serving_version_key="models/demo/serving/v4",
+            admission_facts=build_binding_finalize_admission_facts(
+                support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+                realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+            ),
+        )
 
 
 def test_build_pure_transform_serving_args_encodes_repo_owned_keys() -> None:
@@ -685,7 +967,9 @@ def test_coerce_serving_runtime_policy_accepts_manifest_lineage_models() -> None
 
 def test_coerce_serving_runtime_policy_accepts_contract_and_version() -> None:
     contract = RepresentationPublishContract(
-        serving_artifact_id="mi2:test:serving",
+        subject=ServingPublicationSubject(
+            serving_artifact_id="mi2:test:serving",
+        ),
         serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
@@ -717,6 +1001,97 @@ def test_coerce_serving_runtime_policy_accepts_contract_and_version() -> None:
         expected_serving_build_digest="bafkbuilddigest",
     )
     assert version_policy == contract_policy
+
+
+def test_coerce_serving_runtime_policy_accepts_runtime_ready_representation_publish_spec() -> (
+    None
+):
+    manifest = ServingArtifactManifest(
+        framework_name="torch",
+        adapter_version="adapter-v6-runtime",
+        serving_abi_version="abi-v6-runtime",
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+        tensor_schema_hash="bafktensorschema",
+        canonical_tensor_count=1,
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        build_pipeline_version="pipeline-v6-runtime",
+    )
+    contract = RepresentationPublishContract(
+        subject=ServingPublicationSubject(
+            serving_artifact_id="mi2:test:serving",
+        ),
+        serving_manifest_ref=build_serving_manifest_ref(),
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+        serving_build_digest_version=SERVING_BUILD_DIGEST_VERSION,
+    )
+    spec = RepresentationPublishSpec(
+        serving_artifact_id="mi2:test:serving",
+        serving_manifest_ref=build_serving_manifest_ref(),
+        serving_manifest=manifest,
+        serving_manifest_bytes=manifest.to_bytes(),
+        representation_publish_contract=contract,
+        closeout_contract=AssemblyCloseoutContract(
+            kind="representation_publish",
+            representation_publish_contract=contract,
+        ),
+        admission_facts=build_binding_finalize_admission_facts(
+            support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+        ),
+    )
+
+    policy = coerce_serving_runtime_policy(spec)
+
+    assert policy == ServingRuntimePolicy(
+        require_manifest=True,
+        serving_manifest_ref=build_serving_manifest_ref(),
+        expected_representation_contract_hash="bafkrepresentation",
+        expected_serving_build_digest="bafkbuilddigest",
+    )
+
+
+def test_coerce_serving_runtime_policy_rejects_builder_only_representation_publish_spec() -> (
+    None
+):
+    manifest = ServingArtifactManifest(
+        framework_name="torch",
+        adapter_version="adapter-v6-runtime-blocked",
+        serving_abi_version="abi-v6-runtime-blocked",
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+        tensor_schema_hash="bafktensorschema",
+        canonical_tensor_count=1,
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        build_pipeline_version="pipeline-v6-runtime-blocked",
+    )
+    contract = RepresentationPublishContract(
+        subject=ServingPublicationSubject(
+            serving_artifact_id="mi2:test:serving",
+        ),
+        serving_manifest_ref=build_serving_manifest_ref(),
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+    )
+    spec = RepresentationPublishSpec(
+        serving_artifact_id="mi2:test:serving",
+        serving_manifest_ref=build_serving_manifest_ref(),
+        serving_manifest=manifest,
+        serving_manifest_bytes=manifest.to_bytes(),
+        representation_publish_contract=contract,
+        closeout_contract=AssemblyCloseoutContract(
+            kind="representation_publish",
+            representation_publish_contract=contract,
+        ),
+        admission_facts=build_binding_finalize_admission_facts(
+            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="RUNTIME_BIND_SWAP_READY"):
+        coerce_serving_runtime_policy(spec)
 
 
 def test_build_pure_transform_transform_spec_wraps_transform_args() -> None:
@@ -766,6 +1141,12 @@ def test_build_pure_transform_transform_spec_can_omit_representation_hash() -> N
 
 
 def test_build_pure_transform_publication_spec_wraps_typed_inputs() -> None:
+    admission_facts = ServingAdmissionFacts(
+        finalize_class=FinalizeClass.RUNTIME_ONLY,
+        realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+        support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+        topology_admission_digest="bafktopology",
+    )
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -781,6 +1162,7 @@ def test_build_pure_transform_publication_spec_wraps_typed_inputs() -> None:
         serving_version_key="models/demo/serving/v7",
         serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
         structural_view_ids=("view-a",),
+        admission_facts=admission_facts,
     )
 
     assert publication_spec.build_intent.framework_name == "torch"
@@ -789,3 +1171,143 @@ def test_build_pure_transform_publication_spec_wraps_typed_inputs() -> None:
     assert publication_spec.serving_version_key == "models/demo/serving/v7"
     assert publication_spec.serving_manifest_ref == "tensor:__alt_manifest__.json"
     assert publication_spec.structural_view_ids == ("view-a",)
+    assert publication_spec.admission_facts == admission_facts
+
+
+def test_representation_publish_spec_round_trips_admission_facts_and_digest_version() -> (
+    None
+):
+    canonical_index = _canonical_index(
+        CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ),
+        CanonicalIndexEntry(
+            name="__tensorcast_meta__.manifest_json",
+            dtype=torch.uint8,
+            shape=(64,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=16,
+            size_bytes=64,
+        ),
+        total_size_bytes=80,
+    )
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:spec-roundtrip",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:spec-roundtrip",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=80,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    admission_facts = ServingAdmissionFacts(
+        finalize_class=FinalizeClass.RUNTIME_ONLY,
+        realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+        support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+        topology_admission_digest="bafktopology",
+    )
+    bundle = build_pure_transform_publication_bundle_from_registered_artifact(
+        build_intent=ServingBuildIntent(
+            representation_contract_hash="bafkrepresentation",
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v8",
+            serving_abi_version="abi-v8",
+            build_pipeline_version="pipeline-v8",
+            source_artifact_ref="mi2:test:source",
+        ),
+        serving_artifact=registered_artifact,
+        serving_version_key="models/demo/serving/v8",
+        admission_facts=admission_facts,
+    )
+
+    restored = RepresentationPublishSpec.from_proto(bundle.to_proto())
+
+    assert restored.admission_facts == admission_facts
+    assert (
+        restored.representation_publish_contract.serving_build_digest_version
+        == SERVING_BUILD_DIGEST_VERSION
+    )
+
+
+def test_topology_admission_digest_does_not_change_representation_or_build_identity() -> (
+    None
+):
+    canonical_index = _canonical_index(
+        CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ),
+        CanonicalIndexEntry(
+            name="__tensorcast_meta__.manifest_json",
+            dtype=torch.uint8,
+            shape=(64,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=16,
+            size_bytes=64,
+        ),
+        total_size_bytes=80,
+    )
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:topology-serving",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:topology-serving",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=80,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    intent = ServingBuildIntent(
+        representation_contract_hash="bafkbindingrepr",
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-vtopology",
+        serving_abi_version="abi-vtopology",
+        build_pipeline_version="pipeline-vtopology",
+    )
+
+    bundle_a = build_binding_finalize_publication_bundle_from_registered_artifact(
+        build_intent=intent,
+        serving_artifact=registered_artifact,
+        admission_facts=build_binding_finalize_admission_facts(
+            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            topology_admission_digest="bafktopology-a",
+        ),
+    )
+    bundle_b = build_binding_finalize_publication_bundle_from_registered_artifact(
+        build_intent=intent,
+        serving_artifact=registered_artifact,
+        admission_facts=build_binding_finalize_admission_facts(
+            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            topology_admission_digest="bafktopology-b",
+        ),
+    )
+
+    assert (
+        bundle_a.representation_publish_contract.representation_contract_hash
+        == bundle_b.representation_publish_contract.representation_contract_hash
+    )
+    assert (
+        bundle_a.representation_publish_contract.serving_build_digest
+        == bundle_b.representation_publish_contract.serving_build_digest
+    )
+    assert bundle_a.admission_facts != bundle_b.admission_facts

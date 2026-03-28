@@ -11,9 +11,12 @@
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "daemon/service/controllers/serving_artifact_manifest_utils.h"
 #include "google/protobuf/util/time_util.h"
 
 namespace tensorcast::daemon::assembly_coordination {
+namespace pubv1 = tensorcast::publication::v1;
+
 namespace {
 
 std::vector<v2::AssemblyRequirement> collect_requirements(const v2::AssemblyRequirementSetRef& requirements) {
@@ -65,13 +68,45 @@ absl::StatusOr<std::string_view> expected_coverage_contract_for_binding_contribu
   }
 }
 
+pubv1::BindingValueRef canonicalize_binding_value_ref(const pubv1::BindingValueRef& ref) {
+  pubv1::BindingValueRef canonical;
+  canonical.set_binding_id(ref.binding_id());
+  canonical.set_binding_layout_id(ref.binding_layout_id());
+  canonical.set_binding_value_id(ref.binding_value_id());
+  canonical.set_seal_generation(ref.seal_generation());
+  return canonical;
+}
+
+pubv1::ServingPublicationSubject canonicalize_serving_publication_subject(
+    const v2::RepresentationPublishContract& contract) {
+  pubv1::ServingPublicationSubject canonical;
+  if (contract.has_subject()) {
+    const auto& subject = contract.subject();
+    switch (subject.ref_case()) {
+      case pubv1::ServingPublicationSubject::kServingArtifactId:
+        canonical.set_serving_artifact_id(subject.serving_artifact_id());
+        break;
+      case pubv1::ServingPublicationSubject::kBindingValue:
+        *canonical.mutable_binding_value() = canonicalize_binding_value_ref(subject.binding_value());
+        break;
+      case pubv1::ServingPublicationSubject::REF_NOT_SET:
+        break;
+    }
+  }
+  return canonical;
+}
+
 v2::RepresentationPublishContract canonicalize_representation_publish_contract(
     const v2::RepresentationPublishContract& contract) {
   v2::RepresentationPublishContract canonical;
-  canonical.set_serving_artifact_id(contract.serving_artifact_id());
+  const auto subject = canonicalize_serving_publication_subject(contract);
+  if (subject.ref_case() != pubv1::ServingPublicationSubject::REF_NOT_SET) {
+    *canonical.mutable_subject() = subject;
+  }
   canonical.set_serving_manifest_ref(contract.serving_manifest_ref());
   canonical.set_representation_contract_hash(contract.representation_contract_hash());
   canonical.set_serving_build_digest(contract.serving_build_digest());
+  canonical.set_serving_build_digest_version(contract.serving_build_digest_version());
   return canonical;
 }
 
@@ -176,7 +211,6 @@ v2::AssemblyCloseoutContract canonicalize_closeout_contract(const v2::AssemblyCl
   if (kind == v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH && contract.has_representation_publish_contract()) {
     const auto representation_publish =
         canonicalize_representation_publish_contract(contract.representation_publish_contract());
-    canonical.set_serving_artifact_id(representation_publish.serving_artifact_id());
     canonical.set_serving_manifest_ref(representation_publish.serving_manifest_ref());
     *canonical.mutable_representation_publish_contract() = representation_publish;
   } else {
@@ -198,7 +232,6 @@ std::string compute_closeout_contract_digest(const v2::AssemblyCloseoutContract&
   if (kind == v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH && contract.has_representation_publish_contract()) {
     const auto representation_publish =
         canonicalize_representation_publish_contract(contract.representation_publish_contract());
-    canonical.set_serving_artifact_id(representation_publish.serving_artifact_id());
     canonical.set_serving_manifest_ref(representation_publish.serving_manifest_ref());
     *canonical.mutable_representation_publish_contract() = representation_publish;
   } else {
@@ -230,19 +263,41 @@ absl::Status validate_dependency_ready_closeout_contract(const v2::AssemblyClose
         return absl::InvalidArgumentError(
             "representation_publish closeout contracts require representation_publish_contract");
       }
-      if (!contract.serving_artifact_id().empty() &&
-          contract.serving_artifact_id() != contract.representation_publish_contract().serving_artifact_id()) {
-        return absl::InvalidArgumentError(
-            "serving_artifact_id must match representation_publish_contract.serving_artifact_id");
-      }
       if (!contract.serving_manifest_ref().empty() &&
           contract.serving_manifest_ref() != contract.representation_publish_contract().serving_manifest_ref()) {
         return absl::InvalidArgumentError(
             "serving_manifest_ref must match representation_publish_contract.serving_manifest_ref");
       }
-      if (canonical.serving_artifact_id().empty() || canonical.serving_manifest_ref().empty()) {
+      if (!canonical.representation_publish_contract().has_subject()) {
         return absl::InvalidArgumentError(
-            "representation_publish closeout contracts require serving_artifact_id and serving_manifest_ref");
+            "representation_publish closeout contracts require a serving publication subject");
+      }
+      if (!contract.serving_artifact_id().empty()) {
+        return absl::InvalidArgumentError(
+            "representation_publish closeout contracts must not set serving_artifact_id; "
+            "use representation_publish_contract.subject");
+      }
+      const auto& subject = canonical.representation_publish_contract().subject();
+      switch (subject.ref_case()) {
+        case pubv1::ServingPublicationSubject::kServingArtifactId:
+          if (subject.serving_artifact_id().empty()) {
+            return absl::InvalidArgumentError(
+                "artifact-backed representation_publish subjects require serving_artifact_id");
+          }
+          break;
+        case pubv1::ServingPublicationSubject::kBindingValue:
+          if (subject.binding_value().binding_id().empty() || subject.binding_value().binding_layout_id().empty() ||
+              subject.binding_value().binding_value_id().empty() || subject.binding_value().seal_generation() == 0) {
+            return absl::InvalidArgumentError(
+                "binding-value representation_publish subjects require full binding identity");
+          }
+          break;
+        case pubv1::ServingPublicationSubject::REF_NOT_SET:
+          return absl::InvalidArgumentError(
+              "representation_publish closeout contracts require a serving publication subject");
+      }
+      if (canonical.serving_manifest_ref().empty()) {
+        return absl::InvalidArgumentError("representation_publish closeout contracts require serving_manifest_ref");
       }
       if (canonical.representation_publish_contract().representation_contract_hash().empty()) {
         return absl::InvalidArgumentError(
@@ -250,6 +305,12 @@ absl::Status validate_dependency_ready_closeout_contract(const v2::AssemblyClose
       }
       if (canonical.representation_publish_contract().serving_build_digest().empty()) {
         return absl::InvalidArgumentError("representation_publish closeout contracts require serving_build_digest");
+      }
+      if (!canonical.representation_publish_contract().serving_build_digest_version().empty() &&
+          canonical.representation_publish_contract().serving_build_digest_version() !=
+              serving_artifact_manifest::kPhase1ServingBuildDigestVersion) {
+        return absl::InvalidArgumentError(
+            "representation_publish closeout contracts require a supported serving_build_digest_version");
       }
       return absl::OkStatus();
     case v2::ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH:

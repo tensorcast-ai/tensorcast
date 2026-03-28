@@ -137,6 +137,10 @@ class LipManager {
       std::vector<LeaseSegMeta>&& segments,
       std::vector<RegisterStorageMeta>&& storages);
 
+  // Export an already committed lease as a routable replica without creating a
+  // second lease entry. Used by full-artifact binding-subject publication.
+  [[nodiscard]] absl::StatusOr<RoutableLeaseResult> publish_committed_lease_routable(std::string_view registration_id);
+
   // Attach a Global Store replica_id to a committed LIP lease for best-effort cleanup.
   void attach_replica_id(const std::string& registration_id, std::string replica_id);
 

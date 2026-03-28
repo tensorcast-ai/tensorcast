@@ -215,7 +215,10 @@ json to_json(const RepresentationTensorBinding& binding) {
   }
   out["sources"] = std::move(sources);
   if (binding.fill_rule.has_value()) {
-    out["fill_rule"] = json{{"constant_value", binding.fill_rule->constant_value}};
+    out["fill_rule"] = json{
+        {"constant_value", binding.fill_rule->constant_value},
+        {"destination_range", to_json(binding.fill_rule->destination_range)},
+    };
   } else {
     out["fill_rule"] = nullptr;
   }
@@ -276,6 +279,11 @@ std::optional<TensorAxisRange> single_axis_range(const TensorCoordinateSpec& spe
   }
   return spec.axes.front();
 }
+
+struct ByteSpan {
+  uint64_t offset{0};
+  uint64_t length{0};
+};
 
 absl::Status validate_axis_range(
     const TensorAxisRange& axis,
@@ -363,36 +371,102 @@ absl::StatusOr<uint64_t> product_dims(const std::vector<int64_t>& dims, size_t b
   return total;
 }
 
-absl::StatusOr<uint64_t> slice_size_bytes(const RepresentationTensorSpec& spec, const TensorCoordinateSpec& range) {
-  if (range.selects_scalar) {
-    return spec.element_size == 0 ? spec.logical_length : spec.element_size;
+absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
+    const RepresentationTensorSpec& spec,
+    const TensorCoordinateSpec& range) {
+  if (spec.element_size == 0 && spec.logical_length == 0) {
+    return absl::InvalidArgumentError("tensor requires non-zero element_size or logical_length");
+  }
+  const uint64_t element_bytes = spec.element_size == 0 ? spec.logical_length : spec.element_size;
+  const uint64_t base_offset = spec.logical_offset;
+  if (range.selects_scalar || coordinate_selects_single_element(range, spec)) {
+    uint64_t element_offset = 0;
+    for (const auto& axis : range.axes) {
+      element_offset +=
+          static_cast<uint64_t>(axis.start) * static_cast<uint64_t>(spec.stride[static_cast<size_t>(axis.dim)]);
+    }
+    return std::vector<ByteSpan>{{.offset = base_offset + element_offset * element_bytes, .length = element_bytes}};
   }
   if (spec.shape.empty() || range.axes.empty()) {
-    return spec.logical_length;
+    return std::vector<ByteSpan>{{.offset = base_offset, .length = spec.logical_length}};
   }
   if (!is_row_major_contiguous(spec)) {
-    return absl::InvalidArgumentError("slice_size_bytes requires row-major contiguous tensor");
+    return absl::InvalidArgumentError("multi-axis coordinates require row-major contiguous tensors");
   }
-  if (range.axes.size() != 1) {
-    return absl::InvalidArgumentError("slice_size_bytes only supports a single axis range");
+  std::vector<int64_t> starts(spec.shape.size(), 0);
+  std::vector<int64_t> ends = spec.shape;
+  for (const auto& axis : range.axes) {
+    starts[static_cast<size_t>(axis.dim)] = axis.start;
+    ends[static_cast<size_t>(axis.dim)] = axis.end;
   }
-  const auto& axis = range.axes.front();
-  auto status = validate_axis_range(axis, spec, "slice");
+  std::vector<ByteSpan> spans;
+  auto emit = [&](auto&& self, size_t dim, uint64_t element_offset) -> absl::Status {
+    if (dim == spec.shape.size()) {
+      spans.push_back(ByteSpan{.offset = base_offset + element_offset * element_bytes, .length = element_bytes});
+      return absl::OkStatus();
+    }
+    bool later_full = true;
+    for (size_t next = dim + 1; next < spec.shape.size(); ++next) {
+      if (starts[next] != 0 || ends[next] != spec.shape[next]) {
+        later_full = false;
+        break;
+      }
+    }
+    if (later_full) {
+      auto tail_or = product_dims(spec.shape, dim + 1);
+      if (!tail_or.ok()) {
+        return tail_or.status();
+      }
+      const uint64_t elem_start =
+          element_offset + static_cast<uint64_t>(starts[dim]) * static_cast<uint64_t>(spec.stride[dim]);
+      const uint64_t span_elems = static_cast<uint64_t>(ends[dim] - starts[dim]) * (*tail_or);
+      spans.push_back(
+          ByteSpan{.offset = base_offset + elem_start * element_bytes, .length = span_elems * element_bytes});
+      return absl::OkStatus();
+    }
+    for (int64_t index = starts[dim]; index < ends[dim]; ++index) {
+      auto status =
+          self(self, dim + 1, element_offset + static_cast<uint64_t>(index) * static_cast<uint64_t>(spec.stride[dim]));
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    return absl::OkStatus();
+  };
+  auto status = emit(emit, 0, 0);
   if (!status.ok()) {
     return status;
   }
-  const uint64_t axis_extent = static_cast<uint64_t>(axis.end - axis.start);
-  if (axis.dim == 0) {
-    auto tail_or = product_dims(spec.shape, 1);
-    if (!tail_or.ok()) {
-      return tail_or.status();
+  if (spans.empty()) {
+    return absl::InvalidArgumentError("coordinate selection produced no byte spans");
+  }
+  std::vector<ByteSpan> merged;
+  merged.reserve(spans.size());
+  for (const auto& span : spans) {
+    if (merged.empty()) {
+      merged.push_back(span);
+      continue;
     }
-    return axis_extent * (*tail_or) * spec.element_size;
+    auto& previous = merged.back();
+    if (previous.offset + previous.length == span.offset) {
+      previous.length += span.length;
+      continue;
+    }
+    merged.push_back(span);
   }
-  if (axis.dim == 1 && spec.shape.size() == 2) {
-    return axis_extent * static_cast<uint64_t>(spec.shape.front()) * spec.element_size;
+  return merged;
+}
+
+absl::StatusOr<uint64_t> slice_size_bytes(const RepresentationTensorSpec& spec, const TensorCoordinateSpec& range) {
+  auto spans_or = build_coordinate_byte_spans(spec, range);
+  if (!spans_or.ok()) {
+    return spans_or.status();
   }
-  return absl::InvalidArgumentError("slice_size_bytes only supports dim0 or 2D dim1 slices");
+  uint64_t total = 0;
+  for (const auto& span : *spans_or) {
+    total += span.length;
+  }
+  return total;
 }
 
 bool coordinate_less(const TensorCoordinateSpec& lhs, const TensorCoordinateSpec& rhs) {
@@ -491,6 +565,11 @@ absl::Status validate_binding(const RepresentationTensorBinding& binding) {
       if (!binding.sources.empty()) {
         return absl::InvalidArgumentError(absl::StrCat("binding ", binding.dst_name, " const fill forbids sources"));
       }
+      if (auto dst_status =
+              validate_coordinate_spec(binding.fill_rule->destination_range, binding.dst_spec, "destination");
+          !dst_status.ok()) {
+        return dst_status;
+      }
       break;
     case BindingOpKind::kExactCopy:
     case BindingOpKind::kSliceCopy:
@@ -513,27 +592,23 @@ absl::Status validate_binding(const RepresentationTensorBinding& binding) {
   }
 
   std::vector<std::pair<uint64_t, uint64_t>> dst_spans;
-  dst_spans.reserve(binding.sources.size());
   for (const auto& fragment : binding.sources) {
-    const auto slice_bytes_or = slice_size_bytes(binding.dst_spec, fragment.destination_range);
-    if (!slice_bytes_or.ok()) {
-      return slice_bytes_or.status();
+    auto spans_or = build_coordinate_byte_spans(binding.dst_spec, fragment.destination_range);
+    if (!spans_or.ok()) {
+      return spans_or.status();
     }
-    const uint64_t span_bytes = *slice_bytes_or;
-    uint64_t span_begin = binding.dst_spec.logical_offset;
-    if (const auto axis = single_axis_range(fragment.destination_range);
-        axis.has_value() && binding.dst_spec.element_size > 0 && is_row_major_contiguous(binding.dst_spec)) {
-      if (axis->dim == 0) {
-        auto tail_or = product_dims(binding.dst_spec.shape, 1);
-        if (!tail_or.ok()) {
-          return tail_or.status();
-        }
-        span_begin += static_cast<uint64_t>(axis->start) * (*tail_or) * binding.dst_spec.element_size;
-      } else if (axis->dim == 1 && binding.dst_spec.shape.size() == 2) {
-        span_begin += static_cast<uint64_t>(axis->start) * binding.dst_spec.element_size;
-      }
+    for (const auto& span : *spans_or) {
+      dst_spans.push_back({span.offset, span.offset + span.length});
     }
-    dst_spans.push_back({span_begin, span_begin + span_bytes});
+  }
+  if (binding.fill_rule.has_value()) {
+    auto spans_or = build_coordinate_byte_spans(binding.dst_spec, binding.fill_rule->destination_range);
+    if (!spans_or.ok()) {
+      return spans_or.status();
+    }
+    for (const auto& span : *spans_or) {
+      dst_spans.push_back({span.offset, span.offset + span.length});
+    }
   }
   std::sort(dst_spans.begin(), dst_spans.end());
   for (size_t index = 1; index < dst_spans.size(); ++index) {
@@ -1019,7 +1094,13 @@ absl::StatusOr<RepresentationWorkPlan> build_representation_work_plan(const Repr
       case BindingOpKind::kConstFill:
         item.kind = RepresentationWorkItemKind::kConstFill;
         item.fill_rule = binding.fill_rule;
-        item.committed_bytes = binding.dst_spec.logical_length;
+        {
+          auto committed_bytes_or = slice_size_bytes(binding.dst_spec, binding.fill_rule->destination_range);
+          if (!committed_bytes_or.ok()) {
+            return committed_bytes_or.status();
+          }
+          item.committed_bytes = *committed_bytes_or;
+        }
         plan.committed_bytes += item.committed_bytes;
         plan.items.push_back(std::move(item));
         continue;

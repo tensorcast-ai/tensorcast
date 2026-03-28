@@ -607,6 +607,9 @@ message PutLayoutSpecRequest {
   tensorcast.layout.v1.LayoutSpec layout = 1;
   // Optional audit JSON form (not hashed).
   string layout_json = 2;
+  // Optional canonical index bytes used to seed layout validation when Global
+  // Store has not yet persisted the index for this multihash.
+  bytes canonical_index_data = 3;
 }
 
 message PutLayoutSpecResponse {

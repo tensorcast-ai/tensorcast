@@ -40,6 +40,11 @@ class DiskArtifactService {
       const v2::ImportArtifactFromPathRequest& req,
       v2::ImportArtifactFromPathResponse& resp);
 
+  grpc::Status resolve_public_disk_source(
+      RpcContext& rctx,
+      const v2::ResolvePublicDiskSourceRequest& req,
+      v2::ResolvePublicDiskSourceResponse& resp);
+
   grpc::Status import_artifact_from_path_stream(
       RpcContext& rctx,
       const v2::ImportArtifactFromPathRequest& req,

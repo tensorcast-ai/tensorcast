@@ -113,14 +113,12 @@ DeviceKey make_gpu_target(int ordinal) {
   };
 }
 
-TEST_CASE("MaterializeOrchestrator reselects source after stale-local route", "[store][materialize][reselection]") {
+TEST_CASE("MaterializeOrchestrator accepts local route returned by Global Store", "[store][materialize][reselection]") {
   auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
   gs_client->connected = true;
   gs_client->allow_replica_transport = true;
   gs_client->push_scripted_transport_session(make_transport_session(
       "transport-local", "node-local", "10.1.1.1", 50001, common::memory::MemoryLocation::GPU, 0));
-  gs_client->push_scripted_transport_session(make_transport_session(
-      "transport-remote", "node-remote", "10.1.1.2", 50002, common::memory::MemoryLocation::GPU, 0));
 
   FakeMaterializationBackend backend;
   MaterializeHints hints;
@@ -142,12 +140,11 @@ TEST_CASE("MaterializeOrchestrator reselects source after stale-local route", "[
   REQUIRE(result.ok());
   REQUIRE(backend.register_calls == 1);
   REQUIRE(backend.p2p_attempts.size() == 1);
-  CHECK(backend.p2p_attempts.front().source_ip == "10.1.1.2");
-  CHECK(backend.p2p_attempts.front().source_port == 50002);
-  REQUIRE(gs_client->replica_requests.size() == 2);
-  REQUIRE(gs_client->completed_transport_outcomes.size() == 2);
-  CHECK(gs_client->completed_transport_outcomes[0] == TransportCompletionOutcome::kFailed);
-  CHECK(gs_client->completed_transport_outcomes[1] == TransportCompletionOutcome::kSuccess);
+  CHECK(backend.p2p_attempts.front().source_ip == "10.1.1.1");
+  CHECK(backend.p2p_attempts.front().source_port == 50001);
+  REQUIRE(gs_client->replica_requests.size() == 1);
+  REQUIRE(gs_client->completed_transport_outcomes.size() == 1);
+  CHECK(gs_client->completed_transport_outcomes[0] == TransportCompletionOutcome::kSuccess);
 }
 
 TEST_CASE("MaterializeOrchestrator reselects source after retryable P2P failure", "[store][materialize][reselection]") {
@@ -207,6 +204,13 @@ TEST_CASE(
       "transport-remote", "node-remote", "10.3.3.2", 50022, common::memory::MemoryLocation::GPU, 0));
 
   FakeMaterializationBackend backend;
+  backend.p2p_scripted_statuses = {
+      absl::UnavailableError("retryable local source 1"),
+      absl::UnavailableError("retryable local source 2"),
+      absl::UnavailableError("retryable local source 3"),
+      absl::UnavailableError("retryable local source 4"),
+      absl::OkStatus(),
+  };
   MaterializeHints hints;
   hints.artifact_id = "artifact-reselect-deadline-aware";
   hints.allow_p2p = true;
@@ -226,8 +230,8 @@ TEST_CASE(
 
   auto result = orchestrator.run("artifact-reselect-deadline-aware", make_gpu_target(0), hints, std::nullopt);
   REQUIRE(result.ok());
-  REQUIRE(backend.p2p_attempts.size() == 1);
-  CHECK(backend.p2p_attempts.front().source_ip == "10.3.3.2");
+  REQUIRE(backend.p2p_attempts.size() == 5);
+  CHECK(backend.p2p_attempts.back().source_ip == "10.3.3.2");
   REQUIRE(gs_client->replica_requests.size() == 5);
   for (uint32_t timeout_ms : gs_client->replica_request_wait_timeouts_ms) {
     CHECK(timeout_ms <= 1200);

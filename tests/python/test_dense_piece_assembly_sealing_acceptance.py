@@ -1005,7 +1005,7 @@ def test_complete_pure_transform_publication_publishes_serving_lineage(
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
 
-        result = store.complete_pure_transform_publication(
+        result = store.complete_pure_transform_publication_bridge(
             source_tensors,
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1082,7 +1082,7 @@ def test_complete_pure_transform_publication_structural_pp_publishes_serving_lin
             replicated_tensors=["weights"],
         )
 
-        result = store.complete_pure_transform_publication(
+        result = store.complete_pure_transform_publication_bridge(
             source_tensors,
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1154,7 +1154,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
             expected_view_ids=[],
         )
         source_handle_v1 = store.artifact(artifact_id=source_artifact_v1)
-        result_v1 = store.complete_pure_transform_publication(
+        result_v1 = store.complete_pure_transform_publication_bridge(
             _artifact_tensor_dict(store, artifact_id=source_artifact_v1),
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1188,7 +1188,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
             expected_view_ids=[],
         )
         source_handle_v2 = store.artifact(artifact_id=source_artifact_v2)
-        result_v2 = store.complete_pure_transform_publication(
+        result_v2 = store.complete_pure_transform_publication_bridge(
             _artifact_tensor_dict(store, artifact_id=source_artifact_v2),
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,

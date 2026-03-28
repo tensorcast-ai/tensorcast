@@ -71,10 +71,12 @@ class _ClientStub:
         *,
         disk_generation: int | None = None,
         disk_artifact_id: str | None = None,
+        startup_in_progress_failures: int = 0,
     ) -> None:
         self.canonical_index_bytes = canonical_index_bytes
         self.disk_generation = disk_generation
         self.disk_artifact_id = disk_artifact_id
+        self.startup_in_progress_failures = startup_in_progress_failures
         self.unloaded: list[tuple[str, str]] = []
         self.get_index_calls = 0
         self.resolve_calls: list[tuple[str, bool]] = []
@@ -99,6 +101,12 @@ class _ClientStub:
     def import_artifact_from_path_stream_v2(
         self, *, path: str, verify_checksums: bool = True
     ):
+        if self.startup_in_progress_failures > 0:
+            self.startup_in_progress_failures -= 1
+            raise RuntimeError(
+                "Local StoreDaemon (daemon) is not available. Msg: "
+                "daemon startup still in progress: prewarming"
+            )
         resp = self.import_artifact_from_path_v2(
             path=path,
             verify_checksums=verify_checksums,
@@ -598,6 +606,27 @@ def test_from_disk_progress_mode_uses_stream_resolution():
     artifact = store.from_disk("/tmp/artifact", show_progress=True)
 
     assert artifact.artifact_id == "mi2:idx:data"
+    assert client.resolve_calls == [("/tmp/artifact", True)]
+
+
+def test_from_disk_retries_daemon_startup_in_progress(monkeypatch):
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=7,
+        disk_artifact_id="mi2:idx:data",
+        startup_in_progress_failures=2,
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    artifact = store.from_disk("/tmp/artifact")
+
+    assert artifact.artifact_id == "mi2:idx:data"
+    assert len(sleeps) == 2
     assert client.resolve_calls == [("/tmp/artifact", True)]
 
 

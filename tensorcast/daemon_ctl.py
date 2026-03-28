@@ -1253,11 +1253,50 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def promote_binding_current_value(
+        self,
+        *,
+        binding_id: str,
+        binding_value_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not binding_value_id:
+            raise ValueError("binding_value_id is required")
+        with self._client_span("Client/PromoteBindingCurrentValue") as span:
+            request = store_daemon_pb2.PromoteBindingCurrentValueRequest(
+                binding_id=str(binding_id),
+                binding_value_id=str(binding_value_id),
+            )
+            try:
+                response: store_daemon_pb2.PromoteBindingCurrentValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.PromoteBindingCurrentValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="PromoteBindingCurrentValue RPC failed",
+                    )
+                ) from e
+        return response
+
     def refill_owned_binding(
         self,
         *,
         binding_id: str,
         artifact_id: str,
+        public_disk_source: store_daemon_pb2.PublicDiskSourceHandle | None = None,
+        source_selection: common_pb2.ArtifactSelection | None = None,
+        realization_plan: store_daemon_pb2.BindingRealizationPlan | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         serving_runtime_policy: "ServingRuntimePolicy | None" = None,
@@ -1267,8 +1306,8 @@ class DaemonCtl:
     ) -> store_daemon_pb2.RefillOwnedBindingResponse:
         if not binding_id:
             raise ValueError("binding_id is required")
-        if not artifact_id:
-            raise ValueError("artifact_id is required")
+        if not artifact_id and public_disk_source is None:
+            raise ValueError("artifact_id is required unless public_disk_source is set")
         with self._client_span("Client/RefillOwnedBinding") as span:
             if preference is not None:
                 preference_value = preference
@@ -1287,6 +1326,12 @@ class DaemonCtl:
                 artifact_id=str(artifact_id),
                 preference=preference_value,
             )
+            if public_disk_source is not None:
+                request.public_disk_source.CopyFrom(public_disk_source)
+            if source_selection is not None:
+                request.source_selection.CopyFrom(source_selection)
+            if realization_plan is not None:
+                request.realization_plan.CopyFrom(realization_plan)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
             if serving_runtime_policy is not None:
@@ -2125,6 +2170,34 @@ class DaemonCtl:
 
         return _event_iter()
 
+    def resolve_public_disk_source(
+        self,
+        *,
+        path: str,
+        verify_checksums: bool = True,
+    ) -> store_daemon_pb2.ResolvePublicDiskSourceResponse:
+        if not path:
+            raise ValueError("path is required")
+        with self._client_span("Client/ResolvePublicDiskSource") as span:
+            request = store_daemon_pb2.ResolvePublicDiskSourceRequest(
+                path=path,
+                verify_checksums=bool(verify_checksums),
+            )
+            try:
+                response: store_daemon_pb2.ResolvePublicDiskSourceResponse = (
+                    self._unary_call(
+                        self.stub_v2.ResolvePublicDiskSource,
+                        request,
+                        timeout=_import_artifact_from_path_timeout_seconds(),
+                        span=span,
+                        retries=_import_artifact_from_path_retries(),
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                _raise_import_artifact_from_path_rpc_error(self.server_address, e)
+            return response
+
     def confirm_replica_loaded(
         self,
         disk_path: str,
@@ -2188,7 +2261,7 @@ class DaemonCtl:
                 logger.error(f"Error: {e}")
                 raise RuntimeError("GetServerConfig failed") from e
             else:
-                # Map both legacy and new fields for smooth migration
+                # Older daemons may omit optional local socket metadata.
                 local_handle_socket_path = str(
                     getattr(response, "local_handle_socket_path", "") or ""
                 )

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -51,10 +52,13 @@ class TargetLayoutGpuSink : public Sink, public PositionedSink, public AsyncPosi
   struct StorageState {
     uint64_t base_offset{0};
     uint64_t length{0};
+    uint64_t covered_bytes{0};
+    std::map<uint64_t, uint64_t> covered_intervals;
     std::unique_ptr<GpuMemorySink> sink;
   };
 
   size_t locate_storage(uint64_t offset, size_t bytes) const;
+  void mark_storage_covered(StorageState& state, uint64_t local_offset, size_t bytes);
 
   std::vector<StorageState> storage_states_;
   uint64_t total_size_{0};

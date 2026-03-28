@@ -87,6 +87,7 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/common:trace_macros_lib",
         "//core/store:device_types",
         "//core/store:endpoint_id",
         "//core/store:replica_registry",

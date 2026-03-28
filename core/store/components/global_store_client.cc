@@ -23,6 +23,7 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/otel/grpc_propagation.h"
+#include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/utils.h"
 #include "core/store/components/endpoint_id.h"
 #include "opentelemetry/trace/provider.h"
@@ -2169,11 +2170,17 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica_idempoten
 
   global_store::RegisterReplicaResponse response;
 
-  auto status = execute_rpc_with_retry(
-      request,
-      &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return cluster_runtime_stub_->RegisterReplica(ctx, req, resp); },
-      "RegisterReplica(memory)");
+  absl::Status status = absl::UnknownError("uninitialized");
+  {
+    SC_TRACE_SCOPE("registration_commit.gs.register_memory_replica.rpc");
+    status = execute_rpc_with_retry(
+        request,
+        &response,
+        [this](auto* ctx, const auto& req, auto* resp) {
+          return cluster_runtime_stub_->RegisterReplica(ctx, req, resp);
+        },
+        "RegisterReplica(memory)");
+  }
 
   if (!status.ok()) {
     return status;

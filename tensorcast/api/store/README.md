@@ -39,10 +39,12 @@ managing clients manually.
   The daemon returns `artifact_id`, `canonical_index_bytes`, `generation`, and
   `import_state=READY`, and the SDK seeds `ArtifactCache` with this metadata.
   Import is **reference-only registration** for payload bytes: no payload
-  copy/link/reflink. On first import, the daemon may backfill metadata sidecars
-  such as `artifact_descriptor.json` (and `tensor_index.json` for safetensors
+  copy/link/reflink. Payload bytes remain the correctness boundary. On first
+  import, the daemon may perform bounded daemon-owned metadata backfill such as
+  `artifact_descriptor.json` (and `tensor_index.json` for safetensors
   directories) so later imports can reuse trusted metadata and skip full data
-  hashing.
+  hashing. This backfill does not change artifact identity and does not create a
+  second retrieval contract beside daemon-owned import authority.
   For one-off backfill on root-owned directories, use
   `bash tools/backfill_from_disk_import.sh`, which starts an isolated temporary
   daemon and can auto-escalate to `sudo`.
@@ -54,6 +56,13 @@ managing clients manually.
   environment variables, and `replica_uuid` remains a pure operation/session id.
   Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
   checks for local development.
+- `tensorcast.resolve_public_disk_source(path)` /
+  `Store.resolve_public_disk_source(path)` expose the metadata-first disk
+  ingress needed by binding-native realization. The returned
+  `PublicDiskSourceHandle` carries the normalized disk locator plus
+  `canonical_index_bytes`, and `Binding.realize_from(...)` /
+  `Store.realize_into_binding(...)` can consume it directly without first
+  registering an artifact through `from_disk(...)`.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
@@ -129,6 +138,13 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     `RepresentationPublishContract.to_runtime_policy()`,
     `ServingArtifactManifest.to_runtime_policy()`, and
     `PublishedModelVersion.require_serving_runtime_policy()`.
+  - The repo-owned serving-lineage carriers now also expose an explicit
+    phase-1 compatibility hook for build identity:
+    `ServingArtifactManifest.serving_build_digest_version` and
+    `RepresentationPublishContract.serving_build_digest_version`.
+    Runtime policy remains compatible with existing consumers and still gates on
+    `serving_manifest_ref`, `representation_contract_hash`, and
+    `serving_build_digest`.
   - For integrations that already have a transformed serving artifact in hand,
     `build_pure_transform_publication_bundle_from_registered_artifact(...)`
     assembles a typed `RepresentationPublishSpec`
@@ -141,6 +157,29 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     spec directly and forward it into `start_assembly_attempt(...)` through the
     typed `representation_publish_spec` daemon ingress instead of re-authoring
     the generic closeout shell at each call site.
+    When the spec carries optional `ServingAdmissionFacts`, TensorCast validates
+    the supplied finalize classification, realization protocol, and support
+    level for consistency without inferring missing integration-private rollout
+    state.
+  - For explicit `BINDING_FINALIZE` paths, use
+    `prepare_binding_finalize_serving_registration(...)`,
+    `build_binding_finalize_admission_facts(...)`, and
+    `build_binding_finalize_publication_bundle_from_registered_artifact(...)`
+    to keep finalize classification fixed at
+    `FinalizeClass.REPRESENTATION_CHANGING` while still surfacing repo-owned
+    realization protocol and support-level truth.
+  - If the builder already has finalized serving tensors in memory for a
+    `BINDING_FINALIZE` family, use
+    `Store.register_binding_finalize_publication_bridge(...)` or
+    `Store.complete_binding_finalize_publication_bridge(...)` for the same
+    register + typed `representation_publish` closeout flow that the
+    `PURE_TRANSFORM` helpers use.
+  - For same-binding serving builds, prefer
+    `Store.complete_pure_transform_publication_from_binding(...)` or
+    `Store.complete_binding_finalize_publication_from_binding(...)`. These
+    paths now emit a binding-value publication subject directly into the typed
+    closeout contract; the older tensor-registration helpers remain legacy
+    bridge surfaces for workflows that still start from in-memory tensors.
   - `Store.complete_representation_publish_attempt(...)` runs the same repo-owned
     spec path through `start -> seal -> wait` and returns the final
     `PublishedModelVersion`.
@@ -175,10 +214,10 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     repo-owned publish path without manual `artifact_result` inspection.
   - For offline or pipeline-style `PURE_TRANSFORM` builders that already have
     finalized tensors in memory, use
-    `Store.register_pure_transform_publication(...)` to inject the reserved
+    `Store.register_pure_transform_publication_bridge(...)` to inject the reserved
     manifest tensor and register a durable serving artifact plus typed
     publication bundle, or
-    `Store.complete_pure_transform_publication(...)` to run the same
+    `Store.complete_pure_transform_publication_bridge(...)` to run the same
     repo-owned register + `representation_publish` closeout path in one call.
     When the publish attempt also needs a canonical source contribution, pass
     `source_contribution_device=...` and TensorCast will bind the source
@@ -207,6 +246,14 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     serving manifest and validates `serving_manifest_ref`,
     `representation_contract_hash`, and `serving_build_digest` before the
     artifact is accepted into the serving path.
+    If you pass a full `RepresentationPublishSpec` instead of a plain runtime
+    policy, TensorCast also requires
+    `ServingSupportLevel.RUNTIME_BIND_SWAP_READY` when caller-supplied
+    admission facts are present.
+  - The same runtime-ready gate now also applies to serving-key activation on
+    typed `representation_publish` specs: a spec carrying
+    `serving_version_key` must be admitted at
+    `ServingSupportLevel.RUNTIME_BIND_SWAP_READY`.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
