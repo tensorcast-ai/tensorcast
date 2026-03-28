@@ -288,33 +288,24 @@ def _build_region_layout_selection(
     )
 
 
-class FallbackResolver:
-    """Disk/P2P fallback utilities shared by materialization flows."""
-
-    def __init__(self, runtime: StoreRuntimeContext) -> None:
-        self._runtime = runtime
-
-    def ensure_supported(self, options: GetArtifactOptions | None) -> None:
-        del options
-
-    def record_event(
-        self,
-        *,
-        mode: str,
-        artifact_id: str | None,
-        key: str | None,
-        detail: Mapping[str, object],
-    ) -> None:
-        logger.info(
-            "store.materialize.source",
-            extra={
-                "tc.store.daemon": self._runtime.daemon_endpoint,
-                "tc.store.mode": mode,
-                "tc.store.artifact_id": artifact_id or "",
-                "tc.store.key": key or "",
-                "tc.store.detail": dict(detail),
-            },
-        )
+def _record_retrieval_event(
+    runtime: StoreRuntimeContext,
+    *,
+    mode: str,
+    artifact_id: str | None,
+    key: str | None,
+    detail: Mapping[str, object],
+) -> None:
+    logger.info(
+        "store.materialize.source",
+        extra={
+            "tc.store.daemon": runtime.daemon_endpoint,
+            "tc.store.mode": mode,
+            "tc.store.artifact_id": artifact_id or "",
+            "tc.store.key": key or "",
+            "tc.store.detail": dict(detail),
+        },
+    )
 
 
 class MaterializationPipeline:
@@ -329,7 +320,6 @@ class MaterializationPipeline:
     ) -> None:
         self._runtime = runtime
         self._views = views
-        self._fallback = FallbackResolver(runtime)
         self._executor = TrackedExecutor(runtime)
         self._materialize_fn = materialize_fn
 
@@ -1937,7 +1927,8 @@ class MaterializationPipeline:
                 retryable=False,
             )
         source_label = _source_label(result.source) or ""
-        self._fallback.record_event(
+        _record_retrieval_event(
+            self._runtime,
             mode="disk" if requested_disk else "p2p",
             artifact_id=result.artifact_id or request_artifact_id,
             key=key,
@@ -2471,7 +2462,6 @@ class MaterializationPipeline:
     ) -> tuple[MaterializationPayload, int]:
         artifact_id, key = self._resolve_identifiers(artifact_id, key)
         options = self._build_get_options(options_override)
-        self._fallback.ensure_supported(options)
         device_id = self._resolve_device_selector(device, allow_cpu=allow_cpu)
         try:
             materialized = self._materialize(
@@ -2532,4 +2522,4 @@ class MaterializationPipeline:
             )
 
 
-__all__ = ["MaterializationPipeline", "FallbackResolver"]
+__all__ = ["MaterializationPipeline"]

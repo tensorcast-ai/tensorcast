@@ -4,11 +4,14 @@ title: Batched Owner-File Collective Executor
 status: proposed
 areas: ["core", "daemon", "sdk", "serving", "benchmarks"]
 created: 2026-03-24
-last_updated: 2026-03-24
+last_updated: 2026-03-28
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
   - core/store/replica/collective_disk_loader.cc
+  - core/store/replica/replica.cc
+  - core/store/replica/replica_load_controller.cc
+  - core/store/store_engine_options.h
   - core/store/materialization/benchmarks/safetensors_load_strategy_benchmark_main.cc
   - daemon/service/controllers/replica_materialization_service.cc
   - daemon/app/server_main.cc
@@ -17,20 +20,19 @@ related_code:
   - docs/internals/disk-load-strategy.md
   - docs/internals/model-loading.md
   - docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
-  - /data/workspace/fastsafetensors/fastsafetensors/loader.py
-  - /data/workspace/fastsafetensors/fastsafetensors/file_buffer.py
-  - /data/workspace/fastsafetensors/fastsafetensors/tensor_factory.py
-  - /data/workspace/fastsafetensors/docs/architecture.md
-  - /data/workspace/fastsafetensors/docs/safetensors-load-optimization.md
 links:
+  plan: ../plans/0109-batched-owner-file-collective-executor.md
+  dependencies:
+    - ../plans/0108-01-pre-109-strategy-plane-convergence.md
+  related:
+    - ../plans/0107-retrieval-policy-plane-cleanup.md
+    - ../internals/disk-load-strategy.md
+    - ../internals/model-loading.md
+    - ../benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
   predecessors:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0107-retrieval-policy-plane-cleanup.md
     - ./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
-  related:
-    - ../internals/disk-load-strategy.md
-    - ../internals/model-loading.md
-    - ../benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
 ---
 
 # Summary
@@ -40,7 +42,10 @@ Introduce a new common-runtime executor:
 - `OwnerFileBatchedCollectiveExecutor`
 
 This executor is designed to replace the current eager owner-file collective
-prototype for shared-filesystem, tensor-parallel cold starts.
+prototype for shared-filesystem, same-host tensor-parallel cold starts.
+
+It is intended to become the default collective executor for that workload
+family only after the pre-109 strategy-plane convergence work is complete.
 
 The design is inspired by the parts of `fastsafetensors` that are currently
 winning in practice:
@@ -57,6 +62,8 @@ strictly inside TensorCast's selection-first architecture:
 - `MaterializationFacade` remains the lowering boundary,
 - `ByteRangeMap` remains the canonical fallback IR,
 - source acquisition stays separate from semantic truth and executor choice,
+- execution environment facts stay separate from retrieval policy and semantic
+  truth,
 - mixed execution remains allowed.
 
 The key idea is:
@@ -71,10 +78,37 @@ This design exists to close the remaining shared-filesystem gap against
 `fastsafetensors` without violating TensorCast's internal layering and without
 reverting to vLLM- or model-specific special cases.
 
-# Reference Material From `fastsafetensors`
+Normative source rule:
+
+- TensorCast does not need to preserve broad production compatibility while this
+  executor lands,
+- the repo-owned benchmark notes, strategy-plane designs, and this design are
+  the normative record for what TensorCast adopts,
+- external `fastsafetensors` code is non-normative implementation reference
+  only,
+- temporary migration fallbacks are acceptable only to stage rollout evidence
+  and must be removed once the new executor is proven.
+
+# Sequencing Note
+
+This design is downstream of two prerequisites:
+
+- the runtime-critical request-normalization boundary from `0107`,
+- the common-runtime strategy convergence work from `0108-01`.
+
+It must not be used to justify adding more branch-order policy to `Replica`,
+`ReplicaLoadController`, or `collective_disk_loader.cc`. The executor belongs on
+top of the converged strategy-plane boundary, not inside today's prototype
+ownership seams.
+
+# Non-Normative External Reference Material
 
 This design intentionally uses `fastsafetensors` as an implementation
 reference, but only for the parts that are actually winning in practice.
+
+Those references are illustrative only. The absorbed invariants are restated in
+this design so implementation and review do not depend on an external workspace
+being present.
 
 Relevant local workspace references:
 
@@ -164,6 +198,8 @@ These results imply:
 
 - Match or beat `fastsafetensors` on shared-filesystem TP cold start for the
   same end-to-end workload.
+- Become the default collective executor for shared-filesystem, same-host TP
+  cold start once the prerequisite strategy-plane convergence work is landed.
 - Preserve TensorCast's public selection-first model:
   - `ArtifactSelection`
   - `tensor_dict`
@@ -188,8 +224,25 @@ These results imply:
 - Replace `ArtifactSelection` with a new public contract.
 - Force owner-file collective on host-local SSD where local-batched may still
   be the right executor.
+- Replace `TensorBatchedLocalExecutor` as the global default disk executor.
 - Encode executor-private plans into public SDK or proto request fields.
 - Depend on whole-owner-payload persistent VRAM residency.
+- Skip the pre-109 convergence work and wire this executor directly into the
+  current replica-layer prototype boundaries.
+
+# Prior Constraints Reviewed
+
+- `0108` correctly requires strategy selection to happen before generic lowering,
+  but it did not yet make ordinary replica convergence, cost-model routing, and
+  coordinator boundaries explicit enough for a default collective executor.
+- `0107` correctly separates retrieval policy from rollout policy, but it needed
+  a clearer execution-topology boundary so collective context would not be
+  modeled as retrieval policy.
+- The current repository prototype proved that file ownership and peer
+  distribution are useful, but the eager `owned_payload` and optional root
+  whole-source preload shapes are not acceptable long-term defaults.
+- The host-local/local-batched bias remains correct and is kept. This design
+  narrows its default claim to shared-source collective startup only.
 
 # Current State
 
@@ -409,6 +462,20 @@ TensorCast should outperform `fastsafetensors` by exploiting:
 
 This is exactly the kind of shape described by the benchmark's Strategy C.
 
+## 5. Default routing must be cost-model driven
+
+This executor must not become default merely because collective context is
+present.
+
+`AUTO` policy should choose it only when the planner can show that:
+
+- shared-source dedup is real for the current request,
+- the estimated owner skew stays within policy,
+- peak temporary bytes stay within typed budgets,
+- the expected collective and planner overhead is repaid by lower source reads,
+- and the residual tail is explicit and acceptable for the current rollout
+  stage.
+
 # Proposed Architecture
 
 ## 1. Introduce `OwnerFileBatchedCollectiveExecutor`
@@ -428,9 +495,61 @@ It is intended for requests where:
 - and the request has enough tensor structure to avoid generic fallback for the
   bulk of bytes.
 
+### 1.1 Phase-1 scope
+
+The first production wave is intentionally narrower than the full long-term
+executor model.
+
+Phase-1 scope:
+
+- ordinary disk-backed `tensor_dict(...)` startup,
+- same-host TP collective groups,
+- safetensors sources with complete metadata,
+- replicated, dim0, and 2D dim1 tensor work as the dominant bytes.
+
+Deferred follow-on scope:
+
+- cross-topology reshard,
+- executor-owned concat irregular tails,
+- arbitrary mapped-target execution as part of the default rollout claim.
+
 ## 2. Execution model
 
 The executor runs in bounded batches, not one eager preload pass.
+
+### 2.1 Strategy inputs
+
+The planner should consume:
+
+- `ResolvedMaterializationPlan`
+- `RepresentationWorkPlan`
+- `ResolvedSourceBinding`
+- `ExecutionEnvironmentFacts`
+- typed materialization-strategy policy
+
+This keeps:
+
+- semantic truth in `0108`,
+- topology/locality context in the `0107` execution-topology plane,
+- and executor-private batching inside this executor only.
+
+### 2.2 Default routing and eligibility
+
+This executor is eligible only when all of the following hold:
+
+- collective group context is present and same-host,
+- the source is disk-backed and shared across ranks,
+- metadata is complete enough to build tensor-aware work,
+- estimated owner peak temporary bytes fit configured budgets,
+- estimated owner skew stays below configured thresholds,
+- estimated dedup savings exceed planner and collective overhead,
+- and residual handling satisfies the current rollout stage.
+
+Normative rule:
+
+- when these conditions do not hold, `AUTO` must prefer
+  `TensorBatchedLocalExecutor` or generic fallback rather than forcing
+  owner-file collective.
 
 Each batch contains a subset of source work such that:
 
@@ -472,6 +591,9 @@ The planner should construct an internal batch plan family, for example:
   - source file
   - source span set
   - batch bytes
+  - committed destination ranges
+  - estimated temporary bytes
+  - estimated peer bytes
   - op list
 - `OwnerBatchOp`
   - `DirectReadToFinalOp`
@@ -528,8 +650,9 @@ Current phase rule:
   derive residual generic fallback at runtime,
 - residual generic work must already be explicit in the emitted work plan before
   execution begins,
-- until explicit mixed collective-plus-generic execution is fully implemented,
-  owner-file collective is only eligible for zero-residual work plans.
+- Phase 1 implementation may start with zero-residual-only eligibility,
+- but default graduation for shared-FS `AUTO` requires explicit mixed
+  collective-plus-generic execution with preplanned residual coverage.
 
 ## 5. Source ownership model
 
@@ -549,6 +672,18 @@ Normative rule:
   source span,
 - it does not imply that all bytes from that file must become resident in GPU
   memory at once.
+
+Default ownership should be file-oriented, but it must be weighted by selected
+bytes, not assigned by raw file index round-robin alone.
+
+Normative implementation rules:
+
+- ownership should be computed from the current request's selected source spans,
+- planner policy should cap owner skew with an explicit threshold,
+- hot files may be split into source segments when file-level ownership would
+  violate that threshold,
+- the planner must be able to reject owner-file collective if the resulting skew
+  is still too high.
 
 Future extensions may refine ownership from file-level to source-segment-level,
 but this design does not require that on day one.
@@ -595,6 +730,13 @@ the subset of cases where:
 Long-term, the current coarse root-first collective path should no longer be the
 default strategy for shared-FS TP startup.
 
+Hard-cut rule:
+
+- once the new executor is proven for its intended workload family, temporary
+  migration fallbacks and prototype-only preload shapes should be deleted or
+  isolated away from the steady-state hot path rather than preserved as equal
+  citizens.
+
 This relation is still limited to materialization strategy.
 
 - It does not imply that owner-file collective owns future cross-topology
@@ -633,6 +775,11 @@ Suggested new config concepts:
 - `owner_file_collective_dim1_staging_bytes`
 - `owner_file_collective_max_inflight_batches`
 - `owner_file_collective_shared_fs_only`
+- `owner_file_collective_max_owner_skew_ratio`
+- `owner_file_collective_min_dedup_saving_bytes`
+- `owner_file_collective_group_assemble_timeout`
+- `owner_file_collective_allow_mixed_residual`
+- `owner_file_collective_planner_cache_entries`
 
 These names are illustrative. Final naming should follow the existing
 `daemon_config.proto` conventions.
@@ -642,7 +789,9 @@ Normative rules:
 - rollout must be typed and config-backed,
 - env variables may still exist for diagnosis but not as the primary
   configuration mechanism,
-- executor preference remains a policy choice and must not alter semantic truth.
+- executor preference remains a policy choice and must not alter semantic truth,
+- budget and threshold fields are required for default routing; boolean enable
+  flags alone are not sufficient.
 
 # Correctness Model
 
@@ -684,6 +833,32 @@ This is both:
 - a memory-safety rule,
 - and a correctness rule against accidental stale aliasing.
 
+## 4. Atomic batch commit and failure handling
+
+Each batch is a commit unit for this executor.
+
+Normative rules:
+
+- a batch is committed only after all destination bytes covered by that batch
+  are visible and semantically complete,
+- owner-local direct writes, peer sends, and staged pack results belong to the
+  same commit unit,
+- if any part of the batch fails, the batch is reported as uncommitted and must
+  follow explicit retry, poison, or fallback policy from the strategy plane,
+- `ExecutionCommitReport` must be able to account for committed and uncommitted
+  batch coverage without inventing residual work after the fact.
+
+# Naming Compliance
+
+| Proposed symbol | Kind | Required style | Result |
+| --- | --- | --- | --- |
+| `OwnerFileBatchedCollectiveExecutor` | C++ class | `PascalCase` | pass |
+| `OwnerBatchPlan` | C++ struct | `PascalCase` | pass |
+| `OwnerBatchOp` | C++ variant/struct family | `PascalCase` | pass |
+| `build_owner_batch_plan` | C++ function | `snake_case` | pass |
+| `estimate_owner_collective_cost` | C++ function | `snake_case` | pass |
+| `owner_file_collective_peak_bytes_budget` | config field | `snake_case` | pass |
+
 # Why This Is More Consistent Than Reusing `fastsafetensors` Directly
 
 Directly embedding a `fastsafetensors`-style loader into vLLM or into the SDK
@@ -722,20 +897,37 @@ Practical reference points:
 
 # Rollout Plan
 
+## Phase 0: Pre-109 convergence dependency
+
+- complete the runtime-critical request-normalization work from
+  `docs/plans/0107-retrieval-policy-plane-cleanup.md` Phases 1 through 3,
+- complete the strategy-plane convergence work captured in
+  `docs/plans/0108-01-pre-109-strategy-plane-convergence.md`,
+- especially ordinary replica convergence, execution-environment facts, typed
+  strategy budgets, and prototype cleanup seams.
+
 ## Phase 1: Add the executor beside existing paths
 
 - implement `OwnerFileBatchedCollectiveExecutor` behind typed config,
 - keep current local-batched and generic fallback unchanged,
 - keep current eager collective available only as a lower-priority fallback.
 
-## Phase 2: Route only eligible shared-FS TP startup into it
+## Phase 2: Route explicit shared-FS TP experiments into it
 
 - ordinary disk startup on shared filesystems may choose the new executor when:
   - source metadata is complete,
   - tensor-aware planning covers the bulk of bytes,
-  - estimated owner peak bytes fit the configured budget.
+  - estimated owner peak bytes fit the configured budget,
+  - owner skew and dedup thresholds pass policy.
 
-## Phase 3: Retire eager owner-file preload
+## Phase 3: Make it the default collective executor for shared-FS TP startup
+
+- once explicit mixed residual handling, cost-model routing, and observability
+  are proven,
+- make this executor the default collective choice for eligible shared-FS,
+  same-host TP cold starts.
+
+## Phase 4: Retire eager owner-file preload
 
 - once correctness and performance are proven,
 - delete or demote the current eager `owned_payload` collective path.
@@ -763,7 +955,14 @@ This design must be validated with both correctness and performance evidence.
 - prove that peak extra owner staging stays within configured budget
 - show that current owner-file OOM cases no longer OOM
 
-## 3. Performance
+## 3. Planner and routing evidence
+
+- record planner overhead and cache-hit behavior
+- record estimated versus actual owner skew
+- record executor selection reasons for chosen and rejected candidates
+- validate group-assemble timeout and fail-open behavior under partial rank join
+
+## 4. Performance
 
 Required comparisons:
 
@@ -783,6 +982,8 @@ Primary success criteria:
 
 - shared-FS TP cold-start wall time matches or beats `fastsafetensors`
 - no OOM on the current Step3p5 TP=8 workload
+- shared-FS eligible requests choose this executor by default once rollout is
+  enabled
 - host-local default path remains no worse than current best local-batched path
 
 # Expected Outcome
@@ -802,3 +1003,13 @@ In short:
 - TensorCast already has the richer semantic model,
 - this design combines the two in a form that matches TensorCast's long-term
   architecture.
+
+# References
+
+- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
+- [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
+- [`docs/plans/0108-01-pre-109-strategy-plane-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0108-01-pre-109-strategy-plane-convergence.md)
+- [`docs/plans/0109-batched-owner-file-collective-executor.md`](/data/workspace/tensorcast-280/docs/plans/0109-batched-owner-file-collective-executor.md)
+- [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
+- [`docs/internals/disk-load-strategy.md`](/data/workspace/tensorcast-280/docs/internals/disk-load-strategy.md)
+- [`core/store/replica/collective_disk_loader.cc`](/data/workspace/tensorcast-280/core/store/replica/collective_disk_loader.cc)

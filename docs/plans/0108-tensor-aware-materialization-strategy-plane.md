@@ -4,7 +4,7 @@ title: Tensor-Aware Materialization Strategy Plane Plan
 status: in_progress
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs", "tests"]
 created: 2026-03-23
-last_updated: 2026-03-24
+last_updated: 2026-03-28
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_service.cc
@@ -21,6 +21,10 @@ related_code:
   - tests/python/test_store_view_api.py
 links:
   design: ../designs/0108-tensor-aware-materialization-strategy-plane.md
+  related:
+    - ../plans/0107-retrieval-policy-plane-cleanup.md
+    - ../plans/0108-01-pre-109-strategy-plane-convergence.md
+    - ../plans/0109-batched-owner-file-collective-executor.md
 ---
 
 # Objective
@@ -36,6 +40,25 @@ TensorCast can:
 - preserve current correctness, external-target safety, and JFS advantages,
 - reabsorb the current mapped-target and replica-layer prototypes into one
   internal planner and executor architecture.
+
+# Execution Ownership Note
+
+This document remains the historical landing ledger for the already-completed
+`0108` work through mapped-target strategy extraction, semantic-contract
+lowering, and typed rollout config.
+
+It is no longer the primary execution queue for remaining strategy-plane work:
+
+- `docs/plans/0107-retrieval-policy-plane-cleanup.md` owns the request
+  normalizer and transport-boundary prerequisite.
+- `docs/plans/0108-01-pre-109-strategy-plane-convergence.md` owns the remaining
+  ordinary-replica strategy convergence, coordinator extraction, and diagnostics
+  work.
+- `docs/plans/0109-batched-owner-file-collective-executor.md` owns the new
+  owner-file batched executor after those prerequisites land.
+
+The unchecked items below should be read as historical scope decomposition, not
+as the active ordered queue.
 
 # Latest Status
 
