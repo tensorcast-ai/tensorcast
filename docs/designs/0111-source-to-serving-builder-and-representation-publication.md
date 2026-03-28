@@ -13,9 +13,12 @@ related_code:
   - docs/internals/model-loading.md
   - tensorcast/types.py
   - tensorcast/api/store/__init__.py
+  - tensorcast/api/store/serving_builder.py
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/owned_binding_slot.py
   - proto/tensorcast/daemon/v2/store_daemon.proto
+  - proto/tensorcast/publication/v1/publication.proto
+  - daemon/service/controllers/serving_artifact_manifest_utils.{h,cc}
 links:
   plan: ../plans/0111-source-to-serving-builder-and-representation-publication.md
   dependencies:
@@ -44,11 +47,13 @@ durable serving artifacts and a typed representation-publication bridge for
   `PublishedModelVersion`.
 - this design defines the bridge between them:
   - source-to-serving builder modes,
-  - binding-hosted serving-artifact realization shape for bootstrap and
-    difficult families,
+  - admitted builder realization protocols for bootstrap and difficult
+    families,
   - serving-artifact identity and manifest rules,
   - a builder-layer publication digest that stays separate from `0110`
     semantic identity,
+  - a repo-owned admission carrier that stays separate from both semantic and
+    build identity,
   - a typed `RepresentationPublishContract` child contract for `0105`,
   - self-describing serving-artifact manifest rules,
   - correctness and admission gates,
@@ -63,9 +68,51 @@ The design is intentionally Torch-first in grounding, but not Torch-layer-owned.
   TensorCast owns serving-artifact identity and the representation-publication
   bridge, while a separate shared Torch integration layer owns trace capture,
   binding orchestration, and thin framework-adapter surfaces. In particular, a
-  node-local builder may host the future serving representation on
-  binding-managed storage before closeout, but artifact identity and externally
-  visible lineage still arise only through `0105`.
+  node-local builder may realize the future serving representation either on
+  binding-managed storage or on an admitted scratch host before closeout, but
+  artifact identity and externally visible lineage still arise only through
+  `0105`.
+
+# Why This Revision
+
+Recent bootstrap-design work in `/data/workspace/internal-vllm` exposed one
+important modeling gap in the original `0111` wording.
+
+The original split remains correct:
+
+- `BuilderMode` answers the semantic family of the build,
+- `FinalizeClass` answers whether framework-owned finalize is runtime-only or
+  representation-changing,
+- and `0105` still owns externally visible publication lineage.
+
+What was underspecified is different:
+
+- which builder-side realization protocol is admitted for a family,
+- which bootstrap paths are preferred fast paths versus universal correctness
+  rules,
+- and which topology-sensitive facts belong in semantic identity versus
+  builder/publication admission identity.
+
+Real families such as MoE / EP / EPLB-sensitive `mixtral` and `step3p5` make
+this distinction unavoidable. They are not evidence that `BuilderMode` or
+`FinalizeClass` were wrong. They are evidence that those axes are necessary but
+not yet sufficient to describe every valid source-to-serving realization shape.
+
+This revision therefore extends `0111`; it does not replace its core model.
+
+- `0110` semantic-core ownership remains unchanged.
+- `0084` plane separation remains unchanged.
+- `0105` closeout ownership remains unchanged.
+- `BuilderMode` and `FinalizeClass` remain first-class and are kept as
+  independent axes.
+
+The new material in this revision adds only the missing bridge facts above those
+layers:
+
+- realization protocol,
+- topology-sensitive builder/publication admission,
+- and explicit separation between universal correctness guarantees and preferred
+  fast-path properties.
 
 ```mermaid
 flowchart LR
@@ -92,13 +139,15 @@ flowchart LR
 - Define builder modes that cover both:
   - families whose serving representation is fully expressible by `0110`
     transform contracts,
-  - families that still need binding-managed finalize on framework-owned
-    runtime storage.
+  - families that still need builder-side finalize on framework-owned runtime
+    storage or admitted scratch hosts.
 - Standardize a TensorCast-owned serving-artifact manifest so runtime preflight
   and publication lineage do not depend on integration-private JSON shapes.
 - Keep `representation_contract_hash` as the `0110` semantic-core input and add
   a separate `0111`-owned `serving_build_digest` for builder/publication
   identity.
+- Keep semantic identity, builder/publication identity, and admission or
+  rollout truth as separate questions with different authority roots.
 - Define a typed `RepresentationPublishContract` so `representation_publish`
   becomes dependency-ready without overloading generic closeout carriers.
 - Define correctness gates for:
@@ -107,10 +156,9 @@ flowchart LR
   - builder/publication identity,
   - runtime-only finalize safety,
   - semantic validation before publication.
-- Allow a node-local builder to attach a framework model onto a serving-layout
-  binding before closeout, fill that binding directly from a source artifact,
-  and complete serving publication without introducing a second model-sized copy
-  of canonical serving bytes on the success path.
+- Allow a node-local builder to realize serving artifacts through admitted
+  builder-owned protocols while keeping same-binding / no-second-copy
+  realization as the preferred fast path where validated.
 - Preserve a bootstrap path where a node-local builder may compile source bytes
   into serving bytes before steady-state runtime has switched to plain serving
   artifact bind or swap.
@@ -146,13 +194,14 @@ Current repository and integration facts:
   - artifact-backed current values,
   - local-only sealed values.
 - current `internal-vllm` integration already contains practical
-  binding-hosted serving realization, serving bind, swap, manifest, and
-  invariant-validation logic:
+  serving-artifact bind, swap, manifest, invariant-validation logic, and
+  concrete bootstrap-design pressure from real families:
   - direct serving-artifact startup,
-  - binding-hosted bootstrap realization on serving-layout storage,
   - swap-based reload,
   - integration-private serving-manifest JSON,
-  - integration-private builder/publication identity logic.
+  - integration-private builder/publication identity logic,
+  - and bootstrap design work for local path cold-start across
+    `PURE_TRANSFORM` and `BINDING_FINALIZE` families.
 
 What is still missing is not "more materialization executor design". The missing
 piece is a repository-owned answer to:
@@ -352,9 +401,11 @@ class BuilderMode(StrEnum):
 
 - the family still requires framework-owned finalize logic that changes
   canonical serving bytes, storage identity, or parameter layout,
-- finalize runs on binding-managed storage under TensorCast orchestration,
+- finalize runs under TensorCast-owned builder orchestration and may use more
+  than one admitted realization protocol,
 - publication is only legal after finalize completes, invariants pass, and the
-  result has been promoted into a durable serving artifact.
+  finalized result has been committed or promoted into a durable serving
+  artifact.
 
 Normative rules:
 
@@ -363,6 +414,53 @@ Normative rules:
    classified and admitted,
 3. runtime steady-state bind or swap should consume the resulting serving
    artifact only, regardless of which builder mode created it.
+
+### 1.3 Realization protocols
+
+`BuilderMode` is not the same thing as builder-side realization protocol.
+
+The repository should model realization separately because the same semantic
+builder mode can be executed through more than one admissible TensorCast-owned
+shape.
+
+Representative protocol:
+
+```python
+class RealizationProtocol(StrEnum):
+    SAME_BINDING_FAST_PATH = "same_binding_fast_path"
+    SCRATCH_THEN_COMMIT = "scratch_then_commit"
+```
+
+`SAME_BINDING_FAST_PATH` means:
+
+- one serving-layout binding is the host of the future canonical serving bytes,
+- canonical serving tensors attach to that binding before bytes are ready,
+- source materialization, admitted finalize, validation, seal, and closeout all
+  proceed on the same binding-hosted byte path,
+- and a successful bootstrap may keep runtime attached to those same bytes
+  without a second model-sized bind or copy.
+
+`SCRATCH_THEN_COMMIT` means:
+
+- TensorCast still owns the source-to-serving builder workflow and final serving
+  publication truth,
+- but the family may require an admitted builder-local scratch realization before
+  the final serving bytes are committed into the serving binding or durable
+  serving artifact,
+- and the success path is still required to produce one postprocess-complete
+  serving artifact before steady-state runtime switches to it.
+
+Normative rules:
+
+1. realization protocol is an explicit builder/publication fact above semantic
+   transform truth,
+2. `BuilderMode` does not by itself imply one realization protocol,
+3. `SAME_BINDING_FAST_PATH` is preferred where valid, but it is not a universal
+   requirement for every admitted family,
+4. `SCRATCH_THEN_COMMIT` is still a builder path, not a regression to
+   source-runtime truth,
+5. runtime steady-state bind or swap still consumes the resulting serving
+   artifact only.
 
 ## 2. Shared Torch integration layer (follow-on, not owned here)
 
@@ -442,6 +540,66 @@ Rules:
 This keeps `0111` focused: it owns builder/publication consequences of finalize
 classification, not the full shared Torch adapter API.
 
+### 2.4 Finalize classification versus realization facts
+
+`FinalizeClass` remains necessary, but it does not by itself answer every
+builder-side realization question.
+
+In particular, `REPRESENTATION_CHANGING` families may still differ in whether:
+
+- finalized canonical storage remains on the same binding-hosted byte path,
+- final tensor schema is already stable before finalize starts,
+- and `SAME_BINDING_FAST_PATH` has been validated as a correctness-preserving
+  optimization for that family.
+
+Those differences are not reasons to collapse `FinalizeClass` and
+`RealizationProtocol` into one enum. They are reasons to keep them separate:
+
+- `FinalizeClass` stays framework-facing and semantic,
+- `RealizationProtocol` stays builder-facing and execution-shape-specific,
+- and family admission may depend on both.
+
+### 2.5 Admission truth versus build identity
+
+Current repository state already demonstrates a split that this design should
+make explicit.
+
+- phase-1 `ServingArtifactManifest`, `RepresentationPublishContract`, and
+  `serving_build_digest` are already repo-owned and runtime-enforced,
+- while many family rollout facts still live in integration registries such as
+  `/data/workspace/internal-vllm`.
+
+The next step should not be to silently widen `ServingBuildIntent` or
+`serving_build_digest` with rollout-only fields. Instead, the repository should
+introduce one separate repo-owned carrier for admission and rollout truth above
+build identity.
+
+Representative carrier:
+
+```python
+@dataclass(frozen=True)
+class ServingAdmissionFacts:
+    finalize_class: FinalizeClass
+    realization_protocol: RealizationProtocol
+    support_level: ServingSupportLevel
+    topology_admission_digest: str | None = None
+    fast_path_validated: bool = False
+```
+
+Semantics:
+
+- `ServingAdmissionFacts` answers whether a family, protocol, and topology slice
+  is admitted to builder publication or serving-only runtime,
+- it may be derived from shared framework facts plus a repo-owned family
+  registry,
+- `support_level`, allowlist membership, and `fast_path_validated` are rollout
+  truth and may evolve without changing canonical serving bytes,
+- therefore rollout-only facts must not silently perturb
+  `representation_contract_hash` or phase-1 `serving_build_digest`,
+- and daemon or runtime code may validate caller-supplied admission facts for
+  consistency, but they must not infer missing facts from integration-private
+  state.
+
 ## 3. Build intent, manifest, and self-description
 
 ### 3.1 `ServingBuildIntent`
@@ -465,14 +623,20 @@ Semantics:
 - `source_selection` points at the source artifact input,
 - `transform_contract` is the normalized `0110` semantic core,
 - `builder_mode` states whether framework finalize is part of the build,
+- `ServingBuildIntent` carries stable build/publication identity inputs above
+  the semantic core,
+- `ServingAdmissionFacts` carries protocol, support-level, and topology
+  admission truth above that build identity,
 - `representation_contract_hash` is read from `transform_contract` and remains
   the `0110` semantic-core hash,
 - `adapter_version` and `serving_abi_version` are explicit builder/publication
-  identity inputs and admission facts,
+  identity inputs,
 - `build_pipeline_version` captures builder-side representation-changing pipeline
   versioning such as quantization or packing family revisions,
-- and `serving_build_digest` is derived from build-intent fields above the
-  semantic core rather than by widening `representation_contract_hash`.
+- `serving_build_digest` is derived from stable build-intent fields above the
+  semantic core rather than by widening `representation_contract_hash`,
+- and rollout-only facts such as `support_level` or `fast_path_validated` must
+  not silently perturb the phase-1 digest.
 
 ### 3.2 `ServingArtifactManifest`
 
@@ -522,11 +686,68 @@ Required interpretation:
   contract used during build,
 - the manifest records builder/publication identity and guards runtime preflight
   and lineage observation,
+- phase-1 manifest scope remains intentionally narrower than full rollout or
+  admission truth, and `ServingAdmissionFacts` may travel through separate
+  repo-owned carriers before they become manifest fields,
 - and if the chosen carrier participates in artifact bytes, the design must
   explicitly accept that metadata changes affecting the manifest also affect
   `artifact_id`.
 
-### 3.3 Semantic-core versus builder-publication digests
+### 3.3 Topology-sensitive truth layering
+
+This design keeps three categories separate.
+
+Category 1: topology facts that change canonical serving representation.
+
+- These remain part of semantic identity.
+- They continue to flow through `0110` semantic-core normalization.
+- If a topology fact changes target tensor schema or the meaning of the serving
+  representation, it belongs in `representation_contract_hash`.
+
+Representative examples:
+
+- TP partitioning facts that change target tensor schema,
+- logical layout assumptions that affect canonical serving tensor coordinates.
+
+Category 2: topology facts that do not redefine semantic serving bytes but do
+affect admitted builder/publication execution.
+
+- These belong in admission truth above the semantic core.
+- They may flow through `ServingAdmissionFacts`, future admission digests, and
+  builder/publication allowlist checks.
+- They must not silently widen `representation_contract_hash`.
+
+Representative examples:
+
+- EP world size,
+- EPLB physical-to-logical placement digest,
+- redundant-expert configuration,
+- backend family or kernel-family choices that affect admitted builder pipeline
+  execution but not the semantic serving tensor contract,
+- family-specific validation of `SAME_BINDING_FAST_PATH`.
+
+Category 3: runtime-ephemeral topology and transport choices.
+
+- These remain execution-time facts only.
+- They must not perturb semantic identity, build identity, or admission truth
+  unless a later design explicitly promotes them.
+
+Representative examples:
+
+- live rank-to-device placement after scheduling,
+- communicator route choice,
+- transient transport reachability or local source selection.
+
+Repository rule:
+
+- semantic identity, build identity, admission truth, and runtime-ephemeral
+  execution facts remain different questions with different authority roots,
+- topology-sensitive serving families may need more admission facts than plain
+  TP-only text families,
+- and this design still does not require broad durable artifact-catalog schema
+  expansion to represent those facts in phase 1.
+
+### 3.4 Semantic-core versus builder-publication digests
 
 Repository rule:
 
@@ -534,6 +755,8 @@ Repository rule:
   normalized transform inputs,
 - `serving_build_digest` is the `0111`-owned digest over builder/publication
   identity fields above the semantic core,
+- rollout-only facts such as `support_level`, allowlist membership, and
+  `fast_path_validated` must not perturb the phase-1 digest,
 - the framework layer supplies semantic declarations and versions,
 - but the framework must not privately define a second canonical semantic hash
   algorithm or a second canonical builder/publication digest.
@@ -548,6 +771,16 @@ In particular:
 - and if a field already participates in `representation_contract_hash`, it must
   not be silently renormalized under a different meaning in
   `serving_build_digest`.
+
+Digest evolution rule:
+
+- if a later phase adds new identity-bearing fields above the semantic core, the
+  repository must widen `serving_build_digest` only with an explicit
+  compatibility plan,
+- that plan must either bump a declared digest version or bump the manifest
+  schema together with dual-read or migration behavior,
+- and the repository must not silently change digest meaning underneath existing
+  runtime preflight or published-lineage consumers.
 
 ## 4. Build execution shapes
 
@@ -572,17 +805,19 @@ Advantages:
 A node-local bootstrap builder remains valid as a migration or bootstrap path:
 
 1. start from source artifact,
-2. create or resolve a serving-layout binding on the local target device,
-3. attach canonical serving tensors or framework views onto that binding before
-   bytes are ready,
-4. fill the binding directly from the source artifact through the resolved
-   semantic transform,
-5. run any admitted builder-side finalize on that same binding-hosted storage,
-6. seal the resulting local current value,
-7. complete `representation_publish` closeout so the same bytes gain durable
-   serving-artifact identity,
-8. keep runtime on the same serving-binding current rather than doing a second
-   model-sized bind or copy on success.
+2. select an admitted realization protocol for the family,
+3. create or resolve a serving-layout binding on the local target device,
+4. either:
+   - attach canonical serving tensors or framework views onto that binding
+     before bytes are ready and realize on the same binding-hosted byte path,
+   - or realize on admitted scratch storage and commit the finalized result into
+     the serving binding or durable serving artifact before runtime handoff,
+5. run any admitted builder-side finalize under TensorCast orchestration,
+6. validate the resulting canonical serving bytes,
+7. seal and complete `representation_publish` closeout,
+8. switch runtime only after a durable serving artifact exists,
+9. keep runtime on the same serving-binding current without a second model-sized
+   bind or copy only when the family has validated the same-binding fast path.
 
 Repository rule:
 
@@ -590,6 +825,8 @@ Repository rule:
 - bootstrap may use a long-lived local binding as the host of the future
   serving representation, but that binding remains binding-plane state until
   closeout succeeds,
+- admitted bootstrap builder paths may differ in realization protocol while
+  still sharing the same semantic build mode and publication lineage trunk,
 - any temporary target publication or local attach helper used during bootstrap
   remains volatile internal state owned by `0103`, not external serving
   lineage,
@@ -612,7 +849,17 @@ The key requirement is not the helper name. The key requirement is that:
 
 ### 4.4 `BINDING_FINALIZE` execution
 
-`BINDING_FINALIZE` should run in a TensorCast-owned orchestration shape:
+`BINDING_FINALIZE` remains the builder mode for families whose finalize changes
+canonical serving bytes, storage identity, or parameter layout under
+TensorCast-owned builder orchestration.
+
+What varies by family is not the semantic mode, but the admitted realization
+protocol.
+
+#### Preferred protocol: `SAME_BINDING_FAST_PATH`
+
+When a family can validate the fast path, `BINDING_FINALIZE` should run in the
+preferred TensorCast-owned same-binding shape:
 
 1. create or resolve binding-managed storage,
 2. derive one serving-layout binding that is already the future canonical
@@ -628,6 +875,21 @@ The key requirement is not the helper name. The key requirement is that:
    registration or assembly promotion,
 9. complete `representation_publish` closeout through `0105`.
 
+#### Admitted bridge protocol: `SCRATCH_THEN_COMMIT`
+
+Some families may still require an admitted bridge protocol:
+
+1. create or resolve the future serving binding,
+2. realize source bytes into builder-local scratch storage or a scratch model
+   host under TensorCast orchestration,
+3. run framework finalize on that scratch host,
+4. validate canonical serving tensor invariants and semantic probes against the
+   finalized bytes,
+5. commit the finalized canonical serving bytes into the serving binding or into
+   a durable serving artifact on the serving-layout target path,
+6. complete `representation_publish` closeout through `0105`,
+7. switch runtime only after the postprocess-complete serving artifact exists.
+
 This is the key compromise that keeps framework intrusion bounded:
 
 - the framework does not have to reimplement TensorCast data movement,
@@ -635,12 +897,15 @@ This is the key compromise that keeps framework intrusion bounded:
 - and representation-changing finalize remains explicit rather than hidden inside
   a runtime reload path.
 
-Normative rule:
+Normative rules:
 
 - `seal_current(...)` alone is never a publication-ready result. It is scratch
   state until a durable serving artifact exists.
-- the success path should avoid creating a second model-sized copy of canonical
-  serving bytes after finalize completes.
+- correctness, typed lineage, and serving-only runtime handoff take precedence
+  over fast-path optimization.
+- the success path should prefer avoiding a second model-sized canonical-byte
+  copy after finalize completes, but that preference must not be written as a
+  universal correctness requirement for every admitted family.
 
 ## 5. Publication handshake and lineage
 
@@ -827,11 +1092,45 @@ Interpretation:
 - `RUNTIME_BIND_SWAP_READY`
   - runtime may consume serving artifacts directly at startup and reload
 
+Repository rule:
+
+- `ServingSupportLevel` is rollout or admission truth, not artifact identity,
+- support-level upgrades must not require rebuilding identical serving bytes,
+- and phase-1 runtime preflight should continue to rely on manifest and digest
+  contracts rather than directly encoding allowlist inventory state.
+
 This keeps framework intrusion proportional:
 
 - most frameworks only need to declare semantics and pass admission,
 - only difficult families need custom builder plugins or `BINDING_FINALIZE`
   implementation work.
+
+### 6.6 Admission versus fast-path validation
+
+This design distinguishes two orthogonal rollout questions.
+
+Question 1: is the family admitted to builder publication and serving-only
+runtime?
+
+- Answered by `ServingSupportLevel`, `BuilderMode`, `FinalizeClass`, semantic
+  validation, and runtime preflight rules.
+
+Question 2: has the preferred same-binding fast path been validated for that
+family?
+
+- Answered by family-specific realization evidence.
+- This is a performance/correctness optimization question above admission, not a
+  replacement for admission.
+
+Repository rule:
+
+- a family may be admitted to `BINDING_FINALIZE` publication or even
+  serving-only runtime before `SAME_BINDING_FAST_PATH` is validated,
+- admission state and fast-path validation state still do not by themselves
+  redefine artifact identity,
+- but documentation and rollout state must say that explicitly rather than
+  implying that every admitted family already satisfies one-attach / one-byte
+  fast-path properties.
 
 # Invariants And Error Model
 
@@ -853,6 +1152,11 @@ This keeps framework intrusion proportional:
   artifact identity, `representation_contract_hash`, and
   `serving_build_digest`,
 - runtime-only finalize preserves canonical serving tensor invariants,
+- rollout-only admission facts such as `support_level` and
+  `fast_path_validated` do not silently perturb artifact identity,
+- realization protocol and topology-sensitive admission facts stay above the
+  semantic core instead of being silently collapsed into
+  `representation_contract_hash`,
 - and steady-state runtime reload must consume serving artifacts rather than
   reinterpreting source artifacts once a family reaches
   `RUNTIME_BIND_SWAP_READY`.
@@ -954,10 +1258,12 @@ Proposed interface names follow repository naming rules.
 | Symbol | Kind | Required style | Result |
 | --- | --- | --- | --- |
 | `ServingBuildIntent` | Python dataclass | `PascalCase` | pass |
+| `ServingAdmissionFacts` | Python dataclass | `PascalCase` | pass |
 | `ServingArtifactManifest` | Python dataclass | `PascalCase` | pass |
 | `FrameworkServingFacts` | Python dataclass | `PascalCase` | pass |
 | `RepresentationPublishContract` | Python dataclass | `PascalCase` | pass |
 | `BuilderMode` | Python enum | `PascalCase` | pass |
+| `RealizationProtocol` | Python enum | `PascalCase` | pass |
 | `FinalizeClass` | Python enum | `PascalCase` | pass |
 | `ServingSupportLevel` | Python enum | `PascalCase` | pass |
 | `representation_contract_hash` | field | `snake_case` | pass |
@@ -989,19 +1295,21 @@ Proposed interface names follow repository naming rules.
 - `BINDING_FINALIZE` can become a dumping ground if admission gates are weak,
 - bootstrap builder paths may linger too long if steady-state serving bind or
   swap is not pushed to completion,
-- and node-local builder paths may accidentally grow a second model-sized serving
-  copy if binding-hosted realization and closeout are not kept on the same byte
-  path.
+- node-local builder paths may accidentally grow a second model-sized serving
+  copy if `SAME_BINDING_FAST_PATH` is claimed without family-specific evidence,
+- and topology-sensitive builder/publication facts may drift if they are pushed
+  into private integration state instead of TensorCast-owned admission fields.
 
 ## Mitigations
 
 - require explicit `FinalizeClass` and admission levels,
+- require realization protocol to be explicit for bootstrap-style builder paths,
 - make TensorCast own manifest schema, semantic-core identity import, and
   builder/publication identity semantics,
 - keep `BINDING_FINALIZE` behind semantic validation and explicit publication
   gates,
-- keep binding-hosted bootstrap paths on one attach / one canonical-byte path
-  through closeout,
+- treat same-binding / one-byte bootstrap as a preferred fast path that must be
+  validated rather than presumed,
 - and keep runtime steady-state contracts clear:
   serving artifact bind or swap is the target, and bootstrap remains only a
   builder-time realization path.
@@ -1031,16 +1339,25 @@ This design is accepted only when all of the following are true:
    generic closeout fields or integration-private JSON,
 6. the shared framework layer only needs to provide semantic facts and does not
    require frameworks to reimplement TensorCast materialization plumbing,
-7. builder mode and finalize classification are explicit and participate in
-   admission,
+7. builder mode, finalize classification, and realization protocol are explicit
+   and participate in admission or rollout description at the right layer,
 8. runtime-only finalize safety is validated through canonical serving tensor
    invariants,
 9. binding-hosted bootstrap realization and steady-state serving bind or swap
    are documented as different operational modes with different correctness
    guarantees,
-10. successful node-local bootstrap may leave runtime attached to the same
-    binding-hosted bytes after closeout rather than forcing a second
-    model-sized bind or copy.
+10. successful node-local bootstrap may either:
+    - leave runtime attached to the same binding-hosted bytes on validated fast
+      paths,
+    - or complete an admitted scratch-to-commit handoff before runtime treats
+      the serving artifact as live,
+11. topology-sensitive builder/publication admission facts stay distinct from
+    semantic-core transform identity,
+12. repo-owned admission or rollout facts stay distinct from both semantic
+    identity and phase-1 build identity,
+13. any widening of phase-1 `serving_build_digest` semantics comes with an
+    explicit compatibility or versioning plan rather than a silent digest
+    rewrite.
 
 # References
 

@@ -251,6 +251,7 @@ _ASSEMBLY_PP_PIECE_COVERAGE_CONTRACT = "pp_structural_view"
 _ASSEMBLY_EP_PIECE_COVERAGE_CONTRACT = "ep_structural_view"
 _ASSEMBLY_CANONICAL_COVERAGE_CONTRACT = "canonical_full"
 SERVING_MANIFEST_TENSOR_NAME = "__tensorcast_meta__.manifest_json"
+SERVING_BUILD_DIGEST_VERSION = "tensorcast.serving_build_digest.v1"
 
 
 def _canonical_json_bytes(payload: object) -> bytes:
@@ -296,6 +297,11 @@ class BuilderMode(str, Enum):
     BINDING_FINALIZE = "binding_finalize"
 
 
+class RealizationProtocol(str, Enum):
+    SAME_BINDING_FAST_PATH = "same_binding_fast_path"
+    SCRATCH_THEN_COMMIT = "scratch_then_commit"
+
+
 class FinalizeClass(str, Enum):
     RUNTIME_ONLY = "runtime_only"
     REPRESENTATION_CHANGING = "representation_changing"
@@ -316,6 +322,62 @@ _PUBLICATION_BUILDER_MODE_TO_PROTO: dict[BuilderMode, int] = {
 _PUBLICATION_BUILDER_MODE_FROM_PROTO: dict[int, BuilderMode] = {
     int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM): BuilderMode.PURE_TRANSFORM,
     int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE): BuilderMode.BINDING_FINALIZE,
+}
+_PUBLICATION_REALIZATION_PROTOCOL_TO_PROTO: dict[RealizationProtocol, int] = {
+    RealizationProtocol.SAME_BINDING_FAST_PATH: int(
+        publication_pb2.REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH
+    ),
+    RealizationProtocol.SCRATCH_THEN_COMMIT: int(
+        publication_pb2.REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT
+    ),
+}
+_PUBLICATION_REALIZATION_PROTOCOL_FROM_PROTO: dict[int, RealizationProtocol] = {
+    int(publication_pb2.REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH): (
+        RealizationProtocol.SAME_BINDING_FAST_PATH
+    ),
+    int(publication_pb2.REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT): (
+        RealizationProtocol.SCRATCH_THEN_COMMIT
+    ),
+}
+_PUBLICATION_FINALIZE_CLASS_TO_PROTO: dict[FinalizeClass, int] = {
+    FinalizeClass.RUNTIME_ONLY: int(publication_pb2.FINALIZE_CLASS_RUNTIME_ONLY),
+    FinalizeClass.REPRESENTATION_CHANGING: int(
+        publication_pb2.FINALIZE_CLASS_REPRESENTATION_CHANGING
+    ),
+    FinalizeClass.UNKNOWN_BLOCKED: int(publication_pb2.FINALIZE_CLASS_UNKNOWN_BLOCKED),
+}
+_PUBLICATION_FINALIZE_CLASS_FROM_PROTO: dict[int, FinalizeClass] = {
+    int(publication_pb2.FINALIZE_CLASS_RUNTIME_ONLY): FinalizeClass.RUNTIME_ONLY,
+    int(publication_pb2.FINALIZE_CLASS_REPRESENTATION_CHANGING): (
+        FinalizeClass.REPRESENTATION_CHANGING
+    ),
+    int(publication_pb2.FINALIZE_CLASS_UNKNOWN_BLOCKED): (
+        FinalizeClass.UNKNOWN_BLOCKED
+    ),
+}
+_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO: dict[ServingSupportLevel, int] = {
+    ServingSupportLevel.BLOCKED: int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED),
+    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: int(
+        publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY
+    ),
+    ServingSupportLevel.BUILDER_PUBLICATION_READY: int(
+        publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY
+    ),
+    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: int(
+        publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY
+    ),
+}
+_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO: dict[int, ServingSupportLevel] = {
+    int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED): ServingSupportLevel.BLOCKED,
+    int(publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY): (
+        ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY
+    ),
+    int(publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY): (
+        ServingSupportLevel.BUILDER_PUBLICATION_READY
+    ),
+    int(publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY): (
+        ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+    ),
 }
 _PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[AssemblyTargetKind, int] = {
     "structural_view": int(publication_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW),
@@ -699,6 +761,10 @@ class ServingBuildIntent(BaseModel):
         }
         return _hash_payload_to_multihash(payload)
 
+    @staticmethod
+    def serving_build_digest_version() -> str:
+        return SERVING_BUILD_DIGEST_VERSION
+
     def to_publication_proto(self) -> publication_pb2.ServingBuildIntent:
         proto = publication_pb2.ServingBuildIntent(
             builder_mode=_PUBLICATION_BUILDER_MODE_TO_PROTO[self.builder_mode],
@@ -747,6 +813,7 @@ class PureTransformPublicationSpec(BaseModel):
     requirements: AssemblyRequirementSetRef | None = None
     readiness_policy: AssemblyReadinessPolicy | None = None
     structural_view_ids: tuple[str, ...] = ()
+    admission_facts: ServingAdmissionFacts | None = None
 
     @model_validator(mode="after")
     def _validate_publication_spec(self) -> "PureTransformPublicationSpec":
@@ -758,6 +825,10 @@ class PureTransformPublicationSpec(BaseModel):
             raise ValueError("contract_family must be one of: pp, ep, canonical_full")
         if self.serving_manifest_ref is not None:
             parse_serving_manifest_ref(self.serving_manifest_ref)
+        if self.admission_facts is not None:
+            self.admission_facts.validate_for_representation_publish(
+                builder_mode=self.build_intent.builder_mode
+            )
         return self
 
     def to_proto(self) -> publication_pb2.PureTransformPublicationSpec:
@@ -782,6 +853,8 @@ class PureTransformPublicationSpec(BaseModel):
                 self.readiness_policy.to_publication_proto()
             )
         proto.structural_view_ids.extend(str(item) for item in self.structural_view_ids)
+        if self.admission_facts is not None:
+            proto.admission_facts.CopyFrom(self.admission_facts.to_publication_proto())
         return proto
 
     @classmethod
@@ -808,6 +881,133 @@ class PureTransformPublicationSpec(BaseModel):
                 else None
             ),
             structural_view_ids=tuple(str(item) for item in proto.structural_view_ids),
+            admission_facts=(
+                ServingAdmissionFacts.from_publication_proto(proto.admission_facts)
+                if proto.HasField("admission_facts")
+                else None
+            ),
+        )
+
+
+class ServingAdmissionFacts(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    finalize_class: FinalizeClass
+    realization_protocol: RealizationProtocol
+    support_level: ServingSupportLevel
+    topology_admission_digest: str | None = None
+    fast_path_validated: bool = False
+
+    @field_validator("topology_admission_digest", mode="before")
+    @classmethod
+    def _empty_digest_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _validate_admission_facts(self) -> "ServingAdmissionFacts":
+        if (
+            self.realization_protocol == RealizationProtocol.SAME_BINDING_FAST_PATH
+            and not self.fast_path_validated
+        ):
+            raise ValueError("same_binding_fast_path requires fast_path_validated=True")
+        return self
+
+    def validate_for_representation_publish(self, *, builder_mode: BuilderMode) -> None:
+        if self.finalize_class == FinalizeClass.UNKNOWN_BLOCKED:
+            raise ValueError(
+                "representation publish requires a non-blocked finalize_class"
+            )
+        if self.support_level not in {
+            ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+        }:
+            raise ValueError(
+                "representation publish requires support_level to admit builder publication"
+            )
+        if (
+            builder_mode == BuilderMode.PURE_TRANSFORM
+            and self.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
+        ):
+            raise ValueError(
+                "PURE_TRANSFORM publication cannot use finalize_class=REPRESENTATION_CHANGING"
+            )
+        if (
+            builder_mode == BuilderMode.BINDING_FINALIZE
+            and self.finalize_class != FinalizeClass.REPRESENTATION_CHANGING
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE publication requires finalize_class=REPRESENTATION_CHANGING"
+            )
+
+    def admits_builder_publication(self) -> bool:
+        return self.support_level in {
+            ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+        }
+
+    def admits_runtime_bind_swap(self) -> bool:
+        return self.support_level == ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+
+    def require_runtime_bind_swap_ready(self) -> None:
+        if not self.admits_runtime_bind_swap():
+            raise ValueError(
+                "serving runtime requires support_level=RUNTIME_BIND_SWAP_READY"
+            )
+
+    def require_serving_key_activation_ready(self) -> None:
+        if not self.admits_runtime_bind_swap():
+            raise ValueError(
+                "serving_version_key activation requires support_level=RUNTIME_BIND_SWAP_READY"
+            )
+
+    def to_publication_proto(self) -> publication_pb2.ServingAdmissionFacts:
+        proto = publication_pb2.ServingAdmissionFacts(
+            finalize_class=_PUBLICATION_FINALIZE_CLASS_TO_PROTO[self.finalize_class],
+            realization_protocol=_PUBLICATION_REALIZATION_PROTOCOL_TO_PROTO[
+                self.realization_protocol
+            ],
+            support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO[
+                self.support_level
+            ],
+            fast_path_validated=bool(self.fast_path_validated),
+        )
+        if self.topology_admission_digest is not None:
+            proto.topology_admission_digest = str(self.topology_admission_digest)
+        return proto
+
+    @classmethod
+    def from_publication_proto(
+        cls,
+        proto: publication_pb2.ServingAdmissionFacts,
+    ) -> "ServingAdmissionFacts":
+        if int(proto.finalize_class) == int(publication_pb2.FINALIZE_CLASS_UNSPECIFIED):
+            raise ValueError("ServingAdmissionFacts.finalize_class must be specified")
+        if int(proto.realization_protocol) == int(
+            publication_pb2.REALIZATION_PROTOCOL_UNSPECIFIED
+        ):
+            raise ValueError(
+                "ServingAdmissionFacts.realization_protocol must be specified"
+            )
+        if int(proto.support_level) == int(
+            publication_pb2.SERVING_SUPPORT_LEVEL_UNSPECIFIED
+        ):
+            raise ValueError("ServingAdmissionFacts.support_level must be specified")
+        return cls(
+            finalize_class=_PUBLICATION_FINALIZE_CLASS_FROM_PROTO[
+                int(proto.finalize_class)
+            ],
+            realization_protocol=_PUBLICATION_REALIZATION_PROTOCOL_FROM_PROTO[
+                int(proto.realization_protocol)
+            ],
+            support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO[
+                int(proto.support_level)
+            ],
+            topology_admission_digest=(
+                str(proto.topology_admission_digest or "") or None
+            ),
+            fast_path_validated=bool(proto.fast_path_validated),
         )
 
 
@@ -821,6 +1021,7 @@ class ServingArtifactManifest(BaseModel):
     serving_abi_version: str
     representation_contract_hash: str
     serving_build_digest: str
+    serving_build_digest_version: str = SERVING_BUILD_DIGEST_VERSION
     tensor_schema_hash: str
     canonical_tensor_count: int
     serving_manifest_ref: str = Field(default_factory=build_serving_manifest_ref)
@@ -845,6 +1046,8 @@ class ServingArtifactManifest(BaseModel):
             raise ValueError("representation_contract_hash must not be empty")
         if not self.serving_build_digest:
             raise ValueError("serving_build_digest must not be empty")
+        if not self.serving_build_digest_version:
+            raise ValueError("serving_build_digest_version must not be empty")
         if not self.tensor_schema_hash:
             raise ValueError("tensor_schema_hash must not be empty")
         if self.canonical_tensor_count < 0:
@@ -878,6 +1081,7 @@ class ServingArtifactManifest(BaseModel):
             serving_abi_version=intent.serving_abi_version,
             representation_contract_hash=resolved_representation_contract_hash,
             serving_build_digest=intent.compute_serving_build_digest(),
+            serving_build_digest_version=intent.serving_build_digest_version(),
             tensor_schema_hash=str(tensor_schema_hash),
             canonical_tensor_count=int(canonical_tensor_count),
             serving_manifest_ref=(
@@ -970,43 +1174,190 @@ class ServingRuntimePolicy(BaseModel):
         )
 
 
+class BindingValueRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    binding_id: str
+    binding_layout_id: str
+    binding_value_id: str
+    seal_generation: int
+
+    @model_validator(mode="after")
+    def _validate_ref(self) -> "BindingValueRef":
+        if not self.binding_id:
+            raise ValueError("binding_id must not be empty")
+        if not self.binding_layout_id:
+            raise ValueError("binding_layout_id must not be empty")
+        if not self.binding_value_id:
+            raise ValueError("binding_value_id must not be empty")
+        if int(self.seal_generation) <= 0:
+            raise ValueError("seal_generation must be positive")
+        return self
+
+    def to_proto(self) -> publication_pb2.BindingValueRef:
+        return publication_pb2.BindingValueRef(
+            binding_id=str(self.binding_id),
+            binding_layout_id=str(self.binding_layout_id),
+            binding_value_id=str(self.binding_value_id),
+            seal_generation=int(self.seal_generation),
+        )
+
+    def to_store_proto(self) -> publication_pb2.BindingValueRef:
+        return publication_pb2.BindingValueRef(
+            binding_id=str(self.binding_id),
+            binding_layout_id=str(self.binding_layout_id),
+            binding_value_id=str(self.binding_value_id),
+            seal_generation=int(self.seal_generation),
+        )
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: publication_pb2.BindingValueRef | store_daemon_pb2.BindingValueRef,
+    ) -> "BindingValueRef":
+        return cls(
+            binding_id=str(proto.binding_id),
+            binding_layout_id=str(proto.binding_layout_id),
+            binding_value_id=str(proto.binding_value_id),
+            seal_generation=int(proto.seal_generation),
+        )
+
+
+class ServingPublicationSubject(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    serving_artifact_id: str | None = None
+    binding_value_ref: BindingValueRef | None = None
+
+    @model_validator(mode="after")
+    def _validate_subject(self) -> "ServingPublicationSubject":
+        artifact_id = self.serving_artifact_id
+        binding_value_ref = self.binding_value_ref
+        if artifact_id is not None and not artifact_id:
+            raise ValueError("serving_artifact_id must not be empty")
+        if (artifact_id is None) == (binding_value_ref is None):
+            raise ValueError(
+                "ServingPublicationSubject requires exactly one of serving_artifact_id or binding_value_ref"
+            )
+        return self
+
+    @property
+    def is_artifact_subject(self) -> bool:
+        return self.serving_artifact_id is not None
+
+    @property
+    def is_binding_subject(self) -> bool:
+        return self.binding_value_ref is not None
+
+    def require_serving_artifact_id(self) -> str:
+        if self.serving_artifact_id is None:
+            raise ValueError(
+                "serving publication subject does not yet resolve to a serving_artifact_id"
+            )
+        return self.serving_artifact_id
+
+    def require_binding_value_ref(self) -> BindingValueRef:
+        if self.binding_value_ref is None:
+            raise ValueError(
+                "serving publication subject does not carry a binding_value_ref"
+            )
+        return self.binding_value_ref
+
+    def to_proto(self) -> publication_pb2.ServingPublicationSubject:
+        proto = publication_pb2.ServingPublicationSubject()
+        if self.serving_artifact_id is not None:
+            proto.serving_artifact_id = str(self.serving_artifact_id)
+        elif self.binding_value_ref is not None:
+            proto.binding_value.CopyFrom(self.binding_value_ref.to_proto())
+        return proto
+
+    def to_store_proto(self) -> publication_pb2.ServingPublicationSubject:
+        proto = publication_pb2.ServingPublicationSubject()
+        if self.serving_artifact_id is not None:
+            proto.serving_artifact_id = str(self.serving_artifact_id)
+        elif self.binding_value_ref is not None:
+            proto.binding_value.CopyFrom(self.binding_value_ref.to_store_proto())
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: publication_pb2.ServingPublicationSubject
+        | publication_pb2.ServingPublicationSubject,
+    ) -> "ServingPublicationSubject":
+        ref_case = proto.WhichOneof("ref")
+        if ref_case == "serving_artifact_id":
+            return cls(serving_artifact_id=str(proto.serving_artifact_id))
+        if ref_case == "binding_value":
+            return cls(
+                binding_value_ref=BindingValueRef.from_proto(proto.binding_value)
+            )
+        raise ValueError("ServingPublicationSubject requires exactly one ref")
+
+
 class RepresentationPublishContract(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    serving_artifact_id: str
+    subject: ServingPublicationSubject
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
+    serving_build_digest_version: str | None = None
 
     @model_validator(mode="after")
     def _validate_contract(self) -> "RepresentationPublishContract":
-        if not self.serving_artifact_id:
-            raise ValueError("serving_artifact_id must not be empty")
         parse_serving_manifest_ref(self.serving_manifest_ref)
         if not self.representation_contract_hash:
             raise ValueError("representation_contract_hash must not be empty")
         if not self.serving_build_digest:
             raise ValueError("serving_build_digest must not be empty")
+        if (
+            self.serving_build_digest_version is not None
+            and not self.serving_build_digest_version
+        ):
+            raise ValueError("serving_build_digest_version must not be empty")
         return self
 
+    @property
+    def serving_artifact_id(self) -> str | None:
+        return self.subject.serving_artifact_id
+
+    @property
+    def binding_value_ref(self) -> BindingValueRef | None:
+        return self.subject.binding_value_ref
+
+    def require_serving_artifact_id(self) -> str:
+        return self.subject.require_serving_artifact_id()
+
     def to_proto(self) -> store_daemon_pb2.RepresentationPublishContract:
-        return store_daemon_pb2.RepresentationPublishContract(
-            serving_artifact_id=str(self.serving_artifact_id),
+        proto = store_daemon_pb2.RepresentationPublishContract(
             serving_manifest_ref=str(self.serving_manifest_ref),
             representation_contract_hash=str(self.representation_contract_hash),
             serving_build_digest=str(self.serving_build_digest),
         )
+        proto.subject.CopyFrom(self.subject.to_store_proto())
+        if self.serving_build_digest_version is not None:
+            proto.serving_build_digest_version = str(self.serving_build_digest_version)
+        return proto
 
     @classmethod
     def from_proto(
         cls,
         proto: store_daemon_pb2.RepresentationPublishContract,
     ) -> "RepresentationPublishContract":
+        if not proto.HasField("subject"):
+            raise ValueError(
+                "RepresentationPublishContract requires a serving publication subject"
+            )
+        subject = ServingPublicationSubject.from_proto(proto.subject)
         return cls(
-            serving_artifact_id=str(proto.serving_artifact_id),
+            subject=subject,
             serving_manifest_ref=str(proto.serving_manifest_ref),
             representation_contract_hash=str(proto.representation_contract_hash),
             serving_build_digest=str(proto.serving_build_digest),
+            serving_build_digest_version=(
+                str(proto.serving_build_digest_version or "") or None
+            ),
         )
 
     def validate_against_manifest(
@@ -1025,12 +1376,25 @@ class RepresentationPublishContract(BaseModel):
             raise ValueError(
                 "RepresentationPublishContract.serving_build_digest does not match the serving manifest"
             )
+        if (
+            self.serving_build_digest_version is not None
+            and manifest.serving_build_digest_version
+            != self.serving_build_digest_version
+        ):
+            raise ValueError(
+                "RepresentationPublishContract.serving_build_digest_version does not match the serving manifest"
+            )
 
     def to_runtime_policy(
         self,
         *,
         require_manifest: bool = True,
     ) -> ServingRuntimePolicy:
+        serving_artifact_id = self.serving_artifact_id
+        if serving_artifact_id is None:
+            raise ValueError(
+                "binding publication subjects do not resolve to a serving runtime policy until closeout promotion completes"
+            )
         return ServingRuntimePolicy(
             require_manifest=bool(require_manifest),
             serving_manifest_ref=str(self.serving_manifest_ref),
@@ -1041,23 +1405,34 @@ class RepresentationPublishContract(BaseModel):
         )
 
     def to_publication_proto(self) -> publication_pb2.RepresentationPublishContract:
-        return publication_pb2.RepresentationPublishContract(
-            serving_artifact_id=str(self.serving_artifact_id),
+        proto = publication_pb2.RepresentationPublishContract(
             serving_manifest_ref=str(self.serving_manifest_ref),
             representation_contract_hash=str(self.representation_contract_hash),
             serving_build_digest=str(self.serving_build_digest),
         )
+        proto.subject.CopyFrom(self.subject.to_proto())
+        if self.serving_build_digest_version is not None:
+            proto.serving_build_digest_version = str(self.serving_build_digest_version)
+        return proto
 
     @classmethod
     def from_publication_proto(
         cls,
         proto: publication_pb2.RepresentationPublishContract,
     ) -> "RepresentationPublishContract":
+        if not proto.HasField("subject"):
+            raise ValueError(
+                "RepresentationPublishContract requires a serving publication subject"
+            )
+        subject = ServingPublicationSubject.from_proto(proto.subject)
         return cls(
-            serving_artifact_id=str(proto.serving_artifact_id),
+            subject=subject,
             serving_manifest_ref=str(proto.serving_manifest_ref),
             representation_contract_hash=str(proto.representation_contract_hash),
             serving_build_digest=str(proto.serving_build_digest),
+            serving_build_digest_version=(
+                str(proto.serving_build_digest_version or "") or None
+            ),
         )
 
 
@@ -1098,13 +1473,10 @@ class AssemblyCloseoutContract(BaseModel):
                 raise ValueError(
                     "representation_publish closeout contracts require representation_publish_contract"
                 )
-            if (
-                self.serving_artifact_id is not None
-                and self.serving_artifact_id
-                != self.representation_publish_contract.serving_artifact_id
-            ):
+            if self.serving_artifact_id is not None:
                 raise ValueError(
-                    "serving_artifact_id must match representation_publish_contract.serving_artifact_id"
+                    "representation_publish closeout contracts must not set serving_artifact_id; "
+                    "use representation_publish_contract.subject"
                 )
             if (
                 self.serving_manifest_ref is not None
@@ -1158,7 +1530,7 @@ class AssemblyCloseoutContract(BaseModel):
             serving_artifact_id=(
                 str(proto.serving_artifact_id or "") or None
                 if not representation_publish_contract
-                else representation_publish_contract.serving_artifact_id
+                else None
             ),
             serving_manifest_ref=(
                 str(proto.serving_manifest_ref or "") or None
@@ -1172,10 +1544,11 @@ class AssemblyCloseoutContract(BaseModel):
 class RepresentationPublishSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    serving_artifact_id: str
+    serving_artifact_id: str | None = None
     serving_manifest_ref: str
     serving_manifest: ServingArtifactManifest
     serving_manifest_bytes: bytes
+    canonical_index: object | None = None
     representation_publish_contract: RepresentationPublishContract
     closeout_contract: AssemblyCloseoutContract
     source_artifact_ref: str | None = None
@@ -1184,11 +1557,10 @@ class RepresentationPublishSpec(BaseModel):
     layout_id: str | None = None
     requirements: AssemblyRequirementSetRef | None = None
     readiness_policy: AssemblyReadinessPolicy | None = None
+    admission_facts: ServingAdmissionFacts | None = None
 
     @model_validator(mode="after")
     def _validate_representation_publish_spec(self) -> "RepresentationPublishSpec":
-        if not self.serving_artifact_id:
-            raise ValueError("serving_artifact_id must not be empty")
         parse_serving_manifest_ref(self.serving_manifest_ref)
         if self.contract_family is not None and self.contract_family not in {
             "pp",
@@ -1217,12 +1589,17 @@ class RepresentationPublishSpec(BaseModel):
             raise ValueError(
                 "serving_manifest_ref must match representation_publish_contract.serving_manifest_ref"
             )
-        if (
-            self.serving_artifact_id
-            != self.representation_publish_contract.serving_artifact_id
-        ):
+        subject_artifact_id = self.representation_publish_contract.serving_artifact_id
+        if subject_artifact_id is not None and self.serving_artifact_id not in {
+            None,
+            subject_artifact_id,
+        }:
             raise ValueError(
                 "serving_artifact_id must match representation_publish_contract.serving_artifact_id"
+            )
+        if subject_artifact_id is None and self.serving_artifact_id is not None:
+            raise ValueError(
+                "binding-native representation publish specs must not set serving_artifact_id before closeout promotion"
             )
         if self.closeout_contract.kind != "representation_publish":
             raise ValueError(
@@ -1235,11 +1612,28 @@ class RepresentationPublishSpec(BaseModel):
             raise ValueError(
                 "RepresentationPublishSpec.closeout_contract must carry the same representation_publish_contract"
             )
+        if self.admission_facts is not None:
+            self.admission_facts.validate_for_representation_publish(
+                builder_mode=self.serving_manifest.builder_mode
+            )
+            if self.closeout_contract.serving_version_key is not None:
+                self.admission_facts.require_serving_key_activation_ready()
         return self
 
     @property
     def manifest_tensor_name(self) -> str:
         return parse_serving_manifest_ref(self.serving_manifest_ref)
+
+    def require_serving_runtime_policy(
+        self,
+        *,
+        require_manifest: bool = True,
+    ) -> ServingRuntimePolicy:
+        if self.admission_facts is not None:
+            self.admission_facts.require_runtime_bind_swap_ready()
+        return self.representation_publish_contract.to_runtime_policy(
+            require_manifest=require_manifest
+        )
 
     def to_proto(self) -> publication_pb2.RepresentationPublishSpec:
         proto = publication_pb2.RepresentationPublishSpec(
@@ -1265,6 +1659,8 @@ class RepresentationPublishSpec(BaseModel):
         if self.contract_family is not None:
             proto.contract_family = str(self.contract_family)
         proto.structural_view_ids.extend(str(item) for item in self.structural_view_ids)
+        if self.admission_facts is not None:
+            proto.admission_facts.CopyFrom(self.admission_facts.to_publication_proto())
         return proto
 
     @classmethod
@@ -1281,7 +1677,6 @@ class RepresentationPublishSpec(BaseModel):
             kind="representation_publish",
             source_version_key=str(proto.source_version_key or "") or None,
             serving_version_key=str(proto.serving_version_key or "") or None,
-            serving_artifact_id=representation_publish_contract.serving_artifact_id,
             serving_manifest_ref=representation_publish_contract.serving_manifest_ref,
             representation_publish_contract=representation_publish_contract,
         )
@@ -1308,6 +1703,11 @@ class RepresentationPublishSpec(BaseModel):
                 if proto.HasField("readiness_policy")
                 else None
             ),
+            admission_facts=(
+                ServingAdmissionFacts.from_publication_proto(proto.admission_facts)
+                if proto.HasField("admission_facts")
+                else None
+            ),
         )
 
     def with_attempt_inputs(
@@ -1331,6 +1731,52 @@ class RepresentationPublishSpec(BaseModel):
                     else readiness_policy
                 ),
             }
+        )
+
+
+class PublicDiskSourceHandle(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    canonical_index_bytes: bytes
+    artifact_id: str | None = None
+    generation: int = 0
+    verify_checksums: bool = True
+
+    @model_validator(mode="after")
+    def _validate_handle(self) -> "PublicDiskSourceHandle":
+        if not self.path:
+            raise ValueError("path must not be empty")
+        if not self.canonical_index_bytes:
+            raise ValueError("canonical_index_bytes must not be empty")
+        if self.artifact_id is not None and not self.artifact_id:
+            raise ValueError("artifact_id must not be empty")
+        if int(self.generation) < 0:
+            raise ValueError("generation must be non-negative")
+        return self
+
+    def to_proto(self) -> store_daemon_pb2.PublicDiskSourceHandle:
+        proto = store_daemon_pb2.PublicDiskSourceHandle(
+            path=str(self.path),
+            canonical_index_bytes=bytes(self.canonical_index_bytes),
+            generation=int(self.generation),
+            verify_checksums=bool(self.verify_checksums),
+        )
+        if self.artifact_id is not None:
+            proto.artifact_id = str(self.artifact_id)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.PublicDiskSourceHandle,
+    ) -> "PublicDiskSourceHandle":
+        return cls(
+            path=str(proto.path),
+            canonical_index_bytes=bytes(proto.canonical_index_bytes),
+            artifact_id=str(proto.artifact_id or "") or None,
+            generation=int(proto.generation),
+            verify_checksums=bool(proto.verify_checksums),
         )
 
 
@@ -1413,6 +1859,7 @@ ServingRuntimePolicyInput = Union[
     ServingRuntimePolicy,
     ServingArtifactManifest,
     RepresentationPublishContract,
+    RepresentationPublishSpec,
     PublishedModelVersion,
 ]
 
@@ -1428,11 +1875,13 @@ def coerce_serving_runtime_policy(
         return value.to_runtime_policy()
     if isinstance(value, RepresentationPublishContract):
         return value.to_runtime_policy()
+    if isinstance(value, RepresentationPublishSpec):
+        return value.require_serving_runtime_policy()
     if isinstance(value, PublishedModelVersion):
         return value.require_serving_runtime_policy()
     raise TypeError(
         "serving runtime policy requires ServingRuntimePolicy, ServingArtifactManifest, "
-        "RepresentationPublishContract, or PublishedModelVersion"
+        "RepresentationPublishContract, RepresentationPublishSpec, or PublishedModelVersion"
     )
 
 
@@ -1488,7 +1937,7 @@ class LeasePlan(PlanBase):
 
 class StableDramPlan(PlanBase):
     kind: Literal["dram_stable"] = "dram_stable"
-    stage_on_gpu: bool = True
+    stage_on_gpu: bool = False
     release_gpu_on_commit: bool = True
 
     def apply_to_begin_request(
@@ -1638,7 +2087,9 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "BindingValueRef",
     "BuilderMode",
+    "ServingPublicationSubject",
     "AssemblyCloseoutContract",
     "AssemblyAttemptRef",
     "AssemblyContractFamily",
@@ -1652,12 +2103,16 @@ __all__ = [
     "CommitResult",
     "PublishedModelVersion",
     "PureTransformPublicationSpec",
+    "RealizationProtocol",
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
+    "PublicDiskSourceHandle",
+    "ServingAdmissionFacts",
     "ViewRegistrationKind",
     "SealAssemblyResult",
     "ServingArtifactManifest",
     "ServingBuildIntent",
+    "SERVING_BUILD_DIGEST_VERSION",
     "ServingRuntimePolicy",
     "ServingRuntimePolicyInput",
     "ServingSupportLevel",

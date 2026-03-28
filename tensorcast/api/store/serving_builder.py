@@ -25,12 +25,18 @@ from tensorcast.types import (
     AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    BindingValueRef,
     BuilderMode,
+    FinalizeClass,
     PureTransformPublicationSpec,
+    RealizationProtocol,
     RepresentationPublishContract,
     RepresentationPublishSpec,
+    ServingAdmissionFacts,
     ServingArtifactManifest,
     ServingBuildIntent,
+    ServingPublicationSubject,
+    ServingSupportLevel,
     build_serving_manifest_ref,
 )
 
@@ -52,6 +58,14 @@ class PreparedServingRegistration:
     serving_manifest_bytes: bytes
     representation_contract_hash: str
     canonical_index: CanonicalIndex
+
+
+@dataclass(frozen=True, slots=True)
+class ServingManifestCarrier:
+    serving_manifest_ref: str
+    manifest_tensor_name: str
+    serving_manifest: ServingArtifactManifest
+    serving_manifest_bytes: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +111,56 @@ def _pad_manifest_carrier_bytes(payload: bytes) -> bytes:
     # JSON permits trailing whitespace, so padding here keeps the manifest
     # parseable while avoiding PAD gaps in aligned stable registration layouts.
     return payload + (b" " * (align - remainder))
+
+
+def prepare_serving_manifest_carrier(
+    *,
+    build_intent: ServingBuildIntent,
+    canonical_index: CanonicalIndex,
+    representation_contract_hash: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+) -> ServingManifestCarrier:
+    normalized_logical_topology = _normalize_logical_topology_payload(
+        logical_topology_json
+    )
+    resolved_manifest_ref, manifest_tensor_name = _resolve_manifest_tensor_name(
+        serving_manifest_ref,
+        helper_name="serving manifest carrier",
+    )
+    resolved_representation_contract_hash = (
+        _resolve_explicit_representation_contract_hash(
+            build_intent=build_intent,
+            representation_contract_hash=representation_contract_hash,
+            helper_name="serving manifest carrier",
+        )
+    )
+    manifest = ServingArtifactManifest.from_build_intent(
+        intent=build_intent,
+        representation_contract_hash=resolved_representation_contract_hash,
+        tensor_schema_hash=compute_serving_tensor_schema_hash(
+            canonical_index,
+            manifest_tensor_name=manifest_tensor_name,
+        ),
+        canonical_tensor_count=count_canonical_serving_tensors(
+            canonical_index,
+            manifest_tensor_name=manifest_tensor_name,
+        ),
+        serving_manifest_ref=resolved_manifest_ref,
+        logical_topology_json=(
+            json.dumps(
+                normalized_logical_topology, sort_keys=True, separators=(",", ":")
+            )
+            if normalized_logical_topology is not None
+            else None
+        ),
+    )
+    return ServingManifestCarrier(
+        serving_manifest_ref=resolved_manifest_ref,
+        manifest_tensor_name=manifest_tensor_name,
+        serving_manifest=manifest,
+        serving_manifest_bytes=_pad_manifest_carrier_bytes(manifest.to_bytes()),
+    )
 
 
 def _multibase_multihash_sha256(digest: bytes) -> str:
@@ -148,6 +212,22 @@ def _normalize_contract_family(
             retryable=False,
         )
     return normalized
+
+
+def _coerce_serving_support_level(
+    value: ServingSupportLevel | str,
+) -> ServingSupportLevel:
+    if isinstance(value, ServingSupportLevel):
+        return value
+    return ServingSupportLevel(str(value).strip())
+
+
+def _coerce_realization_protocol(
+    value: RealizationProtocol | str,
+) -> RealizationProtocol:
+    if isinstance(value, RealizationProtocol):
+        return value
+    return RealizationProtocol(str(value).strip())
 
 
 def _resolve_manifest_tensor_name(
@@ -299,6 +379,30 @@ def _artifact_id_from_input(
         "serving_artifact must be a RegisteredArtifact, ArtifactDescriptor, store descriptor, or artifact_id string",
         status_code="INVALID_ARGUMENT",
         retryable=False,
+    )
+
+
+def _resolve_publication_subject(
+    *,
+    serving_artifact: RegisteredArtifact
+    | ArtifactDescriptor
+    | "StoreArtifactDescriptor"
+    | str
+    | None = None,
+    publication_subject: ServingPublicationSubject | BindingValueRef | None = None,
+) -> ServingPublicationSubject:
+    if (serving_artifact is None) == (publication_subject is None):
+        raise ArtifactError(
+            "publication bundle requires exactly one of serving_artifact or publication_subject",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    if publication_subject is not None:
+        if isinstance(publication_subject, BindingValueRef):
+            return ServingPublicationSubject(binding_value_ref=publication_subject)
+        return publication_subject
+    return ServingPublicationSubject(
+        serving_artifact_id=_artifact_id_from_input(serving_artifact)
     )
 
 
@@ -640,21 +744,12 @@ def prepare_pure_transform_serving_registration(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    normalized_logical_topology = _normalize_logical_topology_payload(
-        logical_topology_json
-    )
+    prepared_tensors = {str(name): tensor for name, tensor in dict(tensors).items()}
     resolved_manifest_ref, manifest_tensor_name = _resolve_manifest_tensor_name(
         serving_manifest_ref,
         helper_name="PURE_TRANSFORM serving registration",
     )
-    if manifest_tensor_name in tensors:
-        raise ArtifactError(
-            f"PURE_TRANSFORM serving registration cannot reuse reserved manifest tensor name '{manifest_tensor_name}'",
-            status_code="FAILED_PRECONDITION",
-            retryable=False,
-        )
-
-    prepared_tensors = {str(name): tensor for name, tensor in dict(tensors).items()}
+    manifest_tensor = prepared_tensors.pop(manifest_tensor_name, None)
     base_canonical_index = _canonical_index_from_tensors(prepared_tensors)
     resolved_representation_contract_hash = (
         build_intent.representation_contract_hash
@@ -665,38 +760,42 @@ def prepare_pure_transform_serving_registration(
             manifest_tensor_name=manifest_tensor_name,
         )
     )
-    manifest = ServingArtifactManifest.from_build_intent(
-        intent=build_intent,
+    carrier = prepare_serving_manifest_carrier(
+        build_intent=build_intent,
+        canonical_index=base_canonical_index,
         representation_contract_hash=resolved_representation_contract_hash,
-        tensor_schema_hash=compute_serving_tensor_schema_hash(
-            base_canonical_index,
-            manifest_tensor_name=manifest_tensor_name,
-        ),
-        canonical_tensor_count=count_canonical_serving_tensors(
-            base_canonical_index,
-            manifest_tensor_name=manifest_tensor_name,
-        ),
+        logical_topology_json=logical_topology_json,
         serving_manifest_ref=resolved_manifest_ref,
-        logical_topology_json=(
-            json.dumps(
-                normalized_logical_topology, sort_keys=True, separators=(",", ":")
+    )
+    manifest_device = (
+        next(iter(prepared_tensors.values())).device
+        if prepared_tensors
+        else torch.device("cpu")
+    )
+    if manifest_tensor is None:
+        prepared_tensors[manifest_tensor_name] = torch.tensor(
+            list(carrier.serving_manifest_bytes),
+            dtype=torch.uint8,
+            device=manifest_device,
+        )
+    else:
+        existing_bytes = bytes(
+            manifest_tensor.detach().to("cpu", dtype=torch.uint8).reshape(-1).tolist()
+        )
+        if existing_bytes != carrier.serving_manifest_bytes:
+            raise ArtifactError(
+                "manifest tensor bytes do not match the expected serving manifest carrier",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
             )
-            if normalized_logical_topology is not None
-            else None
-        ),
-    )
-    manifest_bytes = _pad_manifest_carrier_bytes(manifest.to_bytes())
-    prepared_tensors[manifest_tensor_name] = torch.tensor(
-        list(manifest_bytes),
-        dtype=torch.uint8,
-    )
+        prepared_tensors[manifest_tensor_name] = manifest_tensor
     final_canonical_index = _canonical_index_from_tensors(prepared_tensors)
     return PreparedServingRegistration(
         tensors=prepared_tensors,
-        serving_manifest_ref=resolved_manifest_ref,
-        manifest_tensor_name=manifest_tensor_name,
-        serving_manifest=manifest,
-        serving_manifest_bytes=manifest_bytes,
+        serving_manifest_ref=carrier.serving_manifest_ref,
+        manifest_tensor_name=carrier.manifest_tensor_name,
+        serving_manifest=carrier.serving_manifest,
+        serving_manifest_bytes=carrier.serving_manifest_bytes,
         representation_contract_hash=resolved_representation_contract_hash,
         canonical_index=final_canonical_index,
     )
@@ -710,22 +809,20 @@ def prepare_serving_registration(
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
 ) -> PreparedServingRegistration:
-    normalized_logical_topology = _normalize_logical_topology_payload(
-        logical_topology_json
-    )
+    prepared_tensors = {str(name): tensor for name, tensor in dict(tensors).items()}
     resolved_manifest_ref, manifest_tensor_name = _resolve_manifest_tensor_name(
         serving_manifest_ref,
         helper_name="serving registration",
     )
-    if manifest_tensor_name in tensors:
-        raise ArtifactError(
-            f"serving registration cannot reuse reserved manifest tensor name '{manifest_tensor_name}'",
-            status_code="FAILED_PRECONDITION",
-            retryable=False,
-        )
-
-    prepared_tensors = {str(name): tensor for name, tensor in dict(tensors).items()}
+    manifest_tensor = prepared_tensors.pop(manifest_tensor_name, None)
     base_canonical_index = _canonical_index_from_tensors(prepared_tensors)
+    carrier = prepare_serving_manifest_carrier(
+        build_intent=build_intent,
+        canonical_index=base_canonical_index,
+        representation_contract_hash=representation_contract_hash,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=resolved_manifest_ref,
+    )
     resolved_representation_contract_hash = (
         _resolve_explicit_representation_contract_hash(
             build_intent=build_intent,
@@ -733,40 +830,78 @@ def prepare_serving_registration(
             helper_name="serving registration",
         )
     )
-    manifest = ServingArtifactManifest.from_build_intent(
-        intent=build_intent,
-        representation_contract_hash=resolved_representation_contract_hash,
-        tensor_schema_hash=compute_serving_tensor_schema_hash(
-            base_canonical_index,
-            manifest_tensor_name=manifest_tensor_name,
-        ),
-        canonical_tensor_count=count_canonical_serving_tensors(
-            base_canonical_index,
-            manifest_tensor_name=manifest_tensor_name,
-        ),
-        serving_manifest_ref=resolved_manifest_ref,
-        logical_topology_json=(
-            json.dumps(
-                normalized_logical_topology, sort_keys=True, separators=(",", ":")
+    manifest_device = (
+        next(iter(prepared_tensors.values())).device
+        if prepared_tensors
+        else torch.device("cpu")
+    )
+    if manifest_tensor is None:
+        prepared_tensors[manifest_tensor_name] = torch.tensor(
+            list(carrier.serving_manifest_bytes),
+            dtype=torch.uint8,
+            device=manifest_device,
+        )
+    else:
+        existing_bytes = bytes(
+            manifest_tensor.detach().to("cpu", dtype=torch.uint8).reshape(-1).tolist()
+        )
+        if existing_bytes != carrier.serving_manifest_bytes:
+            raise ArtifactError(
+                "manifest tensor bytes do not match the expected serving manifest carrier",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
             )
-            if normalized_logical_topology is not None
-            else None
-        ),
-    )
-    manifest_bytes = _pad_manifest_carrier_bytes(manifest.to_bytes())
-    prepared_tensors[manifest_tensor_name] = torch.tensor(
-        list(manifest_bytes),
-        dtype=torch.uint8,
-    )
+        prepared_tensors[manifest_tensor_name] = manifest_tensor
     final_canonical_index = _canonical_index_from_tensors(prepared_tensors)
     return PreparedServingRegistration(
         tensors=prepared_tensors,
-        serving_manifest_ref=resolved_manifest_ref,
-        manifest_tensor_name=manifest_tensor_name,
-        serving_manifest=manifest,
-        serving_manifest_bytes=manifest_bytes,
+        serving_manifest_ref=carrier.serving_manifest_ref,
+        manifest_tensor_name=carrier.manifest_tensor_name,
+        serving_manifest=carrier.serving_manifest,
+        serving_manifest_bytes=carrier.serving_manifest_bytes,
         representation_contract_hash=resolved_representation_contract_hash,
         canonical_index=final_canonical_index,
+    )
+
+
+def prepare_binding_finalize_serving_registration(
+    *,
+    build_intent: ServingBuildIntent,
+    tensors: Mapping[str, torch.Tensor],
+    representation_contract_hash: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+) -> PreparedServingRegistration:
+    if build_intent.builder_mode is not BuilderMode.BINDING_FINALIZE:
+        raise ArtifactError(
+            "prepare_binding_finalize_serving_registration requires "
+            "ServingBuildIntent.builder_mode=BINDING_FINALIZE",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    return prepare_serving_registration(
+        build_intent=build_intent,
+        tensors=tensors,
+        representation_contract_hash=representation_contract_hash,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+    )
+
+
+def build_binding_finalize_admission_facts(
+    *,
+    support_level: ServingSupportLevel | str,
+    realization_protocol: RealizationProtocol
+    | str = RealizationProtocol.SCRATCH_THEN_COMMIT,
+    topology_admission_digest: str | None = None,
+    fast_path_validated: bool = False,
+) -> ServingAdmissionFacts:
+    return ServingAdmissionFacts(
+        finalize_class=FinalizeClass.REPRESENTATION_CHANGING,
+        realization_protocol=_coerce_realization_protocol(realization_protocol),
+        support_level=_coerce_serving_support_level(support_level),
+        topology_admission_digest=topology_admission_digest,
+        fast_path_validated=bool(fast_path_validated),
     )
 
 
@@ -820,6 +955,7 @@ def build_pure_transform_publication_spec(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
 ) -> PureTransformPublicationSpec:
     return PureTransformPublicationSpec(
         build_intent=build_intent,
@@ -838,6 +974,7 @@ def build_pure_transform_publication_spec(
             for view_id in structural_view_ids
             if str(view_id).strip()
         ),
+        admission_facts=admission_facts,
     )
 
 
@@ -854,6 +991,7 @@ def build_pure_transform_transform_spec(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
     transform_args: dict[str, str | int] | None = None,
     layout_hash: str | None = None,
 ) -> TransformSpec:
@@ -878,6 +1016,7 @@ def build_pure_transform_transform_spec(
             requirements=requirements,
             readiness_policy=readiness_policy,
             structural_view_ids=structural_view_ids,
+            admission_facts=admission_facts,
         ),
     )
 
@@ -890,7 +1029,9 @@ def build_pure_transform_publication_bundle(
     serving_artifact: RegisteredArtifact
     | ArtifactDescriptor
     | "StoreArtifactDescriptor"
-    | str,
+    | str
+    | None = None,
+    publication_subject: ServingPublicationSubject | BindingValueRef | None = None,
     canonical_index: CanonicalIndex,
     source_version_key: str | None = None,
     serving_version_key: str | None = None,
@@ -900,6 +1041,7 @@ def build_pure_transform_publication_bundle(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
 ) -> RepresentationPublishSpec:
     if build_intent.builder_mode is not BuilderMode.PURE_TRANSFORM:
         raise ArtifactError(
@@ -958,17 +1100,21 @@ def build_pure_transform_publication_bundle(
     )
     serving_manifest_bytes = _pad_manifest_carrier_bytes(manifest.to_bytes())
 
+    resolved_subject = _resolve_publication_subject(
+        serving_artifact=serving_artifact,
+        publication_subject=publication_subject,
+    )
     representation_publish_contract = RepresentationPublishContract(
-        serving_artifact_id=_artifact_id_from_input(serving_artifact),
+        subject=resolved_subject,
         serving_manifest_ref=resolved_manifest_ref,
         representation_contract_hash=manifest.representation_contract_hash,
         serving_build_digest=manifest.serving_build_digest,
+        serving_build_digest_version=manifest.serving_build_digest_version,
     )
     closeout_contract = AssemblyCloseoutContract(
         kind="representation_publish",
         source_version_key=source_version_key,
         serving_version_key=serving_version_key,
-        serving_artifact_id=representation_publish_contract.serving_artifact_id,
         serving_manifest_ref=representation_publish_contract.serving_manifest_ref,
         representation_publish_contract=representation_publish_contract,
     )
@@ -980,6 +1126,7 @@ def build_pure_transform_publication_bundle(
         serving_manifest_ref=resolved_manifest_ref,
         serving_manifest=manifest,
         serving_manifest_bytes=serving_manifest_bytes,
+        canonical_index=canonical_index,
         source_artifact_ref=build_intent.source_artifact_ref,
         contract_family=_normalize_contract_family(contract_family),
         structural_view_ids=resolved_structural_view_ids,
@@ -988,6 +1135,7 @@ def build_pure_transform_publication_bundle(
         layout_id=None if layout_id is None else str(layout_id),
         requirements=requirements,
         readiness_policy=readiness_policy,
+        admission_facts=admission_facts,
     )
 
 
@@ -999,7 +1147,9 @@ def build_serving_publication_bundle(
     serving_artifact: RegisteredArtifact
     | ArtifactDescriptor
     | "StoreArtifactDescriptor"
-    | str,
+    | str
+    | None = None,
+    publication_subject: ServingPublicationSubject | BindingValueRef | None = None,
     canonical_index: CanonicalIndex,
     representation_contract_hash: str | None = None,
     source_version_key: str | None = None,
@@ -1010,6 +1160,7 @@ def build_serving_publication_bundle(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
 ) -> RepresentationPublishSpec:
     normalized_logical_topology = _normalize_logical_topology_payload(
         logical_topology_json
@@ -1050,17 +1201,21 @@ def build_serving_publication_bundle(
     )
     serving_manifest_bytes = _pad_manifest_carrier_bytes(manifest.to_bytes())
 
+    resolved_subject = _resolve_publication_subject(
+        serving_artifact=serving_artifact,
+        publication_subject=publication_subject,
+    )
     representation_publish_contract = RepresentationPublishContract(
-        serving_artifact_id=_artifact_id_from_input(serving_artifact),
+        subject=resolved_subject,
         serving_manifest_ref=resolved_manifest_ref,
         representation_contract_hash=manifest.representation_contract_hash,
         serving_build_digest=manifest.serving_build_digest,
+        serving_build_digest_version=manifest.serving_build_digest_version,
     )
     closeout_contract = AssemblyCloseoutContract(
         kind="representation_publish",
         source_version_key=source_version_key,
         serving_version_key=serving_version_key,
-        serving_artifact_id=representation_publish_contract.serving_artifact_id,
         serving_manifest_ref=representation_publish_contract.serving_manifest_ref,
         representation_publish_contract=representation_publish_contract,
     )
@@ -1072,6 +1227,7 @@ def build_serving_publication_bundle(
         serving_manifest_ref=resolved_manifest_ref,
         serving_manifest=manifest,
         serving_manifest_bytes=serving_manifest_bytes,
+        canonical_index=canonical_index,
         source_artifact_ref=build_intent.source_artifact_ref,
         contract_family=_normalize_contract_family(contract_family),
         structural_view_ids=resolved_structural_view_ids,
@@ -1080,6 +1236,63 @@ def build_serving_publication_bundle(
         layout_id=None if layout_id is None else str(layout_id),
         requirements=requirements,
         readiness_policy=readiness_policy,
+        admission_facts=admission_facts,
+    )
+
+
+def build_binding_finalize_publication_bundle(
+    *,
+    build_intent: ServingBuildIntent,
+    source_artifact: RegisteredArtifact | CanonicalIndex | object | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    serving_artifact: RegisteredArtifact
+    | ArtifactDescriptor
+    | "StoreArtifactDescriptor"
+    | str
+    | None = None,
+    publication_subject: ServingPublicationSubject | BindingValueRef | None = None,
+    canonical_index: CanonicalIndex,
+    representation_contract_hash: str | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+    layout_id: str | None = None,
+    requirements: AssemblyRequirementSetRef | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
+) -> RepresentationPublishSpec:
+    if build_intent.builder_mode is not BuilderMode.BINDING_FINALIZE:
+        raise ArtifactError(
+            "build_binding_finalize_publication_bundle requires "
+            "ServingBuildIntent.builder_mode=BINDING_FINALIZE",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    if admission_facts is None:
+        raise ArtifactError(
+            "build_binding_finalize_publication_bundle requires explicit admission_facts",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    return build_serving_publication_bundle(
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        serving_artifact=serving_artifact,
+        publication_subject=publication_subject,
+        canonical_index=canonical_index,
+        representation_contract_hash=representation_contract_hash,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        layout_id=layout_id,
+        requirements=requirements,
+        readiness_policy=readiness_policy,
+        structural_view_ids=structural_view_ids,
+        admission_facts=admission_facts,
     )
 
 
@@ -1097,6 +1310,7 @@ def build_pure_transform_publication_bundle_from_registered_artifact(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
 ) -> RepresentationPublishSpec:
     return build_pure_transform_publication_bundle(
         build_intent=build_intent,
@@ -1112,6 +1326,7 @@ def build_pure_transform_publication_bundle_from_registered_artifact(
         requirements=requirements,
         readiness_policy=readiness_policy,
         structural_view_ids=structural_view_ids,
+        admission_facts=admission_facts,
     )
 
 
@@ -1130,6 +1345,7 @@ def build_serving_publication_bundle_from_registered_artifact(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
 ) -> RepresentationPublishSpec:
     return build_serving_publication_bundle(
         build_intent=build_intent,
@@ -1146,6 +1362,43 @@ def build_serving_publication_bundle_from_registered_artifact(
         requirements=requirements,
         readiness_policy=readiness_policy,
         structural_view_ids=structural_view_ids,
+        admission_facts=admission_facts,
+    )
+
+
+def build_binding_finalize_publication_bundle_from_registered_artifact(
+    *,
+    build_intent: ServingBuildIntent,
+    source_artifact: RegisteredArtifact | CanonicalIndex | object | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    serving_artifact: RegisteredArtifact,
+    representation_contract_hash: str | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+    layout_id: str | None = None,
+    requirements: AssemblyRequirementSetRef | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    structural_view_ids: tuple[str, ...] = (),
+    admission_facts: ServingAdmissionFacts | None = None,
+) -> RepresentationPublishSpec:
+    return build_binding_finalize_publication_bundle(
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        serving_artifact=serving_artifact,
+        canonical_index=_canonical_index_from_input(serving_artifact),
+        representation_contract_hash=representation_contract_hash,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        layout_id=layout_id,
+        requirements=requirements,
+        readiness_policy=readiness_policy,
+        structural_view_ids=structural_view_ids,
+        admission_facts=admission_facts,
     )
 
 
@@ -1170,6 +1423,9 @@ __all__ = [
     "PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY",
     "build_serving_publication_bundle",
     "build_serving_publication_bundle_from_registered_artifact",
+    "build_binding_finalize_admission_facts",
+    "build_binding_finalize_publication_bundle",
+    "build_binding_finalize_publication_bundle_from_registered_artifact",
     "build_pure_transform_serving_args",
     "build_pure_transform_publication_spec",
     "build_pure_transform_transform_spec",
@@ -1178,6 +1434,7 @@ __all__ = [
     "compute_serving_tensor_schema_hash",
     "compute_pure_transform_representation_contract_hash",
     "count_canonical_serving_tensors",
+    "prepare_binding_finalize_serving_registration",
     "prepare_serving_registration",
     "prepare_pure_transform_serving_registration",
 ]

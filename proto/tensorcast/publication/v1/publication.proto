@@ -8,6 +8,35 @@ enum BuilderMode {
   BUILDER_MODE_BINDING_FINALIZE = 2;
 }
 
+enum FinalizeClass {
+  FINALIZE_CLASS_UNSPECIFIED = 0;
+  FINALIZE_CLASS_RUNTIME_ONLY = 1;
+  FINALIZE_CLASS_REPRESENTATION_CHANGING = 2;
+  FINALIZE_CLASS_UNKNOWN_BLOCKED = 3;
+}
+
+enum RealizationProtocol {
+  REALIZATION_PROTOCOL_UNSPECIFIED = 0;
+  REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH = 1;
+  REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT = 2;
+}
+
+enum ServingSupportLevel {
+  SERVING_SUPPORT_LEVEL_UNSPECIFIED = 0;
+  SERVING_SUPPORT_LEVEL_BLOCKED = 1;
+  SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY = 2;
+  SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY = 3;
+  SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY = 4;
+}
+
+message ServingAdmissionFacts {
+  FinalizeClass finalize_class = 1;
+  RealizationProtocol realization_protocol = 2;
+  ServingSupportLevel support_level = 3;
+  string topology_admission_digest = 4;
+  bool fast_path_validated = 5;
+}
+
 message ServingBuildIntent {
   string representation_contract_hash = 1;
   BuilderMode builder_mode = 2;
@@ -52,6 +81,20 @@ message AssemblyReadinessPolicy {
   AssemblyContributorLivenessMode contributor_liveness_mode = 1;
 }
 
+message BindingValueRef {
+  string binding_id = 1;
+  string binding_layout_id = 2;
+  string binding_value_id = 3;
+  uint64 seal_generation = 4;
+}
+
+message ServingPublicationSubject {
+  oneof ref {
+    string serving_artifact_id = 1;
+    BindingValueRef binding_value = 2;
+  }
+}
+
 message PureTransformPublicationSpec {
   ServingBuildIntent build_intent = 1;
   string contract_family = 2;
@@ -63,6 +106,7 @@ message PureTransformPublicationSpec {
   AssemblyRequirementSetRef requirements = 8;
   AssemblyReadinessPolicy readiness_policy = 9;
   repeated string structural_view_ids = 10;
+  ServingAdmissionFacts admission_facts = 11;
 }
 
 message RepresentationPublishContract {
@@ -70,6 +114,8 @@ message RepresentationPublishContract {
   string serving_manifest_ref = 2;
   string representation_contract_hash = 3;
   string serving_build_digest = 4;
+  string serving_build_digest_version = 5;
+  ServingPublicationSubject subject = 6;
 }
 
 message RepresentationPublishSpec {
@@ -83,4 +129,5 @@ message RepresentationPublishSpec {
   string source_artifact_ref = 8;
   string contract_family = 9;
   repeated string structural_view_ids = 10;
+  ServingAdmissionFacts admission_facts = 11;
 }
