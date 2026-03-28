@@ -85,8 +85,8 @@ Repository rule:
   `Store.complete_repo_owned_representation_publish_attempt(...)`.
 - If the builder is not running through `transform_register`, the same serving
   publication semantics are also available through
-  `Store.register_pure_transform_publication(...)` and
-  `Store.complete_pure_transform_publication(...)` on top of already-built
+  `Store.register_pure_transform_publication_bridge(...)` and
+  `Store.complete_pure_transform_publication_bridge(...)` on top of already-built
   in-memory tensors. For the current canonical single-source path, that
   one-shot helper can also contribute the source artifact before sealing when
   `source_contribution_device=...` is provided. Structural `pp` / `ep` publish

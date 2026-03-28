@@ -95,6 +95,7 @@ struct LipExportRecord {
   int device_id{0};
   std::vector<cuda::IpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister
+  std::vector<uint64_t> buffer_sizes; // registered buffer sizes parallel to tensor_keys
   // Region lease ownership for region-backed storages used by this export.
   // These references are acquired explicitly at staging time and must be
   // released when the staged export is released.

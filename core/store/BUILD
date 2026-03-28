@@ -135,6 +135,7 @@ sc_cc_library(
         ":endpoint_id",
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
+        "//core/common:trace_macros_lib",
         "//core/communicator:utils_lib",
         "//core/store/replica:chunk_state",
         "//proto/tensorcast/common/v1:common_cc",

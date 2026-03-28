@@ -473,37 +473,6 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     const auto& session = *transport_or;
     const auto& remote = session.remote_replica;
 
-    if (is_local_replica(remote, local_identity_)) {
-      record_stale_source_detected("local_route", view_id.has_value(), reselection_attempt);
-      LOG(WARNING) << "Global Store returned local replica for artifact_id=" << artifact_id
-                   << "; treating route as stale";
-      absl::Status comp_status = gs_client_->complete_replica_transport(
-          session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
-      if (!comp_status.ok()) {
-        LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
-      }
-      last_p2p_status = stale_local_route_status(artifact_id);
-      if (can_retry_source_selection(
-              last_p2p_status, reselection_attempt, request_deadline, max_reselection_attempts)) {
-        reselection_attempt += 1;
-        record_source_reselection_attempt("local_route", view_id.has_value(), reselection_attempt);
-        if (should_log_reselection_attempt(reselection_attempt)) {
-          const std::chrono::milliseconds retry_remaining = remaining_request_budget(request_deadline);
-          const std::string remaining_label = retry_remaining == std::chrono::milliseconds::max()
-              ? "unbounded"
-              : std::to_string(retry_remaining.count());
-          LOG(WARNING) << "Retrying source selection after stale local route: artifact_id=" << artifact_id
-                       << " attempt=" << reselection_attempt << "/" << max_reselection_attempts
-                       << " remaining_budget_ms=" << remaining_label;
-        }
-        continue;
-      }
-      last_p2p_status =
-          source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
-      record_source_reselection_exhausted("local_route", view_id.has_value(), reselection_attempt);
-      break;
-    }
-
     // Build P2PSource from server-selected remote replica
     P2PSource p2p_src;
     p2p_src.size_bytes = remote.memory_size;

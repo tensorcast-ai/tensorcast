@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -34,6 +34,7 @@ class GpuMemorySink : public Sink, public PositionedSink, public AsyncPositioned
   struct Options {
     gsl::not_null<void*> gpu_base_ptr;
     uint64_t total_size = 0;
+    bool require_complete_on_close = true;
     size_t chunk_size = 128 * 1024 * 1024; // 128MB default
     int device_id = 0;
     std::shared_ptr<common::memory::GpuDeviceMemory> allocation;

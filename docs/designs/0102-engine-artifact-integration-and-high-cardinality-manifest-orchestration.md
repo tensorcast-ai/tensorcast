@@ -9,7 +9,7 @@ areas:
   - integrations
   - docs
 created: 2026-03-17
-last_updated: 2026-03-25
+last_updated: 2026-03-27
 related_code:
   - tensorcast/engine_adapter/kvcache_adapter.py
   - tensorcast/node_agent/executor.py
@@ -78,6 +78,9 @@ Long-term convergence rule:
 - serving-representation publication lineage, serving-artifact manifests used
   for external closeout, and typed representation-publish child contracts remain
   outside `0102` and belong to `0111` / `0105`.
+- integration-private serving manifest JSON, integration-private
+  builder/publication digests, and serving-key closeout ownership are therefore
+  target-state removals from the `0102` layer rather than extension points.
 
 `0102` is therefore not:
 
@@ -86,6 +89,9 @@ Long-term convergence rule:
 - a place to define workflow, continuation, or lifecycle semantics already owned by `0096`, `0100`, and `0094`,
 - or a place to define the serving-representation closeout contract consumed by
   `representation_publish`.
+- or a place to redefine `representation_contract_hash`,
+  `serving_build_digest`, or repo-owned admission carriers in
+  integration-private forms.
 
 # Problem Statement
 

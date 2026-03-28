@@ -14,8 +14,11 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/binding_registry.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
@@ -30,7 +33,10 @@ class AssemblyOperationService {
     ShutdownSignal& shutdown_signal;
     common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
+    BindingRegistry& bindings;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    LipManager* lip_manager{nullptr};
+    SessionLifecycleManager* lifecycle{nullptr};
     DaemonOptions::PostSealPolicy post_seal_policy{};
   };
 

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -143,6 +144,10 @@ def test_build_daemon_process_env_keeps_configured_ld_library_path_prefix(
 ) -> None:
     user_prefix = "/data/cuda/compat:/usr/local/lib"
     monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._COMPAT_LIBRARY_PATH_CANDIDATES",
+        (),
+    )
+    monkeypatch.setattr(
         "tensorcast.cli_utils.proc._discover_daemon_library_paths",
         lambda: (
             Path("/data/cuda/compat"),
@@ -171,6 +176,10 @@ def test_build_daemon_process_env_merges_configured_launcher_envs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._COMPAT_LIBRARY_PATH_CANDIDATES",
+        (),
+    )
+    monkeypatch.setattr(
         "tensorcast.cli_utils.proc._discover_daemon_library_paths",
         lambda: (
             Path("/tensorcast/lib"),
@@ -192,6 +201,38 @@ def test_build_daemon_process_env_merges_configured_launcher_envs(
         "/config/lib",
         "/shared/lib",
         "/base/lib",
+        "/tensorcast/lib",
+        "/torch/lib",
+    ]
+
+
+def test_build_daemon_process_env_prefixes_default_compat_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compat_dir = tmp_path / "cuda-compat"
+    toolkit_dir = tmp_path / "cuda-12.8" / "lib64"
+    compat_dir.mkdir(parents=True)
+    toolkit_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._COMPAT_LIBRARY_PATH_CANDIDATES",
+        (compat_dir, toolkit_dir),
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._discover_daemon_library_paths",
+        lambda: (
+            Path("/tensorcast/lib"),
+            Path("/torch/lib"),
+        ),
+    )
+
+    env = build_daemon_process_env(
+        {"LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"},
+    )
+
+    assert env["LD_LIBRARY_PATH"].split(":") == [
+        str(compat_dir),
+        str(toolkit_dir),
+        "/usr/local/nvidia/lib64",
         "/tensorcast/lib",
         "/torch/lib",
     ]
@@ -231,6 +272,25 @@ def test_discover_daemon_library_paths_avoids_importing_torch(
 
     assert torch_lib.resolve() in paths
     assert nvidia_lib.resolve() in paths
+
+
+def test_discover_daemon_library_paths_prefers_compat_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compat_dir = tmp_path / "cuda-compat"
+    toolkit_dir = tmp_path / "cuda-12.8" / "lib64"
+    compat_dir.mkdir(parents=True)
+    toolkit_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._COMPAT_LIBRARY_PATH_CANDIDATES",
+        (compat_dir, toolkit_dir),
+    )
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(tmp_path / "site-packages")])
+
+    paths = _discover_daemon_library_paths()
+
+    assert paths[:2] == [compat_dir.resolve(), toolkit_dir.resolve()]
 
 
 @pytest.mark.integration

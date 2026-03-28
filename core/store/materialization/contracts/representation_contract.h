@@ -82,6 +82,7 @@ enum class SourceFragmentRole : std::uint8_t {
 
 struct FillRule {
   std::vector<std::uint8_t> constant_value;
+  TensorCoordinateSpec destination_range;
 
   bool operator==(const FillRule&) const = default;
 };

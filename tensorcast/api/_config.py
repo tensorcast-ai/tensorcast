@@ -602,8 +602,9 @@ class RegisterArtifactOptions(BaseModel):
     lease_bytes_limit: int = 0
     # Lease/LIP specific: opt-in in-place mode for LIP flows.
     lease_in_place: bool = False
-    # Stable DRAM options
-    stage_on_gpu: bool = True
+    # Stable DRAM options. Whole-replica GPU staging is disabled; keep
+    # stage_on_gpu=false unless the backend is redesigned.
+    stage_on_gpu: bool = False
     release_gpu_on_commit: bool = True
     # When stage_on_gpu=false, require the daemon to return a CPU memfd publish
     # handshake and fail fast instead of silently falling back to cpu_stream.

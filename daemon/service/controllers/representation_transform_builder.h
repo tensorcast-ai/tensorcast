@@ -47,4 +47,14 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
     const tensorcast::common::v1::ByteSpaceRef& source_byte_space,
     std::string_view representation_family);
 
+absl::StatusOr<BuildRepresentationTransformResult> build_representation_transform_contract(
+    const v2::BindingRealizationPlan& realization_plan,
+    const materialization_layout::CanonicalIndexTable& source_table,
+    const materialization_layout::CanonicalIndexTable& canonical_source_table,
+    const absl::flat_hash_map<std::string, representation_layout::TensorLayoutSpec>& dst_specs,
+    const absl::flat_hash_map<std::string, uint64_t>& dst_base_offsets,
+    const absl::flat_hash_map<std::string, representation_layout::ViewNarrowSpec>& view_narrows,
+    const tensorcast::common::v1::ByteSpaceRef& source_byte_space,
+    std::string_view representation_family);
+
 } // namespace tensorcast::daemon::representation_transform_builder

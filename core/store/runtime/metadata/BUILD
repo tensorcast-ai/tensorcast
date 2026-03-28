@@ -81,6 +81,7 @@ sc_cc_library(
         ":metadata_types",
         ":registration_backend",
         "//core/common:memory_location_lib",
+        "//core/common:trace_macros_lib",
         "//core/store:device_types",
         "//core/store:global_store_client",
         "//core/store/materialization/contracts:loading_spec",

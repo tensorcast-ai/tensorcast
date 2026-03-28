@@ -20,6 +20,11 @@ import psutil
 
 from .errors import ServiceError
 
+_COMPAT_LIBRARY_PATH_CANDIDATES: tuple[Path, ...] = (
+    Path("/data/cuda/compat"),
+    Path("/data/cuda/cuda-12.8/lib64"),
+)
+
 
 def _discover_daemon_library_paths() -> list[Path]:
     """Return library search paths required by the daemon runtime.
@@ -30,7 +35,9 @@ def _discover_daemon_library_paths() -> list[Path]:
     directories for ``LD_LIBRARY_PATH`` augmentation.
     """
 
-    paths: list[Path] = []
+    paths: list[Path] = [
+        candidate for candidate in _COMPAT_LIBRARY_PATH_CANDIDATES if candidate.is_dir()
+    ]
 
     package_root = Path(__file__).resolve().parents[1]
     package_lib = package_root / "lib"
@@ -162,9 +169,15 @@ def build_daemon_process_env(
                 continue
             env[key] = value
 
+    preferred_ld_entries = [
+        str(candidate)
+        for candidate in _COMPAT_LIBRARY_PATH_CANDIDATES
+        if candidate.is_dir()
+    ]
     ld_paths = _discover_daemon_library_paths()
     ld_entries = (
-        _split_env_path_entries(configured_ld_library_path)
+        preferred_ld_entries
+        + _split_env_path_entries(configured_ld_library_path)
         + _split_env_path_entries(env.get("LD_LIBRARY_PATH"))
         + [str(p) for p in ld_paths if str(p)]
     )

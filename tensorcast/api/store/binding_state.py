@@ -40,11 +40,22 @@ def binding_value_from_proto(
     if value is None:
         return None
     binding_id = str(getattr(value, "binding_id", "") or "")
+    binding_layout_id = str(getattr(value, "binding_layout_id", "") or "")
+    binding_value_id = str(getattr(value, "binding_value_id", "") or "")
+    if (
+        not binding_id
+        and not binding_layout_id
+        and not binding_value_id
+        and not value.HasField("selection")
+        and not value.HasField("source_artifact_id")
+        and int(getattr(value, "seal_generation", 0) or 0) == 0
+        and not bool(getattr(value, "is_artifact_backed", False))
+    ):
+        return None
     if not binding_id:
         raise ValueError("binding_id is required")
     if expected_binding_id is not None and binding_id != str(expected_binding_id):
         raise ValueError(f"binding_id mismatch ({binding_id} != {expected_binding_id})")
-    binding_layout_id = str(getattr(value, "binding_layout_id", "") or "")
     if not binding_layout_id:
         raise ValueError("binding_layout_id is required")
     if expected_binding_layout_id is not None and binding_layout_id != str(
@@ -54,7 +65,6 @@ def binding_value_from_proto(
             "binding_layout_id mismatch "
             f"({binding_layout_id} != {expected_binding_layout_id})"
         )
-    binding_value_id = str(getattr(value, "binding_value_id", "") or "")
     if not binding_value_id:
         raise ValueError("binding_value_id is required")
     selection = None

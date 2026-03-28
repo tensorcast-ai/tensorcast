@@ -127,6 +127,35 @@ TEST_CASE("TargetLayoutGpuSink routes writes to storages", "[target_layout_gpu_s
     REQUIRE(out_second == second);
   }
 
+  SECTION("Overlapping writes still satisfy close coverage") {
+    TargetLayoutGpuSink sink(make_options(fixture));
+
+    const std::array<char, 4> first = {'A', 'A', 'A', 'A'};
+    const std::array<char, 4> second = {'B', 'B', 'B', 'B'};
+    const std::array<char, 2> overlap = {'C', 'C'};
+
+    REQUIRE(sink.write_at(0, first.data(), first.size()).ok());
+    REQUIRE(sink.write_at(4, second.data(), second.size()).ok());
+    REQUIRE(sink.write_at(6, overlap.data(), overlap.size()).ok());
+    REQUIRE(sink.close().ok());
+
+    std::array<char, 4> out_first{};
+    std::array<char, 4> out_second{};
+    DeviceGuard guard(0);
+    REQUIRE(guard.status().ok());
+    auto status =
+        tensorcast::cuda::memcpy(out_first.data(), fixture.gpu_ptr0(), out_first.size(), cudaMemcpyDeviceToHost);
+    REQUIRE(status.ok());
+    status = tensorcast::cuda::memcpy(out_second.data(), fixture.gpu_ptr1(), out_second.size(), cudaMemcpyDeviceToHost);
+    REQUIRE(status.ok());
+
+    REQUIRE(out_first == first);
+    CHECK(out_second[0] == 'B');
+    CHECK(out_second[1] == 'B');
+    CHECK(out_second[2] == 'C');
+    CHECK(out_second[3] == 'C');
+  }
+
   SECTION("Writes spanning storages are rejected") {
     TargetLayoutGpuSink sink(make_options(fixture));
 

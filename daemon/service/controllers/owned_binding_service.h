@@ -79,6 +79,11 @@ class OwnedBindingService {
 
   grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
 
+  grpc::Status promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::PromoteBindingCurrentValueRequest& req,
+      v2::PromoteBindingCurrentValueResponse& resp);
+
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
       const v2::RefillOwnedBindingRequest& req,
