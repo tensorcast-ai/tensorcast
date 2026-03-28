@@ -18,10 +18,12 @@ from tensorcast.api import _region_cache as region_cache
 from tensorcast.api import context as tc_context
 from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store.binding import Binding, BindingUpdateEpoch, SealedBindingValue
-from tensorcast.api.store.owned_binding_layout import (build_mapped_tensor_spec,
-                                                       build_owned_layout)
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.owned_binding_layout import (
+    build_mapped_tensor_spec,
+    build_owned_layout,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2

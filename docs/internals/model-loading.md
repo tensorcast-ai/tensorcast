@@ -284,8 +284,8 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
   `artifact.tensor_dict_into(...)` or the convenience `artifact.tensor_into(name, target, ...)`.
   The Store validates shapes/strides/device before mutating buffers, zero-fills PAD segments to keep
   tensors consistent on failure, and unloads daemon-backed replicas immediately after copy/validation.
-- `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
-  policy flags across call sites.
+- `StoreOptions.get` and per-call `GetArtifactOptions` carry execution-scoped retrieval
+  policy (`source`) and topology hints without sprinkling ad-hoc flags across call sites.
 - Low-level lease feeding and commit orchestration are handled internally by the Store,
   so most integrations rely entirely on the functional facade and its cancellation hooks.
 

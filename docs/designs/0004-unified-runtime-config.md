@@ -43,7 +43,7 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `lifecycle`: eviction toggles and intervals, PID scanning, sweeper intervals, TTLs, VRAM fraction.
   - `high_availability`: `global_store_endpoints`, heartbeat/periodic sync/retry.
   - `communicator`: `tensorcast.communicator.v1.CommunicatorConfig` (reused schema).
-  - `engine`: `*_bytes`, streaming and CPU VS sizing, `streaming_buffer_chunks`.
+  - `engine`: `*_bytes`, streaming and CPU VS sizing, `streaming_buffer_chunks`, and typed materialization-strategy policy including executor budgets, thresholds, and diagnostics controls.
   - `envs`: launcher-only environment variables applied by the CLI/SDK when spawning the daemon binary. `LD_LIBRARY_PATH` is merged deterministically as inherited entries, then `envs.LD_LIBRARY_PATH`, then auto-discovered TensorCast/PyTorch/CUDA library directories.
   - `pinned_memory`: daemon-wide pinned budget, class pools, and allocation timeout.
   - `observability`: OTel (lang‑agnostic), logging (enum level, sinks), tracing; `otel_cxx` holds C++‑specific toggles.
@@ -104,6 +104,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 - Determinism: all defaults are applied in one place; behavior does not depend on process environment.
 - Fail‑fast: unknown fields, type mismatches, and invalid units/durations cause startup failure.
 - Cross‑language equivalence: the same file yields identical Protobuf messages in C++ and Python.
+- Strategy-plane executor routing, memory budgets, and topology-related thresholds must be modeled as typed config fields rather than booleans plus hidden runtime heuristics.
 - Distributed namespace profiles (for example byte artifact routing invariants such as shard count/hash version/lease
   staleness policy) must be modeled as typed config fields and remain cluster-consistent; incompatible rolling changes
   must have an explicit cutover strategy instead of mixed semantics.
