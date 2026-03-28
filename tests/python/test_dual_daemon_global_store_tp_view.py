@@ -12,7 +12,7 @@ import grpc
 import pytest
 import torch
 
-from tensorcast import ArtifactError, FallbackOptions, artifact, put, startup
+from tensorcast import ArtifactError, GetArtifactOptions, artifact, put, startup
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
 from tensorcast.global_store.grpc_service import (
     GlobalStoreServicer,
@@ -169,26 +169,23 @@ def test_tp_view_get_across_two_real_daemons_with_global_store(tmp_path: Path) -
         startup.init(mode="connect", address=daemon_b_addr)
         try:
             with pytest.raises(ArtifactError):
-                artifact(
-                    key=key,
-                    fallback=FallbackOptions.local_only(),
-                ).tensor_dict(device=device_selector)
+                artifact(key=key).tensor_dict(
+                    device=device_selector,
+                    options=GetArtifactOptions(source="local_only"),
+                )
 
-            handle = artifact(
-                key=key,
-                fallback=FallbackOptions(
-                    prefer="p2p",
-                    allow_p2p=True,
-                    allow_disk=False,
-                    verify_checksums=False,
-                ),
+            handle = artifact(key=key)
+            materialize_options = GetArtifactOptions(
+                source={"preference": "prefer_p2p", "allow_p2p": True, "allow_disk": False},
+                verify_checksums=False,
             )
 
             tp = 4
             for tp_rank in range(tp):
                 rank_slices = _build_tp_slices(tensors, tp=tp, tp_rank=tp_rank)
                 loaded = handle.view(slices=rank_slices).tensor_dict(
-                    device=device_selector
+                    device=device_selector,
+                    options=materialize_options,
                 )
                 for name, original in tensors.items():
                     expected = _apply_slices(original, rank_slices.get(name, []))

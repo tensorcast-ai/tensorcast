@@ -258,7 +258,7 @@ absl::Status validate_dependency_ready_closeout_contract(const v2::AssemblyClose
             "serving_manifest_ref, or representation_publish_contract");
       }
       return absl::OkStatus();
-    case v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH:
+    case v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH: {
       if (!contract.has_representation_publish_contract()) {
         return absl::InvalidArgumentError(
             "representation_publish closeout contracts require representation_publish_contract");
@@ -313,6 +313,7 @@ absl::Status validate_dependency_ready_closeout_contract(const v2::AssemblyClose
             "representation_publish closeout contracts require a supported serving_build_digest_version");
       }
       return absl::OkStatus();
+    }
     case v2::ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH:
       return absl::UnimplementedError(
           "rollout_gated_publish closeout contracts are not dependency-ready in the current execution wave");

@@ -1424,6 +1424,7 @@ sc_cc_library(
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":materialization_disk_resolve_utils_lib",
+        ":materialization_policy_utils_lib",
         ":materialization_replica_handle_utils_lib",
         ":path_utils_lib",
         ":ref_tracker_hdr",

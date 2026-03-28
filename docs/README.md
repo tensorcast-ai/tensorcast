@@ -16,6 +16,11 @@ Understand how TensorCast works:
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[Binding Unified Model](designs/0084-binding-unified-model-and-contract.md)** - Canonical binding semantics, lifecycle, mapped binding, and publishability
+- **[Retrieval Policy Plane Cleanup](designs/0107-retrieval-policy-plane-cleanup.md)** - Separates retrieval policy from execution topology context and defines the normalized daemon request boundary
+- **[Tensor-Aware Materialization Strategy Plane](designs/0108-tensor-aware-materialization-strategy-plane.md)** - Common-runtime strategy layering for replica, target-backed, and mapped-target materialization
+- **[Pre-109 Strategy Convergence Plan](plans/0108-01-pre-109-strategy-plane-convergence.md)** - Execution step 2: converge ordinary replica strategy ownership, coordinator seams, diagnostics, and typed budgets
+- **[Batched Owner-File Collective Executor](designs/0109-batched-owner-file-collective-executor.md)** - Shared-FS same-host TP collective executor design for bounded owner batching and cross-rank source dedup
+- **[Batched Owner-File Collective Executor Plan](plans/0109-batched-owner-file-collective-executor.md)** - Execution step 3: add the new owner-file collective executor after the earlier prerequisites land
 - **[Representation Semantic Core](designs/0110-artifact-representation-contract-and-transform-unification.md)** - Shared tensor-semantic transform core for mapped binding, mapped-target, builder lowering, and strategy convergence
 - **[Source-to-Serving Builder and Publication](designs/0111-source-to-serving-builder-and-representation-publication.md)** - Builder modes, serving-artifact identity and manifests, `serving_build_digest`, and typed `representation_publish` handoff into `PublishedModelVersion`
 - **[Binding-Native Serving Realization and Publication](designs/0112-binding-native-serving-realization-and-publication.md)** - Make sealed binding current values first-class serving publication subjects, move source-to-binding realization into TensorCast, and remove workspace-driven canonical fallback from same-binding serving flows

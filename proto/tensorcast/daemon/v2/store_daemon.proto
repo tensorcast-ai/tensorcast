@@ -459,8 +459,8 @@ message ReplicaOperationStatus {
 
 message MaterializeReplicaRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
-  reserved 2;
-  reserved "disk_fallback";
+  reserved 2, 9;
+  reserved "disk_fallback", "preference";
 
   string replica_uuid = 3;
   string device_uuid = 4;
@@ -469,7 +469,6 @@ message MaterializeReplicaRequest {
   int32 pid = 7; // Process ID for reference tracking
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
 
-  SourcePreference preference = 9;
   SourcePolicy source_policy = 14;
   LeaseMode lease_mode = 15;
 
@@ -588,14 +587,13 @@ message MappedTensorSpec {
 
 message MaterializeIntoMappedTargetRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
-  reserved 3;
-  reserved "disk_fallback";
+  reserved 3, 7;
+  reserved "disk_fallback", "preference";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
   string device_uuid = 6;
 
-  SourcePreference preference = 7;
   SourcePolicy source_policy = 12;
 
   CopyPlan copy_plan = 8;
@@ -611,14 +609,13 @@ message MaterializeIntoMappedTargetRequest {
 
 message MaterializeIntoTargetRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
-  reserved 3;
-  reserved "disk_fallback";
+  reserved 3, 7;
+  reserved "disk_fallback", "preference";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
   string device_uuid = 6;
 
-  SourcePreference preference = 7;
   SourcePolicy source_policy = 12;
 
   optional string operation_id = 10;
@@ -1076,7 +1073,8 @@ message CreateOwnedBindingRequest {
   bytes target_index_bytes = 3;
   int32 pid = 4;
   string device_uuid = 5;
-  SourcePreference preference = 6;
+  reserved 6;
+  reserved "preference";
   SourcePolicy source_policy = 7;
   optional string operation_id = 8;
   TransformPlacement placement = 9;
@@ -1145,7 +1143,8 @@ message PromoteBindingCurrentValueResponse {
 message RefillOwnedBindingRequest {
   string binding_id = 1;
   string artifact_id = 2;
-  SourcePreference preference = 3;
+  reserved 3;
+  reserved "preference";
   SourcePolicy source_policy = 4;
   optional string operation_id = 5;
   TransformPlacement placement = 6;

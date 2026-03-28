@@ -291,7 +291,8 @@ TEST_CASE(
   tensorcast::daemon::v2::MaterializeReplicaRequest materialize_req;
   materialize_req.mutable_selection()->set_artifact_id(resolve_resp.artifact_id());
   materialize_req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  materialize_req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  materialize_req.mutable_source_policy()->set_preference(
+      tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   grpc::ServerContext materialize_ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse materialize_resp;
   auto materialize_st = harness->service().MaterializeReplica(&materialize_ctx, &materialize_req, &materialize_resp);

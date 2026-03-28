@@ -14,6 +14,7 @@
 #include "absl/status/statusor.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/lip_bridge.h"
@@ -87,8 +88,7 @@ absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry
     store::components::IGlobalStoreClient* global_store_client,
     const std::filesystem::path& storage_path,
     std::string_view resolved_artifact_id,
-    int wait_for_shared_disk_ms,
-    bool allow_disk,
+    const materialization_policy::NormalizedMaterializationRequestContext& request_context,
     const grpc::ServerContext& server_context,
     std::optional<std::filesystem::path>& normalized_disk_path,
     const MaterializeAttemptFn& materialize_retry_once,

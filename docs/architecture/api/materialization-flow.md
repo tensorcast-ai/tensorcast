@@ -104,16 +104,10 @@ Internal strategy-plane types live in
 
 ## Source Selection and Fallback
 
-### SDK preference mapping
+### SDK retrieval policy mapping
 
-`FallbackOptions` in the SDK drives a daemon `SourcePolicy` (preference +
-allow flags) so local-only requests are enforced server-side:
-
-- `prefer=auto` -> `SourcePreference=AUTO`, `allow_p2p=true`, `allow_disk=true`.
-- `prefer=local` -> `allow_p2p=false`, `allow_disk=false`.
-- `prefer=p2p` -> `SourcePreference=PREFER_P2P` (requires `artifact_id`).
-- `prefer=disk` -> `SourcePreference=PREFER_DISK` (daemon resolves disk source
-  from managed/shared-disk bindings or local import registry).
+`GetArtifactOptions.source` lowers to daemon `SourcePolicy` so local-only and
+disk-first requests are enforced server-side.
 - `allow_p2p=False` disables P2P but still allows local replica reuse; disk is allowed unless `prefer=local`.
 
 See `tensorcast/api/store/materialization.py` for the exact decision logic.

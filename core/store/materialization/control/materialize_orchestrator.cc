@@ -299,22 +299,20 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // 1. Preference handling and Global Store connectivity guard
   // ------------------------------------------------------------------
   const bool gs_connected = gs_client_->is_connected();
-  const auto preference = hints.source_preference;
+  const auto retrieval_policy = hints.retrieval_policy();
+  const auto preference = retrieval_policy.preference;
   const bool has_disk_source = disk_source.has_value();
   const bool has_artifact_id_hint = !hints.artifact_id.empty();
-  const bool allow_p2p = hints.allow_p2p;
-  const bool allow_disk = hints.allow_disk;
+  const bool allow_p2p = retrieval_policy.allow_p2p;
+  const bool allow_disk = retrieval_policy.allow_disk;
   if (!allow_p2p && !allow_disk) {
     return absl::FailedPreconditionError("source_policy disallows both P2P and disk materialization");
   }
+  if (auto policy_status = loading::validate_retrieval_policy(retrieval_policy); !policy_status.ok()) {
+    return policy_status;
+  }
   if (preference == loading::SourcePreference::kPreferP2P && !has_artifact_id_hint) {
     return absl::InvalidArgumentError("preference=PREFER_P2P requires a canonical artifact_id");
-  }
-  if (preference == loading::SourcePreference::kPreferP2P && !allow_p2p) {
-    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
-  }
-  if (preference == loading::SourcePreference::kPreferDisk && !allow_disk) {
-    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
   }
   if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");

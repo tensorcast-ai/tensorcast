@@ -36,6 +36,7 @@ from tensorcast.types import (
 )
 
 if TYPE_CHECKING:
+    from tensorcast.api._config import GetArtifactOptions
     from tensorcast.api.store.artifact import Artifact
     from tensorcast.api.store.owned_binding_layout import BindingLayout
     from tensorcast.api.store.runtime import StoreRuntimeContext
@@ -652,6 +653,7 @@ class Binding:
         self,
         artifact: "Artifact | str",
         *,
+        options: "GetArtifactOptions | None" = None,
         publish: bool = False,
         serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         activate_key: str | None = None,
@@ -669,6 +671,7 @@ class Binding:
         try:
             self._slot.swap(
                 artifact,
+                options=options,
                 publish=publish,
                 serving_runtime_policy=coerce_serving_runtime_policy(
                     serving_runtime_policy
@@ -707,6 +710,7 @@ class Binding:
         artifact: "Artifact | PublicDiskSourceHandle | str",
         *,
         realization_plan: object,
+        options: "GetArtifactOptions | None" = None,
         ctx: CallContext | None = None,
     ) -> SealedBindingValue:
         operation_id = _build_transport_operation_id(
@@ -724,6 +728,7 @@ class Binding:
         realize(
             artifact,
             realization_plan=realization_plan,
+            options=options,
             ctx=ctx,
             operation_id=operation_id,
         )

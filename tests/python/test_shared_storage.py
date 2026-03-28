@@ -11,7 +11,7 @@ import pytest
 import torch
 from safetensors.torch import save_file as st_save
 
-from tensorcast import FallbackOptions, from_disk, startup
+from tensorcast import GetArtifactOptions, from_disk, startup
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
 from tensorcast.global_store.grpc_service import (
@@ -110,21 +110,19 @@ def test_shared_storage_roundtrip(tmp_path):
         try:
             startup.init(mode="connect", address=listen)
             try:
-                fallback = FallbackOptions(
-                    prefer="disk",
-                    allow_p2p=False,
-                    verify_checksums=False,
-                )
                 device_selector = (
                     "cpu"
                     if cpu_target
                     else ("cuda:0" if torch.cuda.is_available() else "cpu")
                 )
-                artifact_handle = from_disk(
-                    str(save_path),
-                    verify_checksums=False,
-                ).with_fallback(fallback)
-                loaded_state_dict = artifact_handle.tensor_dict(device=device_selector)
+                artifact_handle = from_disk(str(save_path), verify_checksums=False)
+                loaded_state_dict = artifact_handle.tensor_dict(
+                    device=device_selector,
+                    options=GetArtifactOptions(
+                        source="disk_only",
+                        verify_checksums=False,
+                    ),
+                )
             finally:
                 startup.shutdown()
         finally:
@@ -206,17 +204,19 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
     try:
         startup.init(mode="connect", address=listen)
         try:
-            artifact_handle = from_disk(
-                str(save_path), verify_checksums=False
-            ).with_fallback(
-                FallbackOptions(prefer="disk", allow_p2p=False, verify_checksums=False)
-            )
+            artifact_handle = from_disk(str(save_path), verify_checksums=False)
             device_selector = (
                 "cpu"
                 if cpu_target
                 else ("cuda:0" if torch.cuda.is_available() else "cpu")
             )
-            loaded = artifact_handle.tensor_dict(device=device_selector)
+            loaded = artifact_handle.tensor_dict(
+                device=device_selector,
+                options=GetArtifactOptions(
+                    source="disk_only",
+                    verify_checksums=False,
+                ),
+            )
         finally:
             startup.shutdown()
     finally:
@@ -270,14 +270,17 @@ def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
     try:
         startup.init(mode="connect", address=listen)
         try:
-            artifact_handle = from_disk(
-                str(save_path), verify_checksums=False
-            ).with_fallback(
-                FallbackOptions(prefer="disk", allow_p2p=False, verify_checksums=False)
-            )
+            artifact_handle = from_disk(str(save_path), verify_checksums=False)
             ref = artifact_handle.tensor_dict(device="cuda:0")["weights"]
 
-            binding = artifact_handle.bind(device="cuda:0", packing="byte_space")
+            binding = artifact_handle.bind(
+                device="cuda:0",
+                packing="byte_space",
+                options=GetArtifactOptions(
+                    source="disk_only",
+                    verify_checksums=False,
+                ),
+            )
             try:
                 bound = dict(binding.tensors)["weights"]
                 torch.cuda.synchronize()

@@ -178,6 +178,7 @@ TEST_CASE(
   req.set_wait_for_shared_disk_ms(200);
   req.mutable_source_policy()->set_allow_disk(true);
   req.mutable_source_policy()->set_allow_p2p(true);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
@@ -231,6 +232,7 @@ TEST_CASE(
   req.set_wait_for_shared_disk_ms(200);
   req.mutable_source_policy()->set_allow_disk(true);
   req.mutable_source_policy()->set_allow_p2p(true);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
@@ -282,6 +284,7 @@ TEST_CASE(
   req.set_wait_for_shared_disk_ms(200);
   req.mutable_source_policy()->set_allow_disk(true);
   req.mutable_source_policy()->set_allow_p2p(true);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;

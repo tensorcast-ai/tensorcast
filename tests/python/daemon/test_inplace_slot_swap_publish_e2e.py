@@ -22,7 +22,8 @@ import pytest
 import torch
 import yaml
 
-from tensorcast.api.store import FallbackOptions, Store
+from tensorcast.api import GetArtifactOptions
+from tensorcast.api.store import Store
 from tensorcast.api.store.view_composer import compute_index_multihash
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
@@ -360,20 +361,18 @@ def test_inplace_slot_swap_publish_e2e(
             _wait_artifact_index_ready(daemon_addr, artifact_a_id)
 
             store = Store(daemon_addr)
-            fallback_a = FallbackOptions(
-                prefer="disk",
-                allow_p2p=False,
+            disk_only = GetArtifactOptions(
+                source="disk_only",
                 verify_checksums=False,
             )
-            fallback_b = FallbackOptions(
-                prefer="disk",
-                allow_p2p=False,
-                verify_checksums=False,
-            )
-            artifact_a = store.artifact(artifact_id=artifact_a_id, fallback=fallback_a)
-            artifact_b = store.artifact(artifact_id=artifact_b_id, fallback=fallback_b)
+            artifact_a = store.artifact(artifact_id=artifact_a_id)
+            artifact_b = store.artifact(artifact_id=artifact_b_id)
 
-            binding = artifact_a.bind(device="cuda:0", packing="byte_space")
+            binding = artifact_a.bind(
+                device="cuda:0",
+                packing="byte_space",
+                options=disk_only,
+            )
 
             torch.cuda.synchronize()
             torch.testing.assert_close(
@@ -392,7 +391,7 @@ def test_inplace_slot_swap_publish_e2e(
                 servicer, old_replica_id, expected_available=True, timeout_s=15.0
             )
 
-            binding.swap(artifact_b, publish=True)
+            binding.swap(artifact_b, options=disk_only, publish=True)
             torch.cuda.synchronize()
             new_replica_id = binding._slot.published_replica_id
             assert new_replica_id is not None

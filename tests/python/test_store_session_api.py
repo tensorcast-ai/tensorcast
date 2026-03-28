@@ -27,7 +27,6 @@ from tensorcast.api._register import (
 from tensorcast.api.store import (
     ArtifactError,
     ArtifactFuture,
-    FallbackOptions,
     Store,
     StoreOptions,
 )
@@ -689,11 +688,9 @@ def test_store_get_prefers_disk_when_available(
 
     def fake_materialize(
         *,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         **_: Any,
     ) -> MaterializationPayload:
-        disk_called["preference"] = preference
         disk_called["allow_disk"] = (
             bool(source_policy.allow_disk) if source_policy is not None else None
         )
@@ -709,9 +706,11 @@ def test_store_get_prefers_disk_when_available(
             byte_length=size_bytes,
             storage_offset=int(tensor.storage_offset()),
         )
-        effective_preference = preference
-        if effective_preference is None and source_policy is not None:
-            effective_preference = source_policy.preference
+        effective_preference = (
+            source_policy.preference
+            if source_policy is not None
+            else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        )
         use_disk = (
             effective_preference
             == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
@@ -739,13 +738,13 @@ def test_store_get_prefers_disk_when_available(
 
     store.set_materialize_fn(fake_materialize)
 
-    artifact = store.artifact(
-        key="does-not-matter",
-        fallback="disk",
+    artifact = store.artifact(key="does-not-matter")
+    result = artifact.tensor_dict(
+        device=torch.device("cuda", 0),
+        options=GetArtifactOptions(source="disk_first"),
     )
-    result = artifact.tensor_dict(device=torch.device("cuda", 0))
     assert (
-        disk_called["preference"]
+        disk_called["policy_preference"]
         == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     )
     assert disk_called["allow_disk"] is True
@@ -856,16 +855,16 @@ def test_store_key_resolution_cache_reuses_mapping(
         materialize_fn=env.fake_materialize,
     )
 
-    fallback = FallbackOptions(
-        prefer_disk=True, allow_p2p=False, verify_checksums=False
-    )
-
     # Warm the key mapping cache so key resolution is cached.
     store._runtime.resolve_key_mapping_cached(key=key)
 
-    artifact = store.artifact(key=key, fallback=fallback)
-    first = artifact.tensor_dict(device=torch.device("cuda", 0))
-    second = artifact.tensor_dict(device=torch.device("cuda", 0))
+    artifact = store.artifact(key=key)
+    disk_only = GetArtifactOptions(
+        source="disk_only",
+        verify_checksums=False,
+    )
+    first = artifact.tensor_dict(device=torch.device("cuda", 0), options=disk_only)
+    second = artifact.tensor_dict(device=torch.device("cuda", 0), options=disk_only)
 
     assert torch.allclose(first["weight"], tensor)
     assert torch.allclose(second["weight"], tensor)
@@ -998,23 +997,20 @@ def test_get_function_delegates_to_session(
             *,
             artifact_id: str | None = None,
             key: str | None = None,
-            fallback: FallbackOptions | str | None = None,
         ) -> object:
             self.kwargs = {
                 "artifact_id": artifact_id,
                 "key": key,
-                "fallback": fallback,
             }
             return self.result
 
     session = DummyStore()
     monkeypatch.setattr(store_mod, "store", lambda: session)
-    outcome: object = store_mod.artifact(key="demo", fallback="disk")
+    outcome: object = store_mod.artifact(key="demo")
 
     assert outcome is session.result
     assert session.kwargs is not None
     assert session.kwargs["key"] == "demo"
-    assert session.kwargs["fallback"] == "disk"
 
 
 def test_from_disk_function_delegates_to_session(
@@ -1205,10 +1201,14 @@ def test_store_force_recreate_and_option_refresh(
 
     store_mod.shutdown_process_store()
 
-    initial_opts = store_mod.StoreOptions(fallback=FallbackOptions(prefer_disk=False))
+    initial_opts = store_mod.StoreOptions(
+        get=GetArtifactOptions(source="auto")
+    )
     first = cast(DummyStore, store_mod.store(opts=initial_opts))
 
-    mismatch_opts = store_mod.StoreOptions(fallback=FallbackOptions(prefer_disk=True))
+    mismatch_opts = store_mod.StoreOptions(
+        get=GetArtifactOptions(source="disk_only")
+    )
     with pytest.raises(RuntimeError):
         store_mod.store(opts=mismatch_opts)
 
