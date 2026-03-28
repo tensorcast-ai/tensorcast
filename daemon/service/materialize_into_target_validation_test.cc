@@ -32,6 +32,7 @@
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/ref_tracker.h"
+#include "daemon/state/registration_manager.h"
 #include "daemon/state/replica_session_manager.h"
 #include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
@@ -151,7 +152,9 @@ struct ValidationFixture {
   tensorcast::daemon::SessionLifecycleManager lifecycle_mgr;
   tensorcast::daemon::LifecycleKernel lifecycle_kernel;
   tensorcast::daemon::SessionsService sessions_svc;
+  tensorcast::daemon::RegistrationManager registration_mgr;
   tensorcast::daemon::DeviceResolver devices;
+  tensorcast::daemon::ExternalTargetAccessService external_target_access_service;
   tensorcast::daemon::ArtifactSourceRegistry disk_imports;
   tensorcast::daemon::BindingRegistry binding_registry;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
@@ -173,6 +176,8 @@ struct ValidationFixture {
         lifecycle_kernel("daemon-validation-test"),
         sessions_svc(session_mgr, verif_tracker, &scheduler, &lifecycle_mgr, absl::Seconds(60)),
         devices(tensorcast::store::DeviceRegistry::instance()),
+        external_target_access_service(
+            tensorcast::daemon::ExternalTargetAccessService::Dep{.devices = devices, .regions = regions}),
         binding_registry(),
         storage_root(ensure_dir(test_tmpdir())),
         controller(MaterializationController(
@@ -182,6 +187,7 @@ struct ValidationFixture {
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
                 .lip_manager = lip_mgr,
+                .registration_manager = registration_mgr,
                 .devices = devices,
                 .regions = regions,
                 .disk_imports = disk_imports,
@@ -189,6 +195,7 @@ struct ValidationFixture {
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,
+                .external_target_access_service = external_target_access_service,
                 .global_store_client = global_store_client,
                 .lifecycle = &lifecycle_mgr,
                 .lifecycle_kernel = &lifecycle_kernel,
@@ -275,7 +282,7 @@ TEST_CASE(
   req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
   req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
@@ -327,7 +334,7 @@ TEST_CASE(
   req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
   req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
@@ -962,7 +969,7 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
   req.mutable_selection()->set_artifact_id("artifact_multi_region");
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
-  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
   register_disk_location(*fix.global_store_client, "artifact_multi_region", artifact_rel);
 
   auto* layout = req.mutable_target_layout();
@@ -1086,7 +1093,7 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
-  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);

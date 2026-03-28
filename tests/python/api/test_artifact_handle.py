@@ -18,7 +18,7 @@ from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.retry import build_retry_policies
-from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
+from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     BuilderMode,
@@ -206,7 +206,6 @@ class _PipelineStub:
         artifact_id: str | None,
         key: str | None,
         device,
-        fallback,
         options=None,
         tensor_names: Sequence[str] | None = None,
         view_spec=None,
@@ -522,7 +521,7 @@ def test_to_dict_round_trip_preserves_metadata():
     assert runtime._client.get_index_calls == 0
 
 
-def test_with_fallback_handles_multiple_identifiers():
+def test_subset_clone_handles_multiple_identifiers():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
     runtime.cache_key_mapping("mapped", artifact_id="aid")
@@ -531,7 +530,7 @@ def test_with_fallback_handles_multiple_identifiers():
     artifact = Artifact(store_ref=_store_ref(store), key="mapped")
 
     assert artifact.artifact_id == "aid"
-    clone = artifact.with_fallback(FallbackOptions(prefer="disk", allow_p2p=False))
+    clone = artifact.subset(["foo"])
 
     assert clone.artifact_id == "aid"
     assert clone.key == "mapped"

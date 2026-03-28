@@ -66,12 +66,15 @@ using materialization_index_source::load_descriptor_metadata;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::build_descriptors_from_index;
+using materialization_policy::apply_operation_transport_context;
+using materialization_policy::apply_request_context_to_hints;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
-using materialization_policy::resolve_source_policy;
+using materialization_policy::NormalizedMaterializationRequestContext;
+using materialization_policy::OperationTransportContext;
+using materialization_policy::resolve_materialization_request_context;
+using materialization_policy::resolve_operation_transport_context;
 using materialization_policy::resolve_transform_placement;
-using materialization_policy::to_hint_preference;
-using materialization_policy::validate_source_policy;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_binding_realization_materialization_plan;
 using materialization_target_plan::build_mapped_target_materialization_plan;
@@ -1106,7 +1109,6 @@ v2::MaterializeIntoTargetRequest build_unmapped_request(
     const v2::TargetLayout& target_layout,
     int pid,
     std::string_view device_uuid,
-    v2::SourcePreference preference,
     const v2::SourcePolicy* source_policy,
     std::optional<std::string_view> operation_id,
     v2::TransformPlacement placement) {
@@ -1117,7 +1119,6 @@ v2::MaterializeIntoTargetRequest build_unmapped_request(
   request.mutable_target_layout()->CopyFrom(target_layout);
   request.set_pid(pid);
   request.set_device_uuid(std::string(device_uuid));
-  request.set_preference(preference);
   if (source_policy != nullptr) {
     request.mutable_source_policy()->CopyFrom(*source_policy);
   }
@@ -1131,7 +1132,6 @@ v2::MaterializeIntoTargetRequest build_unmapped_request(
 v2::MaterializeIntoMappedTargetRequest build_mapped_request(
     const BindingRegistry::Record& record,
     std::string_view artifact_id,
-    v2::SourcePreference preference,
     const v2::SourcePolicy* source_policy,
     std::optional<std::string_view> operation_id,
     v2::TransformPlacement placement) {
@@ -1142,7 +1142,6 @@ v2::MaterializeIntoMappedTargetRequest build_mapped_request(
   request.mutable_target_layout()->CopyFrom(record.target_layout);
   request.set_pid(record.owner_pid);
   request.set_device_uuid(record.device_uuid);
-  request.set_preference(preference);
   if (source_policy != nullptr) {
     request.mutable_source_policy()->CopyFrom(*source_policy);
   }
@@ -1168,7 +1167,6 @@ struct SourceBoundMaterializationRequest {
   const v2::BindingRealizationPlan* realization_plan{nullptr};
   const v2::CopyPlan* copy_plan{nullptr};
   const std::vector<v2::MappedTensorSpec>* dst_tensors{nullptr};
-  v2::SourcePreference legacy_preference{v2::SourcePreference::SOURCE_PREFERENCE_AUTO};
   const v2::SourcePolicy* source_policy{nullptr};
   std::optional<std::string_view> operation_id;
   v2::TransformPlacement placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
@@ -1180,7 +1178,8 @@ struct PreparedSourceBoundPlan {
   std::string canonical_index_json;
   uint64_t logical_total_size{0};
   v2::TransformPlacement requested_placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
-  materialization_policy::ResolvedSourcePolicy effective_policy;
+  NormalizedMaterializationRequestContext request_context;
+  OperationTransportContext transport_context;
   std::optional<store::loading::DiskSource> disk_source;
   std::optional<store::loading::DiskMetadata> disk_metadata;
   std::optional<MappedTargetMaterializationPlan> mapped_plan;
@@ -1237,10 +1236,15 @@ grpc::Status prepare_source_bound_plan(
 
   out = PreparedSourceBoundPlan{};
   out.requested_placement = request.placement;
-  out.effective_policy = resolve_source_policy(request.source_policy, request.legacy_preference);
-  if (auto policy_status = validate_source_policy(out.effective_policy); !policy_status.ok()) {
-    return to_grpc_status(policy_status);
+  if (request.operation_id.has_value() && !request.operation_id->empty()) {
+    out.transport_context = resolve_operation_transport_context(*request.operation_id);
   }
+  auto request_context_or =
+      resolve_materialization_request_context(request.source_policy, out.transport_context.execution_topology);
+  if (!request_context_or.ok()) {
+    return to_grpc_status(request_context_or.status());
+  }
+  out.request_context = std::move(*request_context_or);
 
   const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
   tensorcast::common::v1::ArtifactSelection effective_source_selection;
@@ -1270,7 +1274,7 @@ grpc::Status prepare_source_bound_plan(
         &d.disk_imports,
         d.storage_path,
         request.source_selection->artifact_id(),
-        out.effective_policy.allow_disk,
+        out.request_context.retrieval_policy.allow_disk,
         /*allow_local_import_fallback=*/true,
         loopback_peer);
     if (!resolution_or.ok()) {
@@ -1328,12 +1332,7 @@ grpc::Status prepare_source_bound_plan(
     replay_record.copy_plan = *request.copy_plan;
     replay_record.dst_tensors = *request.dst_tensors;
     v2::MaterializeIntoMappedTargetRequest mapped_request = build_mapped_request(
-        replay_record,
-        out.resolved_artifact_id,
-        out.effective_policy.preference,
-        request.source_policy,
-        request.operation_id,
-        request.placement);
+        replay_record, out.resolved_artifact_id, request.source_policy, request.operation_id, request.placement);
     MappedTargetMaterializationPlan mapped_plan;
     auto plan_status = build_mapped_target_materialization_plan(
         d.engine,
@@ -1358,7 +1357,6 @@ grpc::Status prepare_source_bound_plan(
         *request.target_layout,
         request.owner_pid,
         request.device_uuid,
-        out.effective_policy.preference,
         request.source_policy,
         request.operation_id,
         request.placement);
@@ -1407,13 +1405,18 @@ grpc::Status prepare_source_bound_execution(
   if (!requester_worker_id.empty()) {
     out.hints.transport_requester_worker_id = requester_worker_id;
   }
+  apply_operation_transport_context(prepared_plan.transport_context, &out.hints);
+  apply_request_context_to_hints(prepared_plan.request_context, &out.hints);
   const bool prefer_direct_disk_for_source_layout = prepared_plan.disk_source.has_value() &&
       prepared_plan.disk_metadata.has_value() && prepared_plan.disk_metadata->source_index_json.has_value();
-  out.hints.source_preference = prefer_direct_disk_for_source_layout
-      ? store::loading::SourcePreference::kPreferDisk
-      : to_hint_preference(prepared_plan.effective_policy.preference);
-  out.hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : prepared_plan.effective_policy.allow_p2p;
-  out.hints.allow_disk = prepared_plan.effective_policy.allow_disk;
+  if (prefer_direct_disk_for_source_layout) {
+    out.hints.set_retrieval_policy(
+        store::loading::RetrievalPolicy{
+            .preference = store::loading::SourcePreference::kPreferDisk,
+            .allow_p2p = false,
+            .allow_disk = prepared_plan.request_context.retrieval_policy.allow_disk,
+        });
+  }
   out.hints.verify = store::loading::MaterializeHints::Verify::NONE;
   out.hints.export_policy = store::loading::ExportPolicy::kForce;
   if (prepared_plan.disk_metadata.has_value()) {
@@ -1698,7 +1701,6 @@ grpc::Status OwnedBindingService::create_owned_binding(
           .target_index_json = std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
           .copy_plan = mapped ? &req.copy_plan() : nullptr,
           .dst_tensors = mapped ? &mapped_dst_tensors : nullptr,
-          .legacy_preference = req.preference(),
           .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
           .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
           .placement = req.placement(),
@@ -2553,7 +2555,6 @@ grpc::Status OwnedBindingService::refill_owned_binding(
           .realization_plan = use_realization_plan ? &req.realization_plan() : nullptr,
           .copy_plan = (mapped && !use_realization_plan) ? &copy_plan : nullptr,
           .dst_tensors = use_mapped_materialization ? &dst_tensors : nullptr,
-          .legacy_preference = req.preference(),
           .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
           .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
           .placement = req.placement(),

@@ -137,7 +137,7 @@ TEST_CASE(
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
@@ -187,7 +187,7 @@ TEST_CASE(
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   // Set an (identity) view spec to exercise canonical planning without requiring Global Store.
   req.mutable_selection()->mutable_view_spec();
 
@@ -246,7 +246,7 @@ TEST_CASE(
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   req.set_wait_for_completion(false);
   req.set_lease_mode(tensorcast::daemon::v2::LeaseMode::LEASE_MODE_NO_LEASE);
   req.set_replica_uuid("serving-preflight-invalid");
@@ -297,7 +297,7 @@ TEST_CASE(
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   req.set_wait_for_completion(false);
   req.set_lease_mode(tensorcast::daemon::v2::LeaseMode::LEASE_MODE_NO_LEASE);
   req.set_replica_uuid("serving-preflight-strict-missing");

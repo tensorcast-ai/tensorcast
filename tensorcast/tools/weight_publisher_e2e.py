@@ -26,7 +26,7 @@ from typing import Any, Callable
 import torch
 
 import tensorcast as tc
-from tensorcast import FallbackOptions
+from tensorcast import GetArtifactOptions
 from tensorcast.api.store import CopyPlanEntry, Range
 from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.runtime import get_context as get_store_context
@@ -1166,10 +1166,11 @@ class WeightUpdatePublisher:
 
     def _probe_materializable(self, *, key: str, version: int) -> bool:
         try:
-            artifact = resolve_artifact(key=key).with_fallback(
-                self._fallback_for_checks()
+            artifact = resolve_artifact(key=key)
+            tensors = artifact.tensor_dict(
+                device=self._check_device,
+                options=self._check_options(),
             )
-            tensors = artifact.tensor_dict(device=self._check_device)
             _validate_payload(
                 version=version,
                 tensors=tensors,
@@ -1181,8 +1182,8 @@ class WeightUpdatePublisher:
         except Exception:
             return False
 
-    def _fallback_for_checks(self) -> FallbackOptions:
-        return FallbackOptions.local_only()
+    def _check_options(self) -> GetArtifactOptions:
+        return GetArtifactOptions(source="local_only")
 
     def _wait_materialization_state(
         self,
@@ -1253,10 +1254,12 @@ class WeightUpdateReceiver:
         self._key_template = key_template
         self._poll_interval_s = poll_interval_s
         self._per_version_timeout_s = per_version_timeout_s
-        self._fallback = FallbackOptions(
-            prefer="p2p",
-            allow_p2p=True,
-            allow_disk=False,
+        self._materialize_options = GetArtifactOptions(
+            source={
+                "preference": "prefer_p2p",
+                "allow_p2p": True,
+                "allow_disk": False,
+            },
             verify_checksums=False,
         )
         self._materialize_device = _materialization_device(materialize_device)
@@ -1556,7 +1559,7 @@ class WeightUpdateReceiver:
         artifact_id = self._resolve_artifact_id_for_key(key=key)
         if not artifact_id:
             return None
-        return resolve_artifact(artifact_id=artifact_id).with_fallback(self._fallback)
+        return resolve_artifact(artifact_id=artifact_id)
 
     def _resolve_artifact_id_for_key(self, *, key: str) -> str | None:
         started = time.monotonic()
@@ -1619,7 +1622,10 @@ class WeightUpdateReceiver:
             artifact = self._resolve_artifact_for_key(key=key)
             if artifact is None:
                 return False
-            tensors = artifact.tensor_dict(device=self._materialize_device)
+            tensors = artifact.tensor_dict(
+                device=self._materialize_device,
+                options=self._materialize_options,
+            )
             _validate_payload(
                 version=version,
                 tensors=tensors,
@@ -1730,7 +1736,8 @@ class WeightUpdateReceiver:
                     continue
                 start = time.monotonic()
                 materialized = artifact.tensor_dict_with_diagnostics(
-                    device=self._materialize_device
+                    device=self._materialize_device,
+                    options=self._materialize_options,
                 )
                 latency_s = time.monotonic() - start
                 tensors = materialized.tensors
@@ -1871,6 +1878,7 @@ class WeightUpdateReceiver:
                     self._binding = artifact.bind(
                         device=self._materialize_device,
                         packing="byte_space",
+                        options=self._materialize_options,
                         ctx=materialize_ctx,
                     )
                     self._binding_ptrs = {
@@ -1882,7 +1890,11 @@ class WeightUpdateReceiver:
                 else:
                     if self._binding_ptrs is None:
                         raise AssertionError("binding pointer baseline is missing")
-                    self._binding.swap(artifact, ctx=materialize_ctx)
+                    self._binding.swap(
+                        artifact,
+                        options=self._materialize_options,
+                        ctx=materialize_ctx,
+                    )
                     latest_ptrs = {
                         name: tensor.data_ptr()
                         for name, tensor in self._binding.tensors.items()
@@ -2166,6 +2178,7 @@ class WeightUpdateReceiver:
                         tp_total_bytes=self._tp_total_bytes,
                     ),
                     packing="byte_space",
+                    options=self._materialize_options,
                     **bind_kwargs,
                 )
             except Exception:
@@ -2200,7 +2213,7 @@ class WeightUpdateReceiver:
         swap_kwargs: dict[str, Any] = {"publish": False}
         if ctx is not None:
             swap_kwargs["ctx"] = ctx
-        binding.swap(artifact, **swap_kwargs)
+        binding.swap(artifact, options=self._materialize_options, **swap_kwargs)
         latest_ptrs = {
             name: tensor.data_ptr() for name, tensor in binding.tensors.items()
         }
@@ -2246,9 +2259,9 @@ class WeightUpdateReceiver:
         last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
-        rank_attempt_seq: dict[int, int] = {
-            rank: 0 for rank in range(self._tp_world_size)
-        }
+        rank_attempt_seq: dict[int, int] = dict.fromkeys(
+            range(self._tp_world_size), 0
+        )
         completed_ranks: set[int] = set()
         active_rank: int | None = None
         pointer_stable = True

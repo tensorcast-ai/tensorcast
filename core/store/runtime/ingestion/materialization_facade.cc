@@ -94,6 +94,66 @@ bool allow_collective_tensor_executor(const StrategyConfig& strategy_config) {
   return allow_collective_mapped_executor(strategy_config);
 }
 
+bool strategy_diagnostics_basic_enabled(const StrategyConfig& strategy_config) {
+  return strategy_config.diagnostics_verbosity != StrategyConfig::DiagnosticsVerbosity::kOff;
+}
+
+bool strategy_diagnostics_verbose_enabled(const StrategyConfig& strategy_config) {
+  return strategy_config.diagnostics_verbosity == StrategyConfig::DiagnosticsVerbosity::kVerbose;
+}
+
+std::string_view source_locality_name(loading::SourceLocalityHint hint) {
+  switch (hint) {
+    case loading::SourceLocalityHint::kHostLocal:
+      return "host_local";
+    case loading::SourceLocalityHint::kSharedSource:
+      return "shared_source";
+    case loading::SourceLocalityHint::kAuto:
+    default:
+      return "auto";
+  }
+}
+
+uint64_t saturating_multiply_u64(uint64_t lhs, uint64_t rhs) {
+  if (lhs == 0 || rhs == 0) {
+    return 0;
+  }
+  if (lhs > std::numeric_limits<uint64_t>::max() / rhs) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return lhs * rhs;
+}
+
+std::string format_execution_strategy_candidates(const std::vector<strategy::ExecutionStrategyCandidate>& candidates) {
+  std::string out;
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    const auto& candidate = candidates[index];
+    if (index > 0) {
+      out.append(" | ");
+    }
+    absl::StrAppend(
+        &out,
+        strategy::execution_strategy_executor_name(candidate.executor),
+        ":eligible=",
+        candidate.eligible ? 1 : 0,
+        ":reason=",
+        candidate.reason,
+        ":requested=",
+        candidate.estimate.requested_source_bytes,
+        ":unique=",
+        candidate.estimate.unique_source_bytes,
+        ":peak=",
+        candidate.estimate.estimated_peak_temporary_bytes,
+        ":batch=",
+        candidate.estimate.estimated_batch_bytes,
+        ":dedup=",
+        candidate.estimate.estimated_dedup_saving_bytes,
+        ":skew=",
+        candidate.estimate.estimated_owner_skew_ratio);
+  }
+  return out;
+}
+
 absl::StatusOr<loading::MaterializeHints> build_effective_mapped_hints(
     const strategy::ResolvedMaterializationPlan& resolved_plan,
     const loading::MaterializeHints& hints) {
@@ -2062,6 +2122,8 @@ MaterializationFacade::MaterializationFacade(Config config)
       .engine_options = config_.options,
       .replica_runtime = config_.replica_runtime,
       .runtime_context = config_.runtime_context.get(),
+      .ordinary_disk_strategy_planner =
+          [this](const pipeline::IngestionContext& ctx) { return build_ordinary_disk_execution_strategy_plan(ctx); },
   };
   if (hooks_ && hooks_->pipeline_factory) {
     pipeline_ = hooks_->pipeline_factory(pipeline_config);
@@ -2164,6 +2226,272 @@ MaterializationFacade::MaterializationFacade(Config config)
     materialization_service_ = std::make_unique<MaterializationService>(std::move(deps));
   }
   ABSL_CHECK(materialization_service_ != nullptr) << "Materialization service factory returned null";
+}
+
+absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ordinary_disk_execution_strategy_plan(
+    const pipeline::IngestionContext& ctx) const {
+  strategy::ExecutionStrategyPlan plan;
+  const auto& strategy_config = config_.options->materialization_strategy;
+  auto& environment = plan.environment;
+  environment.execution_topology = ctx.hints.execution_topology();
+  environment.source = loading::MaterializationSource::kDisk;
+  environment.target_is_gpu = ctx.target_is_gpu;
+  environment.source_layout_available = ctx.disk.source_index_json.has_value();
+  environment.allow_mixed_execution = strategy_config.allow_mixed_execution;
+  environment.owner_file_collective_peak_bytes_budget = strategy_config.owner_file_collective_peak_bytes_budget;
+  environment.owner_file_collective_batch_bytes = strategy_config.owner_file_collective_batch_bytes;
+  environment.owner_file_collective_dim1_staging_bytes = strategy_config.owner_file_collective_dim1_staging_bytes;
+  environment.owner_file_collective_max_inflight_batches = strategy_config.owner_file_collective_max_inflight_batches;
+  environment.owner_file_collective_shared_fs_only = strategy_config.owner_file_collective_shared_fs_only;
+  environment.owner_file_collective_max_owner_skew_ratio = strategy_config.owner_file_collective_max_owner_skew_ratio;
+  environment.owner_file_collective_min_dedup_saving_bytes =
+      strategy_config.owner_file_collective_min_dedup_saving_bytes;
+  environment.owner_file_collective_group_assemble_timeout =
+      strategy_config.owner_file_collective_group_assemble_timeout;
+  environment.owner_file_collective_allow_mixed_residual = strategy_config.owner_file_collective_allow_mixed_residual;
+  environment.owner_file_collective_planner_cache_entries = strategy_config.owner_file_collective_planner_cache_entries;
+
+  if (ctx.resolved_view_plan.has_value()) {
+    environment.requested_bytes = ctx.resolved_view_plan->view_size_bytes;
+  } else if (ctx.verification.logical_total_size > 0) {
+    environment.requested_bytes = ctx.verification.logical_total_size;
+  } else if (ctx.disk.source.expected_size.has_value()) {
+    environment.requested_bytes = *ctx.disk.source.expected_size;
+  }
+
+  strategy::ExecutionStrategyCostEstimate generic_estimate{
+      .requested_source_bytes = environment.requested_bytes,
+      .unique_source_bytes = environment.requested_bytes,
+  };
+  strategy::ExecutionStrategyCandidate generic_candidate{
+      .executor = strategy::ExecutionStrategyExecutor::kGenericByteRange,
+      .eligible = true,
+      .reason = "exact_generic_fallback",
+      .estimate = generic_estimate,
+  };
+
+  std::string local_reason = "target_not_gpu";
+  std::string collective_reason = "target_not_gpu";
+  strategy::ExecutionStrategyCostEstimate local_estimate = generic_estimate;
+  strategy::ExecutionStrategyCostEstimate collective_estimate = generic_estimate;
+
+  if (ctx.target_is_gpu) {
+    local_reason = "strategy_disabled";
+    collective_reason = "strategy_disabled";
+
+    auto disk_context_or = loader::get_disk_artifact_context(ctx.disk.artifact_path);
+    if (disk_context_or.ok()) {
+      plan.disk_context = *disk_context_or;
+      environment.coordinator_available = plan.disk_context != nullptr;
+    } else if (strategy_diagnostics_verbose_enabled(strategy_config)) {
+      LOG(WARNING) << "materialize_replica strategy planning could not acquire shared disk context"
+                   << " artifact_id=" << ctx.artifact_identifier << " status=" << disk_context_or.status();
+    }
+
+    environment.requires_server_transform = ctx.resolved_view_plan.has_value() &&
+        ctx.resolved_view_plan->transform.requires_materialization &&
+        (ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer) ==
+            loading::TransformPlacement::kServer;
+
+    std::string representation_reason = "missing_variant_or_source_layout";
+    if (ctx.hints.variant.has_value() && ctx.disk.source_index_json.has_value() &&
+        ctx.verification.canonical_index_json.has_value()) {
+      const std::string_view target_index_json = ctx.resolved_view_plan.has_value()
+          ? std::string_view(ctx.resolved_view_plan->view_index_json)
+          : std::string_view(*ctx.verification.canonical_index_json);
+      if (!target_index_json.empty()) {
+        auto representation_or = materialization::contracts::build_index_backed_representation_work(
+            *ctx.disk.source_index_json,
+            target_index_json,
+            *ctx.hints.variant,
+            canonical_byte_space_ref(),
+            "ephemeral_into_target");
+        if (representation_or.ok()) {
+          plan.representation_work_plan = std::move(representation_or->work_plan);
+          if (plan.representation_work_plan->items.empty()) {
+            plan.representation_work_plan.reset();
+            representation_reason = "representation_work_plan_empty";
+          } else {
+            environment.committed_bytes = plan.representation_work_plan->committed_bytes;
+            environment.residual_bytes = plan.representation_work_plan->residual_fallback_map.total_bytes;
+            environment.has_complete_metadata = true;
+            representation_reason = "ok";
+          }
+        } else {
+          representation_reason = representation_or.status().message();
+          if (strategy_diagnostics_verbose_enabled(strategy_config)) {
+            LOG(INFO) << "materialize_replica representation_work unavailable"
+                      << " artifact_id=" << ctx.artifact_identifier << " status=" << representation_or.status();
+          }
+        }
+      } else {
+        representation_reason = "missing_target_index_json";
+      }
+    }
+
+    const bool has_fill_items =
+        plan.representation_work_plan.has_value() && work_plan_has_fill_items(*plan.representation_work_plan);
+    const bool has_residual_fallback = plan.representation_work_plan.has_value() &&
+        plan.representation_work_plan->residual_fallback_map.total_bytes > 0;
+    if (has_fill_items) {
+      representation_reason = "fill_items_require_generic_fallback";
+    } else if (has_residual_fallback) {
+      representation_reason = "residual_fallback_requires_generic_executor";
+    } else if (environment.requires_server_transform) {
+      representation_reason = "server_transform_requires_generic_executor";
+    }
+
+    const uint64_t local_peak_bytes = std::min<uint64_t>(
+        environment.requested_bytes,
+        std::max<uint64_t>(config_.artifact_chunk_bytes, ctx.runtime_context->tx_slice_bytes()));
+    local_estimate = strategy::ExecutionStrategyCostEstimate{
+        .requested_source_bytes = environment.requested_bytes,
+        .unique_source_bytes = environment.requested_bytes,
+        .estimated_peak_temporary_bytes = local_peak_bytes,
+        .estimated_batch_bytes = local_peak_bytes,
+        .estimated_owner_skew_ratio = 1.0,
+        .estimated_dedup_saving_bytes = 0,
+    };
+
+    const bool local_prereqs_ready = strategy_config.enable_local_batched_disk_load && ctx.disk.is_safetensors &&
+        plan.disk_context != nullptr && plan.representation_work_plan.has_value() && !has_fill_items &&
+        !has_residual_fallback && !environment.requires_server_transform;
+    if (local_prereqs_ready) {
+      local_reason = "eligible";
+    } else if (!strategy_config.enable_local_batched_disk_load) {
+      local_reason = "strategy_disabled";
+    } else if (!ctx.disk.is_safetensors) {
+      local_reason = "non_safetensors_source";
+    } else if (plan.disk_context == nullptr) {
+      local_reason = "shared_disk_context_unavailable";
+    } else {
+      local_reason = representation_reason;
+    }
+
+    const auto group = environment.execution_topology.collective_load_group;
+    const uint32_t world_size = group.has_value() ? group->world_size : 0;
+    const uint64_t dedup_saving_bytes =
+        world_size > 1 ? saturating_multiply_u64(environment.requested_bytes, world_size - 1) : 0;
+    collective_estimate = strategy::ExecutionStrategyCostEstimate{
+        .requested_source_bytes = environment.requested_bytes,
+        .unique_source_bytes = world_size > 0 ? environment.requested_bytes : environment.requested_bytes,
+        .estimated_peak_temporary_bytes = environment.requested_bytes,
+        .estimated_batch_bytes = strategy_config.owner_file_collective_batch_bytes,
+        .estimated_owner_skew_ratio = 1.0,
+        .estimated_dedup_saving_bytes = dedup_saving_bytes,
+    };
+
+    const bool locality_blocks_collective = strategy_config.owner_file_collective_shared_fs_only &&
+        environment.execution_topology.source_locality == loading::SourceLocalityHint::kHostLocal;
+    const bool collective_budget_ok = strategy_config.owner_file_collective_peak_bytes_budget == 0 ||
+        collective_estimate.estimated_peak_temporary_bytes <= strategy_config.owner_file_collective_peak_bytes_budget;
+    const bool collective_skew_ok = strategy_config.owner_file_collective_max_owner_skew_ratio <= 0.0 ||
+        collective_estimate.estimated_owner_skew_ratio <= strategy_config.owner_file_collective_max_owner_skew_ratio;
+    const bool collective_dedup_ok = collective_estimate.estimated_dedup_saving_bytes >=
+        strategy_config.owner_file_collective_min_dedup_saving_bytes;
+    const bool collective_prereqs_ready = strategy_config.enable_owner_file_collective && ctx.disk.is_safetensors &&
+        group.has_value() && group->world_size > 1 && plan.disk_context != nullptr &&
+        plan.representation_work_plan.has_value() && !has_fill_items && !has_residual_fallback &&
+        !environment.requires_server_transform && !locality_blocks_collective && collective_budget_ok &&
+        collective_skew_ok && collective_dedup_ok;
+    if (collective_prereqs_ready) {
+      collective_reason = "eligible";
+      plan.collective_load_group = group;
+    } else if (!strategy_config.enable_owner_file_collective) {
+      collective_reason = "strategy_disabled";
+    } else if (!ctx.disk.is_safetensors) {
+      collective_reason = "non_safetensors_source";
+    } else if (!group.has_value() || group->world_size <= 1) {
+      collective_reason = "collective_group_missing";
+    } else if (plan.disk_context == nullptr) {
+      collective_reason = "shared_disk_context_unavailable";
+    } else if (locality_blocks_collective) {
+      collective_reason = "source_locality_host_local";
+    } else if (!collective_budget_ok) {
+      collective_reason = "peak_budget_exceeded";
+    } else if (!collective_skew_ok) {
+      collective_reason = "owner_skew_threshold_exceeded";
+    } else if (!collective_dedup_ok) {
+      collective_reason = "dedup_saving_below_threshold";
+    } else {
+      collective_reason = representation_reason;
+    }
+  }
+
+  plan.candidates = {
+      generic_candidate,
+      strategy::ExecutionStrategyCandidate{
+          .executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal,
+          .eligible = local_reason == "eligible",
+          .reason = local_reason,
+          .estimate = local_estimate,
+      },
+      strategy::ExecutionStrategyCandidate{
+          .executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective,
+          .eligible = collective_reason == "eligible",
+          .reason = collective_reason,
+          .estimate = collective_estimate,
+      },
+  };
+
+  auto choose_generic = [&](std::string reason) {
+    plan.executor = strategy::ExecutionStrategyExecutor::kGenericByteRange;
+    plan.selection_reason = std::move(reason);
+  };
+  const bool local_eligible = plan.candidates[1].eligible;
+  const bool collective_eligible = plan.candidates[2].eligible;
+  switch (strategy_config.executor_preference) {
+    case StrategyConfig::ExecutorPreference::kGenericByteRange:
+      choose_generic("executor_preference_generic");
+      break;
+    case StrategyConfig::ExecutorPreference::kTensorAwareLocal:
+      if (local_eligible) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
+        plan.selection_reason = "executor_preference_tensor_aware_local";
+      } else {
+        choose_generic(absl::StrCat("tensor_aware_local_unavailable:", local_reason));
+      }
+      break;
+    case StrategyConfig::ExecutorPreference::kOwnerFileCollective:
+      if (collective_eligible) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
+        plan.selection_reason = "executor_preference_owner_file_collective";
+      } else if (local_eligible) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
+        plan.selection_reason =
+            absl::StrCat("owner_file_collective_unavailable:", collective_reason, ";fallback=local");
+      } else {
+        choose_generic(absl::StrCat("owner_file_collective_unavailable:", collective_reason));
+      }
+      break;
+    case StrategyConfig::ExecutorPreference::kAuto:
+    default:
+      if (local_eligible) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
+        plan.selection_reason = "auto_prefers_local_batched";
+      } else if (collective_eligible) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
+        plan.selection_reason = "auto_collective_after_local_rejection";
+      } else {
+        choose_generic(absl::StrCat("auto_generic:", local_reason, ",", collective_reason));
+      }
+      break;
+  }
+
+  if (strategy_diagnostics_basic_enabled(strategy_config)) {
+    LOG(INFO) << "materialize_replica strategy_plan"
+              << " artifact_id=" << ctx.artifact_identifier
+              << " executor=" << strategy::execution_strategy_executor_name(plan.executor)
+              << " selection_reason=" << plan.selection_reason << " requested_bytes=" << environment.requested_bytes
+              << " committed_bytes=" << environment.committed_bytes << " residual_bytes=" << environment.residual_bytes
+              << " source_layout_available=" << environment.source_layout_available
+              << " coordinator_available=" << environment.coordinator_available
+              << " source_locality=" << source_locality_name(environment.execution_topology.source_locality)
+              << " collective_group=" << (environment.execution_topology.collective_load_group.has_value() ? 1 : 0)
+              << " candidates=" << format_execution_strategy_candidates(plan.candidates);
+  }
+
+  return plan;
 }
 
 MaterializationFacade::~MaterializationFacade() = default;
@@ -2585,10 +2913,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool gs_connected = gs_client && gs_client->is_connected();
   const bool comm_enabled = comm_manager && comm_manager->is_enabled();
-  const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
-  const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
-  const bool allow_p2p = hints.allow_p2p;
-  const bool allow_disk = hints.allow_disk;
+  const auto retrieval_policy = hints.retrieval_policy();
+  if (auto policy_status = loading::validate_retrieval_policy(retrieval_policy); !policy_status.ok()) {
+    return policy_status;
+  }
+  const bool prefer_disk = retrieval_policy.preference == loading::SourcePreference::kPreferDisk;
+  const bool prefer_p2p = retrieval_policy.preference == loading::SourcePreference::kPreferP2P;
+  const bool allow_p2p = retrieval_policy.allow_p2p;
+  const bool allow_disk = retrieval_policy.allow_disk;
   const bool has_disk_source = disk_source.has_value();
   components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
   if (!is_local_identity(local_identity)) {
@@ -2597,13 +2929,6 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       local_identity.node_address = options.p2p_listen_host;
     }
     local_identity.p2p_port = options.p2p_port;
-  }
-
-  if (prefer_disk && !allow_disk) {
-    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
-  }
-  if (prefer_p2p && !allow_p2p) {
-    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
   }
 
   if (prefer_disk && has_disk_source && allow_disk) {
@@ -3205,10 +3530,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   auto comm_manager = config_.runtime_context->communication_manager();
   const bool gs_connected = gs_client && gs_client->is_connected();
   const bool comm_enabled = comm_manager && comm_manager->is_enabled();
-  const bool prefer_disk = request_hints.source_preference == loading::SourcePreference::kPreferDisk;
-  const bool prefer_p2p = request_hints.source_preference == loading::SourcePreference::kPreferP2P;
-  const bool allow_p2p = request_hints.allow_p2p;
-  const bool allow_disk = request_hints.allow_disk;
+  const auto retrieval_policy = request_hints.retrieval_policy();
+  if (auto policy_status = loading::validate_retrieval_policy(retrieval_policy); !policy_status.ok()) {
+    return policy_status;
+  }
+  const bool prefer_disk = retrieval_policy.preference == loading::SourcePreference::kPreferDisk;
+  const bool prefer_p2p = retrieval_policy.preference == loading::SourcePreference::kPreferP2P;
+  const bool allow_p2p = retrieval_policy.allow_p2p;
+  const bool allow_disk = retrieval_policy.allow_disk;
   const bool has_disk_source = disk_source.has_value();
   components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
   if (!is_local_identity(local_identity)) {
@@ -3217,13 +3546,6 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       local_identity.node_address = options.p2p_listen_host;
     }
     local_identity.p2p_port = options.p2p_port;
-  }
-
-  if (prefer_disk && !allow_disk) {
-    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
-  }
-  if (prefer_p2p && !allow_p2p) {
-    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
   }
 
   if (prefer_disk && has_disk_source && allow_disk) {

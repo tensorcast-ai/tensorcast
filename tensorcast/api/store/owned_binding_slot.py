@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Mapping
 import torch
 
 from tensorcast._c_ext import get_cuda_memory_ptr, restore_tensors
+from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import _tensor_payload_from_proto
 from tensorcast.api.context import CallContext
@@ -31,11 +32,11 @@ from tensorcast.api.store.inplace_slot import (
     _normalize_view_id,
     _selection_publishable,
 )
-from tensorcast.api.store.materialization import _build_source_policy
+from tensorcast.api.store.materialization import _resolve_source_policy_from_options
 from tensorcast.api.store.owned_binding_layout import BindingLayout
 from tensorcast.api.store.realization_plan import binding_realization_plan_to_proto
 from tensorcast.api.store.retry import map_materialization_error
-from tensorcast.api.store.types import ArtifactError, FallbackOptions
+from tensorcast.api.store.types import ArtifactError
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import PublicDiskSourceHandle, ServingRuntimePolicy
@@ -130,7 +131,6 @@ class OwnedBindingSlot:
         current_value_metadata: BindingValueMetadata | None,
         device: torch.device,
         device_id: int,
-        fallback: FallbackOptions | None,
         target_publication_token: bytes | None,
     ) -> None:
         if not tensors:
@@ -159,7 +159,6 @@ class OwnedBindingSlot:
         )
         self._device = device
         self._device_id = int(device_id)
-        self._fallback = fallback
         self._target_publication_token = (
             bytes(target_publication_token) if target_publication_token else None
         )
@@ -578,6 +577,7 @@ class OwnedBindingSlot:
         artifact: "Artifact | PublicDiskSourceHandle | str",
         *,
         realization_plan: object,
+        options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
         operation_id: str | None = None,
     ) -> None:
@@ -596,9 +596,9 @@ class OwnedBindingSlot:
                     status_code="FAILED_PRECONDITION",
                     retryable=False,
                 )
-            preference, source_policy = self._resolve_source_policy(resolved._fallback)
         else:
-            preference, source_policy = self._resolve_source_policy(None)
+            resolved = None
+        source_policy = _resolve_source_policy_from_options(options)
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -641,7 +641,6 @@ class OwnedBindingSlot:
                     realization_plan,
                     target_index_bytes=self._layout.target_index_bytes,
                 ),
-                preference=preference,
                 source_policy=source_policy,
                 operation_id=operation_id,
                 timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
@@ -680,6 +679,7 @@ class OwnedBindingSlot:
         self,
         artifact: "Artifact | str",
         *,
+        options: GetArtifactOptions | None = None,
         publish: bool = False,
         serving_runtime_policy: ServingRuntimePolicy | None = None,
         wait: bool = True,
@@ -704,7 +704,7 @@ class OwnedBindingSlot:
                 drain_timeout_s=drain_timeout_s,
                 ctx=ctx,
             )
-        preference, source_policy = self._resolve_source_policy(resolved._fallback)
+        source_policy = _resolve_source_policy_from_options(options)
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -730,7 +730,6 @@ class OwnedBindingSlot:
                 binding_id=self._binding_id,
                 artifact_id=resolved._ensure_identified(),
                 source_selection=source_selection,
-                preference=preference,
                 source_policy=source_policy,
                 serving_runtime_policy=serving_runtime_policy,
                 operation_id=operation_id,
@@ -803,36 +802,6 @@ class OwnedBindingSlot:
         if isinstance(artifact, str):
             return self._store.artifact(ref=str(artifact))
         return artifact
-
-    def _resolve_source_policy(
-        self, fallback: FallbackOptions | None
-    ) -> tuple[
-        store_daemon_pb2.SourcePreference,
-        store_daemon_pb2.SourcePolicy,
-    ]:
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = fallback.prefer if fallback is not None else "auto"
-        if fallback is not None:
-            if fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-        allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if fallback is None else bool(fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
-        return preference, source_policy
 
     def _normalize_update_epoch(
         self,

@@ -32,8 +32,7 @@ managing clients manually.
 - Handles retain whichever identifiers are available (`artifact_id`, `key`).
   At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
-  `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
-  continue to work.
+  `key` while serialization (`to_dict`/`from_dict`) remains identity-only.
 - `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
   artifacts via daemon `ImportArtifactFromPath` / `ImportArtifactFromPathStream`.
   The daemon returns `artifact_id`, `canonical_index_bytes`, `generation`, and
@@ -67,8 +66,8 @@ managing clients manually.
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
   remains readable for debugging.
-- `with_fallback(...)` clones a handle with different fallback hints; eager
-  `get*` APIs remain unchanged.
+- Retrieval policy is execution-scoped via `GetArtifactOptions`; handles no
+  longer clone or serialize source-selection hints.
 
 Design and execution details: `../../../docs/designs/0077-unified-reference-only-disk-import.md`,
 `../../../docs/plans/0077-unified-reference-only-disk-import.md`.
@@ -378,20 +377,19 @@ binding.swap("model:v2")
   supports `renew()` / `release()`.
 - `ctx.deadline_ms` clamps retry and polling budgets for control-plane actions so waits do not exceed the call budget.
 
-## Fallback Preferences
+## Retrieval Preferences
 
-`FallbackOptions` now supports explicit source preferences:
+`GetArtifactOptions.source` controls retrieval preferences:
 
-- `prefer="auto"` (default) — daemon chooses optimal source
-- `prefer="local"` — disallow P2P and disk; daemon enforces this via
-  `SourcePolicy` gating
-- `prefer="p2p"` — allow remote transfer
-- `prefer="disk"` — prioritize disk fallback when a managed disk location is
-  available; disk paths are resolved by the daemon via Global Store
+- `source="auto"` — daemon chooses the optimal source
+- `source="local_only"` — disallow P2P and disk
+- `source="disk_first"` — prioritize disk while still allowing P2P fallback
+- `source="disk_only"` — require disk and disallow P2P
 
-Use `allow_p2p` / `allow_disk` to gate sources explicitly. Compatibility flags
-`prefer_disk` and `allow_p2p` continue to work; setting
-`replica_uuid` hints the daemon to reuse a prefetched replica.
+Use a structured `RetrievalPolicy` when you need explicit `allow_p2p` /
+`allow_disk` gating or `prefer_p2p`.
+Set `GetArtifactOptions.replica_uuid` to hint daemon-side reuse of a prefetched
+replica.
 
 ## Feature Toggles
 

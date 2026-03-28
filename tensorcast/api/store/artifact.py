@@ -13,7 +13,7 @@ import uuid
 import weakref
 from dataclasses import dataclass, field
 from datetime import timezone
-from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict
 
 import torch
 
@@ -50,7 +50,7 @@ from tensorcast.api.store.mapped_binding import (
 )
 from tensorcast.api.store.materialization import (
     MaterializationPipeline,
-    _build_source_policy,
+    _resolve_source_policy_from_options,
 )
 from tensorcast.api.store.owned_binding_layout import (
     BindingLayout,
@@ -71,8 +71,6 @@ from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
     CanonicalIndexEntry,
-    FallbackOptions,
-    FallbackPreference,
 )
 from tensorcast.api.store.view_composer import (
     ViewBuilder,
@@ -637,59 +635,11 @@ class PlacementPin:
         )
 
 
-class ArtifactSerializedFallback(TypedDict):
-    prefer: FallbackPreference
-    prefer_disk: bool | None
-    allow_p2p: bool
-    allow_disk: bool
-    verify_checksums: bool
-    replica_uuid: str | None
-
-
 class ArtifactSerialized(TypedDict):
     artifact_id: str | None
     key: str | None
-    fallback: ArtifactSerializedFallback | None
     canonical_index: str | None
     generation: int | None
-
-
-def _fallback_to_dict(
-    fallback: FallbackOptions | None,
-) -> ArtifactSerializedFallback | None:
-    if fallback is None:
-        return None
-    return {
-        "prefer": fallback.prefer,
-        "prefer_disk": (
-            bool(fallback.prefer_disk) if fallback.prefer_disk is not None else None
-        ),
-        "allow_p2p": bool(fallback.allow_p2p),
-        "allow_disk": bool(fallback.allow_disk),
-        "verify_checksums": bool(fallback.verify_checksums),
-        "replica_uuid": fallback.replica_uuid,
-    }
-
-
-def _fallback_from_dict(
-    data: ArtifactSerializedFallback | Mapping[str, object] | None,
-) -> FallbackOptions | None:
-    if data is None:
-        return None
-    prefer_value = data.get("prefer")
-    prefer = prefer_value if isinstance(prefer_value, str) else "auto"
-    prefer_disk_raw = data.get("prefer_disk")
-    prefer_disk = prefer_disk_raw if isinstance(prefer_disk_raw, bool) else None
-    replica_uuid_value = data.get("replica_uuid")
-    replica_uuid = replica_uuid_value if isinstance(replica_uuid_value, str) else None
-    return FallbackOptions(
-        prefer=prefer,  # pyright: ignore[reportArgumentType]
-        prefer_disk=prefer_disk,
-        allow_p2p=bool(data.get("allow_p2p", True)),
-        allow_disk=bool(data.get("allow_disk", True)),
-        verify_checksums=bool(data.get("verify_checksums", True)),
-        replica_uuid=replica_uuid,
-    )
 
 
 def _meta_from_entry(entry: CanonicalIndexEntry) -> TensorMeta:
@@ -718,7 +668,6 @@ class Artifact:
         store_ref: weakref.ReferenceType["Store"],
         artifact_id: str | None = None,
         key: str | None = None,
-        fallback: FallbackOptions | str | None = None,
         canonical_index_bytes: bytes | None = None,
         canonical_index: CanonicalIndex | None = None,
         generation: int | None = None,
@@ -733,7 +682,6 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        self._fallback = FallbackOptions.parse(fallback)
         self._artifact_id = artifact_id
         self._key_hint = key
         self._canonical_index_bytes = canonical_index_bytes
@@ -839,13 +787,12 @@ class Artifact:
         view_data_hash = selection_inputs.view_data_hash
         view_index_hint = selection_inputs.view_index_hint
         view_id_hint = selection_inputs.view_id_hint
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        replica_uuid = options.replica_uuid if options is not None else None
         materialize_start = time.perf_counter()
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
             device=device,
-            fallback=self._fallback,
             tensor_names=requested_names,
             view_id=view_id_hint,
             canonical_index_hint=self._canonical_index_bytes,
@@ -1000,13 +947,12 @@ class Artifact:
         view_index_hint = (
             view_metadata.view_index_bytes or None if view_metadata else None
         )
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        replica_uuid = options.replica_uuid if options is not None else None
         pipeline.get_into(
             target,
             artifact_id=artifact_id,
             key=None,
             device=device,
-            fallback=self._fallback,
             options=options,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
@@ -1042,14 +988,13 @@ class Artifact:
         )
         if view_spec_proto is not None:
             view_index_hint = None
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        replica_uuid = options.replica_uuid if options is not None else None
         resolved_device = device if device is not None else target_tensor.device
         pipeline.get_into(
             {requested_names[0]: target_tensor},
             artifact_id=artifact_id,
             key=None,
             device=resolved_device,
-            fallback=self._fallback,
             options=options,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
@@ -1093,6 +1038,7 @@ class Artifact:
         *,
         mapping: CopyPlan | None = None,
         packing: str = "byte_space",
+        options: GetArtifactOptions | None = None,
         capacity_bytes: int | None = None,
         publish: bool = False,
         serving_runtime_policy: ServingRuntimePolicyInput | None = None,
@@ -1148,6 +1094,7 @@ class Artifact:
             device=device_obj,
             mapping=mapping,
             packing=packing,
+            options=options,
             publish=publish,
             serving_runtime_policy=coerce_serving_runtime_policy(
                 serving_runtime_policy
@@ -1161,6 +1108,7 @@ class Artifact:
         *,
         mapping: CopyPlan | None = None,
         packing: str = "byte_space",
+        options: GetArtifactOptions | None = None,
         publish: bool = False,
         serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         ctx: CallContext | None = None,
@@ -1171,6 +1119,7 @@ class Artifact:
                 target_tensors=target_tensors,
                 mapping=mapping,
                 packing=packing,
+                options=options,
                 publish=publish,
                 serving_runtime_policy=coerce_serving_runtime_policy(
                     serving_runtime_policy
@@ -1291,31 +1240,7 @@ class Artifact:
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
 
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = (
-            self._fallback.prefer if self._fallback is not None else "auto"
-        )
-        if self._fallback is not None:
-            if self._fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif self._fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-
-        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+        source_policy = _resolve_source_policy_from_options(options)
 
         client = runtime.ensure_client()
         operation_id = _build_transport_operation_id(
@@ -1348,7 +1273,6 @@ class Artifact:
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
-                        preference=preference,
                         source_policy=source_policy,
                         serving_runtime_policy=coerce_serving_runtime_policy(
                             serving_runtime_policy
@@ -1447,7 +1371,6 @@ class Artifact:
             view_id=region_layout.view_id,
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
-            fallback=self._fallback,
             current_value_metadata=current_value_metadata,
             target_publication_token=getattr(
                 response, "target_publication_token", None
@@ -1461,6 +1384,7 @@ class Artifact:
         target_tensors: Mapping[str, torch.Tensor],
         mapping: CopyPlan,
         packing: str,
+        options: GetArtifactOptions | None,
         publish: bool,
         serving_runtime_policy: ServingRuntimePolicy | None,
         ctx: CallContext | None,
@@ -1584,31 +1508,7 @@ class Artifact:
         ):
             selection_index_bytes = bytes(self._view_metadata.view_index_bytes)
 
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = (
-            self._fallback.prefer if self._fallback is not None else "auto"
-        )
-        if self._fallback is not None:
-            if self._fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif self._fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-
-        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+        source_policy = _resolve_source_policy_from_options(options)
 
         client = runtime.ensure_client()
         operation_id = _build_transport_operation_id(
@@ -1649,7 +1549,6 @@ class Artifact:
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
-                        preference=preference,
                         source_policy=source_policy,
                         serving_runtime_policy=serving_runtime_policy,
                         copy_plan=copy_plan,
@@ -1761,7 +1660,6 @@ class Artifact:
             view_id=region_layout.view_id,
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
-            fallback=self._fallback,
             current_value_metadata=current_value_metadata,
             target_publication_token=getattr(
                 response, "target_publication_token", None
@@ -1792,6 +1690,7 @@ class Artifact:
         device: torch.device,
         mapping: CopyPlan | None,
         packing: str,
+        options: GetArtifactOptions | None,
         publish: bool,
         serving_runtime_policy: ServingRuntimePolicy | None,
         ctx: CallContext | None,
@@ -1927,30 +1826,7 @@ class Artifact:
                 profile["target_index_bytes_len"] = len(owner_layout.target_index_bytes)
                 profile["target_tensor_count"] = target_tensor_count
 
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = (
-            self._fallback.prefer if self._fallback is not None else "auto"
-        )
-        if self._fallback is not None:
-            if self._fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif self._fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+        source_policy = _resolve_source_policy_from_options(options)
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             with tensorcast_profile_stage(
@@ -1971,7 +1847,6 @@ class Artifact:
                     target_index_bytes=owner_layout.target_index_bytes,
                     device_uuid=device_uuid_for(device_id),
                     binding_layout_id=owner_layout.binding_layout_id,
-                    preference=preference,
                     source_policy=source_policy,
                     serving_runtime_policy=serving_runtime_policy,
                     copy_plan=copy_plan_proto,
@@ -2074,7 +1949,6 @@ class Artifact:
             current_value_metadata=current_value_metadata,
             device=device,
             device_id=device_id,
-            fallback=self._fallback,
             target_publication_token=getattr(
                 response, "target_publication_token", None
             ),
@@ -2266,12 +2140,6 @@ class Artifact:
                 uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
             )
 
-        replica_uuid = deterministic_replica_uuid or (
-            self._fallback.replica_uuid if self._fallback else None
-        )
-        if not replica_uuid:
-            replica_uuid = uuid.uuid4().hex
-
         opts = options or GetArtifactOptions()
         opts = opts.model_copy(
             update={
@@ -2279,12 +2147,14 @@ class Artifact:
                 "enable_verification": False,
             }
         )
+        replica_uuid = deterministic_replica_uuid or opts.replica_uuid
+        if not replica_uuid:
+            replica_uuid = uuid.uuid4().hex
 
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
             device=device_obj,
-            fallback=self._fallback,
             tensor_names=requested_names,
             view_id=view_id_hint,
             canonical_index_hint=self._canonical_index_bytes,
@@ -2427,24 +2297,6 @@ class Artifact:
             ctx=ctx,
         )
 
-    def with_fallback(self, fallback: FallbackOptions | str) -> Artifact:
-        parsed = FallbackOptions.parse(fallback)
-        clone = Artifact(
-            store_ref=self._store_ref,
-            artifact_id=self._artifact_id,
-            key=self._key_hint,
-            fallback=parsed,
-            canonical_index_bytes=self._canonical_index_bytes,
-            canonical_index=self._canonical_index,
-            generation=self._generation,
-            view_spec=self._view_spec,
-            view_metadata=self._view_metadata,
-            view_depth=self._view_depth,
-        )
-        clone._released = self._released
-        clone._tensor_metas = dict(self._tensor_metas or {})
-        return clone
-
     def exists(self) -> bool:
         """Check existence lazily, surfacing ArtifactError on failures."""
         if self._canonical_index is not None:
@@ -2516,7 +2368,6 @@ class Artifact:
         return {
             "artifact_id": self._artifact_id,
             "key": self._key_hint,
-            "fallback": _fallback_to_dict(self._fallback),
             "canonical_index": encoded_index,
             "generation": self._generation,
         }
@@ -2525,7 +2376,6 @@ class Artifact:
     def from_dict(cls, data: Mapping[str, object], store: "Store") -> Artifact:
         artifact_id = data.get("artifact_id")
         key_hint = data.get("key")
-        fallback_dict = data.get("fallback")
         canonical_blob = data.get("canonical_index")
         generation = data.get("generation")
         canonical_index_bytes: bytes | None = None
@@ -2542,9 +2392,6 @@ class Artifact:
                     status_code="DATA_LOSS",
                     retryable=False,
                 ) from exc
-        fallback = None
-        if isinstance(fallback_dict, Mapping):
-            fallback = _fallback_from_dict(cast(Mapping[str, object], fallback_dict))
         generation_value = (
             int(generation) if isinstance(generation, (int, float)) else None
         )
@@ -2552,7 +2399,6 @@ class Artifact:
             store_ref=weakref.ref(store),
             artifact_id=str(artifact_id) if artifact_id else None,
             key=str(key_hint) if key_hint else None,
-            fallback=fallback,
             canonical_index_bytes=canonical_index_bytes,
             canonical_index=canonical_index,
             generation=generation_value,
@@ -3103,7 +2949,6 @@ class Artifact:
                 store_ref=self._store_ref,
                 artifact_id=self._artifact_id,
                 key=self._key_hint,
-                fallback=self._fallback,
                 canonical_index_bytes=self._canonical_index_bytes,
                 canonical_index=self._canonical_index,
                 generation=self._generation,
@@ -3132,7 +2977,6 @@ class Artifact:
             store_ref=self._store_ref,
             artifact_id=self._artifact_id,
             key=self._key_hint,
-            fallback=self._fallback,
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
             generation=self._generation,

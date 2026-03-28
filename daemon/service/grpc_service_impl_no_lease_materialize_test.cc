@@ -140,7 +140,8 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);
     req.set_pid(pid);
     req.set_replica_uuid("op-no-lease");
@@ -157,7 +158,8 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(false);
     req.set_pid(pid);
     req.set_replica_uuid("op-no-lease");
@@ -210,7 +212,8 @@ TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);
     req.set_replica_uuid("op-by-key-no-lease");
     req.set_pid(0);
@@ -226,7 +229,8 @@ TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(false);
     req.set_replica_uuid("op-by-key-no-lease");
     req.set_pid(0);
@@ -276,7 +280,7 @@ TEST_CASE("MaterializeReplica short-circuits local cache before disk resolution"
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
   req.set_wait_for_completion(true);
   req.set_pid(static_cast<int>(::getpid()));
   req.set_replica_uuid("op-local-short-1");

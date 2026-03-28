@@ -6,18 +6,15 @@ from dataclasses import dataclass
 from typing import Literal, Mapping
 
 import torch
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict
 
-from tensorcast.api._config import PlanType
+from tensorcast.api._config import GetArtifactOptions, PlanType
 from tensorcast.api.errors import ArtifactError, ArtifactStatusCode
 from tensorcast.types import ServerConfig
 
 TensorDict = Mapping[str, torch.Tensor]
 
 SpanAttributeValue = bool | int | float | str
-
-
-FallbackPreference = Literal["auto", "local", "p2p", "disk"]
 
 
 @dataclass(frozen=True)
@@ -29,96 +26,11 @@ class RetryPolicy:
     jitter: float
 
 
-class FallbackOptions(BaseModel):
-    """Source selection and replica hints for materialization."""
-
-    model_config = ConfigDict(frozen=True)
-
-    prefer: FallbackPreference = "auto"
-    allow_p2p: bool = True
-    allow_disk: bool = True
-    verify_checksums: bool = True
-    prefer_disk: bool | None = None  # Deprecated compatibility flag
-    replica_uuid: str | None = None
-
-    @staticmethod
-    def _to_prefer_literal(value: str) -> FallbackPreference:
-        normalized = value.strip().lower()
-        if normalized == "auto":
-            return "auto"
-        if normalized == "local":
-            return "local"
-        if normalized == "p2p":
-            return "p2p"
-        if normalized == "disk":
-            return "disk"
-        raise ArtifactError(
-            f"Unknown fallback preference '{value}' (expected auto, local, p2p, or disk)",
-            status_code="INVALID_ARGUMENT",
-            retryable=False,
-        )
-
-    @field_validator("prefer", mode="before")
-    @classmethod
-    def _normalize_prefer(cls, value: object) -> FallbackPreference:
-        normalized = "auto" if value is None else str(value).strip().lower()
-        return cls._to_prefer_literal(normalized)
-
-    @classmethod
-    def local_only(cls) -> "FallbackOptions":
-        return cls(
-            prefer="local",
-            allow_p2p=False,
-            allow_disk=False,
-            verify_checksums=True,
-            prefer_disk=False,
-        )
-
-    @classmethod
-    def parse(cls, value: object) -> "FallbackOptions | None":
-        """Accept either a FallbackOptions instance or a string shortcut."""
-        if value is None:
-            return None
-        if isinstance(value, FallbackOptions):
-            return value
-        if isinstance(value, str):
-            raw = value.strip()
-            if raw.lower().startswith("disk:"):
-                raise ArtifactError(
-                    "Fallback string 'disk:' is no longer supported; use Store.from_disk(...) to import "
-                    "and then materialize by artifact_id or key.",
-                    status_code="INVALID_ARGUMENT",
-                    retryable=False,
-                )
-            normalized = raw.lower()
-            if normalized in {"auto", "local", "p2p", "disk"}:
-                if normalized == "local":
-                    return cls.local_only()
-                if normalized == "disk":
-                    return cls(
-                        prefer="disk",
-                        prefer_disk=True,
-                    )
-                prefer_literal = cls._to_prefer_literal(normalized)
-                return cls(prefer=prefer_literal)
-        raise ArtifactError(
-            "Fallback must be a FallbackOptions instance or string "
-            "('auto', 'local', 'p2p', 'disk')",
-            status_code="INVALID_ARGUMENT",
-            retryable=False,
-        )
-
-
 class StoreOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    fallback: FallbackOptions | None = None
+    get: GetArtifactOptions | None = None
     retry_overrides: Mapping[str, RetryPolicy] | None = None
-
-    @field_validator("fallback", mode="before")
-    @classmethod
-    def _coerce_fallback(cls, value: object) -> FallbackOptions | None:
-        return FallbackOptions.parse(value)
 
 
 @dataclass(frozen=True)
@@ -199,10 +111,8 @@ class PersistenceStatusResult:
 __all__ = [
     "ArtifactError",
     "ArtifactStatusCode",
-    "FallbackPreference",
     "CanonicalIndex",
     "CanonicalIndexEntry",
-    "FallbackOptions",
     "LeaseHandle",
     "ReplicaInfo",
     "ReplicaType",

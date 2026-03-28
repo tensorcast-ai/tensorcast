@@ -125,7 +125,6 @@ from tensorcast.api.store.types import (
     ArtifactStatusCode,
     CanonicalIndex,
     CanonicalIndexEntry,
-    FallbackOptions,
     LeaseHandle,
     PersistenceShardStatus,
     PersistenceStatusResult,
@@ -1301,7 +1300,6 @@ class Store:
                 current_value_metadata=current_value_metadata,
                 device=device_obj,
                 device_id=device_id,
-                fallback=None,
                 target_publication_token=None,
             )
             return Binding(slot)
@@ -1462,7 +1460,6 @@ class Store:
             view_id=str(layout.target_layout.view_id or "") or None,
             view_subset_hash=None,
             view_spec=None,
-            fallback=None,
             current_value_metadata=current_value_metadata,
             target_publication_token=None,
             copy_plan=normalized_mapping,
@@ -2914,19 +2911,16 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
-        fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         artifact_id, key = _parse_artifact_ref(
             ref,
             artifact_id=artifact_id,
             key=key,
         )
-        effective_fallback = FallbackOptions.parse(fallback)
         return Artifact(
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
             key=key,
-            fallback=effective_fallback,
         )
 
     async def artifact_async(
@@ -2935,13 +2929,11 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
-        fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         return self.artifact(
             ref,
             artifact_id=artifact_id,
             key=key,
-            fallback=fallback,
         )
 
     def from_disk(
@@ -3105,7 +3097,6 @@ class Store:
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
             key=key,
-            fallback=None,
             canonical_index_bytes=canonical_index_bytes or None,
             canonical_index=canonical_index,
             generation=generation_value,
@@ -4214,20 +4205,17 @@ def artifact(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
-    fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
     store = _coerce_store()
     if ref is None:
         return store.artifact(
             artifact_id=artifact_id,
             key=key,
-            fallback=fallback,
         )
     return store.artifact(
         ref=ref,
         artifact_id=artifact_id,
         key=key,
-        fallback=fallback,
     )
 
 
@@ -4236,20 +4224,17 @@ async def artifact_async(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
-    fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
     store = _coerce_store()
     if ref is None:
         return await store.artifact_async(
             artifact_id=artifact_id,
             key=key,
-            fallback=fallback,
         )
     return await store.artifact_async(
         ref=ref,
         artifact_id=artifact_id,
         key=key,
-        fallback=fallback,
     )
 
 
@@ -4313,7 +4298,6 @@ __all__ = [
     "CanonicalIndexEntry",
     "CopyPlan",
     "CopyPlanEntry",
-    "FallbackOptions",
     "FinalizeClass",
     "LeaseHandle",
     "MaterializationPayload",

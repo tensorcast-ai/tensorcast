@@ -12,6 +12,7 @@ import torch
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api import _region_cache as region_cache
+from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
 from tensorcast.api.operation import (
@@ -31,11 +32,11 @@ from tensorcast.api.store.mapped_binding import (
     validate_copy_plan,
     view_narrow_ranges,
 )
-from tensorcast.api.store.materialization import _build_source_policy
+from tensorcast.api.store.materialization import _resolve_source_policy_from_options
 from tensorcast.api.store.owned_binding_layout import BindingLayout
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import map_materialization_error
-from tensorcast.api.store.types import ArtifactError, FallbackOptions
+from tensorcast.api.store.types import ArtifactError
 from tensorcast.common.selection_contract import (
     build_artifact_selection,
     compute_selected_index_bytes,
@@ -162,7 +163,6 @@ class InplaceSlot:
         view_id: str | None,
         view_subset_hash: bytes | None,
         view_spec: common_pb2.ViewSpec | None,
-        fallback: FallbackOptions | None,
         current_value_metadata: BindingValueMetadata | None,
         target_publication_token: bytes | None,
         copy_plan: Sequence[CopyPlanEntry] | None = None,
@@ -185,7 +185,6 @@ class InplaceSlot:
         self._device_id = int(device_id)
         self._region_ids = tuple(region_ids or ())
         self._view_spec = view_spec
-        self._fallback = fallback
         self._current_value_metadata = current_value_metadata
         self._artifact_id = (
             str(current_value_metadata.source_artifact_id)
@@ -574,6 +573,7 @@ class InplaceSlot:
         self,
         artifact: "Artifact | str",
         *,
+        options: GetArtifactOptions | None = None,
         publish: bool = False,
         serving_runtime_policy: ServingRuntimePolicy | None = None,
         wait: bool = True,
@@ -640,7 +640,7 @@ class InplaceSlot:
                     ctx=ctx,
                 )
 
-            preference, source_policy = self._resolve_source_policy(resolved._fallback)
+            source_policy = _resolve_source_policy_from_options(options)
             artifact_id = resolved._ensure_identified()
             client = self._runtime.ensure_client()
             rpc_timeout_s = _ctx_timeout_s(ctx)
@@ -674,7 +674,6 @@ class InplaceSlot:
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(self._device_id),
-                        preference=preference,
                         source_policy=source_policy,
                         serving_runtime_policy=serving_runtime_policy,
                         copy_plan=self._copy_plan,
@@ -734,7 +733,6 @@ class InplaceSlot:
                 target_publication_token=getattr(
                     response, "target_publication_token", None
                 ),
-                fallback=resolved._fallback,
             )
             self._mark_artifact_backed_current(
                 artifact_id=artifact_id,
@@ -769,7 +767,7 @@ class InplaceSlot:
                 ctx=ctx,
             )
 
-        preference, source_policy = self._resolve_source_policy(resolved._fallback)
+        source_policy = _resolve_source_policy_from_options(options)
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
         rpc_timeout_s = _ctx_timeout_s(ctx)
@@ -813,7 +811,6 @@ class InplaceSlot:
                     selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(self._device_id),
-                    preference=preference,
                     source_policy=source_policy,
                     serving_runtime_policy=serving_runtime_policy,
                     operation_id=operation_id,
@@ -861,7 +858,6 @@ class InplaceSlot:
             target_publication_token=getattr(
                 response, "target_publication_token", None
             ),
-            fallback=resolved._fallback,
         )
         self._mark_artifact_backed_current(
             artifact_id=artifact_id,
@@ -981,36 +977,6 @@ class InplaceSlot:
             new_ids.append(handle.region_id)
         self._region_ids = tuple(new_ids)
 
-    def _resolve_source_policy(
-        self, fallback: FallbackOptions | None
-    ) -> tuple[
-        store_daemon_pb2.SourcePreference,
-        store_daemon_pb2.SourcePolicy,
-    ]:
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = fallback.prefer if fallback is not None else "auto"
-        if fallback is not None:
-            if fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-        allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if fallback is None else bool(fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
-        return preference, source_policy
-
     def _retire_published(
         self,
         *,
@@ -1106,7 +1072,6 @@ class InplaceSlot:
         region_layout: "_RegionBackedLayout",
         view_spec: common_pb2.ViewSpec | None,
         target_publication_token: bytes | None,
-        fallback: FallbackOptions | None,
     ) -> None:
         self._region_ids = tuple(region_layout.region_ids)
         self._view_spec = view_spec
@@ -1130,7 +1095,6 @@ class InplaceSlot:
             view_id=self._view_id,
             view_subset_hash=self._view_subset_hash,
         )
-        self._fallback = fallback
         self._target_publication_token = (
             bytes(target_publication_token) if target_publication_token else None
         )
