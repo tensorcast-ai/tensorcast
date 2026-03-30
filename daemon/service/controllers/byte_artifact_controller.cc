@@ -1346,10 +1346,36 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     RpcContext& rctx,
     const v2::HomeBatchPutIfAbsentRequest& req,
     v2::HomeBatchPutIfAbsentResponse& resp) {
+  struct HomeBatchPutTimingStats {
+    std::size_t batch_payload_slice_items{0};
+    std::size_t inline_payload_items{0};
+    std::size_t payload_ref_items{0};
+    std::size_t communicator_open_count{0};
+    std::size_t grpc_fetch_count{0};
+    std::size_t remote_mirror_count{0};
+    std::uint64_t remote_mirror_bytes{0};
+    std::size_t stage_body_count{0};
+    std::size_t fast_cpu_stage_count{0};
+    std::size_t reuse_attempt_count{0};
+    std::size_t reuse_hit_count{0};
+    std::size_t authority_item_count{0};
+    absl::Duration communicator_open_elapsed{absl::ZeroDuration()};
+    absl::Duration grpc_fetch_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_mirror_elapsed{absl::ZeroDuration()};
+    absl::Duration stage_body_elapsed{absl::ZeroDuration()};
+    absl::Duration fast_cpu_stage_elapsed{absl::ZeroDuration()};
+    absl::Duration reuse_elapsed{absl::ZeroDuration()};
+    absl::Duration authority_apply_elapsed{absl::ZeroDuration()};
+  };
+
+  const absl::Time total_started_at = absl::Now();
+  HomeBatchPutTimingStats timing_stats;
   const absl::Time now = absl::Now();
   const std::optional<std::uint64_t> ttl_ms =
       req.has_ttl_ms() ? std::optional<std::uint64_t>(req.ttl_ms()) : std::nullopt;
   const std::string& local_daemon_id = d_.route_resolver.local_daemon_id();
+  const std::string_view operation_id =
+      req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view("");
   auto home_lease_or = d_.route_resolver.ensure_home_lease(req.fence(), now);
   if (!home_lease_or.ok()) {
     return to_grpc_status(home_lease_or.status());
@@ -1366,7 +1392,51 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     return Status::OK;
   }
 
+  absl::flat_hash_map<std::string, const v2::BatchPayloadTransport*> batch_transports_by_id;
+  batch_transports_by_id.reserve(req.batch_transports_size());
+  for (const auto& transport : req.batch_transports()) {
+    if (!transport.transport_id().empty()) {
+      batch_transports_by_id.emplace(transport.transport_id(), &transport);
+    }
+  }
+  absl::flat_hash_map<std::string, PayloadTransportBroker::ResolvedBatchPayload> resolved_batch_payloads;
+  absl::flat_hash_map<std::string, PayloadTransportBroker::BatchPayloadSource> resolved_batch_sources;
+  absl::flat_hash_map<std::string, std::shared_ptr<const std::string>> mirrored_remote_batch_payloads;
+
+  struct PreparedHomeBatchPutItem {
+    const v2::HomeBatchPutIfAbsentItem* item{nullptr};
+    std::string artifact_id;
+    std::unique_ptr<store::IArtifactLoader> loader;
+    std::optional<BodyBackingManager::LocalByteSpan> local_source;
+    store::loading::MaterializationSource source_kind = store::loading::MaterializationSource::kLocalReplica;
+    std::optional<BodyBackingManager::StageResult> staged_body;
+  };
+
+  struct StageWorkItem {
+    int index{0};
+    std::string artifact_id;
+    std::unique_ptr<store::IArtifactLoader> loader;
+    std::optional<BodyBackingManager::LocalByteSpan> local_source;
+    store::loading::MaterializationSource source_kind = store::loading::MaterializationSource::kLocalReplica;
+  };
+
+  struct StageWorkItemResult {
+    int index{0};
+    std::string artifact_id;
+    absl::Status status;
+    std::optional<BodyBackingManager::StageResult> staged_body;
+    absl::Duration elapsed{absl::ZeroDuration()};
+    bool used_fast_cpu_stage{false};
+  };
+
+  struct ScheduledStageWorkItem {
+    int index{0};
+    std::string artifact_id;
+    folly::SemiFuture<StageWorkItemResult> future;
+  };
+
   std::vector<std::optional<v2::BatchItemOutcome>> deferred_outcomes(req.items_size());
+  std::vector<PreparedHomeBatchPutItem> prepared_items(static_cast<std::size_t>(req.items_size()));
   std::vector<ByteArtifactAuthorityService::PutItem> authority_items;
   std::vector<int> authority_item_indices;
   authority_items.reserve(req.items_size());
@@ -1375,21 +1445,172 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
   for (int index = 0; index < req.items_size(); ++index) {
     const auto& item = req.items(index);
     const std::string artifact_id = item.artifact_id();
-    if (!item.inline_payload().empty() && !item.payload_ref().empty()) {
+    const bool has_batch_payload_slice =
+        item.has_batch_payload_slice() && !item.batch_payload_slice().transport_id().empty();
+    if (has_batch_payload_slice) {
+      ++timing_stats.batch_payload_slice_items;
+    } else if (!item.inline_payload().empty()) {
+      ++timing_stats.inline_payload_items;
+    } else if (!item.payload_ref().empty()) {
+      ++timing_stats.payload_ref_items;
+    }
+    const int source_count = (!item.inline_payload().empty() ? 1 : 0) + (!item.payload_ref().empty() ? 1 : 0) +
+        (has_batch_payload_slice ? 1 : 0);
+    if (source_count > 1) {
       deferred_outcomes[index] = make_outcome(
-          artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, "inline_payload and payload_ref are mutually exclusive");
+          artifact_id,
+          v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT,
+          "inline_payload, payload_ref, and batch_payload_slice are mutually exclusive");
       continue;
     }
 
     std::unique_ptr<store::IArtifactLoader> loader;
+    std::optional<BodyBackingManager::LocalByteSpan> local_source;
     store::loading::MaterializationSource source_kind = store::loading::MaterializationSource::kLocalReplica;
     std::optional<BodyBackingManager::StageResult> staged_body;
-    if (!item.inline_payload().empty()) {
+    if (has_batch_payload_slice) {
+      const auto transport_it = batch_transports_by_id.find(item.batch_payload_slice().transport_id());
+      if (transport_it == batch_transports_by_id.end()) {
+        deferred_outcomes[index] =
+            make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport is missing");
+        continue;
+      }
+
+      const auto* manifest_entry = find_batch_payload_entry(
+          transport_it->second->manifest(),
+          artifact_id,
+          item.batch_payload_slice().offset(),
+          item.batch_payload_slice().length());
+      if (manifest_entry == nullptr) {
+        deferred_outcomes[index] = make_outcome(
+            artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport manifest entry is missing");
+        continue;
+      }
+      if (transport_it->second->has_communicator_source()) {
+        const std::string transport_id = item.batch_payload_slice().transport_id();
+        auto resolved_it = resolved_batch_sources.find(transport_id);
+        if (resolved_it == resolved_batch_sources.end()) {
+          const absl::Time resolve_started_at = absl::Now();
+          auto resolved_or = d_.payload_transport_broker.open_batch_payload_communicator_source(
+              d_.worker_directory_cache,
+              now,
+              absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
+              local_daemon_id,
+              *transport_it->second,
+              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+              operation_id);
+          if (!resolved_or.ok()) {
+            deferred_outcomes[index] = make_outcome(
+                artifact_id,
+                batch_item_status_from_absl_status(resolved_or.status()),
+                std::string(resolved_or.status().message()));
+            continue;
+          }
+          timing_stats.communicator_open_elapsed += absl::Now() - resolve_started_at;
+          ++timing_stats.communicator_open_count;
+          resolved_it = resolved_batch_sources.emplace(transport_id, std::move(*resolved_or)).first;
+        }
+        source_kind = resolved_it->second.remote ? store::loading::MaterializationSource::kP2P
+                                                 : store::loading::MaterializationSource::kLocalReplica;
+        if (resolved_it->second.remote) {
+          auto mirrored_it = mirrored_remote_batch_payloads.find(transport_id);
+          if (mirrored_it == mirrored_remote_batch_payloads.end()) {
+            const absl::Time mirror_started_at = absl::Now();
+            auto mirrored_or = mirror_seekable_source_payload(
+                resolved_it->second.source, transport_it->second->manifest().total_size());
+            if (!mirrored_or.ok()) {
+              deferred_outcomes[index] = make_outcome(
+                  artifact_id,
+                  batch_item_status_from_absl_status(mirrored_or.status()),
+                  std::string(mirrored_or.status().message()));
+              continue;
+            }
+            const absl::Duration mirror_elapsed = absl::Now() - mirror_started_at;
+            timing_stats.remote_mirror_elapsed += mirror_elapsed;
+            ++timing_stats.remote_mirror_count;
+            timing_stats.remote_mirror_bytes += transport_it->second->manifest().total_size();
+            mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
+            LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_mirror"
+                      << " operation_id=" << operation_id << " transport_id=" << transport_id
+                      << " kind=communicator_source"
+                      << " remote=true"
+                      << " read_mode=full_pack"
+                      << " payload_bytes=" << transport_it->second->manifest().total_size()
+                      << " item_count=" << transport_it->second->manifest().entries_size()
+                      << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
+                      << " subsequent_item_slices_local=true";
+          }
+          if (item.batch_payload_slice().offset() + item.batch_payload_slice().length() > mirrored_it->second->size()) {
+            deferred_outcomes[index] = make_outcome(
+                artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport payload is truncated");
+            continue;
+          }
+          local_source = BodyBackingManager::LocalByteSpan{
+              .owner = std::shared_ptr<const void>(
+                  mirrored_it->second, static_cast<const void*>(mirrored_it->second->data())),
+              .data = reinterpret_cast<const std::uint8_t*>(mirrored_it->second->data()) +
+                  item.batch_payload_slice().offset(),
+              .size_bytes = item.batch_payload_slice().length(),
+          };
+        } else {
+          loader = make_loader_from_source_slice(
+              resolved_it->second.source, item.batch_payload_slice().offset(), item.batch_payload_slice().length());
+        }
+      } else if (transport_it->second->has_grpc_chunk_ref()) {
+        auto resolved_it = resolved_batch_payloads.find(item.batch_payload_slice().transport_id());
+        if (resolved_it == resolved_batch_payloads.end()) {
+          const absl::Time fetch_started_at = absl::Now();
+          auto resolved_or = d_.payload_transport_broker.fetch_batch_payload_ref(
+              d_.worker_directory_cache,
+              now,
+              absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
+              local_daemon_id,
+              transport_it->second->grpc_chunk_ref().batch_payload_ref(),
+              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+              operation_id);
+          if (!resolved_or.ok()) {
+            deferred_outcomes[index] = make_outcome(
+                artifact_id,
+                batch_item_status_from_absl_status(resolved_or.status()),
+                std::string(resolved_or.status().message()));
+            continue;
+          }
+          timing_stats.grpc_fetch_elapsed += absl::Now() - fetch_started_at;
+          ++timing_stats.grpc_fetch_count;
+          resolved_it =
+              resolved_batch_payloads.emplace(item.batch_payload_slice().transport_id(), std::move(*resolved_or)).first;
+        }
+        if (!resolved_it->second.payload ||
+            item.batch_payload_slice().offset() + item.batch_payload_slice().length() >
+                resolved_it->second.payload->size()) {
+          deferred_outcomes[index] = make_outcome(
+              artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport payload is truncated");
+          continue;
+        }
+        local_source = BodyBackingManager::LocalByteSpan{
+            .owner = std::shared_ptr<const void>(
+                resolved_it->second.payload, static_cast<const void*>(resolved_it->second.payload->data())),
+            .data = reinterpret_cast<const std::uint8_t*>(resolved_it->second.payload->data()) +
+                item.batch_payload_slice().offset(),
+            .size_bytes = item.batch_payload_slice().length(),
+        };
+        source_kind = resolved_it->second.remote ? store::loading::MaterializationSource::kP2P
+                                                 : store::loading::MaterializationSource::kLocalReplica;
+      } else {
+        deferred_outcomes[index] =
+            make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport kind is unsupported");
+        continue;
+      }
+    }
+    if (loader != nullptr || local_source.has_value()) {
+      // Batch transport already provided a readable source.
+    } else if (!item.inline_payload().empty()) {
       auto payload = std::make_shared<std::string>(item.inline_payload());
-      loader = std::make_unique<store::InlineBufferLoader>(store::loading::InlineBufferSource{
-          .data = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+      local_source = BodyBackingManager::LocalByteSpan{
+          .owner = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+          .data = reinterpret_cast<const std::uint8_t*>(payload->data()),
           .size_bytes = payload->size(),
-      });
+      };
     } else if (!item.payload_ref().empty()) {
       auto source_capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
           d_.worker_directory_cache,
@@ -1399,7 +1620,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
           local_daemon_id,
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
-          req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
+          operation_id);
       if (!source_capability_or.ok()) {
         deferred_outcomes[index] = make_outcome(
             artifact_id,
@@ -1408,16 +1629,19 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
         continue;
       }
       if (source_capability_or->body_capability.has_value()) {
+        const absl::Time reuse_started_at = absl::Now();
         auto reused_or = body_backing_manager_.try_reuse_body(
             BodyBackingManager::ReuseRequest{
                 .artifact_id = artifact_id,
                 .invariant = item.invariant(),
                 .descriptor = source_capability_or->body_capability->descriptor,
                 .body_handle = source_capability_or->body_capability->body_handle,
-                .operation_id = req.has_operation_id() ? req.operation_id() : "",
+                .operation_id = std::string(operation_id),
                 .access_class = BodyAccessClass::kHomeDefault,
                 .route_role = BodyRouteRole::kHomeAuthority,
             });
+        timing_stats.reuse_elapsed += absl::Now() - reuse_started_at;
+        ++timing_stats.reuse_attempt_count;
         if (!reused_or.ok()) {
           deferred_outcomes[index] = make_outcome(
               artifact_id,
@@ -1426,6 +1650,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           continue;
         }
         if (reused_or->has_value()) {
+          ++timing_stats.reuse_hit_count;
           staged_body = std::move(**reused_or);
         }
       }
@@ -1438,7 +1663,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
             absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
             local_daemon_id,
             tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
-            req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(""));
+            operation_id);
         if (!loader_or.ok()) {
           deferred_outcomes[index] = make_outcome(
               artifact_id,
@@ -1451,49 +1676,174 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
       }
     } else {
       deferred_outcomes[index] = make_outcome(
-          artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, "inline_payload or payload_ref is required");
+          artifact_id,
+          v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT,
+          "inline_payload, payload_ref, or batch_payload_slice is required");
       continue;
     }
+    prepared_items[static_cast<std::size_t>(index)] = PreparedHomeBatchPutItem{
+        .item = &item,
+        .artifact_id = artifact_id,
+        .loader = std::move(loader),
+        .local_source = std::move(local_source),
+        .source_kind = source_kind,
+        .staged_body = std::move(staged_body),
+    };
+  }
 
-    if (!staged_body.has_value()) {
-      auto staged_body_or = body_backing_manager_.stage_body(
+  std::vector<StageWorkItem> stage_work_items;
+  stage_work_items.reserve(prepared_items.size());
+  for (int index = 0; index < req.items_size(); ++index) {
+    if (deferred_outcomes[index].has_value()) {
+      continue;
+    }
+    auto& prepared_item = prepared_items[static_cast<std::size_t>(index)];
+    if (prepared_item.item == nullptr || prepared_item.staged_body.has_value()) {
+      continue;
+    }
+    if (prepared_item.loader == nullptr && !prepared_item.local_source.has_value()) {
+      deferred_outcomes[index] =
+          make_outcome(req.items(index).artifact_id(), v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing stage loader");
+      continue;
+    }
+    stage_work_items.push_back(
+        StageWorkItem{
+            .index = index,
+            .artifact_id = prepared_item.artifact_id,
+            .loader = std::move(prepared_item.loader),
+            .local_source = std::move(prepared_item.local_source),
+            .source_kind = prepared_item.source_kind,
+        });
+  }
+
+  const auto run_stage_work_item = [&](StageWorkItem stage_work_item) -> StageWorkItemResult {
+    StageWorkItemResult result;
+    result.index = stage_work_item.index;
+    result.artifact_id = std::move(stage_work_item.artifact_id);
+    const absl::Time stage_started_at = absl::Now();
+    absl::StatusOr<BodyBackingManager::StageResult> staged_body_or = [&]() {
+      if (stage_work_item.local_source.has_value()) {
+        result.used_fast_cpu_stage = true;
+        return body_backing_manager_.stage_body_fast_cpu_verified(
+            result.artifact_id,
+            req.items(result.index).invariant(),
+            std::move(*stage_work_item.local_source),
+            stage_work_item.source_kind,
+            std::string(operation_id),
+            BodyAccessClass::kHomeDefault,
+            BodyRouteRole::kHomeAuthority);
+      }
+      return body_backing_manager_.stage_body(
           BodyBackingManager::StageRequest{
-              .artifact_id = artifact_id,
-              .invariant = item.invariant(),
-              .loader = std::move(loader),
-              .source_kind = source_kind,
-              .operation_id = req.has_operation_id() ? req.operation_id() : "",
+              .artifact_id = result.artifact_id,
+              .invariant = req.items(result.index).invariant(),
+              .loader = std::move(stage_work_item.loader),
+              .source_kind = stage_work_item.source_kind,
+              .operation_id = std::string(operation_id),
               .access_class = BodyAccessClass::kHomeDefault,
               .route_role = BodyRouteRole::kHomeAuthority,
           });
-      if (!staged_body_or.ok()) {
-        deferred_outcomes[index] = make_outcome(
-            artifact_id,
-            batch_item_status_from_absl_status(staged_body_or.status()),
-            std::string(staged_body_or.status().message()));
-        continue;
+    }();
+    result.elapsed = absl::Now() - stage_started_at;
+    if (!staged_body_or.ok()) {
+      result.status = staged_body_or.status();
+      return result;
+    }
+    result.staged_body = std::move(*staged_body_or);
+    return result;
+  };
+  const auto apply_stage_result = [&](StageWorkItemResult result) {
+    timing_stats.stage_body_elapsed += result.elapsed;
+    ++timing_stats.stage_body_count;
+    if (result.used_fast_cpu_stage) {
+      timing_stats.fast_cpu_stage_elapsed += result.elapsed;
+      ++timing_stats.fast_cpu_stage_count;
+    }
+    if (!result.status.ok()) {
+      deferred_outcomes[result.index] = make_outcome(
+          result.artifact_id, batch_item_status_from_absl_status(result.status), std::string(result.status.message()));
+      return;
+    }
+    if (!result.staged_body.has_value()) {
+      deferred_outcomes[result.index] =
+          make_outcome(result.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing staged body");
+      return;
+    }
+    prepared_items[static_cast<std::size_t>(result.index)].staged_body = std::move(result.staged_body);
+  };
+
+  const bool parallel_stage_enabled = batch_get_apply_pool_ != nullptr && batch_get_apply_threads_ > 1;
+  const bool parallel_stage_active = parallel_stage_enabled && stage_work_items.size() > 1;
+  LOG(INFO) << "byte_artifact.home_batch_put_if_absent_stage_plan"
+            << " operation_id=" << operation_id << " stage_work_items=" << stage_work_items.size()
+            << " stage_executor_threads=" << batch_get_apply_threads_ << " parallel_enabled=" << parallel_stage_enabled
+            << " parallel_active=" << parallel_stage_active;
+  const absl::Time stage_wall_started_at = absl::Now();
+  if (!parallel_stage_active) {
+    for (auto& stage_work_item : stage_work_items) {
+      apply_stage_result(run_stage_work_item(std::move(stage_work_item)));
+    }
+  } else {
+    std::vector<ScheduledStageWorkItem> scheduled_stage_items;
+    scheduled_stage_items.reserve(stage_work_items.size());
+    for (auto& stage_work_item : stage_work_items) {
+      scheduled_stage_items.push_back(
+          ScheduledStageWorkItem{
+              .index = stage_work_item.index,
+              .artifact_id = stage_work_item.artifact_id,
+              .future = folly::via(
+                            folly::getKeepAliveToken(*batch_get_apply_pool_),
+                            [run_stage_work_item, stage_work_item = std::move(stage_work_item)]() mutable
+                                -> StageWorkItemResult { return run_stage_work_item(std::move(stage_work_item)); })
+                            .semi(),
+          });
+    }
+    for (auto& scheduled_stage_item : scheduled_stage_items) {
+      try {
+        apply_stage_result(std::move(scheduled_stage_item.future).get());
+      } catch (const std::exception& ex) {
+        deferred_outcomes[scheduled_stage_item.index] =
+            make_outcome(scheduled_stage_item.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, ex.what());
+      } catch (...) {
+        deferred_outcomes[scheduled_stage_item.index] = make_outcome(
+            scheduled_stage_item.artifact_id,
+            v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+            "HomeBatchPutIfAbsent stage task failed");
       }
-      staged_body = std::move(*staged_body_or);
+    }
+  }
+  const absl::Duration stage_wall_elapsed = absl::Now() - stage_wall_started_at;
+
+  for (int index = 0; index < req.items_size(); ++index) {
+    if (deferred_outcomes[index].has_value()) {
+      continue;
+    }
+    auto& prepared_item = prepared_items[static_cast<std::size_t>(index)];
+    if (prepared_item.item == nullptr || !prepared_item.staged_body.has_value()) {
+      deferred_outcomes[index] =
+          make_outcome(req.items(index).artifact_id(), v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing staged body");
+      continue;
     }
 
-    const auto invariant_st =
-        byte_artifact_runtime().validate_invariant_body_descriptor(item.invariant(), staged_body->descriptor);
+    auto& staged_body = prepared_item.staged_body;
+    const auto invariant_st = byte_artifact_runtime().validate_invariant_body_descriptor(
+        prepared_item.item->invariant(), staged_body->descriptor);
     if (!invariant_st.ok()) {
       auto retire_status = staged_body->body_handle.retire();
       if (!retire_status.ok()) {
-        deferred_outcomes[index] =
-            make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, std::string(retire_status.message()));
+        deferred_outcomes[index] = make_outcome(
+            prepared_item.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, std::string(retire_status.message()));
         continue;
       }
-      deferred_outcomes[index] =
-          make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, std::string(invariant_st.message()));
+      deferred_outcomes[index] = make_outcome(
+          prepared_item.artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, std::string(invariant_st.message()));
       continue;
     }
 
     authority_items.push_back(
         ByteArtifactAuthorityService::PutItem{
-            .artifact_id = artifact_id,
-            .invariant = item.invariant(),
+            .artifact_id = prepared_item.artifact_id,
+            .invariant = prepared_item.item->invariant(),
             .descriptor = staged_body->descriptor,
             .verified_content_descriptor = staged_body->verified_content_descriptor,
             .verification_record = staged_body->verification_record,
@@ -1504,6 +1854,8 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     authority_item_indices.push_back(index);
   }
 
+  timing_stats.authority_item_count = authority_items.size();
+  const absl::Time authority_apply_started_at = absl::Now();
   const auto authority_outcomes = authority_service_.batch_put_if_absent(
       authority_items,
       ByteArtifactAuthorityService::Context{
@@ -1514,6 +1866,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           .now = now,
       },
       ttl_ms);
+  timing_stats.authority_apply_elapsed = absl::Now() - authority_apply_started_at;
   for (size_t index = 0; index < authority_outcomes.size(); ++index) {
     deferred_outcomes[authority_item_indices[index]] = authority_outcomes[index];
   }
@@ -1526,6 +1879,29 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     *resp.add_outcomes() =
         make_outcome(req.items(index).artifact_id(), v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing authority outcome");
   }
+  LOG(INFO) << "byte_artifact.home_batch_put_if_absent_summary"
+            << " operation_id=" << operation_id << " requested_items=" << req.items_size()
+            << " batch_payload_slice_items=" << timing_stats.batch_payload_slice_items
+            << " inline_payload_items=" << timing_stats.inline_payload_items
+            << " payload_ref_items=" << timing_stats.payload_ref_items
+            << " communicator_open_count=" << timing_stats.communicator_open_count
+            << " grpc_fetch_count=" << timing_stats.grpc_fetch_count
+            << " remote_mirror_count=" << timing_stats.remote_mirror_count
+            << " remote_mirror_bytes=" << timing_stats.remote_mirror_bytes
+            << " stage_body_count=" << timing_stats.stage_body_count
+            << " fast_cpu_stage_count=" << timing_stats.fast_cpu_stage_count
+            << " stage_body_wall_ms=" << absl::ToDoubleMilliseconds(stage_wall_elapsed)
+            << " reuse_attempt_count=" << timing_stats.reuse_attempt_count
+            << " reuse_hit_count=" << timing_stats.reuse_hit_count
+            << " authority_item_count=" << timing_stats.authority_item_count
+            << " communicator_open_ms=" << absl::ToDoubleMilliseconds(timing_stats.communicator_open_elapsed)
+            << " grpc_fetch_ms=" << absl::ToDoubleMilliseconds(timing_stats.grpc_fetch_elapsed)
+            << " remote_mirror_ms=" << absl::ToDoubleMilliseconds(timing_stats.remote_mirror_elapsed)
+            << " stage_body_ms=" << absl::ToDoubleMilliseconds(timing_stats.stage_body_elapsed)
+            << " fast_cpu_stage_ms=" << absl::ToDoubleMilliseconds(timing_stats.fast_cpu_stage_elapsed)
+            << " reuse_ms=" << absl::ToDoubleMilliseconds(timing_stats.reuse_elapsed)
+            << " authority_apply_ms=" << absl::ToDoubleMilliseconds(timing_stats.authority_apply_elapsed)
+            << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
   rctx.mark_success();
   return Status::OK;
 }

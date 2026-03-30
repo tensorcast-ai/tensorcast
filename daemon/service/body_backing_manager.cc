@@ -3,7 +3,10 @@
 #include "daemon/service/body_backing_manager.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -11,10 +14,15 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "core/store/device_registry.h"
+#include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
+#include "openssl/sha.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
@@ -201,6 +209,329 @@ BodyBackingObservation make_observation(
   return observation;
 }
 
+store::loading::InlineBufferSource make_inline_buffer_source(const BodyBackingManager::LocalByteSpan& source) {
+  return store::loading::InlineBufferSource{
+      .data = source.owner,
+      .size_bytes = source.size_bytes,
+  };
+}
+
+store::loader::ByteRangeMap build_identity_byte_range_map(std::uint64_t size_bytes) {
+  store::loader::ByteRangeMap map;
+  map.total_bytes = size_bytes;
+  map.num_sources = 1;
+  if (size_bytes > 0) {
+    map.segments.push_back(
+        store::loader::ByteRangeSegment{
+            .kind = store::loader::ByteRangeSegment::Kind::kData,
+            .dst_offset = 0,
+            .length = size_bytes,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return map;
+}
+
+struct FinalizedStreamDigest {
+  std::string digest_alg;
+  std::string digest_hex;
+  std::string digest_bytes;
+  std::uint64_t streamed_bytes{0};
+};
+
+class FastCpuDigestState {
+ public:
+  explicit FastCpuDigestState(std::uint64_t total_size_bytes) : total_size_bytes_(total_size_bytes) {
+    SHA256_Init(&ctx_);
+  }
+
+  [[nodiscard]] absl::Status update(std::uint64_t offset, const void* copied_bytes, std::size_t bytes) {
+    absl::MutexLock lock(&mu_);
+    if (!status_.ok()) {
+      return status_;
+    }
+    if (finalized_) {
+      return absl::FailedPreconditionError("stream digest already finalized");
+    }
+    if (offset != next_offset_) {
+      status_ = absl::FailedPreconditionError(
+          absl::StrCat("stream digest requires contiguous offsets: expected=", next_offset_, " actual=", offset));
+      return status_;
+    }
+    if (bytes == 0) {
+      return absl::OkStatus();
+    }
+    if (SHA256_Update(&ctx_, copied_bytes, bytes) != 1) {
+      status_ = absl::InternalError("SHA256_Update failed during fast CPU body staging");
+      return status_;
+    }
+    next_offset_ += bytes;
+    return absl::OkStatus();
+  }
+
+  [[nodiscard]] absl::StatusOr<FinalizedStreamDigest> finalize() {
+    absl::MutexLock lock(&mu_);
+    if (!status_.ok()) {
+      return status_;
+    }
+    if (!finalized_) {
+      if (next_offset_ != total_size_bytes_) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("stream digest incomplete: expected=", total_size_bytes_, " streamed=", next_offset_));
+      }
+      std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+      if (SHA256_Final(digest.data(), &ctx_) != 1) {
+        return absl::InternalError("SHA256_Final failed during fast CPU body staging");
+      }
+      digest_bytes_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
+      digest_hex_ = absl::BytesToHexString(digest_bytes_);
+      absl::AsciiStrToLower(&digest_hex_);
+      finalized_ = true;
+    }
+    return FinalizedStreamDigest{
+        .digest_alg = "sha256",
+        .digest_hex = digest_hex_,
+        .digest_bytes = digest_bytes_,
+        .streamed_bytes = next_offset_,
+    };
+  }
+
+  [[nodiscard]] std::uint64_t streamed_bytes() const {
+    absl::MutexLock lock(&mu_);
+    return next_offset_;
+  }
+
+ private:
+  const std::uint64_t total_size_bytes_;
+  mutable absl::Mutex mu_;
+  SHA256_CTX ctx_;
+  std::uint64_t next_offset_ ABSL_GUARDED_BY(mu_){0};
+  bool finalized_ ABSL_GUARDED_BY(mu_){false};
+  absl::Status status_ ABSL_GUARDED_BY(mu_) = absl::OkStatus();
+  std::string digest_hex_ ABSL_GUARDED_BY(mu_);
+  std::string digest_bytes_ ABSL_GUARDED_BY(mu_);
+};
+
+class FastCpuVerifiedInlineLoader final : public store::IArtifactLoader {
+ public:
+  FastCpuVerifiedInlineLoader(
+      BodyBackingManager::LocalByteSpan source,
+      std::shared_ptr<FastCpuDigestState> digest_state)
+      : source_(std::move(source)), digest_state_(std::move(digest_state)) {}
+
+  absl::Status initialize() override {
+    initialized_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::uint64_t> get_artifact_size() override {
+    if (!initialized_) {
+      return absl::FailedPreconditionError("FastCpuVerifiedInlineLoader not initialized");
+    }
+    if (!source_.owner || source_.data == nullptr || source_.size_bytes == 0) {
+      return absl::FailedPreconditionError("FastCpuVerifiedInlineLoader requires local bytes");
+    }
+    return source_.size_bytes;
+  }
+
+  absl::StatusOr<std::unique_ptr<store::loader::SeekableSource>> open_source() override {
+    if (!initialized_) {
+      return absl::FailedPreconditionError("FastCpuVerifiedInlineLoader not initialized");
+    }
+    if (!source_.owner || source_.data == nullptr || source_.size_bytes == 0) {
+      return absl::FailedPreconditionError("FastCpuVerifiedInlineLoader requires local bytes");
+    }
+
+    class Source final : public store::loader::SeekableSource {
+     public:
+      Source(BodyBackingManager::LocalByteSpan source, std::shared_ptr<FastCpuDigestState> digest_state)
+          : source_(std::move(source)), digest_state_(std::move(digest_state)) {}
+
+      [[nodiscard]] std::uint64_t total_bytes() const override {
+        return source_.size_bytes;
+      }
+
+      absl::StatusOr<std::size_t> read(void* dst, std::size_t max_bytes) override {
+        auto bytes_or = read_at(cursor_, dst, max_bytes);
+        if (!bytes_or.ok()) {
+          return bytes_or.status();
+        }
+        cursor_ += *bytes_or;
+        return bytes_or;
+      }
+
+      absl::StatusOr<std::size_t> read_at(std::uint64_t offset, void* dst, std::size_t bytes) override {
+        if (offset >= source_.size_bytes || bytes == 0) {
+          return static_cast<std::size_t>(0);
+        }
+        const std::uint64_t remaining = source_.size_bytes - offset;
+        const auto to_copy = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, bytes));
+        std::memcpy(dst, source_.data + offset, to_copy);
+        auto update_status = digest_state_->update(offset, dst, to_copy);
+        if (!update_status.ok()) {
+          return update_status;
+        }
+        return to_copy;
+      }
+
+      [[nodiscard]] bool supports_direct_write_at() const override {
+        return true;
+      }
+
+      absl::StatusOr<std::size_t> read_into_at(
+          std::uint64_t src_offset,
+          std::uint64_t dest_va_offset,
+          std::size_t bytes,
+          const store::DirectWriteGrant& grant) override {
+        if (bytes == 0) {
+          return static_cast<std::size_t>(0);
+        }
+        if (src_offset >= source_.size_bytes) {
+          return static_cast<std::size_t>(0);
+        }
+        if (src_offset != dest_va_offset) {
+          return absl::InvalidArgumentError("fast CPU verified source requires identity direct-write offsets");
+        }
+        const std::uint64_t remaining = source_.size_bytes - src_offset;
+        const auto to_copy = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, bytes));
+        const store::DirectWriteGrant::Window* target_window = nullptr;
+        for (const auto& window : grant.windows) {
+          if (dest_va_offset >= window.va_offset && dest_va_offset + to_copy <= window.va_offset + window.length) {
+            target_window = &window;
+            break;
+          }
+        }
+        if (target_window == nullptr) {
+          return absl::InvalidArgumentError("No direct-write window covers requested fast CPU verified range");
+        }
+        const auto window_offset = dest_va_offset - target_window->va_offset;
+        auto* dst = reinterpret_cast<void*>(target_window->local_addr + window_offset);
+        std::memcpy(dst, source_.data + src_offset, to_copy);
+        auto update_status = digest_state_->update(src_offset, dst, to_copy);
+        if (!update_status.ok()) {
+          return update_status;
+        }
+        return to_copy;
+      }
+
+     private:
+      BodyBackingManager::LocalByteSpan source_;
+      std::shared_ptr<FastCpuDigestState> digest_state_;
+      std::uint64_t cursor_{0};
+    };
+
+    return std::unique_ptr<store::loader::SeekableSource>(std::make_unique<Source>(source_, digest_state_));
+  }
+
+ private:
+  BodyBackingManager::LocalByteSpan source_;
+  std::shared_ptr<FastCpuDigestState> digest_state_;
+  bool initialized_{false};
+};
+
+store::runtime::ingestion::VerificationRecord build_stream_verification_record(
+    std::string_view layout_id,
+    absl::Time verified_at) {
+  return store::runtime::ingestion::VerificationRecord{
+      .verification_method = store::runtime::ingestion::VerificationMethod::kSharedExecutorStreamDigest,
+      .verified_at = verified_at,
+      .layout_proof_kind = store::runtime::ingestion::LayoutProofKind::kNamedLayoutId,
+      .layout_proof_value = std::string(layout_id),
+  };
+}
+
+absl::StatusOr<BodyBackingManager::StageResult> finalize_staged_replica(
+    store::StoreEngine& engine,
+    std::string_view metric_mode,
+    BodyAccessClass access_class,
+    const BodyBackingIntent& intent,
+    const ResolvedStorePolicy& resolved_policy,
+    std::string_view layout_id,
+    store::loading::ReplicaHandle replica_handle,
+    store::runtime::ingestion::BackingIdentity backing_identity,
+    store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor,
+    store::runtime::ingestion::VerificationRecord verification_record,
+    absl::Duration* stable_retention_elapsed = nullptr,
+    absl::Duration* inspect_backing_elapsed = nullptr,
+    absl::Duration* handle_create_elapsed = nullptr) {
+  if (backing_identity.replica_key.artifact_id.empty()) {
+    backing_identity.replica_key = replica_handle.key();
+  }
+  if (backing_identity.physical_artifact_id.empty()) {
+    backing_identity.physical_artifact_id = replica_handle.key().artifact_id;
+  }
+  if (!store::runtime::ingestion::backing_identity_matches_replica_key(backing_identity)) {
+    (void)engine.retire_replica_status(replica_handle.key());
+    record_body_backing_metrics(metric_mode, access_class, intent, "backing_identity_mismatch");
+    return absl::InternalError("body staging returned inconsistent backing identity");
+  }
+
+  verified_content_descriptor.content_identity.semantic_layout_identity.kind =
+      store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId;
+  verified_content_descriptor.content_identity.semantic_layout_identity.value = std::string(layout_id);
+  verification_record.layout_proof_kind = store::runtime::ingestion::LayoutProofKind::kNamedLayoutId;
+  verification_record.layout_proof_value = std::string(layout_id);
+  const BodyDescriptor descriptor =
+      make_body_descriptor(backing_identity, layout_id, verified_content_descriptor, verification_record);
+
+  const absl::Time stable_retention_started_at = absl::Now();
+  auto stable_state_or = maybe_admit_stable_retention(engine, resolved_policy, intent, replica_handle);
+  const absl::Duration stable_elapsed = absl::Now() - stable_retention_started_at;
+  if (stable_retention_elapsed != nullptr) {
+    *stable_retention_elapsed = stable_elapsed;
+  }
+  if (!stable_state_or.ok() && intent.stable_retention_requirement == BodyStableRetentionRequirement::kRequireStable) {
+    const auto retire_status = engine.retire_replica_status(replica_handle.key());
+    if (!retire_status.ok()) {
+      record_body_backing_metrics(metric_mode, access_class, intent, "retire_error");
+      return retire_status;
+    }
+    record_body_backing_metrics(metric_mode, access_class, intent, "stable_required_error");
+    return stable_state_or.status();
+  }
+
+  const absl::Time inspect_backing_started_at = absl::Now();
+  auto core_observation_or = engine.inspect_replica_backing(replica_handle.key());
+  const absl::Duration inspect_elapsed = absl::Now() - inspect_backing_started_at;
+  if (inspect_backing_elapsed != nullptr) {
+    *inspect_backing_elapsed = inspect_elapsed;
+  }
+  if (!core_observation_or.ok()) {
+    (void)engine.retire_replica_status(replica_handle.key());
+    record_body_backing_metrics(metric_mode, access_class, intent, "observe_error");
+    return core_observation_or.status();
+  }
+  const BodyBackingObservation observation = make_observation(
+      descriptor,
+      *core_observation_or,
+      stable_state_or.ok() ? *stable_state_or : BodyStableRetentionState::kSkipped,
+      absl::Now());
+
+  const auto replica_key = replica_handle.key();
+  const absl::Time handle_create_started_at = absl::Now();
+  auto body_handle_or = BodyHandle::create(engine, std::move(replica_handle));
+  const absl::Duration handle_elapsed = absl::Now() - handle_create_started_at;
+  if (handle_create_elapsed != nullptr) {
+    *handle_create_elapsed = handle_elapsed;
+  }
+  if (!body_handle_or.ok()) {
+    (void)engine.retire_replica_status(replica_key);
+    record_body_backing_metrics(metric_mode, access_class, intent, "handle_error");
+    return body_handle_or.status();
+  }
+
+  record_body_backing_metrics(metric_mode, access_class, intent, "ok");
+  return BodyBackingManager::StageResult{
+      .descriptor = descriptor,
+      .observation = observation,
+      .body_handle = std::move(*body_handle_or),
+      .verified_content_descriptor = std::move(verified_content_descriptor),
+      .verification_record = std::move(verification_record),
+      .backing_identity = std::move(backing_identity),
+  };
+}
+
 } // namespace
 
 BodyBackingManager::BodyBackingManager(store::StoreEngine& engine) : engine_(engine) {}
@@ -319,6 +650,13 @@ BodyBackingIntent BodyBackingManager::classify_intent(
 }
 
 absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(StageRequest request) const {
+  const absl::Time total_started_at = absl::Now();
+  absl::Duration resolve_policy_elapsed = absl::ZeroDuration();
+  absl::Duration lower_plan_elapsed = absl::ZeroDuration();
+  absl::Duration execute_plan_elapsed = absl::ZeroDuration();
+  absl::Duration stable_retention_elapsed = absl::ZeroDuration();
+  absl::Duration inspect_backing_elapsed = absl::ZeroDuration();
+  absl::Duration handle_create_elapsed = absl::ZeroDuration();
   if (request.artifact_id.empty()) {
     return absl::InvalidArgumentError("artifact_id is required for body staging");
   }
@@ -329,14 +667,17 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
     return absl::InvalidArgumentError("loader is required for body staging");
   }
 
+  const absl::Time resolve_policy_started_at = absl::Now();
   auto resolved_policy_or =
       resolve_body_store_policy(request.access_class, request.route_role, request.resolved_store_policy);
+  resolve_policy_elapsed = absl::Now() - resolve_policy_started_at;
   if (!resolved_policy_or.ok()) {
     return resolved_policy_or.status();
   }
   const BodyPlacementContext context =
       normalize_placement_context(request.access_class, request.route_role, request.invariant.byte_length());
   const BodyBackingIntent intent = classify_intent(context, *resolved_policy_or);
+  const absl::Time lower_plan_started_at = absl::Now();
   auto plan_or = store::runtime::ingestion::lower_to_artifact_plan(
       store::runtime::ingestion::LowerToArtifactPlanRequest{
           .identity =
@@ -364,6 +705,7 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
           .source_kind = request.source_kind,
           .replica_target = build_replica_target(intent),
       });
+  lower_plan_elapsed = absl::Now() - lower_plan_started_at;
   if (!plan_or.ok()) {
     record_body_backing_metrics("stage", request.access_class, intent, "lowering_error");
     return plan_or.status();
@@ -371,7 +713,9 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   store::runtime::ingestion::ArtifactLoweringPlan plan = std::move(*plan_or);
 
   const std::string physical_artifact_id = plan.identity.physical_artifact_id;
+  const absl::Time execute_plan_started_at = absl::Now();
   auto result_or = engine_.execute_artifact_lowering_plan(std::move(plan));
+  execute_plan_elapsed = absl::Now() - execute_plan_started_at;
   if (!result_or.ok()) {
     record_body_backing_metrics("stage", request.access_class, intent, "error");
     return result_or.status();
@@ -386,65 +730,162 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
     return absl::InternalError("body staging did not return shared truth metadata");
   }
 
-  store::loading::ReplicaHandle replica_handle = std::move(*result_or->replica_handle);
-  store::runtime::ingestion::BackingIdentity backing_identity = *result_or->backing_identity;
-  if (backing_identity.physical_artifact_id.empty()) {
-    backing_identity.physical_artifact_id = physical_artifact_id;
+  auto stage_result_or = finalize_staged_replica(
+      engine_,
+      "stage",
+      request.access_class,
+      intent,
+      *resolved_policy_or,
+      request.invariant.layout_id(),
+      std::move(*result_or->replica_handle),
+      *result_or->backing_identity,
+      *result_or->verified_content_descriptor,
+      *result_or->verification_record,
+      &stable_retention_elapsed,
+      &inspect_backing_elapsed,
+      &handle_create_elapsed);
+  if (!stage_result_or.ok()) {
+    return stage_result_or.status();
   }
-  if (!store::runtime::ingestion::backing_identity_matches_replica_key(backing_identity)) {
-    (void)engine_.retire_replica_status(replica_handle.key());
-    record_body_backing_metrics("stage", request.access_class, intent, "backing_identity_mismatch");
-    return absl::InternalError("body staging returned inconsistent backing identity");
+  const absl::Duration total_elapsed = absl::Now() - total_started_at;
+  if (request.source_kind == store::loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(1)) {
+    LOG(INFO) << "body_backing.stage_body_summary"
+              << " artifact_id=" << request.artifact_id << " operation_id=" << request.operation_id
+              << " size_bytes=" << request.invariant.byte_length()
+              << " source_kind=" << static_cast<int>(request.source_kind)
+              << " resolve_policy_ms=" << absl::ToDoubleMilliseconds(resolve_policy_elapsed)
+              << " lower_plan_ms=" << absl::ToDoubleMilliseconds(lower_plan_elapsed)
+              << " execute_plan_ms=" << absl::ToDoubleMilliseconds(execute_plan_elapsed)
+              << " stable_retention_ms=" << absl::ToDoubleMilliseconds(stable_retention_elapsed)
+              << " inspect_backing_ms=" << absl::ToDoubleMilliseconds(inspect_backing_elapsed)
+              << " handle_create_ms=" << absl::ToDoubleMilliseconds(handle_create_elapsed)
+              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
   }
-  const store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor =
-      *result_or->verified_content_descriptor;
-  store::runtime::ingestion::VerifiedContentDescriptor staged_verified_content_descriptor = verified_content_descriptor;
-  staged_verified_content_descriptor.content_identity.semantic_layout_identity.kind =
-      store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId;
-  staged_verified_content_descriptor.content_identity.semantic_layout_identity.value = request.invariant.layout_id();
-  store::runtime::ingestion::VerificationRecord verification_record = *result_or->verification_record;
-  verification_record.layout_proof_kind = store::runtime::ingestion::LayoutProofKind::kNamedLayoutId;
-  verification_record.layout_proof_value = request.invariant.layout_id();
-  const BodyDescriptor descriptor = make_body_descriptor(
-      backing_identity, request.invariant.layout_id(), staged_verified_content_descriptor, verification_record);
+  return stage_result_or;
+}
 
-  auto stable_state_or = maybe_admit_stable_retention(engine_, *resolved_policy_or, intent, replica_handle);
-  if (!stable_state_or.ok() && intent.stable_retention_requirement == BodyStableRetentionRequirement::kRequireStable) {
-    const auto retire_status = engine_.retire_replica_status(replica_handle.key());
-    if (!retire_status.ok()) {
-      record_body_backing_metrics("stage", request.access_class, intent, "retire_error");
-      return retire_status;
-    }
-    record_body_backing_metrics("stage", request.access_class, intent, "stable_required_error");
-    return stable_state_or.status();
+absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_fast_cpu_verified(
+    std::string artifact_id,
+    const v2::PutIfAbsentInvariant& invariant,
+    LocalByteSpan source,
+    store::loading::MaterializationSource source_kind,
+    std::string operation_id,
+    BodyAccessClass access_class,
+    BodyRouteRole route_role,
+    std::optional<ResolvedStorePolicy> resolved_store_policy) const {
+  const absl::Time total_started_at = absl::Now();
+  absl::Duration resolve_policy_elapsed = absl::ZeroDuration();
+  absl::Duration ingest_elapsed = absl::ZeroDuration();
+  absl::Duration stable_retention_elapsed = absl::ZeroDuration();
+  absl::Duration inspect_backing_elapsed = absl::ZeroDuration();
+  absl::Duration handle_create_elapsed = absl::ZeroDuration();
+  if (artifact_id.empty()) {
+    return absl::InvalidArgumentError("artifact_id is required for fast CPU body staging");
   }
-  auto core_observation_or = engine_.inspect_replica_backing(replica_handle.key());
-  if (!core_observation_or.ok()) {
-    (void)engine_.retire_replica_status(replica_handle.key());
-    record_body_backing_metrics("stage", request.access_class, intent, "observe_error");
-    return core_observation_or.status();
+  if (invariant.layout_id().empty()) {
+    return absl::InvalidArgumentError("invariant.layout_id is required for fast CPU body staging");
   }
-  const BodyBackingObservation observation = make_observation(
-      descriptor,
-      *core_observation_or,
-      stable_state_or.ok() ? *stable_state_or : BodyStableRetentionState::kSkipped,
-      absl::Now());
-  const auto replica_key = replica_handle.key();
-  auto body_handle_or = BodyHandle::create(engine_, std::move(replica_handle));
-  if (!body_handle_or.ok()) {
-    (void)engine_.retire_replica_status(replica_key);
-    record_body_backing_metrics("stage", request.access_class, intent, "handle_error");
-    return body_handle_or.status();
+  if (!source.owner || source.data == nullptr || source.size_bytes == 0) {
+    return absl::InvalidArgumentError("fast CPU body staging requires local source bytes");
   }
-  record_body_backing_metrics("stage", request.access_class, intent, "ok");
-  return StageResult{
-      .descriptor = descriptor,
-      .observation = observation,
-      .body_handle = std::move(*body_handle_or),
-      .verified_content_descriptor = std::move(staged_verified_content_descriptor),
-      .verification_record = verification_record,
-      .backing_identity = std::move(backing_identity),
-  };
+  if (source.size_bytes != invariant.byte_length()) {
+    return absl::InvalidArgumentError("fast CPU body staging source size does not match invariant.byte_length");
+  }
+
+  const absl::Time resolve_policy_started_at = absl::Now();
+  auto resolved_policy_or = resolve_body_store_policy(access_class, route_role, resolved_store_policy);
+  resolve_policy_elapsed = absl::Now() - resolve_policy_started_at;
+  if (!resolved_policy_or.ok()) {
+    return resolved_policy_or.status();
+  }
+  const BodyPlacementContext context = normalize_placement_context(access_class, route_role, invariant.byte_length());
+  const BodyBackingIntent intent = classify_intent(context, *resolved_policy_or);
+  if (intent.preferred_residency != BodyPreferredResidency::kCpu) {
+    return stage_body(
+        StageRequest{
+            .artifact_id = std::move(artifact_id),
+            .invariant = invariant,
+            .loader = std::make_unique<store::InlineBufferLoader>(make_inline_buffer_source(source)),
+            .source_kind = source_kind,
+            .operation_id = std::move(operation_id),
+            .access_class = access_class,
+            .route_role = route_role,
+            .resolved_store_policy = std::move(resolved_store_policy),
+        });
+  }
+
+  auto digest_state = std::make_shared<FastCpuDigestState>(source.size_bytes);
+  auto loader = std::make_unique<FastCpuVerifiedInlineLoader>(source, digest_state);
+  auto hints = build_lowering_hints(artifact_id, operation_id);
+  hints.pipeline_concurrency = 1;
+  const std::string physical_artifact_id = build_body_backing_artifact_id(artifact_id, invariant);
+  const absl::Time ingest_started_at = absl::Now();
+  auto replica_handle_or = engine_.ingestion_runtime().ingest_mapped_loader_into_replica(
+      artifact_id,
+      physical_artifact_id,
+      resolve_target_device(intent),
+      build_replica_target(intent),
+      std::move(loader),
+      build_identity_byte_range_map(invariant.byte_length()),
+      hints,
+      source_kind);
+  ingest_elapsed = absl::Now() - ingest_started_at;
+  if (!replica_handle_or.ok()) {
+    record_body_backing_metrics("stage", access_class, intent, "fast_ingest_error");
+    return replica_handle_or.status();
+  }
+
+  auto digest_or = digest_state->finalize();
+  store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+  store::runtime::ingestion::VerificationRecord verification_record;
+  if (digest_or.ok()) {
+    verified_content_descriptor = body_descriptor_to_verified_content_descriptor_with_layout(
+        invariant.layout_id(), invariant.byte_length(), digest_or->digest_alg, digest_or->digest_hex);
+    verification_record = build_stream_verification_record(invariant.layout_id(), absl::Now());
+  } else if (digest_state->streamed_bytes() == 0) {
+    verified_content_descriptor = body_descriptor_to_verified_content_descriptor_with_layout(
+        invariant.layout_id(), invariant.byte_length(), invariant.payload_digest_alg(), invariant.payload_digest_hex());
+    verification_record = build_stream_verification_record(invariant.layout_id(), absl::Now());
+  } else {
+    (void)engine_.retire_replica_status(replica_handle_or->key());
+    record_body_backing_metrics("stage", access_class, intent, "fast_digest_error");
+    return digest_or.status();
+  }
+
+  auto stage_result_or = finalize_staged_replica(
+      engine_,
+      "stage",
+      access_class,
+      intent,
+      *resolved_policy_or,
+      invariant.layout_id(),
+      std::move(*replica_handle_or),
+      store::runtime::ingestion::BackingIdentity{
+          .physical_artifact_id = physical_artifact_id,
+      },
+      std::move(verified_content_descriptor),
+      std::move(verification_record),
+      &stable_retention_elapsed,
+      &inspect_backing_elapsed,
+      &handle_create_elapsed);
+  if (!stage_result_or.ok()) {
+    return stage_result_or.status();
+  }
+
+  const absl::Duration total_elapsed = absl::Now() - total_started_at;
+  if (source_kind == store::loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(1)) {
+    LOG(INFO) << "body_backing.stage_body_fast_cpu_summary"
+              << " artifact_id=" << artifact_id << " operation_id=" << operation_id
+              << " size_bytes=" << invariant.byte_length() << " source_kind=" << static_cast<int>(source_kind)
+              << " streamed_bytes=" << digest_state->streamed_bytes()
+              << " resolve_policy_ms=" << absl::ToDoubleMilliseconds(resolve_policy_elapsed)
+              << " ingest_ms=" << absl::ToDoubleMilliseconds(ingest_elapsed)
+              << " stable_retention_ms=" << absl::ToDoubleMilliseconds(stable_retention_elapsed)
+              << " inspect_backing_ms=" << absl::ToDoubleMilliseconds(inspect_backing_elapsed)
+              << " handle_create_ms=" << absl::ToDoubleMilliseconds(handle_create_elapsed)
+              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+  }
+  return stage_result_or;
 }
 
 absl::StatusOr<std::optional<BodyBackingManager::StageResult>> BodyBackingManager::try_reuse_body(
