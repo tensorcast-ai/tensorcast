@@ -175,6 +175,17 @@ message Engine {
     bool use_dedicated_single_range_concat_stream = 14;
     MaterializationStrategyExecutorPreference executor_preference = 15;
     MaterializationStrategyDiagnosticsVerbosity diagnostics_verbosity = 16;
+
+    uint64 owner_file_collective_peak_bytes_budget = 17;
+    uint64 owner_file_collective_batch_bytes = 18;
+    uint64 owner_file_collective_dim1_staging_bytes = 19;
+    uint32 owner_file_collective_max_inflight_batches = 20;
+    optional bool owner_file_collective_shared_fs_only = 21;
+    double owner_file_collective_max_owner_skew_ratio = 22;
+    uint64 owner_file_collective_min_dedup_saving_bytes = 23;
+    google.protobuf.Duration owner_file_collective_group_assemble_timeout = 24;
+    optional bool owner_file_collective_allow_mixed_residual = 25;
+    uint32 owner_file_collective_planner_cache_entries = 26;
   }
   MaterializationStrategy materialization_strategy = 14;
 }

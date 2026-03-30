@@ -593,6 +593,100 @@ Hard-cut rule:
   temporary compatibility helpers, duplicate request fields, and artifact-owned
   fallback state should be deleted rather than preserved behind flags.
 
+## User Migration Guide
+
+This section is the normative migration map for callers that still use the
+removed fallback surface.
+
+### Migration Rules
+
+1. Keep `Artifact` handles identity-only. Do not attach retrieval policy to the
+   handle.
+2. Pass retrieval/source behavior through `GetArtifactOptions(...)` at the
+   materialization call site, or set `StoreOptions(get=...)` once for process
+   defaults.
+3. Use `tensorcast.from_disk(path)` for explicit disk imports. Disk paths are
+   not part of retrieval policy anymore.
+4. Move `replica_uuid` and `verify_checksums` into `GetArtifactOptions`; they
+   are execution-scoped, not fallback-owned.
+5. Use structured `RetrievalPolicy(...)` whenever you need `prefer_p2p` or
+   explicit allow-flag control. Public presets are only convenience sugar.
+
+### Old To New Surface Map
+
+| Old surface | New surface |
+| --- | --- |
+| `StoreOptions(fallback="local")` | `StoreOptions(get=GetArtifactOptions(source="local_only"))` |
+| `StoreOptions(fallback="disk")` | `StoreOptions(get=GetArtifactOptions(source="disk_first"))` |
+| `fallback="local"` on a read call | `options=GetArtifactOptions(source="local_only")` |
+| `fallback="disk"` on a read call | `options=GetArtifactOptions(source="disk_first")` |
+| `FallbackOptions(prefer="p2p")` | `GetArtifactOptions(source=RetrievalPolicy(preference="prefer_p2p"))` |
+| `FallbackOptions(prefer="disk", allow_p2p=False)` | `GetArtifactOptions(source="disk_only")` |
+| `FallbackOptions(prefer="local")` | `GetArtifactOptions(source="local_only")` |
+| `FallbackOptions.for_disk(path)` or `fallback="disk:/path"` | `handle = tensorcast.from_disk(path)` |
+| `Artifact.with_fallback(...)` | keep `Artifact` unchanged; pass `options=...` when calling `tensor_dict(...)`, `tensor_dict_into(...)`, `prefetch(...)`, or set `StoreOptions(get=...)` |
+| `Artifact.to_dict()/from_dict()` carrying fallback state | no replacement; retrieval policy is not serialized on handles anymore |
+
+### Copy-Paste Examples
+
+Prefer one-off execution-scoped retrieval policy:
+
+```python
+import tensorcast as tc
+
+handle = tc.artifact(key="model:latest")
+weights = handle.tensor_dict(
+    device="cuda:0",
+    options=tc.GetArtifactOptions(source="disk_first"),
+)
+```
+
+Set a process-wide default for all reads through one `Store`:
+
+```python
+import tensorcast as tc
+
+store = tc.store(
+    opts=tc.StoreOptions(
+        get=tc.GetArtifactOptions(source="local_only"),
+    )
+)
+handle = store.artifact(key="model:latest")
+weights = handle.tensor_dict(device="cuda:0")
+```
+
+Use structured policy when you need `prefer_p2p` or explicit gating:
+
+```python
+import tensorcast as tc
+
+handle = tc.artifact(artifact_id="mi2:...")
+weights = handle.tensor_dict(
+    device="cuda:0",
+    options=tc.GetArtifactOptions(
+        source=tc.RetrievalPolicy(
+            preference="prefer_p2p",
+            allow_p2p=True,
+            allow_disk=False,
+        ),
+        replica_uuid="prefetched-replica-uuid",
+        verify_checksums=False,
+    ),
+)
+```
+
+Use explicit disk import instead of path-shaped fallback:
+
+```python
+import tensorcast as tc
+
+handle = tc.from_disk("/mnt/models/model_a")
+weights = handle.tensor_dict(
+    device="cuda:0",
+    options=tc.GetArtifactOptions(source="disk_first"),
+)
+```
+
 # Alternatives And Rationale
 
 Alternative A: keep `0080` and rename fields around a four-value `source_mode`.

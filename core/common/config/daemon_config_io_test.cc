@@ -2,6 +2,7 @@
 
 #include "core/common/config/daemon_config_io.h"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
@@ -137,6 +138,16 @@ engine:
     enable_owner_file_collective: true
     executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE
     diagnostics_verbosity: MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE
+    owner_file_collective_peak_bytes_budget: 17179869184
+    owner_file_collective_batch_bytes: 1073741824
+    owner_file_collective_dim1_staging_bytes: 536870912
+    owner_file_collective_max_inflight_batches: 2
+    owner_file_collective_shared_fs_only: false
+    owner_file_collective_max_owner_skew_ratio: 1.25
+    owner_file_collective_min_dedup_saving_bytes: 134217728
+    owner_file_collective_group_assemble_timeout: 5s
+    owner_file_collective_allow_mixed_residual: true
+    owner_file_collective_planner_cache_entries: 1024
 pinned_memory:
   allocation_timeout: 30s
   classes: []
@@ -176,6 +187,19 @@ pinned_memory:
   REQUIRE(
       strategy.diagnostics_verbosity() ==
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE);
+  REQUIRE(strategy.owner_file_collective_peak_bytes_budget() == 17179869184ULL);
+  REQUIRE(strategy.owner_file_collective_batch_bytes() == 1073741824ULL);
+  REQUIRE(strategy.owner_file_collective_dim1_staging_bytes() == 536870912ULL);
+  REQUIRE(strategy.owner_file_collective_max_inflight_batches() == 2);
+  REQUIRE(strategy.has_owner_file_collective_shared_fs_only());
+  REQUIRE_FALSE(strategy.owner_file_collective_shared_fs_only());
+  REQUIRE(strategy.owner_file_collective_max_owner_skew_ratio() == Catch::Approx(1.25));
+  REQUIRE(strategy.owner_file_collective_min_dedup_saving_bytes() == 134217728ULL);
+  REQUIRE(strategy.has_owner_file_collective_group_assemble_timeout());
+  REQUIRE(strategy.owner_file_collective_group_assemble_timeout().seconds() == 5);
+  REQUIRE(strategy.has_owner_file_collective_allow_mixed_residual());
+  REQUIRE(strategy.owner_file_collective_allow_mixed_residual());
+  REQUIRE(strategy.owner_file_collective_planner_cache_entries() == 1024);
 }
 
 TEST_CASE("DaemonConfig missing materialization strategy gets 0108 defaults", "[config]") {
@@ -205,6 +229,19 @@ pinned_memory:
   REQUIRE_FALSE(strategy.enable_owner_file_collective());
   REQUIRE(strategy.has_allow_mixed_execution());
   REQUIRE(strategy.allow_mixed_execution());
+  REQUIRE(strategy.owner_file_collective_peak_bytes_budget() == 8ULL * 1024ULL * 1024ULL * 1024ULL);
+  REQUIRE(strategy.owner_file_collective_batch_bytes() == 512ULL * 1024ULL * 1024ULL);
+  REQUIRE(strategy.owner_file_collective_dim1_staging_bytes() == 256ULL * 1024ULL * 1024ULL);
+  REQUIRE(strategy.owner_file_collective_max_inflight_batches() == 1);
+  REQUIRE(strategy.has_owner_file_collective_shared_fs_only());
+  REQUIRE(strategy.owner_file_collective_shared_fs_only());
+  REQUIRE(strategy.owner_file_collective_max_owner_skew_ratio() == Catch::Approx(1.5));
+  REQUIRE(strategy.owner_file_collective_min_dedup_saving_bytes() == 64ULL * 1024ULL * 1024ULL);
+  REQUIRE(strategy.has_owner_file_collective_group_assemble_timeout());
+  REQUIRE(strategy.owner_file_collective_group_assemble_timeout().seconds() == 2);
+  REQUIRE(strategy.has_owner_file_collective_allow_mixed_residual());
+  REQUIRE_FALSE(strategy.owner_file_collective_allow_mixed_residual());
+  REQUIRE(strategy.owner_file_collective_planner_cache_entries() == 256);
   REQUIRE(
       strategy.executor_preference() ==
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO);
@@ -233,6 +270,10 @@ pinned_memory:
   REQUIRE(strategy.enable_local_batched_disk_load());
   REQUIRE(strategy.has_enable_owner_file_collective());
   REQUIRE_FALSE(strategy.enable_owner_file_collective());
+  REQUIRE(strategy.has_owner_file_collective_shared_fs_only());
+  REQUIRE(strategy.owner_file_collective_shared_fs_only());
+  REQUIRE(strategy.owner_file_collective_batch_bytes() == 512ULL * 1024ULL * 1024ULL);
+  REQUIRE(strategy.owner_file_collective_planner_cache_entries() == 256);
   REQUIRE(
       strategy.executor_preference() ==
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL);

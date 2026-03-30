@@ -87,6 +87,18 @@ engine:
     allow_mixed_execution: true
     enable_owner_file_collective: false
     executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
+    # Pre-109 typed budgets and thresholds for collective planning. Defaults are
+    # conservative and do not by themselves switch owner-file collective on.
+    owner_file_collective_peak_bytes_budget: 8GB
+    owner_file_collective_batch_bytes: 512MB
+    owner_file_collective_dim1_staging_bytes: 256MB
+    owner_file_collective_max_inflight_batches: 1
+    owner_file_collective_shared_fs_only: true
+    owner_file_collective_max_owner_skew_ratio: 1.5
+    owner_file_collective_min_dedup_saving_bytes: 64MB
+    owner_file_collective_group_assemble_timeout: 2s
+    owner_file_collective_allow_mixed_residual: false
+    owner_file_collective_planner_cache_entries: 256
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
   cpu_shared_memory:
     enabled: true

@@ -5,6 +5,7 @@
 #include <string_view>
 #include <utility>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
@@ -62,6 +63,15 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
   if (ctx.source_type == SourceType::kDisk) {
     config.canonical_index_json = ctx.verification.canonical_index_json;
     config.source_index_json = ctx.disk.source_index_json;
+  }
+  if (ctx.source_type == SourceType::kDisk && ctx.target_is_gpu && ctx.ordinary_disk_strategy_planner) {
+    auto plan_or = ctx.ordinary_disk_strategy_planner(ctx);
+    if (!plan_or.ok()) {
+      LOG(WARNING) << "ordinary disk strategy planning failed for artifact_id=" << ctx.artifact_identifier << ": "
+                   << plan_or.status() << "; falling back to generic byte-range execution";
+    } else {
+      config.execution_strategy_plan = std::move(*plan_or);
+    }
   }
   config.collective_load_group = ctx.hints.collective_load_group;
   config.variant_identity = ctx.hints.variant;

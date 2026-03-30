@@ -884,6 +884,35 @@ int main(int argc, char** argv) {
         ms.has_enable_mapped_multirange_concat_jobs() ? ms.enable_mapped_multirange_concat_jobs() : true;
     strategy.sync_after_single_range_concat_job = ms.sync_after_single_range_concat_job();
     strategy.use_dedicated_single_range_concat_stream = ms.use_dedicated_single_range_concat_stream();
+    if (ms.owner_file_collective_peak_bytes_budget() > 0) {
+      strategy.owner_file_collective_peak_bytes_budget = ms.owner_file_collective_peak_bytes_budget();
+    }
+    if (ms.owner_file_collective_batch_bytes() > 0) {
+      strategy.owner_file_collective_batch_bytes = ms.owner_file_collective_batch_bytes();
+    }
+    if (ms.owner_file_collective_dim1_staging_bytes() > 0) {
+      strategy.owner_file_collective_dim1_staging_bytes = ms.owner_file_collective_dim1_staging_bytes();
+    }
+    if (ms.owner_file_collective_max_inflight_batches() > 0) {
+      strategy.owner_file_collective_max_inflight_batches = ms.owner_file_collective_max_inflight_batches();
+    }
+    strategy.owner_file_collective_shared_fs_only =
+        ms.has_owner_file_collective_shared_fs_only() ? ms.owner_file_collective_shared_fs_only() : true;
+    if (ms.owner_file_collective_max_owner_skew_ratio() > 0.0) {
+      strategy.owner_file_collective_max_owner_skew_ratio = ms.owner_file_collective_max_owner_skew_ratio();
+    }
+    if (ms.owner_file_collective_min_dedup_saving_bytes() > 0) {
+      strategy.owner_file_collective_min_dedup_saving_bytes = ms.owner_file_collective_min_dedup_saving_bytes();
+    }
+    if (ms.has_owner_file_collective_group_assemble_timeout()) {
+      strategy.owner_file_collective_group_assemble_timeout =
+          duration_to_millis(ms.owner_file_collective_group_assemble_timeout());
+    }
+    strategy.owner_file_collective_allow_mixed_residual =
+        ms.has_owner_file_collective_allow_mixed_residual() ? ms.owner_file_collective_allow_mixed_residual() : false;
+    if (ms.owner_file_collective_planner_cache_entries() > 0) {
+      strategy.owner_file_collective_planner_cache_entries = ms.owner_file_collective_planner_cache_entries();
+    }
     switch (ms.executor_preference()) {
       case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_GENERIC_BYTE_RANGE:
         strategy.executor_preference =

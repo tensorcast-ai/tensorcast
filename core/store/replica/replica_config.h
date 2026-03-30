@@ -13,6 +13,7 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/memory_tier_config.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
@@ -82,6 +83,8 @@ struct ReplicaConfig {
   StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
   // - Materialization strategy config (typed rollout and executor selection)
   StoreEngineOptions::MaterializationStrategyConfig materialization_strategy{};
+  // - Common-runtime-selected execution strategy for ordinary disk startup.
+  std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan;
   // - Transform placement preference (server/client)
   loading::TransformPlacement transform_placement = loading::TransformPlacement::kServer;
   // - Tensor compression strategies

@@ -32,6 +32,7 @@ sc_header_only_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
     ],
 )
 
@@ -246,6 +247,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:p2p_loader",
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/materialization/dataplane:view_transform_executor",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/functional:overload",

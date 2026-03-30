@@ -315,7 +315,8 @@ Retrieval is centered on Artifact handles, not on `Store.get` or `Store.get_into
   primary read surface.
 - `tensorcast.from_disk(path)` resolves an artifact id and canonical index from
   a disk directory (explicit import) and seeds the metadata cache. It does not
-  inject disk fallback hints into later materializations.
+  attach retrieval policy to the handle; later reads still use
+  `GetArtifactOptions`.
 
 ### Why handles?
 
@@ -373,8 +374,8 @@ weights = handle.tensor_dict(
 
 Signature: `tensorcast.artifact(*, artifact_id=None, key=None)`
 
-Use `artifact(...)` to build a reusable handle that carries identity and fallback
-hints. You typically provide exactly one of:
+Use `artifact(...)` to build a reusable handle that carries identity and
+metadata only. You typically provide exactly one of:
 
 - `artifact_id`: content-addressed id (preferred)
 - `key`: mapped to an artifact id via key mapping
