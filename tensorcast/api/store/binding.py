@@ -40,6 +40,9 @@ _TRANSPORT_GROUP_PART_ID_TAG = "tc.transport.group.part_id"
 _TRANSPORT_GROUP_PRIORITY_TAG = "tc.transport.group.priority"
 _TRANSPORT_GROUP_EPOCH_TAG = "tc.transport.group.epoch"
 _TRANSPORT_REQUEST_ID_TAG = "tc.transport.request_id"
+_COLLECTIVE_GROUP_ID_OPID_KEY = "clid"
+_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY = "clws"
+_COLLECTIVE_GROUP_RANK_OPID_KEY = "clrk"
 _CANONICAL_FULL_CONTRIBUTION_VIEW_ID = "__canonical_full__"
 _ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
@@ -110,18 +113,55 @@ def _build_transport_operation_id(
         default=0,
     )
     request_id = _read_context_tag_str(tags, _TRANSPORT_REQUEST_ID_TAG)
+    collective_group_id = ""
+    collective_world_size = 0
+    collective_rank = 0
+    collective = ctx.collective
+    if collective is not None:
+        collective_group_id = _sanitize_operation_token(collective.group_id)
+        try:
+            collective_world_size = int(collective.world_size)
+            collective_rank = int(collective.rank)
+        except (TypeError, ValueError):
+            collective_group_id = ""
+            collective_world_size = 0
+            collective_rank = 0
 
+    metadata_parts: list[str] = []
     if group_kind and group_id and part_id and total_parts > 0:
         if not request_id:
             request_id = _sanitize_operation_token(f"{group_id}:{part_id}")
-        metadata = (
-            f"kind={group_kind};gid={group_id};tot={int(total_parts)};"
-            f"part={part_id};pri={int(priority)};ep={int(epoch)};rid={request_id}"
+        metadata_parts.extend(
+            [
+                f"kind={group_kind}",
+                f"gid={group_id}",
+                f"tot={int(total_parts)}",
+                f"part={part_id}",
+                f"pri={int(priority)}",
+                f"ep={int(epoch)}",
+            ]
         )
-        return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}{metadata}"
+    if (
+        collective_group_id
+        and collective_world_size > 1
+        and 0 <= collective_rank < collective_world_size
+    ):
+        metadata_parts.extend(
+            [
+                f"{_COLLECTIVE_GROUP_ID_OPID_KEY}={collective_group_id}",
+                f"{_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY}={int(collective_world_size)}",
+                f"{_COLLECTIVE_GROUP_RANK_OPID_KEY}={int(collective_rank)}",
+            ]
+        )
 
     if request_id:
-        return f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}rid={request_id}"
+        metadata_parts.append(f"rid={request_id}")
+
+    if metadata_parts:
+        return (
+            f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}"
+            f"{';'.join(metadata_parts)}"
+        )
 
     return base_operation_id
 

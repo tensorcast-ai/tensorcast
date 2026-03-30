@@ -51,25 +51,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materiali
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
     const loading::MaterializeHints& hints,
     std::optional<loading::DiskSource> disk_source) {
   return materialization_facade_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints, std::move(disk_source));
+      target_device, resolved_plan, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
     const loading::MaterializeHints& hints) {
-  return materialization_facade_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints);
+  return materialization_facade_->materialize_mapped_into_target(target_device, resolved_plan, hints);
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_loader_into_target(

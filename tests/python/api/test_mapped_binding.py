@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import torch
 
+from tensorcast.api.context import CallContext, CollectiveLoadGroup
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store.cache import ArtifactCacheEntry
@@ -355,6 +356,31 @@ class _FakeMappedClient:
         return types.SimpleNamespace(closed=True)
 
 
+class _FailingRegionClient(_FakeMappedClient):
+    def __init__(self, index_bytes: bytes, *, fail_after: int) -> None:
+        super().__init__(index_bytes)
+        self._fail_after = int(fail_after)
+
+    def register_vram_region(
+        self,
+        *,
+        device_id: int,
+        size_bytes: int,
+        ttl_ms: int,
+        cuda_ipc_handle: bytes,
+        region_name: str | None = None,
+    ) -> Any:
+        if len(self.register_calls) >= self._fail_after:
+            raise MemoryError("region registry capacity reached")
+        return super().register_vram_region(
+            device_id=device_id,
+            size_bytes=size_bytes,
+            ttl_ms=ttl_ms,
+            cuda_ipc_handle=cuda_ipc_handle,
+            region_name=region_name,
+        )
+
+
 class _FakeRuntime:
     def __init__(self, client: _FakeMappedClient) -> None:
         self._client = client
@@ -478,6 +504,62 @@ def test_mapped_binding_uses_materialize_into_mapped_target(
     assert second_selection.view_id == first_selection.view_id
     assert binding.tensors["a"].data_ptr() == pointers["a"]
     assert binding.tensors["b"].data_ptr() == pointers["b"]
+
+
+@pytest.mark.requires_cuda_or_fake
+def test_bind_into_surfaces_region_registry_capacity_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA tensors unavailable; mapped binding requires torch CUDA")
+
+    index_bytes = _make_index_bytes()
+    client = _FailingRegionClient(index_bytes, fail_after=1)
+    runtime = _FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+
+    import tensorcast.api._device as device_mod
+    import tensorcast.api.store as store_mod
+
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
+
+    dst_tensors = {
+        "a": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+        "b": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+    }
+    plan = [
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=0, end=4),
+            dst_name="a",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=4, end=8),
+            dst_name="b",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+    ]
+
+    artifact = store.artifact(artifact_id="artifact-1")
+
+    with pytest.raises(ArtifactError) as excinfo:
+        artifact.bind_into(dst_tensors, mapping=plan)
+
+    assert excinfo.value.status_code == "RESOURCE_EXHAUSTED"
+    assert "region registry capacity" in str(excinfo.value)
+    assert "requested_regions=2" in str(excinfo.value)
+    assert "registered_before_failure=1" in str(excinfo.value)
 
 
 @pytest.mark.requires_cuda_or_fake
@@ -642,6 +724,18 @@ def test_bind_mapping_uses_owner_path(
     assert not client.into_target_calls
     assert not client.into_mapped_calls
     assert binding.selection.view_id
+    assert {spec.name: spec.storage_offset for spec in binding.layout.dst_specs} == {
+        "a": 0,
+        "b": 0,
+    }
+    assert len(binding.layout.target_layout.storages) == 2
+    assert {
+        offset.name: offset.storage_offset
+        for offset in binding.layout.target_layout.offsets
+    } == {
+        "a": 0,
+        "b": 0,
+    }
     ptrs = {name: tensor.data_ptr() for name, tensor in binding.tensors.items()}
 
     binding.swap(artifact2)
@@ -649,6 +743,74 @@ def test_bind_mapping_uses_owner_path(
     assert len(client.refill_calls) == 1
     assert binding.tensors["a"].data_ptr() == ptrs["a"]
     assert binding.tensors["b"].data_ptr() == ptrs["b"]
+
+
+@pytest.mark.requires_cuda_or_fake
+def test_bind_into_mapping_propagates_collective_hint_in_operation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA tensors unavailable; mapped binding requires torch CUDA")
+
+    index_bytes = _make_index_bytes()
+    client = _FakeMappedClient(index_bytes)
+    runtime = _FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+
+    import importlib
+
+    import tensorcast.api._device as device_mod
+
+    artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
+    store_mod = importlib.import_module("tensorcast.api.store.__init__")
+
+    monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    dst_tensors = {
+        "a": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+        "b": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+    }
+    plan = [
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=0, end=4),
+            dst_name="a",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=4, end=8),
+            dst_name="b",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+    ]
+    ctx = CallContext(
+        collective=CollectiveLoadGroup(
+            group_id="same-host-tp-load",
+            world_size=8,
+            rank=3,
+        )
+    )
+
+    artifact.bind_into(dst_tensors, mapping=plan, ctx=ctx)
+
+    assert len(client.into_mapped_calls) == 1
+    operation_id = client.into_mapped_calls[0]["operation_id"]
+    assert "#tcg:" in operation_id
+    assert "clid=same-host-tp-load" in operation_id
+    assert "clws=8" in operation_id
+    assert "clrk=3" in operation_id
 
 
 @pytest.mark.requires_cuda_or_fake
@@ -739,3 +901,48 @@ def test_bind_mapping_fails_on_ambiguous_inference() -> None:
             view_narrows={},
         )
     assert excinfo.value.status_code == "INVALID_ARGUMENT"
+
+
+def test_infer_mapped_target_entries_allows_packed_qkv_style_merge() -> None:
+    index = canonical_index_from_bytes(
+        json.dumps(
+            {
+                "k_proj": [0, 16, [2, 4], [4, 1], "torch.uint16", 0],
+                "q_proj": [16, 64, [8, 4], [4, 1], "torch.uint16", 0],
+                "v_proj": [80, 16, [2, 4], [4, 1], "torch.uint16", 0],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    plan = [
+        CopyPlanEntry(
+            ckpt_name="q_proj",
+            ckpt_range=Range(dim=0, start=0, end=8),
+            dst_name="qkv_proj",
+            dst_range=Range(dim=0, start=0, end=8),
+        ),
+        CopyPlanEntry(
+            ckpt_name="k_proj",
+            ckpt_range=Range(dim=0, start=0, end=2),
+            dst_name="qkv_proj",
+            dst_range=Range(dim=0, start=8, end=10),
+        ),
+        CopyPlanEntry(
+            ckpt_name="v_proj",
+            ckpt_range=Range(dim=0, start=0, end=2),
+            dst_name="qkv_proj",
+            dst_range=Range(dim=0, start=10, end=12),
+        ),
+    ]
+
+    inferred = infer_mapped_target_entries(
+        plan=plan,
+        canonical_index=index,
+        view_narrows={},
+    )
+
+    assert len(inferred) == 1
+    assert inferred[0].name == "qkv_proj"
+    assert inferred[0].shape == (12, 4)
+    assert inferred[0].stride == (4, 1)

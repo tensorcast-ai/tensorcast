@@ -7,6 +7,7 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::daemon {
 
@@ -58,6 +59,10 @@ absl::StatusOr<cuda::IpcMapping*> get_or_open_mapping_for_storage(
 
   std::unique_ptr<cuda::IpcMapping> mapping;
   if (storage.has_handle()) {
+    auto set_device_status = cuda::set_device(storage.device_id);
+    if (!set_device_status.ok()) {
+      return set_device_status;
+    }
     auto map_or =
         cuda::IpcMapping::open(storage.handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok()) {
@@ -73,6 +78,10 @@ absl::StatusOr<cuda::IpcMapping*> get_or_open_mapping_for_storage(
     auto handle_or = regions.get_handle_bytes(storage.region_id);
     if (!handle_or.ok()) {
       return handle_or.status();
+    }
+    auto set_device_status = cuda::set_device(storage.device_id);
+    if (!set_device_status.ok()) {
+      return set_device_status;
     }
     auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok()) {

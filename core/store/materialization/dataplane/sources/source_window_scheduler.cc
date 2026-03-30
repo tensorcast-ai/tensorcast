@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -361,6 +362,38 @@ absl::Status SourceWindowScheduler::Execute(
     };
 
     std::deque<InFlight> inflight;
+    bool spb_released = false;
+
+    auto cleanup_spb = [&]() {
+      if (spb_released) {
+        return;
+      }
+      while (!inflight.empty()) {
+        InFlight entry = std::move(inflight.front());
+        inflight.pop_front();
+        for (auto& handle : entry.handles) {
+          auto st = handle.wait();
+          if (!st.ok()) {
+            LOG(WARNING) << "SourceWindowScheduler cleanup: async handle wait failed for slot " << entry.slot_id << ": "
+                         << st;
+          }
+        }
+        auto ret_status = spb->abort_producer_slot(entry.slot_id);
+        if (!ret_status.ok()) {
+          LOG(WARNING) << "SourceWindowScheduler cleanup: abort_producer_slot failed for slot " << entry.slot_id << ": "
+                       << ret_status;
+        }
+      }
+      auto reset_status = spb->reset_for_new_production();
+      if (!reset_status.ok()) {
+        LOG(WARNING) << "SourceWindowScheduler cleanup: reset_for_new_production failed: " << reset_status;
+      }
+      auto release_status = spb->release();
+      if (!release_status.ok()) {
+        LOG(WARNING) << "SourceWindowScheduler cleanup: release failed: " << release_status;
+      }
+    };
+    absl::Cleanup spb_cleanup = [&]() { cleanup_spb(); };
 
     auto wait_inflight = [&]() -> absl::Status {
       if (inflight.empty()) {
@@ -454,8 +487,18 @@ absl::Status SourceWindowScheduler::Execute(
 
     auto release_status = spb->release();
     if (!release_status.ok()) {
-      return release_status;
+      LOG(WARNING) << "SourceWindowScheduler: initial StreamingPinnedBuffer release failed: " << release_status
+                   << "; forcing reset_for_new_production() and retrying release";
+      auto reset_status = spb->reset_for_new_production();
+      if (!reset_status.ok()) {
+        return reset_status;
+      }
+      release_status = spb->release();
+      if (!release_status.ok()) {
+        return release_status;
+      }
     }
+    spb_released = true;
   } else {
     for (const auto& window : windows) {
       std::vector<uint8_t> buffer(static_cast<size_t>(window.length), 0);

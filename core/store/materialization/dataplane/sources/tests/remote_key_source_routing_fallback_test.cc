@@ -89,7 +89,10 @@ std::shared_ptr<Communicator> make_engine_on_port(int port) {
   return engine;
 }
 
-void register_cpu_tensor(const std::shared_ptr<Communicator>& engine, const std::string& key, std::vector<uint8_t>& src) {
+void register_cpu_tensor(
+    const std::shared_ptr<Communicator>& engine,
+    const std::string& key,
+    std::vector<uint8_t>& src) {
   Communicator::RegisterTensorOptions reg_opts;
   reg_opts.register_mr = false;
   reg_opts.needs_staging = false;
@@ -209,9 +212,7 @@ TEST_CASE("RemoteKeySource falls back to direct reads when routed lookup fails",
   REQUIRE(received == payload);
 }
 
-TEST_CASE(
-    "RemoteKeySource keeps strict direct fallback after routed failure",
-    "[store][p2p][routing]") {
+TEST_CASE("RemoteKeySource keeps strict direct fallback after routed failure", "[store][p2p][routing]") {
   constexpr std::size_t kArtifactBytes = 512 * 1024;
   const std::string tensor_key = "remote_key_source_strict_fallback_tensor";
   const std::string local_endpoint = "node_local/dev/cpu/0";

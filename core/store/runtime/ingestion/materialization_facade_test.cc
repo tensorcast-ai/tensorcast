@@ -850,6 +850,164 @@ TEST_CASE("MaterializationFacade materialize_into_target prefers local canonical
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
+TEST_CASE("MaterializationFacade mapped target respects typed local canonical override", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kCanonicalSize = 16;
+  const std::string artifact_id = "cgid:artifact_local_mapped_override";
+  constexpr std::string_view kCanonicalIndexJson = R"({"tensor":[0,16,[16],[1],"torch.uint8",0]})";
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_local_mapped_override";
+  std::filesystem::create_directories(temp_root);
+
+  auto opts = MakeOptions(temp_root);
+  opts.materialization_strategy.prefer_local_canonical_for_mapped = true;
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  loading::InlineBufferSource source{.data = nullptr, .size_bytes = kCanonicalSize};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = source,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool = harness.runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.runtime_context().async_runtime()},
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .expected_artifact_size = kCanonicalSize,
+      .materialization_strategy = harness.options().materialization_strategy,
+  };
+  auto canonical_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(canonical_or.ok());
+  auto canonical_replica = std::shared_ptr<tensorcast::store::replica::Replica>(std::move(canonical_or.value()));
+
+  CHECK_OK(canonical_replica->get_memory_manager().allocate_memory(MemoryLocation::CPU));
+  auto cpu_ptrs = canonical_replica->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    cpu_ptr[i] = static_cast<uint8_t>(kCanonicalSize - i);
+  }
+  CHECK_OK(canonical_replica->mark_loaded(MemoryLocation::CPU));
+  canonical_replica->set_ready_signal(MemoryLocation::CPU, absl::OkStatus());
+
+  loading::ReplicaKey canonical_key{
+      .artifact_id = artifact_id,
+      .view_id = std::nullopt,
+      .device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  CHECK_OK(harness.replica_runtime().registry().emplace(canonical_key, gsl::not_null{canonical_replica}));
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kCanonicalSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kCanonicalSize});
+  target_layout.total_size = kCanonicalSize;
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = kCanonicalSize;
+  mapping.num_sources = 1;
+  mapping.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = kCanonicalSize,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+  loading::DiskMetadata disk_metadata;
+  disk_metadata.source_index_json = std::string(kCanonicalIndexJson);
+  hints.disk_metadata = disk_metadata;
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = artifact_id;
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = kCanonicalIndexJson;
+  resolved_plan.target_layout = target_layout;
+  resolved_plan.mapped_copy_contract =
+      tensorcast::store::runtime::ingestion::strategy::MappedCopyContract{.fallback_map = mapping};
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kLocalReplica);
+
+  std::array<uint8_t, kCanonicalSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kCanonicalSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    CHECK(host_out[i] == static_cast<uint8_t>(kCanonicalSize - i));
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade rejects mapped-target artifact drift against resolved plan",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{reinterpret_cast<void*>(0x1)}, .length = 16});
+  target_layout.total_size = 16;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_authoritative";
+  resolved_plan.generation = 7;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,16,[16],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  resolved_plan.mapped_copy_contract = tensorcast::store::runtime::ingestion::strategy::MappedCopyContract{
+      .fallback_map = tensorcast::store::loader::ByteRangeMap{
+          .total_bytes = 16,
+          .num_sources = 1,
+          .segments = {tensorcast::store::loader::ByteRangeSegment{
+              .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+              .dst_offset = 0,
+              .length = 16,
+              .src_offset = 0,
+              .source_index = 0,
+          }},
+      }};
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:artifact_drifted";
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_authoritative_plan";
+  std::filesystem::create_directories(temp_root);
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  REQUIRE_FALSE(result_or.ok());
+  CHECK(absl::IsInvalidArgument(result_or.status()));
+  CHECK(result_or.status().message().find("hints.artifact_id does not match resolved_plan") != std::string::npos);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
 TEST_CASE("MaterializationFacade AUTO view route falls back to canonical transport", "[materialization_facade]") {
   SKIP_IF_NO_CUDA();
 

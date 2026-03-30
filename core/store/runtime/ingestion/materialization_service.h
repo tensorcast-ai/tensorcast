@@ -44,6 +44,7 @@ struct MaterializationDeps {
   size_t streaming_buffer_chunks{16};
   int num_threads = 0;
   StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
+  StoreEngineOptions::MaterializationStrategyConfig materialization_strategy{};
   // True when run_auto already performs and owns disk fallback decisions.
   // In that mode MaterializationService must not execute a second disk fallback.
   bool run_auto_handles_disk_fallback{false};

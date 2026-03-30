@@ -93,6 +93,21 @@ message HighAvailability {
 }
 
 message Engine {
+  enum MaterializationStrategyExecutorPreference {
+    MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_UNSPECIFIED = 0;
+    MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO = 1;
+    MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_GENERIC_BYTE_RANGE = 2;
+    MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL = 3;
+    MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE = 4;
+  }
+
+  enum MaterializationStrategyDiagnosticsVerbosity {
+    MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_UNSPECIFIED = 0;
+    MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_OFF = 1;
+    MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_BASIC = 2;
+    MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE = 3;
+  }
+
   reserved 1, 2, 4, 5;
   reserved "mem_pool_size_bytes", "tx_slice_bytes", "streaming_buffer_max_concurrent_sessions", "pinned_allocation_timeout";
   // Renamed: cpu_chunk_size_bytes -> artifact_chunk_bytes (field number unchanged)
@@ -142,6 +157,26 @@ message Engine {
     uint32 disk_source_prefetch_depth = 12;
   }
   ByteMapping byte_mapping = 13;
+
+  message MaterializationStrategy {
+    optional bool enable_tensor_aware_mapped_executor = 1;
+    optional bool enable_local_batched_disk_load = 2;
+    optional bool enable_owner_file_collective = 3;
+    optional bool allow_mixed_execution = 4;
+    bool prefer_local_canonical_for_mapped = 5;
+    optional bool allow_source_ordered_for_mapped = 6;
+    optional bool enable_mapped_dim0_tensor_jobs = 7;
+    optional bool enable_mapped_dim1_tensor_jobs = 8;
+    optional bool enable_mapped_concat_jobs = 9;
+    optional bool enable_mapped_concat_execution = 10;
+    optional bool enable_mapped_single_range_concat_jobs = 11;
+    optional bool enable_mapped_multirange_concat_jobs = 12;
+    bool sync_after_single_range_concat_job = 13;
+    bool use_dedicated_single_range_concat_stream = 14;
+    MaterializationStrategyExecutorPreference executor_preference = 15;
+    MaterializationStrategyDiagnosticsVerbosity diagnostics_verbosity = 16;
+  }
+  MaterializationStrategy materialization_strategy = 14;
 }
 
 message Promotion {

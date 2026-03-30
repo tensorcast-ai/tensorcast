@@ -20,6 +20,7 @@
 
 union ibv_gid {
   uint8_t raw[16];
+
   struct {
     uint64_t subnet_prefix;
     uint64_t interface_id;
@@ -268,6 +269,7 @@ enum ibv_wc_status {
   IBV_WC_RESP_TIMEOUT_ERR,
   IBV_WC_GENERAL_ERR
 };
+
 const char* ibv_wc_status_str(enum ibv_wc_status status);
 
 enum ibv_wc_opcode {
@@ -639,23 +641,27 @@ struct ibv_send_wr {
   enum ibv_wr_opcode opcode;
   int send_flags;
   uint32_t imm_data; /* in network byte order */
+
   union {
     struct {
       uint64_t remote_addr;
       uint32_t rkey;
     } rdma;
+
     struct {
       uint64_t remote_addr;
       uint64_t compare_add;
       uint64_t swap;
       uint32_t rkey;
     } atomic;
+
     struct {
       struct ibv_ah* ah;
       uint32_t remote_qpn;
       uint32_t remote_qkey;
     } ud;
   } wr;
+
   union {
     union {
       struct {

@@ -114,5 +114,129 @@ pinned_memory:
   REQUIRE_FALSE(cfg.engine().cpu_shared_memory().enabled());
 }
 
+TEST_CASE("DaemonConfig materialization strategy defaults and explicit overrides", "[config]") {
+  const std::string yaml = R"YAML(
+server:
+  listen: {host: "127.0.0.1", port: 50052}
+  p2p_listen: {host: "127.0.0.1", port: 65090}
+  storage_path: "/tmp"
+  num_threads: 2
+engine:
+  materialization_strategy:
+    enable_tensor_aware_mapped_executor: false
+    allow_mixed_execution: false
+    prefer_local_canonical_for_mapped: true
+    allow_source_ordered_for_mapped: false
+    enable_mapped_dim0_tensor_jobs: false
+    enable_mapped_dim1_tensor_jobs: false
+    enable_mapped_concat_jobs: false
+    enable_mapped_concat_execution: false
+    enable_mapped_single_range_concat_jobs: false
+    enable_mapped_multirange_concat_jobs: false
+    enable_local_batched_disk_load: true
+    enable_owner_file_collective: true
+    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE
+    diagnostics_verbosity: MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+)YAML";
+
+  auto cfg_or = load_daemon_config_from_text(yaml);
+  REQUIRE(cfg_or.ok());
+  const auto& strategy = cfg_or->engine().materialization_strategy();
+
+  REQUIRE(cfg_or->engine().has_materialization_strategy());
+  REQUIRE(strategy.has_enable_tensor_aware_mapped_executor());
+  REQUIRE_FALSE(strategy.enable_tensor_aware_mapped_executor());
+  REQUIRE(strategy.has_allow_mixed_execution());
+  REQUIRE_FALSE(strategy.allow_mixed_execution());
+  REQUIRE(strategy.prefer_local_canonical_for_mapped());
+  REQUIRE(strategy.has_allow_source_ordered_for_mapped());
+  REQUIRE_FALSE(strategy.allow_source_ordered_for_mapped());
+  REQUIRE(strategy.has_enable_mapped_dim0_tensor_jobs());
+  REQUIRE_FALSE(strategy.enable_mapped_dim0_tensor_jobs());
+  REQUIRE(strategy.has_enable_mapped_dim1_tensor_jobs());
+  REQUIRE_FALSE(strategy.enable_mapped_dim1_tensor_jobs());
+  REQUIRE(strategy.has_enable_mapped_concat_jobs());
+  REQUIRE_FALSE(strategy.enable_mapped_concat_jobs());
+  REQUIRE(strategy.has_enable_mapped_concat_execution());
+  REQUIRE_FALSE(strategy.enable_mapped_concat_execution());
+  REQUIRE(strategy.has_enable_mapped_single_range_concat_jobs());
+  REQUIRE_FALSE(strategy.enable_mapped_single_range_concat_jobs());
+  REQUIRE(strategy.has_enable_mapped_multirange_concat_jobs());
+  REQUIRE_FALSE(strategy.enable_mapped_multirange_concat_jobs());
+  REQUIRE(strategy.has_enable_local_batched_disk_load());
+  REQUIRE(strategy.enable_local_batched_disk_load());
+  REQUIRE(strategy.has_enable_owner_file_collective());
+  REQUIRE(strategy.enable_owner_file_collective());
+  REQUIRE(
+      strategy.executor_preference() ==
+      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE);
+  REQUIRE(
+      strategy.diagnostics_verbosity() ==
+      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE);
+}
+
+TEST_CASE("DaemonConfig missing materialization strategy gets 0108 defaults", "[config]") {
+  const std::string yaml = R"YAML(
+server:
+  listen: {host: "127.0.0.1", port: 50052}
+  p2p_listen: {host: "127.0.0.1", port: 65090}
+  storage_path: "/tmp"
+  num_threads: 2
+engine:
+  artifact_chunk_bytes: 256MB
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+)YAML";
+
+  auto cfg_or = load_daemon_config_from_text(yaml);
+  REQUIRE(cfg_or.ok());
+  const auto& strategy = cfg_or->engine().materialization_strategy();
+
+  REQUIRE(cfg_or->engine().has_materialization_strategy());
+  REQUIRE(strategy.has_enable_tensor_aware_mapped_executor());
+  REQUIRE(strategy.enable_tensor_aware_mapped_executor());
+  REQUIRE(strategy.has_enable_local_batched_disk_load());
+  REQUIRE(strategy.enable_local_batched_disk_load());
+  REQUIRE(strategy.has_enable_owner_file_collective());
+  REQUIRE_FALSE(strategy.enable_owner_file_collective());
+  REQUIRE(strategy.has_allow_mixed_execution());
+  REQUIRE(strategy.allow_mixed_execution());
+  REQUIRE(
+      strategy.executor_preference() ==
+      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO);
+}
+
+TEST_CASE("DaemonConfig partial materialization strategy preserves 0108 defaults", "[config]") {
+  const std::string yaml = R"YAML(
+server:
+  listen: {host: "127.0.0.1", port: 50052}
+  p2p_listen: {host: "127.0.0.1", port: 65090}
+  storage_path: "/tmp"
+  num_threads: 2
+engine:
+  materialization_strategy:
+    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+)YAML";
+
+  auto cfg_or = load_daemon_config_from_text(yaml);
+  REQUIRE(cfg_or.ok());
+  const auto& strategy = cfg_or->engine().materialization_strategy();
+
+  REQUIRE(strategy.has_enable_local_batched_disk_load());
+  REQUIRE(strategy.enable_local_batched_disk_load());
+  REQUIRE(strategy.has_enable_owner_file_collective());
+  REQUIRE_FALSE(strategy.enable_owner_file_collective());
+  REQUIRE(
+      strategy.executor_preference() ==
+      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL);
+}
+
 } // namespace
 } // namespace tensorcast::common::config

@@ -5,11 +5,13 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/ready_signal.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -64,9 +66,19 @@ class ReplicaSessionManager {
       if (expired(it->second)) {
         sessions_.erase(it);
       } else {
-        if (it->second.key != key) {
-          return absl::FailedPreconditionError("replica_uuid already exists with a different ReplicaKey");
+        if (!keys_equivalent(it->second.key, key)) {
+          std::ostringstream existing_ss;
+          existing_ss << it->second.key;
+          std::ostringstream requested_ss;
+          requested_ss << key;
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "replica_uuid already exists with a different ReplicaKey; existing=",
+                  existing_ss.str(),
+                  ", requested=",
+                  requested_ss.str()));
         }
+        it->second.key = merge_equivalent_keys(it->second.key, key);
         it->second.expiry = now() + ttl_;
         return PutResult::kJoined;
       }
@@ -119,6 +131,31 @@ class ReplicaSessionManager {
   }
 
  private:
+  static bool devices_equivalent(const store::DeviceKey& a, const store::DeviceKey& b) {
+    if (a.type != b.type || a.ordinal != b.ordinal) {
+      return false;
+    }
+    if (a.uuid == b.uuid) {
+      return true;
+    }
+    return a.uuid.empty() || b.uuid.empty();
+  }
+
+  static bool keys_equivalent(const store::loading::ReplicaKey& a, const store::loading::ReplicaKey& b) {
+    return a.artifact_id == b.artifact_id && a.view_id == b.view_id && a.replica == b.replica &&
+        devices_equivalent(a.device, b.device);
+  }
+
+  static store::loading::ReplicaKey merge_equivalent_keys(
+      const store::loading::ReplicaKey& existing,
+      const store::loading::ReplicaKey& requested) {
+    store::loading::ReplicaKey merged = existing;
+    if (merged.device.uuid.empty() && !requested.device.uuid.empty()) {
+      merged.device.uuid = requested.device.uuid;
+    }
+    return merged;
+  }
+
   static std::chrono::steady_clock::time_point now() {
     return std::chrono::steady_clock::now();
   }

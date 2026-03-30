@@ -56,6 +56,8 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
   if (ctx.options != nullptr) {
     config.streaming_buffer_chunks = std::max<size_t>(1, ctx.options->streaming_buffer_chunks);
     config.byte_mapping_config = ctx.options->byte_mapping;
+    config.materialization_strategy = ctx.options->materialization_strategy;
+    config.memory_tier_config = ctx.options->memory_tier_config;
   }
   if (ctx.source_type == SourceType::kDisk) {
     config.canonical_index_json = ctx.verification.canonical_index_json;

@@ -483,6 +483,9 @@ absl::StatusOr<std::optional<uint64_t>> read_memlock_limit_bytes() {
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
   common::ensure_logging_initialized();
+  // Broken pipes from log sinks or peer sockets must surface as write/send
+  // errors instead of terminating the daemon process.
+  std::signal(SIGPIPE, SIG_IGN);
   // Avoid global using-directives per project guidelines
   // Note: config loading happens below; defer OTel/log-sink init until then.
   const std::string cfg_path = absl::GetFlag(FLAGS_config);
@@ -852,6 +855,70 @@ int main(int argc, char** argv) {
     }
     if (bm.disk_source_prefetch_depth() > 0) {
       opts.byte_mapping.disk_source_prefetch_depth = bm.disk_source_prefetch_depth();
+    }
+  }
+
+  if (cfg.engine().has_materialization_strategy()) {
+    const auto& ms = cfg.engine().materialization_strategy();
+    auto& strategy = opts.materialization_strategy;
+    strategy.enable_tensor_aware_mapped_executor =
+        ms.has_enable_tensor_aware_mapped_executor() ? ms.enable_tensor_aware_mapped_executor() : true;
+    strategy.enable_local_batched_disk_load =
+        ms.has_enable_local_batched_disk_load() ? ms.enable_local_batched_disk_load() : true;
+    strategy.enable_owner_file_collective =
+        ms.has_enable_owner_file_collective() ? ms.enable_owner_file_collective() : false;
+    strategy.allow_mixed_execution = ms.has_allow_mixed_execution() ? ms.allow_mixed_execution() : true;
+    strategy.prefer_local_canonical_for_mapped = ms.prefer_local_canonical_for_mapped();
+    strategy.allow_source_ordered_for_mapped =
+        ms.has_allow_source_ordered_for_mapped() ? ms.allow_source_ordered_for_mapped() : true;
+    strategy.enable_mapped_dim0_tensor_jobs =
+        ms.has_enable_mapped_dim0_tensor_jobs() ? ms.enable_mapped_dim0_tensor_jobs() : true;
+    strategy.enable_mapped_dim1_tensor_jobs =
+        ms.has_enable_mapped_dim1_tensor_jobs() ? ms.enable_mapped_dim1_tensor_jobs() : true;
+    strategy.enable_mapped_concat_jobs = ms.has_enable_mapped_concat_jobs() ? ms.enable_mapped_concat_jobs() : true;
+    strategy.enable_mapped_concat_execution =
+        ms.has_enable_mapped_concat_execution() ? ms.enable_mapped_concat_execution() : true;
+    strategy.enable_mapped_single_range_concat_jobs =
+        ms.has_enable_mapped_single_range_concat_jobs() ? ms.enable_mapped_single_range_concat_jobs() : true;
+    strategy.enable_mapped_multirange_concat_jobs =
+        ms.has_enable_mapped_multirange_concat_jobs() ? ms.enable_mapped_multirange_concat_jobs() : true;
+    strategy.sync_after_single_range_concat_job = ms.sync_after_single_range_concat_job();
+    strategy.use_dedicated_single_range_concat_stream = ms.use_dedicated_single_range_concat_stream();
+    switch (ms.executor_preference()) {
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_GENERIC_BYTE_RANGE:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kGenericByteRange;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kTensorAwareLocal;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kOwnerFileCollective;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO:
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_UNSPECIFIED:
+      default:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kAuto;
+        break;
+    }
+    switch (ms.diagnostics_verbosity()) {
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_OFF:
+        strategy.diagnostics_verbosity =
+            store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kOff;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE:
+        strategy.diagnostics_verbosity =
+            store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kVerbose;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_BASIC:
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_UNSPECIFIED:
+      default:
+        strategy.diagnostics_verbosity =
+            store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kBasic;
+        break;
     }
   }
 

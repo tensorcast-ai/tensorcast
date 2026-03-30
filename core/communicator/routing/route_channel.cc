@@ -20,13 +20,11 @@ RouteChannel::RouteChannel(
 
 transport::future_read_result_t RouteChannel::read_tensor(const ReadRequest& request) {
   if (hops_.empty()) {
-    return make_failed_read_future(
-        absl::FailedPreconditionError("route channel has no hops"),
-        request.tensor_key);
+    return make_failed_read_future(absl::FailedPreconditionError("route channel has no hops"), request.tensor_key);
   }
   if (hops_.size() != 1) {
-    return make_failed_read_future(absl::UnimplementedError(
-        std::format("multi-hop read not implemented (hops={})", hops_.size())),
+    return make_failed_read_future(
+        absl::UnimplementedError(std::format("multi-hop read not implemented (hops={})", hops_.size())),
         request.tensor_key);
   }
   return hops_.front()->read_tensor(request);

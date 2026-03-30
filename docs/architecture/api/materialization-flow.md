@@ -15,6 +15,7 @@ Related docs:
 - Region-backed lifecycles and teardown: [Region-Backed](./region-backed.md)
 - Error/retry semantics: [Error, Retry, Observability](./error-retry-observability.md)
 - View semantics: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
+- Strategy-plane design: [0108 Tensor-Aware Materialization Strategy Plane](../../designs/0108-tensor-aware-materialization-strategy-plane.md)
 
 ## Definitions and Payloads
 
@@ -85,6 +86,21 @@ sequenceDiagram
 ```
 
 Key controller behavior lives in `daemon/service/controllers/materialization_controller.cc`.
+
+## 0108 Layered Boundary
+
+Mapped-target and selection-aware materialization now use an explicit layered
+boundary:
+
+- controller remains responsible for request validation, external-target safety,
+  poison semantics, and publication gating
+- controller resolves semantic truth into internal runtime contracts
+- `MaterializationFacade` lowers semantic truth plus source facts into executor
+  strategy
+- residual bytes still fall back through the generic byte-range data plane
+
+Internal strategy-plane types live in
+`core/store/runtime/ingestion/materialization_strategy_types.h`.
 
 ## Source Selection and Fallback
 
@@ -262,6 +278,37 @@ CUDA region registered by the client:
     the selected index, and runs the same pump path into GPU memory.
   - Verification is explicitly skipped (`MaterializeHints::Verify::NONE`).
   - On DataLoss, the region is marked poisoned and the client unregisters it.
+
+## Mapped Target Strategy Lowering
+
+`MaterializeIntoMappedTarget` now follows the same layered model as replica and
+region-backed materialization:
+
+1. controller resolves target layout and mapped copy-plan semantics,
+2. controller builds `ResolvedMaterializationPlan` and `MappedCopyContract`,
+3. runtime resolves source binding,
+4. `MaterializationFacade` selects execution:
+   - tensor-aware local executor,
+   - owner-file collective executor,
+   - residual generic byte-range executor.
+
+Mapped executor candidates no longer travel through `MaterializeHints`. They
+are internal runtime contracts only.
+
+## Typed Runtime Strategy Config
+
+Executor rollout and preference are now configured under
+`engine.materialization_strategy` in daemon config. Relevant fields include:
+
+- `enable_tensor_aware_mapped_executor`
+- `enable_local_batched_disk_load`
+- `enable_owner_file_collective`
+- `allow_mixed_execution`
+- `executor_preference`
+- `diagnostics_verbosity`
+
+These replace the earlier mapped/local-batched env-gated prototype controls in
+the common runtime hot path.
 
 ## Verification and Integrity
 

@@ -58,6 +58,7 @@ using status_utils::to_grpc_status;
 namespace {
 
 using materialization_index_source::load_canonical_index_with_disk_fallback;
+using materialization_index_source::load_descriptor_metadata;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::build_descriptors_from_index;
 using materialization_policy::build_view_spec_proto;
@@ -68,6 +69,7 @@ using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_mapped_target_materialization_plan;
+using materialization_target_plan::build_resolved_mapped_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
@@ -174,6 +176,64 @@ std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
   const std::vector<uint8_t> digest = common::sha256_digest_bytes(
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()));
   return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_binding_disk_metadata(
+    const std::optional<std::filesystem::path>& normalized_disk_path,
+    std::string_view resolved_artifact_id,
+    int device_ordinal,
+    ArtifactSourceRegistry& disk_imports) {
+  std::optional<store::loading::DiskMetadata> disk_metadata;
+  if (normalized_disk_path.has_value()) {
+    auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
+    if (!descriptor_or.ok()) {
+      return descriptor_or.status();
+    }
+    auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    store::loading::DiskMetadata metadata;
+    metadata.descriptor_present = descriptor_or->found;
+    metadata.schema_version = descriptor_or->schema_version;
+    metadata.index_multihash = descriptor_or->index_multihash;
+    metadata.data_multihash = descriptor_or->data_multihash;
+    metadata.canonical_index_json = index_or->canonical_index_json;
+    if (index_or->source_index_json.has_value()) {
+      metadata.source_index_json = index_or->source_index_json;
+    }
+    if (!index_or->index_multihash.empty()) {
+      metadata.index_multihash = index_or->index_multihash;
+    }
+    if (index_or->total_size_bytes > 0) {
+      metadata.logical_total_size = index_or->total_size_bytes;
+    }
+    if (index_or->source_total_size_bytes > 0) {
+      metadata.source_total_size_bytes = index_or->source_total_size_bytes;
+    }
+    metadata.is_safetensors = index_or->is_safetensors;
+    disk_metadata = std::move(metadata);
+  }
+  if (auto local_import = disk_imports.lookup_binding(resolved_artifact_id); local_import.has_value()) {
+    if (!disk_metadata.has_value()) {
+      disk_metadata = store::loading::DiskMetadata{};
+    }
+    auto& metadata = *disk_metadata;
+    metadata.descriptor_present = metadata.descriptor_present || local_import->descriptor_present;
+    if (!metadata.canonical_index_json.has_value() && !local_import->canonical_index_json.empty()) {
+      metadata.canonical_index_json = local_import->canonical_index_json;
+    }
+    if (!metadata.source_index_json.has_value() && local_import->source_index_json.has_value()) {
+      metadata.source_index_json = *local_import->source_index_json;
+    }
+    if (!metadata.index_multihash.has_value() && local_import->index_multihash.has_value()) {
+      metadata.index_multihash = *local_import->index_multihash;
+    }
+    if (!metadata.data_multihash.has_value() && local_import->data_multihash.has_value()) {
+      metadata.data_multihash = *local_import->data_multihash;
+    }
+  }
+  return disk_metadata;
 }
 
 struct OwnedStorageLayout {
@@ -1362,11 +1422,23 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (!requester_worker_id.empty()) {
     hints.transport_requester_worker_id = requester_worker_id;
   }
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
+  auto disk_metadata_or = build_binding_disk_metadata(
+      resolution.normalized_disk_path, resolution.resolved_artifact_id, device.ordinal, d_.disk_imports);
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  auto disk_metadata = std::move(*disk_metadata_or);
+  const bool prefer_direct_disk_for_source_layout =
+      disk_source.has_value() && disk_metadata.has_value() && disk_metadata->source_index_json.has_value();
+  hints.source_preference = prefer_direct_disk_for_source_layout ? store::loading::SourcePreference::kPreferDisk
+                                                                 : to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
   hints.export_policy = store::loading::ExportPolicy::kForce;
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = *disk_metadata;
+  }
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
@@ -1407,15 +1479,25 @@ grpc::Status OwnedBindingService::create_owned_binding(
     hints.variant = std::move(variant);
   }
 
+  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
+  if (mapped) {
+    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+        resolution.resolved_artifact_id,
+        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
+        storage_layout.into_target,
+        mapped_plan,
+        hints.variant,
+        disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
+            ? std::optional<std::string_view>(*disk_metadata->source_index_json)
+            : std::nullopt);
+    if (!resolved_plan_or.ok()) {
+      return to_grpc_status(resolved_plan_or.status());
+    }
+    resolved_plan = std::move(*resolved_plan_or);
+  }
+
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
-      ? d_.engine.materialize_mapped_into_target(
-            device,
-            storage_layout.into_target,
-            mapped_plan.copy_plan.map,
-            mapped_plan.canonical_index_json,
-            materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
-            hints,
-            disk_source)
+      ? d_.engine.materialize_mapped_into_target(device, *resolved_plan, hints, disk_source)
       : d_.engine.materialize_into_target(
             device,
             storage_layout.into_target,
@@ -2170,11 +2252,23 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   if (!requester_worker_id.empty()) {
     hints.transport_requester_worker_id = requester_worker_id;
   }
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
+  auto disk_metadata_or = build_binding_disk_metadata(
+      resolution.normalized_disk_path, resolution.resolved_artifact_id, device.ordinal, d_.disk_imports);
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  auto disk_metadata = std::move(*disk_metadata_or);
+  const bool prefer_direct_disk_for_source_layout =
+      disk_source.has_value() && disk_metadata.has_value() && disk_metadata->source_index_json.has_value();
+  hints.source_preference = prefer_direct_disk_for_source_layout ? store::loading::SourcePreference::kPreferDisk
+                                                                 : to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
   hints.export_policy = store::loading::ExportPolicy::kForce;
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = *disk_metadata;
+  }
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
@@ -2214,15 +2308,25 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     hints.variant = std::move(variant);
   }
 
+  std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan> resolved_plan;
+  if (mapped) {
+    auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+        resolution.resolved_artifact_id,
+        materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
+        storage_layout.into_target,
+        mapped_plan,
+        hints.variant,
+        disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
+            ? std::optional<std::string_view>(*disk_metadata->source_index_json)
+            : std::nullopt);
+    if (!resolved_plan_or.ok()) {
+      return to_grpc_status(resolved_plan_or.status());
+    }
+    resolved_plan = std::move(*resolved_plan_or);
+  }
+
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
-      ? d_.engine.materialize_mapped_into_target(
-            device,
-            storage_layout.into_target,
-            mapped_plan.copy_plan.map,
-            mapped_plan.canonical_index_json,
-            materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
-            hints,
-            disk_source)
+      ? d_.engine.materialize_mapped_into_target(device, *resolved_plan, hints, disk_source)
       : d_.engine.materialize_into_target(
             device,
             storage_layout.into_target,

@@ -43,6 +43,7 @@ Guides for developing specific components:
 - **[Store Daemon Development](../daemon/README.md)** - Store Daemon internals and development
 - **[Adding New Metrics](internals/adding-metrics.md)** - How to create and expose metrics
 - **[tensor_dict_into Dataflow](internals/tensor_dict_into_dataflow.md)** - Legacy vs region-backed into paths
+- **[Disk Load Strategy](internals/disk-load-strategy.md)** - TP-aware disk loading decisions for local SSD, shared filesystems, and mapped target flows
 - **[Preemptible Memory Internals](internals/preemptible-memory.md)** - UMA/VS preemption workflow and tuning
 - **[Byte-Range Mapping and Execution](internals/byte-range-mapping-and-execution.md)** - Unified byte-range executor semantics
 - **[Chaos Report Template](internals/chaos-report-template.md)** - Standard handoff template for multi-host chaos runs

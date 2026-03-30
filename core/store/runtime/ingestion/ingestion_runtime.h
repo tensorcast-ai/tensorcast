@@ -16,6 +16,7 @@
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/materialization_facade.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/seal_assembly_result.h"
@@ -63,19 +64,13 @@ class IngestionRuntime {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
       const loading::MaterializeHints& hints);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(

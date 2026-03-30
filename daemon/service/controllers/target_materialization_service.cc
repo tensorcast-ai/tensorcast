@@ -27,6 +27,8 @@
 #include "core/common/selection_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
+#include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
@@ -50,6 +52,7 @@ namespace {
 
 using materialization_index_source::compute_target_layout_multihash;
 using materialization_index_source::load_canonical_index_with_disk_fallback;
+using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::parse_mi2_data_multihash;
 using materialization_index_source::TargetLayoutSpan;
 using materialization_layout::resolve_target_offsets;
@@ -62,6 +65,7 @@ using materialization_policy::validate_source_policy;
 using materialization_request_common::resolve_artifact_binding;
 using materialization_request_common::resolve_managed_disk_path;
 using materialization_target_plan::build_mapped_target_materialization_plan;
+using materialization_target_plan::build_resolved_mapped_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
@@ -209,6 +213,7 @@ std::chrono::milliseconds resolve_target_request_budget(const grpc::ServerContex
 struct ParsedTransportHint {
   std::string request_id;
   std::optional<store::loading::TransportSchedulingGroupHint> scheduling_group;
+  std::optional<store::loading::CollectiveLoadGroupHint> collective_load_group;
 };
 
 ParsedTransportHint parse_transport_hint_from_operation_id(std::string_view operation_id) {
@@ -230,8 +235,11 @@ ParsedTransportHint parse_transport_hint_from_operation_id(std::string_view oper
   std::string group_id;
   std::string part_id;
   std::string request_id_override;
+  std::string collective_group_id;
   int group_total_parts = 0;
   int group_priority = 0;
+  int collective_world_size = 0;
+  int collective_rank = -1;
   uint64_t group_epoch = 0;
 
   for (const std::string_view item : absl::StrSplit(metadata, ';', absl::SkipEmpty())) {
@@ -278,24 +286,48 @@ ParsedTransportHint parse_transport_hint_from_operation_id(std::string_view oper
       request_id_override = std::string(value);
       continue;
     }
+    if (key == "clid") {
+      collective_group_id = std::string(value);
+      continue;
+    }
+    if (key == "clws") {
+      int parsed_world_size = 0;
+      if (absl::SimpleAtoi(value, &parsed_world_size)) {
+        collective_world_size = parsed_world_size;
+      }
+      continue;
+    }
+    if (key == "clrk") {
+      int parsed_rank = -1;
+      if (absl::SimpleAtoi(value, &parsed_rank)) {
+        collective_rank = parsed_rank;
+      }
+      continue;
+    }
   }
 
   if (!request_id_override.empty()) {
     parsed.request_id = std::move(request_id_override);
   }
 
-  if (group_kind.empty() || group_id.empty() || part_id.empty() || group_total_parts <= 0) {
-    return parsed;
+  if (!group_kind.empty() && !group_id.empty() && !part_id.empty() && group_total_parts > 0) {
+    store::loading::TransportSchedulingGroupHint group;
+    group.group_kind = std::move(group_kind);
+    group.group_id = std::move(group_id);
+    group.total_parts = static_cast<uint32_t>(group_total_parts);
+    group.part_id = std::move(part_id);
+    group.priority = static_cast<uint32_t>(std::max(0, group_priority));
+    group.epoch = group_epoch;
+    parsed.scheduling_group = std::move(group);
   }
-
-  store::loading::TransportSchedulingGroupHint group;
-  group.group_kind = std::move(group_kind);
-  group.group_id = std::move(group_id);
-  group.total_parts = static_cast<uint32_t>(group_total_parts);
-  group.part_id = std::move(part_id);
-  group.priority = static_cast<uint32_t>(std::max(0, group_priority));
-  group.epoch = group_epoch;
-  parsed.scheduling_group = std::move(group);
+  if (!collective_group_id.empty() && collective_world_size > 1 && collective_rank >= 0 &&
+      collective_rank < collective_world_size) {
+    store::loading::CollectiveLoadGroupHint collective_group;
+    collective_group.group_id = std::move(collective_group_id);
+    collective_group.world_size = static_cast<uint32_t>(collective_world_size);
+    collective_group.rank = static_cast<uint32_t>(collective_rank);
+    parsed.collective_load_group = std::move(collective_group);
+  }
   return parsed;
 }
 
@@ -310,6 +342,67 @@ void apply_transport_hints_from_operation_id(const std::string& operation_id, st
   if (parsed.scheduling_group.has_value()) {
     hints->transport_scheduling_group = std::move(*parsed.scheduling_group);
   }
+  if (parsed.collective_load_group.has_value()) {
+    hints->collective_load_group = std::move(*parsed.collective_load_group);
+  }
+}
+
+absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_target_disk_metadata(
+    const std::optional<std::filesystem::path>& normalized_disk_path,
+    std::string_view resolved_artifact_id,
+    int device_ordinal,
+    ArtifactSourceRegistry& disk_imports) {
+  std::optional<store::loading::DiskMetadata> disk_metadata;
+  if (normalized_disk_path.has_value()) {
+    auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
+    if (!descriptor_or.ok()) {
+      return descriptor_or.status();
+    }
+    auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    store::loading::DiskMetadata metadata;
+    metadata.descriptor_present = descriptor_or->found;
+    metadata.schema_version = descriptor_or->schema_version;
+    metadata.index_multihash = descriptor_or->index_multihash;
+    metadata.data_multihash = descriptor_or->data_multihash;
+    metadata.canonical_index_json = index_or->canonical_index_json;
+    if (index_or->source_index_json.has_value()) {
+      metadata.source_index_json = index_or->source_index_json;
+    }
+    if (!index_or->index_multihash.empty()) {
+      metadata.index_multihash = index_or->index_multihash;
+    }
+    if (index_or->total_size_bytes > 0) {
+      metadata.logical_total_size = index_or->total_size_bytes;
+    }
+    if (index_or->source_total_size_bytes > 0) {
+      metadata.source_total_size_bytes = index_or->source_total_size_bytes;
+    }
+    metadata.is_safetensors = index_or->is_safetensors;
+    disk_metadata = std::move(metadata);
+  }
+  if (auto local_import = disk_imports.lookup_binding(resolved_artifact_id); local_import.has_value()) {
+    if (!disk_metadata.has_value()) {
+      disk_metadata = store::loading::DiskMetadata{};
+    }
+    auto& metadata = *disk_metadata;
+    metadata.descriptor_present = metadata.descriptor_present || local_import->descriptor_present;
+    if (!metadata.canonical_index_json.has_value() && !local_import->canonical_index_json.empty()) {
+      metadata.canonical_index_json = local_import->canonical_index_json;
+    }
+    if (!metadata.source_index_json.has_value() && local_import->source_index_json.has_value()) {
+      metadata.source_index_json = *local_import->source_index_json;
+    }
+    if (!metadata.index_multihash.has_value() && local_import->index_multihash.has_value()) {
+      metadata.index_multihash = *local_import->index_multihash;
+    }
+    if (!metadata.data_multihash.has_value() && local_import->data_multihash.has_value()) {
+      metadata.data_multihash = *local_import->data_multihash;
+    }
+  }
+  return disk_metadata;
 }
 
 template <typename RequestT>
@@ -625,6 +718,12 @@ grpc::Status TargetMaterializationService::materialize_into_target(
         .require_descriptor = true,
     };
   }
+  auto disk_metadata_or =
+      build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  auto disk_metadata = std::move(*disk_metadata_or);
 
   store::loading::MaterializeHints hints;
   const std::chrono::milliseconds request_budget = resolve_target_request_budget(rctx.server_context());
@@ -638,8 +737,11 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   if (req.has_operation_id() && !req.operation_id().empty()) {
     apply_transport_hints_from_operation_id(req.operation_id(), &hints);
   }
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
+  const bool prefer_direct_disk_for_source_layout =
+      disk_source.has_value() && disk_metadata.has_value() && disk_metadata->source_index_json.has_value();
+  hints.source_preference = prefer_direct_disk_for_source_layout ? store::loading::SourcePreference::kPreferDisk
+                                                                 : to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
   // bind/swap target materialization should become reusable sources so
@@ -647,6 +749,9 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   // original publisher. This is still policy-gated by daemon promotion
   // controls and GS routing limits.
   hints.export_policy = store::loading::ExportPolicy::kForce;
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = *disk_metadata;
+  }
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
@@ -814,6 +919,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     RpcContext& rctx,
     const v2::MaterializeIntoMappedTargetRequest& req,
     v2::MaterializeIntoTargetResponse& resp) {
+  const auto total_start = std::chrono::steady_clock::now();
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs() && req.has_operation_id()) {
     span->SetAttribute("tc.operation.id", req.operation_id());
@@ -831,6 +937,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
       d_.global_store_client,
       d_.disk_imports,
       storage_path_);
+  const auto common_done = std::chrono::steady_clock::now();
   if (!common_or.ok()) {
     return to_grpc_status(common_or.status());
   }
@@ -870,6 +977,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
 
   auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
       rctx.server_context().peer(), "MaterializeIntoMappedTarget", layout, req.pid(), req.device_uuid());
+  const auto target_validate_done = std::chrono::steady_clock::now();
   if (!validated_target_or.ok()) {
     record_materialize_into_target(
         "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -879,6 +987,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   const auto device = validated_target.device;
 
   auto offsets_or = resolve_target_offsets(layout);
+  const auto offsets_done = std::chrono::steady_clock::now();
   if (!offsets_or.ok()) {
     record_materialize_into_target(
         "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -893,6 +1002,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
 
   auto canonical_json_or = load_canonical_index_with_disk_fallback(
       d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
+  const auto canonical_done = std::chrono::steady_clock::now();
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -908,6 +1018,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
       std::move(*canonical_json_or),
       record_materialize_into_target,
       mapped_plan);
+  const auto mapped_plan_done = std::chrono::steady_clock::now();
   if (!build_mapped_plan_status.ok()) {
     return build_mapped_plan_status;
   }
@@ -930,6 +1041,13 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
         .require_descriptor = true,
     };
   }
+  auto disk_metadata_or =
+      build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
+  const auto disk_metadata_done = std::chrono::steady_clock::now();
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  auto disk_metadata = std::move(*disk_metadata_or);
 
   store::loading::MaterializeHints hints;
   const std::chrono::milliseconds request_budget = resolve_target_request_budget(rctx.server_context());
@@ -943,8 +1061,11 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   if (req.has_operation_id() && !req.operation_id().empty()) {
     apply_transport_hints_from_operation_id(req.operation_id(), &hints);
   }
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
+  const bool prefer_direct_disk_for_source_layout =
+      disk_source.has_value() && disk_metadata.has_value() && disk_metadata->source_index_json.has_value();
+  hints.source_preference = prefer_direct_disk_for_source_layout ? store::loading::SourcePreference::kPreferDisk
+                                                                 : to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = prefer_direct_disk_for_source_layout ? false : effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
   // bind/swap target materialization should become reusable sources so
@@ -952,10 +1073,12 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   // original publisher. This is still policy-gated by daemon promotion
   // controls and GS routing limits.
   hints.export_policy = store::loading::ExportPolicy::kForce;
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = *disk_metadata;
+  }
   if (disk_source.has_value()) {
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
-
   if (view_plan.has_value() && view_plan->transform.requires_materialization) {
     return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
   }
@@ -975,15 +1098,41 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
-
   store::loading::IntoTargetLayout target_layout;
   target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
-
   const uint64_t generation = compute_generation_from_index(canonical_index_json);
-  auto result_or = d_.engine.materialize_mapped_into_target(
-      device, target_layout, copy_plan.map, canonical_index_json, generation, hints, disk_source);
+  auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+      resolved_artifact_id,
+      generation,
+      target_layout,
+      materialization_target_plan::MappedTargetMaterializationPlan{
+          .view_spec = view_spec,
+          .view_plan = view_plan,
+          .resolved_selection = resolved_selection,
+          .copy_plan = copy_plan,
+          .canonical_index_json = canonical_index_json,
+          .selected_index_json = {},
+          .publish_storages = {},
+          .publish_segments = {},
+          .logical_total_size = logical_total_size,
+      },
+      hints.variant,
+      disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
+          ? std::optional<std::string_view>(*disk_metadata->source_index_json)
+          : std::nullopt);
+  if (!resolved_plan_or.ok()) {
+    return to_grpc_status(resolved_plan_or.status());
+  }
+  auto resolved_plan = std::move(*resolved_plan_or);
+  const auto materialize_start = std::chrono::steady_clock::now();
+  auto result_or = d_.engine.materialize_mapped_into_target(device, resolved_plan, hints, disk_source);
+  const auto engine_done = std::chrono::steady_clock::now();
   if (!result_or.ok()) {
+    LOG(ERROR) << "MaterializeIntoMappedTarget engine failure"
+               << " artifact_id=" << resolved_artifact_id << " copy_entries=" << req.copy_plan().entries_size()
+               << " dst_tensors=" << req.dst_tensors_size() << " storages=" << layout.storages_size()
+               << " status=" << result_or.status();
     if (absl::IsDataLoss(result_or.status())) {
       for (const auto& region_id : storage_lease.acquired_region_ids()) {
         d_.regions.mark_poisoned(region_id).IgnoreError();
@@ -1097,6 +1246,26 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));
     span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(copy_plan.total_bytes_copied));
   }
+  const double materialize_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - materialize_start).count();
+  const double total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "MaterializeIntoMappedTarget controller timings"
+            << " artifact_id=" << resolved_artifact_id << " copy_entries=" << req.copy_plan().entries_size()
+            << " dst_tensors=" << req.dst_tensors_size() << " storages=" << layout.storages_size()
+            << " common_sec=" << std::chrono::duration<double>(common_done - total_start).count()
+            << " target_validate_sec=" << std::chrono::duration<double>(target_validate_done - common_done).count()
+            << " offsets_sec=" << std::chrono::duration<double>(offsets_done - target_validate_done).count()
+            << " canonical_sec=" << std::chrono::duration<double>(canonical_done - offsets_done).count()
+            << " mapped_plan_sec=" << std::chrono::duration<double>(mapped_plan_done - canonical_done).count()
+            << " disk_metadata_sec=" << std::chrono::duration<double>(disk_metadata_done - mapped_plan_done).count()
+            << " engine_sec=" << std::chrono::duration<double>(engine_done - disk_metadata_done).count()
+            << " materialize_sec=" << materialize_sec << " total_sec=" << total_sec;
+  LOG(INFO) << "MaterializeIntoMappedTarget completed"
+            << " artifact_id=" << resolved_artifact_id
+            << " source_layout=" << (disk_metadata.has_value() && disk_metadata->source_index_json.has_value())
+            << " collective=" << hints.collective_load_group.has_value()
+            << " source=" << v2::MaterializationSource_Name(resp.source()) << " target_bytes=" << logical_total_size
+            << " materialize_sec=" << materialize_sec << " total_sec=" << total_sec;
   record_materialize_into_target("ok", "ok", resp.source());
   rctx.mark_success();
   return Status::OK;

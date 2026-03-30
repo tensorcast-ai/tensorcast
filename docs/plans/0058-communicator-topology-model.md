@@ -20,77 +20,133 @@ related_code:
 
 # Objective
 
-在现有 Communicator 之上引入可搜索拓扑模型（Pool / Endpoint / Link）与路径级抽象（Connection / Channel / Communicator），为多路径、拓扑选路与故障切换提供统一的数据结构与策略入口，并保持现有读写路径可兼容回退。
+Introduce a searchable topology model (Pool / Endpoint / Link) and
+path-level abstractions (Connection / Channel / Communicator) on top of the
+current Communicator implementation, so multipath, topology-aware routing, and
+failover share one unified data model and policy entry point while keeping the
+current read/write path backward-compatible and rollback-safe.
 
 # Current State & Grounding
 
-- 通信层以 `communicator::engine::Communicator` 为中心，面向 peer 的连接抽象是 `engine::Channel`，其内部管理 TCP/MTCP/RDMA 连接与握手状态（`core/communicator/engine/engine.h`，`core/communicator/engine/channel.h`）。
-- 数据面传输直接由 Communicator 选择 RDMA 或 MTCP，路径选择缺乏明确的“拓扑图”，也不存在多跳或多路径抽象（`core/communicator/README.md`，`core/communicator/docs/comm-read-tensor.md`）。
-- P2P 选源由 Global Store 协调，数据面仍由 Communicator 完成读写，当前没有拓扑级路由或自动 failover（`docs/architecture/p2p-transfer-strategies.md`）。
-- 现有 `CommunicatorConfig` 只有 `simple_numa` 等轻量映射，缺少可表达交换结构的拓扑模型（`proto/tensorcast/communicator/v1/communicator_config.proto`）。
+- The communication layer centers on `communicator::engine::Communicator`.
+  Peer-level connection abstraction is `engine::Channel`, which manages
+  TCP/MTCP/RDMA connections and handshake state
+  (`core/communicator/engine/engine.h`,
+  `core/communicator/engine/channel.h`).
+- Data-plane transfer is currently chosen directly by Communicator (RDMA or
+  MTCP). Path selection has no explicit topology graph, and there is no
+  multi-hop or multipath abstraction
+  (`core/communicator/README.md`,
+  `core/communicator/docs/comm-read-tensor.md`).
+- P2P source selection is coordinated by Global Store, while data transfer is
+  still executed by Communicator. There is currently no topology-level routing
+  or automatic failover
+  (`docs/architecture/p2p-transfer-strategies.md`).
+- Existing `CommunicatorConfig` only has lightweight mappings such as
+  `simple_numa`; it lacks a topology model that can represent switching
+  structures (`proto/tensorcast/communicator/v1/communicator_config.proto`).
 
 # Phases & Milestones
 
-- [ ] Phase 1: 拓扑模型与配置骨架
-  - [ ] Milestone 1.1: 新增拓扑数据结构（`Pool` / `Endpoint` / `Link`）与图构建器（建议落在 `core/communicator/topology/`），并提供最小可视化/调试导出。
-  - [ ] Milestone 1.2: 扩展 `CommunicatorConfig` 引入拓扑描述（或等价独立拓扑配置段），并提供从 `simple_numa` 的兼容映射；遵循 `docs/designs/0004-unified-runtime-config.md`。
-  - [ ] Milestone 1.3: 拓扑校验与单元测试（连通性、带宽/延迟字段、Switch Endpoint 合法性）。
+- [ ] Phase 1: Topology model and config skeleton
+  - [ ] Milestone 1.1: Add topology data structures (`Pool` / `Endpoint` /
+    `Link`) and graph builder (recommended under
+    `core/communicator/topology/`), with minimal visualization/debug export.
+  - [ ] Milestone 1.2: Extend `CommunicatorConfig` with topology description
+    (or equivalent standalone topology config section), and provide
+    compatibility mapping from `simple_numa`; follow
+    `docs/designs/0004-unified-runtime-config.md`.
+  - [ ] Milestone 1.3: Add topology validation and unit tests
+    (connectivity, bandwidth/latency fields, Switch Endpoint legality).
 
-- [ ] Phase 2: 执行层映射与兼容桥接
-  - [ ] Milestone 2.1: 新增 `Connection` 与路径级 `Channel`（为避免与 `engine::Channel` 冲突，可在新命名空间引入 `RouteChannel`）并完成到现有传输对象的映射。
-  - [ ] Milestone 2.2: 构建 `Communicator` 聚合器（src-dst 维度）与 Connection 复用缓存，支持多 hop。
-  - [ ] Milestone 2.3: 增加基础统计与健康状态收集（Link/Connection 级别）用于后续路由。
+- [ ] Phase 2: Execution-layer mapping and compatibility bridge
+  - [ ] Milestone 2.1: Add `Connection` and path-level `Channel`
+    (to avoid conflict with `engine::Channel`, use `RouteChannel` in a new
+    namespace) and complete mapping to existing transport objects.
+  - [ ] Milestone 2.2: Build a `Communicator` aggregator (src-dst dimension)
+    plus connection-reuse cache, with multi-hop support.
+  - [ ] Milestone 2.3: Add baseline stats and health collection
+    (Link/Connection level) for later routing decisions.
 
-- [ ] Phase 3: 路径搜索、multipath 与故障切换
-  - [ ] Milestone 3.1: 实现 k-shortest 或最短路搜索（BW/latency/统计混合打分），产出多条候选 Channel。
-  - [ ] Milestone 3.2: `mct_map` 统计闭环，支持按消息大小选择路径并实现 striping。
-  - [ ] Milestone 3.3: 连接失败/握手失败时的自动 failover（回退到其它 Channel 或默认直连）。
+- [ ] Phase 3: Path search, multipath, and failover
+  - [ ] Milestone 3.1: Implement k-shortest or shortest-path search
+    (mixed scoring across BW/latency/stats) and output multiple candidate
+    channels.
+  - [ ] Milestone 3.2: Build `mct_map` feedback loop to support
+    message-size-aware path selection and striping.
+  - [ ] Milestone 3.3: Add automatic failover on connection/handshake failures
+    (switch to alternate channel or default direct path).
 
-- [ ] Phase 4: 业务集成与回归验证
-  - [ ] Milestone 4.1: 在 P2P 读路径引入“路由选择”入口（保持默认回退到旧逻辑），逐步接入 `P2PLoader` / `RemoteKeySource`。
-  - [ ] Milestone 4.2: 增加集成测试与压力回归（多 GPU / 多 NIC / 交换拓扑模拟），并完善文档更新。
+- [ ] Phase 4: Product integration and regression validation
+  - [ ] Milestone 4.1: Introduce routing selection entry in P2P read path
+    (default fallback to existing logic), then gradually integrate with
+    `P2PLoader` / `RemoteKeySource`.
+  - [ ] Milestone 4.2: Add integration tests and stress regression
+    (multi-GPU / multi-NIC / switched-topology simulation), and finish doc
+    updates.
 
-## Phase 2 Mapping Decisions (补充方案)
+## Phase 2 Mapping Decisions (Supplement)
 
-**目标**：在不改动现有数据面行为的前提下，将拓扑可达性映射到现有通信实现，并显式纳入 NVLINK 作为本地 GPU↔GPU 传输。
+**Objective**: map topology reachability to existing communication execution
+without changing current data-plane behavior, while explicitly including NVLINK
+as the local GPU-to-GPU transfer path.
 
-**运行时映射来源**
-- Endpoint 的运行时绑定信息（IP/Port/NIC/GPU UUID 等）以 **Global Store** 为权威来源。
-- 路由层只消费 GS 侧的节点与设备元数据，不引入额外的硬件发现或本地探测。
+**Runtime mapping source**
+- Runtime endpoint binding metadata (IP/Port/NIC/GPU UUID, etc.) uses
+  **Global Store** as the source of truth.
+- The routing layer only consumes node/device metadata from GS and does not
+  introduce extra hardware discovery or local probing.
 
-**传输适配与落地位置**
-- 新增 **NvlinkAdapter** 作为 NVLINK 传输的唯一落地入口（routing/中间层负责选择，执行层由 NvlinkAdapter 完成）。
-- 现有 RDMA/MTCP/TCP 继续由 `engine::Communicator` 执行，作为 **EngineAdapter** 复用。
+**Transport adapters and integration point**
+- Add **NvlinkAdapter** as the only execution entry for NVLINK transport
+  (routing/middleware selects it, and execution is completed by
+  NvlinkAdapter).
+- Existing RDMA/MTCP/TCP execution remains in `engine::Communicator`, reused
+  through **EngineAdapter**.
 
-**映射规则（最小可用）**
-- 同节点 GPU↔GPU：优先走 NVLINK（NvlinkAdapter），失败回退到已有路径。
-- 跨节点通信：仍走 RDMA/MTCP/TCP（EngineAdapter）。
-- Switch Endpoint 仅参与路径搜索，不直接生成 Connection。
+**Mapping rules (minimum viable)**
+- Same-node GPU-to-GPU: prefer NVLINK (`NvlinkAdapter`), fallback to existing
+  path on failure.
+- Cross-node communication: continue using RDMA/MTCP/TCP (`EngineAdapter`).
+- Switch Endpoint participates only in path search and does not directly create
+  `Connection` objects.
 
 # Tasks
 
-- 更新 `core/communicator/README.md`，补充拓扑与多路径语义。
-- 更新 `docs/architecture/p2p-transfer-strategies.md`，说明路由与 failover 在数据面的位置。
-- 若修改 `.proto`，运行 `bash tools/build_proto_python.sh` 并通过 `bazel test //proto/...`。
-- 增加基准或调试工具，便于输出拓扑图与路径选择日志。
+- Update `core/communicator/README.md` with topology and multipath semantics.
+- Update `docs/architecture/p2p-transfer-strategies.md` to describe routing and
+  failover placement in the data plane.
+- If `.proto` is modified, run `bash tools/build_proto_python.sh` and
+  `bazel test //proto/...`.
+- Add benchmark or debug tooling to export topology graphs and
+  path-selection logs.
 
 # Test / Rollout / Backout
 
-- **单元测试**：拓扑构建、路径搜索、Switch Endpoint 约束、连接健康状态更新。
-- **集成测试**：复用现有 `tcp_engine_test` / `rdma` 相关测试，并新增多路径与 failover 场景。
-- **回归验证**：对 `read_tensor` 关键路径做性能对比，确认无退化。
-- **上线策略**：新增配置开关，默认关闭；先在影子模式输出路径选择日志。
-- **回退策略**：禁用拓扑路由配置，回退到旧的直连通道选择。
+- **Unit tests**: topology construction, path search, Switch Endpoint
+  constraints, and connection-health updates.
+- **Integration tests**: reuse current `tcp_engine_test` / RDMA-related tests,
+  plus new multipath and failover scenarios.
+- **Regression validation**: run performance comparison on
+  `read_tensor` critical path and confirm no regression.
+- **Rollout strategy**: add a config switch, default off; first run in
+  shadow mode with path-selection logs.
+- **Backout strategy**: disable topology-routing config and return to the
+  previous direct-channel selection.
 
 # Risks & Tracking
 
-- **复杂度上升**：需确保拓扑模型与现有 `engine::Channel` 的语义边界清晰。
-- **配置兼容**：拓扑配置必须兼容 `simple_numa`，避免破坏现有部署。
-- **性能不确定性**：路径搜索与统计更新需要限频与缓存。
+- **Complexity increase**: keep semantic boundaries clear between topology model
+  and existing `engine::Channel`.
+- **Config compatibility**: topology config must stay compatible with
+  `simple_numa` to avoid deployment breakage.
+- **Performance uncertainty**: path search and stats updates require bounded
+  frequency and caching.
 
 # Owner Checklist
 
-- [ ] 设计与计划双向链接已建立。
-- [ ] 配置变更遵循统一配置设计（`docs/designs/0004-unified-runtime-config.md`）。
-- [ ] 文档更新覆盖核心模块 README 与架构说明。
-- [ ] 关键路径有基准/回归指标。
+- [ ] Bidirectional links between design and plan are in place.
+- [ ] Config changes follow unified config design
+  (`docs/designs/0004-unified-runtime-config.md`).
+- [ ] Doc updates cover core module README and architecture guides.
+- [ ] Benchmark/regression metrics cover the critical path.

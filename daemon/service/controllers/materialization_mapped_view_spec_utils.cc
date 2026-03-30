@@ -72,7 +72,8 @@ absl::StatusOr<ResolvedMappedViewSpec> resolve_mapped_view_spec(
   auto view_meta_or = engine.get_view_metadata(std::string(resolved_artifact_id), *resolved.request_view_id);
   if (!view_meta_or.ok()) {
     if (absl::IsNotFound(view_meta_or.status()) || absl::IsUnimplemented(view_meta_or.status())) {
-      // Opaque mapped view_id is allowed even when control-plane metadata is absent.
+      // Mapped targets may publish a synthetic target byte-space id that does
+      // not correspond to a source-side metadata record.
       return resolved;
     }
     set_reason(reason, ResolveViewSpecErrorReason::kViewMetaMissing);

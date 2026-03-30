@@ -28,6 +28,7 @@ class LinkState {
 
   LinkStats snapshot() const;
   HealthState health() const;
+
   const std::string& link_id() const {
     return link_id_;
   }
@@ -40,15 +41,16 @@ class LinkState {
 
 class Connection : public std::enable_shared_from_this<Connection> {
  public:
-  Connection(ConnectionKey key,
-             ConnectionType type,
-             std::shared_ptr<const topology::Topology> topology,
-             const topology::Link* link,
-             EndpointBinding local_binding,
-             EndpointBinding remote_binding,
-             std::shared_ptr<ConnectionAdapter> adapter,
-             std::shared_ptr<LinkState> link_state,
-             std::shared_ptr<common::AsyncRuntime> async_runtime);
+  Connection(
+      ConnectionKey key,
+      ConnectionType type,
+      std::shared_ptr<const topology::Topology> topology,
+      const topology::Link* link,
+      EndpointBinding local_binding,
+      EndpointBinding remote_binding,
+      std::shared_ptr<ConnectionAdapter> adapter,
+      std::shared_ptr<LinkState> link_state,
+      std::shared_ptr<common::AsyncRuntime> async_runtime);
 
   const ConnectionKey& key() const {
     return key_;

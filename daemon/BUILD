@@ -1753,6 +1753,15 @@ cc_test(
 )
 
 cc_test(
+    name = "materialization_layout_utils_test",
+    srcs = ["service/controllers/materialization_layout_utils_test.cc"],
+    deps = [
+        ":materialization_layout_utils_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "session_lifecycle_test",
     srcs = ["state/session_lifecycle_test.cc"],
     deps = [
@@ -2461,6 +2470,23 @@ cc_test(
         "@abseil-cpp//absl/time:time",
         "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "nccl_ipc_sendrecv_test",
+    srcs = ["service/nccl_ipc_sendrecv_test.cc"],
+    data = [":cuda_ipc_helper"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":cuda_ipc_spawn_helper_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
+        "//core/cuda:device_guard_lib",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@catch2//:catch2_main",
+        "@nccl",
     ],
 )
 

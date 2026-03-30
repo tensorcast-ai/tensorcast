@@ -155,12 +155,15 @@ sc_cc_library(
         "//core/common:streaming_pinned_buffer_lib",
         "//core/cuda:cuda_api_lib",
         "//core/cuda:error_handling_lib",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:disk_artifact_context",
         "//core/store/materialization/dataplane:gpu_memory_sink",
         "//core/store/materialization/dataplane:multi_safetensors_source",
         "//core/store/materialization/dataplane:pump",
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
@@ -271,6 +274,16 @@ cc_test(
         "//core/common:const_granularity_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:device_types",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "collective_disk_loader_test",
+    srcs = ["collective_disk_loader_test.cc"],
+    deps = [
+        ":collective_disk_loader",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

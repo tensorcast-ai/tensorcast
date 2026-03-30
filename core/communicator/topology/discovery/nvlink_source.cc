@@ -2,6 +2,7 @@
 
 #include "core/communicator/topology/discovery/nvlink_source.h"
 
+#include <sys/wait.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -11,7 +12,6 @@
 #include <optional>
 #include <sstream>
 #include <string>
-#include <sys/wait.h>
 #include <utility>
 #include <vector>
 
@@ -130,8 +130,7 @@ absl::StatusOr<std::string> run_command_capture_stdout(const std::string& comman
     return absl::ErrnoToStatus(errno, absl::StrCat("pclose failed for command: ", command));
   }
   if (!WIFEXITED(close_status) || WEXITSTATUS(close_status) != 0) {
-    return absl::UnavailableError(
-        absl::StrCat("command failed: ", command, " (status=", close_status, ")"));
+    return absl::UnavailableError(absl::StrCat("command failed: ", command, " (status=", close_status, ")"));
   }
 
   return output;
@@ -139,8 +138,7 @@ absl::StatusOr<std::string> run_command_capture_stdout(const std::string& comman
 
 absl::StatusOr<NvlinkGpuRecord> parse_gpu_row(const std::vector<std::string>& cols, int line_no) {
   if (cols.size() != 3) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("line ", line_no, ": gpu row expects 3 columns"));
+    return absl::InvalidArgumentError(absl::StrCat("line ", line_no, ": gpu row expects 3 columns"));
   }
   NvlinkGpuRecord record;
   record.gpu_uuid = std::string(absl::StripAsciiWhitespace(cols[1]));
@@ -163,8 +161,7 @@ absl::StatusOr<NvlinkGpuRecord> parse_gpu_row(const std::vector<std::string>& co
 
 absl::StatusOr<NvlinkEdge> parse_edge_row(const std::vector<std::string>& cols, int line_no) {
   if (cols.size() != 5) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("line ", line_no, ": edge row expects 5 columns"));
+    return absl::InvalidArgumentError(absl::StrCat("line ", line_no, ": edge row expects 5 columns"));
   }
 
   NvlinkEdge edge;
@@ -182,8 +179,7 @@ absl::StatusOr<NvlinkEdge> parse_edge_row(const std::vector<std::string>& cols, 
   try {
     edge.link_count = std::stoi(link_count_text);
   } catch (const std::exception&) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("line ", line_no, ": invalid link_count '", link_count_text, "'"));
+    return absl::InvalidArgumentError(absl::StrCat("line ", line_no, ": invalid link_count '", link_count_text, "'"));
   }
   if (edge.link_count <= 0) {
     return absl::InvalidArgumentError(
@@ -197,8 +193,7 @@ absl::StatusOr<NvlinkEdge> parse_edge_row(const std::vector<std::string>& cols, 
         absl::StrCat("line ", line_no, ": invalid bandwidth_hint_gbps '", bandwidth_text, "'"));
   }
   if (edge.bandwidth_hint_gbps < 0.0) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("line ", line_no, ": bandwidth_hint_gbps must be >= 0"));
+    return absl::InvalidArgumentError(absl::StrCat("line ", line_no, ": bandwidth_hint_gbps must be >= 0"));
   }
 
   return edge;
@@ -258,14 +253,15 @@ absl::StatusOr<std::vector<NvlinkGpuRecord>> parse_runtime_gpu_query_output(
 
     if (gpu_index < 0 || gpu_uuid.empty()) {
       absl::Status parse_status = handle_parse_error(
-          absl::InvalidArgumentError(absl::StrCat(
-              "line ",
-              line_no,
-              ": runtime GPU row requires gpu_index>=0 and non-empty gpu_uuid (index=",
-              gpu_index,
-              ", uuid='",
-              gpu_uuid,
-              "')")),
+          absl::InvalidArgumentError(
+              absl::StrCat(
+                  "line ",
+                  line_no,
+                  ": runtime GPU row requires gpu_index>=0 and non-empty gpu_uuid (index=",
+                  gpu_index,
+                  ", uuid='",
+                  gpu_uuid,
+                  "')")),
           strict,
           "NVLINK runtime GPU row");
       if (!parse_status.ok()) {
@@ -277,16 +273,17 @@ absl::StatusOr<std::vector<NvlinkGpuRecord>> parse_runtime_gpu_query_output(
     auto uuid_by_index_it = uuid_by_index.find(gpu_index);
     if (uuid_by_index_it != uuid_by_index.end() && uuid_by_index_it->second != gpu_uuid) {
       absl::Status parse_status = handle_parse_error(
-          absl::InvalidArgumentError(absl::StrCat(
-              "line ",
-              line_no,
-              ": conflicting gpu_uuid for gpu_index ",
-              gpu_index,
-              " (existing='",
-              uuid_by_index_it->second,
-              "', new='",
-              gpu_uuid,
-              "')")),
+          absl::InvalidArgumentError(
+              absl::StrCat(
+                  "line ",
+                  line_no,
+                  ": conflicting gpu_uuid for gpu_index ",
+                  gpu_index,
+                  " (existing='",
+                  uuid_by_index_it->second,
+                  "', new='",
+                  gpu_uuid,
+                  "')")),
           strict,
           "NVLINK runtime GPU row");
       if (!parse_status.ok()) {
@@ -298,16 +295,17 @@ absl::StatusOr<std::vector<NvlinkGpuRecord>> parse_runtime_gpu_query_output(
     auto index_by_uuid_it = index_by_uuid.find(gpu_uuid);
     if (index_by_uuid_it != index_by_uuid.end() && index_by_uuid_it->second != gpu_index) {
       absl::Status parse_status = handle_parse_error(
-          absl::InvalidArgumentError(absl::StrCat(
-              "line ",
-              line_no,
-              ": conflicting gpu_index for gpu_uuid '",
-              gpu_uuid,
-              "' (existing=",
-              index_by_uuid_it->second,
-              ", new=",
-              gpu_index,
-              ")")),
+          absl::InvalidArgumentError(
+              absl::StrCat(
+                  "line ",
+                  line_no,
+                  ": conflicting gpu_index for gpu_uuid '",
+                  gpu_uuid,
+                  "' (existing=",
+                  index_by_uuid_it->second,
+                  ", new=",
+                  gpu_index,
+                  ")")),
           strict,
           "NVLINK runtime GPU row");
       if (!parse_status.ok()) {
@@ -346,8 +344,7 @@ absl::StatusOr<TopologyMatrix> parse_runtime_topology_matrix_output(
   int line_no = 0;
   while (std::getline(input, line)) {
     line_no += 1;
-    const std::string trimmed =
-        std::string(absl::StripAsciiWhitespace(strip_ansi_escape_sequences(line)));
+    const std::string trimmed = std::string(absl::StripAsciiWhitespace(strip_ansi_escape_sequences(line)));
     if (trimmed.empty()) {
       continue;
     }
@@ -381,15 +378,16 @@ absl::StatusOr<TopologyMatrix> parse_runtime_topology_matrix_output(
     const size_t expected_cols = matrix.header_gpu_labels.size() + 1;
     if (tokens.size() < expected_cols) {
       absl::Status parse_status = handle_parse_error(
-          absl::InvalidArgumentError(absl::StrCat(
-              "line ",
-              line_no,
-              ": runtime topology row has ",
-              tokens.size(),
-              " columns, expected >=",
-              expected_cols,
-              " for row ",
-              row_label)),
+          absl::InvalidArgumentError(
+              absl::StrCat(
+                  "line ",
+                  line_no,
+                  ": runtime topology row has ",
+                  tokens.size(),
+                  " columns, expected >=",
+                  expected_cols,
+                  " for row ",
+                  row_label)),
           strict,
           "NVLINK runtime topology row");
       if (!parse_status.ok()) {
@@ -433,37 +431,29 @@ absl::StatusOr<int> parse_nvlink_count_token(
     }
   }
   if (!is_decimal_number(suffix)) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "invalid NVLINK token '",
-        token,
-        "' between ",
-        src_gpu_label,
-        " and ",
-        dst_gpu_label,
-        " (expected NV<number> or NVL)"));
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "invalid NVLINK token '",
+            token,
+            "' between ",
+            src_gpu_label,
+            " and ",
+            dst_gpu_label,
+            " (expected NV<number> or NVL)"));
   }
 
   int link_count = 0;
   try {
     link_count = std::stoi(suffix);
   } catch (const std::exception&) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "invalid NVLINK token '",
-        token,
-        "' between ",
-        src_gpu_label,
-        " and ",
-        dst_gpu_label,
-        " (stoi failed)"));
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "invalid NVLINK token '", token, "' between ", src_gpu_label, " and ", dst_gpu_label, " (stoi failed)"));
   }
   if (link_count <= 0) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "invalid non-positive NVLINK count '",
-        token,
-        "' between ",
-        src_gpu_label,
-        " and ",
-        dst_gpu_label));
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "invalid non-positive NVLINK count '", token, "' between ", src_gpu_label, " and ", dst_gpu_label));
   }
   return link_count;
 }
@@ -484,26 +474,20 @@ std::optional<std::string> lookup_matrix_cell(
 }
 
 void sort_snapshot(NvlinkSnapshot* snapshot) {
-  std::sort(
-      snapshot->gpus.begin(),
-      snapshot->gpus.end(),
-      [](const NvlinkGpuRecord& a, const NvlinkGpuRecord& b) { return a.gpu_uuid < b.gpu_uuid; });
-  std::sort(
-      snapshot->edges.begin(),
-      snapshot->edges.end(),
-      [](const NvlinkEdge& a, const NvlinkEdge& b) {
-        if (a.src_gpu_uuid != b.src_gpu_uuid) {
-          return a.src_gpu_uuid < b.src_gpu_uuid;
-        }
-        return a.dst_gpu_uuid < b.dst_gpu_uuid;
-      });
+  std::sort(snapshot->gpus.begin(), snapshot->gpus.end(), [](const NvlinkGpuRecord& a, const NvlinkGpuRecord& b) {
+    return a.gpu_uuid < b.gpu_uuid;
+  });
+  std::sort(snapshot->edges.begin(), snapshot->edges.end(), [](const NvlinkEdge& a, const NvlinkEdge& b) {
+    if (a.src_gpu_uuid != b.src_gpu_uuid) {
+      return a.src_gpu_uuid < b.src_gpu_uuid;
+    }
+    return a.dst_gpu_uuid < b.dst_gpu_uuid;
+  });
 }
 
 } // namespace
 
-absl::StatusOr<NvlinkSnapshot> load_nvlink_snapshot(
-    const std::string& file_path,
-    NvlinkSnapshotOptions options) {
+absl::StatusOr<NvlinkSnapshot> load_nvlink_snapshot(const std::string& file_path, NvlinkSnapshotOptions options) {
   std::ifstream input(file_path);
   if (!input.good()) {
     return absl::NotFoundError(absl::StrCat("NVLINK snapshot not found: ", file_path));
@@ -543,16 +527,17 @@ absl::StatusOr<NvlinkSnapshot> load_nvlink_snapshot(
         continue;
       }
       if (it->second.gpu_index != gpu.gpu_index) {
-        const absl::Status conflict = absl::InvalidArgumentError(absl::StrCat(
-            "line ",
-            line_no,
-            ": conflicting gpu_index for gpu_uuid '",
-            gpu.gpu_uuid,
-            "' (existing=",
-            it->second.gpu_index,
-            ", new=",
-            gpu.gpu_index,
-            ")"));
+        const absl::Status conflict = absl::InvalidArgumentError(
+            absl::StrCat(
+                "line ",
+                line_no,
+                ": conflicting gpu_index for gpu_uuid '",
+                gpu.gpu_uuid,
+                "' (existing=",
+                it->second.gpu_index,
+                ", new=",
+                gpu.gpu_index,
+                ")"));
         absl::Status conflict_status = handle_parse_error(conflict, options.strict, "NVLINK snapshot GPU row");
         if (!conflict_status.ok()) {
           return conflict_status;
@@ -652,8 +637,8 @@ absl::StatusOr<NvlinkSnapshot> parse_nvlink_runtime_probe_outputs(
 
       if (!forward_token.has_value() && !reverse_token.has_value()) {
         absl::Status parse_status = handle_parse_error(
-            absl::InvalidArgumentError(absl::StrCat(
-                "runtime topology matrix has no cell for GPU pair ", src_label, " <-> ", dst_label)),
+            absl::InvalidArgumentError(
+                absl::StrCat("runtime topology matrix has no cell for GPU pair ", src_label, " <-> ", dst_label)),
             options.strict,
             "NVLINK runtime topology pair");
         if (!parse_status.ok()) {
@@ -666,8 +651,8 @@ absl::StatusOr<NvlinkSnapshot> parse_nvlink_runtime_probe_outputs(
       if (forward_token.has_value()) {
         auto count_or = parse_nvlink_count_token(*forward_token, src_label, dst_label);
         if (!count_or.ok()) {
-          absl::Status parse_status = handle_parse_error(
-              count_or.status(), options.strict, "NVLINK runtime topology token");
+          absl::Status parse_status =
+              handle_parse_error(count_or.status(), options.strict, "NVLINK runtime topology token");
           if (!parse_status.ok()) {
             return parse_status;
           }
@@ -680,8 +665,8 @@ absl::StatusOr<NvlinkSnapshot> parse_nvlink_runtime_probe_outputs(
       if (reverse_token.has_value()) {
         auto count_or = parse_nvlink_count_token(*reverse_token, dst_label, src_label);
         if (!count_or.ok()) {
-          absl::Status parse_status = handle_parse_error(
-              count_or.status(), options.strict, "NVLINK runtime topology token");
+          absl::Status parse_status =
+              handle_parse_error(count_or.status(), options.strict, "NVLINK runtime topology token");
           if (!parse_status.ok()) {
             return parse_status;
           }
@@ -692,16 +677,17 @@ absl::StatusOr<NvlinkSnapshot> parse_nvlink_runtime_probe_outputs(
 
       if (forward_count > 0 && reverse_count > 0 && forward_count != reverse_count) {
         absl::Status parse_status = handle_parse_error(
-            absl::InvalidArgumentError(absl::StrCat(
-                "runtime topology matrix mismatch for ",
-                src_label,
-                " <-> ",
-                dst_label,
-                " (forward=",
-                forward_count,
-                ", reverse=",
-                reverse_count,
-                ")")),
+            absl::InvalidArgumentError(
+                absl::StrCat(
+                    "runtime topology matrix mismatch for ",
+                    src_label,
+                    " <-> ",
+                    dst_label,
+                    " (forward=",
+                    forward_count,
+                    ", reverse=",
+                    reverse_count,
+                    ")")),
             options.strict,
             "NVLINK runtime topology pair");
         if (!parse_status.ok()) {
@@ -743,8 +729,7 @@ absl::StatusOr<NvlinkSnapshot> parse_nvlink_runtime_probe_outputs(
   return snapshot;
 }
 
-absl::StatusOr<NvlinkSnapshot> load_nvlink_runtime_probe(
-    NvlinkRuntimeProbeOptions options) {
+absl::StatusOr<NvlinkSnapshot> load_nvlink_runtime_probe(NvlinkRuntimeProbeOptions options) {
   std::string gpu_query_output;
   if (!options.gpu_query_output_override.empty()) {
     gpu_query_output = options.gpu_query_output_override;
@@ -778,9 +763,7 @@ absl::StatusOr<NvlinkSnapshot> load_nvlink_runtime_probe(
   }
 
   return parse_nvlink_runtime_probe_outputs(
-      gpu_query_output,
-      topology_matrix_output,
-      NvlinkSnapshotOptions{.strict = options.strict});
+      gpu_query_output, topology_matrix_output, NvlinkSnapshotOptions{.strict = options.strict});
 }
 
 } // namespace tensorcast::communicator::topology::discovery

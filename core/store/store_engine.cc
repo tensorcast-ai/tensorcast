@@ -591,6 +591,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = source.size_bytes,
       .byte_mapping_config = options_.byte_mapping,
+      .materialization_strategy = options_.materialization_strategy,
       .memory_tier_config = options_.memory_tier_config,
   };
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
@@ -789,25 +790,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_in
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
     const loading::MaterializeHints& hints,
     std::optional<loading::DiskSource> disk_source) {
   return ingestion_runtime_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints, std::move(disk_source));
+      target_device, resolved_plan, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
     const loading::MaterializeHints& hints) {
-  return ingestion_runtime_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints);
+  return ingestion_runtime_->materialize_mapped_into_target(target_device, resolved_plan, hints);
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_loader_into_target(

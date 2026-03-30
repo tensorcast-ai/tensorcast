@@ -778,8 +778,11 @@ class DaemonCtl:
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
             # Confirm using disk path from the daemon response.
+            confirm_timeout_s = 500.0
             success = self.confirm_replica_loaded(
-                response.disk_path or "", replica_uuid
+                response.disk_path or "",
+                replica_uuid,
+                timeout_s=confirm_timeout_s,
             )
             if not success:
                 raise RuntimeError(
@@ -2018,10 +2021,13 @@ class DaemonCtl:
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
             confirm_start = time.perf_counter()
+            materialize_timeout_s = 60.0 if timeout_s is None else float(timeout_s)
+            confirm_timeout_s = max(300.0, materialize_timeout_s)
             success = self.confirm_replica_loaded(
                 response.disk_path or "",
                 replica_uuid,
                 target_device_type=target_device_type,
+                timeout_s=confirm_timeout_s,
             )
             if timing_out is not None:
                 timing_out["confirm_replica_sec"] = time.perf_counter() - confirm_start
@@ -2096,8 +2102,8 @@ class DaemonCtl:
         replica_uuid: str,
         *,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        timeout_s: float = 30.0,
     ) -> bool:
-        confirm_timeout_s = 30.0
         confirm_retries = 5
         with self._client_span("Client/ConfirmReplica") as span:
             request = store_daemon_pb2.ConfirmReplicaRequest(
@@ -2109,7 +2115,7 @@ class DaemonCtl:
                 _ = self._unary_call(
                     self.stub.ConfirmReplica,
                     request,
-                    timeout=confirm_timeout_s,
+                    timeout=timeout_s,
                     span=span,
                     retries=confirm_retries,
                 )
@@ -2131,7 +2137,7 @@ class DaemonCtl:
                     replica_uuid,
                     disk_path,
                     int(target_device_type),
-                    confirm_timeout_s,
+                    timeout_s,
                     confirm_retries,
                     self.server_address,
                 )

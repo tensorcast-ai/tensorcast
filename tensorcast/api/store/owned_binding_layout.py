@@ -74,6 +74,7 @@ def build_owned_layout(
     view_id: str | None = None,
     ordered_names: Sequence[str] | None = None,
     dst_specs: Sequence[store_daemon_pb2.MappedTensorSpec] | None = None,
+    separate_storages: bool = False,
 ) -> BindingLayout:
     packed_entries = _pack_entries(entries, ordered_names=ordered_names)
     packed_index = CanonicalIndex(
@@ -100,20 +101,36 @@ def build_owned_layout(
     resolved_view_id = str(view_id or "").strip()
     if resolved_view_id:
         target_layout.view_id = resolved_view_id
-    storage_id = "binding:coalesced:0"
-    target_layout.storages.add(
-        storage_id=storage_id,
-        device_id=int(device_id),
-        storage_length=int(packed_index.total_size_bytes),
-        mapping_base_offset=0,
-    )
-    for entry in packed_entries:
-        target_layout.offsets.add(
-            name=entry.name,
+    if separate_storages:
+        for idx, entry in enumerate(packed_entries):
+            storage_id = f"binding:tensor:{idx}"
+            target_layout.storages.add(
+                storage_id=storage_id,
+                device_id=int(device_id),
+                storage_length=int(entry.size_bytes),
+                mapping_base_offset=int(entry.segment_offset),
+            )
+            target_layout.offsets.add(
+                name=entry.name,
+                storage_id=storage_id,
+                storage_offset=0,
+                logical_length=int(entry.size_bytes),
+            )
+    else:
+        storage_id = "binding:coalesced:0"
+        target_layout.storages.add(
             storage_id=storage_id,
-            storage_offset=int(entry.segment_offset),
-            logical_length=int(entry.size_bytes),
+            device_id=int(device_id),
+            storage_length=int(packed_index.total_size_bytes),
+            mapping_base_offset=0,
         )
+        for entry in packed_entries:
+            target_layout.offsets.add(
+                name=entry.name,
+                storage_id=storage_id,
+                storage_offset=int(entry.segment_offset),
+                logical_length=int(entry.size_bytes),
+            )
     return build_binding_layout(
         target_layout=target_layout,
         target_index_bytes=target_index_bytes,
@@ -127,12 +144,13 @@ def build_mapped_tensor_spec(
     shape: Sequence[int],
     stride: Sequence[int],
     dtype: str,
+    storage_offset: int = 0,
     logical_length: int,
 ) -> store_daemon_pb2.MappedTensorSpec:
     spec = store_daemon_pb2.MappedTensorSpec(
         name=str(name),
         dtype=str(dtype),
-        storage_offset=0,
+        storage_offset=int(storage_offset),
         logical_length=int(logical_length),
     )
     spec.shape.extend(int(v) for v in shape)

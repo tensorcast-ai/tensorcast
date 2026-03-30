@@ -46,8 +46,7 @@ transport:
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
   REQUIRE(cfg.transport().so_reuseport() == false);
   REQUIRE(cfg.topology_discovery().lldp().file_path() == "/host-config/lldp-info.txt");
-  REQUIRE(
-      cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == true);
+  REQUIRE(cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == true);
 }
 
 TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
@@ -121,7 +120,6 @@ communicator:
       tensorcast::communicator::v1::NvlinkDiscoveryConfig::SOURCE_SNAPSHOT_FILE);
   REQUIRE(cfg.topology_discovery().nvlink().snapshot_file_path() == "/tmp/nvlink.txt");
   REQUIRE(cfg.topology_discovery().nvlink().required() == true);
-  REQUIRE(
-      cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == false);
+  REQUIRE(cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == false);
   REQUIRE(cfg.topology_discovery().merge_policy().require_connected() == true);
 }

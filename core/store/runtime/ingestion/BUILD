@@ -42,6 +42,17 @@ sc_header_only_library(
     ],
 )
 
+sc_header_only_library(
+    name = "materialization_strategy_types",
+    hdrs = ["materialization_strategy_types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/materialization/contracts:byte_range_map",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:view_plan",
+    ],
+)
+
 sc_cc_library(
     name = "materialization_service",
     srcs = ["materialization_service.cc"],
@@ -71,6 +82,7 @@ sc_cc_library(
         ":artifact_lowering_plan",
         ":ingestion_event_hub",
         ":materialization_service",
+        ":materialization_strategy_types",
         "//core/common:artifact_hash_lib",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
@@ -94,6 +106,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/materialization/dataplane:view_transform_executor",
         "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
+        "//core/store/replica:collective_disk_loader",
         "//core/store/runtime:ingestion_events",
         "//core/store/runtime/context:runtime_context",
         "//core/store/runtime/context:runtime_context_events",
@@ -117,6 +130,7 @@ sc_cc_library(
     deps = [
         ":artifact_lowering_plan",
         ":materialization_facade",
+        ":materialization_strategy_types",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:byte_range_map",
         "//core/store/runtime/context:runtime_context",
