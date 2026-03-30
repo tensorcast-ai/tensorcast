@@ -9,8 +9,12 @@ This document defines a chart set that makes TensorCast communicator and
 Mooncake Transfer Engine performance easy to compare without hiding the
 remaining caveats.
 
-`2026-03-22` 起，`0105` 的主目标从“仅看带宽差距”调整为“量化任务过程中的非数据传输代价”。
-因此本页中的 `GB/s` 图表用于定位趋势，不再单独作为根因结论；根因分析需结合 communicator bench 新增的 amortizable/recurring profiling 字段。
+Starting on `2026-03-22`, the primary objective of `0105` changed from
+"bandwidth-gap-only comparison" to "quantifying non-transfer cost during
+task execution." Therefore, the `GB/s` charts on this page are used to locate
+trends and are no longer treated as standalone root-cause conclusions.
+Root-cause analysis must combine the new amortizable/recurring profiling fields
+from communicator bench.
 
 The output is intentionally split into:
 

@@ -20,8 +20,8 @@ bool is_truthy_env_value(const char* value) {
   if (value == nullptr) {
     return false;
   }
-  return std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0
-      || std::strcmp(value, "True") == 0 || std::strcmp(value, "on") == 0 || std::strcmp(value, "ON") == 0;
+  return std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0 ||
+      std::strcmp(value, "True") == 0 || std::strcmp(value, "on") == 0 || std::strcmp(value, "ON") == 0;
 }
 
 std::atomic<bool>& rdma_profile_enabled_flag() {
@@ -242,8 +242,7 @@ void ReadRequest::notify_completion(const absl::Status& status) {
 
 uint64_t ReadRequest::elapsed_since_create_us() const {
   const auto now = std::chrono::steady_clock::now();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(now - created_at_).count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - created_at_).count());
 }
 
 void ReadRequest::finalize_rdma_profile_status() {

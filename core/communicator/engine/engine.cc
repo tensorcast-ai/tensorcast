@@ -4,8 +4,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <limits>
 #include <map>
@@ -1705,15 +1705,16 @@ future_read_result_t Communicator::read_tensor_local(
 
   const uint64_t tensor_bytes = local_tensor->get_bytes();
   if (remote_offset > tensor_bytes || bytes > tensor_bytes - remote_offset) {
-    result.status = absl::OutOfRangeError(absl::StrCat(
-        "local read range out of bounds: key=",
-        key,
-        " offset=",
-        remote_offset,
-        " bytes=",
-        bytes,
-        " tensor_bytes=",
-        tensor_bytes));
+    result.status = absl::OutOfRangeError(
+        absl::StrCat(
+            "local read range out of bounds: key=",
+            key,
+            " offset=",
+            remote_offset,
+            " bytes=",
+            bytes,
+            " tensor_bytes=",
+            tensor_bytes));
     promise.set_value(std::move(result));
     return future;
   }
@@ -1750,8 +1751,7 @@ future_read_result_t Communicator::read_tensor_local(
       return status;
     }
     return absl::Status(
-        status.code(),
-        absl::StrCat("local tensor copy ", op, " failed for key=", key, ": ", status.message()));
+        status.code(), absl::StrCat("local tensor copy ", op, " failed for key=", key, ": ", status.message()));
   };
 
   absl::Status copy_status = absl::OkStatus();
@@ -1786,7 +1786,8 @@ future_read_result_t Communicator::read_tensor_local(
       }
     } else {
       int can_access = 0;
-      copy_status = wrap_cuda_status("device_can_access_peer", cuda::device_can_access_peer(&can_access, dev_id, src_dev_id));
+      copy_status =
+          wrap_cuda_status("device_can_access_peer", cuda::device_can_access_peer(&can_access, dev_id, src_dev_id));
       if (copy_status.ok() && can_access == 0) {
         copy_status = absl::FailedPreconditionError(
             absl::StrCat("peer access unavailable between dst_device=", dev_id, " and src_device=", src_dev_id));
@@ -1795,17 +1796,16 @@ future_read_result_t Communicator::read_tensor_local(
         copy_status = wrap_cuda_status("enable_peer_access", cuda::enable_peer_access(dev_id, src_dev_id));
       }
       if (copy_status.ok()) {
-        copy_status = wrap_cuda_status(
-            "memcpy_peer_async",
-            cuda::memcpy_peer_async(dst_ptr, dev_id, src_ptr, src_dev_id, bytes));
+        copy_status =
+            wrap_cuda_status("memcpy_peer_async", cuda::memcpy_peer_async(dst_ptr, dev_id, src_ptr, src_dev_id, bytes));
       }
       if (copy_status.ok()) {
         copy_status = wrap_cuda_status("device_synchronize", cuda::device_synchronize());
       }
     }
   } else {
-    copy_status = absl::InvalidArgumentError(absl::StrCat(
-        "unsupported local copy matrix: src_dev_type=", src_dev_type, " dst_dev_type=", dev_type));
+    copy_status = absl::InvalidArgumentError(
+        absl::StrCat("unsupported local copy matrix: src_dev_type=", src_dev_type, " dst_dev_type=", dev_type));
   }
 
   result.status = copy_status;
@@ -2820,48 +2820,47 @@ misc::result_t Communicator::on_receive_response(
     const engine_message_t& msg) {
   LOG(INFO) << "[on_receive_response] Received response op=" << msg->get_op() << " from " << t->get_remote_url();
 
-  auto handle_rdma_connect_failure = [&](const std::string& local_dev_name,
-                                         const std::string& peer_dev_name,
-                                         const char* failure_reason) {
-    LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name
-               << " peer=" << peer_dev_name << " reason=" << failure_reason;
+  auto handle_rdma_connect_failure =
+      [&](const std::string& local_dev_name, const std::string& peer_dev_name, const char* failure_reason) {
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name << " peer=" << peer_dev_name
+                   << " reason=" << failure_reason;
 
-    auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
-    if (endpoint == nullptr) {
-      return;
-    }
+        auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+        if (endpoint == nullptr) {
+          return;
+        }
 
-    uint64_t generation = 0;
-    Channel::HandshakeState from_state = Channel::HandshakeState::kIdle;
-    {
-      absl::MutexLock lock(&endpoint->mu);
-      generation = endpoint->generation;
-      from_state = endpoint->state;
-    }
+        uint64_t generation = 0;
+        Channel::HandshakeState from_state = Channel::HandshakeState::kIdle;
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          generation = endpoint->generation;
+          from_state = endpoint->state;
+        }
 
-    auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
-    const absl::Status status = absl::UnavailableError(failure_reason);
-    for (auto& pending : failed_reads) {
-      pending_requests_.erase_if_present(pending.request->get_key());
-      pending.request->set_result(status);
-    }
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+        const absl::Status status = absl::UnavailableError(failure_reason);
+        for (auto& pending : failed_reads) {
+          pending_requests_.erase_if_present(pending.request->get_key());
+          pending.request->set_result(status);
+        }
 
-    {
-      absl::MutexLock lock(&endpoint->mu);
-      log_handshake_transition(
-          local_dev_name,
-          peer_dev_name,
-          from_state,
-          Channel::HandshakeState::kFailed,
-          endpoint->generation,
-          endpoint->pending_reads.size());
-      endpoint->state = Channel::HandshakeState::kFailed;
-      endpoint->transport.reset();
-      endpoint->failure_count += 1;
-      endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
-      endpoint->retry_scheduled = false;
-    }
-  };
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              from_state,
+              Channel::HandshakeState::kFailed,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->transport.reset();
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+      };
 
   switch (msg->get_op()) {
     case ENGINE_OP_RDMA_CONNECT_RESPONSE: {
@@ -2875,8 +2874,8 @@ misc::result_t Communicator::on_receive_response(
         break;
       }
       if (msg->get_payload_size() < sizeof(ProtoRdmaConnectResponse)) {
-        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_RESPONSE payload too small: got="
-                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectResponse);
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_RESPONSE payload too small: got=" << msg->get_payload_size()
+                   << " expected=" << sizeof(ProtoRdmaConnectResponse);
         break;
       }
 
@@ -3342,8 +3341,8 @@ misc::result_t Communicator::on_receive_response(
     }
     case ENGINE_OP_RDMA_CONNECT_FAILED: {
       if (msg->get_payload_size() < sizeof(ProtoRdmaConnectFailed)) {
-        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED payload too small: got="
-                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectFailed);
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED payload too small: got=" << msg->get_payload_size()
+                   << " expected=" << sizeof(ProtoRdmaConnectFailed);
         break;
       }
 

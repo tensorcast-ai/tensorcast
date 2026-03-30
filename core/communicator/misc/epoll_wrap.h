@@ -8,6 +8,7 @@
 #ifdef __APPLE__
 enum EPOLL_EVENTS {
   EPOLLIN = 0x001,
+
 #define EPOLLIN EPOLLIN
   EPOLLPRI = 0x002,
 #define EPOLLPRI EPOLLPRI

@@ -8,17 +8,12 @@
 
 namespace tensorcast::store::components {
 
-std::string derive_endpoint_id(
-    std::string_view node_id,
-    common::memory::MemoryLocation memory_type,
-    int device_id) {
+std::string derive_endpoint_id(std::string_view node_id, common::memory::MemoryLocation memory_type, int device_id) {
   if (node_id.empty()) {
     return {};
   }
-  const std::string_view dev_type =
-      memory_type == common::memory::MemoryLocation::GPU ? "gpu" : "cpu";
-  const int endpoint_dev_id =
-      memory_type == common::memory::MemoryLocation::GPU ? std::max(0, device_id) : 0;
+  const std::string_view dev_type = memory_type == common::memory::MemoryLocation::GPU ? "gpu" : "cpu";
+  const int endpoint_dev_id = memory_type == common::memory::MemoryLocation::GPU ? std::max(0, device_id) : 0;
   return absl::StrCat(node_id, "/dev/", dev_type, "/", endpoint_dev_id);
 }
 

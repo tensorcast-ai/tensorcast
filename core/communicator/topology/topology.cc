@@ -217,8 +217,7 @@ absl::Status Topology::validate(ValidationOptions options) const {
 
     if (endpoint.kind == EndpointKind::kSwitch) {
       if (!endpoint.pool_ids.empty()) {
-        return absl::InvalidArgumentError(
-            std::format("switch endpoint must not bind to pool: {}", endpoint_id));
+        return absl::InvalidArgumentError(std::format("switch endpoint must not bind to pool: {}", endpoint_id));
       }
       continue;
     }
@@ -237,8 +236,7 @@ absl::Status Topology::validate(ValidationOptions options) const {
 
     for (const auto& pool_id : endpoint.pool_ids) {
       if (pool_id.empty()) {
-        return absl::InvalidArgumentError(
-            std::format("endpoint pool id must be non-empty: {}", endpoint_id));
+        return absl::InvalidArgumentError(std::format("endpoint pool id must be non-empty: {}", endpoint_id));
       }
       if (!seen_pool_ids.insert(pool_id).second) {
         return absl::InvalidArgumentError(
@@ -283,21 +281,18 @@ absl::Status Topology::validate(ValidationOptions options) const {
         break;
       case EndpointType::kUnspecified:
       default:
-        return absl::InvalidArgumentError(
-            std::format("client endpoint type unsupported: {}", endpoint_id));
+        return absl::InvalidArgumentError(std::format("client endpoint type unsupported: {}", endpoint_id));
     }
 
     if (require_cpu_pool && cpu_pool_count == 0) {
-      return absl::InvalidArgumentError(
-          std::format("client endpoint requires at least one CPU pool: {}", endpoint_id));
+      return absl::InvalidArgumentError(std::format("client endpoint requires at least one CPU pool: {}", endpoint_id));
     }
     if (forbid_cpu_pool && cpu_pool_count > 0) {
       return absl::InvalidArgumentError(
           std::format("client endpoint must not bind CPU pools: {} -> {}", endpoint_id, first_cpu_pool));
     }
     if (require_gpu_pool && gpu_pool_count == 0) {
-      return absl::InvalidArgumentError(
-          std::format("client endpoint requires at least one GPU pool: {}", endpoint_id));
+      return absl::InvalidArgumentError(std::format("client endpoint requires at least one GPU pool: {}", endpoint_id));
     }
     if (forbid_gpu_pool && gpu_pool_count > 0) {
       return absl::InvalidArgumentError(
@@ -346,13 +341,11 @@ absl::Status Topology::validate(ValidationOptions options) const {
 
     if (link.type == LinkType::kSwitch) {
       if (!(src_switch || dst_switch)) {
-        return absl::InvalidArgumentError(
-            std::format("SW link must include switch endpoint: {}", link_id));
+        return absl::InvalidArgumentError(std::format("SW link must include switch endpoint: {}", link_id));
       }
     } else {
       if (src_switch || dst_switch) {
-        return absl::InvalidArgumentError(
-            std::format("non-SW link cannot include switch endpoint: {}", link_id));
+        return absl::InvalidArgumentError(std::format("non-SW link cannot include switch endpoint: {}", link_id));
       }
     }
 
@@ -376,8 +369,7 @@ absl::Status Topology::validate(ValidationOptions options) const {
   if (options.require_endpoint_links) {
     for (const auto& [endpoint_id, degree] : link_degree) {
       if (degree == 0) {
-        return absl::InvalidArgumentError(
-            std::format("endpoint must have at least one link: {}", endpoint_id));
+        return absl::InvalidArgumentError(std::format("endpoint must have at least one link: {}", endpoint_id));
       }
     }
   }
@@ -425,10 +417,8 @@ std::string Topology::to_dot() const {
 
   for (const auto& [endpoint_id, endpoint] : endpoints_) {
     std::vector<std::string> label_lines;
-    label_lines.push_back(
-        escape_dot(endpoint.name.empty() ? endpoint_id : endpoint.name));
-    label_lines.push_back(
-        escape_dot(std::format("{} {}", to_string(endpoint.kind), to_string(endpoint.type))));
+    label_lines.push_back(escape_dot(endpoint.name.empty() ? endpoint_id : endpoint.name));
+    label_lines.push_back(escape_dot(std::format("{} {}", to_string(endpoint.kind), to_string(endpoint.type))));
     std::vector<std::string> cpu_pools;
     std::vector<std::string> gpu_pools;
     std::vector<std::string> other_pools;
@@ -457,26 +447,19 @@ std::string Topology::to_dot() const {
     }
 
     if (!cpu_pools.empty()) {
-      label_lines.push_back(
-          escape_dot(std::format("cpu_pools={}", join_ids(cpu_pools))));
+      label_lines.push_back(escape_dot(std::format("cpu_pools={}", join_ids(cpu_pools))));
     }
     if (!gpu_pools.empty()) {
-      label_lines.push_back(
-          escape_dot(std::format("gpu_pools={}", join_ids(gpu_pools))));
+      label_lines.push_back(escape_dot(std::format("gpu_pools={}", join_ids(gpu_pools))));
     }
     if (!other_pools.empty()) {
-      label_lines.push_back(
-          escape_dot(std::format("pools={}", join_ids(other_pools))));
+      label_lines.push_back(escape_dot(std::format("pools={}", join_ids(other_pools))));
     }
     if (endpoint.bandwidth_gbps > 0.0) {
-      label_lines.push_back(
-          escape_dot(std::format("bw={}Gbps", endpoint.bandwidth_gbps)));
+      label_lines.push_back(escape_dot(std::format("bw={}Gbps", endpoint.bandwidth_gbps)));
     }
     const std::string label = join_label_lines(label_lines);
-    output += std::format(
-        "  \"{}\" [label=\"{}\"];\n",
-        escape_dot(endpoint_id),
-        label);
+    output += std::format("  \"{}\" [label=\"{}\"];\n", escape_dot(endpoint_id), label);
   }
 
   for (const auto& [link_id, link] : links_) {
@@ -484,12 +467,10 @@ std::string Topology::to_dot() const {
     label_lines.push_back(escape_dot(link.name.empty() ? link_id : link.name));
     label_lines.push_back(escape_dot(std::format("{}", to_string(link.type))));
     if (link.bandwidth_gbps > 0.0) {
-      label_lines.push_back(
-          escape_dot(std::format("bw={}Gbps", link.bandwidth_gbps)));
+      label_lines.push_back(escape_dot(std::format("bw={}Gbps", link.bandwidth_gbps)));
     }
     if (link.latency_us > 0.0) {
-      label_lines.push_back(
-          escape_dot(std::format("lat={}us", link.latency_us)));
+      label_lines.push_back(escape_dot(std::format("lat={}us", link.latency_us)));
     }
     const std::string label = join_label_lines(label_lines);
     output += std::format(
