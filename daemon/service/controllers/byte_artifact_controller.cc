@@ -647,6 +647,15 @@ ByteArtifactController::PeerBatchTransportSupport ByteArtifactController::local_
   };
 }
 
+bool ByteArtifactController::is_peer_batch_transport_support_refresh_complete(
+    const PeerBatchTransportSupportAwaitContext* ctx) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (ctx == nullptr || ctx->self == nullptr || ctx->daemon_id == nullptr) {
+    return true;
+  }
+  const auto it = ctx->self->peer_batch_transport_support_cache_.find(*ctx->daemon_id);
+  return it == ctx->self->peer_batch_transport_support_cache_.end() || !it->second.refresh_in_flight;
+}
+
 ByteArtifactController::PeerBatchTransportSupport ByteArtifactController::resolve_peer_batch_transport_support(
     std::string_view daemon_id,
     absl::Time now,
@@ -672,10 +681,12 @@ ByteArtifactController::PeerBatchTransportSupport ByteArtifactController::resolv
                  .first;
         should_refresh = true;
       } else if (it->second.refresh_in_flight) {
+        const PeerBatchTransportSupportAwaitContext await_ctx{
+            .self = this,
+            .daemon_id = &daemon_id_key,
+        };
         peer_batch_transport_support_cache_mu_.Await(
-            absl::Condition(
-                +[](const PeerBatchTransportSupportCacheEntry* entry) { return !entry->refresh_in_flight; },
-                &it->second));
+            absl::Condition(&ByteArtifactController::is_peer_batch_transport_support_refresh_complete, &await_ctx));
         now = absl::Now();
         continue;
       } else if (it->second.expires_at > now) {

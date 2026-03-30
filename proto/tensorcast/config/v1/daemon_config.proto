@@ -299,11 +299,11 @@ message DaemonConfig {
       uint64 max_batch_stage_bytes_per_peer = 7;
       // 0 disables batch-native payload transport; 1 enables grpc_chunk_ref v1;
       // 2 enables communicator_source v2 with grpc_chunk_ref fallback.
-      uint32 batch_transport_protocol_version = 8;
+      optional uint32 batch_transport_protocol_version = 8;
       // Enable communicator_source export for batch-native payload transport.
-      bool communicator_source_enabled = 9;
+      optional bool communicator_source_enabled = 9;
       // Enable host-memory export when serving communicator_source packs.
-      bool host_memory_export_enabled = 10;
+      optional bool host_memory_export_enabled = 10;
       // Optional stricter floor for remaining transport TTL at issue time.
       google.protobuf.Duration minimum_batch_transport_ttl = 11;
       // Optional grace window kept after the nominal expiry before release.

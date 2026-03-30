@@ -119,6 +119,14 @@ class ByteArtifactController {
     bool refresh_in_flight{false};
   };
 
+  struct PeerBatchTransportSupportAwaitContext {
+    const ByteArtifactController* self{nullptr};
+    const std::string* daemon_id{nullptr};
+  };
+
+  [[nodiscard]] static bool is_peer_batch_transport_support_refresh_complete(
+      const PeerBatchTransportSupportAwaitContext* ctx) ABSL_NO_THREAD_SAFETY_ANALYSIS;
+
   void reconcile_policy_visibility(
       const std::vector<std::string>& artifact_ids,
       const ByteArtifactAuthorityService::Context& context) const;

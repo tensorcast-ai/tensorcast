@@ -1186,13 +1186,18 @@ int main(int argc, char** argv) {
         daemon_opts.byte_artifact_routing.payload_transport.max_batch_stage_bytes_per_peer =
             pt.max_batch_stage_bytes_per_peer();
       }
-      if (pt.batch_transport_protocol_version() != 0) {
+      if (pt.has_batch_transport_protocol_version()) {
         daemon_opts.byte_artifact_routing.payload_transport.batch_transport_protocol_version =
             pt.batch_transport_protocol_version();
       }
-      daemon_opts.byte_artifact_routing.payload_transport.communicator_source_enabled =
-          pt.communicator_source_enabled();
-      daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled = pt.host_memory_export_enabled();
+      if (pt.has_communicator_source_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.communicator_source_enabled =
+            pt.communicator_source_enabled();
+      }
+      if (pt.has_host_memory_export_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled =
+            pt.host_memory_export_enabled();
+      }
       if (pt.has_minimum_batch_transport_ttl()) {
         daemon_opts.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl =
             duration_to_absl(pt.minimum_batch_transport_ttl());
