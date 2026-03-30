@@ -44,6 +44,16 @@ enum class SourceMutationPolicy : uint8_t { kUnspecified, kReadWrite, kReadOnly 
 
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
+
+  struct DebugStats {
+    std::uint64_t produced_chunks{0};
+    std::uint64_t produced_bytes{0};
+    std::uint64_t source_read_at_us_total{0};
+    std::uint64_t gpu_write_wait_us_total{0};
+    std::uint64_t gpu_write_bytes_total{0};
+  };
+
+  std::optional<DebugStats> debug_stats;
 };
 
 struct IntoTargetStorage {

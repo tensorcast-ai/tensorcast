@@ -34,6 +34,11 @@ struct PumpState {
   std::atomic<bool> should_stop{false};
   std::atomic<bool> drain_requested{false};
   std::atomic<uint64_t> next_chunk_id{0};
+  std::atomic<uint64_t> produced_chunks_total{0};
+  std::atomic<uint64_t> produced_bytes_total{0};
+  std::atomic<uint64_t> producer_read_at_us_total{0};
+  std::atomic<uint64_t> consumer_gpu_write_wait_us_total{0};
+  std::atomic<uint64_t> consumer_gpu_write_bytes_total{0};
   absl::Status producer_status;
   absl::Status consumer_status;
   absl::Mutex status_mutex;
@@ -97,12 +102,19 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
   bool draining = false;
 
   struct AsyncSlot {
-    AsyncSlot(BufferPool& pool_in, int slot_in, uint64_t chunk_in, uint64_t dest_in, size_t bytes_in)
+    AsyncSlot(
+        BufferPool& pool_in,
+        int slot_in,
+        uint64_t chunk_in,
+        uint64_t dest_in,
+        size_t bytes_in,
+        absl::Time submitted_at_in)
         : pool(pool_in),
           slot_id(slot_in),
           global_chunk_id(chunk_in),
           dest_offset(dest_in),
           bytes(bytes_in),
+          submitted_at(submitted_at_in),
           lease(pool_in, slot_in) {}
 
     void return_if_needed() {
@@ -118,6 +130,7 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
       {
         absl::MutexLock lock(&status_mutex);
         callback_status = st;
+        completed_at = absl::Now();
         has_status = true;
       }
       status_cv.SignalAll();
@@ -128,11 +141,18 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
       while (!has_status) {
         status_cv.Wait(&status_mutex);
       }
-      has_status = false;
       if (callback_status.ok()) {
         return fallback;
       }
       return callback_status;
+    }
+
+    absl::Duration copy_elapsed() {
+      absl::MutexLock lock(&status_mutex);
+      if (!has_status) {
+        return absl::ZeroDuration();
+      }
+      return completed_at - submitted_at;
     }
 
     void request_pool_shutdown() {
@@ -144,11 +164,13 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
     uint64_t global_chunk_id;
     uint64_t dest_offset;
     size_t bytes;
+    absl::Time submitted_at;
     SlotLease lease;
     std::atomic<bool> returned{false};
     absl::Mutex status_mutex;
     absl::CondVar status_cv;
     absl::Status callback_status ABSL_GUARDED_BY(status_mutex) = absl::OkStatus();
+    absl::Time completed_at ABSL_GUARDED_BY(status_mutex);
     bool has_status ABSL_GUARDED_BY(status_mutex) = false;
   };
 
@@ -168,6 +190,12 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
     absl::Status st = handle_status;
     if (entry.slot_ctx) {
       st = entry.slot_ctx->await_final_status(handle_status);
+    }
+    if (entry.slot_ctx) {
+      state.consumer_gpu_write_wait_us_total.fetch_add(
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(entry.slot_ctx->copy_elapsed()))),
+          std::memory_order_relaxed);
+      state.consumer_gpu_write_bytes_total.fetch_add(entry.bytes, std::memory_order_relaxed);
     }
     const bool failed = !st.ok();
     if (failed) {
@@ -254,7 +282,7 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
       const uint64_t chunk_id = chunk.global_chunk_id;
       const size_t chunk_bytes = chunk.bytes_in_chunk;
       write_opts.copy_options = copy_opts;
-      auto slot_ctx = std::make_shared<AsyncSlot>(pool, slot_id, chunk_id, dest_offset, chunk_bytes);
+      auto slot_ctx = std::make_shared<AsyncSlot>(pool, slot_id, chunk_id, dest_offset, chunk_bytes, absl::Now());
       write_opts.copy_options->callbacks.on_copy_done = [slot_ctx](absl::Status st) {
         slot_ctx->record_status(st);
         slot_ctx->return_if_needed();
@@ -289,7 +317,12 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
                 .slot_ctx = std::move(slot_ctx)});
       }
     } else {
+      const absl::Time sync_write_started_at = absl::Now();
       auto status = dst.write_at(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
+      state.consumer_gpu_write_wait_us_total.fetch_add(
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - sync_write_started_at))),
+          std::memory_order_relaxed);
+      state.consumer_gpu_write_bytes_total.fetch_add(chunk.bytes_in_chunk, std::memory_order_relaxed);
       pool.return_chunk(chunk.slot_id);
       if (!status.ok()) {
         absl::MutexLock lock(&state.status_mutex);
@@ -454,6 +487,9 @@ void run_range_producer(
           << " read_at_us_total=" << read_at_us_total << " mark_chunk_ready_us_total=" << mark_ready_us_total
           << " duration_us="
           << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - producer_start)));
+  state.produced_chunks_total.fetch_add(produced_chunks, std::memory_order_relaxed);
+  state.produced_bytes_total.fetch_add(produced_bytes, std::memory_order_relaxed);
+  state.producer_read_at_us_total.fetch_add(read_at_us_total, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -464,7 +500,8 @@ absl::Status pump_ranges(
     BufferPool& pool,
     absl::Span<const Range> ranges,
     int concurrency,
-    folly::Executor::KeepAlive<> executor) {
+    folly::Executor::KeepAlive<> executor,
+    PumpDebugStats* debug_stats) {
   if (concurrency <= 0) {
     return absl::InvalidArgumentError("Concurrency must be positive");
   }
@@ -672,6 +709,14 @@ absl::Status pump_ranges(
       LOG(ERROR) << "pump_ranges returning producer error: " << state.producer_status;
       return state.producer_status;
     }
+  }
+
+  if (debug_stats != nullptr) {
+    debug_stats->produced_chunks = state.produced_chunks_total.load(std::memory_order_relaxed);
+    debug_stats->produced_bytes = state.produced_bytes_total.load(std::memory_order_relaxed);
+    debug_stats->source_read_at_us_total = state.producer_read_at_us_total.load(std::memory_order_relaxed);
+    debug_stats->gpu_write_wait_us_total = state.consumer_gpu_write_wait_us_total.load(std::memory_order_relaxed);
+    debug_stats->gpu_write_bytes_total = state.consumer_gpu_write_bytes_total.load(std::memory_order_relaxed);
   }
 
   return close_status;
