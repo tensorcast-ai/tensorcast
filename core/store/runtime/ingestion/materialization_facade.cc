@@ -2274,6 +2274,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
   std::string collective_reason = "target_not_gpu";
   strategy::ExecutionStrategyCostEstimate local_estimate = generic_estimate;
   strategy::ExecutionStrategyCostEstimate collective_estimate = generic_estimate;
+  bool shared_source_proven = false;
 
   if (ctx.target_is_gpu) {
     local_reason = "strategy_disabled";
@@ -2372,6 +2373,9 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
     const uint32_t world_size = group.has_value() ? group->world_size : 0;
     const uint64_t dedup_saving_bytes =
         world_size > 1 ? saturating_multiply_u64(environment.requested_bytes, world_size - 1) : 0;
+    shared_source_proven =
+        environment.execution_topology.source_locality == loading::SourceLocalityHint::kSharedSource ||
+        environment.execution_topology.source_sharing_domain.has_value();
     collective_estimate = strategy::ExecutionStrategyCostEstimate{
         .requested_source_bytes = environment.requested_bytes,
         .unique_source_bytes = world_size > 0 ? environment.requested_bytes : environment.requested_bytes,
@@ -2382,7 +2386,8 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
     };
 
     const bool locality_blocks_collective = strategy_config.owner_file_collective_shared_fs_only &&
-        environment.execution_topology.source_locality == loading::SourceLocalityHint::kHostLocal;
+        (!shared_source_proven ||
+         environment.execution_topology.source_locality == loading::SourceLocalityHint::kHostLocal);
     const bool collective_budget_ok = strategy_config.owner_file_collective_peak_bytes_budget == 0 ||
         collective_estimate.estimated_peak_temporary_bytes <= strategy_config.owner_file_collective_peak_bytes_budget;
     const bool collective_skew_ok = strategy_config.owner_file_collective_max_owner_skew_ratio <= 0.0 ||
@@ -2405,8 +2410,14 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       collective_reason = "collective_group_missing";
     } else if (plan.disk_context == nullptr) {
       collective_reason = "shared_disk_context_unavailable";
-    } else if (locality_blocks_collective) {
+    } else if (
+        strategy_config.owner_file_collective_shared_fs_only &&
+        environment.execution_topology.source_locality == loading::SourceLocalityHint::kHostLocal) {
       collective_reason = "source_locality_host_local";
+    } else if (!shared_source_proven && strategy_config.owner_file_collective_shared_fs_only) {
+      collective_reason = "shared_source_unproven";
+    } else if (locality_blocks_collective) {
+      collective_reason = "shared_source_unproven";
     } else if (!collective_budget_ok) {
       collective_reason = "peak_budget_exceeded";
     } else if (!collective_skew_ok) {
@@ -2466,7 +2477,10 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       break;
     case StrategyConfig::ExecutorPreference::kAuto:
     default:
-      if (local_eligible) {
+      if (collective_eligible && shared_source_proven) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
+        plan.selection_reason = "auto_prefers_owner_file_collective_shared_source";
+      } else if (local_eligible) {
         plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
         plan.selection_reason = "auto_prefers_local_batched";
       } else if (collective_eligible) {

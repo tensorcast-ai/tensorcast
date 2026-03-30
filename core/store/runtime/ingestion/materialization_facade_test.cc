@@ -3,8 +3,12 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <random>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
@@ -22,6 +26,8 @@
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
+#include "core/store/materialization/runtime/pipeline/ingestion_context.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
@@ -55,6 +61,8 @@ using tensorcast::store::runtime::ingestion::ArtifactLoweringPlan;
 using tensorcast::store::runtime::ingestion::MaterializationFacade;
 using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
+namespace pipeline_runtime = tensorcast::store::materialization::runtime::pipeline;
+namespace view_contracts = tensorcast::store::materialization::view;
 
 namespace loading = tensorcast::store::loading;
 
@@ -166,6 +174,106 @@ std::string sha256_hex(std::string_view payload) {
       absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
   absl::AsciiStrToLower(&hex);
   return hex;
+}
+
+std::filesystem::path make_temp_dir(const std::string& prefix) {
+  auto base = std::filesystem::temp_directory_path();
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  std::uniform_int_distribution<uint64_t> dist;
+  auto dir = base / (prefix + "-" + std::to_string(dist(gen)));
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+
+void write_u64_le(std::ofstream& out, uint64_t value) {
+  unsigned char buf[8];
+  for (int i = 0; i < 8; ++i) {
+    buf[i] = static_cast<unsigned char>((value >> (8 * i)) & 0xFF);
+  }
+  out.write(reinterpret_cast<const char*>(buf), 8);
+}
+
+void create_safetensors_file(
+    const std::filesystem::path& path,
+    const std::string& header_json,
+    const std::vector<unsigned char>& payload) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  REQUIRE(out.is_open());
+  write_u64_le(out, static_cast<uint64_t>(header_json.size()));
+  out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
+  if (!payload.empty()) {
+    out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+  }
+}
+
+pipeline_runtime::IngestionContext make_strategy_context(
+    FacadeHarness& harness,
+    const std::filesystem::path& artifact_path,
+    loading::SourceLocalityHint source_locality,
+    std::optional<std::string> source_sharing_domain) {
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  auto disk_context_or = tensorcast::store::loader::get_disk_artifact_context(artifact_path);
+  if (!disk_context_or.ok()) {
+    throw std::runtime_error(disk_context_or.status().ToString());
+  }
+  auto index_info_or = (*disk_context_or)->get_index_info(/*target_device_id=*/0);
+  if (!index_info_or.ok()) {
+    throw std::runtime_error(index_info_or.status().ToString());
+  }
+
+  pipeline_runtime::IngestionContext ctx{
+      .source_type = pipeline_runtime::SourceType::kDisk,
+      .request_id = "strategy-request",
+      .publish_context_id = "strategy-publish",
+      .materialize_mode = loading::MaterializeMode::LOAD_ONLY,
+      .artifact_identifier = "cgid:strategy-artifact",
+      .target =
+          loading::ReplicaTarget{
+              .location = {.type = MemoryLocation::GPU, .device_id = 0},
+          },
+      .hints =
+          loading::MaterializeHints{
+              .collective_load_group =
+                  loading::CollectiveLoadGroupHint{.group_id = "strategy", .world_size = 2, .rank = 0},
+              .source_locality = source_locality,
+              .source_sharing_domain = std::move(source_sharing_domain),
+              .artifact_id = "cgid:strategy-artifact",
+              .variant = std::optional<view_contracts::VariantIdentity>(view_contracts::VariantIdentity{
+                  .canonical_artifact_id = "cgid:strategy-artifact",
+              }),
+          },
+      .target_device = {.type = DeviceType::GPU, .ordinal = 0, .uuid = ""},
+      .target_location = MemoryLocation::GPU,
+      .target_device_id = 0,
+      .target_is_gpu = true,
+      .storage_path = artifact_path,
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .tx_slice_bytes = harness.runtime_context().tx_slice_bytes(),
+      .num_threads = harness.options().num_thread,
+      .pinned_memory_timeout = harness.options().pinned_memory_timeout,
+      .options = &harness.options(),
+      .replica_runtime = &harness.replica_runtime(),
+      .runtime_context = &harness.runtime_context(),
+      .ordinary_disk_strategy_planner = {},
+      .disk =
+          pipeline_runtime::DiskSourceMetadata{
+              .source = loading::DiskSource{.path = artifact_path, .expected_size = 64},
+              .artifact_path = artifact_path,
+              .descriptor_present = false,
+              .is_safetensors = true,
+              .source_index_json = index_info_or->canonical_index_json,
+              .source_total_size_bytes = 64,
+          },
+      .verification =
+          pipeline_runtime::VerificationState{
+              .canonical_index_json = index_info_or->canonical_index_json,
+              .logical_total_size = 64,
+          },
+      .start_time = std::chrono::steady_clock::now(),
+      .publish_to_global_store = false,
+  };
+  return ctx;
 }
 
 } // namespace
@@ -540,6 +648,81 @@ TEST_CASE("MaterializationFacade materialize_replica reuses disk ingestion path"
   harness.shutdown();
   std::error_code cleanup_ec;
   std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade strategy plan requires explicit shared-source proof for owner-file collective",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_unproven");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 7));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(harness, artifact_root, loading::SourceLocalityHint::kAuto, std::nullopt);
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  REQUIRE(plan_or->selection_reason == "auto_prefers_local_batched");
+  REQUIRE(plan_or->candidates.size() == 3);
+  REQUIRE(plan_or->candidates[2].eligible == false);
+  REQUIRE(plan_or->candidates[2].reason == "shared_source_unproven");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade AUTO prefers owner-file collective for explicit shared source",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_shared");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 11));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(
+      harness, artifact_root, loading::SourceLocalityHint::kSharedSource, std::string("shared-fs:test"));
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
+  REQUIRE(plan_or->selection_reason == "auto_prefers_owner_file_collective_shared_source");
+  REQUIRE(plan_or->candidates.size() == 3);
+  REQUIRE(plan_or->candidates[2].eligible == true);
+  REQUIRE(plan_or->candidates[2].reason == "eligible");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
 }
 
 TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stale", "[materialization_facade]") {
