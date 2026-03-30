@@ -3547,6 +3547,26 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     }
   }
 
+  struct BatchPutInstrumentation {
+    std::size_t local_home_batch_count{0};
+    std::size_t remote_home_batch_count{0};
+    std::size_t local_home_item_count{0};
+    std::size_t remote_home_item_count{0};
+    std::size_t local_stage_item_count{0};
+    std::size_t remote_stage_item_count{0};
+    std::size_t remote_payload_ref_count{0};
+    std::size_t remote_batch_transport_count{0};
+    std::size_t remote_batch_transport_communicator_count{0};
+    std::size_t remote_batch_transport_grpc_count{0};
+    std::size_t remote_batch_transport_item_count{0};
+    std::uint64_t remote_batch_transport_bytes{0};
+    absl::Duration local_stage_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_stage_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_apply_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_rpc_elapsed{absl::ZeroDuration()};
+  } stats;
+
+#if 0
   const auto stage_pending_body = [&](PendingPut* pending, BodyAccessClass access_class) {
     if (pending == nullptr || pending->body_handle.has_value()) {
       return;
@@ -3554,6 +3574,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     if (resp.outcomes(pending->outcome_index).status() != v2::BATCH_ITEM_STATUS_UNSPECIFIED) {
       return;
     }
+    const absl::Time stage_started_at = absl::Now();
 
     std::unique_ptr<store::IArtifactLoader> loader;
     store::loading::MaterializationSource source_kind{store::loading::MaterializationSource::kLocalReplica};
@@ -3695,10 +3716,19 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     pending->backing_identity = staged_body->backing_identity;
     pending->observation = staged_body->observation;
     pending->needs_source_layout = false;
+    const absl::Duration stage_elapsed = absl::Now() - stage_started_at;
+    if (access_class == BodyAccessClass::kTransientForward) {
+      ++stats.remote_stage_item_count;
+      stats.remote_stage_elapsed += stage_elapsed;
+    } else {
+      ++stats.local_stage_item_count;
+      stats.local_stage_elapsed += stage_elapsed;
+    }
   };
 
   const auto apply_local_home_put =
       [&](std::uint64_t shard_id, std::uint64_t lease_generation, const ShardPutBatch& batch) {
+        const absl::Time apply_started_at = absl::Now();
         v2::RouteFence fence;
         fence.set_shard_id(shard_id);
         fence.set_lease_generation(lease_generation);
@@ -3769,6 +3799,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
         for (std::size_t index = 0; index < authority_outcomes.size(); ++index) {
           *resp.mutable_outcomes(authority_item_indices[index]) = authority_outcomes[index];
         }
+        stats.local_home_apply_elapsed += absl::Now() - apply_started_at;
       };
 
   const bool local_only = (d_.global_store_client == nullptr);
@@ -3777,11 +3808,31 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       if (batch.items.empty()) {
         continue;
       }
+      ++stats.local_home_batch_count;
+      stats.local_home_item_count += batch.items.size();
       for (auto& pending : batch.items) {
         stage_pending_body(&pending, BodyAccessClass::kHomeDefault);
       }
       apply_local_home_put(shard_id, /*lease_generation=*/1, batch);
     }
+    VLOG(1) << "byte_artifact.batch_put_if_absent_from_region_summary"
+              << " operation_id=" << operation_id
+              << " items=" << req.items_size()
+              << " shard_count=" << shard_batches.size()
+              << " local_home_batches=" << stats.local_home_batch_count
+              << " remote_home_batches=" << stats.remote_home_batch_count
+              << " local_home_items=" << stats.local_home_item_count
+              << " remote_home_items=" << stats.remote_home_item_count
+              << " local_stage_items=" << stats.local_stage_item_count
+              << " remote_stage_items=" << stats.remote_stage_item_count
+              << " remote_payload_refs=" << stats.remote_payload_ref_count
+              << " remote_batch_transports=" << stats.remote_batch_transport_count
+              << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
+              << " remote_batch_transport_bytes=" << stats.remote_batch_transport_bytes
+              << " local_stage_ms=" << absl::ToDoubleMilliseconds(stats.local_stage_elapsed)
+              << " remote_stage_ms=" << absl::ToDoubleMilliseconds(stats.remote_stage_elapsed)
+              << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_home_apply_elapsed)
+              << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed);
     rctx.mark_success();
     return Status::OK;
   }
@@ -3804,6 +3855,81 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     (void)d_.worker_directory_cache.warm_for_daemons(
         remote_daemon_ids, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
   }
+  const auto resolve_peer_batch_transport_support_cached =
+      [&](std::string_view daemon_id) { return resolve_peer_batch_transport_support(daemon_id, now); };
+
+  struct RemoteHomePutOutcomeSlot {
+    std::string artifact_id;
+    int outcome_index{0};
+  };
+
+  struct PreparedRemoteHomeBatchPut {
+    std::uint64_t shard_id{0};
+    std::string holder_daemon_id;
+    std::uint64_t lease_generation{0};
+    int attempt{0};
+    v2::HomeBatchPutIfAbsentRequest home_req;
+    std::vector<RemoteHomePutOutcomeSlot> outcome_slots;
+    std::vector<BodyHandle> retire_handles;
+  };
+
+  struct HomeBatchPutRpcResult {
+    PreparedRemoteHomeBatchPut request;
+    grpc::Status status;
+    v2::HomeBatchPutIfAbsentResponse home_resp;
+    absl::Duration rpc_elapsed{absl::ZeroDuration()};
+  };
+
+  struct ScheduledHomeBatchPut {
+    PreparedRemoteHomeBatchPut request;
+    folly::SemiFuture<HomeBatchPutRpcResult> future;
+  };
+
+  absl::flat_hash_map<std::string, std::shared_ptr<grpc::Channel>> remote_channels;
+  remote_channels.reserve(remote_daemon_ids.size());
+  const auto get_or_create_remote_channel =
+      [&](std::string_view daemon_id) -> absl::StatusOr<std::shared_ptr<grpc::Channel>> {
+    const auto cached_it = remote_channels.find(std::string(daemon_id));
+    if (cached_it != remote_channels.end()) {
+      return cached_it->second;
+    }
+    auto address_or = d_.worker_directory_cache.resolve_daemon_address(
+        daemon_id,
+        absl::Now(),
+        absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    if (!address_or.ok()) {
+      return address_or.status();
+    }
+    auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
+    remote_channels.emplace(std::string(daemon_id), channel);
+    return channel;
+  };
+
+  const auto retire_remote_home_batch_handles = [&](PreparedRemoteHomeBatchPut* request) {
+    if (request == nullptr) {
+      return;
+    }
+    for (const auto& body_handle : request->retire_handles) {
+      (void)body_handle.retire();
+    }
+    request->retire_handles.clear();
+  };
+
+  const auto make_home_batch_put_result =
+      [&](PreparedRemoteHomeBatchPut request,
+          grpc::Status status,
+          std::string_view message = "") -> HomeBatchPutRpcResult {
+    if (!status.ok() && !message.empty()) {
+      status = grpc::Status(status.error_code(), std::string(message));
+    }
+    return HomeBatchPutRpcResult{
+        .request = std::move(request),
+        .status = std::move(status),
+    };
+  };
+
+  std::vector<PreparedRemoteHomeBatchPut> pending_remote_home_batches;
+  pending_remote_home_batches.reserve(shard_batches.size());
 
   for (auto& [shard_id, batch] : shard_batches) {
     if (batch.items.empty()) {
@@ -3828,6 +3954,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     std::string holder_daemon_id = route_it->second.holder_daemon_id;
 
     if (holder_daemon_id == local_daemon_id) {
+      ++stats.local_home_batch_count;
+      stats.local_home_item_count += batch.items.size();
       for (auto& pending : batch.items) {
         stage_pending_body(&pending, BodyAccessClass::kHomeDefault);
       }
@@ -3835,14 +3963,165 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       continue;
     }
 
+    ++stats.remote_home_batch_count;
+    stats.remote_home_item_count += batch.items.size();
     for (auto& pending : batch.items) {
       stage_pending_body(&pending, BodyAccessClass::kTransientForward);
+    }
+    const PeerBatchTransportSupport peer_transport_support =
+        resolve_peer_batch_transport_support_cached(holder_daemon_id);
+    std::vector<v2::BatchPayloadTransport> batch_transports;
+    absl::flat_hash_map<int, v2::BatchPayloadSlice> batch_slice_by_outcome_index;
+    if (peer_transport_support.supports_v1()) {
+      std::vector<BatchPayloadPackEntry> batch_entries;
+      std::vector<int> batch_entry_outcome_indices;
+      batch_entries.reserve(batch.items.size());
+      batch_entry_outcome_indices.reserve(batch.items.size());
+      for (const auto& pending : batch.items) {
+        if (!pending.body_handle.has_value() || !pending.descriptor.has_value() ||
+            resp.outcomes(pending.outcome_index).status() != v2::BATCH_ITEM_STATUS_UNSPECIFIED) {
+          continue;
+        }
+        batch_entries.push_back(
+            BatchPayloadPackEntry{
+                .artifact_id = pending.artifact_id,
+                .payload_size_bytes = pending.descriptor->size_bytes,
+                .body_handle = *pending.body_handle,
+                .body_descriptor = *pending.descriptor,
+                .backing_identity = pending.backing_identity,
+                .backing_instance_generation = pending.body_handle->binding_generation(),
+                .digest_alg = pending.descriptor->payload_digest_alg,
+                .digest_hex = pending.descriptor->payload_digest_hex,
+                .capability_expires_at = absl::InfiniteFuture(),
+            });
+        batch_entry_outcome_indices.push_back(pending.outcome_index);
+      }
+      if (!batch_entries.empty()) {
+        auto packs_or = pack_batch_payload_entries(
+            batch_entries,
+            d_.payload_transport_broker.max_batch_payload_bytes(),
+            d_.payload_transport_broker.max_batch_items());
+        if (!packs_or.ok()) {
+          LOG(WARNING) << "batch_put_if_absent_from_region batch transport fallback to payload_ref: "
+                       << packs_or.status();
+        } else {
+          for (auto& pack : *packs_or) {
+            const bool use_communicator_transport =
+                peer_transport_support.supports_v2() &&
+                d_.payload_transport_broker.batch_transport_communicator_enabled();
+            absl::Status transport_issue_status;
+            std::optional<std::string> batch_payload_ref;
+            std::optional<store::ExportRegistration> communicator_export;
+            bool emitted_communicator_transport = false;
+            if (use_communicator_transport) {
+              auto communicator_export_or = d_.payload_transport_broker.issue_batch_payload_communicator_export(
+                  pack.manifest,
+                  pack.payload,
+                  tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+                  operation_id,
+                  pack.capability_expires_at,
+                  holder_daemon_id);
+              if (communicator_export_or.ok()) {
+                batch_payload_ref = communicator_export_or->batch_payload_ref;
+                communicator_export = communicator_export_or->export_registration;
+                emitted_communicator_transport = true;
+              } else {
+                transport_issue_status = communicator_export_or.status();
+              }
+            }
+            if (!batch_payload_ref.has_value()) {
+              auto batch_payload_ref_or = d_.payload_transport_broker.issue_batch_payload_ref(
+                  pack.manifest,
+                  pack.payload,
+                  tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+                  operation_id,
+                  pack.capability_expires_at,
+                  holder_daemon_id);
+              if (batch_payload_ref_or.ok()) {
+                batch_payload_ref = *batch_payload_ref_or;
+              } else {
+                transport_issue_status = batch_payload_ref_or.status();
+              }
+            }
+            if (!batch_payload_ref.has_value()) {
+              LOG(WARNING) << "batch_put_if_absent_from_region pack fallback to payload_ref: "
+                           << transport_issue_status;
+              continue;
+            }
+            v2::BatchPayloadTransport transport;
+            const std::string transport_id = absl::StrCat("batch-transport-", batch_transports.size() + 1);
+            transport.set_transport_id(transport_id);
+            transport.mutable_manifest()->CopyFrom(pack.manifest);
+            if (use_communicator_transport && communicator_export.has_value()) {
+              auto producer_entry_or = d_.worker_directory_cache.resolve_daemon_entry(
+                  local_daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+              if (producer_entry_or.ok() && producer_entry_or->p2p_port != 0) {
+                auto* communicator_source = transport.mutable_communicator_source();
+                communicator_source->set_batch_payload_ref(*batch_payload_ref);
+                communicator_source->set_protocol_version(d_.payload_transport_broker.batch_transport_protocol_version());
+                communicator_source->set_producer_daemon_id(local_daemon_id);
+                communicator_source->set_consumer_daemon_id(holder_daemon_id);
+                communicator_source->set_producer_host(producer_entry_or->node_address);
+                communicator_source->set_producer_port(producer_entry_or->p2p_port);
+                for (const auto& remote_memory_key : communicator_export->remote_memory_keys) {
+                  communicator_source->add_remote_memory_keys(remote_memory_key);
+                }
+                for (const auto buffer_size : communicator_export->buffer_sizes) {
+                  communicator_source->add_buffer_sizes(buffer_size);
+                }
+                if (!producer_entry_or->node_id.empty()) {
+                  communicator_source->set_remote_endpoint_id(store::components::derive_endpoint_id(
+                      producer_entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
+                }
+                communicator_source->set_memory_location(v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+                communicator_source->set_total_payload_bytes(pack.manifest.total_size());
+              } else {
+                auto* grpc_chunk_ref = transport.mutable_grpc_chunk_ref();
+                grpc_chunk_ref->set_batch_payload_ref(*batch_payload_ref);
+                grpc_chunk_ref->set_protocol_version(1);
+                emitted_communicator_transport = false;
+              }
+            } else {
+              auto* grpc_chunk_ref = transport.mutable_grpc_chunk_ref();
+              grpc_chunk_ref->set_batch_payload_ref(*batch_payload_ref);
+              grpc_chunk_ref->set_protocol_version(std::min<std::uint32_t>(
+                  1, d_.payload_transport_broker.batch_transport_protocol_version()));
+            }
+            ++stats.remote_batch_transport_count;
+            if (emitted_communicator_transport) {
+              ++stats.remote_batch_transport_communicator_count;
+            } else {
+              ++stats.remote_batch_transport_grpc_count;
+            }
+            stats.remote_batch_transport_item_count += pack.source_indices.size();
+            stats.remote_batch_transport_bytes += pack.manifest.total_size();
+            LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
+                      << " operation_id=" << operation_id
+                      << " shard_id=" << shard_id
+                      << " holder_daemon_id=" << holder_daemon_id
+                      << " transport_id=" << transport_id
+                      << " kind=" << (emitted_communicator_transport ? "communicator_source" : "grpc_chunk_ref")
+                      << " item_count=" << pack.source_indices.size()
+                      << " payload_bytes=" << pack.manifest.total_size();
+            for (std::size_t pack_index = 0; pack_index < pack.source_indices.size(); ++pack_index) {
+              auto slice = pack.slices[pack_index];
+              slice.set_transport_id(transport_id);
+              batch_slice_by_outcome_index.emplace(
+                  batch_entry_outcome_indices[pack.source_indices[pack_index]], std::move(slice));
+            }
+            batch_transports.push_back(std::move(transport));
+          }
+        }
+      }
     }
     absl::flat_hash_map<std::string, std::string> payload_ref_by_artifact;
     payload_ref_by_artifact.reserve(batch.items.size());
     std::optional<std::string> payload_ref_error_message;
     for (const auto& pending : batch.items) {
       if (!pending.body_handle.has_value()) {
+        continue;
+      }
+      if (batch_slice_by_outcome_index.find(pending.outcome_index) != batch_slice_by_outcome_index.end()) {
         continue;
       }
       if (!pending.descriptor.has_value()) {
@@ -3868,17 +4147,18 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
         break;
       }
       payload_ref_by_artifact.emplace(pending.artifact_id, *payload_ref_or);
+      ++stats.remote_payload_ref_count;
     }
-    if (payload_ref_error_message.has_value()) {
-      for (const auto& pending : batch.items) {
-        if (pending.body_handle.has_value() &&
-            resp.outcomes(pending.outcome_index).status() == v2::BATCH_ITEM_STATUS_UNSPECIFIED) {
+      if (payload_ref_error_message.has_value()) {
+        for (const auto& pending : batch.items) {
+          if (pending.body_handle.has_value() &&
+              resp.outcomes(pending.outcome_index).status() == v2::BATCH_ITEM_STATUS_UNSPECIFIED) {
           *resp.mutable_outcomes(pending.outcome_index) =
               make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, *payload_ref_error_message);
         }
+        }
       }
-    }
-    if (payload_ref_by_artifact.empty()) {
+    if (payload_ref_by_artifact.empty() && batch_slice_by_outcome_index.empty()) {
       for (const auto& pending : batch.items) {
         if (pending.body_handle.has_value()) {
           (void)pending.body_handle->retire();
@@ -3887,125 +4167,1189 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       continue;
     }
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-      v2::HomeBatchPutIfAbsentResponse home_resp;
-      grpc::Status home_status;
-      auto address_or = d_.worker_directory_cache.resolve_daemon_address(
-          holder_daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
-      if (!address_or.ok()) {
-        for (const auto& pending : batch.items) {
-          if (!pending.body_handle.has_value()) {
-            continue;
-          }
-          *resp.mutable_outcomes(pending.outcome_index) =
-              make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, "home daemon address unavailable");
-        }
-        break;
+    PreparedRemoteHomeBatchPut prepared_remote_batch;
+    prepared_remote_batch.shard_id = shard_id;
+    prepared_remote_batch.holder_daemon_id = holder_daemon_id;
+    prepared_remote_batch.lease_generation = lease_generation;
+    prepared_remote_batch.home_req.mutable_fence()->set_shard_id(shard_id);
+    prepared_remote_batch.home_req.mutable_fence()->set_lease_generation(lease_generation);
+    prepared_remote_batch.home_req.mutable_fence()->set_holder_daemon_id(holder_daemon_id);
+    prepared_remote_batch.home_req.mutable_fence()->set_routing_epoch(options_.routing.routing_epoch);
+    if (ttl_ms.has_value()) {
+      prepared_remote_batch.home_req.set_ttl_ms(*ttl_ms);
+    }
+    if (req.has_operation_id()) {
+      prepared_remote_batch.home_req.set_operation_id(req.operation_id());
+    }
+    prepared_remote_batch.home_req.set_requester_daemon_id(local_daemon_id);
+    for (const auto& transport : batch_transports) {
+      prepared_remote_batch.home_req.add_batch_transports()->CopyFrom(transport);
+    }
+    prepared_remote_batch.outcome_slots.reserve(batch.items.size());
+    prepared_remote_batch.retire_handles.reserve(batch.items.size());
+    for (const auto& pending : batch.items) {
+      if (!pending.body_handle.has_value()) {
+        continue;
       }
-      auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
-      auto stub = v2::StoreDaemonService::NewStub(channel);
-      grpc::ClientContext client_ctx;
-      client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);
-      v2::HomeBatchPutIfAbsentRequest home_req;
-      home_req.mutable_fence()->set_shard_id(shard_id);
-      home_req.mutable_fence()->set_lease_generation(lease_generation);
-      home_req.mutable_fence()->set_holder_daemon_id(holder_daemon_id);
-      home_req.mutable_fence()->set_routing_epoch(options_.routing.routing_epoch);
-      if (ttl_ms.has_value()) {
-        home_req.set_ttl_ms(*ttl_ms);
+      prepared_remote_batch.retire_handles.push_back(*pending.body_handle);
+      auto* dst = prepared_remote_batch.home_req.add_items();
+      dst->set_artifact_id(pending.artifact_id);
+      dst->mutable_invariant()->CopyFrom(pending.invariant);
+      const auto batch_slice_it = batch_slice_by_outcome_index.find(pending.outcome_index);
+      if (batch_slice_it != batch_slice_by_outcome_index.end()) {
+        dst->mutable_batch_payload_slice()->CopyFrom(batch_slice_it->second);
       }
-      if (req.has_operation_id()) {
-        home_req.set_operation_id(req.operation_id());
-      }
-      for (const auto& pending : batch.items) {
-        if (!pending.body_handle.has_value()) {
-          continue;
-        }
-        const auto payload_ref_it = payload_ref_by_artifact.find(pending.artifact_id);
-        if (payload_ref_it == payload_ref_by_artifact.end()) {
-          continue;
-        }
-        auto* dst = home_req.add_items();
-        dst->set_artifact_id(pending.artifact_id);
-        dst->mutable_invariant()->CopyFrom(pending.invariant);
+      const auto payload_ref_it = payload_ref_by_artifact.find(pending.artifact_id);
+      if (payload_ref_it != payload_ref_by_artifact.end()) {
         dst->set_payload_ref(payload_ref_it->second);
+      } else if (batch_slice_it == batch_slice_by_outcome_index.end()) {
+        prepared_remote_batch.home_req.mutable_items()->RemoveLast();
+        continue;
       }
-      if (home_req.items_size() == 0) {
-        break;
-      }
-      home_status = stub->HomeBatchPutIfAbsent(&client_ctx, home_req, &home_resp);
+      prepared_remote_batch.outcome_slots.push_back(
+          RemoteHomePutOutcomeSlot{
+              .artifact_id = pending.artifact_id,
+              .outcome_index = pending.outcome_index,
+          });
+    }
+    if (prepared_remote_batch.home_req.items_size() == 0) {
+      retire_remote_home_batch_handles(&prepared_remote_batch);
+      continue;
+    }
+    pending_remote_home_batches.push_back(std::move(prepared_remote_batch));
+  }
 
-      if (!home_status.ok()) {
-        for (const auto& pending : batch.items) {
-          if (!pending.body_handle.has_value()) {
-            continue;
-          }
-          *resp.mutable_outcomes(pending.outcome_index) =
-              make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, home_status.error_message());
+  const auto dispatch_home_batch_put_wave =
+      [&](std::vector<PreparedRemoteHomeBatchPut> wave) -> std::vector<HomeBatchPutRpcResult> {
+    std::vector<HomeBatchPutRpcResult> completed_results;
+    completed_results.reserve(wave.size());
+    std::vector<ScheduledHomeBatchPut> scheduled;
+    scheduled.reserve(wave.size());
+
+    for (const auto& pending : wave) {
+      auto channel_or = get_or_create_remote_channel(pending.holder_daemon_id);
+      if (!channel_or.ok()) {
+        completed_results.push_back(make_home_batch_put_result(
+            pending,
+            grpc::Status(StatusCode::UNAVAILABLE, "home daemon address unavailable"),
+            "home daemon address unavailable"));
+        continue;
+      }
+      auto remote_channel = *channel_or;
+      scheduled.push_back(ScheduledHomeBatchPut{
+          .request = PreparedRemoteHomeBatchPut{
+              .shard_id = pending.shard_id,
+              .holder_daemon_id = pending.holder_daemon_id,
+              .lease_generation = pending.lease_generation,
+              .attempt = pending.attempt,
+              .home_req = std::move(pending.home_req),
+              .outcome_slots = std::move(pending.outcome_slots),
+              .retire_handles = std::move(pending.retire_handles),
+          },
+          .future =
+              folly::via(
+                  d_.async_runtime.blocking_executor(),
+                  [pending, remote_channel = std::move(remote_channel), this]() mutable
+                      -> HomeBatchPutRpcResult {
+                    HomeBatchPutRpcResult result;
+                    result.request = pending;
+                    auto stub = v2::StoreDaemonService::NewStub(remote_channel);
+                    grpc::ClientContext client_ctx;
+                    client_ctx.set_deadline(
+                        std::chrono::system_clock::now() + inter_daemon_home_rpc_timeout(options_));
+                    const absl::Time remote_home_rpc_started_at = absl::Now();
+                    result.status = stub->HomeBatchPutIfAbsent(&client_ctx, result.request.home_req, &result.home_resp);
+                    result.rpc_elapsed = absl::Now() - remote_home_rpc_started_at;
+                    return result;
+                  })
+                  .semi(),
+      });
+    }
+
+    for (auto& pending : scheduled) {
+      try {
+        completed_results.push_back(std::move(pending.future).get());
+      } catch (const std::exception& ex) {
+        completed_results.push_back(make_home_batch_put_result(
+            std::move(pending.request),
+            grpc::Status(StatusCode::INTERNAL, ex.what()),
+            ex.what()));
+      } catch (...) {
+        completed_results.push_back(make_home_batch_put_result(
+            std::move(pending.request),
+            grpc::Status(StatusCode::INTERNAL, "HomeBatchPutIfAbsent fanout task failed"),
+            "HomeBatchPutIfAbsent fanout task failed"));
+      }
+    }
+    return completed_results;
+  };
+
+  std::function<void(std::vector<HomeBatchPutRpcResult>, bool)> process_home_batch_put_results;
+  process_home_batch_put_results = [&](std::vector<HomeBatchPutRpcResult> results, bool allow_retry) {
+    std::vector<PreparedRemoteHomeBatchPut> retry_batches;
+    retry_batches.reserve(results.size());
+
+    for (auto& result : results) {
+      stats.remote_home_rpc_elapsed += result.rpc_elapsed;
+      LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_home_rpc_result"
+                << " operation_id=" << operation_id
+                << " shard_id=" << result.request.shard_id
+                << " holder_daemon_id=" << result.request.holder_daemon_id
+                << " requested_items=" << result.request.home_req.items_size()
+                << " attempt=" << result.request.attempt
+                << " rpc_ms=" << absl::ToDoubleMilliseconds(result.rpc_elapsed)
+                << " status_ok=" << result.status.ok()
+                << " status_code=" << result.status.error_code()
+                << " status_message=" << result.status.error_message();
+
+      if (!result.status.ok()) {
+        for (const auto& slot : result.request.outcome_slots) {
+          *resp.mutable_outcomes(slot.outcome_index) =
+              make_outcome(slot.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, result.status.error_message());
         }
-        break;
+        retire_remote_home_batch_handles(&result.request);
+        continue;
       }
 
       bool needs_redirect_retry = false;
-      if (home_resp.has_redirect() && home_resp.redirect().shard_id() == shard_id &&
-          home_resp.redirect().lease_generation() != 0 && !home_resp.redirect().holder_daemon_id().empty()) {
-        for (const auto& outcome : home_resp.outcomes()) {
+      if (result.home_resp.has_redirect() && result.home_resp.redirect().shard_id() == result.request.shard_id &&
+          result.home_resp.redirect().lease_generation() != 0 &&
+          !result.home_resp.redirect().holder_daemon_id().empty()) {
+        for (const auto& outcome : result.home_resp.outcomes()) {
           if (outcome.status() == v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION) {
             needs_redirect_retry = true;
             break;
           }
         }
       }
-      if (needs_redirect_retry && attempt == 0) {
-        const auto& redirect = home_resp.redirect();
-        const auto refreshed = d_.route_resolver.refresh_route_from_redirect(shard_id, redirect, now);
+      if (needs_redirect_retry && allow_retry && result.request.attempt == 0) {
+        const auto refreshed =
+            d_.route_resolver.refresh_route_from_redirect(result.request.shard_id, result.home_resp.redirect(), now);
         if (!refreshed.ok) {
-          for (const auto& pending : batch.items) {
-            if (!pending.body_handle.has_value()) {
-              continue;
-            }
-            *resp.mutable_outcomes(pending.outcome_index) =
-                make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, refreshed.message);
+          for (const auto& slot : result.request.outcome_slots) {
+            *resp.mutable_outcomes(slot.outcome_index) =
+                make_outcome(slot.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, refreshed.message);
           }
-          break;
+          retire_remote_home_batch_handles(&result.request);
+          continue;
         }
-        holder_daemon_id = refreshed.holder_daemon_id;
-        lease_generation = refreshed.lease_generation;
+        result.request.holder_daemon_id = refreshed.holder_daemon_id;
+        result.request.lease_generation = refreshed.lease_generation;
+        result.request.attempt = 1;
+        result.request.home_req.mutable_fence()->set_holder_daemon_id(refreshed.holder_daemon_id);
+        result.request.home_req.mutable_fence()->set_lease_generation(refreshed.lease_generation);
+        retry_batches.push_back(std::move(result.request));
         continue;
       }
 
       absl::flat_hash_map<std::string, const v2::BatchItemOutcome*> by_id;
-      by_id.reserve(home_resp.outcomes_size());
-      for (const auto& out : home_resp.outcomes()) {
+      by_id.reserve(result.home_resp.outcomes_size());
+      for (const auto& out : result.home_resp.outcomes()) {
         by_id.emplace(out.artifact_id(), &out);
       }
-      for (const auto& pending : batch.items) {
-        if (!pending.body_handle.has_value()) {
-          continue;
-        }
-        const auto out_it = by_id.find(pending.artifact_id);
+      for (const auto& slot : result.request.outcome_slots) {
+        const auto out_it = by_id.find(slot.artifact_id);
         if (out_it == by_id.end()) {
-          *resp.mutable_outcomes(pending.outcome_index) =
-              make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing home outcome");
+          *resp.mutable_outcomes(slot.outcome_index) =
+              make_outcome(slot.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing home outcome");
           continue;
         }
         v2::BatchItemStatus status = out_it->second->status();
         if (status == v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION) {
           status = v2::BATCH_ITEM_STATUS_UNAVAILABLE;
         }
-        *resp.mutable_outcomes(pending.outcome_index) =
-            make_outcome(pending.artifact_id, status, out_it->second->message());
+        *resp.mutable_outcomes(slot.outcome_index) =
+            make_outcome(slot.artifact_id, status, out_it->second->message());
       }
-      break;
+      retire_remote_home_batch_handles(&result.request);
     }
 
-    for (const auto& pending : batch.items) {
-      if (pending.body_handle.has_value()) {
-        (void)pending.body_handle->retire();
+    if (retry_batches.empty()) {
+      return;
+    }
+
+    std::vector<std::string> retry_remote_daemon_ids;
+    retry_remote_daemon_ids.reserve(retry_batches.size());
+    for (const auto& pending : retry_batches) {
+      retry_remote_daemon_ids.push_back(pending.holder_daemon_id);
+    }
+    if (!retry_remote_daemon_ids.empty()) {
+      (void)d_.worker_directory_cache.warm_for_daemons(
+          retry_remote_daemon_ids,
+          absl::Now(),
+          absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    }
+    auto retry_results = dispatch_home_batch_put_wave(std::move(retry_batches));
+    process_home_batch_put_results(std::move(retry_results), /*allow_retry=*/false);
+  };
+
+  if (!pending_remote_home_batches.empty()) {
+    auto first_wave_results = dispatch_home_batch_put_wave(std::move(pending_remote_home_batches));
+    process_home_batch_put_results(std::move(first_wave_results), /*allow_retry=*/true);
+  }
+
+  VLOG(1) << "byte_artifact.batch_put_if_absent_from_region_summary"
+            << " operation_id=" << operation_id
+            << " items=" << req.items_size()
+            << " shard_count=" << shard_batches.size()
+            << " local_home_batches=" << stats.local_home_batch_count
+            << " remote_home_batches=" << stats.remote_home_batch_count
+            << " local_home_items=" << stats.local_home_item_count
+            << " remote_home_items=" << stats.remote_home_item_count
+            << " local_stage_items=" << stats.local_stage_item_count
+            << " remote_stage_items=" << stats.remote_stage_item_count
+            << " remote_payload_refs=" << stats.remote_payload_ref_count
+            << " remote_batch_transports=" << stats.remote_batch_transport_count
+            << " remote_batch_transport_communicator=" << stats.remote_batch_transport_communicator_count
+            << " remote_batch_transport_grpc=" << stats.remote_batch_transport_grpc_count
+            << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
+            << " remote_batch_transport_bytes=" << stats.remote_batch_transport_bytes
+            << " local_stage_ms=" << absl::ToDoubleMilliseconds(stats.local_stage_elapsed)
+            << " remote_stage_ms=" << absl::ToDoubleMilliseconds(stats.remote_stage_elapsed)
+            << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_home_apply_elapsed)
+            << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed);
+  rctx.mark_success();
+  return Status::OK;
+#endif
+
+  struct RemoteHomePutOutcomeSlot {
+    std::string artifact_id;
+    int outcome_index{0};
+  };
+
+  struct PreparedRemoteHomeBatchPut {
+    std::uint64_t shard_id{0};
+    std::string holder_daemon_id;
+    std::uint64_t lease_generation{0};
+    int attempt{0};
+    v2::HomeBatchPutIfAbsentRequest home_req;
+    std::vector<RemoteHomePutOutcomeSlot> outcome_slots;
+    std::vector<BodyHandle> retire_handles;
+  };
+
+  struct HomeBatchPutRpcResult {
+    PreparedRemoteHomeBatchPut request;
+    grpc::Status status;
+    v2::HomeBatchPutIfAbsentResponse home_resp;
+    absl::Duration rpc_elapsed{absl::ZeroDuration()};
+  };
+
+  struct PutShardTaskInput {
+    std::uint64_t shard_id{0};
+    ByteArtifactRouteResolver::RouteDecision route;
+    ShardPutBatch batch;
+  };
+
+  struct PutShardTaskResult {
+    BatchPutInstrumentation stats;
+    std::vector<std::pair<int, v2::BatchItemOutcome>> outcomes;
+    absl::Duration total_elapsed{absl::ZeroDuration()};
+  };
+
+  const auto retire_remote_home_batch_handles = [&](PreparedRemoteHomeBatchPut* request) {
+    if (request == nullptr) {
+      return;
+    }
+    for (const auto& body_handle : request->retire_handles) {
+      (void)body_handle.retire();
+    }
+    request->retire_handles.clear();
+  };
+
+  const auto make_home_batch_put_result = [&](PreparedRemoteHomeBatchPut request,
+                                              grpc::Status status,
+                                              std::string_view message = "") -> HomeBatchPutRpcResult {
+    if (!status.ok() && !message.empty()) {
+      status = grpc::Status(status.error_code(), std::string(message));
+    }
+    return HomeBatchPutRpcResult{
+        .request = std::move(request),
+        .status = std::move(status),
+    };
+  };
+
+  const bool local_only = (d_.global_store_client == nullptr);
+  absl::flat_hash_map<std::uint64_t, ByteArtifactRouteResolver::RouteDecision> routes;
+  routes.reserve(shard_batches.size());
+
+  if (local_only) {
+    for (const auto& [shard_id, /*batch*/ _] : shard_batches) {
+      routes.emplace(
+          shard_id,
+          ByteArtifactRouteResolver::RouteDecision{
+              .ok = true,
+              .lease_generation = 1,
+              .holder_daemon_id = local_daemon_id,
+          });
+    }
+  } else {
+    std::vector<std::uint64_t> shard_ids;
+    shard_ids.reserve(shard_batches.size());
+    for (const auto& [shard_id, /*batch*/ _] : shard_batches) {
+      shard_ids.push_back(shard_id);
+    }
+    routes = d_.route_resolver.resolve_routes(absl::MakeSpan(shard_ids), now);
+  }
+
+  absl::flat_hash_map<std::string, bool> remote_daemon_id_set;
+  remote_daemon_id_set.reserve(routes.size());
+  std::vector<std::string> remote_daemon_ids;
+  remote_daemon_ids.reserve(routes.size());
+  for (const auto& [shard_id, route] : routes) {
+    (void)shard_id;
+    if (!route.ok || route.holder_daemon_id.empty() || route.holder_daemon_id == local_daemon_id) {
+      continue;
+    }
+    const auto [_, inserted] = remote_daemon_id_set.emplace(route.holder_daemon_id, true);
+    if (inserted) {
+      remote_daemon_ids.push_back(route.holder_daemon_id);
+    }
+  }
+
+  if (!remote_daemon_ids.empty()) {
+    (void)d_.worker_directory_cache.warm_for_daemons(
+        remote_daemon_ids, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+  }
+
+  absl::flat_hash_map<std::string, std::shared_ptr<grpc::Channel>> prebuilt_remote_channels;
+  prebuilt_remote_channels.reserve(remote_daemon_ids.size());
+  absl::flat_hash_map<std::string, PeerBatchTransportSupport> prebuilt_peer_transport_support;
+  prebuilt_peer_transport_support.reserve(remote_daemon_ids.size());
+  for (const auto& daemon_id : remote_daemon_ids) {
+    auto address_or = d_.worker_directory_cache.resolve_daemon_address(
+        daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    if (address_or.ok()) {
+      prebuilt_remote_channels.emplace(
+          daemon_id, create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials));
+    }
+    prebuilt_peer_transport_support.emplace(daemon_id, resolve_peer_batch_transport_support(daemon_id, now));
+  }
+
+  struct LocalProducerEndpoint {
+    bool available{false};
+    std::string node_address;
+    std::uint32_t p2p_port{0};
+    std::string node_id;
+  } local_producer_endpoint;
+
+  auto producer_entry_or = d_.worker_directory_cache.resolve_daemon_entry(
+      local_daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+  if (producer_entry_or.ok()) {
+    local_producer_endpoint.available = producer_entry_or->p2p_port != 0;
+    local_producer_endpoint.node_address = producer_entry_or->node_address;
+    local_producer_endpoint.p2p_port = producer_entry_or->p2p_port;
+    local_producer_endpoint.node_id = producer_entry_or->node_id;
+  }
+
+  std::vector<PutShardTaskInput> shard_tasks;
+  shard_tasks.reserve(shard_batches.size());
+  for (auto& [shard_id, batch] : shard_batches) {
+    if (batch.items.empty()) {
+      continue;
+    }
+    const auto route_it = routes.find(shard_id);
+    shard_tasks.push_back(
+        PutShardTaskInput{
+            .shard_id = shard_id,
+            .route = route_it != routes.end()
+                ? route_it->second
+                : ByteArtifactRouteResolver::RouteDecision{
+                      .ok = false,
+                      .message = "routing lease unavailable",
+                  },
+            .batch = std::move(batch),
+        });
+  }
+
+  const auto resolve_remote_channel_for_task =
+      [&](std::string_view daemon_id) -> absl::StatusOr<std::shared_ptr<grpc::Channel>> {
+    const auto cached_it = prebuilt_remote_channels.find(std::string(daemon_id));
+    if (cached_it != prebuilt_remote_channels.end()) {
+      return cached_it->second;
+    }
+    auto address_or = d_.worker_directory_cache.resolve_daemon_address(
+        daemon_id, absl::Now(), absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    if (!address_or.ok()) {
+      return address_or.status();
+    }
+    return create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
+  };
+
+  const auto resolve_peer_batch_transport_support_for_task = [&](std::string_view daemon_id) {
+    const auto cached_it = prebuilt_peer_transport_support.find(std::string(daemon_id));
+    if (cached_it != prebuilt_peer_transport_support.end()) {
+      return cached_it->second;
+    }
+    return resolve_peer_batch_transport_support(daemon_id, absl::Now());
+  };
+
+  const auto run_put_shard_task = [&](PutShardTaskInput task) -> PutShardTaskResult {
+    const absl::Time task_started_at = absl::Now();
+    PutShardTaskResult task_result;
+    auto& task_stats = task_result.stats;
+
+    std::vector<v2::BatchItemOutcome> task_outcomes(static_cast<std::size_t>(req.items_size()));
+    std::vector<bool> task_has_outcome(static_cast<std::size_t>(req.items_size()), false);
+    std::vector<int> touched_outcomes;
+    touched_outcomes.reserve(task.batch.items.size());
+
+    const auto record_outcome = [&](int outcome_index, v2::BatchItemOutcome outcome) {
+      const auto cast_index = static_cast<std::size_t>(outcome_index);
+      if (!task_has_outcome[cast_index]) {
+        task_has_outcome[cast_index] = true;
+        touched_outcomes.push_back(outcome_index);
+      }
+      task_outcomes[cast_index] = std::move(outcome);
+    };
+
+    const auto has_outcome = [&](int outcome_index) {
+      return task_has_outcome[static_cast<std::size_t>(outcome_index)];
+    };
+
+    const auto stage_pending_body = [&](PendingPut* pending, BodyAccessClass access_class) {
+      if (pending == nullptr || pending->body_handle.has_value() || has_outcome(pending->outcome_index)) {
+        return;
+      }
+      const absl::Time stage_started_at = absl::Now();
+
+      std::unique_ptr<store::IArtifactLoader> loader;
+      store::loading::MaterializationSource source_kind{store::loading::MaterializationSource::kLocalReplica};
+      std::optional<BodyBackingManager::StageResult> staged_body;
+      if (pending->inline_payload) {
+        loader = std::make_unique<store::InlineBufferLoader>(store::loading::InlineBufferSource{
+            .data = std::shared_ptr<const void>(
+                pending->inline_payload, static_cast<const void*>(pending->inline_payload->data())),
+            .size_bytes = pending->inline_payload->size(),
+        });
+      } else if (!pending->payload_ref.empty()) {
+        auto source_capability_or = d_.payload_transport_broker.resolve_payload_ref_capability(
+            d_.worker_directory_cache,
+            pending->payload_ref,
+            pending->artifact_id,
+            now,
+            absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
+            local_daemon_id,
+            tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+            operation_id);
+        if (!source_capability_or.ok()) {
+          record_outcome(
+              pending->outcome_index,
+              make_outcome(
+                  pending->artifact_id,
+                  batch_item_status_from_absl_status(source_capability_or.status()),
+                  std::string(source_capability_or.status().message())));
+          return;
+        }
+        const bool allow_reuse = access_class == BodyAccessClass::kHomeDefault;
+        if (allow_reuse && source_capability_or->body_capability.has_value()) {
+          auto reused_or = body_backing_manager_.try_reuse_body(
+              BodyBackingManager::ReuseRequest{
+                  .artifact_id = pending->artifact_id,
+                  .invariant = pending->invariant,
+                  .descriptor = source_capability_or->body_capability->descriptor,
+                  .body_handle = source_capability_or->body_capability->body_handle,
+                  .operation_id = operation_id,
+                  .access_class = access_class,
+                  .route_role = access_class == BodyAccessClass::kTransientForward ? BodyRouteRole::kTransientForwarder
+                                                                                   : BodyRouteRole::kHomeAuthority,
+              });
+          if (!reused_or.ok()) {
+            record_outcome(
+                pending->outcome_index,
+                make_outcome(
+                    pending->artifact_id,
+                    batch_item_status_from_absl_status(reused_or.status()),
+                    std::string(reused_or.status().message())));
+            return;
+          }
+          if (reused_or->has_value()) {
+            staged_body = std::move(**reused_or);
+          }
+        }
+        if (!staged_body.has_value()) {
+          auto loader_or = open_loader_from_resolved_source_capability(
+              d_.payload_transport_broker,
+              d_.worker_directory_cache,
+              *source_capability_or,
+              now,
+              absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
+              local_daemon_id,
+              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+              operation_id);
+          if (!loader_or.ok()) {
+            record_outcome(
+                pending->outcome_index,
+                make_outcome(
+                    pending->artifact_id,
+                    batch_item_status_from_absl_status(loader_or.status()),
+                    std::string(loader_or.status().message())));
+            return;
+          }
+          source_kind = loader_or->source_kind;
+          loader = std::move(loader_or->loader);
+        }
+      } else if (pending->needs_source_layout) {
+        if (!source_layout.has_value()) {
+          record_outcome(
+              pending->outcome_index,
+              make_outcome(
+                  pending->artifact_id,
+                  v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION,
+                  "source_layout validation did not produce a readable layout"));
+          return;
+        }
+        auto source_or = source_layout->open_item_source(pending->artifact_id);
+        if (!source_or.ok()) {
+          record_outcome(
+              pending->outcome_index,
+              make_outcome(
+                  pending->artifact_id,
+                  batch_item_status_from_absl_status(source_or.status()),
+                  std::string(source_or.status().message())));
+          return;
+        }
+        loader = std::make_unique<SeekableSourceLoader>(*source_or, (*source_or)->total_bytes());
+      } else {
+        record_outcome(
+            pending->outcome_index,
+            make_outcome(
+                pending->artifact_id,
+                v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT,
+                "inline_payload, payload_ref, or source_layout entry is required"));
+        return;
+      }
+
+      if (!staged_body.has_value()) {
+        auto staged_body_or = body_backing_manager_.stage_body(
+            BodyBackingManager::StageRequest{
+                .artifact_id = pending->artifact_id,
+                .invariant = pending->invariant,
+                .loader = std::move(loader),
+                .source_kind = source_kind,
+                .operation_id = operation_id,
+                .access_class = access_class,
+                .route_role = access_class == BodyAccessClass::kTransientForward ? BodyRouteRole::kTransientForwarder
+                                                                                 : BodyRouteRole::kHomeAuthority,
+            });
+        if (!staged_body_or.ok()) {
+          record_outcome(
+              pending->outcome_index,
+              make_outcome(
+                  pending->artifact_id,
+                  batch_item_status_from_absl_status(staged_body_or.status()),
+                  std::string(staged_body_or.status().message())));
+          return;
+        }
+        staged_body = std::move(*staged_body_or);
+      }
+
+      auto invariant_st =
+          byte_artifact_runtime().validate_invariant_body_descriptor(pending->invariant, staged_body->descriptor);
+      if (!invariant_st.ok()) {
+        auto retire_status = staged_body->body_handle.retire();
+        if (!retire_status.ok()) {
+          record_outcome(
+              pending->outcome_index,
+              make_outcome(
+                  pending->artifact_id,
+                  batch_item_status_from_absl_status(retire_status),
+                  std::string(retire_status.message())));
+          return;
+        }
+        record_outcome(
+            pending->outcome_index,
+            make_outcome(
+                pending->artifact_id, v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT, std::string(invariant_st.message())));
+        return;
+      }
+
+      pending->body_handle = staged_body->body_handle;
+      pending->descriptor = staged_body->descriptor;
+      pending->verified_content_descriptor = staged_body->verified_content_descriptor;
+      pending->verification_record = staged_body->verification_record;
+      pending->backing_identity = staged_body->backing_identity;
+      pending->observation = staged_body->observation;
+      pending->needs_source_layout = false;
+
+      const absl::Duration stage_elapsed = absl::Now() - stage_started_at;
+      if (access_class == BodyAccessClass::kTransientForward) {
+        ++task_stats.remote_stage_item_count;
+        task_stats.remote_stage_elapsed += stage_elapsed;
+      } else {
+        ++task_stats.local_stage_item_count;
+        task_stats.local_stage_elapsed += stage_elapsed;
+      }
+    };
+
+    const auto apply_local_home_put = [&](std::uint64_t lease_generation) {
+      const absl::Time apply_started_at = absl::Now();
+      v2::RouteFence fence;
+      fence.set_shard_id(task.shard_id);
+      fence.set_lease_generation(lease_generation);
+      fence.set_holder_daemon_id(local_daemon_id);
+      fence.set_routing_epoch(options_.routing.routing_epoch);
+      auto home_lease_or = d_.route_resolver.ensure_home_lease(fence, now);
+      if (!home_lease_or.ok()) {
+        for (const auto& pending : task.batch.items) {
+          if (!pending.body_handle.has_value()) {
+            continue;
+          }
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(
+                  pending.artifact_id,
+                  batch_item_status_from_absl_status(home_lease_or.status()),
+                  std::string(home_lease_or.status().message())));
+        }
+        return;
+      }
+      if (home_lease_or->kind != ByteArtifactRouteResolver::HomeLeaseDecision::Kind::kOwned) {
+        for (const auto& pending : task.batch.items) {
+          if (!pending.body_handle.has_value()) {
+            continue;
+          }
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, home_lease_or->message));
+        }
+        return;
+      }
+
+      std::vector<ByteArtifactAuthorityService::PutItem> authority_items;
+      std::vector<int> authority_item_indices;
+      authority_items.reserve(task.batch.items.size());
+      authority_item_indices.reserve(task.batch.items.size());
+      for (const auto& pending : task.batch.items) {
+        if (!pending.body_handle.has_value()) {
+          continue;
+        }
+        if (!pending.descriptor.has_value() || !pending.verified_content_descriptor.has_value() ||
+            !pending.verification_record.has_value() || !pending.backing_identity.has_value() ||
+            !pending.observation.has_value()) {
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(
+                  pending.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "staged body metadata is missing"));
+          continue;
+        }
+        authority_items.push_back(
+            ByteArtifactAuthorityService::PutItem{
+                .artifact_id = pending.artifact_id,
+                .invariant = pending.invariant,
+                .descriptor = *pending.descriptor,
+                .verified_content_descriptor = *pending.verified_content_descriptor,
+                .verification_record = *pending.verification_record,
+                .backing_identity = *pending.backing_identity,
+                .observation = *pending.observation,
+                .body_handle = *pending.body_handle,
+            });
+        authority_item_indices.push_back(pending.outcome_index);
+      }
+      const auto authority_outcomes = authority_service_.batch_put_if_absent(
+          authority_items,
+          ByteArtifactAuthorityService::Context{
+              .shard_id = task.shard_id,
+              .lease_generation = home_lease_or->lease_generation,
+              .routing_epoch = options_.routing.routing_epoch,
+              .shard_count = options_.routing.shard_count,
+              .now = now,
+          },
+          ttl_ms);
+      for (std::size_t index = 0; index < authority_outcomes.size(); ++index) {
+        record_outcome(authority_item_indices[index], authority_outcomes[index]);
+      }
+      task_stats.local_home_apply_elapsed += absl::Now() - apply_started_at;
+    };
+
+    const auto finalize_task = [&]() -> PutShardTaskResult {
+      for (const auto& pending : task.batch.items) {
+        if (!has_outcome(pending.outcome_index)) {
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(
+                  pending.artifact_id,
+                  v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+                  "PutShardTask completed without producing an outcome"));
+        }
+      }
+      task_result.outcomes.reserve(touched_outcomes.size());
+      for (const auto outcome_index : touched_outcomes) {
+        task_result.outcomes.emplace_back(
+            outcome_index, std::move(task_outcomes[static_cast<std::size_t>(outcome_index)]));
+      }
+      task_result.total_elapsed = absl::Now() - task_started_at;
+      LOG(INFO) << "byte_artifact.put_shard_task_summary"
+                << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                << " holder_daemon_id=" << task.route.holder_daemon_id
+                << " remote=" << (task.route.holder_daemon_id != local_daemon_id)
+                << " requested_items=" << task.batch.items.size()
+                << " local_stage_ms=" << absl::ToDoubleMilliseconds(task_stats.local_stage_elapsed)
+                << " remote_stage_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_stage_elapsed)
+                << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(task_stats.local_home_apply_elapsed)
+                << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_home_rpc_elapsed)
+                << " total_ms=" << absl::ToDoubleMilliseconds(task_result.total_elapsed);
+      return task_result;
+    };
+
+    if (!task.route.ok) {
+      const std::string message = task.route.message.empty() ? "routing lease unavailable" : task.route.message;
+      for (const auto& pending : task.batch.items) {
+        record_outcome(
+            pending.outcome_index, make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, message));
+      }
+      return finalize_task();
+    }
+
+    const bool is_remote = task.route.holder_daemon_id != local_daemon_id;
+    if (!is_remote) {
+      ++task_stats.local_home_batch_count;
+      task_stats.local_home_item_count += task.batch.items.size();
+      for (auto& pending : task.batch.items) {
+        stage_pending_body(&pending, BodyAccessClass::kHomeDefault);
+      }
+      apply_local_home_put(task.route.lease_generation != 0 ? task.route.lease_generation : 1);
+      return finalize_task();
+    }
+
+    ++task_stats.remote_home_batch_count;
+    task_stats.remote_home_item_count += task.batch.items.size();
+    for (auto& pending : task.batch.items) {
+      stage_pending_body(&pending, BodyAccessClass::kTransientForward);
+    }
+
+    const PeerBatchTransportSupport peer_transport_support =
+        resolve_peer_batch_transport_support_for_task(task.route.holder_daemon_id);
+    std::vector<v2::BatchPayloadTransport> batch_transports;
+    absl::flat_hash_map<int, v2::BatchPayloadSlice> batch_slice_by_outcome_index;
+    if (peer_transport_support.supports_v1()) {
+      std::vector<BatchPayloadPackEntry> batch_entries;
+      std::vector<int> batch_entry_outcome_indices;
+      batch_entries.reserve(task.batch.items.size());
+      batch_entry_outcome_indices.reserve(task.batch.items.size());
+      for (const auto& pending : task.batch.items) {
+        if (!pending.body_handle.has_value() || !pending.descriptor.has_value() || has_outcome(pending.outcome_index)) {
+          continue;
+        }
+        batch_entries.push_back(
+            BatchPayloadPackEntry{
+                .artifact_id = pending.artifact_id,
+                .payload_size_bytes = pending.descriptor->size_bytes,
+                .body_handle = *pending.body_handle,
+                .body_descriptor = *pending.descriptor,
+                .backing_identity = pending.backing_identity,
+                .backing_instance_generation = pending.body_handle->binding_generation(),
+                .digest_alg = pending.descriptor->payload_digest_alg,
+                .digest_hex = pending.descriptor->payload_digest_hex,
+                .capability_expires_at = absl::InfiniteFuture(),
+            });
+        batch_entry_outcome_indices.push_back(pending.outcome_index);
+      }
+      if (!batch_entries.empty()) {
+        auto packs_or = pack_batch_payload_entries(
+            batch_entries,
+            d_.payload_transport_broker.max_batch_payload_bytes(),
+            d_.payload_transport_broker.max_batch_items());
+        if (!packs_or.ok()) {
+          LOG(WARNING) << "batch_put_if_absent_from_region batch transport fallback to payload_ref: "
+                       << packs_or.status();
+        } else {
+          for (auto& pack : *packs_or) {
+            const bool use_communicator_transport = peer_transport_support.supports_v2() &&
+                d_.payload_transport_broker.batch_transport_communicator_enabled();
+            absl::Status transport_issue_status;
+            std::optional<std::string> batch_payload_ref;
+            std::optional<store::ExportRegistration> communicator_export;
+            bool emitted_communicator_transport = false;
+            if (use_communicator_transport) {
+              auto communicator_export_or = d_.payload_transport_broker.issue_batch_payload_communicator_export(
+                  pack.manifest,
+                  pack.payload,
+                  tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+                  operation_id,
+                  pack.capability_expires_at,
+                  task.route.holder_daemon_id);
+              if (communicator_export_or.ok()) {
+                batch_payload_ref = communicator_export_or->batch_payload_ref;
+                communicator_export = communicator_export_or->export_registration;
+                emitted_communicator_transport = true;
+              } else {
+                transport_issue_status = communicator_export_or.status();
+              }
+            }
+            if (!batch_payload_ref.has_value()) {
+              auto batch_payload_ref_or = d_.payload_transport_broker.issue_batch_payload_ref(
+                  pack.manifest,
+                  pack.payload,
+                  tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+                  operation_id,
+                  pack.capability_expires_at,
+                  task.route.holder_daemon_id);
+              if (batch_payload_ref_or.ok()) {
+                batch_payload_ref = *batch_payload_ref_or;
+              } else {
+                transport_issue_status = batch_payload_ref_or.status();
+              }
+            }
+            if (!batch_payload_ref.has_value()) {
+              LOG(WARNING) << "batch_put_if_absent_from_region pack fallback to payload_ref: "
+                           << transport_issue_status;
+              continue;
+            }
+
+            v2::BatchPayloadTransport transport;
+            const std::string transport_id = absl::StrCat("batch-transport-", batch_transports.size() + 1);
+            transport.set_transport_id(transport_id);
+            transport.mutable_manifest()->CopyFrom(pack.manifest);
+            if (use_communicator_transport && communicator_export.has_value()) {
+              if (local_producer_endpoint.available && local_producer_endpoint.p2p_port != 0) {
+                auto* communicator_source = transport.mutable_communicator_source();
+                communicator_source->set_batch_payload_ref(*batch_payload_ref);
+                communicator_source->set_protocol_version(
+                    d_.payload_transport_broker.batch_transport_protocol_version());
+                communicator_source->set_producer_daemon_id(local_daemon_id);
+                communicator_source->set_consumer_daemon_id(task.route.holder_daemon_id);
+                communicator_source->set_producer_host(local_producer_endpoint.node_address);
+                communicator_source->set_producer_port(local_producer_endpoint.p2p_port);
+                for (const auto& remote_memory_key : communicator_export->remote_memory_keys) {
+                  communicator_source->add_remote_memory_keys(remote_memory_key);
+                }
+                for (const auto buffer_size : communicator_export->buffer_sizes) {
+                  communicator_source->add_buffer_sizes(buffer_size);
+                }
+                if (!local_producer_endpoint.node_id.empty()) {
+                  communicator_source->set_remote_endpoint_id(
+                      store::components::derive_endpoint_id(
+                          local_producer_endpoint.node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
+                }
+                communicator_source->set_memory_location(v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+                communicator_source->set_total_payload_bytes(pack.manifest.total_size());
+              } else {
+                auto* grpc_chunk_ref = transport.mutable_grpc_chunk_ref();
+                grpc_chunk_ref->set_batch_payload_ref(*batch_payload_ref);
+                grpc_chunk_ref->set_protocol_version(1);
+                emitted_communicator_transport = false;
+              }
+            } else {
+              auto* grpc_chunk_ref = transport.mutable_grpc_chunk_ref();
+              grpc_chunk_ref->set_batch_payload_ref(*batch_payload_ref);
+              grpc_chunk_ref->set_protocol_version(
+                  std::min<std::uint32_t>(1, d_.payload_transport_broker.batch_transport_protocol_version()));
+            }
+
+            ++task_stats.remote_batch_transport_count;
+            if (emitted_communicator_transport) {
+              ++task_stats.remote_batch_transport_communicator_count;
+            } else {
+              ++task_stats.remote_batch_transport_grpc_count;
+            }
+            task_stats.remote_batch_transport_item_count += pack.source_indices.size();
+            task_stats.remote_batch_transport_bytes += pack.manifest.total_size();
+
+            LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
+                      << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                      << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
+                      << " kind=" << (emitted_communicator_transport ? "communicator_source" : "grpc_chunk_ref")
+                      << " item_count=" << pack.source_indices.size()
+                      << " payload_bytes=" << pack.manifest.total_size();
+
+            for (std::size_t pack_index = 0; pack_index < pack.source_indices.size(); ++pack_index) {
+              auto slice = pack.slices[pack_index];
+              slice.set_transport_id(transport_id);
+              batch_slice_by_outcome_index.emplace(
+                  batch_entry_outcome_indices[pack.source_indices[pack_index]], std::move(slice));
+            }
+            batch_transports.push_back(std::move(transport));
+          }
+        }
+      }
+    }
+
+    absl::flat_hash_map<std::string, std::string> payload_ref_by_artifact;
+    payload_ref_by_artifact.reserve(task.batch.items.size());
+    std::optional<std::string> payload_ref_error_message;
+    for (const auto& pending : task.batch.items) {
+      if (!pending.body_handle.has_value()) {
+        continue;
+      }
+      if (batch_slice_by_outcome_index.find(pending.outcome_index) != batch_slice_by_outcome_index.end()) {
+        continue;
+      }
+      if (!pending.descriptor.has_value()) {
+        record_outcome(
+            pending.outcome_index,
+            make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "staged descriptor is missing"));
+        payload_ref_error_message = "staged descriptor is missing";
+        break;
+      }
+      auto payload_ref_or = d_.payload_transport_broker.issue_payload_ref(
+          pending.artifact_id,
+          *pending.body_handle,
+          *pending.descriptor,
+          pending.backing_identity,
+          pending.body_handle->binding_generation(),
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+          operation_id);
+      if (!payload_ref_or.ok()) {
+        record_outcome(
+            pending.outcome_index,
+            make_outcome(
+                pending.artifact_id,
+                batch_item_status_from_absl_status(payload_ref_or.status()),
+                std::string(payload_ref_or.status().message())));
+        payload_ref_error_message = std::string(payload_ref_or.status().message());
+        break;
+      }
+      payload_ref_by_artifact.emplace(pending.artifact_id, *payload_ref_or);
+      ++task_stats.remote_payload_ref_count;
+    }
+    if (payload_ref_error_message.has_value()) {
+      for (const auto& pending : task.batch.items) {
+        if (pending.body_handle.has_value() && !has_outcome(pending.outcome_index)) {
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, *payload_ref_error_message));
+        }
+      }
+    }
+
+    if (payload_ref_by_artifact.empty() && batch_slice_by_outcome_index.empty()) {
+      for (const auto& pending : task.batch.items) {
+        if (pending.body_handle.has_value()) {
+          (void)pending.body_handle->retire();
+        }
+      }
+      return finalize_task();
+    }
+
+    PreparedRemoteHomeBatchPut prepared_remote_batch;
+    prepared_remote_batch.shard_id = task.shard_id;
+    prepared_remote_batch.holder_daemon_id = task.route.holder_daemon_id;
+    prepared_remote_batch.lease_generation = task.route.lease_generation;
+    prepared_remote_batch.home_req.mutable_fence()->set_shard_id(task.shard_id);
+    prepared_remote_batch.home_req.mutable_fence()->set_lease_generation(task.route.lease_generation);
+    prepared_remote_batch.home_req.mutable_fence()->set_holder_daemon_id(task.route.holder_daemon_id);
+    prepared_remote_batch.home_req.mutable_fence()->set_routing_epoch(options_.routing.routing_epoch);
+    if (ttl_ms.has_value()) {
+      prepared_remote_batch.home_req.set_ttl_ms(*ttl_ms);
+    }
+    if (req.has_operation_id()) {
+      prepared_remote_batch.home_req.set_operation_id(req.operation_id());
+    }
+    prepared_remote_batch.home_req.set_requester_daemon_id(local_daemon_id);
+    for (const auto& transport : batch_transports) {
+      prepared_remote_batch.home_req.add_batch_transports()->CopyFrom(transport);
+    }
+    prepared_remote_batch.outcome_slots.reserve(task.batch.items.size());
+    prepared_remote_batch.retire_handles.reserve(task.batch.items.size());
+    for (const auto& pending : task.batch.items) {
+      if (!pending.body_handle.has_value()) {
+        continue;
+      }
+      prepared_remote_batch.retire_handles.push_back(*pending.body_handle);
+      auto* dst = prepared_remote_batch.home_req.add_items();
+      dst->set_artifact_id(pending.artifact_id);
+      dst->mutable_invariant()->CopyFrom(pending.invariant);
+      const auto batch_slice_it = batch_slice_by_outcome_index.find(pending.outcome_index);
+      if (batch_slice_it != batch_slice_by_outcome_index.end()) {
+        dst->mutable_batch_payload_slice()->CopyFrom(batch_slice_it->second);
+      }
+      const auto payload_ref_it = payload_ref_by_artifact.find(pending.artifact_id);
+      if (payload_ref_it != payload_ref_by_artifact.end()) {
+        dst->set_payload_ref(payload_ref_it->second);
+      } else if (batch_slice_it == batch_slice_by_outcome_index.end()) {
+        prepared_remote_batch.home_req.mutable_items()->RemoveLast();
+        continue;
+      }
+      prepared_remote_batch.outcome_slots.push_back(
+          RemoteHomePutOutcomeSlot{
+              .artifact_id = pending.artifact_id,
+              .outcome_index = pending.outcome_index,
+          });
+    }
+    if (prepared_remote_batch.home_req.items_size() == 0) {
+      retire_remote_home_batch_handles(&prepared_remote_batch);
+      return finalize_task();
+    }
+
+    const auto dispatch_remote_home_batch = [&](PreparedRemoteHomeBatchPut request) -> HomeBatchPutRpcResult {
+      auto channel_or = resolve_remote_channel_for_task(request.holder_daemon_id);
+      if (!channel_or.ok()) {
+        return make_home_batch_put_result(
+            std::move(request),
+            grpc::Status(StatusCode::UNAVAILABLE, "home daemon address unavailable"),
+            "home daemon address unavailable");
+      }
+      HomeBatchPutRpcResult result;
+      result.request = std::move(request);
+      auto stub = v2::StoreDaemonService::NewStub(*channel_or);
+      grpc::ClientContext client_ctx;
+      client_ctx.set_deadline(std::chrono::system_clock::now() + inter_daemon_home_rpc_timeout(options_));
+      const absl::Time rpc_started_at = absl::Now();
+      result.status = stub->HomeBatchPutIfAbsent(&client_ctx, result.request.home_req, &result.home_resp);
+      result.rpc_elapsed = absl::Now() - rpc_started_at;
+      return result;
+    };
+
+    for (;;) {
+      auto rpc_result = dispatch_remote_home_batch(std::move(prepared_remote_batch));
+      task_stats.remote_home_rpc_elapsed += rpc_result.rpc_elapsed;
+      LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_home_rpc_result"
+                << " operation_id=" << operation_id << " shard_id=" << rpc_result.request.shard_id
+                << " holder_daemon_id=" << rpc_result.request.holder_daemon_id
+                << " requested_items=" << rpc_result.request.home_req.items_size()
+                << " attempt=" << rpc_result.request.attempt
+                << " rpc_ms=" << absl::ToDoubleMilliseconds(rpc_result.rpc_elapsed)
+                << " status_ok=" << rpc_result.status.ok() << " status_code=" << rpc_result.status.error_code()
+                << " status_message=" << rpc_result.status.error_message();
+
+      if (!rpc_result.status.ok()) {
+        for (const auto& slot : rpc_result.request.outcome_slots) {
+          record_outcome(
+              slot.outcome_index,
+              make_outcome(slot.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, rpc_result.status.error_message()));
+        }
+        retire_remote_home_batch_handles(&rpc_result.request);
+        return finalize_task();
+      }
+
+      bool needs_redirect_retry = false;
+      if (rpc_result.home_resp.has_redirect() &&
+          rpc_result.home_resp.redirect().shard_id() == rpc_result.request.shard_id &&
+          rpc_result.home_resp.redirect().lease_generation() != 0 &&
+          !rpc_result.home_resp.redirect().holder_daemon_id().empty()) {
+        for (const auto& outcome : rpc_result.home_resp.outcomes()) {
+          if (outcome.status() == v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION) {
+            needs_redirect_retry = true;
+            break;
+          }
+        }
+      }
+
+      if (needs_redirect_retry && rpc_result.request.attempt == 0) {
+        const auto refreshed = d_.route_resolver.refresh_route_from_redirect(
+            rpc_result.request.shard_id, rpc_result.home_resp.redirect(), absl::Now());
+        if (!refreshed.ok) {
+          for (const auto& slot : rpc_result.request.outcome_slots) {
+            record_outcome(
+                slot.outcome_index,
+                make_outcome(slot.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, refreshed.message));
+          }
+          retire_remote_home_batch_handles(&rpc_result.request);
+          return finalize_task();
+        }
+        rpc_result.request.holder_daemon_id = refreshed.holder_daemon_id;
+        rpc_result.request.lease_generation = refreshed.lease_generation;
+        rpc_result.request.attempt = 1;
+        rpc_result.request.home_req.mutable_fence()->set_holder_daemon_id(refreshed.holder_daemon_id);
+        rpc_result.request.home_req.mutable_fence()->set_lease_generation(refreshed.lease_generation);
+        prepared_remote_batch = std::move(rpc_result.request);
+        continue;
+      }
+
+      absl::flat_hash_map<std::string, const v2::BatchItemOutcome*> by_id;
+      by_id.reserve(rpc_result.home_resp.outcomes_size());
+      for (const auto& out : rpc_result.home_resp.outcomes()) {
+        by_id.emplace(out.artifact_id(), &out);
+      }
+      for (const auto& slot : rpc_result.request.outcome_slots) {
+        const auto out_it = by_id.find(slot.artifact_id);
+        if (out_it == by_id.end()) {
+          record_outcome(
+              slot.outcome_index,
+              make_outcome(slot.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "missing home outcome"));
+          continue;
+        }
+        v2::BatchItemStatus status = out_it->second->status();
+        if (status == v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION) {
+          status = v2::BATCH_ITEM_STATUS_UNAVAILABLE;
+        }
+        record_outcome(slot.outcome_index, make_outcome(slot.artifact_id, status, out_it->second->message()));
+      }
+      retire_remote_home_batch_handles(&rpc_result.request);
+      return finalize_task();
+    }
+  };
+
+  const auto merge_stats = [&](const BatchPutInstrumentation& delta) {
+    stats.local_home_batch_count += delta.local_home_batch_count;
+    stats.remote_home_batch_count += delta.remote_home_batch_count;
+    stats.local_home_item_count += delta.local_home_item_count;
+    stats.remote_home_item_count += delta.remote_home_item_count;
+    stats.local_stage_item_count += delta.local_stage_item_count;
+    stats.remote_stage_item_count += delta.remote_stage_item_count;
+    stats.remote_payload_ref_count += delta.remote_payload_ref_count;
+    stats.remote_batch_transport_count += delta.remote_batch_transport_count;
+    stats.remote_batch_transport_communicator_count += delta.remote_batch_transport_communicator_count;
+    stats.remote_batch_transport_grpc_count += delta.remote_batch_transport_grpc_count;
+    stats.remote_batch_transport_item_count += delta.remote_batch_transport_item_count;
+    stats.remote_batch_transport_bytes += delta.remote_batch_transport_bytes;
+    stats.local_stage_elapsed += delta.local_stage_elapsed;
+    stats.remote_stage_elapsed += delta.remote_stage_elapsed;
+    stats.local_home_apply_elapsed += delta.local_home_apply_elapsed;
+    stats.remote_home_rpc_elapsed += delta.remote_home_rpc_elapsed;
+  };
+
+  const std::size_t max_parallel_put_shards = std::max<std::size_t>(
+      1, std::min<std::size_t>(shard_tasks.size(), static_cast<std::size_t>(batch_get_apply_threads_)));
+
+  for (std::size_t offset = 0; offset < shard_tasks.size(); offset += max_parallel_put_shards) {
+    const std::size_t limit = std::min<std::size_t>(offset + max_parallel_put_shards, shard_tasks.size());
+    std::vector<folly::SemiFuture<PutShardTaskResult>> futures;
+    futures.reserve(limit - offset);
+    for (std::size_t index = offset; index < limit; ++index) {
+      futures.push_back(
+          folly::via(
+              folly::getKeepAliveToken(*batch_get_apply_pool_),
+              [task = std::move(shard_tasks[index]), &run_put_shard_task]() mutable {
+                return run_put_shard_task(std::move(task));
+              })
+              .semi());
+    }
+
+    for (auto& future : futures) {
+      try {
+        auto shard_result = std::move(future).get();
+        merge_stats(shard_result.stats);
+        for (auto& [outcome_index, outcome] : shard_result.outcomes) {
+          *resp.mutable_outcomes(outcome_index) = std::move(outcome);
+        }
+      } catch (const std::exception& ex) {
+        LOG(ERROR) << "PutShardTask failed: " << ex.what();
+      } catch (...) {
+        LOG(ERROR) << "PutShardTask failed with unknown exception";
       }
     }
   }
 
+  for (int index = 0; index < resp.outcomes_size(); ++index) {
+    if (resp.outcomes(index).status() != v2::BATCH_ITEM_STATUS_UNSPECIFIED) {
+      continue;
+    }
+    *resp.mutable_outcomes(index) = make_outcome(
+        resp.outcomes(index).artifact_id(),
+        v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+        "PutShardTask failed before producing an outcome");
+  }
+
+  VLOG(1) << "byte_artifact.batch_put_if_absent_from_region_summary"
+          << " operation_id=" << operation_id << " items=" << req.items_size() << " shard_count=" << shard_tasks.size()
+          << " max_parallel_put_shards=" << max_parallel_put_shards
+          << " local_home_batches=" << stats.local_home_batch_count
+          << " remote_home_batches=" << stats.remote_home_batch_count
+          << " local_home_items=" << stats.local_home_item_count
+          << " remote_home_items=" << stats.remote_home_item_count
+          << " local_stage_items=" << stats.local_stage_item_count
+          << " remote_stage_items=" << stats.remote_stage_item_count
+          << " remote_payload_refs=" << stats.remote_payload_ref_count
+          << " remote_batch_transports=" << stats.remote_batch_transport_count
+          << " remote_batch_transport_communicator=" << stats.remote_batch_transport_communicator_count
+          << " remote_batch_transport_grpc=" << stats.remote_batch_transport_grpc_count
+          << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
+          << " remote_batch_transport_bytes=" << stats.remote_batch_transport_bytes
+          << " local_stage_ms=" << absl::ToDoubleMilliseconds(stats.local_stage_elapsed)
+          << " remote_stage_ms=" << absl::ToDoubleMilliseconds(stats.remote_stage_elapsed)
+          << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_home_apply_elapsed)
+          << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed);
   rctx.mark_success();
   return Status::OK;
 }
