@@ -129,6 +129,12 @@ bool use_dedicated_single_range_concat_stream(const StrategyConfig& strategy) {
   return strategy.use_dedicated_single_range_concat_stream;
 }
 
+std::chrono::milliseconds collective_group_assemble_timeout(const StrategyConfig& strategy) {
+  return strategy.owner_file_collective_group_assemble_timeout.count() > 0
+      ? strategy.owner_file_collective_group_assemble_timeout
+      : kGroupAssembleTimeout;
+}
+
 LocalBatchedDiskLoadResult local_batched_fallback(
     std::string_view artifact_id,
     std::string_view reason,
@@ -442,6 +448,51 @@ struct Dim1PackWorkspace {
   cudaStream_t pack_stream{nullptr};
 };
 
+struct OwnerRankWorkspace {
+  std::unique_ptr<common::memory::GpuDeviceMemory> stage_buffer;
+  size_t stage_capacity_bytes{0};
+  cudaStream_t h2d_stream{nullptr};
+  cudaEvent_t ready_event{nullptr};
+  int device_id{-1};
+  Dim1PackWorkspace dim1_pack_workspace;
+
+  ~OwnerRankWorkspace() {
+    if (ready_event != nullptr && device_id >= 0) {
+      const absl::Status set_st = tensorcast::cuda::set_device(device_id);
+      if (!set_st.ok()) {
+        LOG(WARNING) << "failed to set device before destroying owner ready event: " << set_st;
+      } else {
+        const absl::Status destroy_st = tensorcast::cuda::event_destroy(ready_event);
+        if (!destroy_st.ok()) {
+          LOG(WARNING) << "failed to destroy owner ready event: " << destroy_st;
+        }
+      }
+    }
+    if (h2d_stream != nullptr && device_id >= 0) {
+      const absl::Status set_st = tensorcast::cuda::set_device(device_id);
+      if (!set_st.ok()) {
+        LOG(WARNING) << "failed to set device before destroying owner H2D stream: " << set_st;
+      } else {
+        const absl::Status destroy_st = tensorcast::cuda::stream_destroy(h2d_stream);
+        if (!destroy_st.ok()) {
+          LOG(WARNING) << "failed to destroy owner H2D stream: " << destroy_st;
+        }
+      }
+    }
+    if (dim1_pack_workspace.pack_stream != nullptr && device_id >= 0) {
+      const absl::Status set_st = tensorcast::cuda::set_device(device_id);
+      if (!set_st.ok()) {
+        LOG(WARNING) << "failed to set device before destroying owner dim1 pack stream: " << set_st;
+      } else {
+        const absl::Status destroy_st = tensorcast::cuda::stream_destroy(dim1_pack_workspace.pack_stream);
+        if (!destroy_st.ok()) {
+          LOG(WARNING) << "failed to destroy owner dim1 pack stream: " << destroy_st;
+        }
+      }
+    }
+  }
+};
+
 struct RemoteStageWorkspace {
   std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> buffers;
   std::vector<cudaEvent_t> done_events;
@@ -488,11 +539,41 @@ struct FileSegment {
   int owner_rank{0};
 };
 
-struct OwnedFileRankState {
-  std::unique_ptr<common::memory::GpuDeviceMemory> owned_payload;
-  uint64_t owned_total_bytes{0};
-  std::vector<uint64_t> owned_file_base;
-  std::vector<bool> owned_file;
+enum class OwnerBatchOpKind : uint8_t {
+  kReplicated = 0,
+  kDim0 = 1,
+  kDim1 = 2,
+};
+
+struct OwnerPlannedJob {
+  size_t job_index{0};
+  size_t file_index{0};
+  int owner_rank{0};
+  OwnerBatchOpKind op_kind{OwnerBatchOpKind::kReplicated};
+  uint64_t source_begin{0};
+  uint64_t source_end{0};
+  uint64_t source_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+};
+
+struct OwnerBatchPlan {
+  int owner_rank{0};
+  uint64_t batch_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  uint64_t first_source_offset{0};
+  std::vector<size_t> planned_job_indices;
+};
+
+struct OwnerCollectivePlan {
+  std::vector<OwnerPlannedJob> planned_jobs;
+  std::vector<OwnerBatchPlan> batches;
+  std::vector<uint64_t> owner_bytes_by_rank;
+  uint64_t unique_source_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  double owner_skew_ratio{1.0};
+  bool used_segment_split{false};
 };
 
 struct SegmentCopy {
@@ -887,6 +968,319 @@ absl::StatusOr<size_t> find_file_index_for_offset(const std::vector<FileSegment>
     }
   }
   return absl::OutOfRangeError("offset not mapped to a safetensors file");
+}
+
+uint64_t effective_owner_batch_bytes(const StrategyConfig& strategy_config, uint64_t fallback_bytes) {
+  const uint64_t configured_bytes = strategy_config.owner_file_collective_batch_bytes > 0
+      ? strategy_config.owner_file_collective_batch_bytes
+      : fallback_bytes;
+  return std::max<uint64_t>(1, configured_bytes);
+}
+
+uint64_t effective_owner_dim1_staging_bytes(const StrategyConfig& strategy_config, uint64_t fallback_bytes) {
+  const uint64_t configured_bytes = strategy_config.owner_file_collective_dim1_staging_bytes > 0
+      ? strategy_config.owner_file_collective_dim1_staging_bytes
+      : fallback_bytes;
+  return std::max<uint64_t>(1, configured_bytes);
+}
+
+absl::StatusOr<std::pair<uint64_t, uint64_t>> owner_job_source_interval(const TensorJob& job) {
+  uint64_t source_begin = 0;
+  TC_ASSIGN_OR_RETURN(source_begin, source_base_offset_bytes(job.source));
+  if (source_begin > std::numeric_limits<uint64_t>::max() - job.source.size_bytes) {
+    return absl::OutOfRangeError("owner collective source interval overflows");
+  }
+  return std::pair<uint64_t, uint64_t>{source_begin, source_begin + job.source.size_bytes};
+}
+
+uint64_t owner_job_peer_transfer_bytes(const TensorJob& job, int owner_rank) {
+  uint64_t peer_transfer_bytes = 0;
+  for (size_t rank = 0; rank < job.slices.size(); ++rank) {
+    if (static_cast<int>(rank) == owner_rank) {
+      continue;
+    }
+    peer_transfer_bytes += job.slices[rank].dst_size_bytes;
+  }
+  return peer_transfer_bytes;
+}
+
+OwnerBatchOpKind owner_batch_op_kind_for_job(const TensorJob& job) {
+  switch (job.distribution) {
+    case TensorJob::Distribution::kDim0Partitioned:
+      return OwnerBatchOpKind::kDim0;
+    case TensorJob::Distribution::kDim1Partitioned:
+      return OwnerBatchOpKind::kDim1;
+    case TensorJob::Distribution::kReplicated:
+    default:
+      return OwnerBatchOpKind::kReplicated;
+  }
+}
+
+uint64_t estimate_owner_job_peak_temporary_bytes(
+    const TensorJob& job,
+    uint64_t direct_batch_bytes,
+    uint64_t dim1_staging_bytes) {
+  switch (job.distribution) {
+    case TensorJob::Distribution::kDim1Partitioned:
+      return std::min<uint64_t>(job.source.size_bytes, dim1_staging_bytes);
+    case TensorJob::Distribution::kDim0Partitioned:
+    case TensorJob::Distribution::kReplicated:
+    default:
+      return std::min<uint64_t>(job.source.size_bytes, direct_batch_bytes);
+  }
+}
+
+double compute_owner_skew_ratio(const std::vector<uint64_t>& owner_bytes_by_rank) {
+  if (owner_bytes_by_rank.empty()) {
+    return 1.0;
+  }
+  uint64_t total_bytes = 0;
+  uint64_t max_bytes = 0;
+  for (uint64_t bytes : owner_bytes_by_rank) {
+    total_bytes += bytes;
+    max_bytes = std::max(max_bytes, bytes);
+  }
+  if (total_bytes == 0) {
+    return 1.0;
+  }
+  const double average_bytes =
+      static_cast<double>(total_bytes) / static_cast<double>(std::max<size_t>(1, owner_bytes_by_rank.size()));
+  if (average_bytes <= 0.0) {
+    return 1.0;
+  }
+  return static_cast<double>(max_bytes) / average_bytes;
+}
+
+absl::StatusOr<OwnerCollectivePlan> build_owner_file_collective_plan(
+    const std::vector<TensorJob>& jobs,
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    int world_size,
+    const StrategyConfig& strategy_config,
+    uint64_t stage_chunk_bytes) {
+  if (jobs.empty()) {
+    return OwnerCollectivePlan{};
+  }
+  if (segments.empty()) {
+    return absl::InvalidArgumentError("owner collective planning requires safetensors segments");
+  }
+  if (world_size <= 1) {
+    return absl::InvalidArgumentError("owner collective planning requires world_size > 1");
+  }
+
+  std::vector<FileSegment> file_segments;
+  TC_ASSIGN_OR_RETURN(file_segments, compute_file_segments(segments, world_size));
+  OwnerCollectivePlan plan;
+  plan.owner_bytes_by_rank.resize(static_cast<size_t>(world_size), 0);
+  plan.planned_jobs.resize(jobs.size());
+
+  std::vector<std::vector<size_t>> jobs_by_file(file_segments.size());
+  std::vector<uint64_t> source_bytes_by_file(file_segments.size(), 0);
+
+  const uint64_t batch_bytes = effective_owner_batch_bytes(strategy_config, stage_chunk_bytes);
+  const uint64_t dim1_staging_bytes = effective_owner_dim1_staging_bytes(strategy_config, batch_bytes);
+  for (size_t job_idx = 0; job_idx < jobs.size(); ++job_idx) {
+    const auto& job = jobs[job_idx];
+    std::pair<uint64_t, uint64_t> source_interval;
+    TC_ASSIGN_OR_RETURN(source_interval, owner_job_source_interval(job));
+    size_t file_idx = 0;
+    TC_ASSIGN_OR_RETURN(file_idx, find_file_index_for_offset(file_segments, source_interval.first));
+    const auto& file_segment = file_segments[file_idx];
+    if (source_interval.second > file_segment.base_offset + file_segment.data_size) {
+      return absl::UnimplementedError(
+          absl::StrCat("owner collective does not support multi-file tensor source spans: ", job.name));
+    }
+
+    auto& planned_job = plan.planned_jobs[job_idx];
+    planned_job.job_index = job_idx;
+    planned_job.file_index = file_idx;
+    planned_job.op_kind = owner_batch_op_kind_for_job(job);
+    planned_job.source_begin = source_interval.first;
+    planned_job.source_end = source_interval.second;
+    planned_job.source_bytes = source_interval.second - source_interval.first;
+    planned_job.peer_transfer_bytes = 0;
+    planned_job.peak_temporary_bytes = estimate_owner_job_peak_temporary_bytes(job, batch_bytes, dim1_staging_bytes);
+
+    jobs_by_file[file_idx].push_back(job_idx);
+    source_bytes_by_file[file_idx] += planned_job.source_bytes;
+    plan.unique_source_bytes += planned_job.source_bytes;
+  }
+
+  std::vector<size_t> file_order;
+  file_order.reserve(file_segments.size());
+  for (size_t file_idx = 0; file_idx < file_segments.size(); ++file_idx) {
+    if (source_bytes_by_file[file_idx] == 0) {
+      continue;
+    }
+    file_order.push_back(file_idx);
+  }
+  std::sort(file_order.begin(), file_order.end(), [&](size_t lhs, size_t rhs) {
+    if (source_bytes_by_file[lhs] != source_bytes_by_file[rhs]) {
+      return source_bytes_by_file[lhs] > source_bytes_by_file[rhs];
+    }
+    return file_segments[lhs].base_offset < file_segments[rhs].base_offset;
+  });
+
+  auto assign_jobs_greedily = [&](const std::vector<size_t>& job_order) {
+    std::fill(plan.owner_bytes_by_rank.begin(), plan.owner_bytes_by_rank.end(), 0);
+    for (size_t planned_idx = 0; planned_idx < plan.planned_jobs.size(); ++planned_idx) {
+      plan.planned_jobs[planned_idx].owner_rank = 0;
+    }
+    for (size_t job_idx : job_order) {
+      size_t chosen_rank = 0;
+      uint64_t chosen_bytes = plan.owner_bytes_by_rank[0];
+      for (size_t rank = 1; rank < plan.owner_bytes_by_rank.size(); ++rank) {
+        if (plan.owner_bytes_by_rank[rank] < chosen_bytes) {
+          chosen_rank = rank;
+          chosen_bytes = plan.owner_bytes_by_rank[rank];
+        }
+      }
+      plan.planned_jobs[job_idx].owner_rank = static_cast<int>(chosen_rank);
+      plan.owner_bytes_by_rank[chosen_rank] += plan.planned_jobs[job_idx].source_bytes;
+    }
+  };
+
+  {
+    std::fill(plan.owner_bytes_by_rank.begin(), plan.owner_bytes_by_rank.end(), 0);
+    for (size_t file_idx : file_order) {
+      size_t chosen_rank = 0;
+      uint64_t chosen_bytes = plan.owner_bytes_by_rank[0];
+      for (size_t rank = 1; rank < plan.owner_bytes_by_rank.size(); ++rank) {
+        if (plan.owner_bytes_by_rank[rank] < chosen_bytes) {
+          chosen_rank = rank;
+          chosen_bytes = plan.owner_bytes_by_rank[rank];
+        }
+      }
+      for (size_t job_idx : jobs_by_file[file_idx]) {
+        plan.planned_jobs[job_idx].owner_rank = static_cast<int>(chosen_rank);
+      }
+      plan.owner_bytes_by_rank[chosen_rank] += source_bytes_by_file[file_idx];
+    }
+  }
+
+  plan.owner_skew_ratio = compute_owner_skew_ratio(plan.owner_bytes_by_rank);
+  const bool skew_exceeds_threshold = strategy_config.owner_file_collective_max_owner_skew_ratio > 0.0 &&
+      plan.owner_skew_ratio > strategy_config.owner_file_collective_max_owner_skew_ratio;
+  if (skew_exceeds_threshold) {
+    std::vector<size_t> job_order;
+    job_order.reserve(plan.planned_jobs.size());
+    for (size_t job_idx = 0; job_idx < plan.planned_jobs.size(); ++job_idx) {
+      job_order.push_back(job_idx);
+    }
+    std::sort(job_order.begin(), job_order.end(), [&](size_t lhs, size_t rhs) {
+      const auto& lhs_job = plan.planned_jobs[lhs];
+      const auto& rhs_job = plan.planned_jobs[rhs];
+      if (lhs_job.source_bytes != rhs_job.source_bytes) {
+        return lhs_job.source_bytes > rhs_job.source_bytes;
+      }
+      if (lhs_job.file_index != rhs_job.file_index) {
+        return lhs_job.file_index < rhs_job.file_index;
+      }
+      return lhs_job.source_begin < rhs_job.source_begin;
+    });
+    assign_jobs_greedily(job_order);
+    plan.owner_skew_ratio = compute_owner_skew_ratio(plan.owner_bytes_by_rank);
+    plan.used_segment_split = true;
+  }
+
+  for (auto& planned_job : plan.planned_jobs) {
+    planned_job.peer_transfer_bytes =
+        owner_job_peer_transfer_bytes(jobs[planned_job.job_index], planned_job.owner_rank);
+    plan.peer_transfer_bytes += planned_job.peer_transfer_bytes;
+  }
+
+  std::vector<std::vector<size_t>> jobs_by_owner(plan.owner_bytes_by_rank.size());
+  for (size_t planned_idx = 0; planned_idx < plan.planned_jobs.size(); ++planned_idx) {
+    jobs_by_owner[static_cast<size_t>(plan.planned_jobs[planned_idx].owner_rank)].push_back(planned_idx);
+  }
+
+  for (size_t rank = 0; rank < jobs_by_owner.size(); ++rank) {
+    auto& owner_jobs = jobs_by_owner[rank];
+    if (owner_jobs.empty()) {
+      continue;
+    }
+    std::sort(owner_jobs.begin(), owner_jobs.end(), [&](size_t lhs, size_t rhs) {
+      const auto& lhs_job = plan.planned_jobs[lhs];
+      const auto& rhs_job = plan.planned_jobs[rhs];
+      if (lhs_job.file_index != rhs_job.file_index) {
+        return lhs_job.file_index < rhs_job.file_index;
+      }
+      return lhs_job.source_begin < rhs_job.source_begin;
+    });
+
+    OwnerBatchPlan current_batch;
+    current_batch.owner_rank = static_cast<int>(rank);
+    current_batch.first_source_offset = std::numeric_limits<uint64_t>::max();
+    for (size_t planned_idx : owner_jobs) {
+      const auto& planned_job = plan.planned_jobs[planned_idx];
+      if (!current_batch.planned_job_indices.empty() &&
+          current_batch.batch_bytes + planned_job.source_bytes > batch_bytes) {
+        plan.batches.push_back(std::move(current_batch));
+        current_batch = OwnerBatchPlan{
+            .owner_rank = static_cast<int>(rank),
+            .first_source_offset = std::numeric_limits<uint64_t>::max(),
+        };
+      }
+      current_batch.batch_bytes += planned_job.source_bytes;
+      current_batch.peer_transfer_bytes += planned_job.peer_transfer_bytes;
+      current_batch.peak_temporary_bytes =
+          std::max(current_batch.peak_temporary_bytes, planned_job.peak_temporary_bytes);
+      current_batch.first_source_offset = std::min(current_batch.first_source_offset, planned_job.source_begin);
+      current_batch.planned_job_indices.push_back(planned_idx);
+    }
+    if (!current_batch.planned_job_indices.empty()) {
+      plan.batches.push_back(std::move(current_batch));
+    }
+  }
+
+  std::sort(plan.batches.begin(), plan.batches.end(), [](const OwnerBatchPlan& lhs, const OwnerBatchPlan& rhs) {
+    if (lhs.first_source_offset != rhs.first_source_offset) {
+      return lhs.first_source_offset < rhs.first_source_offset;
+    }
+    return lhs.owner_rank < rhs.owner_rank;
+  });
+  return plan;
+}
+
+absl::Status ensure_owner_rank_workspace(OwnerRankWorkspace* workspace, int device_id, size_t stage_bytes) {
+  if (workspace == nullptr) {
+    return absl::InvalidArgumentError("owner rank workspace is required");
+  }
+  if (workspace->device_id != device_id) {
+    workspace->stage_buffer.reset();
+    workspace->stage_capacity_bytes = 0;
+    workspace->dim1_pack_workspace.pack_buffers.clear();
+    workspace->dim1_pack_workspace.capacity_bytes = 0;
+    if (workspace->ready_event != nullptr && workspace->device_id >= 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(workspace->device_id));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_destroy(workspace->ready_event));
+      workspace->ready_event = nullptr;
+    }
+    if (workspace->h2d_stream != nullptr && workspace->device_id >= 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(workspace->device_id));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(workspace->h2d_stream));
+      workspace->h2d_stream = nullptr;
+    }
+    if (workspace->dim1_pack_workspace.pack_stream != nullptr && workspace->device_id >= 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(workspace->device_id));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(workspace->dim1_pack_workspace.pack_stream));
+      workspace->dim1_pack_workspace.pack_stream = nullptr;
+    }
+    workspace->device_id = device_id;
+  }
+
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_id));
+  if (workspace->stage_buffer == nullptr || workspace->stage_capacity_bytes < stage_bytes) {
+    workspace->stage_buffer = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(workspace->stage_buffer->allocate(stage_bytes, device_id));
+    workspace->stage_capacity_bytes = stage_bytes;
+  }
+  if (workspace->h2d_stream == nullptr) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&workspace->h2d_stream, cudaStreamNonBlocking));
+  }
+  if (workspace->ready_event == nullptr) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&workspace->ready_event, cudaEventDisableTiming));
+  }
+  return absl::OkStatus();
 }
 
 std::vector<loader::Range> split_even_ranges(uint64_t base, uint64_t total_bytes, int parts) {
@@ -2022,6 +2416,8 @@ absl::StatusOr<std::optional<std::unique_ptr<common::memory::GpuDeviceMemory>>> 
 
   if (disable_collective_whole_source_preload()) {
     LOG(INFO) << "collective_whole_source skipped"
+              << " prototype=1"
+              << " cleanup_target=0109"
               << " reason=disabled"
               << " source_bytes=" << source_bytes;
     return std::optional<std::unique_ptr<common::memory::GpuDeviceMemory>>{};
@@ -2032,6 +2428,8 @@ absl::StatusOr<std::optional<std::unique_ptr<common::memory::GpuDeviceMemory>>> 
   TC_RETURN_IF_ERROR(tensorcast::cuda::get_memory_info(&free_bytes, &total_bytes, root_device_id));
   if (source_bytes + kWholeSourceFreeMemoryReserveBytes > free_bytes) {
     LOG(INFO) << "collective_whole_source skipped"
+              << " prototype=1"
+              << " cleanup_target=0109"
               << " reason=insufficient_free_memory"
               << " source_bytes=" << source_bytes << " free_bytes=" << free_bytes << " total_bytes=" << total_bytes
               << " reserve_bytes=" << kWholeSourceFreeMemoryReserveBytes;
@@ -3553,126 +3951,39 @@ absl::Status execute_group_collective(
     return jobs_or.status();
   }
   const auto jobs_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - jobs_start).count();
-  std::vector<FileSegment> owner_file_segments;
-  std::vector<OwnedFileRankState> owner_states;
-  double owner_preload_sec = 0.0;
+  const bool owner_file_enabled = enable_collective_owner_file_strategy(strategy_config);
+  std::optional<OwnerCollectivePlan> owner_collective_plan;
+  double owner_plan_sec = 0.0;
+  size_t owner_batch_count = 0;
   size_t owner_replicated_jobs = 0;
   size_t owner_dim0_jobs = 0;
+  size_t owner_dim1_jobs = 0;
   double owner_exec_sec = 0.0;
   uint64_t owner_peer_transfer_bytes = 0;
-  const bool owner_file_enabled = enable_collective_owner_file_strategy(strategy_config);
   if (owner_file_enabled) {
-    auto file_segments_or =
-        compute_file_segments(participants.front().disk_context->safetensors_segments(), clique->world_size());
-    if (!file_segments_or.ok()) {
-      return file_segments_or.status();
+    const auto owner_plan_start = std::chrono::steady_clock::now();
+    auto owner_plan_or = build_owner_file_collective_plan(
+        *jobs_or,
+        participants.front().disk_context->safetensors_segments(),
+        clique->world_size(),
+        strategy_config,
+        chunk_bytes);
+    owner_plan_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_plan_start).count();
+    if (owner_plan_or.ok()) {
+      owner_collective_plan = std::move(*owner_plan_or);
+      owner_batch_count = owner_collective_plan->batches.size();
+      LOG(INFO) << "collective_owner_file_batched plan"
+                << " artifact_id=" << participants.front().replica_key.artifact_id
+                << " batches=" << owner_collective_plan->batches.size()
+                << " unique_source_bytes=" << owner_collective_plan->unique_source_bytes
+                << " peer_transfer_bytes=" << owner_collective_plan->peer_transfer_bytes
+                << " owner_skew_ratio=" << owner_collective_plan->owner_skew_ratio
+                << " segment_split=" << (owner_collective_plan->used_segment_split ? 1 : 0);
+    } else {
+      LOG(WARNING) << "collective_owner_file_batched fallback"
+                   << " artifact_id=" << participants.front().replica_key.artifact_id
+                   << " status=" << owner_plan_or.status();
     }
-    owner_file_segments = std::move(*file_segments_or);
-    owner_states.resize(participants.size());
-    for (size_t rank = 0; rank < participants.size(); ++rank) {
-      auto& state = owner_states[rank];
-      state.owned_file_base.assign(owner_file_segments.size(), 0);
-      state.owned_file.assign(owner_file_segments.size(), false);
-      for (size_t file_idx = 0; file_idx < owner_file_segments.size(); ++file_idx) {
-        if (owner_file_segments[file_idx].owner_rank != static_cast<int>(rank)) {
-          continue;
-        }
-        state.owned_file[file_idx] = true;
-        state.owned_file_base[file_idx] = state.owned_total_bytes;
-        state.owned_total_bytes += owner_file_segments[file_idx].data_size;
-      }
-    }
-    const auto preload_start = std::chrono::steady_clock::now();
-    std::vector<absl::Status> preload_status(participants.size(), absl::OkStatus());
-    std::vector<std::thread> preload_threads;
-    preload_threads.reserve(participants.size());
-    for (size_t rank = 0; rank < participants.size(); ++rank) {
-      if (owner_states[rank].owned_total_bytes == 0) {
-        continue;
-      }
-      preload_threads.emplace_back([&, rank]() {
-        auto& state = owner_states[rank];
-        const int device_id = participants[rank].device_id;
-        auto payload = std::make_unique<common::memory::GpuDeviceMemory>();
-        absl::Status status = tensorcast::cuda::set_device(device_id);
-        if (!status.ok()) {
-          preload_status[rank] = status;
-          return;
-        }
-        status = payload->allocate(static_cast<size_t>(state.owned_total_bytes), device_id);
-        if (!status.ok()) {
-          preload_status[rank] = status;
-          return;
-        }
-
-        loader::MultiSafetensorsSource backing_source(participants.front().disk_context->safetensors_segments());
-        std::vector<RemappedSource::Segment> remap;
-        remap.reserve(owner_file_segments.size());
-        for (size_t file_idx = 0; file_idx < owner_file_segments.size(); ++file_idx) {
-          if (!state.owned_file[file_idx]) {
-            continue;
-          }
-          remap.push_back(
-              RemappedSource::Segment{
-                  .dst_offset = state.owned_file_base[file_idx],
-                  .src_offset = owner_file_segments[file_idx].base_offset,
-                  .end_offset = state.owned_file_base[file_idx] + owner_file_segments[file_idx].data_size,
-              });
-        }
-        RemappedSource remapped_source(gsl::not_null<loader::SeekableSource*>{&backing_source}, std::move(remap));
-        loader::GpuMemorySink sink(
-            loader::GpuMemorySink::Options{
-                .gpu_base_ptr = gsl::not_null<void*>{payload->get()},
-                .total_size = state.owned_total_bytes,
-                .chunk_size = chunk_bytes,
-                .device_id = device_id,
-                .allocation = nullptr,
-                .gpu_sched_enabled = false,
-                .gpu_sched_limit_bytes = loader::DEFAULT_GPU_SCHED_LIMIT_BYTES,
-                .gpu_sched_limit_copies = loader::DEFAULT_GPU_SCHED_LIMIT_COPIES,
-            });
-        auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-            /*num_chunks=*/2, chunk_bytes, pinned_pool);
-        status = session_spb->initialize(
-            pinned_timeout,
-            absl::StrCat(
-                "collective_owner_file_preload artifact_id=",
-                participants.front().replica_key.artifact_id,
-                " rank=",
-                rank));
-        if (!status.ok()) {
-          preload_status[rank] = status;
-          return;
-        }
-        loader::StreamingBufferAdapter adapter(session_spb);
-        const auto ranges = split_even_ranges(/*base=*/0, state.owned_total_bytes, /*parts=*/2);
-        status = loader::pump_ranges(
-            remapped_source,
-            sink,
-            adapter,
-            ranges,
-            /*concurrency=*/2,
-            whole_source_load_runtime().blocking_executor());
-        if (status.ok()) {
-          status = sink.close();
-        }
-        if (status.ok()) {
-          state.owned_payload = std::move(payload);
-        }
-        preload_status[rank] = status;
-      });
-    }
-    for (auto& thread : preload_threads) {
-      if (thread.joinable()) {
-        thread.join();
-      }
-    }
-    for (const auto& status : preload_status) {
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    owner_preload_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - preload_start).count();
   }
   const auto whole_source_start = std::chrono::steady_clock::now();
   std::unique_ptr<common::memory::GpuDeviceMemory> root_source;
@@ -3680,18 +3991,28 @@ absl::Status execute_group_collective(
   if (participants.front().disk_context->safetensors_segments().empty()) {
     return absl::FailedPreconditionError("collective disk load requires non-empty safetensors segments");
   }
-  auto root_source_or = maybe_load_whole_source_to_root_buffer(
-      participants,
-      participants.front().disk_context->safetensors_segments(),
-      pinned_pool,
-      pinned_timeout,
-      chunk_bytes);
-  if (!root_source_or.ok()) {
-    return root_source_or.status();
-  }
-  if (root_source_or->has_value()) {
-    root_source = std::move(**root_source_or);
-    whole_source_enabled = true;
+  if (!owner_file_enabled) {
+    auto root_source_or = maybe_load_whole_source_to_root_buffer(
+        participants,
+        participants.front().disk_context->safetensors_segments(),
+        pinned_pool,
+        pinned_timeout,
+        chunk_bytes);
+    if (!root_source_or.ok()) {
+      return root_source_or.status();
+    }
+    if (root_source_or->has_value()) {
+      root_source = std::move(**root_source_or);
+      whole_source_enabled = true;
+      LOG(INFO) << "collective_whole_source prototype"
+                << " artifact_id=" << participants.front().replica_key.artifact_id << " prototype=1"
+                << " cleanup_target=0109"
+                << " source_bytes=" << root_source->size();
+    }
+  } else {
+    LOG(INFO) << "collective_whole_source skipped"
+              << " artifact_id=" << participants.front().replica_key.artifact_id
+              << " reason=owner_file_batched_enabled";
   }
   const auto whole_source_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - whole_source_start).count();
@@ -3725,111 +4046,78 @@ absl::Status execute_group_collective(
   double replicated_sec = 0.0;
   double dim0_sec = 0.0;
   double dim1_sec = 0.0;
-  for (const auto& job : *jobs_or) {
-    bool handled_by_owner_file = false;
-    if (owner_file_enabled &&
-        (job.distribution == TensorJob::Distribution::kReplicated ||
-         job.distribution == TensorJob::Distribution::kDim0Partitioned)) {
-      size_t file_idx = 0;
-      auto file_idx_or = find_file_index_for_offset(owner_file_segments, job.source.offset);
-      if (file_idx_or.ok()) {
-        file_idx = *file_idx_or;
-        const auto& file_segment = owner_file_segments[file_idx];
-        if (job.source.offset + job.source.size_bytes <= file_segment.base_offset + file_segment.data_size) {
-          const int owner_rank = file_segment.owner_rank;
-          auto& owner_state = owner_states[static_cast<size_t>(owner_rank)];
-          if (owner_state.owned_payload != nullptr && owner_state.owned_file[file_idx]) {
-            const uint64_t tensor_file_off = job.source.offset - file_segment.base_offset;
-            const auto* tensor_ptr = static_cast<const std::uint8_t*>(owner_state.owned_payload->get()) +
-                owner_state.owned_file_base[file_idx] + tensor_file_off;
-            const auto owner_start = std::chrono::steady_clock::now();
-            if (job.distribution == TensorJob::Distribution::kReplicated) {
-              const auto& owner_slice = job.slices[static_cast<size_t>(owner_rank)];
-              if (owner_slice.dst_size_bytes > 0) {
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::set_device(participants[static_cast<size_t>(owner_rank)].device_id));
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[static_cast<size_t>(owner_rank)].gpu_ptr) +
-                    owner_slice.dst_offset;
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::memcpy_async(
-                        dst_ptr,
-                        tensor_ptr,
-                        static_cast<size_t>(owner_slice.dst_size_bytes),
-                        cudaMemcpyDeviceToDevice,
-                        clique->stream(owner_rank)));
-              }
-              TC_RETURN_IF_ERROR(clique->group_start());
-              for (size_t peer = 0; peer < participants.size(); ++peer) {
-                if (static_cast<int>(peer) == owner_rank) {
-                  continue;
-                }
-                const auto& peer_slice = job.slices[peer];
-                if (peer_slice.dst_size_bytes == 0) {
-                  continue;
-                }
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[peer].gpu_ptr) + peer_slice.dst_offset;
-                TC_RETURN_IF_ERROR(clique->send_u8(
-                    owner_rank, tensor_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), static_cast<int>(peer)));
-                TC_RETURN_IF_ERROR(clique->recv_u8(
-                    static_cast<int>(peer), dst_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), owner_rank));
-                owner_peer_transfer_bytes += peer_slice.dst_size_bytes;
-              }
-              TC_RETURN_IF_ERROR(clique->group_end());
-              TC_RETURN_IF_ERROR(clique->synchronize_all());
-              owner_replicated_jobs += 1;
-              owner_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_start).count();
-              handled_by_owner_file = true;
-            } else if (job.distribution == TensorJob::Distribution::kDim0Partitioned) {
-              uint64_t per_row_bytes = job.source.elem_size;
-              for (size_t dim = 1; dim < job.source.shape.size(); ++dim) {
-                per_row_bytes *= static_cast<uint64_t>(job.source.shape[dim]);
-              }
-              const auto& owner_slice = job.slices[static_cast<size_t>(owner_rank)];
-              if (owner_slice.dst_size_bytes > 0) {
-                const uint64_t owner_src_off = static_cast<uint64_t>(owner_slice.start) * per_row_bytes;
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[static_cast<size_t>(owner_rank)].gpu_ptr) +
-                    owner_slice.dst_offset;
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::set_device(participants[static_cast<size_t>(owner_rank)].device_id));
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::memcpy_async(
-                        dst_ptr,
-                        tensor_ptr + owner_src_off,
-                        static_cast<size_t>(owner_slice.dst_size_bytes),
-                        cudaMemcpyDeviceToDevice,
-                        clique->stream(owner_rank)));
-              }
-              TC_RETURN_IF_ERROR(clique->group_start());
-              for (size_t peer = 0; peer < participants.size(); ++peer) {
-                if (static_cast<int>(peer) == owner_rank) {
-                  continue;
-                }
-                const auto& peer_slice = job.slices[peer];
-                if (peer_slice.dst_size_bytes == 0) {
-                  continue;
-                }
-                const uint64_t peer_src_off = static_cast<uint64_t>(peer_slice.start) * per_row_bytes;
-                const auto* src_ptr = tensor_ptr + peer_src_off;
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[peer].gpu_ptr) + peer_slice.dst_offset;
-                TC_RETURN_IF_ERROR(clique->send_u8(
-                    owner_rank, src_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), static_cast<int>(peer)));
-                TC_RETURN_IF_ERROR(clique->recv_u8(
-                    static_cast<int>(peer), dst_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), owner_rank));
-                owner_peer_transfer_bytes += peer_slice.dst_size_bytes;
-              }
-              TC_RETURN_IF_ERROR(clique->group_end());
-              TC_RETURN_IF_ERROR(clique->synchronize_all());
-              owner_dim0_jobs += 1;
-              owner_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_start).count();
-              handled_by_owner_file = true;
-            }
-          }
+  std::vector<bool> handled_by_owner_file(jobs_or->size(), false);
+  if (owner_collective_plan.has_value()) {
+    const uint64_t owner_direct_chunk_bytes =
+        std::min<uint64_t>(chunk_bytes, effective_owner_batch_bytes(strategy_config, chunk_bytes));
+    const uint64_t owner_dim1_chunk_bytes = std::min<uint64_t>(
+        owner_direct_chunk_bytes, effective_owner_dim1_staging_bytes(strategy_config, owner_direct_chunk_bytes));
+    const size_t owner_stage_bytes = static_cast<size_t>(std::max(owner_direct_chunk_bytes, owner_dim1_chunk_bytes));
+    std::vector<OwnerRankWorkspace> owner_workspaces(participants.size());
+    for (const auto& batch : owner_collective_plan->batches) {
+      auto& workspace = owner_workspaces[static_cast<size_t>(batch.owner_rank)];
+      TC_RETURN_IF_ERROR(ensure_owner_rank_workspace(
+          &workspace, participants[static_cast<size_t>(batch.owner_rank)].device_id, owner_stage_bytes));
+      for (size_t planned_idx : batch.planned_job_indices) {
+        const auto& planned_job = owner_collective_plan->planned_jobs[planned_idx];
+        const auto& job = (*jobs_or)[planned_job.job_index];
+        const auto owner_start = std::chrono::steady_clock::now();
+        switch (job.distribution) {
+          case TensorJob::Distribution::kReplicated:
+            TC_RETURN_IF_ERROR(execute_replicated_tensor(
+                job,
+                participants,
+                source,
+                *clique,
+                host_buffer,
+                static_cast<size_t>(owner_direct_chunk_bytes),
+                workspace.stage_buffer->get(),
+                workspace.h2d_stream,
+                workspace.ready_event,
+                batch.owner_rank));
+            owner_replicated_jobs += 1;
+            break;
+          case TensorJob::Distribution::kDim0Partitioned:
+            TC_RETURN_IF_ERROR(execute_dim0_tensor(
+                job,
+                participants,
+                source,
+                *clique,
+                host_buffer,
+                static_cast<size_t>(owner_direct_chunk_bytes),
+                workspace.stage_buffer->get(),
+                workspace.h2d_stream,
+                workspace.ready_event,
+                batch.owner_rank));
+            owner_dim0_jobs += 1;
+            break;
+          case TensorJob::Distribution::kDim1Partitioned:
+            TC_RETURN_IF_ERROR(execute_dim1_tensor(
+                job,
+                participants,
+                source,
+                *clique,
+                host_buffer,
+                static_cast<size_t>(owner_dim1_chunk_bytes),
+                workspace.stage_buffer->get(),
+                workspace.h2d_stream,
+                workspace.ready_event,
+                batch.owner_rank,
+                &workspace.dim1_pack_workspace));
+            owner_dim1_jobs += 1;
+            break;
         }
+        owner_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_start).count();
+        owner_peer_transfer_bytes += planned_job.peer_transfer_bytes;
+        handled_by_owner_file[planned_job.job_index] = true;
       }
     }
-    if (handled_by_owner_file) {
+  }
+  for (size_t job_idx = 0; job_idx < jobs_or->size(); ++job_idx) {
+    if (handled_by_owner_file[job_idx]) {
       continue;
     }
+    const auto& job = (*jobs_or)[job_idx];
     const auto job_start = std::chrono::steady_clock::now();
     switch (job.distribution) {
       case TensorJob::Distribution::kReplicated:
@@ -3912,10 +4200,16 @@ absl::Status execute_group_collective(
   LOG(INFO) << "collective_disk_load timings: clique_init=" << clique_sec << "s"
             << " clique_cache_hit=" << (clique_cache_hit ? 1 : 0) << " pinned_alloc=" << pinned_alloc_sec << "s"
             << " root_alloc=" << root_alloc_sec << "s"
-            << " owner_file_enabled=" << (owner_file_enabled ? 1 : 0) << " owner_preload=" << owner_preload_sec << "s"
-            << " owner_replicated_jobs=" << owner_replicated_jobs << " owner_dim0_jobs=" << owner_dim0_jobs
+            << " owner_file_enabled=" << (owner_file_enabled ? 1 : 0) << " owner_plan=" << owner_plan_sec << "s"
+            << " owner_batches=" << owner_batch_count << " owner_replicated_jobs=" << owner_replicated_jobs
+            << " owner_dim0_jobs=" << owner_dim0_jobs << " owner_dim1_jobs=" << owner_dim1_jobs
             << " owner_exec=" << owner_exec_sec << "s"
-            << " owner_peer_transfer_bytes=" << owner_peer_transfer_bytes
+            << " owner_peer_transfer_bytes=" << owner_peer_transfer_bytes << " owner_unique_source_bytes="
+            << (owner_collective_plan.has_value() ? owner_collective_plan->unique_source_bytes : 0)
+            << " owner_skew_ratio="
+            << (owner_collective_plan.has_value() ? owner_collective_plan->owner_skew_ratio : 1.0)
+            << " owner_segment_split="
+            << (owner_collective_plan.has_value() && owner_collective_plan->used_segment_split ? 1 : 0)
             << " whole_source=" << (whole_source_enabled ? 1 : 0) << " whole_source_load=" << whole_source_sec << "s"
             << " whole_source_bytes=" << (root_source != nullptr ? root_source->size() : 0)
             << " build_jobs=" << jobs_sec << "s"
@@ -4421,7 +4715,8 @@ CollectiveDiskLoadResult wait_for_group_and_maybe_execute(
       LOG(INFO) << "collective_disk_load launching group_id=" << request.group.group_id
                 << " world_size=" << state->world_size;
     } else {
-      const absl::Time deadline = absl::Now() + absl::Milliseconds(kGroupAssembleTimeout.count());
+      const absl::Time deadline =
+          absl::Now() + absl::Milliseconds(collective_group_assemble_timeout(request.strategy_config).count());
       while (!state->launching && !state->complete && absl::Now() < deadline) {
         state->cv.WaitWithDeadline(&state->mu, deadline);
       }
@@ -4539,7 +4834,8 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
       LOG(INFO) << "collective_mapped_target launching group_id=" << request.group.group_id
                 << " world_size=" << state->world_size;
     } else {
-      const absl::Time deadline = absl::Now() + absl::Milliseconds(kGroupAssembleTimeout.count());
+      const absl::Time deadline =
+          absl::Now() + absl::Milliseconds(collective_group_assemble_timeout(options.strategy_config).count());
       while (!state->launching && !state->complete && absl::Now() < deadline) {
         state->cv.WaitWithDeadline(&state->mu, deadline);
       }

@@ -200,6 +200,11 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       bool publish_canonical,
       SealProgressCallback progress_cb = {});
 
+  absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan_for_testing(
+      const materialization::runtime::pipeline::IngestionContext& ctx) const {
+    return build_ordinary_disk_execution_strategy_plan(ctx);
+  }
+
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
 
@@ -229,6 +234,9 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
+
+  absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan(
+      const materialization::runtime::pipeline::IngestionContext& ctx) const;
 
   absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
       std::string_view logical_artifact_id,

@@ -1,7 +1,7 @@
 ---
 slug: batched-owner-file-collective-executor
 title: Batched Owner-File Collective Executor
-status: proposed
+status: implemented
 areas: ["core", "daemon", "sdk", "serving", "benchmarks"]
 created: 2026-03-24
 last_updated: 2026-03-28
@@ -89,12 +89,45 @@ Normative source rule:
 - temporary migration fallbacks are acceptable only to stage rollout evidence
   and must be removed once the new executor is proven.
 
+# Implementation Status
+
+The phase-1 scope of this design is now landed in the repository:
+
+- ordinary disk startup requires explicit shared-source proof before
+  owner-file collective becomes eligible under `AUTO`
+- `MaterializationFacade` prefers owner-file collective for eligible
+  shared-source TP startup and keeps host-local or unproven-source requests on
+  local-batched or generic execution
+- `collective_disk_load` now builds a bounded owner batch plan with weighted
+  file ownership, optional job-level split for skew control, and batch-local
+  owner staging
+- replicated, dim0, and dim1 collective tensor work now execute through the
+  owner rank without eager `owned_payload` residency
+- root whole-source preload is skipped on the owner-file batched path and
+  remains only as legacy fallback scaffolding
+
+The implemented steady-state scope remains intentionally zero-residual-only:
+
+- owner-file collective eligibility still rejects requests with residual
+  fallback bytes
+- residual mixed execution therefore remains on local-batched or generic paths
+  rather than being synthesized at collective runtime
+
 # Sequencing Note
 
 This design is downstream of two prerequisites:
 
 - the runtime-critical request-normalization boundary from `0107`,
 - the common-runtime strategy convergence work from `0108-01`.
+
+Those prerequisites are now landed in this repository. `0109` should start from
+the already-converged seams:
+
+- normalized retrieval-policy versus execution-topology inputs,
+- ordinary-disk `ExecutionStrategyPlan` ownership in `MaterializationFacade`,
+- executor-runner-only replica/runtime ownership,
+- typed owner-file budget and timeout fields under
+  `engine.materialization_strategy`.
 
 It must not be used to justify adding more branch-order policy to `Replica`,
 `ReplicaLoadController`, or `collective_disk_loader.cc`. The executor belongs on
@@ -316,6 +349,14 @@ It is the right default stopgap because it:
 But it remains single-rank and does not solve the cross-rank shared source
 duplication problem. On shared filesystems that still leaves real performance on
 the table.
+
+Current runtime starting point after `0108-01`:
+
+- ordinary disk startup already builds a common-runtime `ExecutionStrategyPlan`,
+- `AUTO` currently prefers `TensorBatchedLocalExecutor` before the collective
+  prototype,
+- the owner-file collective candidate is non-default and still dispatches into
+  the current `collective_disk_load` prototype runtime when explicitly selected.
 
 ## 4. `fastsafetensors` provides the right memory lesson, not the final shape
 
@@ -539,6 +580,8 @@ This executor is eligible only when all of the following hold:
 
 - collective group context is present and same-host,
 - the source is disk-backed and shared across ranks,
+- shared-source locality is explicit or otherwise proven by runtime-owned
+  evidence; `source_locality=AUTO` is not sufficient proof for default routing,
 - metadata is complete enough to build tensor-aware work,
 - estimated owner peak temporary bytes fit configured budgets,
 - estimated owner skew stays below configured thresholds,
@@ -550,6 +593,10 @@ Normative rule:
 - when these conditions do not hold, `AUTO` must prefer
   `TensorBatchedLocalExecutor` or generic fallback rather than forcing
   owner-file collective.
+- the initial `0109` rollout must require either:
+  - explicit `ExecutionTopologyContext.source_locality = SHARED_SOURCE`, or
+  - daemon-managed shared-disk provenance that proves ranks share the same
+    backing source domain.
 
 Each batch contains a subset of source work such that:
 
@@ -767,9 +814,9 @@ Typed daemon rollout should remain under:
 
 - `engine.materialization_strategy`
 
-Suggested new config concepts:
+The converged repository already has the relevant typed fields:
 
-- `enable_owner_file_batched_collective`
+- `enable_owner_file_collective`
 - `owner_file_collective_peak_bytes_budget`
 - `owner_file_collective_batch_bytes`
 - `owner_file_collective_dim1_staging_bytes`
@@ -781,8 +828,10 @@ Suggested new config concepts:
 - `owner_file_collective_allow_mixed_residual`
 - `owner_file_collective_planner_cache_entries`
 
-These names are illustrative. Final naming should follow the existing
-`daemon_config.proto` conventions.
+These are the actual field names under the current
+`proto/tensorcast/config/v1/daemon_config.proto` and
+`StoreEngineOptions::MaterializationStrategyConfig`. `0109` should consume
+these landed controls rather than introducing a second naming family.
 
 Normative rules:
 
@@ -899,18 +948,21 @@ Practical reference points:
 
 ## Phase 0: Pre-109 convergence dependency
 
-- complete the runtime-critical request-normalization work from
-  `docs/plans/0107-retrieval-policy-plane-cleanup.md` Phases 1 through 3,
-- complete the strategy-plane convergence work captured in
-  `docs/plans/0108-01-pre-109-strategy-plane-convergence.md`,
-- especially ordinary replica convergence, execution-environment facts, typed
-  strategy budgets, and prototype cleanup seams.
+- completed:
+  - the runtime-critical request-normalization work from
+    `docs/plans/0107-retrieval-policy-plane-cleanup.md` Phases 1 through 3,
+  - the strategy-plane convergence work captured in
+    `docs/plans/0108-01-pre-109-strategy-plane-convergence.md`,
+  - especially ordinary replica convergence, execution-environment facts, typed
+    strategy budgets, and prototype cleanup seams.
 
 ## Phase 1: Add the executor beside existing paths
 
 - implement `OwnerFileBatchedCollectiveExecutor` behind typed config,
 - keep current local-batched and generic fallback unchanged,
 - keep current eager collective available only as a lower-priority fallback.
+- require explicit shared-source proof for initial routing; do not let
+  `source_locality=AUTO` silently behave as “shared filesystem”.
 
 ## Phase 2: Route explicit shared-FS TP experiments into it
 
