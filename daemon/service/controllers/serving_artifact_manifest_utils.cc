@@ -484,6 +484,9 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
   }
   auto manifest_tensor_or = find_manifest_tensor(parsed_index_or->tensors, *manifest_tensor_name_or);
   if (!manifest_tensor_or.ok()) {
+    if (absl::IsNotFound(manifest_tensor_or.status()) && !request.require_manifest) {
+      return ServingArtifactPreflightResult{};
+    }
     return manifest_tensor_or.status();
   }
   auto payload_or = read_manifest_tensor_payload(

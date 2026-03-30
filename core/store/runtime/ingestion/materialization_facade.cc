@@ -2154,6 +2154,8 @@ MaterializationFacade::MaterializationFacade(Config config)
     return run_disk_ingestion_internal(artifact_identifier, source, target, hints, /*publish_to_global_store=*/false);
   };
   deps.run_auto = [this](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
+    auto client = config_.runtime_context->global_store_client();
+    const bool gs_connected = client && client->is_connected();
     if (request.requested_view_id().has_value()) {
       auto local_view_or = materialize_view_from_local_canonical(request);
       if (local_view_or.ok()) {
@@ -2164,7 +2166,7 @@ MaterializationFacade::MaterializationFacade(Config config)
       }
       LOG(INFO) << "materialize_view.local_canonical_unavailable artifact_id=" << request.canonical_artifact_id()
                 << " view_id=" << *request.requested_view_id() << " reason=" << local_view_or.status();
-      if (request.hints().allow_disk && request.has_disk_source()) {
+      if (!gs_connected && request.hints().allow_disk && request.has_disk_source()) {
         loading::ReplicaTarget target;
         target.location.type =
             request.target_is_gpu() ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
@@ -2181,8 +2183,6 @@ MaterializationFacade::MaterializationFacade(Config config)
       }
     }
 
-    auto client = config_.runtime_context->global_store_client();
-    const bool gs_connected = client && client->is_connected();
     if (!gs_connected) {
       if (!request.hints().allow_disk || !request.has_disk_source()) {
         return absl::FailedPreconditionError("GlobalStoreClient not connected");
@@ -3145,10 +3145,12 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return absl::DataLossError(
           absl::StrCat("materialize_mapped_into_target fill execution failed: ", fill_status.message()));
     }
-    auto close_status = sink.close();
-    if (!close_status.ok()) {
-      return absl::DataLossError(
-          absl::StrCat("materialize_mapped_into_target fill sink close failed: ", close_status.message()));
+    if (representation_work_plan.committed_bytes >= total_size) {
+      auto close_status = sink.close();
+      if (!close_status.ok()) {
+        return absl::DataLossError(
+            absl::StrCat("materialize_mapped_into_target fill sink close failed: ", close_status.message()));
+      }
     }
     return loading::MaterializeIntoTargetResult{.source = loading::MaterializationSource::kUnspecified};
   }

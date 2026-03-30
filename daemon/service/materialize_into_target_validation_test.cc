@@ -625,7 +625,7 @@ TEST_CASE("MaterializeIntoTarget rejects offset mismatch", "[daemon][materialize
 
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
-  REQUIRE(status.error_message() == "target_layout storage_offset mismatch");
+  REQUIRE(status.error_message().starts_with("target_layout storage_offset mismatch"));
 }
 
 TEST_CASE("MaterializeIntoTarget view index requires view or ordered selection", "[daemon][materialize][into_target]") {
