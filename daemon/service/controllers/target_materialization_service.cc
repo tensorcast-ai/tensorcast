@@ -439,21 +439,21 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  auto common_or = prepare_target_materialization_common(
-      req,
-      rctx.server_context().peer(),
-      "MaterializeIntoTarget",
-      d_.global_store_client,
-      d_.disk_imports,
-      storage_path_);
-  if (!common_or.ok()) {
-    return to_grpc_status(common_or.status());
+  if (!req.has_selection() || req.selection().artifact_id().empty()) {
+    record_materialize_into_target(
+        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required for MaterializeIntoTarget"};
   }
-  auto common = std::move(*common_or);
-  const auto request_context = common.request_context;
-  std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
-  const bool gs_connected = common.gs_connected;
-  std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
+  if (!req.has_target_layout()) {
+    record_materialize_into_target(
+        "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout is required"};
+  }
+  if (req.device_uuid().empty()) {
+    record_materialize_into_target(
+        "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "device_uuid is required"};
+  }
 
   const auto& layout = req.target_layout();
   if (layout.layout_kind() != v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED) {
@@ -479,15 +479,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout must include at least one storage entry"};
   }
 
-  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
-      rctx.server_context().peer(), "MaterializeIntoTarget", layout, req.pid(), req.device_uuid());
-  if (!validated_target_or.ok()) {
-    record_materialize_into_target(
-        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(validated_target_or.status());
-  }
-  auto validated_target = std::move(*validated_target_or);
-  const auto device = validated_target.device;
+  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
 
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
@@ -501,6 +493,22 @@ grpc::Status TargetMaterializationService::materialize_into_target(
         "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
+
+  auto common_or = prepare_target_materialization_common(
+      req,
+      rctx.server_context().peer(),
+      "MaterializeIntoTarget",
+      d_.global_store_client,
+      d_.disk_imports,
+      storage_path_);
+  if (!common_or.ok()) {
+    return to_grpc_status(common_or.status());
+  }
+  auto common = std::move(*common_or);
+  const auto request_context = common.request_context;
+  std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
+  const bool gs_connected = common.gs_connected;
+  std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
 
   auto canonical_json_or = load_canonical_index_with_disk_fallback(
       d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
@@ -523,6 +531,15 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   if (!build_plan_status.ok()) {
     return build_plan_status;
   }
+
+  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
+      rctx.server_context().peer(), "MaterializeIntoTarget", layout, req.pid(), req.device_uuid());
+  if (!validated_target_or.ok()) {
+    record_materialize_into_target(
+        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(validated_target_or.status());
+  }
+  auto validated_target = std::move(*validated_target_or);
 
   const auto& resolved_selection = plan.resolved_selection;
   const bool has_subset = resolved_selection.tensor_names_size() > 0;

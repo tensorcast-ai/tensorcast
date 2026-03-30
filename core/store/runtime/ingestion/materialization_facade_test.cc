@@ -757,14 +757,14 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
   disk_handle.replica_key.artifact_id = hints.artifact_id;
   disk_handle.replica_key.device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   harness.fake_pipeline->set_next_disk_result(std::move(disk_handle));
-  harness.fake_pipeline->set_next_p2p_result(absl::FailedPreconditionError("p2p should be skipped"));
+  harness.fake_pipeline->set_next_p2p_result(absl::FailedPreconditionError("stale p2p route"));
 
   DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
   auto handle_or =
       harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints, disk_source);
   REQUIRE(handle_or.ok());
   REQUIRE(harness.fake_pipeline->disk_invocations().size() == 1);
-  REQUIRE(harness.fake_pipeline->p2p_invocations().empty());
+  REQUIRE_FALSE(harness.fake_pipeline->p2p_invocations().empty());
   REQUIRE(gs_client->replica_requests.size() >= 1);
   REQUIRE(gs_client->replica_request_wait_timeouts_ms.size() == gs_client->replica_requests.size());
   for (uint32_t timeout_ms : gs_client->replica_request_wait_timeouts_ms) {
