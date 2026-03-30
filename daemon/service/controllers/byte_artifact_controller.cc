@@ -5483,7 +5483,7 @@ grpc::Status ByteArtifactController::batch_touch_ttl(
         auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
         auto stub = v2::StoreDaemonService::NewStub(channel);
         grpc::ClientContext client_ctx;
-        client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);
+        client_ctx.set_deadline(std::chrono::system_clock::now() + inter_daemon_home_rpc_timeout(options_));
         v2::HomeBatchTouchTtlRequest home_req;
         home_req.mutable_fence()->set_shard_id(shard_id);
         home_req.mutable_fence()->set_lease_generation(lease_generation);
