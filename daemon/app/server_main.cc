@@ -1109,6 +1109,31 @@ int main(int argc, char** argv) {
       if (pt.has_cleanup_interval()) {
         daemon_opts.byte_artifact_routing.payload_transport.cleanup_interval = duration_to_absl(pt.cleanup_interval());
       }
+      if (pt.max_batch_payload_bytes() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_payload_bytes = pt.max_batch_payload_bytes();
+      }
+      if (pt.max_batch_items() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_items = pt.max_batch_items();
+      }
+      if (pt.max_batch_stage_bytes_per_peer() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_stage_bytes_per_peer =
+            pt.max_batch_stage_bytes_per_peer();
+      }
+      if (pt.batch_transport_protocol_version() != 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.batch_transport_protocol_version =
+            pt.batch_transport_protocol_version();
+      }
+      daemon_opts.byte_artifact_routing.payload_transport.communicator_source_enabled =
+          pt.communicator_source_enabled();
+      daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled = pt.host_memory_export_enabled();
+      if (pt.has_minimum_batch_transport_ttl()) {
+        daemon_opts.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl =
+            duration_to_absl(pt.minimum_batch_transport_ttl());
+      }
+      if (pt.has_transport_release_guard()) {
+        daemon_opts.byte_artifact_routing.payload_transport.transport_release_guard =
+            duration_to_absl(pt.transport_release_guard());
+      }
     }
   }
 

@@ -2,6 +2,8 @@
 
 #include "daemon/state/daemon_kernel.h"
 
+#include <utility>
+
 #include <algorithm>
 #include <utility>
 
@@ -180,6 +182,17 @@ DaemonKernel::DaemonKernel(
           .max_chunk_bytes = options_.byte_artifact_routing.payload_transport.max_chunk_bytes,
           .fetch_deadline = options_.byte_artifact_routing.payload_transport.fetch_deadline,
           .cleanup_interval = options_.byte_artifact_routing.payload_transport.cleanup_interval,
+          .max_batch_payload_bytes = options_.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
+          .max_batch_items = options_.byte_artifact_routing.payload_transport.max_batch_items,
+          .max_batch_stage_bytes_per_peer =
+              options_.byte_artifact_routing.payload_transport.max_batch_stage_bytes_per_peer,
+          .batch_transport_protocol_version =
+              options_.byte_artifact_routing.payload_transport.batch_transport_protocol_version,
+          .communicator_source_enabled = options_.byte_artifact_routing.payload_transport.communicator_source_enabled,
+          .host_memory_export_enabled = options_.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+          .minimum_batch_transport_ttl = options_.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl,
+          .transport_release_guard = options_.byte_artifact_routing.payload_transport.transport_release_guard,
+          .comm_manager = engine_->get_shared_comm_manager(),
           .inter_daemon_channel_credentials = inter_daemon_channel_credentials_,
           .inter_daemon_grpc_security = options_.inter_daemon_grpc_security,
       });

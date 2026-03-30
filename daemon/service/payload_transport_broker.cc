@@ -14,14 +14,18 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/components/endpoint_id.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/sources/remote_key_source.h"
 #include "daemon/service/serving_lifecycle.h"
 #include "daemon/state/distributed_security_kernel.h"
 #include "daemon/state/routed_authority_protocol.h"
@@ -60,6 +64,14 @@ std::string compute_sha256_hex(std::string_view payload) {
   return hex;
 }
 
+std::string compute_batch_manifest_digest_hex(const v2::BatchPayloadManifest& manifest) {
+  auto manifest_bytes_or = common::CapabilityTokenManager::serialize_scope_deterministic(manifest);
+  if (!manifest_bytes_or.ok()) {
+    return "";
+  }
+  return compute_sha256_hex(*manifest_bytes_or);
+}
+
 std::string payload_ref_capability_id(std::string_view payload_id) {
   return absl::StrCat("payload-ref:", payload_id);
 }
@@ -96,6 +108,74 @@ std::string payload_direction_label(tensorcast::common::v1::PayloadRefDirection 
     default:
       return "unspecified";
   }
+}
+
+absl::Status validate_batch_payload_manifest(const v2::BatchPayloadManifest& manifest) {
+  if (manifest.total_size() == 0) {
+    return absl::InvalidArgumentError("batch payload manifest total_size must be > 0");
+  }
+  if (manifest.entries_size() == 0) {
+    return absl::InvalidArgumentError("batch payload manifest requires at least one entry");
+  }
+  absl::flat_hash_set<std::string> seen_artifact_ids;
+  std::uint64_t cursor = 0;
+  for (const auto& entry : manifest.entries()) {
+    if (entry.artifact_id().empty()) {
+      return absl::InvalidArgumentError("batch payload manifest entry artifact_id is required");
+    }
+    if (!seen_artifact_ids.insert(entry.artifact_id()).second) {
+      return absl::InvalidArgumentError("batch payload manifest contains duplicate artifact_id");
+    }
+    if (entry.length() == 0) {
+      return absl::InvalidArgumentError("batch payload manifest entry length must be > 0");
+    }
+    if (entry.digest_alg().empty() != entry.digest_hex().empty()) {
+      return absl::InvalidArgumentError("batch payload manifest entry digest_alg and digest_hex must both be set");
+    }
+    if (entry.offset() != cursor) {
+      return absl::InvalidArgumentError("batch payload manifest entries must be densely packed and offset-ordered");
+    }
+    if (entry.offset() > manifest.total_size() || entry.length() > manifest.total_size() - entry.offset()) {
+      return absl::InvalidArgumentError("batch payload manifest entry exceeds total_size");
+    }
+    cursor = entry.offset() + entry.length();
+  }
+  if (cursor != manifest.total_size()) {
+    return absl::InvalidArgumentError("batch payload manifest total_size does not match packed entry lengths");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status validate_batch_communicator_source(
+    const v2::BatchPayloadTransport& transport,
+    const PayloadTransportBroker::BatchRefMetadata& metadata) {
+  if (!transport.has_communicator_source()) {
+    return absl::InvalidArgumentError("batch transport communicator_source is required");
+  }
+  const auto& source = transport.communicator_source();
+  if (source.batch_payload_ref().empty()) {
+    return absl::InvalidArgumentError("communicator_source batch_payload_ref is required");
+  }
+  if (source.producer_daemon_id().empty()) {
+    return absl::InvalidArgumentError("communicator_source producer_daemon_id is required");
+  }
+  if (source.producer_port() == 0) {
+    return absl::InvalidArgumentError("communicator_source producer_port is required");
+  }
+  if (source.remote_memory_keys_size() == 0 || source.remote_memory_keys_size() != source.buffer_sizes_size()) {
+    return absl::InvalidArgumentError("communicator_source remote_memory_keys and buffer_sizes must match");
+  }
+  if (source.total_payload_bytes() == 0) {
+    return absl::InvalidArgumentError("communicator_source total_payload_bytes must be > 0");
+  }
+  if (metadata.payload_size != 0 && metadata.payload_size != source.total_payload_bytes()) {
+    return absl::FailedPreconditionError("communicator_source total_payload_bytes mismatch");
+  }
+  if (!metadata.consumer_daemon_id.empty() && !source.consumer_daemon_id().empty() &&
+      metadata.consumer_daemon_id != source.consumer_daemon_id()) {
+    return absl::FailedPreconditionError("communicator_source consumer_daemon_id mismatch");
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<absl::Time> resolve_payload_ref_expiry(
@@ -561,6 +641,7 @@ class RemotePayloadRefSource final : public store::loader::SeekableSource {
     std::string payload_ref;
     std::string artifact_id;
     std::string operation_id;
+    tensorcast::common::v1::PayloadRefDirection direction{tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED};
     std::string address;
     std::shared_ptr<grpc::ChannelCredentials> channel_credentials;
     std::uint64_t max_chunk_bytes{1ULL << 20};
@@ -590,7 +671,10 @@ class RemotePayloadRefSource final : public store::loader::SeekableSource {
       return static_cast<size_t>(0);
     }
 
+    const absl::Time read_started_at = absl::Now();
     size_t copied = 0;
+    std::size_t rpc_count = 0;
+    absl::Duration rpc_elapsed = absl::ZeroDuration();
     const size_t target_bytes = static_cast<size_t>(std::min<uint64_t>(bytes, options_.metadata.payload_size - offset));
     auto* out = static_cast<char*>(dst);
 
@@ -609,7 +693,10 @@ class RemotePayloadRefSource final : public store::loader::SeekableSource {
       }
 
       v2::FetchPayloadRefChunkResponse response;
+      const absl::Time rpc_started_at = absl::Now();
       const auto rpc_status = stub_->FetchPayloadRefChunk(&client_ctx, request, &response);
+      rpc_elapsed += absl::Now() - rpc_started_at;
+      ++rpc_count;
       if (!rpc_status.ok()) {
         return absl::UnavailableError(rpc_status.error_message());
       }
@@ -633,6 +720,13 @@ class RemotePayloadRefSource final : public store::loader::SeekableSource {
         break;
       }
     }
+    VLOG(1) << "payload_ref.remote_fetch_summary"
+            << " direction=" << payload_direction_label(options_.direction) << " operation_id=" << options_.operation_id
+            << " artifact_id=" << options_.artifact_id << " issuer_address=" << options_.address
+            << " payload_bytes=" << options_.metadata.payload_size << " requested_bytes=" << target_bytes
+            << " chunk_rpcs=" << rpc_count << " max_chunk_bytes=" << options_.max_chunk_bytes
+            << " rpc_ms=" << absl::ToDoubleMilliseconds(rpc_elapsed)
+            << " total_read_ms=" << absl::ToDoubleMilliseconds(absl::Now() - read_started_at);
     return copied;
   }
 
@@ -673,6 +767,107 @@ class PayloadRefLoader final : public store::IArtifactLoader {
  private:
   bool initialized_{false};
   RemoteOptions remote_;
+};
+
+class RemoteBatchPayloadRefSource final : public store::loader::SeekableSource {
+ public:
+  struct Options {
+    PayloadTransportBroker::BatchRefMetadata metadata;
+    std::string batch_payload_ref;
+    std::string operation_id;
+    tensorcast::common::v1::PayloadRefDirection direction{tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED};
+    std::string address;
+    std::shared_ptr<grpc::ChannelCredentials> channel_credentials;
+    std::uint64_t max_chunk_bytes{1ULL << 20};
+    absl::Duration fetch_deadline{absl::Seconds(5)};
+  };
+
+  explicit RemoteBatchPayloadRefSource(Options options)
+      : options_(std::move(options)),
+        channel_(create_inter_daemon_channel(options_.address, options_.channel_credentials)),
+        stub_(v2::StoreDaemonService::NewStub(channel_)) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return options_.metadata.payload_size;
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(cursor_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    cursor_ += *read_or;
+    return *read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= options_.metadata.payload_size || bytes == 0) {
+      return static_cast<size_t>(0);
+    }
+
+    const absl::Time read_started_at = absl::Now();
+    size_t copied = 0;
+    std::size_t rpc_count = 0;
+    absl::Duration rpc_elapsed = absl::ZeroDuration();
+    const size_t target_bytes = static_cast<size_t>(std::min<uint64_t>(bytes, options_.metadata.payload_size - offset));
+    auto* out = static_cast<char*>(dst);
+
+    while (copied < target_bytes) {
+      grpc::ClientContext client_ctx;
+      client_ctx.set_deadline(
+          std::chrono::system_clock::now() +
+          std::chrono::milliseconds(absl::ToInt64Milliseconds(options_.fetch_deadline)));
+      v2::FetchBatchPayloadRefChunkRequest request;
+      request.set_batch_payload_ref(options_.batch_payload_ref);
+      request.set_offset(offset + copied);
+      request.set_max_bytes(std::min<std::uint64_t>(options_.max_chunk_bytes, target_bytes - copied));
+      if (!options_.operation_id.empty()) {
+        request.set_operation_id(options_.operation_id);
+      }
+
+      v2::FetchBatchPayloadRefChunkResponse response;
+      const absl::Time rpc_started_at = absl::Now();
+      const auto rpc_status = stub_->FetchBatchPayloadRefChunk(&client_ctx, request, &response);
+      rpc_elapsed += absl::Now() - rpc_started_at;
+      ++rpc_count;
+      if (!rpc_status.ok()) {
+        return absl::UnavailableError(rpc_status.error_message());
+      }
+      auto item_status = absl_status_from_batch_item_status(response.status(), response.message());
+      if (!item_status.ok()) {
+        return item_status;
+      }
+      if (response.total_size() != options_.metadata.payload_size) {
+        return absl::DataLossError("batch_payload_ref total_size mismatch");
+      }
+      if (response.chunk().empty()) {
+        if (response.eof()) {
+          break;
+        }
+        return absl::DataLossError("batch_payload_ref fetch returned empty non-terminal chunk");
+      }
+      const size_t chunk_bytes = std::min(target_bytes - copied, response.chunk().size());
+      std::memcpy(out + copied, response.chunk().data(), chunk_bytes);
+      copied += chunk_bytes;
+      if (response.eof()) {
+        break;
+      }
+    }
+    VLOG(1) << "batch_payload_ref.remote_fetch_summary"
+            << " direction=" << payload_direction_label(options_.direction) << " operation_id=" << options_.operation_id
+            << " transport_id=" << options_.metadata.transport_id << " issuer_address=" << options_.address
+            << " payload_bytes=" << options_.metadata.payload_size << " requested_bytes=" << target_bytes
+            << " chunk_rpcs=" << rpc_count << " max_chunk_bytes=" << options_.max_chunk_bytes
+            << " rpc_ms=" << absl::ToDoubleMilliseconds(rpc_elapsed)
+            << " total_read_ms=" << absl::ToDoubleMilliseconds(absl::Now() - read_started_at);
+    return copied;
+  }
+
+ private:
+  Options options_;
+  std::shared_ptr<grpc::Channel> channel_;
+  std::unique_ptr<v2::StoreDaemonService::Stub> stub_;
+  uint64_t cursor_{0};
 };
 
 absl::StatusOr<std::string> read_source_fully(store::loader::SeekableSource& source) {
@@ -1227,6 +1422,206 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   return *token_or;
 }
 
+absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
+    const v2::BatchPayloadManifest& manifest,
+    std::shared_ptr<const std::string> payload,
+    tensorcast::common::v1::PayloadRefDirection direction,
+    std::string_view operation_id,
+    absl::Time capability_expires_at,
+    std::string_view consumer_daemon_id) {
+  if (!batch_transport_enabled()) {
+    return absl::FailedPreconditionError("batch payload transport is disabled");
+  }
+  if (daemon_id_.empty()) {
+    return absl::FailedPreconditionError("daemon_id is required for batch_payload_ref issuance");
+  }
+  if (!payload || payload->empty()) {
+    return absl::InvalidArgumentError("payload is required for batch_payload_ref issuance");
+  }
+  if (capability_tokens_ == nullptr || !capability_tokens_->configured()) {
+    return absl::FailedPreconditionError("capability tokens are required for batch_payload_ref transport");
+  }
+  if (lifecycle_manager_ == nullptr) {
+    return absl::FailedPreconditionError("batch_payload_ref lifecycle manager is unavailable");
+  }
+  if (direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED) {
+    return absl::InvalidArgumentError("batch_payload_ref direction is required");
+  }
+  auto manifest_status = validate_batch_payload_manifest(manifest);
+  if (!manifest_status.ok()) {
+    return manifest_status;
+  }
+  if (manifest.total_size() != payload->size()) {
+    return absl::FailedPreconditionError("batch payload manifest total_size does not match payload size");
+  }
+
+  const absl::Time now = absl::Now();
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
+  const std::string transport_id = [&]() {
+    absl::MutexLock lock(&mu_);
+    prune_locked(now);
+    return mint_payload_id();
+  }();
+
+  BatchRefMetadata metadata;
+  metadata.issuer_daemon_id = daemon_id_;
+  metadata.transport_id = transport_id;
+  metadata.manifest_digest_hex = compute_batch_manifest_digest_hex(manifest);
+  metadata.consumer_daemon_id = std::string(consumer_daemon_id);
+  metadata.payload_size = payload->size();
+  metadata.direction = direction;
+  metadata.operation_id = std::string(operation_id);
+  metadata.expires_at = expires_at;
+
+  auto lease_or = lifecycle_manager_->create_retention_lease(
+      expires_at - now,
+      std::vector<std::function<absl::Status()>>{
+          [this, transport_id]() -> absl::Status {
+            std::optional<store::ExportRegistration> communicator_export;
+            {
+              absl::MutexLock lock(&mu_);
+              const auto it = batch_records_.find(transport_id);
+              if (it != batch_records_.end()) {
+                communicator_export = it->second.communicator_export;
+                batch_records_.erase(it);
+              }
+            }
+            if (communicator_export.has_value() && options_.comm_manager != nullptr) {
+              for (const auto& tensor_key : communicator_export->remote_memory_keys) {
+                (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+              }
+            }
+            return absl::OkStatus();
+          },
+      });
+  if (!lease_or.ok()) {
+    return lease_or.status();
+  }
+
+  {
+    absl::MutexLock lock(&mu_);
+    auto& record = batch_records_[transport_id];
+    record.metadata = metadata;
+    record.manifest = manifest;
+    record.payload = std::move(payload);
+    record.lease_id = *lease_or;
+  }
+
+  tensorcast::common::v1::BatchPayloadRefScope scope;
+  scope.set_transport_id(metadata.transport_id);
+  scope.set_payload_size(metadata.payload_size);
+  scope.set_direction(direction);
+  if (!metadata.operation_id.empty()) {
+    scope.set_operation_id(metadata.operation_id);
+  }
+  if (!metadata.manifest_digest_hex.empty()) {
+    scope.set_manifest_digest_hex(metadata.manifest_digest_hex);
+  }
+  if (!metadata.consumer_daemon_id.empty()) {
+    scope.set_consumer_daemon_id(metadata.consumer_daemon_id);
+  }
+  auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  if (!scope_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return scope_or.status();
+  }
+  auto token_or = capability_tokens_->mint(
+      daemon_id_,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_BATCH_PAYLOAD_REF,
+      *scope_or,
+      static_cast<std::uint64_t>(absl::ToUnixMillis(expires_at)));
+  if (!token_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return token_or.status();
+  }
+  return *token_or;
+}
+
+absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransportBroker::
+    issue_batch_payload_communicator_export(
+        const v2::BatchPayloadManifest& manifest,
+        std::shared_ptr<const std::string> payload,
+        tensorcast::common::v1::PayloadRefDirection direction,
+        std::string_view operation_id,
+        absl::Time capability_expires_at,
+        std::string_view consumer_daemon_id) {
+  if (!batch_transport_communicator_enabled()) {
+    return absl::FailedPreconditionError("batch communicator transport is disabled");
+  }
+  if (!payload || payload->empty()) {
+    return absl::InvalidArgumentError("payload is required for batch communicator transport");
+  }
+  auto manifest_status = validate_batch_payload_manifest(manifest);
+  if (!manifest_status.ok()) {
+    return manifest_status;
+  }
+  if (manifest.total_size() != payload->size()) {
+    return absl::FailedPreconditionError("batch payload manifest total_size does not match payload size");
+  }
+  const absl::Time now = absl::Now();
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
+  if (expires_at - now < options_.minimum_batch_transport_ttl) {
+    return absl::FailedPreconditionError("batch communicator transport ttl below minimum");
+  }
+  const absl::Time export_started_at = absl::Now();
+  std::vector<void*> buffer_addresses{const_cast<char*>(payload->data())};
+  std::vector<size_t> buffer_sizes{payload->size()};
+  const absl::Time register_started_at = absl::Now();
+  auto registration_or = options_.comm_manager->register_memory(buffer_addresses, buffer_sizes, /*device_id=*/-1);
+  const absl::Duration register_elapsed = absl::Now() - register_started_at;
+  if (!registration_or.ok()) {
+    return registration_or.status();
+  }
+  const absl::Time issue_ref_started_at = absl::Now();
+  auto batch_payload_ref_or =
+      issue_batch_payload_ref(manifest, payload, direction, operation_id, capability_expires_at, consumer_daemon_id);
+  const absl::Duration issue_ref_elapsed = absl::Now() - issue_ref_started_at;
+  if (!batch_payload_ref_or.ok()) {
+    for (const auto& tensor_key : registration_or->remote_memory_keys) {
+      (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+    }
+    return batch_payload_ref_or.status();
+  }
+  auto metadata_or = inspect_batch_payload_ref(*batch_payload_ref_or, now, /*require_not_expired=*/true);
+  if (!metadata_or.ok()) {
+    for (const auto& tensor_key : registration_or->remote_memory_keys) {
+      (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+    }
+    return metadata_or.status();
+  }
+  {
+    absl::MutexLock lock(&mu_);
+    const auto it = batch_records_.find(metadata_or->transport_id);
+    if (it == batch_records_.end()) {
+      for (const auto& tensor_key : registration_or->remote_memory_keys) {
+        (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+      }
+      return absl::NotFoundError("batch communicator transport record is missing");
+    }
+    it->second.communicator_export = *registration_or;
+  }
+  VLOG(1) << "batch_payload_ref.communicator_export_summary"
+          << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
+          << " transport_id=" << metadata_or->transport_id << " payload_bytes=" << metadata_or->payload_size
+          << " remote_keys=" << registration_or->remote_memory_keys.size()
+          << " register_ms=" << absl::ToDoubleMilliseconds(register_elapsed)
+          << " issue_ref_ms=" << absl::ToDoubleMilliseconds(issue_ref_elapsed)
+          << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - export_started_at);
+  return BatchCommunicatorExport{
+      .metadata = *metadata_or,
+      .batch_payload_ref = *batch_payload_ref_or,
+      .export_registration = *registration_or,
+  };
+}
+
 absl::StatusOr<PayloadTransportBroker::RefMetadata> PayloadTransportBroker::inspect_payload_ref(
     std::string_view payload_ref,
     absl::Time now,
@@ -1272,6 +1667,53 @@ absl::StatusOr<PayloadTransportBroker::RefMetadata> PayloadTransportBroker::insp
   }
   if (require_not_expired && metadata.expires_at <= now) {
     return absl::PermissionDeniedError("payload_ref expired");
+  }
+  return metadata;
+}
+
+absl::StatusOr<PayloadTransportBroker::BatchRefMetadata> PayloadTransportBroker::inspect_batch_payload_ref(
+    std::string_view batch_payload_ref,
+    absl::Time now,
+    bool require_not_expired) const {
+  if (batch_payload_ref.empty()) {
+    return absl::InvalidArgumentError("batch_payload_ref is required");
+  }
+  if (capability_tokens_ == nullptr || !capability_tokens_->configured()) {
+    return absl::FailedPreconditionError("capability tokens are required for batch_payload_ref transport");
+  }
+  if (!common::CapabilityTokenManager::looks_like_envelope(batch_payload_ref)) {
+    return absl::InvalidArgumentError("batch_payload_ref format is invalid");
+  }
+  auto env_or = capability_tokens_->verify(
+      batch_payload_ref,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_BATCH_PAYLOAD_REF,
+      /*expected_issuer=*/"",
+      now,
+      require_not_expired);
+  if (!env_or.ok()) {
+    return env_or.status();
+  }
+
+  tensorcast::common::v1::BatchPayloadRefScope scope;
+  if (!scope.ParseFromString(env_or->scope())) {
+    return absl::InvalidArgumentError("batch_payload_ref scope parse failed");
+  }
+
+  BatchRefMetadata metadata;
+  metadata.issuer_daemon_id = env_or->issuer_daemon_id();
+  metadata.transport_id = scope.transport_id();
+  metadata.manifest_digest_hex = to_lower_copy(scope.manifest_digest_hex());
+  metadata.consumer_daemon_id = scope.consumer_daemon_id();
+  metadata.payload_size = scope.payload_size();
+  metadata.direction = scope.direction();
+  metadata.operation_id = scope.operation_id();
+  metadata.expires_at = absl::FromUnixMillis(static_cast<std::int64_t>(env_or->expires_at_ms()));
+  if (metadata.transport_id.empty() || metadata.payload_size == 0 ||
+      metadata.direction == tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED) {
+    return absl::InvalidArgumentError("batch_payload_ref scope missing required fields");
+  }
+  if (require_not_expired && metadata.expires_at <= now) {
+    return absl::PermissionDeniedError("batch_payload_ref expired");
   }
   return metadata;
 }
@@ -1956,6 +2398,62 @@ absl::StatusOr<PayloadTransportBroker::LocalResolvedPayload> PayloadTransportBro
   };
 }
 
+absl::StatusOr<PayloadTransportBroker::LocalResolvedBatchPayload> PayloadTransportBroker::
+    resolve_local_batch_payload_ref_record(
+        std::string_view batch_payload_ref,
+        absl::Time now,
+        tensorcast::common::v1::PayloadRefDirection expected_direction,
+        std::string_view expected_operation_id) {
+  auto metadata_or = inspect_batch_payload_ref(batch_payload_ref, now, /*require_not_expired=*/true);
+  if (!metadata_or.ok()) {
+    return metadata_or.status();
+  }
+  if (expected_direction != tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED &&
+      metadata_or->direction != expected_direction) {
+    return absl::FailedPreconditionError("batch_payload_ref direction mismatch");
+  }
+  if (!metadata_or->operation_id.empty()) {
+    if (expected_operation_id.empty()) {
+      return absl::InvalidArgumentError("operation_id is required for batch_payload_ref");
+    }
+    if (metadata_or->operation_id != expected_operation_id) {
+      return absl::FailedPreconditionError("batch_payload_ref operation_id mismatch");
+    }
+  }
+
+  absl::MutexLock lock(&mu_);
+  prune_locked(now);
+  auto it = batch_records_.find(metadata_or->transport_id);
+  if (it == batch_records_.end()) {
+    return absl::NotFoundError("batch_payload_ref is no longer valid");
+  }
+  if (it->second.metadata.expires_at <= now) {
+    batch_records_.erase(it);
+    return absl::PermissionDeniedError("batch_payload_ref expired");
+  }
+  if (metadata_or->payload_size != 0 && metadata_or->payload_size != it->second.metadata.payload_size) {
+    return absl::FailedPreconditionError("batch_payload_ref payload_size mismatch");
+  }
+  if (!metadata_or->manifest_digest_hex.empty() &&
+      metadata_or->manifest_digest_hex != it->second.metadata.manifest_digest_hex) {
+    return absl::FailedPreconditionError("batch_payload_ref manifest_digest mismatch");
+  }
+  if (!metadata_or->consumer_daemon_id.empty() &&
+      metadata_or->consumer_daemon_id != it->second.metadata.consumer_daemon_id) {
+    return absl::FailedPreconditionError("batch_payload_ref consumer_daemon_id mismatch");
+  }
+  if (metadata_or->direction != it->second.metadata.direction) {
+    return absl::FailedPreconditionError("batch_payload_ref direction mismatch");
+  }
+  if (metadata_or->operation_id != it->second.metadata.operation_id) {
+    return absl::FailedPreconditionError("batch_payload_ref operation_id mismatch");
+  }
+  return LocalResolvedBatchPayload{
+      .metadata = it->second.metadata,
+      .payload = it->second.payload,
+  };
+}
+
 absl::StatusOr<PayloadTransportBroker::PayloadChunk> PayloadTransportBroker::read_local_payload_ref_chunk(
     std::string_view payload_ref,
     std::string_view expected_artifact_id,
@@ -1985,6 +2483,35 @@ absl::StatusOr<PayloadTransportBroker::PayloadChunk> PayloadTransportBroker::rea
     chunk = std::move(*chunk_or);
   }
   return PayloadChunk{
+      .metadata = resolved_or->metadata,
+      .chunk = std::move(chunk),
+      .eof = (offset + chunk_bytes) >= resolved_or->metadata.payload_size,
+  };
+}
+
+absl::StatusOr<PayloadTransportBroker::BatchPayloadChunk> PayloadTransportBroker::read_local_batch_payload_ref_chunk(
+    std::string_view batch_payload_ref,
+    absl::Time now,
+    std::uint64_t offset,
+    std::uint64_t max_bytes,
+    tensorcast::common::v1::PayloadRefDirection expected_direction,
+    std::string_view expected_operation_id) {
+  auto resolved_or =
+      resolve_local_batch_payload_ref_record(batch_payload_ref, now, expected_direction, expected_operation_id);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
+  }
+  if (!resolved_or->payload || resolved_or->payload->empty()) {
+    return absl::FailedPreconditionError("batch_payload_ref payload is unavailable");
+  }
+  if (offset > resolved_or->metadata.payload_size) {
+    return absl::OutOfRangeError("batch_payload_ref offset exceeds payload size");
+  }
+  const std::uint64_t remaining = resolved_or->metadata.payload_size - offset;
+  const std::uint64_t chunk_bytes = std::min(max_bytes, remaining);
+  std::string chunk;
+  chunk.assign(resolved_or->payload->data() + offset, static_cast<std::size_t>(chunk_bytes));
+  return BatchPayloadChunk{
       .metadata = resolved_or->metadata,
       .chunk = std::move(chunk),
       .eof = (offset + chunk_bytes) >= resolved_or->metadata.payload_size,
@@ -2033,6 +2560,223 @@ absl::StatusOr<PayloadTransportBroker::ResolvedPayload> PayloadTransportBroker::
   return ResolvedPayload{
       .metadata = loader_or->metadata,
       .payload = std::move(*payload_or),
+  };
+}
+
+absl::StatusOr<PayloadTransportBroker::ResolvedBatchPayload> PayloadTransportBroker::fetch_batch_payload_ref(
+    WorkerDirectoryCache& worker_directory_cache,
+    absl::Time now,
+    absl::Duration worker_directory_staleness_budget,
+    std::string_view local_daemon_id,
+    std::string_view batch_payload_ref,
+    tensorcast::common::v1::PayloadRefDirection expected_direction,
+    std::string_view expected_operation_id) {
+  auto metadata_or = inspect_batch_payload_ref(batch_payload_ref, now, /*require_not_expired=*/true);
+  if (!metadata_or.ok()) {
+    return metadata_or.status();
+  }
+  if (expected_direction != tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED &&
+      metadata_or->direction != expected_direction) {
+    return absl::FailedPreconditionError("batch_payload_ref direction mismatch");
+  }
+  if (!metadata_or->operation_id.empty()) {
+    if (expected_operation_id.empty()) {
+      return absl::InvalidArgumentError("operation_id is required for batch_payload_ref");
+    }
+    if (metadata_or->operation_id != expected_operation_id) {
+      return absl::FailedPreconditionError("batch_payload_ref operation_id mismatch");
+    }
+  }
+
+  if (metadata_or->issuer_daemon_id.empty() || metadata_or->issuer_daemon_id == local_daemon_id) {
+    auto local_or =
+        resolve_local_batch_payload_ref_record(batch_payload_ref, now, expected_direction, expected_operation_id);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return ResolvedBatchPayload{
+        .metadata = local_or->metadata,
+        .payload = local_or->payload,
+        .remote = false,
+    };
+  }
+
+  auto address_or = worker_directory_cache.resolve_daemon_address(
+      metadata_or->issuer_daemon_id, now, worker_directory_staleness_budget);
+  if (!address_or.ok()) {
+    return address_or.status();
+  }
+  RemoteBatchPayloadRefSource source(
+      RemoteBatchPayloadRefSource::Options{
+          .metadata = *metadata_or,
+          .batch_payload_ref = std::string(batch_payload_ref),
+          .operation_id = std::string(expected_operation_id),
+          .direction = expected_direction,
+          .address = *address_or,
+          .channel_credentials = options_.inter_daemon_channel_credentials,
+          .max_chunk_bytes = options_.max_chunk_bytes,
+          .fetch_deadline = options_.fetch_deadline,
+      });
+  auto payload_or = read_source_fully(source);
+  if (!payload_or.ok()) {
+    return payload_or.status();
+  }
+  if (metadata_or->payload_size != payload_or->size()) {
+    return absl::DataLossError("batch_payload_ref payload_size mismatch");
+  }
+  return ResolvedBatchPayload{
+      .metadata = *metadata_or,
+      .payload = std::make_shared<const std::string>(std::move(*payload_or)),
+      .remote = true,
+  };
+}
+
+absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroker::
+    open_batch_payload_communicator_source(
+        WorkerDirectoryCache& worker_directory_cache,
+        absl::Time now,
+        absl::Duration worker_directory_staleness_budget,
+        std::string_view local_daemon_id,
+        const v2::BatchPayloadTransport& transport,
+        tensorcast::common::v1::PayloadRefDirection expected_direction,
+        std::string_view expected_operation_id) {
+  if (!transport.has_communicator_source()) {
+    return absl::InvalidArgumentError("batch transport communicator_source is required");
+  }
+  const absl::Time open_started_at = absl::Now();
+  absl::Duration endpoint_resolve_elapsed{absl::ZeroDuration()};
+  const auto& source = transport.communicator_source();
+  auto metadata_or = inspect_batch_payload_ref(source.batch_payload_ref(), now, /*require_not_expired=*/true);
+  if (!metadata_or.ok()) {
+    return metadata_or.status();
+  }
+  if (expected_direction != tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED &&
+      metadata_or->direction != expected_direction) {
+    return absl::FailedPreconditionError("batch_payload_ref direction mismatch");
+  }
+  if (!metadata_or->operation_id.empty()) {
+    if (expected_operation_id.empty()) {
+      return absl::InvalidArgumentError("operation_id is required for batch_payload_ref");
+    }
+    if (metadata_or->operation_id != expected_operation_id) {
+      return absl::FailedPreconditionError("batch_payload_ref operation_id mismatch");
+    }
+  }
+  if (!metadata_or->consumer_daemon_id.empty() && metadata_or->consumer_daemon_id != local_daemon_id) {
+    return absl::PermissionDeniedError("batch_payload_ref consumer_daemon_id mismatch");
+  }
+  auto manifest_status = validate_batch_payload_manifest(transport.manifest());
+  if (!manifest_status.ok()) {
+    return manifest_status;
+  }
+  if (!metadata_or->manifest_digest_hex.empty() &&
+      metadata_or->manifest_digest_hex != compute_batch_manifest_digest_hex(transport.manifest())) {
+    return absl::DataLossError("batch transport manifest digest mismatch");
+  }
+  auto communicator_status = validate_batch_communicator_source(transport, *metadata_or);
+  if (!communicator_status.ok()) {
+    return communicator_status;
+  }
+
+  if (metadata_or->issuer_daemon_id.empty() || metadata_or->issuer_daemon_id == local_daemon_id) {
+    auto local_or = resolve_local_batch_payload_ref_record(
+        source.batch_payload_ref(), now, expected_direction, expected_operation_id);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    LOG(INFO) << "batch_payload_ref.communicator_open_summary"
+              << " direction=" << payload_direction_label(expected_direction)
+              << " operation_id=" << expected_operation_id << " transport_id=" << metadata_or->transport_id
+              << " remote=false"
+              << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
+              << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size();
+    return BatchPayloadSource{
+        .metadata = local_or->metadata,
+        .source =
+            std::shared_ptr<store::loader::SeekableSource>(std::make_shared<SharedStringSource>(local_or->payload)),
+        .remote = false,
+    };
+  }
+  if (options_.comm_manager == nullptr || !options_.comm_manager->is_enabled()) {
+    return absl::FailedPreconditionError("communicator is unavailable for batch transport");
+  }
+
+  std::string producer_host = source.producer_host();
+  uint16_t producer_port = static_cast<uint16_t>(source.producer_port());
+  std::string remote_endpoint_id = source.remote_endpoint_id();
+  if (producer_host.empty() || producer_port == 0 || remote_endpoint_id.empty()) {
+    const absl::Time resolve_started_at = absl::Now();
+    auto producer_entry_or = worker_directory_cache.resolve_daemon_entry(
+        metadata_or->issuer_daemon_id, now, worker_directory_staleness_budget);
+    endpoint_resolve_elapsed += absl::Now() - resolve_started_at;
+    if (!producer_entry_or.ok()) {
+      return producer_entry_or.status();
+    }
+    if (producer_host.empty()) {
+      producer_host = producer_entry_or->node_address;
+    }
+    if (producer_port == 0) {
+      producer_port = static_cast<uint16_t>(producer_entry_or->p2p_port);
+    }
+    if (remote_endpoint_id.empty() && !producer_entry_or->node_id.empty()) {
+      remote_endpoint_id = store::components::derive_endpoint_id(
+          producer_entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0);
+    }
+  }
+  if (producer_host.empty() || producer_port == 0) {
+    return absl::FailedPreconditionError("communicator_source producer endpoint is incomplete");
+  }
+
+  std::string local_endpoint_id = source.local_endpoint_id_hint();
+  if (local_endpoint_id.empty()) {
+    const absl::Time resolve_started_at = absl::Now();
+    auto local_entry_or =
+        worker_directory_cache.resolve_daemon_entry(local_daemon_id, now, worker_directory_staleness_budget);
+    endpoint_resolve_elapsed += absl::Now() - resolve_started_at;
+    if (local_entry_or.ok() && !local_entry_or->node_id.empty()) {
+      local_endpoint_id = store::components::derive_endpoint_id(
+          local_entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0);
+    }
+  }
+
+  std::vector<size_t> buffer_sizes;
+  buffer_sizes.reserve(source.buffer_sizes_size());
+  std::uint64_t total_size = 0;
+  for (const auto buf_size : source.buffer_sizes()) {
+    buffer_sizes.push_back(static_cast<size_t>(buf_size));
+    total_size += buf_size;
+  }
+  if (total_size != source.total_payload_bytes()) {
+    return absl::FailedPreconditionError("communicator_source buffer_sizes do not match total_payload_bytes");
+  }
+  store::loader::RemoteKeySource::Options source_opts{
+      .comm_engine =
+          gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
+              options_.comm_manager->get_shared_engine()},
+      .memory_keys = std::vector<std::string>(source.remote_memory_keys().begin(), source.remote_memory_keys().end()),
+      .buffer_sizes = std::move(buffer_sizes),
+      .ip = producer_host,
+      .port = producer_port,
+      .local_endpoint_id = std::move(local_endpoint_id),
+      .remote_endpoint_id = std::move(remote_endpoint_id),
+      .routing_context = options_.comm_manager->routing_context(),
+      .total_size = source.total_payload_bytes(),
+      .request_budget = std::chrono::milliseconds(absl::ToInt64Milliseconds(options_.fetch_deadline)),
+      .artifact_id = metadata_or->transport_id,
+  };
+  LOG(INFO) << "batch_payload_ref.communicator_open_summary"
+            << " direction=" << payload_direction_label(expected_direction) << " operation_id=" << expected_operation_id
+            << " transport_id=" << metadata_or->transport_id << " remote=true"
+            << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
+            << " producer_host=" << producer_host << " producer_port=" << producer_port
+            << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size()
+            << " endpoint_resolve_ms=" << absl::ToDoubleMilliseconds(endpoint_resolve_elapsed)
+            << " total_open_ms=" << absl::ToDoubleMilliseconds(absl::Now() - open_started_at);
+  return BatchPayloadSource{
+      .metadata = *metadata_or,
+      .source =
+          std::shared_ptr<store::loader::SeekableSource>(std::make_shared<store::loader::RemoteKeySource>(source_opts)),
+      .remote = true,
   };
 }
 
@@ -2101,6 +2845,7 @@ absl::StatusOr<PayloadTransportBroker::PayloadLoader> PayloadTransportBroker::op
                   .payload_ref = std::string(payload_ref),
                   .artifact_id = std::string(expected_artifact_id),
                   .operation_id = std::string(expected_operation_id),
+                  .direction = expected_direction,
                   .address = *address_or,
                   .channel_credentials = options_.inter_daemon_channel_credentials,
                   .max_chunk_bytes = options_.max_chunk_bytes,
@@ -2134,6 +2879,22 @@ void PayloadTransportBroker::prune_locked(absl::Time now) {
     }
     records_.erase(it);
   }
+
+  std::vector<std::pair<std::string, std::optional<store::ExportRegistration>>> expired_batch_refs;
+  expired_batch_refs.reserve(batch_records_.size());
+  for (const auto& [transport_id, record] : batch_records_) {
+    if (record.metadata.expires_at <= now) {
+      expired_batch_refs.emplace_back(transport_id, record.communicator_export);
+    }
+  }
+  for (const auto& [transport_id, communicator_export] : expired_batch_refs) {
+    batch_records_.erase(transport_id);
+    if (communicator_export.has_value() && options_.comm_manager != nullptr) {
+      for (const auto& tensor_key : communicator_export->remote_memory_keys) {
+        (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+      }
+    }
+  }
 }
 
 std::string PayloadTransportBroker::mint_payload_id() {
@@ -2144,7 +2905,7 @@ std::string PayloadTransportBroker::mint_payload_id() {
       byte = static_cast<char>(absl::Uniform<std::uint32_t>(bitgen_, 0u, 256u));
     }
     const std::string payload_id = absl::BytesToHexString(raw);
-    if (!records_.contains(payload_id)) {
+    if (!records_.contains(payload_id) && !batch_records_.contains(payload_id)) {
       return payload_id;
     }
   }

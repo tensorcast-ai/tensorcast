@@ -12,6 +12,7 @@ enum CapabilityAudience {
   CAPABILITY_AUDIENCE_QUEUE_WORK_LEASE = 3;
   CAPABILITY_AUDIENCE_TARGET_PUBLICATION = 4;
   CAPABILITY_AUDIENCE_PAYLOAD_REF = 5;
+  CAPABILITY_AUDIENCE_BATCH_PAYLOAD_REF = 6;
 }
 
 // Scope for placement lease capability tokens.
@@ -48,6 +49,15 @@ message PayloadRefScope {
   string digest_hex = 5;
   PayloadRefDirection direction = 6;
   string operation_id = 7;
+}
+
+message BatchPayloadRefScope {
+  string transport_id = 1;
+  uint64 payload_size = 2;
+  PayloadRefDirection direction = 3;
+  string operation_id = 4;
+  string manifest_digest_hex = 5;
+  string consumer_daemon_id = 6;
 }
 
 // Optional fencing for volatile control-plane operations.
