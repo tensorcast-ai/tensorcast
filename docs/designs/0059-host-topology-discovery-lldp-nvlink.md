@@ -24,29 +24,42 @@ related_code:
 
 # Summary
 
-当前拓扑建模仍主要依赖显式输入（`simple_numa` 或手工构造），LLDP 信息仅在 `NetDev::read_rail_id()` 中作为 RDMA rail 选择的局部输入使用，未进入统一拓扑模型。NVLINK 也尚未形成可配置、可测试、可合并的数据来源。
+Current topology modeling still relies mostly on explicit inputs (`simple_numa`
+or manual construction). LLDP is only used as a local input in
+`NetDev::read_rail_id()` for RDMA rail selection and is not part of the
+unified topology model. NVLINK also does not yet provide a configurable,
+testable, and mergeable source.
 
-本设计定义一条主机内拓扑发现与建模流水线：
+This design defines a host-local topology discovery and modeling pipeline:
 
-- 从 LLDP 文件读取 NIC rail 与 PCI 信息。
-- 从 NVLINK 数据源读取 GPU 间链路信息。
-- 按统一规则合并，生成当前机器的 `Topology`（`Pool / Endpoint / Link`）与配套绑定信息。
-- 保持兼容：发现失败时可回退到现有行为，不阻断当前读路径。
+- read NIC rail and PCI information from LLDP input
+- read GPU interconnect information from NVLINK input
+- merge both sources under deterministic rules to generate the host `Topology`
+  (`Pool / Endpoint / Link`) and binding metadata
+- preserve compatibility: discovery failures degrade to existing behavior and do
+  not block the current read path
 
 # Goals / Non-Goals
 
 ## Goals
 
-- 把 LLDP 与 NVLINK 纳入统一的 host-topology 数据面，而非零散逻辑。
-- 引入可配置的数据源与严格/宽松校验策略，遵循统一运行时配置原则（禁止新增 ad-hoc env 作为主路径）。
-- 产出确定性的拓扑对象，支持 DOT 导出、单测校验、后续路由策略消费。
-- 明确降级路径：LLDP 缺失、NVLINK 不可用、部分字段冲突时都有可预期行为。
+- Bring LLDP and NVLINK into one unified host-topology data plane instead of
+  scattered logic.
+- Introduce configurable data sources and strict/relaxed validation policies,
+  following unified runtime config principles (no new ad-hoc env vars on the
+  main path).
+- Produce deterministic topology objects that support DOT export, unit testing,
+  and downstream routing consumption.
+- Define clear degradation behavior for LLDP missing, NVLINK unavailable, and
+  partial field conflicts.
 
 ## Non-Goals
 
-- 首版不做跨机器全局拓扑发现与全局最优路由。
-- 首版不要求完成多跳路由（`RoutingContext` 当前 direct 1-hop 限制保持不变）。
-- 首版不移除历史 `TENSORCAST_LLDP_FILE_NAME` 行为，只做兼容并规划弃用。
+- v1 does not implement cluster-wide topology discovery or global optimal
+  routing across nodes.
+- v1 does not require multi-hop routing (`RoutingContext` remains direct 1-hop).
+- v1 does not remove the legacy `TENSORCAST_LLDP_FILE_NAME` behavior; it keeps
+  compatibility and plans deprecation separately.
 
 # Architecture & Interfaces
 
@@ -69,99 +82,121 @@ flowchart LR
 
 ## Source 1: LLDP Rail Snapshot
 
-输入文件沿用当前容器提供格式（示例）：
+The input file follows the current container-provided format (example):
 
 ```text
 brainpf0=0000:0e:00.0,mlx5_0,1
 brainvf0=0000:0e:00.1,mlx5_9,1
 ```
 
-解析规则：
+Parsing rules:
 
-- 忽略空行与 `#` 注释行。
-- 每行格式为 `<if_name>=<pci_bdf>,<nic_name>,<rail_id>`。
-- `rail_id` 解析为正整数；非法值按策略处理（fail 或 warn+skip）。
-- 主键以 `nic_name`（如 `mlx5_0`）为准，`if_name` 作为附属标签。
+- ignore empty lines and `#` comment lines
+- each line format is `<if_name>=<pci_bdf>,<nic_name>,<rail_id>`
+- parse `rail_id` as a positive integer; invalid values follow policy
+  (fail or warn+skip)
+- use `nic_name` (for example `mlx5_0`) as the primary key, and keep `if_name`
+  as a secondary label
 
-输出结构（概念）：
+Output shape (conceptual):
 
 - `LldpNicRecord { if_name, pci_bdf, nic_name, rail_id }`
 
 ## Source 2: NVLINK Topology
 
-定义统一抽象接口，首版支持两类来源：
+Define a unified abstraction with two v1 source modes:
 
-- `snapshot_file`：离线快照文件（开发机和 CI 友好，便于可重复测试）。
-- `runtime_probe`：运行时探测（当前实现基于 `nvidia-smi --query-gpu=index,uuid` 与 `nvidia-smi topo -m`，后续可演进为 NVML 或同等接口）。
+- `snapshot_file`: offline snapshot input (developer and CI friendly,
+  reproducible)
+- `runtime_probe`: runtime probing (current implementation based on
+  `nvidia-smi --query-gpu=index,uuid` and `nvidia-smi topo -m`, with a future
+  path to NVML or equivalent APIs)
 
-输出结构（概念）：
+Output shape (conceptual):
 
 - `NvlinkGpuRecord { gpu_uuid, gpu_index }`
 - `NvlinkEdge { src_gpu_uuid, dst_gpu_uuid, link_count, bandwidth_hint_gbps }`
 
 ## Baseline Host Inventory
 
-首版采用“配置优先，发现补充”：
+v1 uses a "config-first, discovery-augmented" model:
 
-- CPU/GPU/NIC 基线由 `simple_numa`（已存在）或后续 host inventory provider 提供。
-- LLDP 负责 NIC rail 与 PCI 标签补强。
-- NVLINK 负责 GPU-GPU 互联关系补强。
+- CPU/GPU/NIC baseline comes from existing `simple_numa` or a future host
+  inventory provider
+- LLDP enriches NIC rail and PCI labels
+- NVLINK enriches GPU-to-GPU interconnect relations
 
-这样可以避免仅靠 LLDP（没有 GPU 信息）无法完成完整拓扑的问题。
+This avoids the LLDP-only limitation (LLDP alone does not contain GPU
+information and cannot produce a complete topology).
 
 ## Canonical Merge Model
 
-新增中间模型（概念）：
+Introduce conceptual intermediate models:
 
 - `HostDiscoverySnapshot`
 - `HostTopologyMergeInput`
 - `HostTopologyMergeResult`
 
-合并原则（确定性）：
+Merge rules (deterministic):
 
-1. 先建立 CPU/GPU pool 与 NIC endpoint 基线。
-2. 用 LLDP 结果为 NIC endpoint 绑定 `rail_id`、`pci_bdf`、`if_name` 标签。
-3. 执行 NIC↔GPU 亲和性推断：按 PCI 拓扑最短“距离”（最长公共 PCI 路径前缀）缩小 NIC 的 GPU pool 集合。
-4. 基于 rail 生成网络 switch 端点（`netsw_rail_<id>`）并建立 `SW` 链路。
-5. 为每个 GPU 生成 NVLINK endpoint（`nvlink_<gpu_uuid>`），按 `NvlinkEdge` 生成 `P2P` 链路。
-6. 最终生成可验证的 `Topology`；如果网络图与 NVLINK 图不连通，允许 `require_connected=false`。
+1. Build baseline CPU/GPU pools and NIC endpoints first.
+2. Attach LLDP labels (`rail_id`, `pci_bdf`, `if_name`) to NIC endpoints.
+3. Run NIC<->GPU affinity inference: narrow NIC GPU pool candidates using PCI
+   topology distance (longest common PCI-path prefix).
+4. Create network switch endpoints by rail (`netsw_rail_<id>`) and generate `SW`
+   links.
+5. Create NVLINK endpoints per GPU (`nvlink_<gpu_uuid>`) and generate `P2P`
+   links from `NvlinkEdge`.
+6. Emit a validated `Topology`; allow `require_connected=false` when network and
+   NVLINK graphs are not fully connected.
 
 ## NIC-GPU Affinity Inference
 
-推断目标：在不改变 `simple_numa` 基线 CPU 归属的前提下，让每个 NIC 只保留“最近”的 GPU pool 子集，减少跨 root-complex 或跨 NUMA 的非必要路径。
+Inference objective: without changing baseline CPU ownership from `simple_numa`,
+keep only the nearest GPU pool subset for each NIC to reduce unnecessary paths
+across root complexes or NUMA boundaries.
 
-输入来源与优先级：
+Input sources and priority:
 
-- GPU PCI path：
-  - 优先使用测试覆盖钩子 `HostTopologyBuilderOptions.gpu_pci_path_overrides`（用于确定性单测）。
-  - 默认路径：`cudaGetDeviceProperties` 获取 `domain:bus:device`，再 resolve `/sys/bus/pci/devices/<bdf>` realpath。
-- NIC PCI path：
-  - 优先使用 `HostTopologyBuilderOptions.nic_pci_path_overrides`。
-  - 默认路径 1：LLDP 中 `pci_bdf` 对应的 sysfs realpath。
-  - 默认路径 2（降级）：`/sys/class/infiniband/<nic>/device` realpath。
+- GPU PCI path:
+  - prefer test hook `HostTopologyBuilderOptions.gpu_pci_path_overrides`
+    (deterministic unit tests)
+  - default path: use `cudaGetDeviceProperties` for `domain:bus:device`, then
+    resolve `/sys/bus/pci/devices/<bdf>` realpath
+- NIC PCI path:
+  - prefer `HostTopologyBuilderOptions.nic_pci_path_overrides`
+  - default path 1: sysfs realpath for LLDP `pci_bdf`
+  - default path 2 (degrade): `/sys/class/infiniband/<nic>/device` realpath
 
-推断规则（确定性）：
+Inference rules (deterministic):
 
-1. 只对 `EndpointKind::kClient && EndpointType::kNic` 端点执行。
-2. 在该 NIC 现有 `pool_ids` 的 GPU 子集范围内打分，避免引入基线之外的 GPU。
-3. 以 NIC/GPU PCI realpath 的最长公共前缀长度作为亲和分值，保留所有并列最高分 GPU（处理并列/多卡同距）。
-4. 输出 `pool_ids` 保序：先保留原 CPU pool，再保留筛选后的 GPU pool。
+1. Apply only to `EndpointKind::kClient && EndpointType::kNic` endpoints.
+2. Score only GPU subsets already present in NIC `pool_ids`, without introducing
+   non-baseline GPUs.
+3. Use longest common prefix length of NIC/GPU PCI realpaths as affinity score,
+   and keep all GPUs tied at the top score (supports equal-distance cases).
+4. Keep output `pool_ids` stable: original CPU pools first, then filtered GPU
+   pools.
 
-降级与兼容：
+Degrade and compatibility behavior:
 
-- 任一 NIC 或 GPU 无法解析 PCI path 时，跳过该对象，不中断拓扑构建。
-- 若亲和性推断部分失败，则标记 observability 降级并保留基线 pool，不改变 fail-fast 行为边界（除非上层 required 语义要求）。
-- 推断逻辑默认仅在 `topology_discovery.enable=true` 时启用。
+- if PCI path resolution fails for any NIC or GPU, skip that object and keep
+  topology building alive
+- if affinity inference partially fails, mark observability degradation and keep
+  baseline pools; do not expand fail-fast boundaries unless upper required
+  semantics request it
+- inference is enabled by default only when `topology_discovery.enable=true`
 
-可观测性：
+Observability:
 
-- 增加字段：
+- add fields:
   - `affinity_nic_candidate_count`
   - `affinity_nic_scored_count`
   - `affinity_nic_narrowed_count`
   - `affinity_degraded`
   - `affinity_degrade_reason`
-- `simple_numa_topology_tool` stderr 汇总中同步输出亲和性统计，便于灰度验证。
+- include affinity summary in `simple_numa_topology_tool` stderr output for
+  staged verification
 
 ## Topology Projection Rules
 
@@ -174,11 +209,12 @@ brainvf0=0000:0e:00.1,mlx5_9,1
   - `nvlink_<gpu_uuid_or_index>` (`kClient`, `kNvlink`)
 - Link:
   - `nic_<x> -> netsw_rail_<r>` (`kSwitch`)
-  - `nvlink_<a> <-> nvlink_<b>` (`kP2P`, 双向显式边)
+  - `nvlink_<a> <-> nvlink_<b>` (`kP2P`, explicit bidirectional edges)
 
 ## Config Additions (Proto-Level)
 
-在 `tensorcast.communicator.v1.CommunicatorConfig` 下新增发现配置段（命名示意）：
+Add a discovery config section under
+`tensorcast.communicator.v1.CommunicatorConfig` (illustrative naming):
 
 ```proto
 message TopologyDiscoveryConfig {
@@ -189,64 +225,85 @@ message TopologyDiscoveryConfig {
 }
 ```
 
-建议字段语义：
+Suggested field semantics:
 
-- `lldp.file_path`：默认 `/host-config/lldp-info.txt`，支持在开发机指向仓库快照。
-- `lldp.required`：true 时文件缺失/解析失败即启动失败。
-- `nvlink.source`：`DISABLED | SNAPSHOT_FILE | RUNTIME_PROBE`。
-- `nvlink.required`：true 时 NVLINK 源不可用即启动失败。
-- `merge_policy.emit_rail_switch_endpoints`：是否显式建模 rail switch。
+- `lldp.file_path`: defaults to `/host-config/lldp-info.txt`, supports repository
+  snapshots on development hosts
+- `lldp.required`: fail startup on missing file or parse failure when true
+- `nvlink.source`: `DISABLED | SNAPSHOT_FILE | RUNTIME_PROBE`
+- `nvlink.required`: fail startup when NVLINK source is unavailable and true
+- `merge_policy.emit_rail_switch_endpoints`: whether to model rail switch
+  endpoints explicitly
 
-说明：
+Notes:
 
-- `DaemonConfig` 已嵌入 `communicator`，无需新增并行配置入口。
-- 不新增新的环境变量控制发现逻辑；历史 env 仅作兼容兜底路径。
+- `DaemonConfig` already embeds communicator config; no parallel config entry is
+  required
+- no new environment variable is introduced for discovery control; legacy env is
+  compatibility fallback only
 
 ## Integration Points
 
-- 新增模块：`core/communicator/topology/discovery/`（parser/source/merge/builder）。
-- `RoutingContext` 保持接口稳定；通过 `set_topology(...)` 注入发现结果。
-- `EndpointBinding` 建议增补可选字段（如 `pci_bdf`、`rail_id`、`gpu_uuid`）以支持后续路由策略。
-- `core/communicator/transport/net_dev.cc` 的 `read_rail_id()` 迁移为调用统一 LLDP 解析组件，避免重复解析逻辑。
+- add module `core/communicator/topology/discovery/`
+  (parser/source/merge/builder)
+- keep `RoutingContext` interface stable and inject discovery output through
+  `set_topology(...)`
+- extend `EndpointBinding` with optional fields (`pci_bdf`, `rail_id`,
+  `gpu_uuid`) for future routing policies
+- migrate `read_rail_id()` in `core/communicator/transport/net_dev.cc` to reuse
+  the unified LLDP parser and avoid duplicated parsing logic
 
-## Cross-node NIC rail matching（路由阶段增量）
+## Cross-Node NIC Rail Matching (Routing Increment)
 
-为匹配“每个 GPU 亲和本地 NIC/NVLINK endpoint，跨节点走 NIC rail 对齐”的实践部署，本设计在路由阶段补充了跨节点 rail 匹配策略（保持 `RoutingContext` 1-hop 语义不变）：
+To align with practical deployment policy (each GPU prefers local NIC/NVLINK
+endpoints, and cross-node paths prefer aligned NIC rails), this design adds a
+cross-node rail matching policy at routing stage while keeping `RoutingContext`
+1-hop semantics unchanged:
 
-1. 若 `src -> dst` 存在 direct link，沿用 direct 1-hop。
-2. 若 direct link 不存在且 `src_binding.node_id != dst_binding.node_id`：
-   - 从本机拓扑中为 source 选择本地 NIC（优先 rail 命中，再结合 GPU pool 亲和）。
-   - 以该 NIC rail 作为 preferred rail，在目标节点 bindings 中选择可用网络地址端点（评分优先级：preferred rail > dst rail > endpoint/NIC 特征）。
-   - 用本地 NIC 邻接链路（通常是 `nic -> netsw_rail_<id>`）作为链路锚点建立 1-hop channel。
-3. 该策略允许运行时 endpoint id（例如 `node/dev/gpu/<id>`）与拓扑 endpoint id 解耦，不要求两者完全同名。
-4. 若 rail 匹配失败，保持现有错误语义并由上层 `RemoteKeySource` 继续 strict direct fallback。
+1. If a direct link exists for `src -> dst`, keep direct 1-hop behavior.
+2. If no direct link exists and `src_binding.node_id != dst_binding.node_id`:
+   - select a local NIC for source from local topology (rail match first, then
+     GPU-pool affinity)
+   - use that NIC rail as preferred rail and choose an available network
+     endpoint in destination bindings (score priority:
+     preferred rail > destination rail > endpoint/NIC features)
+   - use local NIC adjacent link (typically `nic -> netsw_rail_<id>`) as route
+     anchor to build a 1-hop channel
+3. This policy decouples runtime endpoint ids (for example `node/dev/gpu/<id>`)
+   from topology endpoint ids and does not require strict naming equality.
+4. If rail matching fails, preserve existing error semantics and let upper
+   `RemoteKeySource` continue strict direct fallback.
 
 # Error Model & Invariants
 
-- LLDP 解析不变量：
-  - `nic_name` 不可为空。
-  - 同 `nic_name` 不允许冲突的 `rail_id`。
-  - `pci_bdf` 需符合 `dddd:bb:ss.f` 基本格式。
-- NVLINK 不变量：
-  - 端点 GPU 必须可映射到已知 GPU pool。
-  - 自环边无效；重复边合并计数。
-- 合并不变量：
-  - `Topology::validate()` 必须通过。
-  - 不因部分源缺失导致崩溃；按 required 策略 fail-fast 或 degrade。
+- LLDP parsing invariants:
+  - `nic_name` must not be empty
+  - the same `nic_name` must not map to conflicting `rail_id` values
+  - `pci_bdf` must satisfy base `dddd:bb:ss.f` format
+- NVLINK invariants:
+  - endpoint GPUs must map to known GPU pools
+  - self-loop edges are invalid; duplicate edges are merged by count
+- Merge invariants:
+  - `Topology::validate()` must pass
+  - missing partial source data must not crash; follow required policy for
+    fail-fast or degrade
 
-降级策略：
+Degrade policy:
 
-- `topology_discovery.enable=false`：完全回退现有路径。
-- LLDP 不可用且 `lldp.required=false`：rail 设为 unknown，网络拓扑退化为单 switch 或无 rail 分层。
-- NVLINK 不可用且 `nvlink.required=false`：只生成网络侧拓扑，不生成 NVLINK 链路。
+- `topology_discovery.enable=false`: fully fall back to existing path
+- LLDP unavailable with `lldp.required=false`: rail is unknown and network
+  topology degrades to a single switch layer (or no rail layering)
+- NVLINK unavailable with `nvlink.required=false`: emit network-side topology
+  only, without NVLINK links
 
 # Schema Changes (if any)
 
-有。需要扩展：
+Yes. Extend:
 
-- `proto/tensorcast/communicator/v1/communicator_config.proto`（新增 `TopologyDiscoveryConfig` 与子消息）。
+- `proto/tensorcast/communicator/v1/communicator_config.proto`
+  (add `TopologyDiscoveryConfig` and submessages)
 
-若 `.proto` 变更，必须执行：
+If `.proto` is modified, run:
 
 ```bash
 bash tools/build_proto_python.sh
@@ -254,36 +311,40 @@ bash tools/build_proto_python.sh
 
 # Naming Compliance
 
-- 类/结构体（PascalCase）：
+- Classes/structs (PascalCase):
   - `LldpDiscoveryConfig`
   - `NvlinkDiscoveryConfig`
   - `HostDiscoverySnapshot`
   - `HostTopologyMergeResult`
-- 函数/方法（snake_case）：
+- Functions/methods (snake_case):
   - `load_lldp_records`
   - `collect_nvlink_edges`
   - `merge_discovery_sources`
   - `build_topology_from_discovery`
-- 常量/枚举（ALL_CAPS）：
+- Constants/enums (ALL_CAPS):
   - `NVLINK_SOURCE_DISABLED`
   - `NVLINK_SOURCE_SNAPSHOT_FILE`
   - `NVLINK_SOURCE_RUNTIME_PROBE`
 
 # Trade-offs & Risks
 
-- 引入新配置字段会提升系统复杂度。
-  - 缓解：默认关闭，按阶段启用，提供清晰 fallback。
-- 运行时 NVLINK 探测在不同驱动环境下可能不稳定。
-  - 缓解：首版优先快照输入，运行时探测独立开关。
-- LLDP 文件格式来自环境约定，存在漂移风险。
-  - 缓解：定义严格 parser + 版本化样例 + 单元测试。
+- New config fields increase system complexity.
+  - Mitigation: keep disabled by default, roll out in phases, and provide clear
+    fallback behavior.
+- Runtime NVLINK probing can be unstable across driver environments.
+  - Mitigation: prioritize snapshot input in v1 and gate runtime probing behind
+    an independent switch.
+- LLDP format depends on environment conventions and may drift.
+  - Mitigation: strict parser, versioned sample files, and unit tests.
 
 # Compatibility & Acceptance Criteria
 
-- 不开启 `topology_discovery` 时，行为与当前版本保持一致。
-- 开启后可基于 LLDP + NVLINK 构建当前机器拓扑，并可导出 DOT。
-- 任一来源缺失时按 `required` 配置执行 fail-fast 或 degrade，且日志可定位。
-- `RoutingContext` 与 `RemoteKeySource` 现有调用链不破坏；失败可回退 direct 读路径。
+- When `topology_discovery` is disabled, behavior matches current version.
+- When enabled, LLDP + NVLINK can build host topology and export DOT.
+- If any source is missing, behavior follows `required` policy (fail-fast or
+  degrade) with diagnosable logs.
+- Existing `RoutingContext` and `RemoteKeySource` call chains remain intact; on
+  failure, direct read fallback still works.
 
 # References
 
