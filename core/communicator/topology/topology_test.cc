@@ -16,6 +16,7 @@
 
 namespace {
 
+using tensorcast::communicator::topology::BuildSwitchTopologyFromSimpleNuma;
 using tensorcast::communicator::topology::Endpoint;
 using tensorcast::communicator::topology::EndpointKind;
 using tensorcast::communicator::topology::EndpointType;
@@ -23,7 +24,6 @@ using tensorcast::communicator::topology::Link;
 using tensorcast::communicator::topology::LinkType;
 using tensorcast::communicator::topology::Pool;
 using tensorcast::communicator::topology::PoolType;
-using tensorcast::communicator::topology::BuildSwitchTopologyFromSimpleNuma;
 using tensorcast::communicator::topology::SimpleNumaTopologyOptions;
 using tensorcast::communicator::topology::Topology;
 using tensorcast::communicator::topology::ValidationOptions;
@@ -156,11 +156,7 @@ TEST_CASE("Topology rail-optimized 8-GPU/8-NIC/2-CPU NVLINK layout", "[communica
   options.require_endpoint_links = true;
   options.require_connected = false; // NVLINK and network fabrics are modeled as separate components.
 
-  auto topology_or = Topology::Build(
-      std::move(pools),
-      std::move(endpoints),
-      std::move(links),
-      options);
+  auto topology_or = Topology::Build(std::move(pools), std::move(endpoints), std::move(links), options);
   INFO(topology_or.status());
   REQUIRE(topology_or.ok());
   const Topology& topology = topology_or.value();
@@ -213,11 +209,7 @@ TEST_CASE("Topology no-rail 4-GPU/1-NIC/1-CPU layout", "[communicator][topology]
   options.require_endpoint_links = true;
   options.require_connected = true;
 
-  auto topology_or = Topology::Build(
-      std::move(pools),
-      std::move(endpoints),
-      std::move(links),
-      options);
+  auto topology_or = Topology::Build(std::move(pools), std::move(endpoints), std::move(links), options);
   INFO(topology_or.status());
   REQUIRE(topology_or.ok());
   const Topology& topology = topology_or.value();
@@ -265,19 +257,13 @@ TEST_CASE("Topology rejects switch links with mismatched endpoint types", "[comm
   options.require_endpoint_links = true;
   options.require_connected = true;
 
-  auto topology_or = Topology::Build(
-      std::move(pools),
-      std::move(endpoints),
-      std::move(links),
-      options);
+  auto topology_or = Topology::Build(std::move(pools), std::move(endpoints), std::move(links), options);
   INFO(topology_or.status());
   CHECK_FALSE(topology_or.ok());
-  CHECK(std::string(topology_or.status().message()).find("endpoint types must match") !=
-        std::string::npos);
+  CHECK(std::string(topology_or.status().message()).find("endpoint types must match") != std::string::npos);
 }
 
-TEST_CASE("Topology rejects forward and P2P links with mismatched endpoint types",
-          "[communicator][topology]") {
+TEST_CASE("Topology rejects forward and P2P links with mismatched endpoint types", "[communicator][topology]") {
   const auto build_mismatched_link = [](LinkType link_type) {
     std::vector<Pool> pools;
     pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
@@ -314,19 +300,14 @@ TEST_CASE("Topology rejects forward and P2P links with mismatched endpoint types
     options.require_endpoint_links = true;
     options.require_connected = true;
 
-    return Topology::Build(
-        std::move(pools),
-        std::move(endpoints),
-        std::move(links),
-        options);
+    return Topology::Build(std::move(pools), std::move(endpoints), std::move(links), options);
   };
 
   for (LinkType link_type : {LinkType::kForward, LinkType::kP2P}) {
     auto topology_or = build_mismatched_link(link_type);
     INFO(topology_or.status());
     CHECK_FALSE(topology_or.ok());
-    CHECK(std::string(topology_or.status().message()).find("endpoint types must match") !=
-          std::string::npos);
+    CHECK(std::string(topology_or.status().message()).find("endpoint types must match") != std::string::npos);
   }
 }
 
@@ -359,11 +340,7 @@ TEST_CASE("Topology rejects disconnected graphs when required", "[communicator][
   options.require_endpoint_links = false;
   options.require_connected = true;
 
-  auto topology_or = Topology::Build(
-      std::move(pools),
-      std::move(endpoints),
-      std::move(links),
-      options);
+  auto topology_or = Topology::Build(std::move(pools), std::move(endpoints), std::move(links), options);
   INFO(topology_or.status());
   CHECK_FALSE(topology_or.ok());
   CHECK(std::string(topology_or.status().message()).find("disconnected") != std::string::npos);
@@ -387,8 +364,7 @@ TEST_CASE("SimpleNuma topology rejects duplicate node ids", "[communicator][topo
   auto topology_or = BuildSwitchTopologyFromSimpleNuma(config);
   INFO(topology_or.status());
   CHECK_FALSE(topology_or.ok());
-  CHECK(std::string(topology_or.status().message()).find("duplicate simple_numa node id") !=
-        std::string::npos);
+  CHECK(std::string(topology_or.status().message()).find("duplicate simple_numa node id") != std::string::npos);
 }
 
 TEST_CASE("SimpleNuma topology rejects duplicate gpu ids", "[communicator][topology]") {
@@ -410,8 +386,7 @@ TEST_CASE("SimpleNuma topology rejects duplicate gpu ids", "[communicator][topol
   auto topology_or = BuildSwitchTopologyFromSimpleNuma(config);
   INFO(topology_or.status());
   CHECK_FALSE(topology_or.ok());
-  CHECK(std::string(topology_or.status().message()).find("duplicate simple_numa gpu id") !=
-        std::string::npos);
+  CHECK(std::string(topology_or.status().message()).find("duplicate simple_numa gpu id") != std::string::npos);
 }
 
 TEST_CASE("SimpleNuma topology rejects nodes with empty NIC lists", "[communicator][topology]") {
@@ -445,6 +420,5 @@ TEST_CASE("SimpleNuma topology rejects switch_id collisions", "[communicator][to
   auto topology_or = BuildSwitchTopologyFromSimpleNuma(config, options);
   INFO(topology_or.status());
   CHECK_FALSE(topology_or.ok());
-  CHECK(std::string(topology_or.status().message()).find("switch_id collides") !=
-        std::string::npos);
+  CHECK(std::string(topology_or.status().message()).find("switch_id collides") != std::string::npos);
 }

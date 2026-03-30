@@ -22,6 +22,7 @@
 #include <string>
 
 #include "aligned_buffer.h"
+
 namespace tensorcast::checkpoint {
 
 [[maybe_unused]] constexpr size_t kPartitionMaxSize = 10L << 30; // 10GB

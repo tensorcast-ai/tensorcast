@@ -41,8 +41,8 @@ void StreamingBufferAdapter::return_chunk(int slot_id) {
     VLOG(1) << "Recovered producer-owned slot via abort_producer_slot slot=" << slot_id;
     return;
   }
-  LOG(ERROR) << "Failed to release slot after return_chunk fallback slot=" << slot_id
-             << " return_status=" << status << " abort_status=" << abort_status;
+  LOG(ERROR) << "Failed to release slot after return_chunk fallback slot=" << slot_id << " return_status=" << status
+             << " abort_status=" << abort_status;
 }
 
 absl::Status StreamingBufferAdapter::mark_chunk_ready(int slot_id, uint64_t global_chunk_idx, size_t valid_bytes) {

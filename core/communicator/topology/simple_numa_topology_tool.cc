@@ -25,8 +25,8 @@ int main(int argc, char** argv) {
 
   tensorcast::communicator::topology::Topology topology;
   if (cfg_or->topology_discovery().enable()) {
-    auto build_or = tensorcast::communicator::topology::discovery::build_topology_from_discovery_with_observability(
-        cfg_or.value());
+    auto build_or =
+        tensorcast::communicator::topology::discovery::build_topology_from_discovery_with_observability(cfg_or.value());
     if (!build_or.ok()) {
       std::cerr << "Failed to build topology: " << build_or.status().ToString() << "\n";
       return 1;

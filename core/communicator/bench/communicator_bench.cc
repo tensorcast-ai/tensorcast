@@ -677,8 +677,7 @@ absl::Status probe_gpu_mr_registration(const Options& options, const RdmPrefligh
   tc::misc::wrap_ibv_dereg_mr(mr);
   std::ostringstream line;
   line << "GPU_MR_PROBE"
-       << " nic=" << probe_nic << " rail=" << dev->get_rail_id() << " bytes=" << probe_buffer.bytes()
-       << " status=ok";
+       << " nic=" << probe_nic << " rail=" << dev->get_rail_id() << " bytes=" << probe_buffer.bytes() << " status=ok";
   emit_machine_line(line.str());
   return absl::OkStatus();
 }
@@ -701,8 +700,7 @@ void print_preflight(const Options& options, const RdmPreflight& preflight) {
   line << " selected_nic=" << (preflight.selected_nic.empty() ? "-" : preflight.selected_nic)
        << " selected_rail=" << preflight.selected_rail_id;
   if (!preflight.gpu_name.empty()) {
-    line << " gpu=" << preflight.gpu_name << " gpu_bus=" << preflight.gpu_bus
-         << " gpu_device=" << preflight.gpu_device;
+    line << " gpu=" << preflight.gpu_name << " gpu_bus=" << preflight.gpu_bus << " gpu_device=" << preflight.gpu_device;
   }
   emit_machine_line(line.str());
 }
@@ -739,6 +737,7 @@ absl::Status run_target(const Options& options) {
     uint64_t buffer_fill_copy_us = 0;
     uint64_t register_tensor_us = 0;
   };
+
   TargetStartupProfile startup;
 
   auto cfg = make_config(options);
@@ -807,9 +806,9 @@ absl::Status run_target(const Options& options) {
              << " init_buffer_fill_alloc_us=" << startup.buffer_fill_alloc_us
              << " init_buffer_fill_pattern_us=" << startup.buffer_fill_pattern_us
              << " init_buffer_fill_copy_us=" << startup.buffer_fill_copy_us
-             << " init_register_tensor_us=" << startup.register_tensor_us
-             << " init_total_us="
-             << (startup.communicator_init_us + startup.buffer_alloc_us + startup.buffer_fill_us + startup.register_tensor_us);
+             << " init_register_tensor_us=" << startup.register_tensor_us << " init_total_us="
+             << (startup.communicator_init_us + startup.buffer_alloc_us + startup.buffer_fill_us +
+                 startup.register_tensor_us);
   emit_machine_line(ready_line.str());
 
   while (true) {
@@ -844,6 +843,7 @@ absl::Status run_initiator(const Options& options) {
     uint64_t buffer_initial_clear_us = 0;
     uint64_t warmup_total_us = 0;
   };
+
   InitiatorStartupProfile startup;
 
   auto cfg = make_config(options);
@@ -1041,7 +1041,8 @@ absl::Status run_initiator(const Options& options) {
                 << " batch_avg_verify_copy_per_request_us=" << avg_from_sum(batch_result.verify_copy_us)
                 << " batch_avg_verify_checksum_per_request_us=" << avg_from_sum(batch_result.verify_checksum_us)
                 << " iteration_total_us=" << batch_result.batch_total_us
-                << " batch_max_request_us=" << batch_result.max_request_us << " total_us=" << batch_result.batch_wall_us;
+                << " batch_max_request_us=" << batch_result.max_request_us
+                << " total_us=" << batch_result.batch_wall_us;
       std::lock_guard<std::mutex> lock(io_mu);
       emit_machine_line(iter_line.str());
     }
@@ -1062,6 +1063,7 @@ absl::Status run_initiator(const Options& options) {
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(0, options.duration_sec));
   std::vector<double> latencies_us;
+
   struct SummaryProfile {
     uint64_t iterations = 0;
     uint64_t requests = 0;
@@ -1086,6 +1088,7 @@ absl::Status run_initiator(const Options& options) {
     uint64_t sum_rdma_ack_windows = 0;
     uint64_t sum_rdma_ack_segments = 0;
   };
+
   SummaryProfile summary_profile;
   std::mutex stats_mu;
   std::mutex error_mu;
@@ -1194,58 +1197,54 @@ absl::Status run_initiator(const Options& options) {
   const uint64_t amortizable_init_total_us =
       startup.communicator_init_us + startup.buffer_alloc_us + startup.buffer_initial_clear_us;
   const uint64_t amortizable_total_us = amortizable_init_total_us + startup.warmup_total_us;
-  const auto amortized_per_iteration_us =
-      summary_profile.iterations == 0
-          ? 0.0
-          : static_cast<double>(amortizable_total_us) / static_cast<double>(summary_profile.iterations);
+  const auto amortized_per_iteration_us = summary_profile.iterations == 0
+      ? 0.0
+      : static_cast<double>(amortizable_total_us) / static_cast<double>(summary_profile.iterations);
   const auto amortized_per_request_us =
       total_requests == 0 ? 0.0 : static_cast<double>(amortizable_total_us) / static_cast<double>(total_requests);
   std::ostringstream summary_line;
-  summary_line << "SUMMARY"
-               << " iterations=" << completed_count << " requests=" << total_requests << " threads=" << options.threads
-               << " batch_size=" << options.batch_size << " qp_count=" << options.qp_count
-               << " outstanding_wr=" << options.outstanding_wr << " bytes=" << total_bytes << " wall_us=" << wall_us
-               << " avg_us=" << avg_us << " p50_us=" << percentile(50.0) << " p95_us=" << percentile(95.0)
-               << " p99_us=" << percentile(99.0) << " bw_GBps=" << bw_GBps << " bw_gbps=" << bw_gbps
-               << " amortizable_init_communicator_us=" << startup.communicator_init_us
-               << " amortizable_init_buffer_alloc_us=" << startup.buffer_alloc_us
-               << " amortizable_init_buffer_alloc_set_device_us=" << startup.buffer_alloc_set_device_us
-               << " amortizable_init_buffer_alloc_call_us=" << startup.buffer_alloc_call_us
-               << " amortizable_init_buffer_clear_us=" << startup.buffer_initial_clear_us
-               << " amortizable_warmup_total_us=" << startup.warmup_total_us
-               << " amortizable_init_total_us=" << amortizable_init_total_us
-               << " amortizable_total_us=" << amortizable_total_us
-               << " amortized_per_iteration_us=" << amortized_per_iteration_us
-               << " amortized_per_request_us=" << amortized_per_request_us
-               << " recurring_avg_iteration_total_us=" << avg_iteration_metric(summary_profile.sum_batch_total_us)
-               << " recurring_avg_clear_us=" << avg_iteration_metric(summary_profile.sum_clear_us)
-               << " recurring_avg_issue_us=" << avg_iteration_metric(summary_profile.sum_issue_us)
-               << " recurring_avg_wait_us=" << avg_iteration_metric(summary_profile.sum_wait_us)
-               << " recurring_avg_verify_total_us=" << avg_iteration_metric(summary_profile.sum_verify_total_us)
-               << " recurring_avg_verify_buffer_alloc_us="
-               << avg_iteration_metric(summary_profile.sum_verify_buffer_alloc_us)
-               << " recurring_avg_verify_copy_us=" << avg_iteration_metric(summary_profile.sum_verify_copy_us)
-               << " recurring_avg_verify_checksum_us=" << avg_iteration_metric(summary_profile.sum_verify_checksum_us)
-               << " recurring_avg_clear_per_request_us=" << avg_request_metric(summary_profile.sum_clear_us)
-               << " recurring_avg_verify_per_request_us=" << avg_request_metric(summary_profile.sum_verify_total_us)
-               << " recurring_avg_verify_buffer_alloc_per_request_us="
-               << avg_request_metric(summary_profile.sum_verify_buffer_alloc_us)
-               << " recurring_avg_verify_copy_per_request_us=" << avg_request_metric(summary_profile.sum_verify_copy_us)
-               << " recurring_avg_verify_checksum_per_request_us="
-               << avg_request_metric(summary_profile.sum_verify_checksum_us)
-               << " avg_response_wait_us=" << avg_request_metric(summary_profile.sum_request_first_response_us)
-               << " avg_first_post_us=" << avg_request_metric(summary_profile.sum_rdma_first_post_us)
-               << " avg_post_after_response_us=" << avg_request_metric(summary_profile.sum_rdma_post_after_response_us)
-               << " avg_data_phase_us=" << avg_request_metric(summary_profile.sum_rdma_post_to_last_completion_us)
-               << " avg_tail_after_last_completion_us="
-               << avg_request_metric(summary_profile.sum_tail_after_last_completion_us)
-               << " avg_handshake_wait_us=" << avg_request_metric(summary_profile.sum_rdma_handshake_queue_wait_us)
-               << " avg_response_windows=" << avg_request_metric(summary_profile.sum_rdma_response_windows)
-               << " avg_response_segments=" << avg_request_metric(summary_profile.sum_rdma_response_segments)
-               << " avg_wr_posted=" << avg_request_metric(summary_profile.sum_rdma_wr_posted)
-               << " avg_wc_completed=" << avg_request_metric(summary_profile.sum_rdma_wc_completed)
-               << " avg_ack_windows=" << avg_request_metric(summary_profile.sum_rdma_ack_windows)
-               << " avg_ack_segments=" << avg_request_metric(summary_profile.sum_rdma_ack_segments);
+  summary_line
+      << "SUMMARY"
+      << " iterations=" << completed_count << " requests=" << total_requests << " threads=" << options.threads
+      << " batch_size=" << options.batch_size << " qp_count=" << options.qp_count
+      << " outstanding_wr=" << options.outstanding_wr << " bytes=" << total_bytes << " wall_us=" << wall_us
+      << " avg_us=" << avg_us << " p50_us=" << percentile(50.0) << " p95_us=" << percentile(95.0)
+      << " p99_us=" << percentile(99.0) << " bw_GBps=" << bw_GBps << " bw_gbps=" << bw_gbps
+      << " amortizable_init_communicator_us=" << startup.communicator_init_us
+      << " amortizable_init_buffer_alloc_us=" << startup.buffer_alloc_us
+      << " amortizable_init_buffer_alloc_set_device_us=" << startup.buffer_alloc_set_device_us
+      << " amortizable_init_buffer_alloc_call_us=" << startup.buffer_alloc_call_us
+      << " amortizable_init_buffer_clear_us=" << startup.buffer_initial_clear_us
+      << " amortizable_warmup_total_us=" << startup.warmup_total_us
+      << " amortizable_init_total_us=" << amortizable_init_total_us << " amortizable_total_us=" << amortizable_total_us
+      << " amortized_per_iteration_us=" << amortized_per_iteration_us
+      << " amortized_per_request_us=" << amortized_per_request_us
+      << " recurring_avg_iteration_total_us=" << avg_iteration_metric(summary_profile.sum_batch_total_us)
+      << " recurring_avg_clear_us=" << avg_iteration_metric(summary_profile.sum_clear_us)
+      << " recurring_avg_issue_us=" << avg_iteration_metric(summary_profile.sum_issue_us)
+      << " recurring_avg_wait_us=" << avg_iteration_metric(summary_profile.sum_wait_us)
+      << " recurring_avg_verify_total_us=" << avg_iteration_metric(summary_profile.sum_verify_total_us)
+      << " recurring_avg_verify_buffer_alloc_us=" << avg_iteration_metric(summary_profile.sum_verify_buffer_alloc_us)
+      << " recurring_avg_verify_copy_us=" << avg_iteration_metric(summary_profile.sum_verify_copy_us)
+      << " recurring_avg_verify_checksum_us=" << avg_iteration_metric(summary_profile.sum_verify_checksum_us)
+      << " recurring_avg_clear_per_request_us=" << avg_request_metric(summary_profile.sum_clear_us)
+      << " recurring_avg_verify_per_request_us=" << avg_request_metric(summary_profile.sum_verify_total_us)
+      << " recurring_avg_verify_buffer_alloc_per_request_us="
+      << avg_request_metric(summary_profile.sum_verify_buffer_alloc_us)
+      << " recurring_avg_verify_copy_per_request_us=" << avg_request_metric(summary_profile.sum_verify_copy_us)
+      << " recurring_avg_verify_checksum_per_request_us=" << avg_request_metric(summary_profile.sum_verify_checksum_us)
+      << " avg_response_wait_us=" << avg_request_metric(summary_profile.sum_request_first_response_us)
+      << " avg_first_post_us=" << avg_request_metric(summary_profile.sum_rdma_first_post_us)
+      << " avg_post_after_response_us=" << avg_request_metric(summary_profile.sum_rdma_post_after_response_us)
+      << " avg_data_phase_us=" << avg_request_metric(summary_profile.sum_rdma_post_to_last_completion_us)
+      << " avg_tail_after_last_completion_us=" << avg_request_metric(summary_profile.sum_tail_after_last_completion_us)
+      << " avg_handshake_wait_us=" << avg_request_metric(summary_profile.sum_rdma_handshake_queue_wait_us)
+      << " avg_response_windows=" << avg_request_metric(summary_profile.sum_rdma_response_windows)
+      << " avg_response_segments=" << avg_request_metric(summary_profile.sum_rdma_response_segments)
+      << " avg_wr_posted=" << avg_request_metric(summary_profile.sum_rdma_wr_posted)
+      << " avg_wc_completed=" << avg_request_metric(summary_profile.sum_rdma_wc_completed)
+      << " avg_ack_windows=" << avg_request_metric(summary_profile.sum_rdma_ack_windows)
+      << " avg_ack_segments=" << avg_request_metric(summary_profile.sum_rdma_ack_segments);
   emit_machine_line(summary_line.str());
   return absl::OkStatus();
 }

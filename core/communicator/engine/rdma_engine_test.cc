@@ -846,7 +846,12 @@ TEST_CASE("RDMA connect failure cleanup tolerates missing pending request", "[rd
   local_tensor->set_read_ready();
 
   auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
-      "rdma_cleanup_tensor", "127.0.0.1", 65002, local_tensor, /*remote_offset=*/0, /*request_id=*/17,
+      "rdma_cleanup_tensor",
+      "127.0.0.1",
+      65002,
+      local_tensor,
+      /*remote_offset=*/0,
+      /*request_id=*/17,
       net_dev->get_rail_id());
   auto remote_tensor = std::make_shared<tensorcast::communicator::transport::RemotePartitionTensor>(
       "rdma_cleanup_tensor", remote_dev_name, /*addr=*/0xBEE0, local_tensor->get_bytes(), /*rkey=*/0xBEEF);

@@ -164,14 +164,15 @@ misc::result_t RdmaContext::ibv_init() {
         continue;
       }
 
-      scan_candidates.push_back(PortScanCandidate{
-          .dev_id = d,
-          .device = devices[d],
-          .device_name = device_name,
-          .port = port,
-          .port_attr = port_attr,
-          .best_gid_index = best_gid_index,
-      });
+      scan_candidates.push_back(
+          PortScanCandidate{
+              .dev_id = d,
+              .device = devices[d],
+              .device_name = device_name,
+              .port = port,
+              .port_attr = port_attr,
+              .best_gid_index = best_gid_index,
+          });
     }
 
     if (misc::SUCCESS != misc::wrap_ibv_close_device(context)) {
@@ -180,9 +181,7 @@ misc::result_t RdmaContext::ibv_init() {
   }
 
   std::sort(
-      scan_candidates.begin(),
-      scan_candidates.end(),
-      [](const PortScanCandidate& lhs, const PortScanCandidate& rhs) {
+      scan_candidates.begin(), scan_candidates.end(), [](const PortScanCandidate& lhs, const PortScanCandidate& rhs) {
         if (lhs.device_name != rhs.device_name) {
           return lhs.device_name < rhs.device_name;
         }
@@ -206,17 +205,15 @@ misc::result_t RdmaContext::ibv_init() {
     struct ibv_port_attr port_attr{};
     std::memset(&port_attr, 0, sizeof(port_attr));
     if (misc::SUCCESS != misc::wrap_ibv_query_port(context, candidate.port, &port_attr)) {
-      LOG(WARNING) << "unable to re-query port attr " << candidate.device_name
-                   << " port=" << candidate.port;
+      LOG(WARNING) << "unable to re-query port attr " << candidate.device_name << " port=" << candidate.port;
       if (misc::SUCCESS != misc::wrap_ibv_close_device(context)) {
         return misc::INTERNAL_ERROR;
       }
       continue;
     }
     if (!is_port_usable(port_attr)) {
-      LOG(INFO) << "skip unstable RDMA port after recheck: dev=" << candidate.device_name
-                << " port=" << candidate.port << " state=" << port_attr.state
-                << " link_layer=" << static_cast<int>(port_attr.link_layer);
+      LOG(INFO) << "skip unstable RDMA port after recheck: dev=" << candidate.device_name << " port=" << candidate.port
+                << " state=" << port_attr.state << " link_layer=" << static_cast<int>(port_attr.link_layer);
       if (misc::SUCCESS != misc::wrap_ibv_close_device(context)) {
         return misc::INTERNAL_ERROR;
       }
@@ -225,8 +222,8 @@ misc::result_t RdmaContext::ibv_init() {
 
     auto dev = std::make_shared<NetDev>(context, candidate.dev_id, candidate.device, candidate.port, port_attr);
     if (dev->get_best_gid_index() <= 0) {
-      LOG(INFO) << "skip RDMA candidate due to missing usable GID after recheck: dev="
-                << candidate.device_name << " port=" << candidate.port;
+      LOG(INFO) << "skip RDMA candidate due to missing usable GID after recheck: dev=" << candidate.device_name
+                << " port=" << candidate.port;
       if (misc::SUCCESS != misc::wrap_ibv_close_device(context)) {
         return misc::INTERNAL_ERROR;
       }
@@ -241,21 +238,18 @@ misc::result_t RdmaContext::ibv_init() {
     return misc::INTERNAL_ERROR;
   }
 
-  std::sort(
-      devs_.begin(),
-      devs_.end(),
-      [](const net_dev_t& lhs, const net_dev_t& rhs) {
-        if (lhs->get_rail_id() != rhs->get_rail_id()) {
-          return lhs->get_rail_id() < rhs->get_rail_id();
-        }
-        if (lhs->get_name() != rhs->get_name()) {
-          return lhs->get_name() < rhs->get_name();
-        }
-        if (lhs->get_port() != rhs->get_port()) {
-          return lhs->get_port() < rhs->get_port();
-        }
-        return lhs->get_dev_id() < rhs->get_dev_id();
-      });
+  std::sort(devs_.begin(), devs_.end(), [](const net_dev_t& lhs, const net_dev_t& rhs) {
+    if (lhs->get_rail_id() != rhs->get_rail_id()) {
+      return lhs->get_rail_id() < rhs->get_rail_id();
+    }
+    if (lhs->get_name() != rhs->get_name()) {
+      return lhs->get_name() < rhs->get_name();
+    }
+    if (lhs->get_port() != rhs->get_port()) {
+      return lhs->get_port() < rhs->get_port();
+    }
+    return lhs->get_dev_id() < rhs->get_dev_id();
+  });
 
   for (const auto& dev : devs_) {
     auto it = rail_devs_.find(dev->get_rail_id());
@@ -270,9 +264,8 @@ misc::result_t RdmaContext::ibv_init() {
       continue;
     }
     const bool is_primary = rail_it->second == dev;
-    LOG(INFO) << "RDMA rail device registered: dev=" << dev->get_name()
-              << " port=" << dev->get_port() << " rail_id=" << dev->get_rail_id()
-              << " role=" << (is_primary ? "primary" : "backup");
+    LOG(INFO) << "RDMA rail device registered: dev=" << dev->get_name() << " port=" << dev->get_port()
+              << " rail_id=" << dev->get_rail_id() << " role=" << (is_primary ? "primary" : "backup");
   }
 
   for (auto dev : devs_) {
@@ -432,8 +425,7 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
                    << " after affinity scan; max_prefix_candidates is empty";
       return nullptr;
     }
-    const int fallback_idx =
-        max_prefix_candidates[static_cast<size_t>(gpu_id) % max_prefix_candidates.size()];
+    const int fallback_idx = max_prefix_candidates[static_cast<size_t>(gpu_id) % max_prefix_candidates.size()];
     LOG(WARNING) << "No RDMA candidate satisfies max GID + max PCI-prefix jointly for gpu_id=" << gpu_id
                  << "; fallback to max-prefix candidate dev=" << devs_[fallback_idx]->get_name();
     dev_vector_[gpu_id] = devs_[fallback_idx];

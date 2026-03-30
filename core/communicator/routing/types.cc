@@ -5,10 +5,11 @@
 namespace tensorcast::communicator::routing {
 namespace {
 
-HealthState derive_health_from_counts(uint64_t success_count,
-                                      uint64_t failure_count,
-                                      absl::Time last_success,
-                                      absl::Time last_failure) {
+HealthState derive_health_from_counts(
+    uint64_t success_count,
+    uint64_t failure_count,
+    absl::Time last_success,
+    absl::Time last_failure) {
   if (success_count == 0 && failure_count == 0) {
     return HealthState::kUnknown;
   }
@@ -65,19 +66,11 @@ bool EndpointBinding::has_network_address() const {
 }
 
 HealthState derive_health(const ConnectionStats& stats) {
-  return derive_health_from_counts(
-      stats.success_count,
-      stats.failure_count,
-      stats.last_success,
-      stats.last_failure);
+  return derive_health_from_counts(stats.success_count, stats.failure_count, stats.last_success, stats.last_failure);
 }
 
 HealthState derive_health(const LinkStats& stats) {
-  return derive_health_from_counts(
-      stats.success_count,
-      stats.failure_count,
-      stats.last_success,
-      stats.last_failure);
+  return derive_health_from_counts(stats.success_count, stats.failure_count, stats.last_success, stats.last_failure);
 }
 
 } // namespace tensorcast::communicator::routing
