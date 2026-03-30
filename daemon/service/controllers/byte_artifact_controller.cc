@@ -1586,6 +1586,7 @@ grpc::Status ByteArtifactController::batch_exists(
 
   const absl::Time now = absl::Now();
   const std::string local_daemon_id = d_.route_resolver.local_daemon_id();
+  const bool allow_high_card_attrs = rctx.allow_high_card_attrs();
 
   struct ShardRequest {
     std::vector<std::string> artifact_ids;
@@ -1659,6 +1660,68 @@ grpc::Status ByteArtifactController::batch_exists(
         remote_daemon_ids, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
   }
 
+  struct PendingHomeBatchExists {
+    std::uint64_t shard_id{0};
+    const ShardRequest* batch{nullptr};
+    std::string holder_daemon_id;
+    std::uint64_t lease_generation{0};
+    bool remote_home{false};
+    int attempt{0};
+  };
+
+  struct HomeBatchExistsRpcResult {
+    PendingHomeBatchExists request;
+    grpc::Status status;
+    v2::HomeBatchExistsResponse home_resp;
+    absl::Duration rpc_elapsed{absl::ZeroDuration()};
+  };
+
+  struct ScheduledHomeBatchExists {
+    PendingHomeBatchExists request;
+    folly::SemiFuture<HomeBatchExistsRpcResult> future;
+  };
+
+  struct BatchExistsStats {
+    std::size_t local_home_batch_count{0};
+    std::size_t remote_home_batch_count{0};
+    std::size_t local_home_item_count{0};
+    std::size_t remote_home_item_count{0};
+    absl::Duration local_home_rpc_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_rpc_elapsed{absl::ZeroDuration()};
+  } stats;
+
+  absl::flat_hash_map<std::string, std::shared_ptr<grpc::Channel>> remote_channels;
+  remote_channels.reserve(remote_daemon_ids.size());
+  const auto get_or_create_remote_channel =
+      [&](std::string_view daemon_id) -> absl::StatusOr<std::shared_ptr<grpc::Channel>> {
+    const auto cached_it = remote_channels.find(std::string(daemon_id));
+    if (cached_it != remote_channels.end()) {
+      return cached_it->second;
+    }
+    auto address_or = d_.worker_directory_cache.resolve_daemon_address(
+        daemon_id, absl::Now(), absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    if (!address_or.ok()) {
+      return address_or.status();
+    }
+    auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
+    remote_channels.emplace(std::string(daemon_id), channel);
+    return channel;
+  };
+
+  const auto make_home_batch_exists_result = [&](PendingHomeBatchExists request,
+                                                 grpc::Status status,
+                                                 std::string_view message = "") -> HomeBatchExistsRpcResult {
+    if (!status.ok() && !message.empty()) {
+      status = grpc::Status(status.error_code(), std::string(message));
+    }
+    return HomeBatchExistsRpcResult{
+        .request = std::move(request),
+        .status = std::move(status),
+    };
+  };
+
+  std::vector<PendingHomeBatchExists> pending_batches;
+  pending_batches.reserve(shard_requests.size());
   for (const auto& [shard_id, batch] : shard_requests) {
     const auto route_it = routes.find(shard_id);
     if (route_it == routes.end() || !route_it->second.ok) {
@@ -1672,89 +1735,171 @@ grpc::Status ByteArtifactController::batch_exists(
       continue;
     }
 
-    std::uint64_t lease_generation = route_it->second.lease_generation;
-    std::string holder_daemon_id = route_it->second.holder_daemon_id;
+    const std::string holder_daemon_id = route_it->second.holder_daemon_id;
+    const bool remote_home = holder_daemon_id != local_daemon_id;
+    if (remote_home) {
+      ++stats.remote_home_batch_count;
+      stats.remote_home_item_count += batch.artifact_ids.size();
+    } else {
+      ++stats.local_home_batch_count;
+      stats.local_home_item_count += batch.artifact_ids.size();
+    }
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-      v2::HomeBatchExistsResponse home_resp;
-      grpc::Status home_status;
+    pending_batches.push_back(
+        PendingHomeBatchExists{
+            .shard_id = shard_id,
+            .batch = &batch,
+            .holder_daemon_id = holder_daemon_id,
+            .lease_generation = route_it->second.lease_generation,
+            .remote_home = remote_home,
+            .attempt = 0,
+        });
+  }
 
-      if (holder_daemon_id == local_daemon_id) {
-        v2::HomeBatchExistsRequest home_req;
-        home_req.mutable_fence()->set_shard_id(shard_id);
-        home_req.mutable_fence()->set_lease_generation(lease_generation);
-        home_req.mutable_fence()->set_holder_daemon_id(local_daemon_id);
-        home_req.mutable_fence()->set_routing_epoch(options_.routing.routing_epoch);
-        for (const auto& artifact_id : batch.artifact_ids) {
-          home_req.add_artifact_ids(artifact_id);
+  const auto dispatch_home_batch_exists_wave =
+      [&](const std::vector<PendingHomeBatchExists>& wave) -> std::vector<HomeBatchExistsRpcResult> {
+    std::vector<HomeBatchExistsRpcResult> completed_results;
+    completed_results.reserve(wave.size());
+    std::vector<ScheduledHomeBatchExists> scheduled;
+    scheduled.reserve(wave.size());
+
+    for (const auto& pending : wave) {
+      std::shared_ptr<grpc::Channel> remote_channel;
+      if (pending.remote_home) {
+        auto channel_or = get_or_create_remote_channel(pending.holder_daemon_id);
+        if (!channel_or.ok()) {
+          completed_results.push_back(make_home_batch_exists_result(
+              pending,
+              grpc::Status(StatusCode::UNAVAILABLE, "home daemon address unavailable"),
+              "home daemon address unavailable"));
+          continue;
         }
-        grpc::ServerContext home_ctx;
-        RpcContext home_rctx{"HomeBatchExists", home_ctx, rctx.allow_high_card_attrs()};
-        home_status = home_batch_exists(home_rctx, home_req, home_resp);
-      } else {
-        auto address_or = d_.worker_directory_cache.resolve_daemon_address(
-            holder_daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
-        if (!address_or.ok()) {
-          for (size_t idx = 0; idx < batch.artifact_ids.size(); ++idx) {
-            *resp.mutable_outcomes(batch.outcome_indices[idx]) = make_outcome(
-                batch.artifact_ids[idx], v2::BATCH_ITEM_STATUS_UNAVAILABLE, "home daemon address unavailable");
-          }
-          break;
-        }
-        auto channel = create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials);
-        auto stub = v2::StoreDaemonService::NewStub(channel);
-        grpc::ClientContext client_ctx;
-        client_ctx.set_deadline(std::chrono::system_clock::now() + options_.routing.route_staleness_budget);
-        v2::HomeBatchExistsRequest home_req;
-        home_req.mutable_fence()->set_shard_id(shard_id);
-        home_req.mutable_fence()->set_lease_generation(lease_generation);
-        home_req.mutable_fence()->set_holder_daemon_id(holder_daemon_id);
-        home_req.mutable_fence()->set_routing_epoch(options_.routing.routing_epoch);
-        for (const auto& artifact_id : batch.artifact_ids) {
-          home_req.add_artifact_ids(artifact_id);
-        }
-        home_status = stub->HomeBatchExists(&client_ctx, home_req, &home_resp);
+        remote_channel = *channel_or;
       }
 
-      if (!home_status.ok()) {
-        for (size_t idx = 0; idx < batch.artifact_ids.size(); ++idx) {
-          *resp.mutable_outcomes(batch.outcome_indices[idx]) = make_outcome(
-              batch.artifact_ids[idx], v2::BATCH_ITEM_STATUS_UNAVAILABLE, std::string(home_status.error_message()));
+      scheduled.push_back(
+          ScheduledHomeBatchExists{
+              .request = pending,
+              .future = folly::via(
+                            d_.async_runtime.blocking_executor(),
+                            [this, pending, remote_channel = std::move(remote_channel), allow_high_card_attrs]() mutable
+                                -> HomeBatchExistsRpcResult {
+                              HomeBatchExistsRpcResult result;
+                              result.request = pending;
+
+                              v2::HomeBatchExistsRequest home_req;
+                              home_req.mutable_fence()->set_shard_id(pending.shard_id);
+                              home_req.mutable_fence()->set_lease_generation(pending.lease_generation);
+                              home_req.mutable_fence()->set_holder_daemon_id(pending.holder_daemon_id);
+                              home_req.mutable_fence()->set_routing_epoch(options_.routing.routing_epoch);
+                              for (const auto& artifact_id : pending.batch->artifact_ids) {
+                                home_req.add_artifact_ids(artifact_id);
+                              }
+
+                              const absl::Time home_rpc_started_at = absl::Now();
+                              if (!pending.remote_home) {
+                                grpc::ServerContext home_ctx;
+                                RpcContext home_rctx{"HomeBatchExists", home_ctx, allow_high_card_attrs};
+                                result.status = home_batch_exists(home_rctx, home_req, result.home_resp);
+                              } else {
+                                auto stub = v2::StoreDaemonService::NewStub(remote_channel);
+                                grpc::ClientContext client_ctx;
+                                client_ctx.set_deadline(
+                                    std::chrono::system_clock::now() + inter_daemon_home_rpc_timeout(options_));
+                                result.status = stub->HomeBatchExists(&client_ctx, home_req, &result.home_resp);
+                              }
+                              result.rpc_elapsed = absl::Now() - home_rpc_started_at;
+                              return result;
+                            })
+                            .semi(),
+          });
+    }
+
+    for (auto& pending : scheduled) {
+      try {
+        completed_results.push_back(std::move(pending.future).get());
+      } catch (const std::exception& ex) {
+        completed_results.push_back(
+            make_home_batch_exists_result(pending.request, grpc::Status(StatusCode::INTERNAL, ex.what()), ex.what()));
+      } catch (...) {
+        completed_results.push_back(make_home_batch_exists_result(
+            pending.request,
+            grpc::Status(StatusCode::INTERNAL, "HomeBatchExists fanout task failed"),
+            "HomeBatchExists fanout task failed"));
+      }
+    }
+    return completed_results;
+  };
+
+  std::function<void(std::vector<HomeBatchExistsRpcResult>, bool)> process_home_batch_exists_results;
+  process_home_batch_exists_results = [&](std::vector<HomeBatchExistsRpcResult> results, bool allow_retry) {
+    std::vector<PendingHomeBatchExists> retry_batches;
+    retry_batches.reserve(results.size());
+
+    for (auto& result : results) {
+      if (result.request.remote_home) {
+        stats.remote_home_rpc_elapsed += result.rpc_elapsed;
+      } else {
+        stats.local_home_rpc_elapsed += result.rpc_elapsed;
+      }
+
+      LOG(INFO) << "byte_artifact.batch_exists_home_rpc_result"
+                << " shard_id=" << result.request.shard_id << " remote_home=" << result.request.remote_home
+                << " holder_daemon_id=" << result.request.holder_daemon_id
+                << " requested_artifacts=" << result.request.batch->artifact_ids.size()
+                << " attempt=" << result.request.attempt << " rpc_ms=" << absl::ToDoubleMilliseconds(result.rpc_elapsed)
+                << " status_ok=" << result.status.ok() << " status_code=" << result.status.error_code()
+                << " status_message=" << result.status.error_message();
+
+      if (!result.status.ok()) {
+        for (std::size_t idx = 0; idx < result.request.batch->artifact_ids.size(); ++idx) {
+          *resp.mutable_outcomes(result.request.batch->outcome_indices[idx]) = make_outcome(
+              result.request.batch->artifact_ids[idx],
+              v2::BATCH_ITEM_STATUS_UNAVAILABLE,
+              result.status.error_message());
         }
-        break;
+        continue;
       }
 
       bool needs_redirect_retry = false;
-      if (home_resp.has_redirect() && home_resp.redirect().shard_id() == shard_id &&
-          home_resp.redirect().lease_generation() != 0 && !home_resp.redirect().holder_daemon_id().empty()) {
-        for (const auto& outcome : home_resp.outcomes()) {
+      if (result.home_resp.has_redirect() && result.home_resp.redirect().shard_id() == result.request.shard_id &&
+          result.home_resp.redirect().lease_generation() != 0 &&
+          !result.home_resp.redirect().holder_daemon_id().empty()) {
+        for (const auto& outcome : result.home_resp.outcomes()) {
           if (outcome.status() == v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION) {
             needs_redirect_retry = true;
             break;
           }
         }
       }
-      if (needs_redirect_retry && attempt == 0) {
-        const auto& redirect = home_resp.redirect();
-        const auto refreshed = d_.route_resolver.refresh_route_from_redirect(shard_id, redirect, now);
+      if (needs_redirect_retry && allow_retry && result.request.attempt == 0) {
+        const auto refreshed =
+            d_.route_resolver.refresh_route_from_redirect(result.request.shard_id, result.home_resp.redirect(), now);
         if (!refreshed.ok) {
-          for (size_t idx = 0; idx < batch.artifact_ids.size(); ++idx) {
-            *resp.mutable_outcomes(batch.outcome_indices[idx]) =
-                make_outcome(batch.artifact_ids[idx], v2::BATCH_ITEM_STATUS_UNAVAILABLE, refreshed.message);
+          for (std::size_t idx = 0; idx < result.request.batch->artifact_ids.size(); ++idx) {
+            *resp.mutable_outcomes(result.request.batch->outcome_indices[idx]) = make_outcome(
+                result.request.batch->artifact_ids[idx], v2::BATCH_ITEM_STATUS_UNAVAILABLE, refreshed.message);
           }
-          break;
+          continue;
         }
-        holder_daemon_id = refreshed.holder_daemon_id;
-        lease_generation = refreshed.lease_generation;
+        retry_batches.push_back(
+            PendingHomeBatchExists{
+                .shard_id = result.request.shard_id,
+                .batch = result.request.batch,
+                .holder_daemon_id = refreshed.holder_daemon_id,
+                .lease_generation = refreshed.lease_generation,
+                .remote_home = refreshed.holder_daemon_id != local_daemon_id,
+                .attempt = 1,
+            });
         continue;
       }
 
       absl::flat_hash_map<std::string, int> index_by_artifact;
-      index_by_artifact.reserve(batch.artifact_ids.size());
-      for (size_t idx = 0; idx < batch.artifact_ids.size(); ++idx) {
-        index_by_artifact.emplace(batch.artifact_ids[idx], static_cast<int>(idx));
+      index_by_artifact.reserve(result.request.batch->artifact_ids.size());
+      for (size_t idx = 0; idx < result.request.batch->artifact_ids.size(); ++idx) {
+        index_by_artifact.emplace(result.request.batch->artifact_ids[idx], static_cast<int>(idx));
       }
-      for (const auto& item : home_resp.outcomes()) {
+      for (const auto& item : result.home_resp.outcomes()) {
         const auto idx_it = index_by_artifact.find(item.artifact_id());
         if (idx_it == index_by_artifact.end()) {
           continue;
@@ -1763,12 +1908,27 @@ grpc::Status ByteArtifactController::batch_exists(
         if (status == v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION) {
           status = v2::BATCH_ITEM_STATUS_UNAVAILABLE;
         }
-        *resp.mutable_outcomes(batch.outcome_indices[static_cast<size_t>(idx_it->second)]) =
+        *resp.mutable_outcomes(result.request.batch->outcome_indices[static_cast<size_t>(idx_it->second)]) =
             make_outcome(item.artifact_id(), status, item.message());
       }
-      break;
     }
-  }
+
+    if (!retry_batches.empty()) {
+      process_home_batch_exists_results(dispatch_home_batch_exists_wave(retry_batches), false);
+    }
+  };
+
+  process_home_batch_exists_results(dispatch_home_batch_exists_wave(pending_batches), true);
+
+  VLOG(1) << "byte_artifact.batch_exists_summary"
+          << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
+          << " local_home_batches=" << stats.local_home_batch_count
+          << " remote_home_batches=" << stats.remote_home_batch_count
+          << " local_home_items=" << stats.local_home_item_count
+          << " remote_home_items=" << stats.remote_home_item_count
+          << " local_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_elapsed)
+          << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed)
+          << " parallel_active=" << (pending_batches.size() > 1);
 
   rctx.mark_success();
   return Status::OK;
