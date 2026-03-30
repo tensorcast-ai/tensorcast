@@ -31,32 +31,8 @@
 namespace tensorcast::store::replica {
 
 using common::memory::MemoryLocation;
-using materialization::contracts::RepresentationWorkPlan;
 
 namespace {
-
-struct DiskExecutionMetadata {
-  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  std::string view_index_json;
-};
-
-tensorcast::common::v1::ByteSpaceRef canonical_byte_space() {
-  tensorcast::common::v1::ByteSpaceRef out;
-  out.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
-  return out;
-}
-
-absl::StatusOr<RepresentationWorkPlan> build_disk_representation_work_plan(
-    std::string_view source_index_json,
-    std::string_view view_index_json,
-    const loading::VariantIdentity& variant_identity) {
-  auto result_or = materialization::contracts::build_index_backed_representation_work(
-      source_index_json, view_index_json, variant_identity, canonical_byte_space(), "ephemeral_into_target");
-  if (!result_or.ok()) {
-    return result_or.status();
-  }
-  return std::move(result_or->work_plan);
-}
 
 std::optional<uint64_t> compute_total_size_from_index(std::string_view index_json) {
   if (index_json.empty()) {
@@ -141,29 +117,6 @@ loader::ByteRangeMappedSource::Options make_mmap_aware_map_options(
           << " min_total_bytes=" << options.direct_gather_min_total_bytes
           << " max_rows_touched=" << options.direct_gather_max_rows_touched;
   return options;
-}
-
-absl::StatusOr<std::optional<DiskExecutionMetadata>> build_disk_execution_metadata(
-    const IArtifactLoader* loader,
-    const std::optional<std::string>& canonical_index_json,
-    const std::optional<loader::ViewPlan>& view_plan) {
-  auto* disk_loader = dynamic_cast<const DiskLoader*>(loader);
-  if (disk_loader == nullptr) {
-    return std::nullopt;
-  }
-  auto shared_or = disk_loader->shared_context();
-  if (!shared_or.ok()) {
-    return shared_or.status();
-  }
-  const std::string view_index_json =
-      view_plan.has_value() ? view_plan->view_index_json : canonical_index_json.value_or(std::string());
-  if (view_index_json.empty()) {
-    return std::nullopt;
-  }
-  return DiskExecutionMetadata{
-      .disk_context = *shared_or,
-      .view_index_json = std::move(view_index_json),
-  };
 }
 
 } // namespace
@@ -321,7 +274,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       std::move(config.variant_identity),
       config.transform_placement,
       config.byte_mapping_config,
-      config.materialization_strategy));
+      config.materialization_strategy,
+      std::move(config.execution_strategy_plan)));
   return replica_ptr;
 }
 
@@ -342,7 +296,8 @@ Replica::Replica(
     std::optional<loading::VariantIdentity> variant_identity,
     loading::TransformPlacement transform_placement,
     StoreEngineOptions::ByteMappingConfig byte_mapping_config,
-    StoreEngineOptions::MaterializationStrategyConfig materialization_strategy)
+    StoreEngineOptions::MaterializationStrategyConfig materialization_strategy,
+    std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
@@ -355,7 +310,8 @@ Replica::Replica(
       variant_identity_(std::move(variant_identity)),
       transform_placement_(transform_placement),
       byte_mapping_config_(std::move(byte_mapping_config)),
-      materialization_strategy_(std::move(materialization_strategy)) {}
+      materialization_strategy_(std::move(materialization_strategy)),
+      execution_strategy_plan_(std::move(execution_strategy_plan)) {}
 
 //--------------------------------------------------------------------------
 // Destructor
@@ -498,77 +454,34 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     std::optional<ReplicaLoadController::CollectiveDiskLoadInput> collective_disk_load;
     std::optional<ReplicaLoadController::LocalBatchedDiskLoadInput> local_batched_disk_load;
-    std::optional<DiskExecutionMetadata> disk_execution_metadata;
-    std::optional<RepresentationWorkPlan> disk_representation_work_plan;
-    std::optional<absl::Status> disk_representation_work_plan_error;
-    bool disk_representation_work_plan_attempted = false;
-    auto ensure_disk_representation_work_plan = [&]() -> bool {
-      if (disk_representation_work_plan_attempted) {
-        return disk_representation_work_plan.has_value();
-      }
-      disk_representation_work_plan_attempted = true;
-      if (!source_index_json_.has_value() || !variant_identity_.has_value() || !disk_execution_metadata.has_value()) {
-        disk_representation_work_plan_error =
-            absl::FailedPreconditionError("representation work prerequisites missing");
-        return false;
-      }
-      auto work_plan_or = build_disk_representation_work_plan(
-          *source_index_json_, disk_execution_metadata->view_index_json, *variant_identity_);
-      if (!work_plan_or.ok()) {
-        disk_representation_work_plan_error = work_plan_or.status();
-        return false;
-      }
-      if (work_plan_or->items.empty()) {
-        disk_representation_work_plan_error = absl::FailedPreconditionError("representation work plan is empty");
-        return false;
-      }
-      disk_representation_work_plan = std::move(*work_plan_or);
-      return true;
-    };
-    if (collective_load_group_.has_value()) {
-      if (target_location != MemoryLocation::GPU || source_location != MemoryLocation::DISK) {
-        LOG(INFO) << "Replica(" << key_.artifact_id
-                  << "): collective disk load skipped because target/source are not GPU<-DISK"
-                  << " target=" << location_to_string(target_location)
-                  << " source=" << location_to_string(source_location);
+    const std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan>& execution_strategy_plan =
+        execution_strategy_plan_;
+    if (execution_strategy_plan.has_value() && target_location == MemoryLocation::GPU &&
+        source_location == MemoryLocation::DISK) {
+      const auto& plan = *execution_strategy_plan;
+      if (plan.executor == runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective &&
+          plan.collective_load_group.has_value() && plan.disk_context != nullptr &&
+          plan.representation_work_plan.has_value()) {
+        collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
+            .group = *plan.collective_load_group,
+            .disk_context = plan.disk_context,
+            .representation_work_plan = *plan.representation_work_plan,
+            .materialization_strategy = materialization_strategy_,
+        };
       } else if (
-          !source_index_json_.has_value() || !canonical_index_json_.has_value() || !variant_identity_.has_value()) {
-        LOG(INFO) << "Replica(" << key_.artifact_id << "): collective disk load skipped because metadata is incomplete"
-                  << " source_index=" << source_index_json_.has_value()
-                  << " canonical_index=" << canonical_index_json_.has_value()
-                  << " variant_identity=" << variant_identity_.has_value();
-      } else if (view_plan_.has_value() && view_plan_->transform.requires_materialization) {
-        LOG(INFO) << "Replica(" << key_.artifact_id
-                  << "): collective disk load skipped because view transform requires materialization";
-      } else {
-        auto disk_metadata_or = build_disk_execution_metadata(loader_.get().get(), canonical_index_json_, view_plan_);
-        if (!disk_metadata_or.ok()) {
-          LOG(WARNING) << "Replica(" << key_.artifact_id
-                       << "): collective disk load disabled because shared_context is unavailable: "
-                       << disk_metadata_or.status();
-        } else if (!disk_metadata_or->has_value()) {
-          LOG(INFO) << "Replica(" << key_.artifact_id
-                    << "): collective disk load skipped because loader is not DiskLoader or view_index_json is empty";
-        } else {
-          disk_execution_metadata = std::move(*disk_metadata_or);
-          if (ensure_disk_representation_work_plan()) {
-            collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
-                .group = *collective_load_group_,
-                .disk_context = disk_execution_metadata->disk_context,
-                .representation_work_plan = *disk_representation_work_plan,
-                .materialization_strategy = materialization_strategy_,
-            };
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
-                      << " rank=" << collective_load_group_->rank
-                      << " world_size=" << collective_load_group_->world_size;
-          } else {
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): collective disk load skipped because shared representation lowering is unavailable: "
-                      << disk_representation_work_plan_error->message();
-          }
-        }
+          plan.executor == runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal &&
+          plan.disk_context != nullptr && plan.representation_work_plan.has_value()) {
+        local_batched_disk_load = ReplicaLoadController::LocalBatchedDiskLoadInput{
+            .disk_context = plan.disk_context,
+            .representation_work_plan = *plan.representation_work_plan,
+            .materialization_strategy = materialization_strategy_,
+        };
       }
+      LOG(INFO) << "Replica(" << key_.artifact_id << "): using execution_strategy_plan executor="
+                << runtime::ingestion::strategy::execution_strategy_executor_name(plan.executor)
+                << " selection_reason=" << plan.selection_reason
+                << " collective_selected=" << collective_disk_load.has_value()
+                << " local_batched_selected=" << local_batched_disk_load.has_value();
     }
     const StoreEngineOptions::ByteMappingConfig effective_byte_mapping_config =
         maybe_relax_mmap_strided_thresholds(byte_mapping_config_, *source_ptr, source_location, key_.artifact_id);
@@ -579,38 +492,10 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
           concurrency,
           std::nullopt,
           {},
+          execution_strategy_plan,
           std::move(collective_disk_load),
           std::nullopt);
     } else {
-      if (materialization_strategy_.enable_local_batched_disk_load && target_location == MemoryLocation::GPU &&
-          canonical_index_json_.has_value() && source_index_json_.has_value() && variant_identity_.has_value()) {
-        if (!disk_execution_metadata.has_value()) {
-          auto disk_metadata_or = build_disk_execution_metadata(loader_.get().get(), canonical_index_json_, view_plan_);
-          if (!disk_metadata_or.ok()) {
-            LOG(WARNING) << "Replica(" << key_.artifact_id
-                         << "): local batched disk load disabled because shared_context is unavailable: "
-                         << disk_metadata_or.status();
-          } else if (disk_metadata_or->has_value()) {
-            disk_execution_metadata = std::move(*disk_metadata_or);
-          }
-        }
-        if (disk_execution_metadata.has_value()) {
-          if (ensure_disk_representation_work_plan()) {
-            // This executor is best-effort: unsupported view shapes must fall
-            // back to the generic byte-range path below without changing
-            // materialization semantics.
-            local_batched_disk_load = ReplicaLoadController::LocalBatchedDiskLoadInput{
-                .disk_context = disk_execution_metadata->disk_context,
-                .representation_work_plan = *disk_representation_work_plan,
-                .materialization_strategy = materialization_strategy_,
-            };
-          } else {
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): local batched disk load skipped because shared representation lowering is unavailable: "
-                      << disk_representation_work_plan_error->message();
-          }
-        }
-      }
       bool composed_view = false;
       if (!local_batched_disk_load.has_value() && canonical_index_json_.has_value() && source_index_json_.has_value()) {
         auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
@@ -682,6 +567,7 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
           concurrency,
           std::nullopt,
           std::move(post_load_fn),
+          execution_strategy_plan,
           std::nullopt,
           std::move(local_batched_disk_load));
     }

@@ -1,9 +1,10 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <string>
 
 #include "absl/status/statusor.h"
@@ -15,6 +16,7 @@
 #include "core/store/materialization/runtime/pipeline/source_adapter.h"
 #include "core/store/materialization/runtime/pipeline/verification_stage.h"
 #include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
@@ -33,6 +35,8 @@ class IngestionPipeline {
     const StoreEngineOptions* engine_options;
     store_runtime::ReplicaRuntime* replica_runtime;
     store_runtime::RuntimeContext* runtime_context;
+    std::function<absl::StatusOr<store_runtime::ingestion::strategy::ExecutionStrategyPlan>(const IngestionContext&)>
+        ordinary_disk_strategy_planner;
   };
 
   explicit IngestionPipeline(Config config);

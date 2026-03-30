@@ -212,6 +212,7 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
       int concurrency,
       std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt,
       std::function<absl::Status()> post_load_fn = {},
+      std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan = std::nullopt,
       std::optional<CollectiveDiskLoadInput> collective_disk_load = std::nullopt,
       std::optional<LocalBatchedDiskLoadInput> local_batched_disk_load = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 

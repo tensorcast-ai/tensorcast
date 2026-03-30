@@ -155,6 +155,16 @@ struct StoreEngineOptions {
     bool use_dedicated_single_range_concat_stream{false};
     ExecutorPreference executor_preference{ExecutorPreference::kAuto};
     DiagnosticsVerbosity diagnostics_verbosity{DiagnosticsVerbosity::kBasic};
+    uint64_t owner_file_collective_peak_bytes_budget{8ULL * 1024ULL * 1024ULL * 1024ULL};
+    uint64_t owner_file_collective_batch_bytes{512ULL * 1024ULL * 1024ULL};
+    uint64_t owner_file_collective_dim1_staging_bytes{256ULL * 1024ULL * 1024ULL};
+    uint32_t owner_file_collective_max_inflight_batches{1};
+    bool owner_file_collective_shared_fs_only{true};
+    double owner_file_collective_max_owner_skew_ratio{1.5};
+    uint64_t owner_file_collective_min_dedup_saving_bytes{64ULL * 1024ULL * 1024ULL};
+    std::chrono::milliseconds owner_file_collective_group_assemble_timeout{std::chrono::milliseconds(2000)};
+    bool owner_file_collective_allow_mixed_residual{false};
+    uint32_t owner_file_collective_planner_cache_entries{256};
   };
 
   MaterializationStrategyConfig materialization_strategy{};

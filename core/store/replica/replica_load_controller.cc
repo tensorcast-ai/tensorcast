@@ -119,6 +119,25 @@ class GpuTransferGateLease {
   int device_id_{-1};
 };
 
+std::string format_strategy_candidates(
+    const std::vector<runtime::ingestion::strategy::ExecutionStrategyCandidate>& candidates) {
+  std::string out;
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    const auto& candidate = candidates[index];
+    if (index > 0) {
+      out.append(" | ");
+    }
+    absl::StrAppend(
+        &out,
+        runtime::ingestion::strategy::execution_strategy_executor_name(candidate.executor),
+        ":eligible=",
+        candidate.eligible ? 1 : 0,
+        ":reason=",
+        candidate.reason);
+  }
+  return out;
+}
+
 } // namespace
 
 // V3 final cutover: plan/execute/commit path is always enabled (no flags)
@@ -1356,6 +1375,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
     int concurrency,
     std::optional<absl::Span<const uint32_t>> chunk_indices,
     std::function<absl::Status()> post_load_fn,
+    std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan,
     std::optional<CollectiveDiskLoadInput> collective_disk_load,
     std::optional<LocalBatchedDiskLoadInput> local_batched_disk_load) {
   // Phase 1: capture state under lock and ensure allocation + LOADING
@@ -1408,6 +1428,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
            concurrency,
            chunk_indices,
            post_load_fn = std::move(post_load_fn),
+           execution_strategy_plan = std::move(execution_strategy_plan),
            collective_disk_load = std::move(collective_disk_load),
            local_batched_disk_load = std::move(local_batched_disk_load),
            local_device_id](auto&&) mutable -> absl::Status {
@@ -1466,7 +1487,22 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                         << "): plan ranges device=" << device_id << " target=" << static_cast<int>(target_location)
                         << " ranges=" << range_str;
             }
+            const std::string requested_executor = execution_strategy_plan.has_value()
+                ? std::string(
+                      runtime::ingestion::strategy::execution_strategy_executor_name(execution_strategy_plan->executor))
+                : (collective_disk_load.has_value()
+                       ? "OwnerFileCollectiveExecutor"
+                       : (local_batched_disk_load.has_value() ? "TensorBatchedLocalExecutor"
+                                                              : "GenericByteRangeExecutor"));
+            if (execution_strategy_plan.has_value()) {
+              LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): execution_strategy_plan"
+                        << " executor=" << requested_executor
+                        << " selection_reason=" << execution_strategy_plan->selection_reason
+                        << " candidates=" << format_strategy_candidates(execution_strategy_plan->candidates);
+            }
             absl::Status exec_status;
+            std::string actual_executor = requested_executor;
+            std::string runtime_fallback_reason;
             if (collective_disk_load.has_value()) {
               auto collective_result = try_collective_disk_load(
                   CollectiveDiskLoadRequest{
@@ -1484,6 +1520,8 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
               if (collective_result.handled) {
                 exec_status = collective_result.status;
               } else {
+                actual_executor = "GenericByteRangeExecutor";
+                runtime_fallback_reason = "collective_not_handled";
                 exec_status = self->transfer_service_->execute(
                     plan,
                     target_location,
@@ -1510,6 +1548,8 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
               if (local_result.handled) {
                 exec_status = local_result.status;
               } else {
+                actual_executor = "GenericByteRangeExecutor";
+                runtime_fallback_reason = "local_batched_not_handled";
                 LOG(WARNING) << "ReplicaLoadController(" << self->replica_key_.artifact_id
                              << "): LOCAL_BATCHED_DISK_LOAD_FALLBACK handing off to generic transfer path";
                 exec_status = self->transfer_service_->execute(
@@ -1578,7 +1618,45 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
             }
             // Facade state LOADED
             LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): setting final LOADED state";
-            return self->set_state(target_location, MemoryState::LOADED);
+            absl::Status final_state = self->set_state(target_location, MemoryState::LOADED);
+            if (!final_state.ok()) {
+              return final_state;
+            }
+            runtime::ingestion::strategy::ExecutionCommitReport commit_report;
+            commit_report.source = (execution_strategy_plan.has_value() || collective_disk_load.has_value() ||
+                                    local_batched_disk_load.has_value())
+                ? loading::MaterializationSource::kDisk
+                : loading::MaterializationSource::kUnspecified;
+            commit_report.requested_bytes =
+                execution_strategy_plan.has_value() && execution_strategy_plan->environment.requested_bytes > 0
+                ? execution_strategy_plan->environment.requested_bytes
+                : self->artifact_size_;
+            commit_report.committed_bytes = commit_report.requested_bytes;
+            commit_report.fallback_bytes =
+                actual_executor == "GenericByteRangeExecutor" ? commit_report.requested_bytes : 0;
+            commit_report.residual_bytes = execution_strategy_plan.has_value()
+                ? execution_strategy_plan->environment.residual_bytes
+                : commit_report.fallback_bytes;
+            if (actual_executor == "GenericByteRangeExecutor") {
+              commit_report.residual_bytes = commit_report.fallback_bytes;
+            }
+            commit_report.collective_handled = actual_executor == "OwnerFileCollectiveExecutor";
+            commit_report.dominant_executor = actual_executor;
+            commit_report.selection_reason = execution_strategy_plan.has_value()
+                ? execution_strategy_plan->selection_reason
+                : std::string("replica_executor_dispatch");
+            if (!runtime_fallback_reason.empty()) {
+              absl::StrAppend(&commit_report.selection_reason, ";runtime_fallback=", runtime_fallback_reason);
+            }
+            LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): execution_commit"
+                      << " requested_executor=" << requested_executor
+                      << " actual_executor=" << commit_report.dominant_executor
+                      << " requested_bytes=" << commit_report.requested_bytes
+                      << " committed_bytes=" << commit_report.committed_bytes
+                      << " fallback_bytes=" << commit_report.fallback_bytes
+                      << " residual_bytes=" << commit_report.residual_bytes
+                      << " selection_reason=" << commit_report.selection_reason;
+            return final_state;
           })
       .semi();
 }

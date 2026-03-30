@@ -111,6 +111,7 @@ absl::Status initialize_context(
   ctx.options = config.engine_options;
   ctx.replica_runtime = config.replica_runtime;
   ctx.runtime_context = config.runtime_context;
+  ctx.ordinary_disk_strategy_planner = config.ordinary_disk_strategy_planner;
   ctx.target_device = target.location.to_device_key();
   ctx.target_is_gpu = ctx.target_device.type == DeviceType::GPU;
   ctx.target_location = ctx.target_is_gpu ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;

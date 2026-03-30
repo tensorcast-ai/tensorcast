@@ -125,12 +125,13 @@ Partially implemented in this repository:
   - `RepresentationTransformContract`
   - `RepresentationWorkPlan`
   - `ResolvedSourceBinding`
+  - `ExecutionEnvironmentFacts`
+  - `ExecutionStrategyPlan`
   - `ExecutionCommitReport`
-- ordinary `materialize_replica` disk startup still chooses collective,
-  local-batched, and generic execution primarily through replica-layer wiring in
-  `core/store/replica/replica.cc` and
-  `core/store/replica/replica_load_controller.cc`; full common-runtime
-  convergence is not complete yet.
+- ordinary `materialize_replica` disk startup now reaches a common-runtime
+  strategy seam in `MaterializationFacade` before final executor choice, and
+  `Replica` / `ReplicaLoadController` consume the selected plan rather than
+  owning `AUTO`.
 - mapped-target controller lowering now builds the internal resolved plan and
   passes it directly into the common runtime as the authoritative semantic
   contract, with the runtime validating request hints against that plan instead
@@ -152,15 +153,17 @@ Partially implemented in this repository:
   - owner-file collective handoff,
   - residual generic byte-range fallback.
 - ordinary replica local-batched and collective executors now consume shared
-  work-plan items instead of recovering semantic truth in executor-local code.
+  work-plan items and common-runtime-selected plan ownership instead of
+  recovering semantic truth in executor-local code.
 - the current owner-file collective implementation still lives as a replica-side
   prototype with eager `owned_payload` preload and optional root whole-source
-  preload, so it does not yet satisfy the long-term strategy-plane memory model.
+  preload, but it is now explicitly non-default prototype scaffolding rather
+  than the owner of ordinary startup routing.
 - ordinary non-collective `into_target` still executes through the generic
   byte-range backend after shared lowering.
-- `ExecutionCommitReport` currently exists mostly as a mapped-target reporting
-  surface and does not yet express batch-level commit/failure semantics for all
-  ordinary disk startup executors.
+- `ExecutionCommitReport` and ordinary strategy-plan diagnostics now apply to
+  ordinary disk startup as well as mapped-target execution, though `0109` still
+  owns the follow-on batch-level owner-file executor semantics.
 - public SDK retrieval APIs remain unchanged.
 
 Remaining follow-up work after this implementation is operational validation on
