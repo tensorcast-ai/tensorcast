@@ -50,7 +50,11 @@ managing clients manually.
   Stream events are the canonical progress contract (`phase`, bytes, `percent`,
   terminal `done`, machine-readable `error_code`).
   Same-host collective disk loading is now an explicit per-call contract:
-  set `ctx=CallContext(collective=CollectiveLoadGroup(...))` to request it.
+  prefer `GetArtifactOptions(execution_topology=ExecutionTopologyContext(...))`
+  as the daemon-owned source-bound contract.
+  `ctx=CallContext(collective=CollectiveLoadGroup(...))` is no longer accepted
+  by `Binding.swap(...)` / `Binding.realize_from(...)` on daemon-owned
+  bindings; keep `ctx` there for timeout/tags only.
   TensorCast no longer auto-enables collective mode from ambient GPU
   environment variables, and `replica_uuid` remains a pure operation/session id.
   Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
@@ -327,6 +331,10 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - `binding.swap(artifact_or_ref, publish=False, activate_key=None, ...)` performs
   safe retire → overwrite → optional publish, reusing the original selection
   (including view slices) without restating them.
+- `binding.last_execution_diagnostics` exposes the daemon-reported typed
+  execution facts for the most recent source-bound refill or promote, including
+  collective policy/use, dominant executor, and hash/identity observability for
+  closeout-driven publication paths.
 
 Example (vLLM-style split weight):
 

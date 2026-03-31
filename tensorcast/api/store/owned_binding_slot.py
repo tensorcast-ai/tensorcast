@@ -39,7 +39,11 @@ from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import PublicDiskSourceHandle, ServingRuntimePolicy
+from tensorcast.types import (
+    ExecutionDiagnostics,
+    PublicDiskSourceHandle,
+    ServingRuntimePolicy,
+)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -117,6 +121,145 @@ def restore_owned_binding_tensors(
     )
 
 
+def _collective_group_to_proto(
+    group: object | None,
+) -> store_daemon_pb2.CollectiveLoadGroup | None:
+    if group is None:
+        return None
+    group_id = str(getattr(group, "group_id", "") or "")
+    raw_world_size = getattr(group, "world_size", 0)
+    world_size = 0 if raw_world_size is None else int(raw_world_size)
+    # rank=0 is valid for collective ingress; avoid falsy normalization that
+    # rewrites it to -1.
+    raw_rank = getattr(group, "rank", -1)
+    rank = -1 if raw_rank is None else int(raw_rank)
+    if not group_id:
+        return None
+    if world_size <= 1 or rank < 0 or rank >= world_size:
+        raise ArtifactError(
+            "collective_group requires a non-empty group_id with world_size > 1 and a valid rank",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    proto = store_daemon_pb2.CollectiveLoadGroup()
+    proto.group_id = group_id
+    proto.world_size = world_size
+    proto.rank = rank
+    return proto
+
+
+def _source_locality_to_proto(
+    value: object,
+) -> store_daemon_pb2.SourceLocality:
+    normalized = str(getattr(value, "value", value) or "auto").strip().lower()
+    if normalized == "host_local":
+        return store_daemon_pb2.SOURCE_LOCALITY_HOST_LOCAL
+    if normalized == "shared_source":
+        return store_daemon_pb2.SOURCE_LOCALITY_SHARED_SOURCE
+    return store_daemon_pb2.SOURCE_LOCALITY_AUTO
+
+
+def _build_source_execution_contract(
+    *,
+    options: GetArtifactOptions | None,
+    ctx: CallContext | None,
+) -> tuple[
+    store_daemon_pb2.SourceExecutionTopology | None,
+    store_daemon_pb2.CollectivePolicy | None,
+]:
+    execution_topology = None if options is None else options.execution_topology
+    explicit_collective_group = (
+        None if execution_topology is None else execution_topology.collective_group
+    )
+    ctx_collective_group = None if ctx is None else ctx.collective
+    if ctx_collective_group is not None:
+        raise ArtifactError(
+            "ctx.collective is no longer accepted for daemon-owned source-bound "
+            "materialization; use options.execution_topology.collective_group",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    policy_mode = (
+        None
+        if execution_topology is None
+        else getattr(execution_topology, "collective_policy", None)
+    )
+    if policy_mode is None and explicit_collective_group is not None:
+        from tensorcast.api._config import CollectivePolicyMode
+
+        policy_mode = CollectivePolicyMode.REQUIRE_COLLECTIVE
+
+    if str(getattr(policy_mode, "value", policy_mode) or "") == "disable_collective":
+        if explicit_collective_group is not None:
+            raise ArtifactError(
+                "collective_policy=disable_collective conflicts with a collective group",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+    elif policy_mode is not None and explicit_collective_group is None:
+        raise ArtifactError(
+            "collective_policy requires execution_topology.collective_group",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    topology_proto: store_daemon_pb2.SourceExecutionTopology | None = None
+    source_locality = (
+        execution_topology.source_locality if execution_topology is not None else None
+    )
+    source_sharing_domain = (
+        None
+        if execution_topology is None
+        else str(execution_topology.source_sharing_domain or "") or None
+    )
+    if (
+        explicit_collective_group is not None
+        or source_locality is not None
+        or source_sharing_domain is not None
+    ):
+        topology_proto = store_daemon_pb2.SourceExecutionTopology()
+        collective_group_proto = _collective_group_to_proto(explicit_collective_group)
+        if collective_group_proto is not None:
+            topology_proto.collective_load_group.CopyFrom(collective_group_proto)
+        if source_locality is not None:
+            topology_proto.source_locality = _source_locality_to_proto(source_locality)
+        if source_sharing_domain is not None:
+            topology_proto.source_sharing_domain = source_sharing_domain
+
+    if policy_mode is None:
+        return topology_proto, None
+
+    normalized_policy = str(getattr(policy_mode, "value", policy_mode)).strip().lower()
+    if normalized_policy == "require_collective":
+        return (
+            topology_proto,
+            store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+        )
+    if normalized_policy == "allow_not_eligible_fallback":
+        return (
+            topology_proto,
+            store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+        )
+    return topology_proto, store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
+
+
+def _execution_diagnostics_from_response(
+    response: object,
+) -> ExecutionDiagnostics | None:
+    diagnostics_proto = getattr(response, "execution_diagnostics", None)
+    if diagnostics_proto is None:
+        return None
+    has_field = getattr(response, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field("execution_diagnostics"):
+                return None
+        except ValueError:
+            pass
+    return ExecutionDiagnostics.from_proto(diagnostics_proto)
+
+
 class OwnedBindingSlot:
     """Stable, daemon-owned CUDA layout that can be refilled in-place."""
 
@@ -172,6 +315,7 @@ class OwnedBindingSlot:
         self._published_replica_id: str | None = None
         self._dirty = False
         self._closed = False
+        self._last_execution_diagnostics: ExecutionDiagnostics | None = None
 
     @property
     def tensors(self) -> Mapping[str, torch.Tensor]:
@@ -226,6 +370,10 @@ class OwnedBindingSlot:
     @property
     def dirty(self) -> bool:
         return self._dirty
+
+    @property
+    def last_execution_diagnostics(self) -> ExecutionDiagnostics | None:
+        return self._last_execution_diagnostics
 
     @property
     def byte_space(self) -> common_pb2.ByteSpaceRef:
@@ -537,6 +685,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
         self._ensure_open()
+        self._last_execution_diagnostics = None
         timeout_s = _ctx_timeout_s(ctx)
         try:
             response = self._runtime.ensure_client().promote_binding_current_value(
@@ -570,6 +719,9 @@ class OwnedBindingSlot:
         self._contribution_source_artifact_id = metadata.source_artifact_id
         self._target_publication_token = None
         self._dirty = False
+        self._last_execution_diagnostics = _execution_diagnostics_from_response(
+            response
+        )
         return response
 
     def realize_from(
@@ -599,6 +751,11 @@ class OwnedBindingSlot:
         else:
             resolved = None
         source_policy = _resolve_source_policy_from_options(options)
+        execution_topology, collective_policy = _build_source_execution_contract(
+            options=options,
+            ctx=ctx,
+        )
+        self._last_execution_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -642,6 +799,8 @@ class OwnedBindingSlot:
                     target_index_bytes=self._layout.target_index_bytes,
                 ),
                 source_policy=source_policy,
+                execution_topology=execution_topology,
+                collective_policy=collective_policy,
                 operation_id=operation_id,
                 timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
             )
@@ -674,6 +833,9 @@ class OwnedBindingSlot:
         self._target_publication_token = None
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
+        self._last_execution_diagnostics = _execution_diagnostics_from_response(
+            response
+        )
 
     def swap(
         self,
@@ -705,6 +867,11 @@ class OwnedBindingSlot:
                 ctx=ctx,
             )
         source_policy = _resolve_source_policy_from_options(options)
+        execution_topology, collective_policy = _build_source_execution_contract(
+            options=options,
+            ctx=ctx,
+        )
+        self._last_execution_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -731,6 +898,8 @@ class OwnedBindingSlot:
                 artifact_id=resolved._ensure_identified(),
                 source_selection=source_selection,
                 source_policy=source_policy,
+                execution_topology=execution_topology,
+                collective_policy=collective_policy,
                 serving_runtime_policy=serving_runtime_policy,
                 operation_id=operation_id,
                 timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
@@ -768,6 +937,9 @@ class OwnedBindingSlot:
             )
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
+        self._last_execution_diagnostics = _execution_diagnostics_from_response(
+            response
+        )
         if publish:
             self.publish_replica(
                 ttl_ms=publish_ttl_ms,

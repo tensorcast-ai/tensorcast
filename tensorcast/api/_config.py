@@ -720,12 +720,45 @@ class SourceLocalityHint(str, Enum):
         )
 
 
+class CollectivePolicyMode(str, Enum):
+    REQUIRE_COLLECTIVE = "require_collective"
+    ALLOW_NOT_ELIGIBLE_FALLBACK = "allow_not_eligible_fallback"
+    DISABLE_COLLECTIVE = "disable_collective"
+
+    @staticmethod
+    def parse(value: object) -> "CollectivePolicyMode":
+        if isinstance(value, CollectivePolicyMode):
+            return value
+        normalized = (
+            "require_collective" if value is None else str(value).strip().lower()
+        )
+        if normalized == "require_collective":
+            return CollectivePolicyMode.REQUIRE_COLLECTIVE
+        if normalized == "allow_not_eligible_fallback":
+            return CollectivePolicyMode.ALLOW_NOT_ELIGIBLE_FALLBACK
+        if normalized == "disable_collective":
+            return CollectivePolicyMode.DISABLE_COLLECTIVE
+        raise ValueError(
+            "Unknown collective_policy "
+            f"'{value}'; expected require_collective, "
+            "allow_not_eligible_fallback, or disable_collective."
+        )
+
+
 class ExecutionTopologyContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     collective_group: CollectiveLoadGroup | None = None
+    collective_policy: CollectivePolicyMode | None = None
     source_locality: SourceLocalityHint = SourceLocalityHint.AUTO
     source_sharing_domain: str | None = None
+
+    @field_validator("collective_policy", mode="before")
+    @classmethod
+    def _normalize_collective_policy(cls, value: object) -> CollectivePolicyMode | None:
+        if value is None or value == "":
+            return None
+        return CollectivePolicyMode.parse(value)
 
     @field_validator("source_locality", mode="before")
     @classmethod

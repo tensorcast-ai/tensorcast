@@ -41,6 +41,7 @@ TEST_CASE("startup gate blocks data-plane RPCs but allows status RPCs", "[daemon
     auto st = svc.GetServerConfig(&ctx, &req, &resp);
     REQUIRE(st.ok());
     REQUIRE(resp.startup_phase() == tensorcast::daemon::v2::DAEMON_STARTUP_PHASE_LISTENING);
+    REQUIRE(resp.source_bound_contract_version() == 2);
   }
 
   {

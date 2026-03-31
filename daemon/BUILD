@@ -614,6 +614,7 @@ sc_cc_library(
     srcs = ["state/binding_registry.cc"],
     hdrs = ["state/binding_registry.h"],
     deps = [
+        ":types_hdr",
         "//core/common:cuda_memory_lib",
         "//core/cuda:cuda_ipc_lib",
         "//proto/tensorcast/common/v1:common_cc",

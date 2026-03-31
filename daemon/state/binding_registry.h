@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/cuda/cuda_ipc.h"
+#include "daemon/state/types.h"
 #include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -43,6 +45,7 @@ class BindingRegistry {
     std::string target_publication_token;
     std::string current_binding_value_id;
     uint64_t seal_generation{0};
+    std::optional<CommitLeaseResult> sealed_commit_result;
     uint64_t update_epoch_counter{0};
     std::string active_update_epoch;
     v2::CopyPlan copy_plan;

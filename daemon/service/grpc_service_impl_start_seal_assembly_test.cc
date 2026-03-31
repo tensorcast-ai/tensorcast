@@ -333,7 +333,8 @@ TEST_CASE(
   closeout->set_kind(tensorcast::daemon::v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH);
   closeout->set_source_version_key("models/demo/source/v1");
   closeout->set_serving_version_key("models/demo/serving/v1");
-  closeout->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
+  closeout->mutable_representation_publish_contract()->mutable_subject()->set_serving_artifact_id(
+      "mi2:serving:index:data");
   closeout->mutable_representation_publish_contract()->set_serving_manifest_ref(
       "tensor:__tensorcast_meta__.manifest_json");
   closeout->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
@@ -375,7 +376,7 @@ TEST_CASE("StartAssemblyAttempt accepts representation_publish_spec carrier", "[
   spec->set_source_version_key("models/demo/source/v1");
   spec->set_serving_version_key("models/demo/serving/v1");
   spec->set_serving_manifest_bytes(representation_publish_manifest_payload("pure_transform"));
-  spec->mutable_representation_publish_contract()->set_serving_artifact_id("mi2:serving:index:data");
+  spec->mutable_representation_publish_contract()->mutable_subject()->set_serving_artifact_id("mi2:serving:index:data");
   spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
   spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
   spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");

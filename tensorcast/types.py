@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 from datetime import datetime
-from enum import Enum
+from enum import Enum, IntFlag
 from typing import Iterable, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -32,6 +32,173 @@ class ServerConfig(BaseModel):
     artifact_chunk_bytes: int = 0
     local_handle_socket_path: str = ""
     cpu_shared_memory_enabled: bool = True
+    source_bound_capability_flags: int = 0
+    source_bound_contract_version: int = 0
+
+    def has_source_bound_capability(self, capability: "SourceBoundCapability") -> bool:
+        return bool(int(self.source_bound_capability_flags) & int(capability))
+
+
+class SourceBoundCapability(IntFlag):
+    FIRST_CLASS_COLLECTIVE_INGRESS = int(
+        store_daemon_pb2.SOURCE_BOUND_CAPABILITY_FLAG_FIRST_CLASS_COLLECTIVE_INGRESS
+    )
+    TYPED_EXECUTION_DIAGNOSTICS = int(
+        store_daemon_pb2.SOURCE_BOUND_CAPABILITY_FLAG_TYPED_EXECUTION_DIAGNOSTICS
+    )
+    SINGLE_MINT_BINDING_CLOSEOUT = int(
+        store_daemon_pb2.SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT
+    )
+
+
+class CollectivePolicy(str, Enum):
+    REQUIRE_COLLECTIVE = "require_collective"
+    ALLOW_NOT_ELIGIBLE_FALLBACK = "allow_not_eligible_fallback"
+    DISABLE_COLLECTIVE = "disable_collective"
+
+
+class CollectiveFailureClass(str, Enum):
+    NOT_ELIGIBLE = "not_eligible"
+    EXECUTION_FAILED = "execution_failed"
+
+
+class HashLocation(str, Enum):
+    NONE = "none"
+    SEAL = "seal"
+    BINDING_CLOSEOUT = "binding_closeout"
+
+
+class IdentityMintStrategy(str, Enum):
+    NOT_APPLICABLE = "not_applicable"
+    SEAL_MINT = "seal_mint"
+    SEAL_REUSE = "seal_reuse"
+    CLOSEOUT_MINT = "closeout_mint"
+
+
+_COLLECTIVE_POLICY_TO_PROTO: dict[CollectivePolicy, int] = {
+    CollectivePolicy.REQUIRE_COLLECTIVE: int(
+        store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+    ),
+    CollectivePolicy.ALLOW_NOT_ELIGIBLE_FALLBACK: int(
+        store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK
+    ),
+    CollectivePolicy.DISABLE_COLLECTIVE: int(
+        store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
+    ),
+}
+_COLLECTIVE_POLICY_FROM_PROTO: dict[int, CollectivePolicy] = {
+    value: key for key, value in _COLLECTIVE_POLICY_TO_PROTO.items()
+}
+_COLLECTIVE_FAILURE_CLASS_TO_PROTO: dict[CollectiveFailureClass, int] = {
+    CollectiveFailureClass.NOT_ELIGIBLE: int(
+        store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE
+    ),
+    CollectiveFailureClass.EXECUTION_FAILED: int(
+        store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED
+    ),
+}
+_COLLECTIVE_FAILURE_CLASS_FROM_PROTO: dict[int, CollectiveFailureClass] = {
+    value: key for key, value in _COLLECTIVE_FAILURE_CLASS_TO_PROTO.items()
+}
+_HASH_LOCATION_TO_PROTO: dict[HashLocation, int] = {
+    HashLocation.NONE: int(store_daemon_pb2.HASH_LOCATION_NONE),
+    HashLocation.SEAL: int(store_daemon_pb2.HASH_LOCATION_SEAL),
+    HashLocation.BINDING_CLOSEOUT: int(store_daemon_pb2.HASH_LOCATION_BINDING_CLOSEOUT),
+}
+_HASH_LOCATION_FROM_PROTO: dict[int, HashLocation] = {
+    value: key for key, value in _HASH_LOCATION_TO_PROTO.items()
+}
+_IDENTITY_MINT_STRATEGY_TO_PROTO: dict[IdentityMintStrategy, int] = {
+    IdentityMintStrategy.NOT_APPLICABLE: int(
+        store_daemon_pb2.IDENTITY_MINT_STRATEGY_NOT_APPLICABLE
+    ),
+    IdentityMintStrategy.SEAL_MINT: int(
+        store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_MINT
+    ),
+    IdentityMintStrategy.SEAL_REUSE: int(
+        store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_REUSE
+    ),
+    IdentityMintStrategy.CLOSEOUT_MINT: int(
+        store_daemon_pb2.IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT
+    ),
+}
+_IDENTITY_MINT_STRATEGY_FROM_PROTO: dict[int, IdentityMintStrategy] = {
+    value: key for key, value in _IDENTITY_MINT_STRATEGY_TO_PROTO.items()
+}
+
+
+class ExecutionDiagnostics(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    collective_requested: bool = False
+    collective_acknowledged: bool = False
+    collective_used: bool = False
+    collective_policy: CollectivePolicy = CollectivePolicy.DISABLE_COLLECTIVE
+    collective_failure_class: CollectiveFailureClass | None = None
+    dominant_executor: str | None = None
+    direct_write_supported: bool = False
+    fallback_bytes: int = 0
+    residual_bytes: int = 0
+    hash_rounds: int = 0
+    hash_location: HashLocation = HashLocation.NONE
+    identity_mint_strategy: IdentityMintStrategy = IdentityMintStrategy.NOT_APPLICABLE
+
+    def to_proto(self) -> store_daemon_pb2.ExecutionDiagnostics:
+        proto = store_daemon_pb2.ExecutionDiagnostics(
+            collective_requested=bool(self.collective_requested),
+            collective_acknowledged=bool(self.collective_acknowledged),
+            collective_used=bool(self.collective_used),
+            collective_policy=_COLLECTIVE_POLICY_TO_PROTO[self.collective_policy],
+            dominant_executor=str(self.dominant_executor or ""),
+            direct_write_supported=bool(self.direct_write_supported),
+            fallback_bytes=int(self.fallback_bytes),
+            residual_bytes=int(self.residual_bytes),
+            hash_rounds=int(self.hash_rounds),
+            hash_location=_HASH_LOCATION_TO_PROTO[self.hash_location],
+            identity_mint_strategy=_IDENTITY_MINT_STRATEGY_TO_PROTO[
+                self.identity_mint_strategy
+            ],
+        )
+        if self.collective_failure_class is not None:
+            proto.collective_failure_class = _COLLECTIVE_FAILURE_CLASS_TO_PROTO[
+                self.collective_failure_class
+            ]
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.ExecutionDiagnostics,
+    ) -> "ExecutionDiagnostics":
+        collective_failure_class_value = int(proto.collective_failure_class)
+        return cls(
+            collective_requested=bool(proto.collective_requested),
+            collective_acknowledged=bool(proto.collective_acknowledged),
+            collective_used=bool(proto.collective_used),
+            collective_policy=_COLLECTIVE_POLICY_FROM_PROTO.get(
+                int(proto.collective_policy),
+                CollectivePolicy.DISABLE_COLLECTIVE,
+            ),
+            collective_failure_class=(
+                _COLLECTIVE_FAILURE_CLASS_FROM_PROTO.get(collective_failure_class_value)
+                if collective_failure_class_value
+                != int(store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_UNSPECIFIED)
+                else None
+            ),
+            dominant_executor=str(proto.dominant_executor or "") or None,
+            direct_write_supported=bool(proto.direct_write_supported),
+            fallback_bytes=int(proto.fallback_bytes),
+            residual_bytes=int(proto.residual_bytes),
+            hash_rounds=int(proto.hash_rounds),
+            hash_location=_HASH_LOCATION_FROM_PROTO.get(
+                int(proto.hash_location),
+                HashLocation.NONE,
+            ),
+            identity_mint_strategy=_IDENTITY_MINT_STRATEGY_FROM_PROTO.get(
+                int(proto.identity_mint_strategy),
+                IdentityMintStrategy.NOT_APPLICABLE,
+            ),
+        )
 
 
 # ----------------------------- Handshake models ----------------------------
@@ -1831,6 +1998,7 @@ class PublishedModelVersion(BaseModel):
     representation_contract_hash: str | None = None
     serving_build_digest: str | None = None
     serving_manifest_ref: str | None = None
+    serving_execution_diagnostics: ExecutionDiagnostics | None = None
 
     def require_serving_runtime_policy(self) -> ServingRuntimePolicy:
         if not self.serving_manifest_ref:
@@ -2044,6 +2212,12 @@ class DeregisterArtifactOutcome(BaseModel):
 
 __all__ = [
     "ServerConfig",
+    "SourceBoundCapability",
+    "CollectivePolicy",
+    "CollectiveFailureClass",
+    "HashLocation",
+    "IdentityMintStrategy",
+    "ExecutionDiagnostics",
     "CoalescedHandshake",
     "LeaseHandshake",
     "StableDramHandshake",

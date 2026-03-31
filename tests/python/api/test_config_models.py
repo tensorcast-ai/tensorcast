@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from tensorcast.api._config import (
+    CollectivePolicyMode,
     ExecutionTopologyContext,
     GetArtifactOptions,
     OverflowPolicy,
@@ -219,7 +220,9 @@ def test_get_options_reject_removed_prefer_field() -> None:
 
 def test_get_options_validate_wait_for_shared_disk_ms() -> None:
     assert GetArtifactOptions().wait_for_shared_disk_ms == 0
-    assert GetArtifactOptions(wait_for_shared_disk_ms=123).wait_for_shared_disk_ms == 123
+    assert (
+        GetArtifactOptions(wait_for_shared_disk_ms=123).wait_for_shared_disk_ms == 123
+    )
     assert GetArtifactOptions(wait_for_shared_disk_ms=None).wait_for_shared_disk_ms == 0
 
     with pytest.raises(ValidationError):
@@ -241,7 +244,8 @@ def test_get_options_parse_structured_source_and_topology() -> None:
                 group_id="g",
                 world_size=2,
                 rank=1,
-            )
+            ),
+            collective_policy="allow_not_eligible_fallback",
         ),
     )
     assert opts.source is not None
@@ -249,6 +253,10 @@ def test_get_options_parse_structured_source_and_topology() -> None:
     assert opts.execution_topology is not None
     assert opts.execution_topology.collective_group is not None
     assert opts.execution_topology.collective_group.group_id == "g"
+    assert (
+        opts.execution_topology.collective_policy
+        is CollectivePolicyMode.ALLOW_NOT_ELIGIBLE_FALLBACK
+    )
 
 
 def test_store_options_accept_execution_scoped_defaults() -> None:

@@ -897,20 +897,18 @@ bool LipManager::wait_exports_drained(const ArtifactDeviceKey& key, absl::Time d
   return false;
 }
 
-absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
-    const std::string& registration_id,
+absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
     int device_id,
     int owner_pid,
-    uint32_t ttl_ms,
-    uint64_t epoch,
     uint64_t total_size,
     tensorcast::common::ArtifactIdKind id_kind,
     const std::string& client_artifact_id,
     const std::string& index_data,
     const std::string& index_key_hex,
-    std::vector<LeaseSegMeta>&& segments,
-    std::vector<RegisterStorageMeta>&& storages,
-    std::vector<RegisterTensorAliasMeta>&& aliases) {
+    absl::Span<const LeaseSegMeta> segments,
+    absl::Span<const RegisterStorageMeta> storages,
+    absl::Span<const RegisterTensorAliasMeta> aliases,
+    const std::optional<CommitLeaseResult>& identity_override) {
   std::string canonical_index_json = index_data;
   if (!storages.empty() && !aliases.empty()) {
     auto rebuilt_or = build_canonical_index_from_metadata(
@@ -924,8 +922,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     } else {
       auto stable_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device_id);
       if (stable_or.ok() && *stable_or != rebuilt) {
-        LOG(WARNING) << "Rebuilt canonical index differs from client-provided data; "
-                     << "preferring rebuilt version for registration_id=" << registration_id;
+        LOG(WARNING) << "Rebuilt canonical index differs from client-provided data; preferring rebuilt version";
       }
       canonical_index_json = rebuilt;
     }
@@ -1087,7 +1084,28 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   }
   index_multihash = *index_mh_or;
 
-  if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
+  if (identity_override.has_value()) {
+    out = *identity_override;
+    if (out.artifact_id.empty()) {
+      return absl::InvalidArgumentError("identity_override.artifact_id is required");
+    }
+    if (out.index_multihash.empty()) {
+      return absl::InvalidArgumentError("identity_override.index_multihash is required");
+    }
+    if (out.id_kind == common::ArtifactIdKind::kMi2 && out.data_multihash.empty()) {
+      return absl::InvalidArgumentError("identity_override.data_multihash is required for MI2");
+    }
+    if (out.index_multihash != index_multihash) {
+      return absl::FailedPreconditionError("identity_override index multihash does not match canonical index");
+    }
+    out.total_size = total_size;
+    if (out.schema_version.empty()) {
+      out.schema_version = "v3";
+    }
+    if (out.encoding.empty()) {
+      out.encoding = "json";
+    }
+  } else if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
     auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
     if (!data_mh_or.ok())
       return data_mh_or.status();
@@ -1104,9 +1122,81 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     out.id_kind = common::ArtifactIdKind::kCgid;
   }
 
-  out.schema_version = "v3";
-  out.encoding = "json";
+  if (out.schema_version.empty()) {
+    out.schema_version = "v3";
+  }
+  if (out.encoding.empty()) {
+    out.encoding = "json";
+  }
   out.total_size = total_size;
+
+  // Verification JSON: read three 8-byte values (start/middle/end) if possible.
+  auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
+    uint64_t v = 0;
+    auto st = src.read_at(off, &v, sizeof(v));
+    if (!st.ok()) {
+      return std::nullopt;
+    }
+    if (*st != sizeof(v)) {
+      return std::nullopt;
+    }
+    return v;
+  };
+  if (total_size >= 8) {
+    auto v0 = read_u64(0);
+    auto v1 = read_u64(total_size / 2);
+    auto v2 = read_u64(total_size - 8);
+    if (v0 && v1 && v2) {
+      nlohmann::json jv;
+      jv["artifact_size"] = total_size;
+      jv["key_values"] = {*v0, *v1, *v2};
+      out.verification_json = jv.dump();
+    }
+  }
+
+  return out;
+}
+
+absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
+    const std::string& registration_id,
+    int device_id,
+    int owner_pid,
+    uint32_t ttl_ms,
+    uint64_t epoch,
+    uint64_t total_size,
+    tensorcast::common::ArtifactIdKind id_kind,
+    const std::string& client_artifact_id,
+    const std::string& index_data,
+    const std::string& index_key_hex,
+    std::vector<LeaseSegMeta>&& segments,
+    std::vector<RegisterStorageMeta>&& storages,
+    std::vector<RegisterTensorAliasMeta>&& aliases,
+    const std::optional<CommitLeaseResult>& identity_override) {
+  auto out_or = build_commit_lease_result(
+      device_id,
+      owner_pid,
+      total_size,
+      id_kind,
+      client_artifact_id,
+      index_data,
+      index_key_hex,
+      absl::MakeSpan(segments),
+      absl::MakeSpan(storages),
+      absl::MakeSpan(aliases),
+      identity_override);
+  if (!out_or.ok()) {
+    return out_or.status();
+  }
+  CommitLeaseResult out = *out_or;
+  std::string canonical_index_json = index_data;
+  if (!storages.empty() && !aliases.empty()) {
+    auto rebuilt_or = build_canonical_index_from_metadata(
+        absl::MakeSpan(segments), absl::MakeSpan(storages), absl::MakeSpan(aliases), device_id);
+    if (!rebuilt_or.ok()) {
+      return rebuilt_or.status();
+    }
+    canonical_index_json = *rebuilt_or;
+  }
 
   // Enforce device-unique commit for VRAM_LEASED: (artifact_id, device_id)
   {
@@ -1120,28 +1210,6 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
         return absl::AlreadyExistsError(
             absl::StrCat("lease already exists for artifact on device (pid=", it->second.owner_pid, ")"));
       }
-    }
-  }
-
-  // Verification JSON: read three 8-byte values (start/middle/end) if possible
-  auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
-    uint64_t v = 0;
-    auto st = src.read_at(off, &v, sizeof(v));
-    if (!st.ok())
-      return std::nullopt;
-    if (*st != sizeof(v))
-      return std::nullopt;
-    return v;
-  };
-  if (total_size >= 8) {
-    auto v0 = read_u64(0);
-    auto v1 = read_u64(total_size / 2);
-    auto v2 = read_u64(total_size - 8);
-    if (v0 && v1 && v2) {
-      nlohmann::json jv;
-      jv["artifact_size"] = total_size;
-      jv["key_values"] = {*v0, *v1, *v2};
-      out.verification_json = jv.dump();
     }
   }
 
