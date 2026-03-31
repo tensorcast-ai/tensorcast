@@ -4,7 +4,7 @@ title: Tensor-Aware Materialization Strategy Plane
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs"]
 created: 2026-03-23
-last_updated: 2026-03-28
+last_updated: 2026-03-31
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_service.cc
@@ -37,11 +37,11 @@ related_code:
   - ../architecture/api/materialization-flow.md
   - ../architecture/api/region-backed.md
 links:
-  plan: ../plans/0108-tensor-aware-materialization-strategy-plane.md
   related:
-    - ../plans/0107-retrieval-policy-plane-cleanup.md
-    - ../plans/0108-01-pre-109-strategy-plane-convergence.md
-    - ../plans/0109-batched-owner-file-collective-executor.md
+    - ./0107-retrieval-policy-plane-cleanup.md
+    - ./0109-batched-owner-file-collective-executor.md
+    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ../plans/0113-step3p5-closure-and-sot-convergence.md
   dependencies:
     - ./0004-unified-runtime-config.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -102,18 +102,17 @@ binding-aware architecture.
 This design remains the authoritative architectural record for the strategy
 plane, but execution is now intentionally split:
 
-- `docs/plans/0108-tensor-aware-materialization-strategy-plane.md` records the
-  already-landed mapped-target, semantic-contract, and typed-config extraction
-  work.
-- `docs/plans/0107-retrieval-policy-plane-cleanup.md` owns the request
-  normalization prerequisite that separates retrieval policy from execution
-  topology context.
-- `docs/plans/0108-01-pre-109-strategy-plane-convergence.md` is the active
-  convergence plan for remaining ordinary-replica strategy ownership,
-  coordinator seams, typed budgets, and diagnostics.
-- `docs/plans/0109-batched-owner-file-collective-executor.md` starts only after
-  those prerequisites are complete and adds a new executor on top of the stable
-  strategy-plane boundary.
+- the request-normalization prerequisite remains owned by
+  `docs/designs/0107-retrieval-policy-plane-cleanup.md`;
+- the mapped-target, semantic-contract, typed-config extraction, and ordinary
+  replica convergence work that previously lived in the deleted `0108` / `0108-01`
+  companion plans is now folded back into this design's implementation record;
+- all remaining residual execution, delete gates, and Step3p5-oriented closure
+  work now live only in
+  `docs/designs/0113-step3p5-closure-and-sot-convergence.md` and
+  `docs/plans/0113-step3p5-closure-and-sot-convergence.md`;
+- no new execution note should reopen the deleted `0108` companion plans unless
+  `0113` itself is revised first.
 
 # Implementation Status
 
@@ -1016,8 +1015,8 @@ Mitigations:
 - [`docs/designs/0078-selection-first-artifact-retrieval.md`](/data/workspace/tensorcast-280/docs/designs/0078-selection-first-artifact-retrieval.md)
 - [`docs/designs/0084-binding-unified-model-and-contract.md`](/data/workspace/tensorcast-280/docs/designs/0084-binding-unified-model-and-contract.md)
 - [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
-- [`docs/plans/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/plans/0108-tensor-aware-materialization-strategy-plane.md)
-- [`docs/plans/0108-01-pre-109-strategy-plane-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0108-01-pre-109-strategy-plane-convergence.md)
+- [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
+- [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
 - [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
 - [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
 - [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)

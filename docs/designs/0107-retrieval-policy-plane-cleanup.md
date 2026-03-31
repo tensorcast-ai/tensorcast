@@ -4,7 +4,7 @@ title: Retrieval Policy Plane Cleanup, Execution Topology Context, And Transport
 areas: ["sdk", "daemon", "core", "proto", "docs", "tests"]
 status: implemented
 created: 2026-03-18
-last_updated: 2026-03-28
+last_updated: 2026-03-31
 related_code:
   - tensorcast/api/store/types.py
   - tensorcast/api/_config.py
@@ -29,7 +29,8 @@ links:
   related:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0109-batched-owner-file-collective-executor.md
-    - ../plans/0108-01-pre-109-strategy-plane-convergence.md
+    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ../plans/0113-step3p5-closure-and-sot-convergence.md
   predecessors:
     - ./0071-managed-shared-disk-persistence.md
     - ./0078-selection-first-artifact-retrieval.md
@@ -97,6 +98,15 @@ Compatibility policy:
   this retrieval-policy surface.
 - This landed with the target-state hard cut, so compatibility-only fallback
   ownership and redundant request merge paths are deleted rather than preserved.
+
+Residual execution tracking:
+
+- the retrieval-policy and execution-topology split defined here is already
+  landed and remains authoritative;
+- downstream strategy-plane, owner-file collective, representation-publication,
+  and Step3p5 closeout work is now consolidated under
+  `0113-step3p5-closure-and-sot-convergence`;
+- the deleted `0108`-series execution notes are no longer active SOT.
 
 # Problem Statement
 
@@ -754,7 +764,8 @@ Mitigations:
 - `docs/designs/0084-binding-unified-model-and-contract.md`
 - `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`
 - `docs/designs/0109-batched-owner-file-collective-executor.md`
-- `docs/plans/0108-01-pre-109-strategy-plane-convergence.md`
+- `docs/designs/0113-step3p5-closure-and-sot-convergence.md`
+- `docs/plans/0113-step3p5-closure-and-sot-convergence.md`
 - `docs/designs/0104-artifact-realization-and-cluster-rollout.md`
 - `docs/architecture/api/api-design.md`
 - `docs/architecture/api/materialization-flow.md`

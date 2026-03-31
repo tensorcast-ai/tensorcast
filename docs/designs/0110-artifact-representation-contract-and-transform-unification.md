@@ -4,7 +4,7 @@ title: Artifact Representation Semantic Core and Materialization Transform Unifi
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-03-25
+last_updated: 2026-03-31
 related_code:
   - docs/designs/0055-programmable-framework.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
@@ -29,7 +29,9 @@ related_code:
   - daemon/service/controllers/representation_layout_types.h
   - daemon/service/controllers/materialization_target_plan_utils.cc
 links:
-  plan: ../plans/0110-artifact-representation-contract-and-transform-unification.md
+  related:
+    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ../plans/0113-step3p5-closure-and-sot-convergence.md
   dependencies:
     - ./0055-programmable-framework.md
     - ./0078-selection-first-artifact-retrieval.md
@@ -77,6 +79,16 @@ This design intentionally narrows the first hard cut to the semantic core.
 Those follow-on concerns remain part of the long-term direction, but they should
 consume the semantic core defined here instead of being folded into the first
 contract cut.
+
+# Execution Tracking
+
+The semantic-core hard cut defined here is already landed in repo-local runtime.
+
+- the deleted `0110` companion plan is no longer an active execution note;
+- remaining producer-boundary convergence, topology-scoped follow-on extraction,
+  and Step3p5 closure dependencies now live in the `0113` design/plan pair;
+- no future work should reintroduce executor-local semantic truth or a second
+  integration-private semantic stack under the banner of "finishing 0110".
 
 ```mermaid
 flowchart LR

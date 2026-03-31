@@ -4,7 +4,7 @@ title: Batched Owner-File Collective Executor
 status: implemented
 areas: ["core", "daemon", "sdk", "serving", "benchmarks"]
 created: 2026-03-24
-last_updated: 2026-03-28
+last_updated: 2026-03-31
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
@@ -21,11 +21,12 @@ related_code:
   - docs/internals/model-loading.md
   - docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
 links:
-  plan: ../plans/0109-batched-owner-file-collective-executor.md
   dependencies:
-    - ../plans/0108-01-pre-109-strategy-plane-convergence.md
+    - ./0108-tensor-aware-materialization-strategy-plane.md
+    - ./0113-step3p5-closure-and-sot-convergence.md
   related:
-    - ../plans/0107-retrieval-policy-plane-cleanup.md
+    - ./0107-retrieval-policy-plane-cleanup.md
+    - ../plans/0113-step3p5-closure-and-sot-convergence.md
     - ../internals/disk-load-strategy.md
     - ../internals/model-loading.md
     - ../benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
@@ -113,12 +114,18 @@ The implemented steady-state scope remains intentionally zero-residual-only:
 - residual mixed execution therefore remains on local-batched or generic paths
   rather than being synthesized at collective runtime
 
+Residual execution tracking after this phase-1 landing is now centralized:
+
+- the deleted `0109` companion plan is no longer the active execution owner;
+- mixed-residual policy, benchmark recapture, serving graduation evidence, and
+  prototype-deletion gates now live only in the `0113` design/plan pair.
+
 # Sequencing Note
 
 This design is downstream of two prerequisites:
 
 - the runtime-critical request-normalization boundary from `0107`,
-- the common-runtime strategy convergence work from `0108-01`.
+- the common-runtime strategy convergence work now folded back into `0108`.
 
 Those prerequisites are now landed in this repository. `0109` should start from
 the already-converged seams:
@@ -950,9 +957,9 @@ Practical reference points:
 
 - completed:
   - the runtime-critical request-normalization work from
-    `docs/plans/0107-retrieval-policy-plane-cleanup.md` Phases 1 through 3,
-  - the strategy-plane convergence work captured in
-    `docs/plans/0108-01-pre-109-strategy-plane-convergence.md`,
+    `docs/designs/0107-retrieval-policy-plane-cleanup.md`,
+  - the strategy-plane convergence work folded back into
+    `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`,
   - especially ordinary replica convergence, execution-environment facts, typed
     strategy budgets, and prototype cleanup seams.
 
@@ -1060,8 +1067,8 @@ In short:
 
 - [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
 - [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
-- [`docs/plans/0108-01-pre-109-strategy-plane-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0108-01-pre-109-strategy-plane-convergence.md)
-- [`docs/plans/0109-batched-owner-file-collective-executor.md`](/data/workspace/tensorcast-280/docs/plans/0109-batched-owner-file-collective-executor.md)
+- [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
+- [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
 - [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
 - [`docs/internals/disk-load-strategy.md`](/data/workspace/tensorcast-280/docs/internals/disk-load-strategy.md)
 - [`core/store/replica/collective_disk_loader.cc`](/data/workspace/tensorcast-280/core/store/replica/collective_disk_loader.cc)
