@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-03-28
+last_updated: 2026-03-31
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -26,7 +26,9 @@ related_code:
   - daemon/service/controllers/assembly_operation_service.cc
   - daemon/service/controllers/target_materialization_service.cc
 links:
-  plan: ../plans/0112-binding-native-serving-realization-and-publication-plan.md
+  related:
+    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ../plans/0113-step3p5-closure-and-sot-convergence.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -110,6 +112,13 @@ That shipped scope is explicit:
 
 The remaining work after this design closeout is performance work, not
 semantic blocker work.
+
+That remaining work is now tracked only in the `0113` closure design/plan.
+
+- the deleted `0112` companion plan and Step3p5 performance follow-up note are
+  no longer active execution SOT;
+- source-bound collective contract cutover, single-mint closeout, executor
+  convergence, and final legacy deletion now belong to `0113`.
 
 # Closure Summary
 

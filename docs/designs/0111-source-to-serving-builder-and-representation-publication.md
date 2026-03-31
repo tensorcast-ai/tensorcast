@@ -1,10 +1,10 @@
 ---
 slug: source-to-serving-builder-and-representation-publication
 title: Source-to-Serving Builder and Representation Publication Lineage
-status: draft
+status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-03-27
+last_updated: 2026-03-31
 related_code:
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -20,7 +20,9 @@ related_code:
   - proto/tensorcast/publication/v1/publication.proto
   - daemon/service/controllers/serving_artifact_manifest_utils.{h,cc}
 links:
-  plan: ../plans/0111-source-to-serving-builder-and-representation-publication.md
+  related:
+    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ../plans/0113-step3p5-closure-and-sot-convergence.md
   dependencies:
     - ./0110-artifact-representation-contract-and-transform-unification.md
     - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -72,6 +74,17 @@ The design is intentionally Torch-first in grounding, but not Torch-layer-owned.
   binding-managed storage or on an admitted scratch host before closeout, but
   artifact identity and externally visible lineage still arise only through
   `0105`.
+
+# Implementation Status
+
+The repo-owned `0111` bridge contract is now landed at its intended base scope:
+
+- serving-publication subject carriers, builder helpers, manifest utilities,
+  and binding-native publication entrypoints are present in this repository;
+- the deleted `0111` companion plan has been folded back into this design;
+- the remaining work is no longer "finish the base `0111` implementation", but
+  residual hardening, external integration convergence, and Step3p5 closeout
+  cleanup now tracked by `0113`.
 
 # Why This Revision
 
@@ -594,6 +607,12 @@ Semantics:
   registry,
 - `support_level`, allowlist membership, and `fast_path_validated` are rollout
   truth and may evolve without changing canonical serving bytes,
+- `fast_path_validated` is a correctness and admission fact for the
+  same-binding path only; it does not certify collective use, dominant executor
+  quality, direct-write use, or GPU-only or single-round hash behavior,
+- execution-quality facts such as collective outcome, executor choice, hash
+  rounds, hash location, or identity mint strategy therefore belong in a
+  separate diagnostics contract rather than inside `ServingAdmissionFacts`,
 - therefore rollout-only facts must not silently perturb
   `representation_contract_hash` or phase-1 `serving_build_digest`,
 - and daemon or runtime code may validate caller-supplied admission facts for
@@ -635,6 +654,9 @@ Semantics:
   versioning such as quantization or packing family revisions,
 - `serving_build_digest` is derived from stable build-intent fields above the
   semantic core rather than by widening `representation_contract_hash`,
+- execution-quality facts remain outside `ServingBuildIntent` and
+  `ServingAdmissionFacts`; they belong to runtime diagnostics surfaces such as
+  the residual Step3p5 closure tracked by `0113`,
 - and rollout-only facts such as `support_level` or `fast_path_validated` must
   not silently perturb the phase-1 digest.
 
