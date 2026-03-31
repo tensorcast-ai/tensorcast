@@ -199,12 +199,48 @@ Normative rules:
 - `Sealed` state is the immutable byte snapshot that may enter routed publish paths.
 - only sealed byte artifacts may use `PUT_IF_ABSENT_JOIN`.
 
-Join invariants for `PUT_IF_ABSENT_JOIN`:
+Verification modes for `PUT_IF_ABSENT_JOIN`:
 
-- `layout_id`,
-- `byte_length`,
-- `payload_digest_alg = "sha256"`,
-- `payload_digest_hex = sha256(payload_bytes).hexdigest()`.
+- `BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256`
+- `BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY`
+
+Normative rules:
+
+- the default mode for generic routed byte artifacts remains
+  `BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256`,
+- `BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY` exists for
+  engine-owned logical byte artifacts whose `artifact_id` is the engine's
+  canonical logical page identity and whose producers do not guarantee
+  bitwise-identical payload bytes across repeated publications,
+- `STRICT_SHA256` joins on:
+  - `layout_id`,
+  - `byte_length`,
+  - `payload_digest_alg = "sha256"`,
+  - `payload_digest_hex = sha256(payload_bytes).hexdigest()`,
+- `LAYOUT_AND_SIZE_ONLY` joins on:
+  - `layout_id`,
+  - `byte_length`,
+  - and the routed `artifact_id` itself,
+- in `LAYOUT_AND_SIZE_ONLY`, `payload_digest_alg` and `payload_digest_hex`
+  become optional per-item metadata:
+  - when present they are advisory verification metadata and observability
+    inputs,
+  - when absent they must not block publication, existence, or retrieval,
+  - and they must not become an implicit second equality channel beside the
+    engine-owned logical `artifact_id`.
+
+Multiple puts of the same logical byte artifact remain first-writer-wins:
+
+- `PUT_IF_ABSENT_JOIN` never means upsert,
+- the first successful routed claim for the current home epoch fixes the visible
+  claim for that `artifact_id`,
+- later `PUT_IF_ABSENT_JOIN` attempts with the same join key may adopt the
+  existing claim, but must not rewrite the retained backing in place,
+- later writers must not silently replace the previously published bytes even if
+  their payload differs under `LAYOUT_AND_SIZE_ONLY`,
+- a workflow that truly needs last-writer-wins or repair-by-rewrite must use an
+  explicit overwrite or delete-and-reissue flow rather than a second
+  `PUT_IF_ABSENT_JOIN`.
 
 TTL rules:
 
@@ -215,14 +251,26 @@ TTL rules:
 
 Recommended identity profile:
 
-`cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>`
+`cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<model_version_enc>~<layout_id>~<engine_key_enc>`
 
 Identity rules:
 
 - the suffix after `cgid:` must satisfy the shared CGID grammar `[-._~A-Za-z0-9]`,
 - segments are separated by `~`,
 - arbitrary bytes or strings should use `b64u.<base64url_nopad(...)>`,
-- SDK and C++ runtime paths must share one parser, validator, and test-vector set.
+- SDK and C++ runtime paths must share one parser, validator, and test-vector set,
+- `model_id_enc` identifies the logical model family, while `model_version_enc`
+  identifies the concrete served model revision or checkpoint generation that
+  produced the bytes,
+- `layout_id` must bind the byte-level page serialization contract, including
+  any format version, attention family, dtype or encoding contract, and page
+  size,
+- `engine_key_enc` must bind the engine-owned logical page identity and any
+  rank-local shard qualifier required for correctness, such as TP or PP
+  ownership,
+- engine-owned logical byte artifacts must not encode run-local or host-local
+  values such as `run_id`, `instance_id`, `daemon_id`, or machine identity into
+  the routed `artifact_id`.
 
 Authority split:
 

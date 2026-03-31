@@ -13,6 +13,7 @@ TEST_CASE("Byte artifact cgid parse vectors", "[artifact_identity][byte_artifact
   const std::string artifact_id =
       "cgid:byte_artifact~tenantA~sglang~"
       "b64u.bWV0YS1sbGFtYS9MbGFtYS0zLjEtOEItSW5zdHJ1Y3Q~"
+      "b64u.ZGVmYXVsdA~"
       "layout_v1~b64u.cmVxdWVzdC0wMDAxOmJsay00Mg";
   REQUIRE(is_byte_artifact_id(artifact_id));
   auto parsed_or = parse_byte_artifact_cgid(artifact_id);
@@ -22,6 +23,7 @@ TEST_CASE("Byte artifact cgid parse vectors", "[artifact_identity][byte_artifact
   REQUIRE(parsed.engine == "sglang");
   REQUIRE(parsed.layout_id == "layout_v1");
   REQUIRE(parsed.model_id_enc == "b64u.bWV0YS1sbGFtYS9MbGFtYS0zLjEtOEItSW5zdHJ1Y3Q");
+  REQUIRE(parsed.model_version_enc == "b64u.ZGVmYXVsdA");
   REQUIRE(parsed.engine_key_enc == "b64u.cmVxdWVzdC0wMDAxOmJsay00Mg");
 }
 

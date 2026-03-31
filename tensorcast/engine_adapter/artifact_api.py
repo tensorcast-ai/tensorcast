@@ -28,6 +28,7 @@ class PutIfAbsentInvariant:
     byte_length: int
     payload_digest_alg: str
     payload_digest_hex: str
+    verification_mode: str = "BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256"
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +345,7 @@ def seal_byte_artifact(
         byte_length=len(payload_bytes),
         payload_digest_alg="sha256",
         payload_digest_hex=payload_digest_hex,
+        verification_mode="BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256",
     )
     return SealedByteArtifact(
         artifact_id=opened.artifact_id,

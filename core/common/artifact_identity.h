@@ -34,6 +34,7 @@ struct ByteArtifactCgidParts {
   std::string namespace_name;
   std::string engine;
   std::string model_id_enc;
+  std::string model_version_enc;
   std::string layout_id;
   std::string engine_key_enc;
 };

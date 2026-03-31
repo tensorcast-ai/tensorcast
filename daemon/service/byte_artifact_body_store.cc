@@ -28,15 +28,45 @@ std::string to_lower_copy(std::string_view value) {
 }
 
 bool invariant_matches_descriptor(const v2::PutIfAbsentInvariant& invariant, const BodyDescriptor& descriptor) {
-  return invariant.layout_id() == descriptor.layout_id && invariant.byte_length() == descriptor.size_bytes &&
-      to_lower_copy(invariant.payload_digest_alg()) == descriptor.payload_digest_alg &&
+  const auto verification_mode = invariant_verification_mode(invariant);
+  if (verification_mode != descriptor.verification_mode || invariant.layout_id() != descriptor.layout_id ||
+      invariant.byte_length() != descriptor.size_bytes) {
+    return false;
+  }
+  if (!verification_mode_requires_payload_digest(verification_mode)) {
+    return true;
+  }
+  return to_lower_copy(invariant.payload_digest_alg()) == descriptor.payload_digest_alg &&
       to_lower_copy(invariant.payload_digest_hex()) == descriptor.payload_digest_hex;
 }
 
 bool content_matches_claim_descriptor(const BodyDescriptor& lhs, const BodyDescriptor& rhs) {
-  return lhs.physical_artifact_id == rhs.physical_artifact_id && lhs.layout_id == rhs.layout_id &&
-      lhs.size_bytes == rhs.size_bytes && lhs.payload_digest_alg == rhs.payload_digest_alg &&
-      lhs.payload_digest_hex == rhs.payload_digest_hex;
+  if (lhs.verification_mode != rhs.verification_mode || lhs.layout_id != rhs.layout_id ||
+      lhs.size_bytes != rhs.size_bytes) {
+    return false;
+  }
+  if (!verification_mode_requires_payload_digest(lhs.verification_mode)) {
+    return true;
+  }
+  return lhs.payload_digest_alg == rhs.payload_digest_alg && lhs.payload_digest_hex == rhs.payload_digest_hex;
+}
+
+bool verified_content_matches_descriptor(
+    const store::runtime::ingestion::VerifiedContentDescriptor& verified_content_descriptor,
+    const BodyDescriptor& descriptor) {
+  const auto& content_identity = verified_content_descriptor.content_identity;
+  if (content_identity.semantic_layout_identity.kind != store::runtime::ingestion::SemanticLayoutKind::kNamedLayoutId ||
+      content_identity.semantic_layout_identity.value != descriptor.layout_id ||
+      content_identity.logical_size_bytes != descriptor.size_bytes) {
+    return false;
+  }
+  if (!verification_mode_requires_payload_digest(descriptor.verification_mode)) {
+    return true;
+  }
+  return normalize_body_digest_value(content_identity.digest_alg) == descriptor.payload_digest_alg &&
+      normalize_body_digest_value(
+          store::runtime::ingestion::content_digest_bytes_to_hex(content_identity.digest_bytes)) ==
+      descriptor.payload_digest_hex;
 }
 
 bool authority_is_visible(const AuthorityEntry& entry) {
@@ -812,7 +842,7 @@ ByteArtifactBodyStore::PutResult ByteArtifactBodyStore::put_if_absent(
     const BodyDescriptor normalized_descriptor = normalized_body_descriptor(descriptor);
     if (!invariant_matches_descriptor(invariant, entry.claim_descriptor) ||
         !content_matches_claim_descriptor(normalized_descriptor, entry.claim_descriptor) ||
-        verified_content_descriptor != entry.verified_content_descriptor) {
+        !verified_content_matches_descriptor(verified_content_descriptor, entry.claim_descriptor)) {
       maybe_retire_backing_handle(body_handle, "conflict");
       return PutResult{.outcome = PutOutcome::kConflict};
     }

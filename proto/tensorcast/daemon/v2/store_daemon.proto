@@ -619,11 +619,18 @@ message BatchItemOutcome {
   string message = 3;
 }
 
+enum ByteArtifactVerificationMode {
+  BYTE_ARTIFACT_VERIFICATION_MODE_UNSPECIFIED = 0;
+  BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256 = 1;
+  BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY = 2;
+}
+
 message PutIfAbsentInvariant {
   string layout_id = 1;
   uint64 byte_length = 2;
   string payload_digest_alg = 3;
   string payload_digest_hex = 4;
+  ByteArtifactVerificationMode verification_mode = 5;
 }
 
 message BatchExistsRequest {

@@ -410,8 +410,8 @@ absl::Status validate_batch_payload_pack_entry(const BatchPayloadPackEntry& entr
   if (has_body_handle && entry.body_descriptor->size_bytes != entry.payload_size_bytes) {
     return absl::InvalidArgumentError("batch payload entry body descriptor size mismatch");
   }
-  if (entry.digest_alg.empty() || entry.digest_hex.empty()) {
-    return absl::InvalidArgumentError("batch payload entry digest is required");
+  if (entry.digest_alg.empty() != entry.digest_hex.empty()) {
+    return absl::InvalidArgumentError("batch payload entry digest_alg and digest_hex must both be set");
   }
   return absl::OkStatus();
 }
@@ -441,6 +441,22 @@ absl::StatusOr<std::string> issue_payload_ref_for_batch_payload_pack_entry(
   if (entry.inline_payload) {
     return payload_transport_broker.issue_payload_ref(
         entry.artifact_id, entry.inline_payload, direction, operation_id, entry.capability_expires_at);
+  }
+  if (entry.body_descriptor.has_value() &&
+      (!entry.body_descriptor->payload_digest_alg.empty() != !entry.body_descriptor->payload_digest_hex.empty())) {
+    return absl::InvalidArgumentError("body descriptor digest metadata must be fully set or fully empty");
+  }
+  if (entry.body_descriptor.has_value() && entry.body_descriptor->payload_digest_alg.empty()) {
+    auto payload_or = entry.body_handle->read_all_bytes();
+    if (!payload_or.ok()) {
+      return payload_or.status();
+    }
+    return payload_transport_broker.issue_payload_ref(
+        entry.artifact_id,
+        std::make_shared<const std::string>(std::move(*payload_or)),
+        direction,
+        operation_id,
+        entry.capability_expires_at);
   }
   return payload_transport_broker.issue_payload_ref(
       entry.artifact_id,
@@ -816,6 +832,10 @@ absl::StatusOr<ResolvedSourceCapability> ByteArtifactController::restore_backing
   expected_descriptor.payload_digest_alg = normalize_body_digest_value(content_identity.digest_alg);
   expected_descriptor.payload_digest_hex = normalize_body_digest_value(
       store::runtime::ingestion::content_digest_bytes_to_hex(content_identity.digest_bytes));
+  expected_descriptor.verification_mode =
+      expected_descriptor.payload_digest_alg.empty() && expected_descriptor.payload_digest_hex.empty()
+      ? v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY
+      : v2::BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256;
   auto policy_source =
       d_.persistence_manager->resolve_policy_source(artifact_id, source_capability.policy_source_ref->control_ref);
   if (!policy_source.has_value()) {

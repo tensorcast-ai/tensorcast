@@ -305,6 +305,24 @@ This preserves the `0087` rule:
 - engine-owned mutable state stays open and engine-local,
 - only sealed immutable snapshots enter TensorCast publication and routing paths.
 
+For engine-owned logical byte artifacts, sealing and join semantics must remain
+explicitly separate:
+
+- sealing still means "freeze one concrete payload snapshot for this publication
+  attempt",
+- but an engine integration may declare that routed join truth is keyed by the
+  engine-owned logical `artifact_id` plus layout or size contract rather than by
+  payload digest,
+- this exception is intended for integrations such as runtime KV pages where
+  the engine defines logical page identity but does not guarantee bitwise-stable
+  payload bytes across repeated publications,
+- and even in that mode, repeated publish attempts remain first-writer-wins
+  `PUT_IF_ABSENT_JOIN`, not upsert.
+
+If an integration needs rewrite or repair semantics, it must use a distinct
+overwrite or delete-and-reissue flow instead of interpreting repeated
+`PutIfAbsentInvariant` publication as last-writer-wins.
+
 # High-Cardinality Manifest Semantics
 
 ## `ManifestResult` is the current integration-side carrier today

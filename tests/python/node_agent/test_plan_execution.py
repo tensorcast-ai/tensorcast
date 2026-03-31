@@ -404,7 +404,7 @@ def test_node_agent_executes_artifact_actions() -> None:
         return ManifestResult.from_artifact_ids(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",),
         )
 
     def _publish(rid: str, ttl_ms: int | None, _sealed, _ctx):  # noqa: ANN001
@@ -412,7 +412,7 @@ def test_node_agent_executes_artifact_actions() -> None:
         manifest = ManifestResult.from_artifact_ids(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",),
         )
         return PublishResult(
             manifest=manifest,
@@ -522,7 +522,7 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
             ),
             artifact_selections=(
                 common_pb2.ArtifactSelection(
-                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
                     logical_layout_hash=b"logical-a",
                     selection_hash=b"selection-a",
                 ),
@@ -541,7 +541,7 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
             ),
             artifact_selections=(
                 common_pb2.ArtifactSelection(
-                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
                     logical_layout_hash=b"logical-a",
                     selection_hash=b"selection-a",
                 ),
