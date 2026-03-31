@@ -397,8 +397,8 @@ flowchart TD
     A["disk-backed mapped into-target request"] --> B{"disk + collective hint + representation work plan?"}
     B -- "yes" --> C["try collective mapped executor"]
     B -- "no" --> D{"source-ordered path available?"}
-    D -- "yes" --> E["GenericByteRangeExecutor(source_ordered)"]
-    D -- "no" --> F["ByteRangeMappedSource + GenericByteRangeExecutor"]
+    D -- "yes" --> E["SourceOrderedMappedTargetExecutor"]
+    D -- "no" --> F["MappedTargetStreamingExecutor"]
 ```
 
 The key differences from ordinary `tensor_dict` startup are:
@@ -412,7 +412,9 @@ The key differences from ordinary `tensor_dict` startup are:
   work plan already has zero residual generic fallback,
 - runtime execution must not partially execute mapped work and then implicitly
   derive new residual fallback at execution time,
-- otherwise the residual executor is still the generic byte-range engine.
+- otherwise the residual executor is still the byte-range fallback path, but it
+  now reports through typed source-bound executor names rather than the generic
+  replica-path label.
 
 ## Runtime Binding And Ordinary Disk Startup
 

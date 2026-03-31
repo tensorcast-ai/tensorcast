@@ -2807,7 +2807,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                   absl::StrCat(
                       "materialize_into_target collective execution failed: ", collective_result.status.message()));
             }
-            return loading::MaterializeIntoTargetResult{.source = source_kind};
+            return loading::MaterializeIntoTargetResult{
+                .source = source_kind,
+                .requested_bytes = effective_map.total_bytes,
+                .committed_bytes = effective_map.total_bytes,
+                .fallback_bytes = 0,
+                .residual_bytes = 0,
+                .collective_handled = true,
+                .direct_write_supported = false,
+                .source_ordered = false,
+                .dominant_executor = "OwnerFileCollectiveExecutor",
+                .selection_reason = "collective_mapped_target",
+            };
           }
         }
       }
@@ -2906,7 +2917,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_into_target view transform failed: ", transform_status.message()));
       }
     }
-    return loading::MaterializeIntoTargetResult{.source = source_kind};
+    return loading::MaterializeIntoTargetResult{
+        .source = source_kind,
+        .requested_bytes = effective_map.total_bytes,
+        .committed_bytes = effective_map.total_bytes,
+        .fallback_bytes = effective_map.total_bytes,
+        .residual_bytes = 0,
+        .collective_handled = false,
+        .direct_write_supported = false,
+        .source_ordered = source_ordered,
+        .dominant_executor = source_ordered ? "SourceOrderedDirectTargetExecutor" : "DirectTargetStreamingExecutor",
+        .selection_reason = source_ordered ? "source_ordered_direct_target" : "direct_target_streaming",
+    };
   };
 
   const bool requires_source_layout_remap = source_index_json.has_value();
@@ -3151,7 +3173,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_mapped_into_target fill sink close failed: ", close_status.message()));
       }
     }
-    return loading::MaterializeIntoTargetResult{.source = loading::MaterializationSource::kUnspecified};
+    return loading::MaterializeIntoTargetResult{
+        .source = loading::MaterializationSource::kUnspecified,
+        .requested_bytes = total_size,
+        .committed_bytes = representation_work_plan.committed_bytes,
+        .fallback_bytes = 0,
+        .residual_bytes = representation_work_plan.residual_fallback_map.total_bytes,
+        .collective_handled = false,
+        .direct_write_supported = false,
+        .source_ordered = false,
+        .dominant_executor = "BindingRealizationPlanExecutor",
+        .selection_reason = "binding_realization_plan",
+    };
   }
 
   auto build_identity_map = [](uint64_t bytes) -> loader::ByteRangeMap {
@@ -3398,7 +3431,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                       << " fallback_bytes=" << collective_report.fallback_bytes
                       << " collective_handled=" << collective_report.collective_handled
                       << " dominant_executor=" << collective_report.dominant_executor;
-            return loading::MaterializeIntoTargetResult{.source = source_kind};
+            return loading::MaterializeIntoTargetResult{
+                .source = source_kind,
+                .requested_bytes = collective_report.requested_bytes,
+                .committed_bytes = collective_report.committed_bytes,
+                .fallback_bytes = collective_report.fallback_bytes,
+                .residual_bytes = collective_report.residual_bytes,
+                .collective_handled = collective_report.collective_handled,
+                .direct_write_supported = collective_report.direct_write_supported,
+                .source_ordered = collective_report.source_ordered,
+                .dominant_executor = collective_report.dominant_executor,
+                .selection_reason = collective_report.selection_reason,
+            };
           }
         }
       }
@@ -3495,7 +3539,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .collective_handled = false,
         .direct_write_supported = source_binding.direct_write_capable,
         .source_ordered = source_ordered,
-        .dominant_executor = source_ordered ? "GenericByteRangeExecutor(source_ordered)" : "GenericByteRangeExecutor",
+        .dominant_executor = source_ordered ? "SourceOrderedMappedTargetExecutor" : "MappedTargetStreamingExecutor",
+        .selection_reason = source_ordered ? "source_ordered_mapped_target" : "mapped_target_streaming",
     };
     LOG(INFO) << "materialize_mapped_into_target source execution"
               << " source_kind=" << static_cast<int>(source_kind)
@@ -3518,7 +3563,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               << " direct_write_supported=" << commit_report.direct_write_supported
               << " source_ordered=" << commit_report.source_ordered
               << " dominant_executor=" << commit_report.dominant_executor;
-    return loading::MaterializeIntoTargetResult{.source = source_kind};
+    return loading::MaterializeIntoTargetResult{
+        .source = source_kind,
+        .requested_bytes = commit_report.requested_bytes,
+        .committed_bytes = commit_report.committed_bytes,
+        .fallback_bytes = commit_report.fallback_bytes,
+        .residual_bytes = commit_report.residual_bytes,
+        .collective_handled = commit_report.collective_handled,
+        .direct_write_supported = commit_report.direct_write_supported,
+        .source_ordered = commit_report.source_ordered,
+        .dominant_executor = commit_report.dominant_executor,
+        .selection_reason = commit_report.selection_reason,
+    };
   };
 
   const bool local_canonical_override = prefer_local_canonical_source_for_mapped(strategy_config);
@@ -3868,7 +3924,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::DataLossError(
         absl::StrCat("materialize_mapped_loader_into_target sink close failed: ", close_status.message()));
   }
-  return loading::MaterializeIntoTargetResult{.source = source_kind};
+  return loading::MaterializeIntoTargetResult{
+      .source = source_kind,
+      .requested_bytes = total_size,
+      .committed_bytes = total_size,
+      .fallback_bytes = total_size,
+      .residual_bytes = 0,
+      .collective_handled = false,
+      .direct_write_supported = false,
+      .source_ordered = false,
+      .dominant_executor = "MappedLoaderTargetExecutor",
+      .selection_reason = "mapped_loader_target",
+  };
 }
 
 absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_lowering_plan(
