@@ -121,6 +121,15 @@ bool verbose_mapped_concat_diagnostics(const StrategyConfig& strategy) {
   return strategy.diagnostics_verbosity == StrategyConfig::DiagnosticsVerbosity::kVerbose;
 }
 
+bool byte_range_map_has_pad_segments(const loader::ByteRangeMap& map) {
+  for (const auto& segment : map.segments) {
+    if (segment.kind == loader::ByteRangeSegment::Kind::kPad && segment.length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool sync_after_single_range_concat_job(const StrategyConfig& strategy) {
   return strategy.sync_after_single_range_concat_job;
 }
@@ -4955,6 +4964,11 @@ CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
   if (!request.disk_context->is_safetensors()) {
     LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id
               << " reason=non_safetensors_source";
+    return {.handled = false, .status = absl::OkStatus()};
+  }
+  if (byte_range_map_has_pad_segments(request.representation_work_plan.residual_fallback_map)) {
+    LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id
+              << " reason=pad_segments_not_supported";
     return {.handled = false, .status = absl::OkStatus()};
   }
   return wait_for_mapped_group_and_maybe_execute(request, pinned_pool, pinned_timeout, options);
