@@ -56,6 +56,15 @@ struct MaterializeIntoTargetResult {
   };
 
   std::optional<DebugStats> debug_stats;
+  uint64_t requested_bytes{0};
+  uint64_t committed_bytes{0};
+  uint64_t fallback_bytes{0};
+  uint64_t residual_bytes{0};
+  bool collective_handled{false};
+  bool direct_write_supported{false};
+  bool source_ordered{false};
+  std::string dominant_executor;
+  std::string selection_reason;
 };
 
 struct IntoTargetStorage {

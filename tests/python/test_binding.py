@@ -16,6 +16,8 @@ import torch
 import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api import context as tc_context
+from tensorcast.api._config import ExecutionTopologyContext, GetArtifactOptions
+from tensorcast.api.context import CollectiveLoadGroup
 from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store.binding import Binding, BindingUpdateEpoch, SealedBindingValue
 from tensorcast.api.store.cache import ArtifactCacheEntry
@@ -29,6 +31,10 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
+    CollectiveFailureClass,
+    CollectivePolicy,
+    HashLocation,
+    IdentityMintStrategy,
     PublishedModelVersion,
     ServingRuntimePolicy,
     VramRegionHandle,
@@ -99,6 +105,12 @@ class FakeBindingClient:
         self._binding_layout_ids: dict[str, str] = {}
         self._binding_generations: dict[str, int] = {}
         self._binding_value_counter = 0
+        self.promote_execution_diagnostics: (
+            store_daemon_pb2.ExecutionDiagnostics | None
+        ) = None
+        self.refill_execution_diagnostics: (
+            store_daemon_pb2.ExecutionDiagnostics | None
+        ) = None
 
     def _make_binding_value(
         self,
@@ -326,7 +338,7 @@ class FakeBindingClient:
             total_size=32,
             id_kind=common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2,
         )
-        return types.SimpleNamespace(
+        response = types.SimpleNamespace(
             artifact_descriptor=descriptor,
             current_value=self._make_binding_value(
                 binding_id=binding_id,
@@ -334,6 +346,9 @@ class FakeBindingClient:
             ),
             existed=False,
         )
+        if self.promote_execution_diagnostics is not None:
+            response.execution_diagnostics = self.promote_execution_diagnostics
+        return response
 
     def refill_owned_binding(self, **kwargs: Any) -> Any:
         self.refill_calls.append(kwargs)
@@ -349,18 +364,21 @@ class FakeBindingClient:
         self._token_counter += 1
         binding_id = str(kwargs["binding_id"])
         if kwargs.get("realization_plan") is not None:
-            return types.SimpleNamespace(
+            response = types.SimpleNamespace(
                 artifact_id=str(kwargs["artifact_id"]),
                 current_value=self._make_binding_value(
                     binding_id=binding_id,
                     selection=None,
                 ),
             )
+            if self.refill_execution_diagnostics is not None:
+                response.execution_diagnostics = self.refill_execution_diagnostics
+            return response
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(self._binding_selections[binding_id])
         selection.artifact_id = str(kwargs["artifact_id"])
         self._binding_selections[binding_id] = selection
-        return types.SimpleNamespace(
+        response = types.SimpleNamespace(
             artifact_id=str(selection.artifact_id),
             resolved_selection=selection,
             target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
@@ -369,6 +387,9 @@ class FakeBindingClient:
                 selection=selection,
             ),
         )
+        if self.refill_execution_diagnostics is not None:
+            response.execution_diagnostics = self.refill_execution_diagnostics
+        return response
 
     def close_owned_binding(self, *, binding_id: str, **_kwargs: Any) -> Any:
         self.close_calls.append(str(binding_id))
@@ -604,6 +625,170 @@ def test_binding_view_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert request_selection is not None
 
 
+def test_binding_swap_forwards_first_class_execution_topology(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
+
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
+    options = GetArtifactOptions(
+        execution_topology=ExecutionTopologyContext(
+            collective_group=CollectiveLoadGroup(
+                group_id="same-host-tp-load",
+                world_size=8,
+                rank=3,
+            ),
+            source_locality="shared_source",
+            source_sharing_domain="node-a",
+        )
+    )
+
+    binding.swap(artifact2, options=options)
+
+    refill_call = client.refill_calls[-1]
+    execution_topology = refill_call["execution_topology"]
+    assert execution_topology.collective_load_group.group_id == "same-host-tp-load"
+    assert execution_topology.collective_load_group.world_size == 8
+    assert execution_topology.collective_load_group.rank == 3
+    assert (
+        execution_topology.source_locality
+        == store_daemon_pb2.SOURCE_LOCALITY_SHARED_SOURCE
+    )
+    assert execution_topology.source_sharing_domain == "node-a"
+    assert (
+        refill_call["collective_policy"]
+        == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+    )
+    assert "#tcg:" not in str(refill_call["operation_id"])
+
+
+def test_binding_swap_rejects_ctx_collective_for_source_bound_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
+
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
+    options = GetArtifactOptions(
+        execution_topology=ExecutionTopologyContext(
+            collective_group=CollectiveLoadGroup(
+                group_id="same-host-tp-load",
+                world_size=8,
+                rank=3,
+            )
+        )
+    )
+    ctx = tc_context(
+        collective=CollectiveLoadGroup(
+            group_id="same-host-tp-load",
+            world_size=8,
+            rank=3,
+        )
+    )
+
+    with pytest.raises(ArtifactError, match="ctx.collective is no longer accepted"):
+        binding.swap(artifact2, options=options, ctx=ctx)
+
+
+def test_binding_realize_from_rejects_ctx_collective_for_source_bound_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+
+    with pytest.raises(ArtifactError, match="ctx.collective is no longer accepted"):
+        binding.realize_from(
+            artifact,
+            realization_plan=(
+                store_mod.BindingRealizationEntry(
+                    op="copy",
+                    source_name="alpha",
+                    dst_name="alpha",
+                ),
+            ),
+            options=GetArtifactOptions(
+                execution_topology=ExecutionTopologyContext(
+                    collective_group=CollectiveLoadGroup(
+                        group_id="same-host-tp-load",
+                        world_size=8,
+                        rank=3,
+                    ),
+                    collective_policy="require_collective",
+                )
+            ),
+            ctx=tc_context(
+                collective=CollectiveLoadGroup(
+                    group_id="same-host-tp-load",
+                    world_size=8,
+                    rank=3,
+                )
+            ),
+        )
+
+
+def test_binding_swap_tracks_last_execution_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
+    client.refill_execution_diagnostics = store_daemon_pb2.ExecutionDiagnostics(
+        collective_requested=True,
+        collective_acknowledged=True,
+        collective_used=False,
+        collective_policy=store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+        collective_failure_class=store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE,
+        dominant_executor="SourceOrderedMappedTargetExecutor",
+        direct_write_supported=False,
+        fallback_bytes=128,
+        residual_bytes=0,
+        hash_rounds=1,
+        hash_location=store_daemon_pb2.HASH_LOCATION_SEAL,
+        identity_mint_strategy=store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_MINT,
+    )
+
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
+    binding.swap(artifact2)
+
+    diagnostics = binding.last_execution_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.collective_policy is CollectivePolicy.ALLOW_NOT_ELIGIBLE_FALLBACK
+    assert diagnostics.collective_failure_class is CollectiveFailureClass.NOT_ELIGIBLE
+    assert diagnostics.hash_location is HashLocation.SEAL
+    assert diagnostics.identity_mint_strategy is IdentityMintStrategy.SEAL_MINT
+
+
+def test_binding_promote_tracks_last_execution_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    client.promote_execution_diagnostics = store_daemon_pb2.ExecutionDiagnostics(
+        collective_requested=False,
+        collective_acknowledged=False,
+        collective_used=False,
+        collective_policy=store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+        hash_rounds=0,
+        hash_location=store_daemon_pb2.HASH_LOCATION_NONE,
+        identity_mint_strategy=(store_daemon_pb2.IDENTITY_MINT_STRATEGY_NOT_APPLICABLE),
+    )
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+
+    sealed = binding.seal_current(update_epoch=binding.begin_update())
+    promoted = sealed.promote_serving_artifact()
+
+    assert promoted.artifact_id.startswith("mi2:promoted:")
+    diagnostics = binding.last_execution_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.hash_location is HashLocation.NONE
+    assert diagnostics.identity_mint_strategy is IdentityMintStrategy.NOT_APPLICABLE
+
+
 def test_binding_append_publish_uses_view_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -710,10 +895,55 @@ def test_binding_realize_from_sets_local_current_value(
     assert binding.artifact_id is None
     assert len(client.refill_calls) == 1
     realization_plan = client.refill_calls[0]["realization_plan"]
-    assert realization_plan.entries[0].op_kind == \
-        store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
+    assert (
+        realization_plan.entries[0].op_kind
+        == store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
+    )
     assert realization_plan.entries[0].source_name == "alpha"
     assert realization_plan.entries[1].dst_name == "beta"
+
+
+def test_binding_realize_from_accepts_rank_zero_collective_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+
+    binding.realize_from(
+        artifact,
+        realization_plan=(
+            store_mod.BindingRealizationEntry(
+                op="copy",
+                source_name="alpha",
+                dst_name="alpha",
+            ),
+        ),
+        options=GetArtifactOptions(
+            execution_topology=ExecutionTopologyContext(
+                collective_group=CollectiveLoadGroup(
+                    group_id="same-host-tp-load",
+                    world_size=8,
+                    rank=0,
+                ),
+                collective_policy="require_collective",
+                source_locality="shared_source",
+            )
+        ),
+    )
+
+    refill_call = client.refill_calls[-1]
+    execution_topology = refill_call["execution_topology"]
+    assert execution_topology is not None
+    assert execution_topology.collective_load_group.group_id == "same-host-tp-load"
+    assert execution_topology.collective_load_group.world_size == 8
+    assert execution_topology.collective_load_group.rank == 0
+    assert (
+        refill_call["collective_policy"]
+        == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+    )
+    assert "#tcg:" not in str(refill_call["operation_id"])
 
 
 def test_binding_realize_from_serializes_partial_const_fill_ranges(
@@ -738,8 +968,10 @@ def test_binding_realize_from_serializes_partial_const_fill_ranges(
 
     assert len(client.refill_calls) == 1
     realization_plan = client.refill_calls[0]["realization_plan"]
-    assert realization_plan.entries[0].op_kind == \
-        store_daemon_pb2.BINDING_REALIZATION_OP_KIND_CONST_FILL
+    assert (
+        realization_plan.entries[0].op_kind
+        == store_daemon_pb2.BINDING_REALIZATION_OP_KIND_CONST_FILL
+    )
     assert realization_plan.entries[0].dst_ranges[0].dim == 0
     assert realization_plan.entries[0].dst_ranges[0].start == 1
     assert realization_plan.entries[0].dst_ranges[0].end == 3
@@ -771,8 +1003,10 @@ def test_binding_realize_from_preserves_multiaxis_copy_ranges(
 
     assert len(client.refill_calls) == 1
     realization_plan = client.refill_calls[0]["realization_plan"]
-    assert realization_plan.entries[0].op_kind == \
-        store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
+    assert (
+        realization_plan.entries[0].op_kind
+        == store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
+    )
     assert len(realization_plan.entries[0].source_ranges) == 1
     assert realization_plan.entries[0].source_ranges[0].dim == 0
     assert realization_plan.entries[0].source_ranges[0].start == 0
@@ -814,8 +1048,10 @@ def test_binding_realize_from_omits_zero_length_fill_ranges(
     assert len(client.refill_calls) == 1
     realization_plan = client.refill_calls[0]["realization_plan"]
     assert len(realization_plan.entries) == 1
-    assert realization_plan.entries[0].op_kind == \
-        store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
+    assert (
+        realization_plan.entries[0].op_kind
+        == store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
+    )
 
 
 def test_daemon_binding_allows_mapped_layout_without_create_time_mapping(
@@ -1100,9 +1336,7 @@ def test_create_client_binding_uses_region_backed_layout_on_rpc(
     layout = store_mod.build_owned_layout(
         entries=canonical_index_from_bytes(_make_index_bytes()).entries,
         device_id=0,
-        index_kind=(
-            store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
-        ),
+        index_kind=(store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED),
         logical_layout_hash=None,
         separate_storages=True,
     )
@@ -1258,9 +1492,7 @@ def test_sealed_binding_value_can_promote_serving_artifact(
     layout = store_mod.build_owned_layout(
         entries=canonical_index_from_bytes(_make_index_bytes()).entries,
         device_id=0,
-        index_kind=(
-            store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
-        ),
+        index_kind=(store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED),
         logical_layout_hash=None,
         separate_storages=True,
     )
@@ -1285,9 +1517,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
     layout = store_mod.build_owned_layout(
         entries=canonical_index_from_bytes(_make_index_bytes()).entries,
         device_id=0,
-        index_kind=(
-            store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
-        ),
+        index_kind=(store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED),
         logical_layout_hash=None,
         separate_storages=True,
     )
@@ -1358,7 +1588,10 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
     assert len(client.create_binding_calls) == 1
     assert len(client.promote_calls) == 0
     assert client.submit_contribution_calls[-1]["binding_id"] == binding.binding_id
-    assert client.submit_contribution_calls[-1]["binding_value_id"] == binding.current_value.binding_value_id
+    assert (
+        client.submit_contribution_calls[-1]["binding_value_id"]
+        == binding.current_value.binding_value_id
+    )
     publication = captured["start_kwargs"]["publication"]
     assert publication.serving_artifact_id is None
     assert publication.representation_publish_contract.binding_value_ref is not None
@@ -1366,7 +1599,9 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
         publication.representation_publish_contract.binding_value_ref.binding_value_id
         == binding.current_value.binding_value_id
     )
-    canonical_entries = {entry.name: entry for entry in publication.canonical_index.entries}
+    canonical_entries = {
+        entry.name: entry for entry in publication.canonical_index.entries
+    }
     assert canonical_entries["alpha"].segment_offset == 0
     assert canonical_entries["beta"].segment_offset == 16
     assert canonical_entries["alpha"].size_bytes == 16

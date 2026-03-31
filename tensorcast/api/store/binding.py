@@ -29,6 +29,7 @@ from tensorcast.types import (
 from tensorcast.types import (
     AssemblyAttemptRef,
     BindingValueRef,
+    ExecutionDiagnostics,
     PartialSealResult,
     PublicDiskSourceHandle,
     ServingRuntimePolicyInput,
@@ -154,6 +155,7 @@ def _build_transport_operation_id(
     *,
     base_operation_id: str,
     ctx: CallContext | None,
+    include_collective: bool = True,
 ) -> str:
     if ctx is None:
         return base_operation_id
@@ -181,16 +183,17 @@ def _build_transport_operation_id(
     collective_group_id = ""
     collective_world_size = 0
     collective_rank = 0
-    collective = ctx.collective
-    if collective is not None:
-        collective_group_id = _sanitize_operation_token(collective.group_id)
-        try:
-            collective_world_size = int(collective.world_size)
-            collective_rank = int(collective.rank)
-        except (TypeError, ValueError):
-            collective_group_id = ""
-            collective_world_size = 0
-            collective_rank = 0
+    if include_collective:
+        collective = ctx.collective
+        if collective is not None:
+            collective_group_id = _sanitize_operation_token(collective.group_id)
+            try:
+                collective_world_size = int(collective.world_size)
+                collective_rank = int(collective.rank)
+            except (TypeError, ValueError):
+                collective_group_id = ""
+                collective_world_size = 0
+                collective_rank = 0
 
     metadata_parts: list[str] = []
     if group_kind and group_id and part_id and total_parts > 0:
@@ -649,6 +652,11 @@ class Binding:
             return None
         return current_value.selection
 
+    @property
+    def last_execution_diagnostics(self) -> ExecutionDiagnostics | None:
+        diagnostics = getattr(self._slot, "last_execution_diagnostics", None)
+        return diagnostics if isinstance(diagnostics, ExecutionDiagnostics) else None
+
     def swap(
         self,
         artifact: "Artifact | str",
@@ -663,9 +671,11 @@ class Binding:
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
     ) -> SealedBindingValue:
+        include_collective = not isinstance(self._slot, OwnedBindingSlot)
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
             ctx=ctx,
+            include_collective=include_collective,
         )
         self._stop_keepalive()
         try:
@@ -716,6 +726,7 @@ class Binding:
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
             ctx=ctx,
+            include_collective=False,
         )
         self._stop_keepalive()
         realize = getattr(self._slot, "realize_from", None)

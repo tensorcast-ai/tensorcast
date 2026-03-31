@@ -66,3 +66,15 @@ def test_materialization_runtime_error_transport_timeout_is_retryable() -> None:
     assert mapped.status_code == "UNAVAILABLE"
     assert mapped.retryable is True
     assert retry_reason_bucket(mapped) in {"transport_unavailable", "unavailable"}
+
+
+def test_materialization_error_extracts_collective_failure_class() -> None:
+    err = _DummyRpcError(
+        grpc.StatusCode.FAILED_PRECONDITION,
+        "collective execution failed [tc.collective_failure_class=execution_failed]",
+    )
+    mapped = map_materialization_error(err)
+    assert mapped.status_code == "FAILED_PRECONDITION"
+    assert mapped.retryable is False
+    assert mapped.collective_failure_class == "execution_failed"
+    assert "tc.collective_failure_class" not in str(mapped)

@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from tensorcast.api._config import (
+    CollectivePolicyMode,
     ExecutionTopologyContext,
     GetArtifactOptions,
     RetrievalPolicy,
@@ -36,12 +37,17 @@ def test_get_options_parse_topology() -> None:
                 group_id="group-a",
                 world_size=4,
                 rank=2,
-            )
+            ),
+            collective_policy="require_collective",
         )
     )
     assert opts.execution_topology is not None
     assert opts.execution_topology.collective_group is not None
     assert opts.execution_topology.collective_group.rank == 2
+    assert (
+        opts.execution_topology.collective_policy
+        is CollectivePolicyMode.REQUIRE_COLLECTIVE
+    )
 
 
 def test_store_options_accept_execution_scoped_defaults() -> None:

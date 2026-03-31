@@ -1389,6 +1389,8 @@ class DaemonCtl:
         source_selection: common_pb2.ArtifactSelection | None = None,
         realization_plan: store_daemon_pb2.BindingRealizationPlan | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        execution_topology: store_daemon_pb2.SourceExecutionTopology | None = None,
+        collective_policy: store_daemon_pb2.CollectivePolicy | None = None,
         serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         operation_id: str | None = None,
@@ -1411,6 +1413,10 @@ class DaemonCtl:
             if realization_plan is not None:
                 request.realization_plan.CopyFrom(realization_plan)
             request.source_policy.CopyFrom(resolved_source_policy)
+            if execution_topology is not None:
+                request.execution_topology.CopyFrom(execution_topology)
+            if collective_policy is not None:
+                request.collective_policy = collective_policy
             if serving_runtime_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
                     serving_runtime_policy.to_proto()
@@ -2350,6 +2356,12 @@ class DaemonCtl:
                     ),
                     local_handle_socket_path=local_handle_socket_path,
                     cpu_shared_memory_enabled=cpu_shared_memory_enabled,
+                    source_bound_capability_flags=int(
+                        getattr(response, "source_bound_capability_flags", 0)
+                    ),
+                    source_bound_contract_version=int(
+                        getattr(response, "source_bound_contract_version", 0)
+                    ),
                 )
 
     def execute_plan(

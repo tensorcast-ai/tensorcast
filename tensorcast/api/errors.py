@@ -24,6 +24,8 @@ ArtifactStatusCode = Literal[
     "UNAUTHENTICATED",
 ]
 
+CollectiveFailureClassName = Literal["not_eligible", "execution_failed"]
+
 
 class ArtifactError(RuntimeError):
     """Structured exception surfaced by Store verbs."""
@@ -34,13 +36,18 @@ class ArtifactError(RuntimeError):
         *,
         status_code: ArtifactStatusCode,
         retryable: bool,
+        collective_failure_class: CollectiveFailureClassName | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code: ArtifactStatusCode = status_code
         self.retryable = bool(retryable)
+        self.collective_failure_class: CollectiveFailureClassName | None = (
+            collective_failure_class
+        )
 
 
 __all__ = [
     "ArtifactError",
     "ArtifactStatusCode",
+    "CollectiveFailureClassName",
 ]

@@ -19,6 +19,19 @@ namespace {
 
 using store::loader::ViewOp;
 
+store::loading::SourceLocalityHint to_source_locality(v2::SourceLocality locality) {
+  switch (locality) {
+    case v2::SourceLocality::SOURCE_LOCALITY_HOST_LOCAL:
+      return store::loading::SourceLocalityHint::kHostLocal;
+    case v2::SourceLocality::SOURCE_LOCALITY_SHARED_SOURCE:
+      return store::loading::SourceLocalityHint::kSharedSource;
+    case v2::SourceLocality::SOURCE_LOCALITY_AUTO:
+    case v2::SourceLocality::SOURCE_LOCALITY_UNSPECIFIED:
+    default:
+      return store::loading::SourceLocalityHint::kAuto;
+  }
+}
+
 } // namespace
 
 store::loading::SourcePreference to_hint_preference(v2::SourcePreference preference) {
@@ -91,6 +104,48 @@ std::optional<store::loading::CollectiveLoadGroupHint> resolve_collective_group_
       .world_size = world_size,
       .rank = rank,
   };
+}
+
+absl::StatusOr<ExecutionTopologyContext> resolve_source_execution_topology(
+    const v2::SourceExecutionTopology* topology) {
+  ExecutionTopologyContext execution_topology;
+  if (topology == nullptr) {
+    return execution_topology;
+  }
+  if (topology->has_collective_load_group()) {
+    auto group_hint = resolve_collective_group_hint(&topology->collective_load_group());
+    if (!group_hint.has_value()) {
+      return absl::InvalidArgumentError("execution_topology.collective_load_group is invalid");
+    }
+    execution_topology.collective_load_group = std::move(group_hint);
+  }
+  execution_topology.source_locality = to_source_locality(topology->source_locality());
+  if (topology->has_source_sharing_domain() && !topology->source_sharing_domain().empty()) {
+    execution_topology.source_sharing_domain = topology->source_sharing_domain();
+  }
+  return execution_topology;
+}
+
+absl::StatusOr<v2::CollectivePolicy> resolve_collective_policy(
+    v2::CollectivePolicy requested,
+    const ExecutionTopologyContext& execution_topology) {
+  const bool has_collective_group = execution_topology.collective_load_group.has_value();
+  if (requested == v2::CollectivePolicy::COLLECTIVE_POLICY_UNSPECIFIED) {
+    return has_collective_group ? v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+                                : v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
+  }
+  if (requested == v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE && has_collective_group) {
+    return absl::InvalidArgumentError("collective_policy=disable_collective conflicts with a collective_load_group");
+  }
+  if (requested != v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE && !has_collective_group) {
+    return absl::InvalidArgumentError("collective_policy requires execution_topology.collective_load_group");
+  }
+  return requested;
+}
+
+bool collective_policy_requests_collective(v2::CollectivePolicy policy) {
+  return policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE ||
+      policy == v2::CollectivePolicy::COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK;
 }
 
 OperationTransportContext resolve_operation_transport_context(std::string_view operation_id) {
@@ -263,6 +318,36 @@ void apply_request_context_to_hints(
   }
   hints->set_retrieval_policy(context.retrieval_policy);
   hints->set_execution_topology(context.execution_topology);
+}
+
+v2::ExecutionDiagnostics build_execution_diagnostics(
+    const store::loading::MaterializeIntoTargetResult* result,
+    v2::CollectivePolicy collective_policy,
+    const ExecutionTopologyContext& execution_topology,
+    uint32_t hash_rounds,
+    v2::HashLocation hash_location,
+    v2::IdentityMintStrategy identity_mint_strategy) {
+  v2::ExecutionDiagnostics diagnostics;
+  const bool collective_requested =
+      collective_policy_requests_collective(collective_policy) && execution_topology.collective_load_group.has_value();
+  diagnostics.set_collective_requested(collective_requested);
+  diagnostics.set_collective_acknowledged(collective_requested);
+  diagnostics.set_collective_policy(collective_policy);
+  diagnostics.set_hash_rounds(hash_rounds);
+  diagnostics.set_hash_location(hash_location);
+  diagnostics.set_identity_mint_strategy(identity_mint_strategy);
+  if (result == nullptr) {
+    return diagnostics;
+  }
+  diagnostics.set_collective_used(result->collective_handled);
+  diagnostics.set_dominant_executor(result->dominant_executor);
+  diagnostics.set_direct_write_supported(result->direct_write_supported);
+  diagnostics.set_fallback_bytes(result->fallback_bytes);
+  diagnostics.set_residual_bytes(result->residual_bytes);
+  if (collective_requested && !result->collective_handled) {
+    diagnostics.set_collective_failure_class(v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);
+  }
+  return diagnostics;
 }
 
 absl::StatusOr<ViewSpec> convert_view_spec(const tensorcast::common::v1::ViewSpec& proto) {

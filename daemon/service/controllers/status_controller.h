@@ -59,6 +59,15 @@ class StatusController {
   grpc::Status get_server_config(RpcContext& rctx, v2::GetServerConfigResponse& resp) {
     auto& e = d_.engine;
     (void)rctx;
+    // Contract version 2 includes truthful same-binding identity diagnostics
+    // (`seal_mint` vs `seal_reuse` vs `not_applicable`) and structured
+    // collective failure-class surfacing through SDK-visible errors.
+    constexpr uint32_t kSourceBoundContractVersion = 2;
+    constexpr uint64_t kSourceBoundCapabilityFlags =
+        static_cast<uint64_t>(
+            v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_FIRST_CLASS_COLLECTIVE_INGRESS) |
+        static_cast<uint64_t>(v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_TYPED_EXECUTION_DIAGNOSTICS) |
+        static_cast<uint64_t>(v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT);
     resp.set_mem_pool_size(static_cast<int64_t>(e.get_mem_pool_size()));
     // Canonical fields (no gRPC frame size surfaced)
     resp.set_artifact_chunk_bytes(static_cast<uint64_t>(e.get_artifact_chunk_bytes()));
@@ -66,6 +75,8 @@ class StatusController {
     resp.set_local_handle_socket_path(d_.local_handle_socket_path);
     resp.set_cpu_shared_memory_enabled(d_.cpu_shared_memory_enabled);
     resp.set_startup_phase(startup_phase_proto());
+    resp.set_source_bound_capability_flags(kSourceBoundCapabilityFlags);
+    resp.set_source_bound_contract_version(kSourceBoundContractVersion);
     resp.set_batch_transport_protocol_version(d_.batch_transport_protocol_version);
     resp.set_batch_payload_grpc_chunk_ref_enabled(d_.batch_payload_grpc_chunk_ref_enabled);
     resp.set_batch_payload_communicator_source_enabled(d_.batch_payload_communicator_source_enabled);

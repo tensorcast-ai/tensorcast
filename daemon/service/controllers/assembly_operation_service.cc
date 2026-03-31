@@ -57,6 +57,7 @@ namespace pubv1 = tensorcast::publication::v1;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
 namespace serving_manifest = serving_artifact_manifest;
+using materialization_policy::build_execution_diagnostics;
 using materialization_policy::spec_includes_transpose;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_post_seal::compute_view_meta_digest;
@@ -730,6 +731,7 @@ struct RepresentationPublishValidationResult {
   std::string serving_manifest_ref;
   std::string representation_contract_hash;
   std::string serving_build_digest;
+  std::optional<v2::ExecutionDiagnostics> serving_execution_diagnostics;
 };
 
 struct BoundCloseoutSnapshot {
@@ -743,6 +745,7 @@ struct BoundCloseoutSnapshot {
   std::string target_index_json;
   cuda::IpcHandleBytes handle_bytes;
   common::memory::GpuDeviceMemory* allocation{nullptr};
+  std::optional<CommitLeaseResult> sealed_commit_result;
   std::vector<store::runtime::ingestion::MaterializationFacade::SealAssemblyCutInput::BoundCanonicalSpan>
       bound_canonical_spans;
 };
@@ -900,6 +903,7 @@ absl::StatusOr<BoundCloseoutSnapshot> capture_bound_closeout_snapshot(
     snapshot.target_index_json = record->target_index_json;
     snapshot.handle_bytes = record->handle_bytes;
     snapshot.allocation = record->allocation.get();
+    snapshot.sealed_commit_result = record->sealed_commit_result;
     snapshot.bound_canonical_spans = std::move(*spans_or);
   }
   return snapshot;
@@ -1016,6 +1020,13 @@ absl::StatusOr<RepresentationPublishValidationResult> validate_artifact_subject_
   result.serving_manifest_ref = preflight_or->serving_manifest_ref;
   result.representation_contract_hash = preflight_or->representation_contract_hash;
   result.serving_build_digest = preflight_or->serving_build_digest;
+  result.serving_execution_diagnostics = build_execution_diagnostics(
+      /*result=*/nullptr,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      store::loading::ExecutionTopologyContext{},
+      /*hash_rounds=*/0,
+      v2::HashLocation::HASH_LOCATION_NONE,
+      v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE);
   return result;
 }
 
@@ -1187,7 +1198,8 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
       /*index_key_hex=*/"",
       std::move(storage_layout_or->publish_segments),
       std::move(storage_layout_or->publish_storages),
-      std::move(*aliases_or));
+      std::move(*aliases_or),
+      snapshot.sealed_commit_result);
   if (!out_or.ok()) {
     return out_or.status();
   }
@@ -1265,6 +1277,15 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
   }
 
   populate_artifact_descriptor_from_commit_lease(*out_or, &prevalidated.serving_artifact);
+  prevalidated.serving_execution_diagnostics = build_execution_diagnostics(
+      /*result=*/nullptr,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      store::loading::ExecutionTopologyContext{},
+      /*hash_rounds=*/snapshot.sealed_commit_result.has_value() ? 0U : 1U,
+      snapshot.sealed_commit_result.has_value() ? v2::HashLocation::HASH_LOCATION_SEAL
+                                                : v2::HashLocation::HASH_LOCATION_BINDING_CLOSEOUT,
+      snapshot.sealed_commit_result.has_value() ? v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_REUSE
+                                                : v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT);
   rollback.release();
   return prevalidated;
 }
@@ -1369,6 +1390,10 @@ absl::Status finalize_dependency_ready_closeout(
       result_msg->set_representation_contract_hash(representation_publish_or->representation_contract_hash);
       result_msg->set_serving_manifest_ref(representation_publish_or->serving_manifest_ref);
       result_msg->set_serving_build_digest(representation_publish_or->serving_build_digest);
+      if (representation_publish_or->serving_execution_diagnostics.has_value()) {
+        result_msg->mutable_serving_execution_diagnostics()->CopyFrom(
+            *representation_publish_or->serving_execution_diagnostics);
+      }
       return absl::OkStatus();
     }
     case v2::ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH:

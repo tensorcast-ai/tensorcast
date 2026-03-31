@@ -21,6 +21,7 @@
 #include "absl/log/log.h"
 #include "absl/random/random.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
@@ -68,12 +69,16 @@ using materialization_layout::resolve_target_offsets;
 using materialization_payload::build_descriptors_from_index;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::build_execution_diagnostics;
 using materialization_policy::build_view_spec_proto;
+using materialization_policy::collective_policy_requests_collective;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::OperationTransportContext;
+using materialization_policy::resolve_collective_policy;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_operation_transport_context;
+using materialization_policy::resolve_source_execution_topology;
 using materialization_policy::resolve_transform_placement;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_binding_realization_materialization_plan;
@@ -909,6 +914,28 @@ std::string mint_binding_value_id() {
   return mint_random_id(16);
 }
 
+constexpr std::string_view kCollectiveFailureClassMarker = "tc.collective_failure_class=";
+
+std::string collective_failure_class_name(v2::CollectiveFailureClass failure_class) {
+  switch (failure_class) {
+    case v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE:
+      return "not_eligible";
+    case v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED:
+      return "execution_failed";
+    case v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_UNSPECIFIED:
+    default:
+      return "unspecified";
+  }
+}
+
+std::string annotate_collective_failure_message(std::string_view message, v2::CollectiveFailureClass failure_class) {
+  return absl::StrCat(message, " [", kCollectiveFailureClassMarker, collective_failure_class_name(failure_class), "]");
+}
+
+bool is_collective_execution_failure(const absl::Status& status) {
+  return absl::StrContains(status.message(), "collective execution failed:");
+}
+
 absl::StatusOr<std::vector<RegisterTensorAliasMeta>> build_binding_tensor_aliases(
     const BindingRegistry::Record& record) {
   auto offsets_or = resolve_target_offsets(record.target_layout);
@@ -969,6 +996,40 @@ void populate_artifact_descriptor(const CommitLeaseResult& out, tensorcast::comm
           : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
 }
 
+v2::ExecutionDiagnostics build_binding_closeout_diagnostics(
+    v2::IdentityMintStrategy identity_mint_strategy,
+    const store::loading::MaterializeIntoTargetResult* source_execution = nullptr) {
+  uint32_t hash_rounds = 0;
+  v2::HashLocation hash_location = v2::HashLocation::HASH_LOCATION_NONE;
+  switch (identity_mint_strategy) {
+    case v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_MINT:
+      hash_rounds = 1U;
+      hash_location = v2::HashLocation::HASH_LOCATION_SEAL;
+      break;
+    case v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_REUSE:
+      hash_rounds = 0U;
+      hash_location = v2::HashLocation::HASH_LOCATION_SEAL;
+      break;
+    case v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT:
+      hash_rounds = 1U;
+      hash_location = v2::HashLocation::HASH_LOCATION_BINDING_CLOSEOUT;
+      break;
+    case v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE:
+    case v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_UNSPECIFIED:
+    default:
+      hash_rounds = 0U;
+      hash_location = v2::HashLocation::HASH_LOCATION_NONE;
+      break;
+  }
+  return build_execution_diagnostics(
+      source_execution,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      store::loading::ExecutionTopologyContext{},
+      hash_rounds,
+      hash_location,
+      identity_mint_strategy);
+}
+
 void fill_binding_value(const BindingRegistry::Record& record, v2::BindingValue& value) {
   value.set_binding_id(record.binding_id);
   value.set_binding_layout_id(record.binding_layout_id);
@@ -995,6 +1056,7 @@ void mark_ready_artifact(
   record->active_update_epoch.clear();
   record->current_binding_value_id = mint_binding_value_id();
   record->seal_generation += 1;
+  record->sealed_commit_result.reset();
 }
 
 void mark_allocated(BindingRegistry::Record* record) {
@@ -1004,6 +1066,7 @@ void mark_allocated(BindingRegistry::Record* record) {
   record->current_binding_value_id.clear();
   record->state = v2::BINDING_STATE_ALLOCATED;
   record->active_update_epoch.clear();
+  record->sealed_commit_result.reset();
 }
 
 void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch) {
@@ -1013,6 +1076,7 @@ void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch
   record->current_binding_value_id.clear();
   record->state = v2::BINDING_STATE_MUTABLE;
   record->active_update_epoch = std::string(update_epoch);
+  record->sealed_commit_result.reset();
 }
 
 void mark_ready_local(BindingRegistry::Record* record) {
@@ -1023,6 +1087,7 @@ void mark_ready_local(BindingRegistry::Record* record) {
   record->active_update_epoch.clear();
   record->current_binding_value_id = mint_binding_value_id();
   record->seal_generation += 1;
+  record->sealed_commit_result.reset();
 }
 
 void mark_dirty(BindingRegistry::Record* record) {
@@ -1032,6 +1097,7 @@ void mark_dirty(BindingRegistry::Record* record) {
   record->current_binding_value_id.clear();
   record->state = v2::BINDING_STATE_DIRTY;
   record->active_update_epoch.clear();
+  record->sealed_commit_result.reset();
 }
 
 std::string next_update_epoch(BindingRegistry::Record* record) {
@@ -1168,6 +1234,8 @@ struct SourceBoundMaterializationRequest {
   const v2::CopyPlan* copy_plan{nullptr};
   const std::vector<v2::MappedTensorSpec>* dst_tensors{nullptr};
   const v2::SourcePolicy* source_policy{nullptr};
+  const v2::SourceExecutionTopology* execution_topology{nullptr};
+  v2::CollectivePolicy collective_policy{v2::COLLECTIVE_POLICY_UNSPECIFIED};
   std::optional<std::string_view> operation_id;
   v2::TransformPlacement placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
 };
@@ -1180,6 +1248,7 @@ struct PreparedSourceBoundPlan {
   v2::TransformPlacement requested_placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
   NormalizedMaterializationRequestContext request_context;
   OperationTransportContext transport_context;
+  v2::CollectivePolicy collective_policy{v2::COLLECTIVE_POLICY_UNSPECIFIED};
   std::optional<store::loading::DiskSource> disk_source;
   std::optional<store::loading::DiskMetadata> disk_metadata;
   std::optional<MappedTargetMaterializationPlan> mapped_plan;
@@ -1239,12 +1308,21 @@ grpc::Status prepare_source_bound_plan(
   if (request.operation_id.has_value() && !request.operation_id->empty()) {
     out.transport_context = resolve_operation_transport_context(*request.operation_id);
   }
-  auto request_context_or =
-      resolve_materialization_request_context(request.source_policy, out.transport_context.execution_topology);
+  auto execution_topology_or = resolve_source_execution_topology(request.execution_topology);
+  if (!execution_topology_or.ok()) {
+    return to_grpc_status(execution_topology_or.status());
+  }
+  auto request_context_or = resolve_materialization_request_context(request.source_policy, *execution_topology_or);
   if (!request_context_or.ok()) {
     return to_grpc_status(request_context_or.status());
   }
   out.request_context = std::move(*request_context_or);
+  auto collective_policy_or =
+      resolve_collective_policy(request.collective_policy, out.request_context.execution_topology);
+  if (!collective_policy_or.ok()) {
+    return to_grpc_status(collective_policy_or.status());
+  }
+  out.collective_policy = *collective_policy_or;
 
   const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
   tensorcast::common::v1::ArtifactSelection effective_source_selection;
@@ -2319,6 +2397,60 @@ grpc::Status OwnedBindingService::seal_binding(
     return to_grpc_status(record_or.status());
   }
   const auto record = *record_or;
+  if (d_.lip_manager == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "LipManager is unavailable"};
+  }
+  int device_id = -1;
+  int owner_pid = 0;
+  v2::TargetLayout target_layout;
+  std::string target_index_json;
+  common::memory::GpuDeviceMemory* allocation = nullptr;
+  cuda::IpcHandleBytes handle_bytes;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state != v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is not mutable"};
+    }
+    if (record->active_update_epoch != req.update_epoch()) {
+      mark_dirty(record.get());
+      return {StatusCode::FAILED_PRECONDITION, "update_epoch mismatch"};
+    }
+    device_id = record->device_id;
+    owner_pid = record->owner_pid;
+    target_layout = record->target_layout;
+    target_index_json = record->target_index_json;
+    allocation = record->allocation.get();
+    handle_bytes = record->handle_bytes;
+  }
+  if (allocation == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "binding allocation is unavailable"};
+  }
+  auto storage_layout_or =
+      build_owned_storage_layout(target_layout, device_id, gsl::not_null<void*>{allocation->get()}, handle_bytes);
+  if (!storage_layout_or.ok()) {
+    return to_grpc_status(storage_layout_or.status());
+  }
+  auto aliases_or = build_binding_tensor_aliases(*record);
+  if (!aliases_or.ok()) {
+    return to_grpc_status(aliases_or.status());
+  }
+  auto sealed_commit_or = d_.lip_manager->build_commit_lease_result(
+      device_id,
+      owner_pid,
+      storage_layout_or->total_size,
+      tensorcast::common::ArtifactIdKind::kMi2,
+      /*client_artifact_id=*/"",
+      target_index_json,
+      /*index_key_hex=*/"",
+      absl::MakeSpan(storage_layout_or->publish_segments),
+      absl::MakeSpan(storage_layout_or->publish_storages),
+      absl::MakeSpan(*aliases_or));
+  if (!sealed_commit_or.ok()) {
+    return to_grpc_status(sealed_commit_or.status());
+  }
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -2332,6 +2464,7 @@ grpc::Status OwnedBindingService::seal_binding(
       return {StatusCode::FAILED_PRECONDITION, "update_epoch mismatch"};
     }
     mark_ready_local(record.get());
+    record->sealed_commit_result = *sealed_commit_or;
     resp.set_state(record->state);
     fill_binding_value(*record, *resp.mutable_current_value());
   }
@@ -2363,6 +2496,7 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
   std::string target_index_json;
   cuda::IpcHandleBytes handle_bytes;
   common::memory::GpuDeviceMemory* allocation = nullptr;
+  std::optional<CommitLeaseResult> sealed_commit_result;
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -2388,6 +2522,7 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
     target_index_json = record->target_index_json;
     handle_bytes = record->handle_bytes;
     allocation = record->allocation.get();
+    sealed_commit_result = record->sealed_commit_result;
   }
 
   if (auto contribution_status =
@@ -2411,6 +2546,8 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
       fill_binding_value(*record, *resp.mutable_current_value());
     }
     resp.mutable_artifact_descriptor()->CopyFrom(*desc_or);
+    resp.mutable_execution_diagnostics()->CopyFrom(
+        build_binding_closeout_diagnostics(v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE));
     resp.set_existed(true);
     rctx.mark_success();
     return Status::OK;
@@ -2444,7 +2581,8 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
       /*index_key_hex=*/"",
       std::move(storage_layout_or->publish_segments),
       std::move(storage_layout_or->publish_storages),
-      std::move(*aliases_or));
+      std::move(*aliases_or),
+      sealed_commit_result);
   if (!out_or.ok()) {
     return to_grpc_status(out_or.status());
   }
@@ -2470,6 +2608,9 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
   }
 
   populate_artifact_descriptor(*out_or, resp.mutable_artifact_descriptor());
+  resp.mutable_execution_diagnostics()->CopyFrom(build_binding_closeout_diagnostics(
+      sealed_commit_result.has_value() ? v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_REUSE
+                                       : v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT));
   resp.set_existed(false);
   rctx.mark_success();
   return Status::OK;
@@ -2556,6 +2697,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
           .copy_plan = (mapped && !use_realization_plan) ? &copy_plan : nullptr,
           .dst_tensors = use_mapped_materialization ? &dst_tensors : nullptr,
           .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
+          .execution_topology = req.has_execution_topology() ? &req.execution_topology() : nullptr,
+          .collective_policy = req.collective_policy(),
           .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
           .placement = req.placement(),
       },
@@ -2597,17 +2740,83 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       absl::MutexLock lock(&record->mu);
       mark_dirty(record.get());
     }
+    if (collective_policy_requests_collective(prepared_plan.collective_policy) &&
+        is_collective_execution_failure(result_or.status())) {
+      return {
+          StatusCode::FAILED_PRECONDITION,
+          annotate_collective_failure_message(
+              result_or.status().message(), v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED)};
+    }
     return to_grpc_status(result_or.status());
   }
+  const auto execution_diagnostics = build_execution_diagnostics(
+      &*result_or,
+      prepared_plan.collective_policy,
+      prepared_plan.request_context.execution_topology,
+      /*hash_rounds=*/0,
+      v2::HashLocation::HASH_LOCATION_NONE,
+      v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE);
+  if (collective_policy_requests_collective(prepared_plan.collective_policy) &&
+      execution_diagnostics.collective_requested() && !execution_diagnostics.collective_used() &&
+      prepared_plan.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE) {
+    {
+      absl::MutexLock lock(&record->mu);
+      mark_dirty(record.get());
+    }
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        annotate_collective_failure_message(
+            "collective requested but the source-bound path was not eligible",
+            v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE)};
+  }
   if (prepared_plan.local_only_ready) {
+    if (d_.lip_manager == nullptr) {
+      {
+        absl::MutexLock lock(&record->mu);
+        mark_dirty(record.get());
+      }
+      return {StatusCode::FAILED_PRECONDITION, "LipManager is unavailable"};
+    }
+    auto aliases_or = build_binding_tensor_aliases(*record);
+    if (!aliases_or.ok()) {
+      {
+        absl::MutexLock lock(&record->mu);
+        mark_dirty(record.get());
+      }
+      return to_grpc_status(aliases_or.status());
+    }
+    auto sealed_commit_or = d_.lip_manager->build_commit_lease_result(
+        device_id,
+        owner_pid,
+        storage_layout.total_size,
+        tensorcast::common::ArtifactIdKind::kMi2,
+        /*client_artifact_id=*/"",
+        target_index_json,
+        /*index_key_hex=*/"",
+        absl::MakeSpan(storage_layout.publish_segments),
+        absl::MakeSpan(storage_layout.publish_storages),
+        absl::MakeSpan(*aliases_or));
+    if (!sealed_commit_or.ok()) {
+      {
+        absl::MutexLock lock(&record->mu);
+        mark_dirty(record.get());
+      }
+      return to_grpc_status(sealed_commit_or.status());
+    }
     {
       absl::MutexLock lock(&record->mu);
       mark_ready_local(record.get());
+      record->sealed_commit_result = *sealed_commit_or;
     }
     resp.set_artifact_id(prepared_plan.resolved_artifact_id);
     resp.set_source(to_proto_source(result_or->source));
     resp.set_state(v2::BINDING_STATE_READY_LOCAL);
     fill_binding_value(*record, *resp.mutable_current_value());
+    auto local_ready_diagnostics = execution_diagnostics;
+    local_ready_diagnostics.set_hash_rounds(1U);
+    local_ready_diagnostics.set_hash_location(v2::HashLocation::HASH_LOCATION_SEAL);
+    local_ready_diagnostics.set_identity_mint_strategy(v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_MINT);
+    resp.mutable_execution_diagnostics()->CopyFrom(local_ready_diagnostics);
     rctx.mark_success();
     return Status::OK;
   }
@@ -2657,6 +2866,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   resp.mutable_resolved_selection()->CopyFrom(prepared_plan.current_selection);
   resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
   fill_binding_value(*record, *resp.mutable_current_value());
+  resp.mutable_execution_diagnostics()->CopyFrom(execution_diagnostics);
   rctx.mark_success();
   return Status::OK;
 }

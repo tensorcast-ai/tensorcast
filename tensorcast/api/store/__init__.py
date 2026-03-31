@@ -163,7 +163,10 @@ from tensorcast.types import (
     HostSharedRegionClass,
     LocalRegionHandle,
     RegionMemoryKind,
+    ExecutionDiagnostics,
     FinalizeClass,
+    HashLocation,
+    IdentityMintStrategy,
     PartialSealResult,
     PublicDiskSourceHandle,
     PublishedModelVersion,
@@ -178,6 +181,7 @@ from tensorcast.types import (
     ServingRuntimePolicy,
     ServingRuntimePolicyInput,
     ServingSupportLevel,
+    SourceBoundCapability,
     VramRegionHandle,
     build_serving_manifest_ref,
     coerce_serving_runtime_policy,
@@ -866,6 +870,11 @@ def _decode_published_model_version_from_response(
         ),
         serving_build_digest=str(payload.serving_build_digest or "") or None,
         serving_manifest_ref=str(payload.serving_manifest_ref or "") or None,
+        serving_execution_diagnostics=(
+            ExecutionDiagnostics.from_proto(payload.serving_execution_diagnostics)
+            if payload.HasField("serving_execution_diagnostics")
+            else None
+        ),
     )
 
 
@@ -4310,6 +4319,9 @@ __all__ = [
     "PreparedServingRegistration",
     "PreparedPureTransformServingRegistration",
     "PublishedModelVersion",
+    "ExecutionDiagnostics",
+    "HashLocation",
+    "IdentityMintStrategy",
     "PureTransformPublicationBundle",
     "RealizationProtocol",
     "RegisteredServingPublication",
@@ -4317,6 +4329,7 @@ __all__ = [
     "RegisteredArtifact",
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
+    "SourceBoundCapability",
     "ServingPublicationSubject",
     "ReplicaInfo",
     "RetryPolicy",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 import threading
 import time
 from concurrent.futures import CancelledError
@@ -45,6 +46,10 @@ _TRANSIENT_MESSAGE_TOKENS = (
     "connection refused",
     "broken pipe",
 )
+_COLLECTIVE_FAILURE_CLASS_PATTERN = re.compile(
+    r"\s*\[tc\.collective_failure_class=(not_eligible|execution_failed)\]\s*",
+    re.IGNORECASE,
+)
 
 
 def _looks_transient_message(message: str) -> bool:
@@ -60,6 +65,14 @@ def _append_debug_hint(message: str) -> str:
 
 def _append_hint(message: str, hint: str) -> str:
     return _append_debug_hint(f"{message}\nHint: {hint}")
+
+
+def _extract_collective_failure_class(message: str) -> tuple[str, str | None]:
+    match = _COLLECTIVE_FAILURE_CLASS_PATTERN.search(message)
+    if match is None:
+        return message, None
+    cleaned = _COLLECTIVE_FAILURE_CLASS_PATTERN.sub(" ", message, count=1)
+    return cleaned.strip(), match.group(1).lower()
 
 
 def _global_store_not_connected_hint() -> str:
@@ -205,18 +218,21 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         details = _grpc_details(exc)
         status_name = status_code.name if status_code is not None else "UNKNOWN"
         mapped = details or "retrieval failed"
+        mapped, collective_failure_class = _extract_collective_failure_class(mapped)
         lowered = mapped.lower()
         if "selection.logical_layout_hash does not match resolved selection" in mapped:
             return ArtifactError(
                 _append_hint(mapped, _selection_layout_mismatch_hint()),
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
+                collective_failure_class=collective_failure_class,
             )
         if "globalstoreclient not connected" in lowered:
             return ArtifactError(
                 _append_hint(mapped, _global_store_not_connected_hint()),
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
+                collective_failure_class=collective_failure_class,
             )
         if "tensor index not found" in lowered:
             hint = (
@@ -228,6 +244,7 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
                 _append_hint(mapped, hint),
                 status_code="NOT_FOUND",
                 retryable=False,
+                collective_failure_class=collective_failure_class,
             )
         if "artifact_descriptor.json required when verify_checksums=true" in lowered:
             hint = (
@@ -238,25 +255,34 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
                 _append_hint(mapped, hint),
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
+                collective_failure_class=collective_failure_class,
             )
         retryable = status_name in _TRANSIENT_STATUS_CODES or _looks_transient_message(
             mapped
         )
         if not details:
             mapped = _append_debug_hint(mapped)
-        return ArtifactError(mapped, status_code=status_name, retryable=retryable)
+        return ArtifactError(
+            mapped,
+            status_code=status_name,
+            retryable=retryable,
+            collective_failure_class=collective_failure_class,
+        )
+    message, collective_failure_class = _extract_collective_failure_class(message)
     lowered = message.lower()
     if "selection.logical_layout_hash does not match resolved selection" in message:
         return ArtifactError(
             _append_hint(message, _selection_layout_mismatch_hint()),
             status_code="INVALID_ARGUMENT",
             retryable=False,
+            collective_failure_class=collective_failure_class,
         )
     if "globalstoreclient not connected" in lowered:
         return ArtifactError(
             _append_hint(message, _global_store_not_connected_hint()),
             status_code="FAILED_PRECONDITION",
             retryable=False,
+            collective_failure_class=collective_failure_class,
         )
     if "tensor index not found" in lowered:
         hint = (
@@ -265,7 +291,12 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             "(e.g., tensorcast.save_* examples) to generate the index."
         )
         message = _append_hint(message, hint)
-        return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
+        return ArtifactError(
+            message,
+            status_code="NOT_FOUND",
+            retryable=False,
+            collective_failure_class=collective_failure_class,
+        )
     if "artifact_descriptor.json required when verify_checksums=true" in lowered:
         hint = (
             "Add artifact_descriptor.json alongside the tensors. For explicit imports via "
@@ -276,6 +307,7 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             message,
             status_code="FAILED_PRECONDITION",
             retryable=False,
+            collective_failure_class=collective_failure_class,
         )
     if isinstance(exc, RuntimeError):
         if "failed to confirm artifact loading" in lowered:
@@ -287,14 +319,35 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
                 _append_hint(message, hint),
                 status_code="UNAVAILABLE",
                 retryable=True,
+                collective_failure_class=collective_failure_class,
             )
         if "not found" in lowered:
-            return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
+            return ArtifactError(
+                message,
+                status_code="NOT_FOUND",
+                retryable=False,
+                collective_failure_class=collective_failure_class,
+            )
         if "unavailable" in lowered or "not available" in lowered:
-            return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
+            return ArtifactError(
+                message,
+                status_code="UNAVAILABLE",
+                retryable=True,
+                collective_failure_class=collective_failure_class,
+            )
         if _looks_transient_message(message):
-            return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
-    return ArtifactError(message, status_code="UNKNOWN", retryable=False)
+            return ArtifactError(
+                message,
+                status_code="UNAVAILABLE",
+                retryable=True,
+                collective_failure_class=collective_failure_class,
+            )
+    return ArtifactError(
+        message,
+        status_code="UNKNOWN",
+        retryable=False,
+        collective_failure_class=collective_failure_class,
+    )
 
 
 def raise_mapped_materialization_error(exc: Exception) -> NoReturn:

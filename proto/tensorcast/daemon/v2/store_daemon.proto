@@ -188,17 +188,23 @@ message GetServerConfigResponse {
   bool cpu_shared_memory_enabled = 7;
   // Single source of truth for daemon startup visibility across CLI, SDK, and tests.
   DaemonStartupPhase startup_phase = 8;
+  // Bitset of SourceBoundCapabilityFlag values exposed through GetServerConfig
+  // so downstream integrations can gate on stable source-bound contract slices.
+  uint64 source_bound_capability_flags = 9;
+  // Source-bound contract schema/version exposed independently from capability
+  // readiness bits so clients can reason about additive evolution.
+  uint32 source_bound_contract_version = 10;
   // 0 disables batch-native payload transport; 1 enables grpc_chunk_ref v1;
   // 2 enables communicator_source v2 with grpc_chunk_ref fallback.
-  uint32 batch_transport_protocol_version = 9;
+  uint32 batch_transport_protocol_version = 11;
   // True when grpc_chunk_ref is served for batch-native payload transport.
-  bool batch_payload_grpc_chunk_ref_enabled = 10;
+  bool batch_payload_grpc_chunk_ref_enabled = 12;
   // Sender-side slab packing ceiling for one batch transport object.
-  uint64 max_batch_payload_bytes = 11;
+  uint64 max_batch_payload_bytes = 13;
   // True when communicator_source is served for batch-native payload transport.
-  bool batch_payload_communicator_source_enabled = 12;
+  bool batch_payload_communicator_source_enabled = 14;
   // True when host-memory export is enabled for communicator_source packs.
-  bool batch_payload_host_memory_export_enabled = 13;
+  bool batch_payload_host_memory_export_enabled = 15;
 }
 
 message RegisterRequest {
@@ -538,6 +544,69 @@ message CollectiveLoadGroup {
   string group_id = 1;
   uint32 world_size = 2;
   uint32 rank = 3;
+}
+
+enum SourceLocality {
+  SOURCE_LOCALITY_UNSPECIFIED = 0;
+  SOURCE_LOCALITY_AUTO = 1;
+  SOURCE_LOCALITY_HOST_LOCAL = 2;
+  SOURCE_LOCALITY_SHARED_SOURCE = 3;
+}
+
+message SourceExecutionTopology {
+  CollectiveLoadGroup collective_load_group = 1;
+  SourceLocality source_locality = 2;
+  optional string source_sharing_domain = 3;
+}
+
+enum CollectivePolicy {
+  COLLECTIVE_POLICY_UNSPECIFIED = 0;
+  COLLECTIVE_POLICY_REQUIRE_COLLECTIVE = 1;
+  COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK = 2;
+  COLLECTIVE_POLICY_DISABLE_COLLECTIVE = 3;
+}
+
+enum CollectiveFailureClass {
+  COLLECTIVE_FAILURE_CLASS_UNSPECIFIED = 0;
+  COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE = 1;
+  COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED = 2;
+}
+
+enum HashLocation {
+  HASH_LOCATION_UNSPECIFIED = 0;
+  HASH_LOCATION_NONE = 1;
+  HASH_LOCATION_SEAL = 2;
+  HASH_LOCATION_BINDING_CLOSEOUT = 3;
+}
+
+enum IdentityMintStrategy {
+  IDENTITY_MINT_STRATEGY_UNSPECIFIED = 0;
+  IDENTITY_MINT_STRATEGY_NOT_APPLICABLE = 1;
+  IDENTITY_MINT_STRATEGY_SEAL_MINT = 2;
+  IDENTITY_MINT_STRATEGY_SEAL_REUSE = 3;
+  IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT = 4;
+}
+
+message ExecutionDiagnostics {
+  bool collective_requested = 1;
+  bool collective_acknowledged = 2;
+  bool collective_used = 3;
+  CollectivePolicy collective_policy = 4;
+  CollectiveFailureClass collective_failure_class = 5;
+  string dominant_executor = 6;
+  bool direct_write_supported = 7;
+  uint64 fallback_bytes = 8;
+  uint64 residual_bytes = 9;
+  uint32 hash_rounds = 10;
+  HashLocation hash_location = 11;
+  IdentityMintStrategy identity_mint_strategy = 12;
+}
+
+enum SourceBoundCapabilityFlag {
+  SOURCE_BOUND_CAPABILITY_FLAG_UNSPECIFIED = 0;
+  SOURCE_BOUND_CAPABILITY_FLAG_FIRST_CLASS_COLLECTIVE_INGRESS = 1;
+  SOURCE_BOUND_CAPABILITY_FLAG_TYPED_EXECUTION_DIAGNOSTICS = 2;
+  SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT = 4;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
@@ -1267,6 +1336,7 @@ message PromoteBindingCurrentValueResponse {
   BindingState state = 2;
   BindingValue current_value = 3;
   bool existed = 4;
+  ExecutionDiagnostics execution_diagnostics = 5;
 }
 
 message RefillOwnedBindingRequest {
@@ -1281,6 +1351,8 @@ message RefillOwnedBindingRequest {
   tensorcast.common.v1.ArtifactSelection source_selection = 8;
   BindingRealizationPlan realization_plan = 9;
   PublicDiskSourceHandle public_disk_source = 10;
+  SourceExecutionTopology execution_topology = 11;
+  CollectivePolicy collective_policy = 12;
 }
 
 message RefillOwnedBindingResponse {
@@ -1290,6 +1362,7 @@ message RefillOwnedBindingResponse {
   tensorcast.common.v1.ArtifactSelection resolved_selection = 4;
   BindingState state = 5;
   BindingValue current_value = 6;
+  ExecutionDiagnostics execution_diagnostics = 7;
 }
 
 message CloseOwnedBindingRequest {
@@ -2204,6 +2277,7 @@ message SealAssemblyResult {
   string serving_version_key = 5;
   string serving_manifest_ref = 6;
   string serving_build_digest = 7;
+  ExecutionDiagnostics serving_execution_diagnostics = 8;
 }
 
 message StartSealAssemblyRequest {
