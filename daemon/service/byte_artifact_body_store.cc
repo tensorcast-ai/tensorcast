@@ -21,6 +21,12 @@ namespace {
 
 using AuthorityEntry = ByteArtifactRuntimeState::AuthorityEntry;
 
+enum class BackingPruneOutcome : std::uint8_t {
+  kNoop,
+  kPruned,
+  kRetryLater,
+};
+
 std::string to_lower_copy(std::string_view value) {
   std::string out(value);
   absl::AsciiStrToLower(&out);
@@ -264,6 +270,24 @@ void unlink_authority_from_backing_locked(
   }
 }
 
+void enqueue_orphan_backing_candidate_locked(
+    const store::runtime::ingestion::BackingIdentity& identity,
+    ByteArtifactRuntimeState* state) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (state == nullptr) {
+    return;
+  }
+  state->orphan_backing_candidates.insert(identity);
+}
+
+void clear_orphan_backing_candidate_locked(
+    const store::runtime::ingestion::BackingIdentity& identity,
+    ByteArtifactRuntimeState* state) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (state == nullptr) {
+    return;
+  }
+  state->orphan_backing_candidates.erase(identity);
+}
+
 bool backing_has_authority_refs_locked(
     const store::runtime::ingestion::BackingIdentity& identity,
     ByteArtifactRuntimeState* state) ABSL_NO_THREAD_SAFETY_ANALYSIS {
@@ -286,50 +310,38 @@ void maybe_retire_backing_handle(const BodyHandle& body_handle, std::string_view
   record_body_store_retire_metrics(reason);
 }
 
-void maybe_prune_backing_locked(
+BackingPruneOutcome maybe_prune_backing_locked(
     const store::runtime::ingestion::BackingIdentity& identity,
     ByteArtifactRuntimeState* state,
     std::string_view reason) ABSL_NO_THREAD_SAFETY_ANALYSIS {
   if (state == nullptr) {
-    return;
+    return BackingPruneOutcome::kNoop;
   }
   auto backing_it = state->backing_entries.find(identity);
   if (backing_it == state->backing_entries.end()) {
-    return;
+    clear_orphan_backing_candidate_locked(identity, state);
+    return BackingPruneOutcome::kNoop;
   }
   if (backing_has_authority_refs_locked(identity, state)) {
-    return;
+    clear_orphan_backing_candidate_locked(identity, state);
+    return BackingPruneOutcome::kNoop;
   }
   if (backing_it->second.lifecycle_state == BackingLifecycleState::kActive ||
       backing_it->second.lifecycle_state == BackingLifecycleState::kInvalidated) {
-    return;
+    clear_orphan_backing_candidate_locked(identity, state);
+    return BackingPruneOutcome::kNoop;
   }
   maybe_retire_backing_handle(backing_it->second.retained_body_handle, reason);
   if (!backing_it->second.retained_body_handle.empty() && !backing_it->second.retained_body_handle.unique_owner()) {
     set_backing_lifecycle_state_locked(&backing_it->second, BackingLifecycleState::kDraining, reason);
-    return;
+    enqueue_orphan_backing_candidate_locked(identity, state);
+    return BackingPruneOutcome::kRetryLater;
   }
   set_backing_lifecycle_state_locked(&backing_it->second, BackingLifecycleState::kRetired, reason);
   remove_backing_replica_index_locked(backing_it->second, state);
   state->backing_entries.erase(backing_it);
-}
-
-void prune_orphan_backings_locked(ByteArtifactRuntimeState* state, std::string_view reason)
-    ABSL_NO_THREAD_SAFETY_ANALYSIS {
-  if (state == nullptr) {
-    return;
-  }
-  std::vector<store::runtime::ingestion::BackingIdentity> candidates;
-  candidates.reserve(state->backing_entries.size());
-  for (const auto& [identity, record] : state->backing_entries) {
-    (void)record;
-    if (!backing_has_authority_refs_locked(identity, state)) {
-      candidates.push_back(identity);
-    }
-  }
-  for (const auto& identity : candidates) {
-    maybe_prune_backing_locked(identity, state, reason);
-  }
+  clear_orphan_backing_candidate_locked(identity, state);
+  return BackingPruneOutcome::kPruned;
 }
 
 void mark_backing_invalidated_locked(
@@ -407,7 +419,7 @@ void retire_authority_backing_locked(
     set_backing_lifecycle_state_locked(&backing_it->second, BackingLifecycleState::kDraining, reason);
   }
   unlink_authority_from_backing_locked(artifact_id, identity, state);
-  maybe_prune_backing_locked(identity, state, reason);
+  (void)maybe_prune_backing_locked(identity, state, reason);
   entry->retained_backing_identity.reset();
 }
 
@@ -426,7 +438,6 @@ void erase_claim_locked(std::string_view artifact_id, ByteArtifactRuntimeState* 
   retire_authority_backing_locked(artifact_id, &entry_it->second, state, reason);
   decrement_shard_authority_refcount_locked(entry_it->second.shard_id, state);
   state->authority_entries.erase(entry_it);
-  prune_orphan_backings_locked(state, reason);
 }
 
 bool claim_matches_context_locked(
@@ -648,6 +659,7 @@ void install_or_rebind_backing_locked(
       set_backing_lifecycle_state_locked(
           &old_backing_it->second, BackingLifecycleState::kDraining, "authority_released");
     }
+    (void)maybe_prune_backing_locked(old_identity, state, "rebind_old_identity");
   }
 
   std::uint64_t generation = 1;
@@ -699,12 +711,35 @@ void install_or_rebind_backing_locked(
   (void)clear_policy_visibility_locked(entry, "ready_backing_rebound");
   entry->visibility_kind = AuthorityVisibilityKind::kReadyBacking;
   entry->claim_state = AuthorityClaimState::kClaimedVisible;
-  prune_orphan_backings_locked(state, "rebind");
 }
 
 } // namespace
 
 ByteArtifactBodyStore::ByteArtifactBodyStore(ByteArtifactRuntimeState& state) : state_(state) {}
+
+void ByteArtifactBodyStore::run_maintenance_once(std::size_t max_candidates) {
+  std::vector<store::runtime::ingestion::BackingIdentity> candidates;
+  candidates.reserve(max_candidates);
+  {
+    absl::MutexLock lock(&state_.mu);
+    auto it = state_.orphan_backing_candidates.begin();
+    while (it != state_.orphan_backing_candidates.end() && candidates.size() < max_candidates) {
+      candidates.push_back(*it);
+      auto erase_it = it++;
+      state_.orphan_backing_candidates.erase(erase_it);
+    }
+  }
+  if (candidates.empty()) {
+    return;
+  }
+
+  for (const auto& identity : candidates) {
+    {
+      absl::MutexLock lock(&state_.mu);
+      (void)maybe_prune_backing_locked(identity, &state_, "maintenance");
+    }
+  }
+}
 
 bool ByteArtifactBodyStore::exists(
     std::string_view artifact_id,
@@ -938,7 +973,6 @@ void ByteArtifactBodyStore::invalidate_artifact_visibility(
     return;
   }
   transition_to_invisible_locked(&entry_it->second, &state_);
-  prune_orphan_backings_locked(&state_, reason);
 }
 
 void ByteArtifactBodyStore::invalidate_replica_visibility(
@@ -974,7 +1008,6 @@ void ByteArtifactBodyStore::invalidate_replica_visibility(
       transition_to_invisible_locked(&entry_it->second, &state_);
     }
   }
-  prune_orphan_backings_locked(&state_, reason);
 }
 
 } // namespace tensorcast::daemon

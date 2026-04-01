@@ -28,6 +28,7 @@ enum class TaskKind : std::uint8_t {
   kSessionLifecycle,
   kPersistence,
   kByteArtifactLeaseKeepalive,
+  kByteArtifactBodyStoreMaintenance,
 };
 
 class BackgroundScheduler {
@@ -117,6 +118,8 @@ class BackgroundScheduler {
         return "Persistence";
       case TaskKind::kByteArtifactLeaseKeepalive:
         return "ByteArtifactLeaseKeepalive";
+      case TaskKind::kByteArtifactBodyStoreMaintenance:
+        return "ByteArtifactBodyStoreMaintenance";
       default:
         return "Unknown";
     }

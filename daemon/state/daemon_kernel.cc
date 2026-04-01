@@ -337,6 +337,14 @@ void DaemonKernel::configure_scheduler_tasks_() {
       this->byte_artifact_route_resolver_->keepalive_owned_shard_leases_once(absl::Now());
     });
   }
+
+  scheduler_->add_task(
+      TaskKind::kByteArtifactBodyStoreMaintenance, ByteArtifactBodyStore::kMaintenanceInterval, [this]() {
+        if (this->byte_artifact_body_store_ == nullptr) {
+          return;
+        }
+        this->byte_artifact_body_store_->run_maintenance_once();
+      });
 }
 
 } // namespace tensorcast::daemon

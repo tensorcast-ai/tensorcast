@@ -64,6 +64,8 @@ struct ByteArtifactRuntimeState {
       absl::flat_hash_set<std::string>,
       store::runtime::ingestion::BackingIdentityHash>
       backing_authority_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>
+      orphan_backing_candidates ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<
       store::loading::ReplicaKey,
       absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>,
