@@ -47,7 +47,9 @@ class ByteArtifactRegionLayout {
     std::string storage_id;
     std::uint64_t logical_base{0};
     std::uint64_t length{0};
+    IpcRegionRegistry::MemoryKind memory_kind{IpcRegionRegistry::MemoryKind::kVram};
     void* base_ptr{nullptr};
+    int device_id{-1};
   };
 
   struct ItemRange {

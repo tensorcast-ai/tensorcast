@@ -612,6 +612,11 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   }
   auto validated_target = std::move(*validated_target_or);
   const auto device = validated_target.device;
+  if (device.type != DeviceType::GPU || device.ordinal < 0) {
+    record_materialize_into_target(
+        "error", "target_kind_unsupported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "HOST_SHARED target_layout is not supported for MaterializeIntoTarget"};
+  }
 
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
@@ -985,6 +990,11 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
   auto validated_target = std::move(*validated_target_or);
   const auto device = validated_target.device;
+  if (device.type != DeviceType::GPU || device.ordinal < 0) {
+    record_materialize_into_target(
+        "error", "target_kind_unsupported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "HOST_SHARED target_layout is not supported for MaterializeIntoMappedTarget"};
+  }
 
   auto offsets_or = resolve_target_offsets(layout);
   const auto offsets_done = std::chrono::steady_clock::now();

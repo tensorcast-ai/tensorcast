@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import array
 import atexit
+import fcntl
 import os
 import random
+import socket
+import struct
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -59,10 +63,14 @@ from tensorcast.types import (
     CoalescedHandshake,
     CommitResult,
     DeregisterArtifactOutcome,
+    HostSharedRegionAttachment,
+    HostSharedRegionClass,
     LeaseHandshake,
     LeaseSegment,
+    LocalRegionHandle,
     LocalStableTierResult,
     Plan,
+    RegionMemoryKind,
     RegisterStorage,
     RegisterTensorAlias,
     SealAssemblyResult,
@@ -85,6 +93,13 @@ _DEFAULT_FEED_PROGRESS_LOG_INTERVAL_BYTES = 0
 _METRICS_LOCK: RLock = RLock()
 _METRIC_CHANNEL_REFRESHES: int = 0
 _METRIC_RPC_RETRIES: int = 0
+_LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
+    0: "ok",
+    1: "not_found",
+    2: "failed_precondition",
+    3: "permission_denied",
+    4: "internal",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +632,110 @@ class DaemonCtl:
 
     def _get_effective_pid(self) -> int:
         return get_host_pid() if self.use_host_pid else os.getpid()
+
+    @staticmethod
+    def _ensure_fd_cloexec(fd: int) -> None:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+        fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+
+    def _local_handle_socket_path(self) -> str:
+        config = self.get_server_config()
+        if not config.local_handle_socket_path:
+            raise RuntimeError("Daemon local_handle_socket_path is missing")
+        return config.local_handle_socket_path
+
+    def _request_local_handle_fd(
+        self,
+        *,
+        opcode: int,
+        token: bytes,
+        local_handle_socket_path: str,
+        timeout_s: float,
+    ) -> int:
+        if not local_handle_socket_path:
+            raise RuntimeError("Local handle socket path is required")
+        if not token:
+            raise RuntimeError("Local handle token is empty")
+        if len(token) > 1024:
+            raise RuntimeError("Local handle token is too large")
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout_s)
+            try:
+                sock.connect(local_handle_socket_path)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Failed to connect LocalHandle socket at {local_handle_socket_path}"
+                ) from exc
+            try:
+                sock.sendall(bytes([opcode]) + struct.pack("=I", len(token)) + token)
+            except OSError as exc:
+                raise RuntimeError("LocalHandle send failed") from exc
+
+            recv_flags = getattr(socket, "MSG_CMSG_CLOEXEC", 0)
+            try:
+                data, ancdata, _, _ = sock.recvmsg(
+                    1, socket.CMSG_SPACE(struct.calcsize("i")), recv_flags
+                )
+            except (OSError, TimeoutError) as exc:
+                raise RuntimeError("LocalHandle recv failed") from exc
+            if not data:
+                raise RuntimeError("Local handle server returned empty response")
+            code = int(data[0])
+            if code != 0:
+                label = _LOCAL_HANDLE_RESP_LABELS.get(code, f"unknown({code})")
+                raise RuntimeError(f"LocalHandle request failed: {label}")
+
+            recv_fds: list[int] = []
+            for level, ctype, cmsg_data in ancdata:
+                if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
+                    fds = array.array("i")
+                    fds.frombytes(cmsg_data)
+                    recv_fds.extend(int(fd) for fd in fds)
+            if not recv_fds:
+                raise RuntimeError("LocalHandle returned no file descriptor")
+
+            fd = recv_fds[0]
+            for extra_fd in recv_fds[1:]:
+                with suppress(OSError):
+                    os.close(extra_fd)
+            self._ensure_fd_cloexec(fd)
+            return fd
+
+    def _release_local_handle_token(
+        self,
+        *,
+        token: bytes,
+        local_handle_socket_path: str,
+        timeout_s: float,
+    ) -> bool:
+        if not local_handle_socket_path:
+            raise RuntimeError("Local handle socket path is required")
+        if not token:
+            raise RuntimeError("Local handle token is empty")
+        if len(token) > 1024:
+            raise RuntimeError("Local handle token is too large")
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout_s)
+            try:
+                sock.connect(local_handle_socket_path)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Failed to connect LocalHandle socket at {local_handle_socket_path}"
+                ) from exc
+            try:
+                sock.sendall(bytes([2]) + struct.pack("=I", len(token)) + token)
+                response = sock.recv(1)
+            except (OSError, TimeoutError) as exc:
+                raise RuntimeError("LocalHandle release failed") from exc
+            if not response:
+                raise RuntimeError("Local handle server returned empty response")
+            code = int(response[0])
+            if code == 0:
+                return True
+            label = _LOCAL_HANDLE_RESP_LABELS.get(code, f"unknown({code})")
+            raise RuntimeError(f"LocalHandle release failed: {label}")
 
     def unload_from_cpu(self, disk_path):
         with self._client_span("Client/UnloadReplica") as span:
@@ -2710,49 +2829,73 @@ class DaemonCtl:
             logger.error(f"FeedRegisterArtifactStream(lease) failed: {e}")
             return False
 
-    def register_vram_region(
+    def register_region(
         self,
         *,
-        device_id: int,
+        memory_kind: RegionMemoryKind,
         size_bytes: int,
         ttl_ms: int,
-        cuda_ipc_handle: bytes,
+        device_id: int | None = None,
+        cuda_ipc_handle: bytes | None = None,
+        host_shared_attach_token: bytes | None = None,
+        daemon_managed: bool = False,
+        host_shared_region_class: HostSharedRegionClass | None = None,
         session_id: str | None = None,
         region_name: str | None = None,
         timeout_s: float = 10.0,
-    ) -> VramRegionHandle:
-        if device_id < 0:
-            raise ValueError("device_id must be non-negative")
+    ) -> LocalRegionHandle:
         if size_bytes <= 0:
             raise ValueError("size_bytes must be positive")
         if ttl_ms < 0:
             raise ValueError("ttl_ms must be non-negative (0 disables TTL)")
-        if not cuda_ipc_handle:
-            raise ValueError("cuda_ipc_handle must not be empty")
 
-        req = store_daemon_pb2.RegisterVramRegionRequest(
-            device_id=int(device_id),
-            cuda_ipc_handle=bytes(cuda_ipc_handle),
-            size_bytes=int(size_bytes),
-            ttl_ms=int(ttl_ms),
-            owner_pid=int(self._get_effective_pid()),
-        )
+        if memory_kind is RegionMemoryKind.VRAM:
+            if device_id is None or int(device_id) < 0:
+                raise ValueError("device_id must be non-negative for VRAM regions")
+            if not cuda_ipc_handle:
+                raise ValueError("cuda_ipc_handle must not be empty for VRAM regions")
+            req = store_daemon_pb2.RegisterRegionRequest(
+                memory_kind=store_daemon_pb2.REGION_MEMORY_KIND_VRAM,
+                device_id=int(device_id),
+                size_bytes=int(size_bytes),
+                ttl_ms=int(ttl_ms),
+                owner_pid=int(self._get_effective_pid()),
+                cuda_ipc_handle=bytes(cuda_ipc_handle),
+            )
+        else:
+            req = store_daemon_pb2.RegisterRegionRequest(
+                memory_kind=store_daemon_pb2.REGION_MEMORY_KIND_HOST_SHARED,
+                device_id=-1,
+                size_bytes=int(size_bytes),
+                ttl_ms=int(ttl_ms),
+                owner_pid=int(self._get_effective_pid()),
+            )
+            req.host_shared.attach_token = bytes(host_shared_attach_token or b"")
+            req.host_shared.daemon_managed = bool(daemon_managed)
+            region_class = host_shared_region_class or HostSharedRegionClass.SCRATCH
+            req.host_shared.region_class = (
+                store_daemon_pb2.HOST_SHARED_REGION_CLASS_ALLOCATOR
+                if region_class is HostSharedRegionClass.ALLOCATOR
+                else store_daemon_pb2.HOST_SHARED_REGION_CLASS_SCRATCH
+            )
         if session_id:
             req.session_id = session_id
         if region_name:
             req.region_name = region_name
 
-        with self._client_span("Client/RegisterVramRegion") as span:
+        with self._client_span("Client/RegisterRegion") as span:
             set_span_attributes(
                 {
-                    "tc.device.id": int(device_id),
                     "tc.region.size_bytes": int(size_bytes),
                     "tc.region.ttl_ms": int(ttl_ms),
+                    "tc.region.memory_kind": memory_kind.value,
                 }
             )
+            if device_id is not None:
+                set_span_attributes({"tc.device.id": int(device_id)})
             try:
                 resp = self._unary_call(
-                    self.stub.RegisterVramRegion,
+                    self.stub.RegisterRegion,
                     req,
                     timeout=timeout_s,
                     span=span,
@@ -2778,20 +2921,78 @@ class DaemonCtl:
                         _grpc_message(e, fallback="resource exhausted")
                     ) from e
                 raise RuntimeError(
-                    "RegisterVramRegion failed: "
-                    f"{_grpc_message(e, fallback='rpc failed')}"
+                    f"RegisterRegion failed: {_grpc_message(e, fallback='rpc failed')}"
                 ) from e
 
         expires_at = None
         if resp.HasField("expires_at"):
             expires_at = resp.expires_at.ToDatetime(tzinfo=timezone.utc)
-        return VramRegionHandle(
-            region_id=str(resp.region_id),
+        resolved_device_id = int(resp.region.device_id)
+        region_class: HostSharedRegionClass | None = None
+        if resp.HasField("host_shared"):
+            if (
+                resp.host_shared.region_class
+                == store_daemon_pb2.HOST_SHARED_REGION_CLASS_ALLOCATOR
+            ):
+                region_class = HostSharedRegionClass.ALLOCATOR
+            elif (
+                resp.host_shared.region_class
+                == store_daemon_pb2.HOST_SHARED_REGION_CLASS_SCRATCH
+            ):
+                region_class = HostSharedRegionClass.SCRATCH
+        return LocalRegionHandle(
+            region_id=str(resp.region.region_id),
+            memory_kind=(
+                RegionMemoryKind.HOST_SHARED
+                if resp.region.memory_kind
+                == store_daemon_pb2.REGION_MEMORY_KIND_HOST_SHARED
+                else RegionMemoryKind.VRAM
+            ),
             ttl_ms=int(resp.ttl_ms),
+            size_bytes=int(resp.region.size_bytes),
+            device_id=None if resolved_device_id < 0 else resolved_device_id,
+            attach_token=(
+                bytes(resp.host_shared.attach_token)
+                if resp.HasField("host_shared")
+                else b""
+            ),
+            daemon_managed=(
+                bool(resp.host_shared.daemon_managed)
+                if resp.HasField("host_shared")
+                else False
+            ),
+            host_shared_region_class=region_class,
             expires_at=expires_at,
         )
 
-    def unregister_vram_region(
+    def register_vram_region(
+        self,
+        *,
+        device_id: int,
+        size_bytes: int,
+        ttl_ms: int,
+        cuda_ipc_handle: bytes,
+        session_id: str | None = None,
+        region_name: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> VramRegionHandle:
+        handle = self.register_region(
+            memory_kind=RegionMemoryKind.VRAM,
+            device_id=device_id,
+            size_bytes=size_bytes,
+            ttl_ms=ttl_ms,
+            cuda_ipc_handle=cuda_ipc_handle,
+            session_id=session_id,
+            region_name=region_name,
+            timeout_s=timeout_s,
+        )
+        return VramRegionHandle(
+            region_id=handle.region_id,
+            ttl_ms=handle.ttl_ms,
+            expires_at=handle.expires_at,
+        )
+
+    def unregister_region(
         self,
         region_id: str,
         *,
@@ -2801,7 +3002,7 @@ class DaemonCtl:
     ) -> bool:
         if not region_id:
             raise ValueError("region_id is required")
-        req = store_daemon_pb2.UnregisterVramRegionRequest(
+        req = store_daemon_pb2.UnregisterRegionRequest(
             region_id=region_id,
             owner_pid=int(self._get_effective_pid()),
         )
@@ -2810,11 +3011,11 @@ class DaemonCtl:
         if force is not None:
             req.force = bool(force)
 
-        with self._client_span("Client/UnregisterVramRegion") as span:
+        with self._client_span("Client/UnregisterRegion") as span:
             set_span_attributes({"tc.region.id": region_id})
             try:
                 resp = self._unary_call(
-                    self.stub.UnregisterVramRegion,
+                    self.stub.UnregisterRegion,
                     req,
                     timeout=timeout_s,
                     span=span,
@@ -2834,11 +3035,65 @@ class DaemonCtl:
                         _grpc_message(e, fallback="failed precondition")
                     ) from e
                 raise RuntimeError(
-                    "UnregisterVramRegion failed: "
+                    "UnregisterRegion failed: "
                     f"{_grpc_message(e, fallback='rpc failed')}"
                 ) from e
 
         return bool(resp.released)
+
+    def unregister_vram_region(
+        self,
+        region_id: str,
+        *,
+        session_id: str | None = None,
+        force: bool | None = None,
+        timeout_s: float = 10.0,
+    ) -> bool:
+        return self.unregister_region(
+            region_id,
+            session_id=session_id,
+            force=force,
+            timeout_s=timeout_s,
+        )
+
+    def attach_host_shared_region(
+        self,
+        handle: LocalRegionHandle,
+        *,
+        timeout_s: float = 5.0,
+    ) -> HostSharedRegionAttachment:
+        if handle.memory_kind is not RegionMemoryKind.HOST_SHARED:
+            raise ValueError("attach_host_shared_region requires HOST_SHARED")
+        if not handle.attach_token:
+            raise ValueError("HOST_SHARED region is missing attach_token")
+        fd = self._request_local_handle_fd(
+            opcode=3,
+            token=handle.attach_token,
+            local_handle_socket_path=self._local_handle_socket_path(),
+            timeout_s=timeout_s,
+        )
+        return HostSharedRegionAttachment(
+            region_id=handle.region_id,
+            size_bytes=handle.size_bytes,
+            attach_token=handle.attach_token,
+            fd=fd,
+        )
+
+    def release_host_shared_region(
+        self,
+        handle: LocalRegionHandle,
+        *,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        if handle.memory_kind is not RegionMemoryKind.HOST_SHARED:
+            raise ValueError("release_host_shared_region requires HOST_SHARED")
+        if not handle.attach_token:
+            raise ValueError("HOST_SHARED region is missing attach_token")
+        return self._release_local_handle_token(
+            token=handle.attach_token,
+            local_handle_socket_path=self._local_handle_socket_path(),
+            timeout_s=timeout_s,
+        )
 
     def deregister_artifact(
         self,

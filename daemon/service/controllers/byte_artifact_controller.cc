@@ -228,6 +228,45 @@ absl::StatusOr<store::runtime::ingestion::ArtifactLoweringPlan> build_into_targe
       });
 }
 
+absl::Status materialize_loader_into_host_target(
+    std::unique_ptr<store::IArtifactLoader> loader,
+    const store::loading::IntoTargetLayout& target_layout,
+    std::uint64_t payload_bytes) {
+  if (loader == nullptr) {
+    return absl::InvalidArgumentError("HOST_SHARED target materialization requires loader");
+  }
+  if (target_layout.storages.size() != 1) {
+    return absl::InvalidArgumentError("HOST_SHARED byte-artifact target requires exactly one storage");
+  }
+  if (target_layout.storages.front().length < payload_bytes) {
+    return absl::InvalidArgumentError("HOST_SHARED target storage is smaller than payload");
+  }
+
+  auto init_status = loader->initialize();
+  if (!init_status.ok()) {
+    return init_status;
+  }
+  auto source_size_or = loader->get_artifact_size();
+  if (!source_size_or.ok()) {
+    return source_size_or.status();
+  }
+  if (*source_size_or < payload_bytes) {
+    return absl::FailedPreconditionError("HOST_SHARED target source is smaller than payload");
+  }
+  auto source_or = loader->open_source();
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+  auto read_or = (*source_or)->read_at(0, target_layout.storages.front().base_ptr.get(), payload_bytes);
+  if (!read_or.ok()) {
+    return read_or.status();
+  }
+  if (*read_or != payload_bytes) {
+    return absl::DataLossError("HOST_SHARED target read returned a short payload");
+  }
+  return absl::OkStatus();
+}
+
 struct LoaderSourceResolution {
   std::unique_ptr<store::IArtifactLoader> loader;
   store::loading::MaterializationSource source_kind{store::loading::MaterializationSource::kUnspecified};
@@ -2490,7 +2529,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
       req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view("");
   const std::string operation_id_owned(operation_id);
   const bool allow_high_card_attrs = rctx.allow_high_card_attrs();
-  const auto target_device = store::DeviceRegistry::instance().gpu_key(target_layout.device_id());
+  const bool host_target_layout = target_layout.device_id() < 0;
   const auto log_transport_apply_stats = [&]() {
     for (const auto& record : transport_apply_logs) {
       LOG(INFO) << "byte_artifact.batch_get_into_region_transport_apply_summary"
@@ -2816,36 +2855,52 @@ grpc::Status ByteArtifactController::batch_get_into_region(
       }
 
       const absl::Time lowering_started_at = absl::Now();
-      auto lowering_or = build_into_target_lowering_plan(
-          item_ref.artifact_id,
-          target_device,
-          *item_target_layout_or,
-          std::move(loader),
-          payload_bytes,
-          source_kind,
-          operation_id_owned);
-      if (!lowering_or.ok()) {
-        push_outcome(make_outcome(
+      if (host_target_layout) {
+        auto host_materialize_status =
+            materialize_loader_into_host_target(std::move(loader), *item_target_layout_or, payload_bytes);
+        if (!host_materialize_status.ok()) {
+          push_outcome(make_outcome(
+              item_ref.artifact_id,
+              batch_item_status_from_absl_status(host_materialize_status),
+              std::string(host_materialize_status.message())));
+          return;
+        }
+        if (applied_transport_stats != nullptr) {
+          applied_transport_stats->staged_bytes += payload_bytes;
+        }
+      } else {
+        const auto target_device = store::DeviceRegistry::instance().gpu_key(target_layout.device_id());
+        auto lowering_or = build_into_target_lowering_plan(
             item_ref.artifact_id,
-            batch_item_status_from_absl_status(lowering_or.status()),
-            std::string(lowering_or.status().message())));
-        return;
-      }
-      auto materialize_or = d_.engine.execute_artifact_lowering_plan(std::move(*lowering_or));
-      if (!materialize_or.ok()) {
-        push_outcome(make_outcome(
-            item_ref.artifact_id,
-            batch_item_status_from_absl_status(materialize_or.status()),
-            std::string(materialize_or.status().message())));
-        return;
-      }
-      if (applied_transport_stats != nullptr && materialize_or->into_target_result.has_value() &&
-          materialize_or->into_target_result->debug_stats.has_value()) {
-        const auto& debug_stats = *materialize_or->into_target_result->debug_stats;
-        applied_transport_stats->staged_bytes += debug_stats.produced_bytes;
-        applied_transport_stats->gpu_write_bytes += debug_stats.gpu_write_bytes_total;
-        applied_transport_stats->source_stage_copy_elapsed += absl::Microseconds(debug_stats.source_read_at_us_total);
-        applied_transport_stats->gpu_write_elapsed += absl::Microseconds(debug_stats.gpu_write_wait_us_total);
+            target_device,
+            *item_target_layout_or,
+            std::move(loader),
+            payload_bytes,
+            source_kind,
+            operation_id_owned);
+        if (!lowering_or.ok()) {
+          push_outcome(make_outcome(
+              item_ref.artifact_id,
+              batch_item_status_from_absl_status(lowering_or.status()),
+              std::string(lowering_or.status().message())));
+          return;
+        }
+        auto materialize_or = d_.engine.execute_artifact_lowering_plan(std::move(*lowering_or));
+        if (!materialize_or.ok()) {
+          push_outcome(make_outcome(
+              item_ref.artifact_id,
+              batch_item_status_from_absl_status(materialize_or.status()),
+              std::string(materialize_or.status().message())));
+          return;
+        }
+        if (applied_transport_stats != nullptr && materialize_or->into_target_result.has_value() &&
+            materialize_or->into_target_result->debug_stats.has_value()) {
+          const auto& debug_stats = *materialize_or->into_target_result->debug_stats;
+          applied_transport_stats->staged_bytes += debug_stats.produced_bytes;
+          applied_transport_stats->gpu_write_bytes += debug_stats.gpu_write_bytes_total;
+          applied_transport_stats->source_stage_copy_elapsed += absl::Microseconds(debug_stats.source_read_at_us_total);
+          applied_transport_stats->gpu_write_elapsed += absl::Microseconds(debug_stats.gpu_write_wait_us_total);
+        }
       }
       push_outcome(make_outcome(item_ref.artifact_id, v2::BATCH_ITEM_STATUS_OK));
       const absl::Duration lowering_elapsed = absl::Now() - lowering_started_at;

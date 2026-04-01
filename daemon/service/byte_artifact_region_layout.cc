@@ -21,14 +21,57 @@ namespace {
 using materialization_target_storage::AcquireTargetStoragesError;
 using materialization_target_storage::TargetStorageLease;
 
-absl::Status validate_layout_device_uuid(const v2::TargetLayout& layout, std::string_view device_uuid) {
-  if (device_uuid.empty()) {
-    return absl::InvalidArgumentError("device_uuid is required");
+absl::StatusOr<IpcRegionRegistry::MemoryKind> resolve_storage_memory_kind(const v2::StorageEntry& storage) {
+  switch (storage.storage_source_case()) {
+    case v2::StorageEntry::kVramRegionId:
+      return IpcRegionRegistry::MemoryKind::kVram;
+    case v2::StorageEntry::kRegionRef:
+      switch (storage.region_ref().memory_kind()) {
+        case v2::REGION_MEMORY_KIND_VRAM:
+          return IpcRegionRegistry::MemoryKind::kVram;
+        case v2::REGION_MEMORY_KIND_HOST_SHARED:
+          return IpcRegionRegistry::MemoryKind::kHostShared;
+        case v2::REGION_MEMORY_KIND_UNSPECIFIED:
+        default:
+          return absl::InvalidArgumentError("region_ref.memory_kind must be specified");
+      }
+    case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
+    default:
+      return absl::InvalidArgumentError("target_layout storages must reference a region");
   }
+}
+
+absl::StatusOr<IpcRegionRegistry::MemoryKind> validate_layout_memory_kind(
+    const v2::TargetLayout& layout,
+    std::string_view device_uuid) {
   std::optional<int32_t> device_id;
+  std::optional<IpcRegionRegistry::MemoryKind> memory_kind;
   for (const auto& storage : layout.storages()) {
+    auto storage_memory_kind_or = resolve_storage_memory_kind(storage);
+    if (!storage_memory_kind_or.ok()) {
+      return storage_memory_kind_or.status();
+    }
+    const auto storage_memory_kind = *storage_memory_kind_or;
+    if (!memory_kind.has_value()) {
+      memory_kind = storage_memory_kind;
+    } else if (*memory_kind != storage_memory_kind) {
+      return absl::InvalidArgumentError("byte artifact region layout must use one memory kind");
+    }
+    if (storage_memory_kind == IpcRegionRegistry::MemoryKind::kHostShared) {
+      if (storage.device_id() != -1) {
+        return absl::InvalidArgumentError("HOST_SHARED storage.device_id must be -1");
+      }
+      if (!device_uuid.empty()) {
+        return absl::InvalidArgumentError("device_uuid must be empty for HOST_SHARED byte artifact layouts");
+      }
+      continue;
+    }
+
     if (storage.device_id() < 0) {
       return absl::InvalidArgumentError("storage.device_id must be >= 0");
+    }
+    if (device_uuid.empty()) {
+      return absl::InvalidArgumentError("device_uuid is required for VRAM byte artifact layouts");
     }
     if (!device_id.has_value()) {
       device_id = storage.device_id();
@@ -40,7 +83,10 @@ absl::Status validate_layout_device_uuid(const v2::TargetLayout& layout, std::st
       return absl::InvalidArgumentError("storage.device_id does not match device_uuid");
     }
   }
-  return absl::OkStatus();
+  if (!memory_kind.has_value()) {
+    return absl::InvalidArgumentError("target_layout must include at least one storage");
+  }
+  return *memory_kind;
 }
 
 } // namespace
@@ -69,15 +115,11 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
   if (layout.storages_size() == 0) {
     return absl::InvalidArgumentError("target_layout must include at least one storage");
   }
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
-      return absl::InvalidArgumentError("target_layout storages must use vram_region_id");
-    }
+  auto layout_memory_kind_or = validate_layout_memory_kind(layout, device_uuid);
+  if (!layout_memory_kind_or.ok()) {
+    return layout_memory_kind_or.status();
   }
-  auto device_uuid_st = validate_layout_device_uuid(layout, device_uuid);
-  if (!device_uuid_st.ok()) {
-    return device_uuid_st;
-  }
+  const auto layout_memory_kind = *layout_memory_kind_or;
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
   auto lease_or = TargetStorageLease::acquire(registry, layout.storages(), owner_pid, &acquire_error);
@@ -88,19 +130,26 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
   ByteArtifactRegionLayout result;
   result.storage_lease_ = std::move(*lease_or);
   result.storages_.reserve(layout.storages_size());
-  result.device_id_ = layout.storages(0).device_id();
+  result.device_id_ =
+      layout_memory_kind == IpcRegionRegistry::MemoryKind::kHostShared ? -1 : layout.storages(0).device_id();
 
   absl::flat_hash_map<std::string, std::size_t> storage_indices;
   storage_indices.reserve(layout.storages_size());
   std::uint64_t logical_cursor = 0;
   for (int i = 0; i < layout.storages_size(); ++i) {
     const auto& storage = layout.storages(i);
+    auto storage_memory_kind_or = resolve_storage_memory_kind(storage);
+    if (!storage_memory_kind_or.ok()) {
+      return storage_memory_kind_or.status();
+    }
     result.storages_.push_back(
         StorageRange{
             .storage_id = storage.storage_id(),
             .logical_base = logical_cursor,
             .length = storage.storage_length(),
+            .memory_kind = *storage_memory_kind_or,
             .base_ptr = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).base_ptr.get(),
+            .device_id = storage.device_id(),
         });
     storage_indices.emplace(storage.storage_id(), static_cast<std::size_t>(i));
     logical_cursor += storage.storage_length();
@@ -217,10 +266,13 @@ absl::StatusOr<std::shared_ptr<store::loader::SeekableSource>> ByteArtifactRegio
   }
   const auto& range = it->second;
   const auto& storage = storages_.at(range.storage_index);
+  void* item_base_ptr = static_cast<std::uint8_t*>(storage.base_ptr) + range.storage_local_offset;
+  if (storage.memory_kind == IpcRegionRegistry::MemoryKind::kHostShared) {
+    return std::shared_ptr<store::loader::SeekableSource>(std::make_shared<store::loader::CpuMemorySource>(
+        gsl::not_null<const void*>{static_cast<const void*>(item_base_ptr)}, range.logical_length));
+  }
   return std::shared_ptr<store::loader::SeekableSource>(std::make_shared<store::loader::GpuMemorySource>(
-      gsl::not_null<void*>{static_cast<std::uint8_t*>(storage.base_ptr) + range.storage_local_offset},
-      device_id_,
-      range.logical_length));
+      gsl::not_null<void*>{item_base_ptr}, device_id_, range.logical_length));
 }
 
 } // namespace tensorcast::daemon

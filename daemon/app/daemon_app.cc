@@ -364,11 +364,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
         .socket_path = app->options_.daemon_options.local_handle_socket_path,
         .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
     };
-    auto* leases = app->kernel_->handle_leases();
-    if (leases == nullptr) {
-      return absl::FailedPreconditionError("handle leases unavailable for local handle server");
-    }
-    app->local_handle_server_ = std::make_unique<LocalHandleServer>(lh_opts, *leases);
+    app->local_handle_server_ =
+        std::make_unique<LocalHandleServer>(lh_opts, app->kernel_->region_registry(), app->kernel_->handle_leases());
   }
 
   if (app->options_.worker_lifecycle.has_value()) {

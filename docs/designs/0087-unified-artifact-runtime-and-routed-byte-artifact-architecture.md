@@ -67,7 +67,7 @@ The unified model is:
 - `WriteMode`: overwrite or `PUT_IF_ABSENT_JOIN`.
 
 `byte_artifact` is a profile, not a parallel runtime. The final daemon shape keeps routed byte-artifact authority,
-caller-owned region access, payload transport, and publication capabilities in separate modules with explicit trust
+local shared-region access, payload transport, and publication capabilities in separate modules with explicit trust
 boundaries.
 
 Engine-oriented alias policy and manifest-oriented integration guidance live in
@@ -87,7 +87,7 @@ As of 2026-03-30, the live implementation matches this design:
   `PayloadTransportBroker`.
 - `DaemonKernel` owns long-lived routed byte-artifact state: runtime state, body store, route resolver, payload
   transport broker, and shared worker directory cache.
-- `ExternalTargetAccessService` is the shared caller-owned region boundary used by both materialization flows and
+- `ExternalTargetAccessService` is the shared local region boundary used by both materialization flows and
   byte-artifact ingress flows.
 - `TargetPublicationScope`, `TargetPublicationRegistry`, `target_publication_token`, `PayloadRefScope`, and
   `BatchPayloadRefScope` are the live capability contracts.
@@ -102,7 +102,7 @@ Goals
 - Keep one artifact-first semantic model for weights, structured artifacts, and routed byte artifacts.
 - Keep `ArtifactSelection` as the only selection envelope across SDK, daemon, NodeAgent, and plans.
 - Keep routed byte-artifact truth off the Global Store per-blob hot path.
-- Keep caller-owned region reads and writes inside one daemon-local safety boundary.
+- Keep caller-accessible local region reads and writes inside one daemon-local safety boundary.
 - Keep payload transport reusable and capability-scoped.
 - Keep plan and NodeAgent artifact actions aligned with canonical `manifest/publish/hydrate/evict_local` semantics.
 
@@ -332,13 +332,19 @@ Rules:
 
 Rules:
 
-- these RPCs remain loopback or UDS-only because they touch caller-owned regions,
+- these RPCs remain loopback or UDS-only because they touch caller-accessible local shared regions,
 - they validate `pid`, `device_uuid`, and `TargetLayout` through `ExternalTargetAccessService`,
 - `BatchGetIntoRegionRequest` carries only `selections`, `target_layout`, `pid`, `device_uuid`, and optional
   `operation_id`,
 - `BatchPutIfAbsentFromRegionRequest` carries item selections plus invariants or payload refs, `source_layout`, optional
   `ttl_ms`, `pid`, `device_uuid`, and optional `operation_id`,
 - `preference` and `source_policy` are not part of the final `BatchGetIntoRegion` contract.
+
+Current live implementation note:
+
+- current region-backed byte-artifact ingress is still `VRAM` only,
+- the planned `HOST_SHARED` extension widens only the local placement layer,
+- it does not change routed authority, `RouteFence`, per-item outcome shape, or transport ownership.
 
 ### 5.3 Home-scoped fenced authority RPCs
 
@@ -651,7 +657,7 @@ sequenceDiagram
 Put-path rules:
 
 1. Source-side batching is grouped by remote home bucket first; a transport pack must not mix different home daemons.
-2. The source daemon must not expose caller-owned regions directly as a remote fetch source after the local ingress RPC
+2. The source daemon must not expose caller-accessible local regions directly as a remote fetch source after the local ingress RPC
    returns.
 3. Before issuing a batch capability on the put path, the source daemon must adopt or stage the bytes into daemon-owned
    transport state.
@@ -881,6 +887,239 @@ Rules:
 9. `v1 grpc_chunk_ref` is the required fallback realization whenever peers do not jointly advertise
    `v2 communicator_source`.
 
+#### 5.5.13 Planned local `HOST_SHARED` region extension for byte-artifact batch ingress
+
+This section describes the next planned extension. It is not implemented yet.
+
+Goal:
+
+- remove the mandatory GPU staging hop for local byte-artifact batch `put` and `get`,
+- keep `BatchGetIntoRegion` / `BatchPutIfAbsentFromRegion` local-only,
+- keep byte-artifact identity, routed authority truth, and per-item results unchanged,
+- change only the local placement surface so the caller and local daemon may share host memory in addition to VRAM.
+
+Planned region model:
+
+- the region-backed placement surface should converge toward a unified registration model such as
+  `RegisterRegion(memory_kind=VRAM|HOST_SHARED)` rather than adding a permanently SGLang-specific side API,
+- `memory_kind=HOST_SHARED` means one daemon-local shared host byte window whose lifetime is governed by the same
+  local-only lease, TTL, bounds, and poison rules as other region-backed placement surfaces,
+- the external region concept remains local placement state only; it is not part of byte-artifact identity, routing,
+  authority, or publication truth,
+- the implementation may still distinguish backing modes internally, for example:
+  - caller-managed or externally imported memory,
+  - daemon-managed shared slabs exported to local clients,
+  but that distinction must stay below the unified region contract.
+
+Planned schema direction:
+
+- the external surface should converge toward a generic region reference rather than a storage-source-specific
+  `host_region_id` field,
+- one reasonable target shape is:
+  - `enum RegionMemoryKind { VRAM, HOST_SHARED }`
+  - `message RegionRef { string region_id; RegionMemoryKind memory_kind; }`
+  - `StorageEntry.oneof storage_source { bytes cuda_ipc_handle; RegionRef region_ref; }`
+- for allocator-backed Phase B residency, the request must additionally carry a slot-lifetime token or equivalent
+  fields sufficient to recover:
+  - `slot_index`
+  - `slot_generation`
+  - `offset_bytes`
+  - `length_bytes`
+- the first safe rollout should preserve one logical slot token per KV page even if adjacent slots are later coalesced
+  internally after validation and before execution,
+- legacy `RegisterVramRegion` may remain as a compatibility wrapper over the unified region model,
+  but new host-shared flows should not create a parallel storage schema family.
+
+Normative rules:
+
+1. `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` remain loopback or UDS-only even after `HOST_SHARED` exists.
+   Remote or home daemons must never write directly into a caller-accessible host region.
+2. `HOST_SHARED` widens only the local source or target placement type. It must not alter `HomeBatch*`,
+   `FetchBatchPayloadRefChunk`, `communicator_source`, shard-home leases, or routed authority ownership.
+3. `device_uuid` remains meaningful for `VRAM` regions. The planned `HOST_SHARED` extension should treat GPU-device
+   validation as not applicable to host-backed entries rather than pretending host memory belongs to one GPU.
+4. A host region is a byte window with explicit `{region_id, offset, length}` bounds. The controller and runtime must
+   continue to validate layout coverage item-by-item before any bytes are copied.
+5. Host-region support must preserve failure granularity:
+   - transport failure stays pack-scoped,
+   - verification failure stays item-scoped when boundaries remain trusted,
+   - target fill or source read failure stays item-scoped or pack-scoped according to the same rules already used for
+     `VRAM`.
+6. `HOST_SHARED` must compose with existing verification modes, including the current
+   `BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY` path used by SGLang HiCache integration.
+7. Phase-1 host-shared rollout should reject mixed `VRAM` + `HOST_SHARED` `TargetLayout` requests. Supporting one
+   request that spans both memory kinds is a later extension rather than a baseline requirement.
+8. For pure `HOST_SHARED` placement:
+   - `device_uuid` should be treated as not applicable,
+   - `storage.device_id` should not participate in GPU-device matching,
+   - and validation should fail closed if a request simultaneously claims `HOST_SHARED` storage and a contradictory GPU
+     device binding.
+9. Per-rank host slabs are the intended deployment shape for SGLang HiCache. Each rank owns its own exported
+   `HOST_SHARED` slab because HiCache residency and page allocation are rank-local.
+10. Ordinary batch-operation failure on `HOST_SHARED` placement must not automatically imply whole-slab poison.
+    The planned host-slab model should distinguish:
+    - slab-level fatal faults:
+      mapping corruption, lease invalidity, inconsistent bounds metadata, or another condition that makes the whole
+      slab unsafe to continue using,
+    - operation-local faults:
+      one batch transport failure, one verification failure, or one interrupted fill or publish affecting only the
+      current placement window or page set.
+11. Whole-slab poison and slab retirement should be reserved for slab-level fatal faults.
+    Operation-local faults should invalidate only the affected window or page-range state and allow the slab itself to
+    remain attached.
+12. The caller owns per-slot liveness:
+    - any slot in `SlotReserved`, `GetInFlight`, or `PutInFlight` must remain pinned against eviction,
+    - the caller must not recycle a slot or bump its generation while any in-flight ref remains,
+    - and `BatchGetIntoRegion` should target slots that are not yet visible as committed HiCache residency.
+
+Planned bring-up sequence:
+
+0. Add daemon-managed `HOST_SHARED` slab export and local-attach lifecycle:
+   - local slab allocation,
+   - memfd export,
+   - local lease issuance,
+   - client mapping,
+   - and keepalive or release semantics for long-lived attached slabs.
+1. Add `HOST_SHARED` source support to `BatchPutIfAbsentFromRegion`.
+   The put path is the narrower bring-up because it only needs a host-readable source layout.
+2. Add `HOST_SHARED` target support to `BatchGetIntoRegion`.
+   The get path is deeper because the runtime must gain a host-target sink rather than the current GPU-only target sink.
+3. Switch SGLang off GPU staging and onto long-lived host staging slabs exported by the local daemon.
+4. Add a TensorCast-aware host allocator so SGLang L2 pages can live directly inside daemon-exported host slabs and
+   the staging copy disappears.
+
+Phase-relationship rule:
+
+- Phase A host staging and Phase B direct host allocation must reuse the same underlying `HOST_SHARED` region
+  mechanism,
+- they should differ only in policy and integration depth:
+  - Phase A uses the exported slab as a scratch placement surface,
+  - Phase B uses the same style of exported slab as allocator-owned L2 residency,
+- the design should avoid introducing one temporary API or one temporary lifecycle path for Phase A and a second,
+  unrelated one for Phase B.
+- once the SGLang TensorCast backend switches to the `HOST_SHARED` path, GPU staging should be removed from that
+  backend rather than retained as a runtime fallback inside the same integration path.
+
+Planned phase-A non-zero-copy data flow:
+
+```mermaid
+flowchart LR
+    A["SGLang ordinary L2 host pages"] -->|"CPU memcpy"| B["TensorCast-exported HOST_SHARED staging slab"]
+    B -->|"BatchPutIfAbsentFromRegion<br/>source_layout on HOST_SHARED"| C["Local source daemon"]
+    C --> D["Routed byte-artifact transport<br/>existing v1/v2 paths"]
+
+    E["Remote or local source daemon"] -->|"BatchGetIntoRegion"| F["TensorCast-exported HOST_SHARED staging slab"]
+    F -->|"CPU memcpy"| G["SGLang ordinary L2 host pages"]
+```
+
+Planned phase-B zero-copy data flow:
+
+```mermaid
+flowchart LR
+    A["TensorCast daemon-managed HOST_SHARED slab"] -->|"memfd export + local lease"| B["SGLang rank maps slab"]
+    B -->|"one-time cudaHostRegister on local mapping when enabled"| C["TensorCast-aware HostKVCache allocator"]
+    C --> D["L2 pages live directly inside the exported slab"]
+    D -->|"BatchPutIfAbsentFromRegion<br/>use source page offsets directly"| E["Existing TensorCast put transport"]
+    F["TensorCast byte-artifact substrate"] -->|"BatchGetIntoRegion<br/>direct-write into destination page offsets"| D
+```
+
+Planned daemon-managed host-slab lifecycle:
+
+```mermaid
+stateDiagram-v2
+  [*] --> SlabAllocated
+  SlabAllocated --> SlabExported: local memfd lease minted
+  SlabExported --> SlabMapped: local rank maps memfd
+  SlabMapped --> HostRegistered: optional cudaHostRegister on mapped bytes
+  SlabMapped --> InUse
+  HostRegistered --> InUse
+  InUse --> Detached: rank shutdown or allocator teardown
+  Detached --> SlabReaped: lease expiry or explicit release
+```
+
+Design notes for the SGLang HiCache use case:
+
+- the first validation step should use one long-lived `HOST_SHARED` staging slab per rank rather than allocating a new
+  memfd per batch,
+- the zero-copy target is one long-lived daemon-managed slab per rank, internally page-partitioned by the SGLang host
+  allocator rather than one region per page,
+- for allocator-backed Phase B residency, one slab `slot` is the ownership unit and typically corresponds to one KV
+  page,
+- allocator-backed slot reuse must be protected by a monotonically increasing `generation` so a delayed completion from
+  an old lifetime cannot land into a reused slot,
+- Phase A scratch slabs and Phase B allocator slabs should share one export and attach mechanism but use different
+  policies:
+  - Phase A treats the slab as scratch placement space,
+  - Phase B treats the slab as allocator-owned L2 residency,
+- if host-to-device load-back performance matters, the SGLang process should map the exported memfd and perform
+  long-lived `cudaHostRegister` on that local mapping instead of forcing a separate GPU staging allocation,
+- correctness for `HOST_SHARED` placement must not depend on host pinning:
+  - shared host placement should work before pinning is enabled,
+  - `cudaHostRegister` is a performance policy primarily for allocator slabs and later host-to-device load-back,
+- scratch slabs should default to unpinned `HOST_SHARED` unless a later measurement justifies pinning them too.
+
+Phase-B transport scope:
+
+- the immediate zero-copy target is the get path:
+  - `BatchGetIntoRegion` should write directly into allocator-owned `HOST_SHARED` slot or contiguous slot-run windows,
+  - the current TensorCast direct-write CPU sink path is the intended foundation for this,
+- the put path should still stop requiring an extra SGLang-side staging copy once the source page already lives in the
+  exported slab,
+- but this milestone does not require a new CPU-source direct-RDMA communicator path for put:
+  - daemon-side put transport may continue to use the existing communicator/export realization,
+  - CPU-source direct RDMA is follow-up communicator work rather than baseline `HOST_SHARED` bring-up.
+
+`SlotInvalid` semantics:
+
+- `SlotInvalid` means the bytes in that slot are not trusted as a valid page for the current generation,
+- it is entered for get-side target fill failure, failed post-fill validation, or another corruption signal affecting
+  the slot's current lifetime,
+- ordinary put-side transport failure does not by itself invalidate the source slot because the put path does not
+  mutate local source bytes,
+- an invalid slot must not be returned as a hit, inserted into committed residency, or rebound to a new logical page
+  without retirement,
+- retirement means removing provisional visibility, waiting for in-flight refs to drain, bumping generation, and only
+  then returning the slot to the free pool.
+
+Planned host-slab fault model:
+
+- Phase A scratch slabs and Phase B allocator slabs should both avoid whole-slab poison for ordinary batch failures.
+- For Phase A scratch slabs:
+  - one failed batch `put/get` should invalidate only the current staging window,
+  - the next batch may reuse or overwrite another window in the same slab,
+  - only slab-level fatal faults should force slab retirement and re-export.
+- For Phase B allocator slabs:
+  - one failed `get` or `put` should invalidate only the affected page slots or page ranges,
+  - other resident pages in the slab must remain usable,
+  - slab retirement should remain a rare control-path event rather than a normal data-path failure response.
+
+Planned allocator-slot lifecycle for Phase B:
+
+```mermaid
+stateDiagram-v2
+  [*] --> SlotFree
+  SlotFree --> SlotReserved: allocator assigns slot with generation g
+  SlotReserved --> GetInFlight: BatchGetIntoRegion targets slot[g]
+  GetInFlight --> SlotResident: direct-write for slot[g] completes
+  SlotReserved --> SlotResident: local write or recompute populates slot[g]
+  SlotResident --> PutInFlight: BatchPutIfAbsentFromRegion publishes slot[g]
+  PutInFlight --> SlotResident: publish success, duplicate, or put failure
+  GetInFlight --> SlotInvalid: get failed for slot[g]
+  SlotResident --> SlotRetiring: eviction or reuse requested
+  SlotInvalid --> SlotRetiring: quarantine or explicit retire
+  SlotRetiring --> SlotFree: generation bumps to g+1 before reuse
+```
+
+Planned Phase-B teardown order:
+
+1. Stop admitting new slot allocations and reject new batch region RPCs that target the slab.
+2. Drain all in-flight slot refs so no slot remains in `GetInFlight` or `PutInFlight`.
+3. Remove or retire any remaining resident or invalid slots from committed visibility.
+4. Bump generation for each retired slot before it may return to `SlotFree`.
+5. If the local mapping was host-registered, `cudaHostUnregister(...)` it.
+6. Unmap the memfd from the local rank.
+7. Release the local slab lease so the daemon may reap the backing object.
+
 ## 6. Final daemon layering and state ownership
 
 ```mermaid
@@ -1108,7 +1347,8 @@ design delta.
 
 - `ArtifactSelection` remains the only selection contract across SDK, daemon, plan, and NodeAgent paths.
 - `cgid:byte_artifact~...` remains excluded from Global Store per-blob artifact and replica catalogs.
-- `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` remain local-only because they operate on caller-owned regions.
+- `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` remain local-only because they operate on caller-accessible
+  local shared regions.
 - `BatchGetIntoRegionRequest` does not reintroduce `preference` or `source_policy`.
 - `StoreDaemonServiceImpl` keeps delegate-only live paths for `Batch*`, `HomeBatch*`, `FetchPayloadRefChunk`, and
   `FetchBatchPayloadRefChunk`.
