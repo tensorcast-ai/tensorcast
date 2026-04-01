@@ -520,12 +520,7 @@ absl::StatusOr<BodyBackingManager::StageResult> finalize_staged_replica(
   const BodyDescriptor descriptor = make_body_descriptor(
       backing_identity, layout_id, verification_mode, verified_content_descriptor, verification_record);
 
-  const absl::Time stable_retention_started_at = absl::Now();
   auto stable_state_or = maybe_admit_stable_retention(engine, resolved_policy, intent, replica_handle);
-  const absl::Duration stable_elapsed = absl::Now() - stable_retention_started_at;
-  if (stable_retention_elapsed != nullptr) {
-    *stable_retention_elapsed = stable_elapsed;
-  }
   if (!stable_state_or.ok() && intent.stable_retention_requirement == BodyStableRetentionRequirement::kRequireStable) {
     const auto retire_status = engine.retire_replica_status(replica_handle.key());
     if (!retire_status.ok()) {
@@ -536,12 +531,7 @@ absl::StatusOr<BodyBackingManager::StageResult> finalize_staged_replica(
     return stable_state_or.status();
   }
 
-  const absl::Time inspect_backing_started_at = absl::Now();
   auto core_observation_or = engine.inspect_replica_backing(replica_handle.key());
-  const absl::Duration inspect_elapsed = absl::Now() - inspect_backing_started_at;
-  if (inspect_backing_elapsed != nullptr) {
-    *inspect_backing_elapsed = inspect_elapsed;
-  }
   if (!core_observation_or.ok()) {
     (void)engine.retire_replica_status(replica_handle.key());
     record_body_backing_metrics(metric_mode, access_class, intent, "observe_error");
@@ -554,12 +544,7 @@ absl::StatusOr<BodyBackingManager::StageResult> finalize_staged_replica(
       absl::Now());
 
   const auto replica_key = replica_handle.key();
-  const absl::Time handle_create_started_at = absl::Now();
   auto body_handle_or = BodyHandle::create(engine, std::move(replica_handle));
-  const absl::Duration handle_elapsed = absl::Now() - handle_create_started_at;
-  if (handle_create_elapsed != nullptr) {
-    *handle_create_elapsed = handle_elapsed;
-  }
   if (!body_handle_or.ok()) {
     (void)engine.retire_replica_status(replica_key);
     record_body_backing_metrics(metric_mode, access_class, intent, "handle_error");
