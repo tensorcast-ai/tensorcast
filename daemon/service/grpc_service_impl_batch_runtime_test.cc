@@ -160,6 +160,28 @@ std::string artifact_on_same_shard(std::string_view base_artifact_id, std::strin
   return {};
 }
 
+std::string make_valid_byte_artifact_id(
+    std::string_view namespace_name,
+    std::string_view engine,
+    std::string_view model_id,
+    std::string_view model_version,
+    std::string_view layout_id,
+    std::string_view engine_key) {
+  return absl::StrCat(
+      "cgid:byte_artifact~",
+      namespace_name,
+      "~",
+      engine,
+      "~",
+      tensorcast::common::encode_cgid_segment(model_id),
+      "~",
+      tensorcast::common::encode_cgid_segment(model_version),
+      "~",
+      layout_id,
+      "~",
+      tensorcast::common::encode_cgid_segment(engine_key));
+}
+
 TEST_CASE("ArtifactProfileRegistry exposes explicit family and authority traits", "[daemon][profile_registry]") {
   using Registry = tensorcast::daemon::ArtifactProfileRegistry;
 
@@ -277,7 +299,8 @@ TEST_CASE("HomeBatch* put/get/exists support join and conflict", "[daemon][batch
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE";
+  const std::string artifact_id = make_valid_byte_artifact_id(
+      "tenant", "sglang", "meta-llama/Llama-3.1-8B-Instruct", "default", "layout_v1", "request-host-shared-ok:blk-1");
   const std::string payload = "payload-bytes-v1";
   const uint64_t shard_id = shard_for_artifact(artifact_id);
 
