@@ -12,9 +12,7 @@
 
 namespace tensorcast::communicator::routing {
 
-inline transport::future_read_result_t make_failed_read_future(
-    absl::Status status,
-    std::string tensor_key = {}) {
+inline transport::future_read_result_t make_failed_read_future(absl::Status status, std::string tensor_key = {}) {
   std::promise<transport::read_result_t> promise;
   auto future = promise.get_future();
   transport::read_result_t result;

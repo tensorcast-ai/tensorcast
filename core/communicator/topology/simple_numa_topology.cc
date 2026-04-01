@@ -48,8 +48,7 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
     pools.push_back(Pool{cpu_pool_id(node.id()), cpu_pool_id(node.id()), PoolType::kCpu});
     for (int gpu_id : node.gpus()) {
       if (!seen_gpus.insert(gpu_id).second) {
-        return absl::InvalidArgumentError(
-            std::format("duplicate simple_numa gpu id: {}", gpu_id));
+        return absl::InvalidArgumentError(std::format("duplicate simple_numa gpu id: {}", gpu_id));
       }
       pools.push_back(Pool{gpu_pool_id(gpu_id), gpu_pool_id(gpu_id), PoolType::kGpu});
     }
@@ -62,12 +61,10 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
 
   for (const auto& node : simple.nodes()) {
     if (node.nics().empty()) {
-      return absl::InvalidArgumentError(
-          std::format("simple_numa node {} has no nics", node.id()));
+      return absl::InvalidArgumentError(std::format("simple_numa node {} has no nics", node.id()));
     }
     if (node.gpus().empty()) {
-      return absl::InvalidArgumentError(
-          std::format("simple_numa node {} has no gpus", node.id()));
+      return absl::InvalidArgumentError(std::format("simple_numa node {} has no gpus", node.id()));
     }
 
     absl::flat_hash_set<std::string> pool_ids_seen;
@@ -87,8 +84,7 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
 
     for (const auto& nic : node.nics()) {
       if (nic.empty()) {
-        return absl::InvalidArgumentError(
-            std::format("simple_numa node {} has empty nic name", node.id()));
+        return absl::InvalidArgumentError(std::format("simple_numa node {} has empty nic name", node.id()));
       }
       const std::string endpoint_id = std::format("nic_{}", nic);
       if (!seen_nics.insert(endpoint_id).second) {
@@ -119,8 +115,7 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
     return absl::InvalidArgumentError("simple_numa has no nics");
   }
   if (seen_nics.contains(options.switch_id)) {
-    return absl::InvalidArgumentError(
-        std::format("switch_id collides with nic endpoint id: {}", options.switch_id));
+    return absl::InvalidArgumentError(std::format("switch_id collides with nic endpoint id: {}", options.switch_id));
   }
 
   Endpoint switch_endpoint;
@@ -134,11 +129,7 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
   validation.require_endpoint_links = true;
   validation.require_connected = options.require_connected;
 
-  return Topology::Build(
-      std::move(pools),
-      std::move(endpoints),
-      std::move(links),
-      validation);
+  return Topology::Build(std::move(pools), std::move(endpoints), std::move(links), validation);
 }
 
 } // namespace tensorcast::communicator::topology

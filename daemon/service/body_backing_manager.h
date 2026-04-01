@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -18,6 +19,12 @@ namespace tensorcast::daemon {
 
 class BodyBackingManager {
  public:
+  struct LocalByteSpan {
+    std::shared_ptr<const void> owner;
+    const std::uint8_t* data{nullptr};
+    std::uint64_t size_bytes{0};
+  };
+
   struct StageRequest {
     std::string artifact_id;
     v2::PutIfAbsentInvariant invariant;
@@ -52,6 +59,15 @@ class BodyBackingManager {
   explicit BodyBackingManager(store::StoreEngine& engine);
 
   [[nodiscard]] absl::StatusOr<StageResult> stage_body(StageRequest request) const;
+  [[nodiscard]] absl::StatusOr<StageResult> stage_body_fast_cpu_verified(
+      std::string artifact_id,
+      const v2::PutIfAbsentInvariant& invariant,
+      LocalByteSpan source,
+      store::loading::MaterializationSource source_kind,
+      std::string operation_id,
+      BodyAccessClass access_class = BodyAccessClass::kHomeDefault,
+      BodyRouteRole route_role = BodyRouteRole::kHomeAuthority,
+      std::optional<ResolvedStorePolicy> resolved_store_policy = std::nullopt) const;
   [[nodiscard]] absl::StatusOr<std::optional<StageResult>> try_reuse_body(ReuseRequest request) const;
 
  private:

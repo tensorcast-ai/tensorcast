@@ -294,6 +294,9 @@ misc::result_t RdmaTransport::do_post_send() {
     return misc::FAILED;
   }
 
+  if (req->rdma_profile_enabled()) {
+    req->note_rdma_posted_wr(1);
+  }
   // Push to per-QP queue for lock-free completion matching
   per_qp_inflight_queues_[qp_index].push(req);
   return misc::SUCCESS;
@@ -360,6 +363,11 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     if (res != misc::SUCCESS) {
       posted_count = (bad_wr != nullptr) ? static_cast<size_t>(bad_wr - wrs.data()) : 0;
     }
+    // Record posting before exposing the request to CQ consumers. Otherwise a
+    // very fast completion can observe completion-before-post in profiling.
+    if (request->rdma_profile_enabled()) {
+      request->note_rdma_posted_wr(static_cast<uint32_t>(posted_count));
+    }
     for (size_t i = 0; i < posted_count; ++i) {
       request->enqueue_completion_bytes(segs[indices[i]].length);
       per_qp_inflight_queues_[qp_index].push(request);
@@ -393,6 +401,9 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
     auto req = per_qp_inflight_queues_[qp_index].pop(true);
     if (req == nullptr) {
       LOG(FATAL) << "abnormal queue state for qp_index=" << qp_index;
+    }
+    if (req->rdma_profile_enabled()) {
+      req->note_rdma_completion();
     }
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {

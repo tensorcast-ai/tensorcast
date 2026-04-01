@@ -49,10 +49,14 @@ using tensorcast::daemon::v2::BatchGetIntoRegionResponse;
 using tensorcast::daemon::v2::BatchItemStatus;
 using tensorcast::daemon::v2::BatchPutIfAbsentFromRegionRequest;
 using tensorcast::daemon::v2::BatchPutIfAbsentFromRegionResponse;
+using tensorcast::daemon::v2::HomeBatchPutIfAbsentRequest;
+using tensorcast::daemon::v2::HomeBatchPutIfAbsentResponse;
 using tensorcast::store::components::AcquireShardHomeLeaseResult;
 using tensorcast::store::components::ActiveWorkerInfo;
 using tensorcast::store::components::RpcOptions;
 using tensorcast::store::components::ShardHomeLeaseDescriptor;
+using tensorcast::store::components::ShardHomeLeaseKeepaliveInput;
+using tensorcast::store::components::ShardHomeLeaseKeepaliveOutcome;
 using tensorcast::store::components::ShardHomeRouteInfo;
 using tensorcast::store::testing::GlobalStoreClientStub;
 
@@ -100,6 +104,46 @@ uint64_t shard_for_artifact(std::string_view artifact_id, uint64_t shard_count) 
     hash64 |= static_cast<uint64_t>(digest[i]) << (8U * i);
   }
   return hash64 % shard_count;
+}
+
+uint64_t shard_home_hrw_score_for_test(uint64_t shard_id, std::string_view daemon_id) {
+  const std::string key = absl::StrCat("byte-artifact-home:", shard_id, ":", daemon_id);
+  const auto digest = tensorcast::common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(key.data()), key.size()));
+  uint64_t score = 0;
+  for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+    score |= static_cast<uint64_t>(digest[i]) << (8U * i);
+  }
+  return score;
+}
+
+std::string expected_shard_home_owner_for_test(uint64_t shard_id, absl::Span<const std::string> daemon_ids) {
+  std::string best_daemon_id;
+  uint64_t best_score = 0;
+  for (const auto& daemon_id : daemon_ids) {
+    const auto score = shard_home_hrw_score_for_test(shard_id, daemon_id);
+    if (best_daemon_id.empty() || score > best_score || (score == best_score && daemon_id < best_daemon_id)) {
+      best_daemon_id = daemon_id;
+      best_score = score;
+    }
+  }
+  return best_daemon_id;
+}
+
+std::string find_artifact_id_for_expected_home(
+    std::string_view expected_owner,
+    absl::Span<const std::string> daemon_ids,
+    uint64_t shard_count = 4096ULL) {
+  for (uint64_t index = 0; index < 10000; ++index) {
+    const std::string artifact_id =
+        absl::StrCat("cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.expected", index);
+    const uint64_t shard_id = shard_for_artifact(artifact_id, shard_count);
+    if (expected_shard_home_owner_for_test(shard_id, daemon_ids) == expected_owner) {
+      return artifact_id;
+    }
+  }
+  FAIL("could not find test artifact with desired expected shard-home owner");
+  return {};
 }
 
 struct RegisteredRegion {
@@ -372,6 +416,64 @@ class InMemoryShardHomeGlobalStore final : public GlobalStoreClientStub {
     return absl::NotFoundError("lease token not found");
   }
 
+  absl::StatusOr<std::vector<ShardHomeLeaseKeepaliveOutcome>> batch_keepalive_shard_home_leases(
+      const std::vector<ShardHomeLeaseKeepaliveInput>& leases,
+      uint64_t ttl_ms,
+      const RpcOptions&) override {
+    std::vector<ShardHomeLeaseKeepaliveOutcome> out;
+    out.reserve(leases.size());
+
+    absl::MutexLock lock(&mu_);
+    const absl::Time now = absl::Now();
+    for (const auto& lease : leases) {
+      ShardHomeLeaseKeepaliveOutcome outcome;
+      outcome.shard_id = lease.shard_id;
+      outcome.lease_generation = lease.lease_generation;
+      outcome.lease_token = lease.lease_token;
+
+      const auto it = leases_.find(lease.shard_id);
+      if (it == leases_.end() || it->second.lease_token != lease.lease_token) {
+        outcome.ok = false;
+        outcome.message = "lease token not found";
+        out.push_back(std::move(outcome));
+        continue;
+      }
+
+      auto& st = it->second;
+      if (st.expires_at != absl::UnixEpoch() && st.expires_at <= now) {
+        outcome.ok = false;
+        outcome.message = "lease expired";
+        out.push_back(std::move(outcome));
+        continue;
+      }
+      if (st.lease_generation != lease.lease_generation) {
+        outcome.ok = false;
+        outcome.message = "lease generation mismatch";
+        outcome.lease = ShardHomeLeaseDescriptor{
+            .shard_id = st.shard_id,
+            .holder_daemon_id = st.holder_daemon_id,
+            .lease_token = st.lease_token,
+            .lease_generation = st.lease_generation,
+            .expires_at = st.expires_at,
+        };
+        out.push_back(std::move(outcome));
+        continue;
+      }
+
+      st.expires_at = now + absl::Milliseconds(ttl_ms);
+      outcome.ok = true;
+      outcome.lease = ShardHomeLeaseDescriptor{
+          .shard_id = st.shard_id,
+          .holder_daemon_id = st.holder_daemon_id,
+          .lease_token = st.lease_token,
+          .lease_generation = st.lease_generation,
+          .expires_at = st.expires_at,
+      };
+      out.push_back(std::move(outcome));
+    }
+    return out;
+  }
+
  private:
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, ActiveWorkerInfo> workers_ ABSL_GUARDED_BY(mu_);
@@ -572,6 +674,300 @@ TEST_CASE("BatchExists retries on stale shard-home fence redirect (remote home)"
 }
 
 TEST_CASE(
+    "BatchExists acquires unleased remote home via expected owner",
+    "[daemon][batch][redirect][e2e][expected_owner]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_expected_owner_exists");
+  const auto root_home = make_tmp_dir("home_expected_owner_exists");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  const std::vector<std::string> daemon_ids{std::string(kFrontDaemonId), std::string(kHomeDaemonId)};
+  const std::string artifact_id = find_artifact_id_for_expected_home(kHomeDaemonId, daemon_ids);
+  const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
+  REQUIRE_FALSE(gs->get_shard_home_lease(shard_id, RpcOptions{}).ok());
+
+  BatchExistsRequest req;
+  req.add_selections()->set_artifact_id(artifact_id);
+  BatchExistsResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = front.harness->service().BatchExists(&ctx, &req, &resp);
+  REQUIRE(st.ok());
+  REQUIRE(resp.outcomes_size() == 1);
+  REQUIRE(resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
+
+  auto route_or = gs->get_shard_home_lease(shard_id, RpcOptions{});
+  REQUIRE(route_or.ok());
+  REQUIRE(route_or->holder_daemon_id == kHomeDaemonId);
+}
+
+TEST_CASE(
+    "BatchExists preserves published authority after home lease reacquire",
+    "[daemon][batch][redirect][e2e][lease_reacquire]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_exists_after_reacquire");
+  const auto root_home = make_tmp_dir("home_exists_after_reacquire");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::milliseconds(50);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true);
+  gs->upsert_worker(
+      kHomeDaemonId,
+      "127.0.0.1",
+      static_cast<uint32_t>(std::stoi(home.address.substr(home.address.find(':') + 1))),
+      kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bGVhc2UtcmVhY3F1aXJl~layout_v1~b64u.azI";
+  const std::string payload = "published-before-reacquire";
+  const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
+  gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kHomeDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(home.harness->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  {
+    BatchExistsRequest req;
+    req.add_selections()->set_artifact_id(artifact_id);
+    BatchExistsResponse resp;
+    grpc::ServerContext ctx;
+    const auto st = front.harness->service().BatchExists(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    REQUIRE(resp.outcomes_size() == 1);
+    REQUIRE(resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+  {
+    BatchExistsRequest req;
+    req.add_selections()->set_artifact_id(artifact_id);
+    BatchExistsResponse resp;
+    grpc::ServerContext ctx;
+    const auto st = front.harness->service().BatchExists(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    REQUIRE(resp.outcomes_size() == 1);
+    REQUIRE(resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  }
+
+  REQUIRE(gs->current_generation(shard_id) >= 2);
+}
+
+TEST_CASE(
+    "BatchExists keeps shard-home lease alive while home daemon stays idle",
+    "[daemon][batch][redirect][e2e][lease_keepalive]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_exists_with_keepalive");
+  const auto root_home = make_tmp_dir("home_exists_with_keepalive");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::milliseconds(50);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::milliseconds(10);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true);
+  gs->upsert_worker(
+      kHomeDaemonId,
+      "127.0.0.1",
+      static_cast<uint32_t>(std::stoi(home.address.substr(home.address.find(':') + 1))),
+      kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.a2VlcGFsaXZlLWlkbGU~layout_v1~b64u.azc";
+  const std::string payload = "published-before-idle";
+  const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
+  gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kHomeDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(home.harness->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+  {
+    BatchExistsRequest req;
+    req.add_selections()->set_artifact_id(artifact_id);
+    BatchExistsResponse resp;
+    grpc::ServerContext ctx;
+    const auto st = front.harness->service().BatchExists(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    REQUIRE(resp.outcomes_size() == 1);
+    REQUIRE(resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  }
+
+  REQUIRE(gs->current_generation(shard_id) == 1);
+}
+
+TEST_CASE(
+    "ensure_home_lease keeps route-only shard-home leases alive before first authority entry",
+    "[daemon][batch][redirect][e2e][lease_keepalive][route_only]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_home = make_tmp_dir("home_route_only_keepalive");
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::milliseconds(50);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::milliseconds(10);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/false);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
+
+  constexpr uint64_t shard_id = 1729;
+  auto& resolver = home.harness->kernel().byte_artifact_route_resolver();
+  const auto route = resolver.resolve_route(shard_id, absl::Now());
+  REQUIRE(route.ok);
+  REQUIRE(route.holder_daemon_id == kHomeDaemonId);
+  REQUIRE(route.lease_generation == 1);
+
+  tensorcast::daemon::v2::RouteFence fence;
+  fence.set_shard_id(shard_id);
+  fence.set_lease_generation(route.lease_generation);
+  fence.set_holder_daemon_id(kHomeDaemonId);
+  fence.set_routing_epoch(1);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+  auto ensure_or = resolver.ensure_home_lease(fence, absl::Now());
+  REQUIRE(ensure_or.ok());
+  REQUIRE(ensure_or->kind == tensorcast::daemon::ByteArtifactRouteResolver::HomeLeaseDecision::Kind::kOwned);
+  REQUIRE(ensure_or->lease_generation == 1);
+  REQUIRE(gs->current_generation(shard_id) == 1);
+}
+
+TEST_CASE(
     "BatchExists does not acquire when daemon is not shard-home eligible",
     "[daemon][batch][redirect][eligibility]") {
   auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
@@ -765,6 +1161,128 @@ TEST_CASE("Batch get/put transport payload_ref over remote home daemon", "[daemo
   get_req.set_pid(target_region.owner_pid);
   get_req.set_device_uuid(target_region.device_uuid);
   get_req.set_operation_id("op-remote-payload-ref");
+
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  const auto get_st = front.harness->service().BatchGetIntoRegion(&get_ctx, &get_req, &get_resp);
+  REQUIRE(get_st.ok());
+  REQUIRE(get_resp.outcomes_size() == 1);
+  REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  std::vector<char> out(payload.size(), '\0');
+  REQUIRE(tensorcast::cuda::memcpy(out.data(), target_region.device_ptr, out.size(), cudaMemcpyDeviceToHost).ok());
+  REQUIRE(std::string(out.data(), out.size()) == payload);
+
+  release_test_region(*front.harness, source_region);
+  release_test_region(*front.harness, target_region);
+}
+
+TEST_CASE(
+    "BatchPutIfAbsentFromRegion acquires unleased remote home via expected owner",
+    "[daemon][batch][redirect][transport][expected_owner]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_expected_owner_put");
+  const auto root_home = make_tmp_dir("home_expected_owner_put");
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(kFrontDaemonId, "127.0.0.1", grpc_port_from_address(front.address), kShardHomeEligibleFlag);
+
+  const std::vector<std::string> daemon_ids{std::string(kFrontDaemonId), std::string(kHomeDaemonId)};
+  const std::string artifact_id = find_artifact_id_for_expected_home(kHomeDaemonId, daemon_ids);
+  const std::string payload = "remote-put-expected-owner";
+  const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
+  REQUIRE_FALSE(gs->get_shard_home_lease(shard_id, RpcOptions{}).ok());
+
+  auto source_region = register_test_region(*front.harness, /*device_id=*/0, payload.size());
+  REQUIRE(
+      tensorcast::cuda::memcpy(source_region.device_ptr, payload.data(), payload.size(), cudaMemcpyHostToDevice).ok());
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* put_item = put_req.add_items();
+  put_item->mutable_selection()->set_artifact_id(artifact_id);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+  populate_single_region_layout(
+      put_req.mutable_source_layout(),
+      source_region,
+      artifact_id,
+      payload.size(),
+      /*device_id=*/0);
+  put_req.set_pid(source_region.owner_pid);
+  put_req.set_device_uuid(source_region.device_uuid);
+  put_req.set_operation_id("op-expected-owner-put");
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  const auto put_st = front.harness->service().BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp);
+  REQUIRE(put_st.ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto route_or = gs->get_shard_home_lease(shard_id, RpcOptions{});
+  REQUIRE(route_or.ok());
+  REQUIRE(route_or->holder_daemon_id == kHomeDaemonId);
+  REQUIRE(count_cpu_replicas(*engine_front) == 0);
+  REQUIRE(count_cpu_replicas(*engine_home) == 1);
+
+  BatchExistsRequest exists_req;
+  exists_req.add_selections()->set_artifact_id(artifact_id);
+  BatchExistsResponse exists_resp;
+  grpc::ServerContext exists_ctx;
+  const auto exists_st = front.harness->service().BatchExists(&exists_ctx, &exists_req, &exists_resp);
+  REQUIRE(exists_st.ok());
+  REQUIRE(exists_resp.outcomes_size() == 1);
+  REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto target_region = register_test_region(*front.harness, /*device_id=*/0, payload.size());
+  REQUIRE(tensorcast::cuda::memset(target_region.device_ptr, 0, payload.size()).ok());
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(artifact_id);
+  populate_single_region_layout(
+      get_req.mutable_target_layout(),
+      target_region,
+      artifact_id,
+      payload.size(),
+      /*device_id=*/0);
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_device_uuid(target_region.device_uuid);
+  get_req.set_operation_id("op-expected-owner-get");
 
   BatchGetIntoRegionResponse get_resp;
   grpc::ServerContext get_ctx;

@@ -145,6 +145,9 @@ struct BodyDescriptor {
   std::uint64_t size_bytes{0};
   std::string payload_digest_alg;
   std::string payload_digest_hex;
+  v2::ByteArtifactVerificationMode verification_mode{
+      v2::BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256,
+  };
   absl::Time created_at{absl::InfinitePast()};
   absl::Time verified_at{absl::InfinitePast()};
 
@@ -240,9 +243,36 @@ inline std::string normalize_body_digest_value(std::string_view value) {
   return normalized;
 }
 
+inline v2::ByteArtifactVerificationMode normalize_byte_artifact_verification_mode(
+    v2::ByteArtifactVerificationMode mode) {
+  if (mode == v2::BYTE_ARTIFACT_VERIFICATION_MODE_UNSPECIFIED) {
+    return v2::BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256;
+  }
+  return mode;
+}
+
+inline v2::ByteArtifactVerificationMode invariant_verification_mode(const v2::PutIfAbsentInvariant& invariant) {
+  return normalize_byte_artifact_verification_mode(invariant.verification_mode());
+}
+
+inline bool verification_mode_requires_payload_digest(v2::ByteArtifactVerificationMode mode) {
+  return normalize_byte_artifact_verification_mode(mode) == v2::BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256;
+}
+
+inline const char* byte_artifact_verification_mode_label(v2::ByteArtifactVerificationMode mode) {
+  switch (normalize_byte_artifact_verification_mode(mode)) {
+    case v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY:
+      return "layout_and_size_only";
+    case v2::BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256:
+    default:
+      return "strict_sha256";
+  }
+}
+
 inline BodyDescriptor normalized_body_descriptor(BodyDescriptor descriptor) {
   descriptor.payload_digest_alg = normalize_body_digest_value(descriptor.payload_digest_alg);
   descriptor.payload_digest_hex = normalize_body_digest_value(descriptor.payload_digest_hex);
+  descriptor.verification_mode = normalize_byte_artifact_verification_mode(descriptor.verification_mode);
   return descriptor;
 }
 
@@ -252,6 +282,7 @@ inline v2::PutIfAbsentInvariant body_descriptor_to_invariant(const BodyDescripto
   invariant.set_byte_length(descriptor.size_bytes);
   invariant.set_payload_digest_alg(descriptor.payload_digest_alg);
   invariant.set_payload_digest_hex(descriptor.payload_digest_hex);
+  invariant.set_verification_mode(normalize_byte_artifact_verification_mode(descriptor.verification_mode));
   return invariant;
 }
 
@@ -274,7 +305,9 @@ inline store::runtime::ingestion::VerifiedContentDescriptor body_descriptor_to_v
 inline store::runtime::ingestion::VerificationRecord body_descriptor_to_verification_record(
     const BodyDescriptor& descriptor) {
   return store::runtime::ingestion::VerificationRecord{
-      .verification_method = store::runtime::ingestion::VerificationMethod::kSharedExecutorFullReadDigest,
+      .verification_method = verification_mode_requires_payload_digest(descriptor.verification_mode)
+          ? store::runtime::ingestion::VerificationMethod::kSharedExecutorFullReadDigest
+          : store::runtime::ingestion::VerificationMethod::kLayoutAndSizeContract,
       .verified_at = descriptor.verified_at,
       .layout_proof_kind = store::runtime::ingestion::LayoutProofKind::kNamedLayoutId,
       .layout_proof_value = descriptor.layout_id,

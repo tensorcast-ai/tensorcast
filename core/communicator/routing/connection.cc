@@ -18,8 +18,7 @@ constexpr absl::Duration kReadResultTimeout = absl::Seconds(60);
 
 } // namespace
 
-LinkState::LinkState(std::string link_id)
-    : link_id_(std::move(link_id)) {}
+LinkState::LinkState(std::string link_id) : link_id_(std::move(link_id)) {}
 
 void LinkState::record_success(absl::Duration latency) {
   absl::MutexLock lock(&mu_);
@@ -45,15 +44,16 @@ HealthState LinkState::health() const {
   return derive_health(stats_);
 }
 
-Connection::Connection(ConnectionKey key,
-                       ConnectionType type,
-                       std::shared_ptr<const topology::Topology> topology,
-                       const topology::Link* link,
-                       EndpointBinding local_binding,
-                       EndpointBinding remote_binding,
-                       std::shared_ptr<ConnectionAdapter> adapter,
-                       std::shared_ptr<LinkState> link_state,
-                       std::shared_ptr<common::AsyncRuntime> async_runtime)
+Connection::Connection(
+    ConnectionKey key,
+    ConnectionType type,
+    std::shared_ptr<const topology::Topology> topology,
+    const topology::Link* link,
+    EndpointBinding local_binding,
+    EndpointBinding remote_binding,
+    std::shared_ptr<ConnectionAdapter> adapter,
+    std::shared_ptr<LinkState> link_state,
+    std::shared_ptr<common::AsyncRuntime> async_runtime)
     : key_(std::move(key)),
       type_(type),
       topology_ref_(std::move(topology)),
@@ -82,44 +82,37 @@ transport::future_read_result_t Connection::read_tensor(const ReadRequest& reque
   auto promise = std::make_shared<std::promise<transport::read_result_t>>();
   auto future = promise->get_future();
   const std::string tensor_key = request.tensor_key;
-  folly::via(async_runtime_->blocking_executor(),
-             [self,
-              start_time,
-              tensor_key,
-              promise,
-              future = std::move(inner_future)]() mutable {
-               transport::read_result_t result;
-               const auto wait_status =
-                   future.wait_for(absl::ToChronoMilliseconds(kReadResultTimeout));
-               if (wait_status == std::future_status::ready) {
-                 try {
-                   result = future.get();
-                 } catch (const std::exception& ex) {
-                   result.status = absl::UnknownError(ex.what());
-                   result.tensor_key = tensor_key;
-                 } catch (...) {
-                   result.status = absl::UnknownError(
-                       "read result future raised non-standard exception");
-                   result.tensor_key = tensor_key;
-                 }
-               } else if (wait_status == std::future_status::timeout) {
-                 result.status = absl::DeadlineExceededError(std::format(
-                     "read result future not ready after {}",
-                     absl::FormatDuration(kReadResultTimeout)));
-                 result.tensor_key = tensor_key;
-               } else {
-                 result.status = absl::FailedPreconditionError(
-                     "read result future is deferred; bounded wait required");
-                 result.tensor_key = tensor_key;
-               }
-               const absl::Duration latency = absl::Now() - start_time;
-               if (result.status.ok()) {
-                 self->record_success(latency);
-               } else {
-                 self->record_failure(result.status);
-               }
-               promise->set_value(std::move(result));
-             });
+  folly::via(
+      async_runtime_->blocking_executor(),
+      [self, start_time, tensor_key, promise, future = std::move(inner_future)]() mutable {
+        transport::read_result_t result;
+        const auto wait_status = future.wait_for(absl::ToChronoMilliseconds(kReadResultTimeout));
+        if (wait_status == std::future_status::ready) {
+          try {
+            result = future.get();
+          } catch (const std::exception& ex) {
+            result.status = absl::UnknownError(ex.what());
+            result.tensor_key = tensor_key;
+          } catch (...) {
+            result.status = absl::UnknownError("read result future raised non-standard exception");
+            result.tensor_key = tensor_key;
+          }
+        } else if (wait_status == std::future_status::timeout) {
+          result.status = absl::DeadlineExceededError(
+              std::format("read result future not ready after {}", absl::FormatDuration(kReadResultTimeout)));
+          result.tensor_key = tensor_key;
+        } else {
+          result.status = absl::FailedPreconditionError("read result future is deferred; bounded wait required");
+          result.tensor_key = tensor_key;
+        }
+        const absl::Duration latency = absl::Now() - start_time;
+        if (result.status.ok()) {
+          self->record_success(latency);
+        } else {
+          self->record_failure(result.status);
+        }
+        promise->set_value(std::move(result));
+      });
   return future;
 }
 

@@ -35,6 +35,7 @@ class BodyHandle {
   [[nodiscard]] bool unique_owner() const;
 
   [[nodiscard]] absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> make_loader() const;
+  [[nodiscard]] absl::Status read_into_range(std::uint64_t offset, void* dst, std::size_t bytes) const;
   [[nodiscard]] absl::StatusOr<std::string> read_range(std::uint64_t offset, std::size_t bytes) const;
   [[nodiscard]] absl::StatusOr<std::string> read_all_bytes() const;
   [[nodiscard]] absl::StatusOr<std::string> compute_sha256_hex() const;

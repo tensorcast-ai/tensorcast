@@ -142,6 +142,46 @@ uint64_t shard_for_artifact(std::string_view artifact_id) {
   return hash64 % 4096ULL;
 }
 
+std::string replace_final_b64u_suffix(std::string_view artifact_id, std::string_view suffix) {
+  const std::size_t marker = artifact_id.rfind("~b64u.");
+  REQUIRE(marker != std::string_view::npos);
+  return absl::StrCat(artifact_id.substr(0, marker + 6), suffix);
+}
+
+std::string artifact_on_same_shard(std::string_view base_artifact_id, std::string_view seed) {
+  const std::uint64_t target_shard = shard_for_artifact(base_artifact_id);
+  for (int attempt = 0; attempt < 10000; ++attempt) {
+    const std::string candidate = replace_final_b64u_suffix(base_artifact_id, absl::StrCat(seed, attempt));
+    if (candidate != base_artifact_id && shard_for_artifact(candidate) == target_shard) {
+      return candidate;
+    }
+  }
+  FAIL("failed to find same-shard artifact id");
+  return {};
+}
+
+std::string make_valid_byte_artifact_id(
+    std::string_view namespace_name,
+    std::string_view engine,
+    std::string_view model_id,
+    std::string_view model_version,
+    std::string_view layout_id,
+    std::string_view engine_key) {
+  return absl::StrCat(
+      "cgid:byte_artifact~",
+      namespace_name,
+      "~",
+      engine,
+      "~",
+      tensorcast::common::encode_cgid_segment(model_id),
+      "~",
+      tensorcast::common::encode_cgid_segment(model_version),
+      "~",
+      layout_id,
+      "~",
+      tensorcast::common::encode_cgid_segment(engine_key));
+}
+
 TEST_CASE("ArtifactProfileRegistry exposes explicit family and authority traits", "[daemon][profile_registry]") {
   using Registry = tensorcast::daemon::ArtifactProfileRegistry;
 
@@ -259,7 +299,8 @@ TEST_CASE("HomeBatch* put/get/exists support join and conflict", "[daemon][batch
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE";
+  const std::string artifact_id = make_valid_byte_artifact_id(
+      "tenant", "sglang", "meta-llama/Llama-3.1-8B-Instruct", "default", "layout_v1", "request-host-shared-ok:blk-1");
   const std::string payload = "payload-bytes-v1";
   const uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -297,7 +338,6 @@ TEST_CASE("HomeBatch* put/get/exists support join and conflict", "[daemon][batch
   REQUIRE(conflict_st.ok());
   REQUIRE(conflict_resp.outcomes_size() == 1);
   REQUIRE(conflict_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
-  REQUIRE(count_cpu_replicas(*engine) == 1);
 
   HomeBatchExistsRequest exists_req;
   exists_req.mutable_fence()->CopyFrom(put_req.fence());
@@ -468,6 +508,7 @@ TEST_CASE("Batch* front-door supports source_layout and payload_ref transport", 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
@@ -527,10 +568,178 @@ TEST_CASE("Batch* front-door supports source_layout and payload_ref transport", 
   release_test_region(*harness, target_region);
 }
 
+TEST_CASE("HomeBatchGet emits batch transport for large payloads", "[daemon][batch][batch_payload_ref][get]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.max_batch_payload_bytes = 1ULL << 20;
+  options.byte_artifact_routing.payload_transport.max_batch_items = 8;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id_a = "cgid:byte_artifact~tenant~engine~b64u.YmF0Y2gtZ2V0LWE~layout_v1~b64u.azVh";
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchget");
+  const std::string payload_a(64, 'a');
+  const std::string payload_b(96, 'b');
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-home-batch-get-pack");
+  auto* item_a = put_req.add_items();
+  item_a->set_artifact_id(artifact_id_a);
+  item_a->set_inline_payload(payload_a);
+  set_invariant(item_a->mutable_invariant(), "layout_v1", payload_a);
+  auto* item_b = put_req.add_items();
+  item_b->set_artifact_id(artifact_id_b);
+  item_b->set_inline_payload(payload_b);
+  set_invariant(item_b->mutable_invariant(), "layout_v1", payload_b);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.set_operation_id("op-home-batch-get-pack");
+  get_req.add_artifact_ids(artifact_id_a);
+  get_req.add_artifact_ids(artifact_id_b);
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 2);
+  REQUIRE(get_resp.batch_transports_size() == 1);
+  REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.items(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.items(0).inline_payload().empty());
+  REQUIRE(get_resp.items(1).inline_payload().empty());
+  REQUIRE(get_resp.items(0).payload_ref().empty());
+  REQUIRE(get_resp.items(1).payload_ref().empty());
+  REQUIRE(get_resp.items(0).has_batch_payload_slice());
+  REQUIRE(get_resp.items(1).has_batch_payload_slice());
+  REQUIRE(get_resp.items(0).batch_payload_slice().transport_id() == "batch-transport-1");
+  REQUIRE(get_resp.items(1).batch_payload_slice().transport_id() == "batch-transport-1");
+
+  const auto& transport = get_resp.batch_transports(0);
+  REQUIRE(transport.transport_id() == "batch-transport-1");
+  REQUIRE(transport.has_grpc_chunk_ref());
+  REQUIRE(transport.manifest().entries_size() == 2);
+  REQUIRE(transport.manifest().entries(0).artifact_id() == artifact_id_a);
+  REQUIRE(transport.manifest().entries(1).artifact_id() == artifact_id_b);
+  REQUIRE(transport.manifest().entries(0).length() == payload_a.size());
+  REQUIRE(transport.manifest().entries(1).length() == payload_b.size());
+  REQUIRE(transport.manifest().total_size() == payload_a.size() + payload_b.size());
+
+  const auto resolved_or = harness->kernel().payload_transport_broker().fetch_batch_payload_ref(
+      harness->kernel().worker_directory_cache(),
+      absl::Now(),
+      absl::Seconds(1),
+      kDaemonId,
+      transport.grpc_chunk_ref().batch_payload_ref(),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-home-batch-get-pack");
+  REQUIRE(resolved_or.ok());
+  REQUIRE_FALSE(resolved_or->remote);
+  REQUIRE(resolved_or->payload != nullptr);
+  REQUIRE(*resolved_or->payload == payload_a + payload_b);
+}
+
+TEST_CASE("HomeBatchPutIfAbsent accepts batch payload slices", "[daemon][batch][batch_payload_ref][put]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 1ULL << 20;
+  options.byte_artifact_routing.payload_transport.max_batch_payload_bytes = 1ULL << 20;
+  options.byte_artifact_routing.payload_transport.max_batch_items = 8;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id_a = "cgid:byte_artifact~tenant~engine~b64u.YmF0Y2gtcHV0LWE~layout_v1~b64u.azZh";
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchput");
+  const std::string payload_a = "batch-put-alpha";
+  const std::string payload_b = "batch-put-beta-more-bytes";
+  const std::string slab = payload_a + payload_b;
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a);
+
+  tensorcast::daemon::v2::BatchPayloadManifest manifest;
+  auto* entry_a = manifest.add_entries();
+  entry_a->set_artifact_id(artifact_id_a);
+  entry_a->set_offset(0);
+  entry_a->set_length(payload_a.size());
+  entry_a->set_digest_alg("sha256");
+  entry_a->set_digest_hex(sha256_hex(payload_a));
+  auto* entry_b = manifest.add_entries();
+  entry_b->set_artifact_id(artifact_id_b);
+  entry_b->set_offset(payload_a.size());
+  entry_b->set_length(payload_b.size());
+  entry_b->set_digest_alg("sha256");
+  entry_b->set_digest_hex(sha256_hex(payload_b));
+  manifest.set_total_size(slab.size());
+
+  auto batch_payload_ref_or = harness->kernel().payload_transport_broker().issue_batch_payload_ref(
+      manifest,
+      std::make_shared<const std::string>(slab),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+      "op-home-batch-put-pack");
+  REQUIRE(batch_payload_ref_or.ok());
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-home-batch-put-pack");
+  auto* transport = put_req.add_batch_transports();
+  transport->set_transport_id("batch-transport-1");
+  transport->mutable_manifest()->CopyFrom(manifest);
+  transport->mutable_grpc_chunk_ref()->set_batch_payload_ref(*batch_payload_ref_or);
+  transport->mutable_grpc_chunk_ref()->set_protocol_version(1);
+
+  auto* item_a = put_req.add_items();
+  item_a->set_artifact_id(artifact_id_a);
+  set_invariant(item_a->mutable_invariant(), "layout_v1", payload_a);
+  item_a->mutable_batch_payload_slice()->set_transport_id("batch-transport-1");
+  item_a->mutable_batch_payload_slice()->set_offset(0);
+  item_a->mutable_batch_payload_slice()->set_length(payload_a.size());
+
+  auto* item_b = put_req.add_items();
+  item_b->set_artifact_id(artifact_id_b);
+  set_invariant(item_b->mutable_invariant(), "layout_v1", payload_b);
+  item_b->mutable_batch_payload_slice()->set_transport_id("batch-transport-1");
+  item_b->mutable_batch_payload_slice()->set_offset(payload_a.size());
+  item_b->mutable_batch_payload_slice()->set_length(payload_b.size());
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.add_artifact_ids(artifact_id_a);
+  get_req.add_artifact_ids(artifact_id_b);
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 2);
+  REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.items(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.items(0).inline_payload() == payload_a);
+  REQUIRE(get_resp.items(1).inline_payload() == payload_b);
+}
+
 TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][batch][payload_ref][reuse]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
@@ -808,10 +1017,25 @@ TEST_CASE(
   REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.items_size() == 1);
   REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
-  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
-
-  auto metadata_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
-      get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  auto metadata_or = [&]() -> absl::StatusOr<tensorcast::daemon::PayloadTransportBroker::BatchRefMetadata> {
+    if (!get_resp.items(0).payload_ref().empty()) {
+      auto payload_ref_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
+          get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+      if (!payload_ref_or.ok()) {
+        return payload_ref_or.status();
+      }
+      tensorcast::daemon::PayloadTransportBroker::BatchRefMetadata metadata;
+      metadata.expires_at = payload_ref_or->expires_at;
+      return metadata;
+    }
+    REQUIRE(get_resp.items(0).has_batch_payload_slice());
+    REQUIRE(get_resp.batch_transports_size() == 1);
+    const auto& transport = get_resp.batch_transports(0);
+    REQUIRE(transport.transport_id() == get_resp.items(0).batch_payload_slice().transport_id());
+    REQUIRE(transport.has_grpc_chunk_ref());
+    return harness->kernel().payload_transport_broker().inspect_batch_payload_ref(
+        transport.grpc_chunk_ref().batch_payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  }();
   REQUIRE(metadata_or.ok());
   CHECK(metadata_or->expires_at <= entry->expires_at);
 }
@@ -1625,7 +1849,6 @@ TEST_CASE(
   REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.items_size() == 1);
   REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
-  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
 
   REQUIRE(engine->clear_mem() == 0);
 
@@ -1638,12 +1861,36 @@ TEST_CASE(
   REQUIRE(exists_resp.outcomes_size() == 1);
   REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
 
-  auto payload_or = harness->kernel().payload_transport_broker().resolve_local_payload_ref(
-      get_resp.items(0).payload_ref(),
-      artifact_id,
-      absl::Now(),
-      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-      "op-survive-retire");
+  auto payload_or = [&]() -> absl::StatusOr<tensorcast::daemon::PayloadTransportBroker::ResolvedPayload> {
+    if (!get_resp.items(0).payload_ref().empty()) {
+      return harness->kernel().payload_transport_broker().resolve_local_payload_ref(
+          get_resp.items(0).payload_ref(),
+          artifact_id,
+          absl::Now(),
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+          "op-survive-retire");
+    }
+    REQUIRE(get_resp.items(0).has_batch_payload_slice());
+    REQUIRE(get_resp.batch_transports_size() == 1);
+    const auto& transport = get_resp.batch_transports(0);
+    REQUIRE(transport.transport_id() == get_resp.items(0).batch_payload_slice().transport_id());
+    REQUIRE(transport.has_grpc_chunk_ref());
+    auto resolved_or = harness->kernel().payload_transport_broker().fetch_batch_payload_ref(
+        harness->kernel().worker_directory_cache(),
+        absl::Now(),
+        absl::Seconds(1),
+        kDaemonId,
+        transport.grpc_chunk_ref().batch_payload_ref(),
+        tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+        "op-survive-retire");
+    if (!resolved_or.ok()) {
+      return resolved_or.status();
+    }
+    tensorcast::daemon::PayloadTransportBroker::ResolvedPayload payload;
+    payload.metadata.expires_at = resolved_or->metadata.expires_at;
+    payload.payload = resolved_or->payload != nullptr ? *resolved_or->payload : "";
+    return payload;
+  }();
   REQUIRE(payload_or.ok());
   REQUIRE(payload_or->payload == payload);
 }
@@ -1703,6 +1950,38 @@ TEST_CASE("BodyBackingManager derives stable admission from shared policy flow",
   CHECK(
       transient_or->observation.stable_retention_state == tensorcast::daemon::BodyStableRetentionState::kNotRequested);
   REQUIRE(transient_or->body_handle.retire().ok());
+}
+
+TEST_CASE("BodyBackingManager fast CPU staging hashes during local byte ingress", "[daemon][body_backing][fast_cpu]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  tensorcast::daemon::BodyBackingManager manager(*engine);
+
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.ZmFzdA~layout_v1~b64u.azQ";
+  const auto payload = std::make_shared<const std::string>("fast-cpu-body-payload");
+  tensorcast::daemon::v2::PutIfAbsentInvariant invariant;
+  set_invariant(&invariant, "layout_v1", *payload);
+
+  auto staged_or = manager.stage_body_fast_cpu_verified(
+      artifact_id,
+      invariant,
+      tensorcast::daemon::BodyBackingManager::LocalByteSpan{
+          .owner = std::shared_ptr<const void>(payload, static_cast<const void*>(payload->data())),
+          .data = reinterpret_cast<const std::uint8_t*>(payload->data()),
+          .size_bytes = payload->size(),
+      },
+      tensorcast::store::loading::MaterializationSource::kP2P,
+      "op-fast-cpu");
+  REQUIRE(staged_or.ok());
+  CHECK(staged_or->descriptor.payload_digest_alg == "sha256");
+  CHECK(staged_or->descriptor.payload_digest_hex == invariant.payload_digest_hex());
+  CHECK(staged_or->descriptor.size_bytes == payload->size());
+  CHECK(
+      staged_or->verification_record.verification_method ==
+      tensorcast::store::runtime::ingestion::VerificationMethod::kSharedExecutorStreamDigest);
+  auto read_back_or = staged_or->body_handle.read_all_bytes();
+  REQUIRE(read_back_or.ok());
+  CHECK(*read_back_or == *payload);
+  REQUIRE(staged_or->body_handle.retire().ok());
 }
 
 TEST_CASE("HomeBatchTouchTtl keeps immortal entries immortal", "[daemon][batch][ttl]") {

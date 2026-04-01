@@ -37,6 +37,7 @@ enum class VerificationMethod : std::uint8_t {
   kSharedExecutorStreamDigest = 2,
   kRegistrationCommit = 3,
   kSealCommit = 4,
+  kLayoutAndSizeContract = 5,
 };
 
 struct ResolvedSourceDescriptor {

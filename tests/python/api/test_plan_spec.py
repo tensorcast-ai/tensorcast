@@ -426,7 +426,7 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
         ),
         artifact_selections=(
             common_pb2.ArtifactSelection(
-                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
                 logical_layout_hash=b"logical-a",
                 selection_hash=b"selection-a",
             ),
@@ -472,7 +472,7 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     )
     publish_outcome = publish_step.artifact_result.publish.put_outcomes.add()
     publish_outcome.artifact_id = (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
     )
     publish_outcome.status_code = "OK"
     publish_outcome.message = "created"
@@ -489,11 +489,11 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     )
     hydrate_outcome = hydrate_step.artifact_result.hydrate.get_outcomes.add()
     hydrate_outcome.artifact_id = (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
     )
     hydrate_outcome.status_code = "MISS"
     hydrate_step.artifact_result.hydrate.missing_artifact_ids.append(
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azI"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azI"
     )
 
     evict_step = response.steps.add(
@@ -505,7 +505,7 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     evict_step.artifact_result.evict_local.engine_request_id = "rid-123"
     evict_outcome = evict_step.artifact_result.evict_local.outcomes.add()
     evict_outcome.artifact_id = (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
     )
     evict_outcome.status_code = "OK"
 
@@ -526,7 +526,7 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     hydrate_result = result.steps["s3"].artifact_result
     assert isinstance(hydrate_result, HydrateResult)
     assert hydrate_result.missing_artifact_ids == (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azI",
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azI",
     )
     evict_result = result.steps["s4"].artifact_result
     assert isinstance(evict_result, BatchResult)

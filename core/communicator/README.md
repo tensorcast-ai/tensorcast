@@ -66,6 +66,12 @@ flowchart TB
 * **PinnedBufferPool & StreamingPinnedBuffer** — Shared pinned pools sourced from the daemon-wide `pinned_memory` authority (or internal defaults when constructed standalone).
 * **MrCache** — Per-protection-domain cache that reuses RDMA MRs for staged buffers to avoid repeated registrations.
 
+### RDMA Read Profiling Toggle
+
+- Fine-grained RDMA per-request profiling fields in `ReadResult` (`request_first_response_us` and `rdma_*`) are disabled by default to keep `read_tensor()` hot paths lean.
+- Enable them explicitly with `TENSORCAST_COMM_RDMA_READ_PROFILE=1` before process startup, or call `transport::ReadRequest::set_rdma_profile_enabled_for_process(true)` during process initialization.
+- `//core/communicator:communicator_bench_binary` keeps this toggle off by default; pass `--rdma-profile` when benchmark runs need detailed per-request RDMA timing fields.
+
 ### Topology Model (Pool / Endpoint / Link)
 
 The communicator now ships a topology model under `core/communicator/topology/` that captures *reachability* separately from the transport implementation:

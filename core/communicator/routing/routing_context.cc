@@ -116,9 +116,7 @@ std::string describe_binding(const EndpointBinding& binding) {
       binding.has_network_address() ? std::format("{}:{}", binding.ip, binding.port) : "none");
 }
 
-DevicePoolHint infer_device_pool_hint(
-    std::string_view endpoint_id,
-    const EndpointBinding& binding) {
+DevicePoolHint infer_device_pool_hint(std::string_view endpoint_id, const EndpointBinding& binding) {
   DevicePoolHint hint;
 
   if (const auto gpu_id = parse_gpu_dev_id_from_endpoint_id(endpoint_id); gpu_id.has_value() && *gpu_id >= 0) {
@@ -183,8 +181,7 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::Communicator::prim
     return primary_channel_;
   }
   primary_channel_.reset();
-  auto channel_or = context_->build_direct_channel_with_generation(
-      src_endpoint_id_, dst_endpoint_id_);
+  auto channel_or = context_->build_direct_channel_with_generation(src_endpoint_id_, dst_endpoint_id_);
   if (!channel_or.ok()) {
     return channel_or.status();
   }
@@ -251,8 +248,7 @@ absl::Status RoutingContext::update_endpoint_binding(EndpointBinding binding) {
   if (binding.endpoint_id.empty()) {
     return absl::InvalidArgumentError("endpoint binding id must be non-empty");
   }
-  return absl::FailedPreconditionError(
-      "endpoint bindings are immutable; update_endpoint_binding is not supported");
+  return absl::FailedPreconditionError("endpoint bindings are immutable; update_endpoint_binding is not supported");
 }
 
 absl::StatusOr<std::shared_ptr<RoutingContext::Communicator>> RoutingContext::get_communicator(
@@ -270,8 +266,8 @@ absl::StatusOr<std::shared_ptr<RoutingContext::Communicator>> RoutingContext::ge
       return existing;
     }
   }
-  auto communicator = std::shared_ptr<Communicator>(
-      new Communicator(src_endpoint_id, dst_endpoint_id, shared_from_this()));
+  auto communicator =
+      std::shared_ptr<Communicator>(new Communicator(src_endpoint_id, dst_endpoint_id, shared_from_this()));
   communicators_[key] = communicator;
   return communicator;
 }
@@ -308,8 +304,7 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
   return build_direct_channel_locked(src_endpoint_id, dst_endpoint_id);
 }
 
-absl::StatusOr<RoutingContext::ChannelBuildResult>
-RoutingContext::build_direct_channel_with_generation(
+absl::StatusOr<RoutingContext::ChannelBuildResult> RoutingContext::build_direct_channel_with_generation(
     const std::string& src_endpoint_id,
     const std::string& dst_endpoint_id) {
   absl::MutexLock lock(&mu_);
@@ -329,13 +324,11 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
 
   auto src_binding_it = bindings_.find(src_endpoint_id);
   if (src_binding_it == bindings_.end()) {
-    return absl::NotFoundError(
-        std::format("missing endpoint binding for source: {}", src_endpoint_id));
+    return absl::NotFoundError(std::format("missing endpoint binding for source: {}", src_endpoint_id));
   }
   auto dst_binding_it = bindings_.find(dst_endpoint_id);
   if (dst_binding_it == bindings_.end()) {
-    return absl::NotFoundError(
-        std::format("missing endpoint binding for destination: {}", dst_endpoint_id));
+    return absl::NotFoundError(std::format("missing endpoint binding for destination: {}", dst_endpoint_id));
   }
 
   const topology::Endpoint* src_endpoint = topology_->find_endpoint(src_endpoint_id);
@@ -352,27 +345,24 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
   }
 
   if (!link) {
-    auto rail_path_or = resolve_rail_matched_path_locked(
-        src_endpoint_id,
-        dst_endpoint_id,
-        local_binding,
-        remote_binding);
+    auto rail_path_or =
+        resolve_rail_matched_path_locked(src_endpoint_id, dst_endpoint_id, local_binding, remote_binding);
     if (!rail_path_or.ok()) {
       if (!src_endpoint) {
-        return absl::NotFoundError(std::format(
-            "source endpoint not found in topology and no rail-matched fallback: {}",
-            src_endpoint_id));
+        return absl::NotFoundError(
+            std::format("source endpoint not found in topology and no rail-matched fallback: {}", src_endpoint_id));
       }
       if (!dst_endpoint) {
-        return absl::NotFoundError(std::format(
-            "destination endpoint not found in topology and no rail-matched fallback: {}",
-            dst_endpoint_id));
+        return absl::NotFoundError(
+            std::format(
+                "destination endpoint not found in topology and no rail-matched fallback: {}", dst_endpoint_id));
       }
-      return absl::NotFoundError(std::format(
-          "no direct link or rail-matched fallback between endpoints: {} -> {} ({})",
-          src_endpoint_id,
-          dst_endpoint_id,
-          rail_path_or.status().message()));
+      return absl::NotFoundError(
+          std::format(
+              "no direct link or rail-matched fallback between endpoints: {} -> {} ({})",
+              src_endpoint_id,
+              dst_endpoint_id,
+              rail_path_or.status().message()));
     }
 
     RailMatchedPath rail_path = std::move(rail_path_or).value();
@@ -389,48 +379,26 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
 
   ConnectionProtocol protocol = ConnectionProtocol::kAuto;
   if (protocol_src_endpoint != nullptr && protocol_dst_endpoint != nullptr) {
-    protocol = select_protocol_locked(
-        *protocol_src_endpoint,
-        *protocol_dst_endpoint,
-        local_binding,
-        remote_binding);
+    protocol = select_protocol_locked(*protocol_src_endpoint, *protocol_dst_endpoint, local_binding, remote_binding);
   }
 
-  auto connection = get_or_create_connection_locked(
-      src_endpoint_id,
-      dst_endpoint_id,
-      link,
-      protocol,
-      local_binding,
-      remote_binding);
+  auto connection =
+      get_or_create_connection_locked(src_endpoint_id, dst_endpoint_id, link, protocol, local_binding, remote_binding);
   const bool same_node = !local_binding.node_id.empty() && local_binding.node_id == remote_binding.node_id;
-  const std::string_view path_kind =
-      used_rail_fallback
+  const std::string_view path_kind = used_rail_fallback
       ? "cross_node_rail_fallback"
       : (same_node ? (src_endpoint_id == dst_endpoint_id ? "same_node_loopback" : "local_fanout")
                    : "cross_node_direct");
-  LOG(INFO) << "[routing] route resolved: src=" << src_endpoint_id
-            << " dst=" << dst_endpoint_id
-            << " path=" << path_kind
-            << " protocol=" << to_string(protocol)
-            << " adapter=" << protocol_adapter_name(protocol)
-            << " link=" << (link == nullptr ? "none" : link->id)
-            << " link_type=" << to_string(connection->type())
-            << " local={" << describe_binding(local_binding) << "}"
+  LOG(INFO) << "[routing] route resolved: src=" << src_endpoint_id << " dst=" << dst_endpoint_id
+            << " path=" << path_kind << " protocol=" << to_string(protocol)
+            << " adapter=" << protocol_adapter_name(protocol) << " link=" << (link == nullptr ? "none" : link->id)
+            << " link_type=" << to_string(connection->type()) << " local={" << describe_binding(local_binding) << "}"
             << " remote={" << describe_binding(remote_binding) << "}";
   std::vector<std::shared_ptr<Connection>> hops;
   hops.push_back(connection);
 
-  std::string channel_id = std::format(
-      "{}->{}:{}",
-      src_endpoint_id,
-      dst_endpoint_id,
-      to_string(protocol));
-  return std::make_shared<RouteChannel>(
-      std::move(channel_id),
-      src_endpoint_id,
-      dst_endpoint_id,
-      std::move(hops));
+  std::string channel_id = std::format("{}->{}:{}", src_endpoint_id, dst_endpoint_id, to_string(protocol));
+  return std::make_shared<RouteChannel>(std::move(channel_id), src_endpoint_id, dst_endpoint_id, std::move(hops));
 }
 
 std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
@@ -443,8 +411,7 @@ std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
   ConnectionKey key{src_endpoint_id, dst_endpoint_id, protocol};
   auto it = connections_.find(key);
   if (it != connections_.end()) {
-    VLOG(1) << "[routing] reusing cached connection: src=" << src_endpoint_id
-            << " dst=" << dst_endpoint_id
+    VLOG(1) << "[routing] reusing cached connection: src=" << src_endpoint_id << " dst=" << dst_endpoint_id
             << " protocol=" << to_string(protocol);
     return it->second;
   }
@@ -467,12 +434,9 @@ std::shared_ptr<Connection> RoutingContext::get_or_create_connection_locked(
       std::move(link_state),
       async_runtime_);
   connections_.emplace(std::move(key), connection);
-  LOG(INFO) << "[routing] connection created: src=" << src_endpoint_id
-            << " dst=" << dst_endpoint_id
-            << " protocol=" << to_string(protocol)
-            << " adapter=" << protocol_adapter_name(protocol)
-            << " type=" << to_string(type)
-            << " link=" << (link == nullptr ? "none" : link->id);
+  LOG(INFO) << "[routing] connection created: src=" << src_endpoint_id << " dst=" << dst_endpoint_id
+            << " protocol=" << to_string(protocol) << " adapter=" << protocol_adapter_name(protocol)
+            << " type=" << to_string(type) << " link=" << (link == nullptr ? "none" : link->id);
   return connection;
 }
 
@@ -487,8 +451,7 @@ const topology::Link* RoutingContext::find_link_locked(
   return nullptr;
 }
 
-const topology::Link* RoutingContext::find_any_link_for_endpoint_locked(
-    const std::string& endpoint_id) const {
+const topology::Link* RoutingContext::find_any_link_for_endpoint_locked(const std::string& endpoint_id) const {
   const topology::Link* best = nullptr;
   for (const auto& [link_id, link] : topology_->links()) {
     if (link.src_endpoint_id != endpoint_id && link.dst_endpoint_id != endpoint_id) {
@@ -528,13 +491,11 @@ int RoutingContext::infer_nic_rail_id_locked(const std::string& nic_endpoint_id)
   return inferred_rail_id;
 }
 
-absl::StatusOr<RoutingContext::LocalNicSelection>
-RoutingContext::select_local_nic_for_source_locked(
+absl::StatusOr<RoutingContext::LocalNicSelection> RoutingContext::select_local_nic_for_source_locked(
     const std::string& src_endpoint_id,
     const EndpointBinding& src_binding) const {
   const topology::Endpoint* direct_endpoint = topology_->find_endpoint(src_endpoint_id);
-  if (direct_endpoint != nullptr &&
-      direct_endpoint->kind == topology::EndpointKind::kClient &&
+  if (direct_endpoint != nullptr && direct_endpoint->kind == topology::EndpointKind::kClient &&
       direct_endpoint->type == topology::EndpointType::kNic) {
     return LocalNicSelection{
         .endpoint = direct_endpoint,
@@ -545,8 +506,7 @@ RoutingContext::select_local_nic_for_source_locked(
   std::vector<const topology::Endpoint*> nic_candidates;
   nic_candidates.reserve(topology_->endpoints().size());
   for (const auto& [endpoint_id, endpoint] : topology_->endpoints()) {
-    if (endpoint.kind != topology::EndpointKind::kClient ||
-        endpoint.type != topology::EndpointType::kNic) {
+    if (endpoint.kind != topology::EndpointKind::kClient || endpoint.type != topology::EndpointType::kNic) {
       continue;
     }
     nic_candidates.push_back(&endpoint);
@@ -556,9 +516,7 @@ RoutingContext::select_local_nic_for_source_locked(
   }
 
   std::sort(
-      nic_candidates.begin(),
-      nic_candidates.end(),
-      [](const topology::Endpoint* lhs, const topology::Endpoint* rhs) {
+      nic_candidates.begin(), nic_candidates.end(), [](const topology::Endpoint* lhs, const topology::Endpoint* rhs) {
         return lhs->id < rhs->id;
       });
 
@@ -615,8 +573,7 @@ RoutingContext::select_local_nic_for_source_locked(
   }
 
   if (best_endpoint == nullptr) {
-    return absl::NotFoundError(
-        std::format("failed to resolve local NIC endpoint for source: {}", src_endpoint_id));
+    return absl::NotFoundError(std::format("failed to resolve local NIC endpoint for source: {}", src_endpoint_id));
   }
   return LocalNicSelection{
       .endpoint = best_endpoint,
@@ -649,8 +606,7 @@ absl::StatusOr<EndpointBinding> RoutingContext::select_remote_binding_for_rail_l
 
     const topology::Endpoint* candidate_endpoint = topology_->find_endpoint(binding.endpoint_id);
     int candidate_rail_id = binding.rail_id;
-    if (candidate_rail_id < 0 &&
-        candidate_endpoint != nullptr &&
+    if (candidate_rail_id < 0 && candidate_endpoint != nullptr &&
         candidate_endpoint->kind == topology::EndpointKind::kClient &&
         candidate_endpoint->type == topology::EndpointType::kNic) {
       candidate_rail_id = infer_nic_rail_id_locked(candidate_endpoint->id);
@@ -699,30 +655,26 @@ absl::StatusOr<EndpointBinding> RoutingContext::select_remote_binding_for_rail_l
       score += 5;
     }
 
-    candidates.push_back(RemoteCandidate{
-        .binding = &binding,
-        .score = score,
-    });
+    candidates.push_back(
+        RemoteCandidate{
+            .binding = &binding,
+            .score = score,
+        });
   }
 
   if (candidates.empty()) {
     if (dst_binding.has_network_address()) {
       return dst_binding;
     }
-    return absl::NotFoundError(std::format(
-        "no remote binding with network address for node: {}",
-        dst_binding.node_id));
+    return absl::NotFoundError(std::format("no remote binding with network address for node: {}", dst_binding.node_id));
   }
 
-  std::sort(
-      candidates.begin(),
-      candidates.end(),
-      [](const RemoteCandidate& lhs, const RemoteCandidate& rhs) {
-        if (lhs.score != rhs.score) {
-          return lhs.score > rhs.score;
-        }
-        return lhs.binding->endpoint_id < rhs.binding->endpoint_id;
-      });
+  std::sort(candidates.begin(), candidates.end(), [](const RemoteCandidate& lhs, const RemoteCandidate& rhs) {
+    if (lhs.score != rhs.score) {
+      return lhs.score > rhs.score;
+    }
+    return lhs.binding->endpoint_id < rhs.binding->endpoint_id;
+  });
   return *candidates.front().binding;
 }
 
@@ -732,12 +684,10 @@ absl::StatusOr<RoutingContext::RailMatchedPath> RoutingContext::resolve_rail_mat
     const EndpointBinding& src_binding,
     const EndpointBinding& dst_binding) const {
   if (src_binding.node_id.empty() || dst_binding.node_id.empty()) {
-    return absl::FailedPreconditionError(
-        "rail-matched routing requires node_id in both endpoint bindings");
+    return absl::FailedPreconditionError("rail-matched routing requires node_id in both endpoint bindings");
   }
   if (src_binding.node_id == dst_binding.node_id) {
-    return absl::FailedPreconditionError(
-        "rail-matched routing only applies to cross-node communication");
+    return absl::FailedPreconditionError("rail-matched routing only applies to cross-node communication");
   }
 
   auto local_nic_or = select_local_nic_for_source_locked(src_endpoint_id, src_binding);
@@ -746,9 +696,7 @@ absl::StatusOr<RoutingContext::RailMatchedPath> RoutingContext::resolve_rail_mat
   }
   const LocalNicSelection local_nic = std::move(local_nic_or).value();
   if (local_nic.endpoint == nullptr) {
-    return absl::NotFoundError(std::format(
-        "failed to resolve local NIC endpoint for source: {}",
-        src_endpoint_id));
+    return absl::NotFoundError(std::format("failed to resolve local NIC endpoint for source: {}", src_endpoint_id));
   }
 
   int preferred_rail_id = local_nic.rail_id;
@@ -774,12 +722,9 @@ absl::StatusOr<RoutingContext::RailMatchedPath> RoutingContext::resolve_rail_mat
     selected_link = find_any_link_for_endpoint_locked(local_nic.endpoint->id);
   }
 
-  LOG(INFO) << "[routing] rail fallback selected: src=" << src_endpoint_id
-            << " dst=" << dst_endpoint_id
-            << " local_nic=" << local_nic.endpoint->id
-            << " local_rail=" << local_nic.rail_id
-            << " preferred_rail=" << preferred_rail_id
-            << " remote_endpoint=" << remote_binding.endpoint_id
+  LOG(INFO) << "[routing] rail fallback selected: src=" << src_endpoint_id << " dst=" << dst_endpoint_id
+            << " local_nic=" << local_nic.endpoint->id << " local_rail=" << local_nic.rail_id
+            << " preferred_rail=" << preferred_rail_id << " remote_endpoint=" << remote_binding.endpoint_id
             << " remote_rail=" << remote_binding.rail_id
             << " link=" << (selected_link == nullptr ? "none" : selected_link->id);
   return RailMatchedPath{
@@ -802,27 +747,20 @@ ConnectionProtocol RoutingContext::select_protocol_locked(
     return ConnectionProtocol::kAuto;
   }
 
-  if (src_endpoint.type == topology::EndpointType::kNvlink &&
-      dst_endpoint.type == topology::EndpointType::kNvlink &&
-      options_.prefer_nvlink &&
-      nvlink_adapter_ &&
-      nvlink_adapter_->is_available()) {
+  if (src_endpoint.type == topology::EndpointType::kNvlink && dst_endpoint.type == topology::EndpointType::kNvlink &&
+      options_.prefer_nvlink && nvlink_adapter_ && nvlink_adapter_->is_available()) {
     return ConnectionProtocol::kNvlink;
   }
 
-  if (src_endpoint.type == topology::EndpointType::kPcie &&
-      dst_endpoint.type == topology::EndpointType::kPcie &&
-      options_.prefer_pcie &&
-      pcie_adapter_ &&
-      pcie_adapter_->is_available()) {
+  if (src_endpoint.type == topology::EndpointType::kPcie && dst_endpoint.type == topology::EndpointType::kPcie &&
+      options_.prefer_pcie && pcie_adapter_ && pcie_adapter_->is_available()) {
     return ConnectionProtocol::kPcie;
   }
 
   return ConnectionProtocol::kAuto;
 }
 
-std::shared_ptr<LinkState> RoutingContext::get_or_create_link_state_locked(
-    const topology::Link* link) {
+std::shared_ptr<LinkState> RoutingContext::get_or_create_link_state_locked(const topology::Link* link) {
   if (!link) {
     return nullptr;
   }
@@ -835,9 +773,7 @@ std::shared_ptr<LinkState> RoutingContext::get_or_create_link_state_locked(
   return state;
 }
 
-std::string RoutingContext::make_peer_key(
-    const std::string& src_endpoint_id,
-    const std::string& dst_endpoint_id) {
+std::string RoutingContext::make_peer_key(const std::string& src_endpoint_id, const std::string& dst_endpoint_id) {
   return std::format("{}->{}", src_endpoint_id, dst_endpoint_id);
 }
 

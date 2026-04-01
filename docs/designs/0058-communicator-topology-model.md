@@ -19,33 +19,44 @@ related_code:
 
 # Summary
 
-建立一套可组合、可搜索的通信拓扑模型，把“可达性”与“执行路径”解耦：
+Define a composable and searchable communication topology model that decouples
+"reachability" from "execution path":
 
-- 以 **Pool / Endpoint / Link** 结构化表达拓扑图。
-- 以 **Connection** 封装真实通信实现（RDMA/TCP/SHM 等）。
-- 以 **Channel / Communicator** 管理多跳路径、多路径并行与策略选择。
-- 引入 **Switch Endpoint / SW Link**，把交换结构压缩为可搜索的图结构，避免端到端组合爆炸。
+- use **Pool / Endpoint / Link** to express topology as a graph
+- use **Connection** to wrap executable transports (RDMA/TCP/SHM, etc.)
+- use **Channel / Communicator** to manage multi-hop paths, multipath parallelism,
+  and policy selection
+- introduce **Switch Endpoint / SW Link** to compress switching structures into a
+  searchable graph and avoid end-to-end combination explosion
 
-该模型为后续的 **multipath、拓扑选路、故障切换** 提供统一的数据结构与统计入口，并可在不重写现有传输层的前提下演进。
+This model provides a unified data structure and statistics entry point for
+future **multipath routing, topology-aware routing, and failover**, while
+allowing incremental adoption without rewriting the existing transport stack.
 
 # Goals / Non-Goals
 
 ## Goals
 
-- 明确表达“资源域 + 设备端点 + 链路”的拓扑关系，并可被路径搜索直接消费。
-- 用 Switch Endpoint / SW Link 把交换结构压缩进图模型，避免枚举式组合爆炸。
-- 在 Communicator 内引入“多路径 + 多跳”的抽象，支持基于统计的路径选择与故障切换。
-- 兼容现有 Communicator 传输实现与配置模型，允许渐进式迁移。
+- Represent topology relations as "resource domain + device endpoint + link" and
+  make them directly consumable by path search.
+- Compress switching structures into the graph via Switch Endpoint / SW Link
+  instead of pre-enumerating combinations.
+- Introduce "multipath + multi-hop" abstractions inside Communicator, with
+  stats-aware path selection and failover.
+- Stay compatible with existing Communicator transports and config model, and
+  support incremental migration.
 
 ## Non-Goals
 
-- 重写 RDMA/TCP/MTCP 传输实现或复制引擎。
-- 改变 P2P 选源策略（Global Store 的 replica 选择策略不在本设计范围）。
-- 在首版就实现跨节点的全局最优路由（首版以局部图、局部策略为主）。
+- Rewriting RDMA/TCP/MTCP transport implementations or copy engines.
+- Changing P2P source-selection policy (Global Store replica selection is out
+  of scope for this design).
+- Delivering global optimal cross-node routing in v1 (v1 focuses on local
+  graphs and local policies).
 
 # Architecture & Interfaces
 
-## 分层结构
+## Layered Model
 
 ```mermaid
 flowchart TB
@@ -54,130 +65,173 @@ flowchart TB
   Link --> Connection[Connection]
   Connection --> Channel[Channel]
   Channel --> Communicator[Communicator]
-  Switch["Switch Endpoint"] --- Link
+  Switch[Switch Endpoint] --- Link
 ```
 
-- **Topology 表达层**：`Pool / Endpoint / Link` 表达可达性与结构。
-- **执行层**：`Connection` 封装真实传输（RDMA/TCP/SHM 等）。
-- **调度复用层**：`Channel / Communicator` 管理多跳路径与策略选择。
+- **Topology expression layer**: `Pool / Endpoint / Link` represent structure
+  and reachability.
+- **Execution layer**: `Connection` wraps executable transport objects
+  (RDMA/TCP/SHM, etc.).
+- **Scheduling and reuse layer**: `Channel / Communicator` manage multi-hop
+  paths and policy selection.
 
-## Phase 2 包装层细化
+## Phase 2 Wrapper Refinement
 
-Phase 2 在不改动现有数据面行为的前提下，引入 routing 包装层把 Topology 映射到现有通信实现：
+Phase 2 introduces a routing wrapper layer that maps Topology to existing
+communication execution without changing current data-plane behavior:
 
-- **RoutingContext**：持有 `Topology` 与 `EndpointBinding`（node id / IP / port / device ids），生成 src→dst 的路由 Communicator。
-- **RouteChannel**：表达一条路径（Phase 2 仅支持 direct 1-hop；多 hop 返回 `UNIMPLEMENTED`）。
-- **ConnectionAdapter**：封装执行层适配；`EngineAdapter` 复用 `engine::Communicator`，`NvlinkAdapter` 作为占位实现。
-- **Stats/Health**：`ConnectionStats` / `LinkStats` 记录成功/失败/时延/最后错误，并派生 `HealthState` 供后续路由。
+- **RoutingContext**: holds `Topology` and `EndpointBinding`
+  (`node_id / ip / port / device_ids`) and builds routed communicators for
+  `src -> dst`.
+- **RouteChannel**: represents one route path (Phase 2 supports direct 1-hop
+  only; multi-hop returns `UNIMPLEMENTED`).
+- **ConnectionAdapter**: execution adapter wrapper; `EngineAdapter` reuses
+  `engine::Communicator`, and `NvlinkAdapter` is a placeholder implementation.
+- **Stats/Health**: `ConnectionStats` / `LinkStats` track success/failure/
+  latency/last_error and derive `HealthState` for later routing decisions.
 
-NVLINK 选择规则：同节点 + NVLINK endpoints + adapter available → NVLINK，否则回退到 `AUTO`（engine 路径）。该包装层尚未接入 P2P 读路径，Phase 4 统一接入。
+NVLINK selection rule: same-node + NVLINK endpoints + available adapter implies
+NVLINK path; otherwise fall back to `AUTO` (engine path). This wrapper is not
+yet wired into the P2P read path and will be integrated in Phase 4.
 
-## 对象模型（字段语义）
+## Object Model (Field Semantics)
 
-### Pool（资源域）
-- 作用：描述资源归属与上下文（CPU/GPU/NUMA 等），为端点提供亲和与策略边界。
-- 关键字段：
-  - `type`：CPU / GPU
+### Pool (Resource Domain)
+
+- Role: describes resource ownership and context (CPU/GPU/NUMA), and provides
+  affinity and policy boundaries for endpoints.
+- Key fields:
+  - `type`: CPU / GPU
   - `uuid`
   - `endpoint_list`
 
-### Endpoint（传输端点）
-- 作用：通信单边实体；承载设备能力与拓扑属性。
-- 类型：
-  - **Client Endpoint**：真实设备端点（NIC/PCIe/NVLink）。
-  - **Switch Endpoint**：仅用于路径搜索的抽象交换节点。
-- 关键字段：
-  - `type`：NIC / PCIE / NVLINK + Client 或 Switch
-  - `pool_ids`
-    - NIC/PCIE：至少包含一个 CPU pool + 一个 GPU pool
-    - NVLINK：仅包含 GPU pools（CPU pool 为空）
-    - Switch：不绑定任何 pool
-  - `name` / `uuid`
-  - `bw`（用于路径打分与 striping 权重）
-  - `communicators_map`：`{ dst: [communicator_list] }`
-  - `link_list`：从该端点出发的 Link
-  - （可选）`buffer_manager` / `channel_list`
+### Endpoint (Transfer Endpoint)
 
-### Link（拓扑边）
-- 作用：拓扑图上的“可达性边”；服务于路径搜索，而非直接等同真实连接。
-- 关键字段：
+- Role: one-side communication entity carrying device capability and topology
+  attributes.
+- Types:
+  - **Client Endpoint**: concrete device endpoint (NIC/PCIe/NVLink).
+  - **Switch Endpoint**: abstract switch node used only by path search.
+- Key fields:
+  - `type`: NIC / PCIE / NVLINK + Client or Switch
+  - `pool_ids`
+    - NIC/PCIE: at least one CPU pool + one GPU pool
+    - NVLINK: GPU pools only (empty CPU pool)
+    - Switch: no pool binding
+  - `name` / `uuid`
+  - `bw` (path scoring and striping weight)
+  - `communicators_map`: `{ dst: [communicator_list] }`
+  - `link_list`: outgoing links from this endpoint
+  - (optional) `buffer_manager` / `channel_list`
+
+### Link (Topology Edge)
+
+- Role: reachability edge in the topology graph; used by path search and not
+  equivalent to a concrete connection object.
+- Key fields:
   - `name` / `uuid`
   - `bw` / `latency`
   - `src_endpoint` / `dst_endpoint`
-  - `type`：`FORWARD / P2P / SW`
-  - `connections`：`{ dst: { proto: connection } }`
+  - `type`: `FORWARD / P2P / SW`
+  - `connections`: `{ dst: { proto: connection } }`
 
-### Connection（真实连接封装）
-- 作用：可执行的通信通道封装（协议 + 端点 + 实现对象）。
-- 关键字段：
-  - `type`：`POOL_FWD / P2P / SW`
-  - `proto`：SHM / RDMA / TCP / ...
+### Connection (Executable Connection Wrapper)
+
+- Role: executable communication wrapper (protocol + endpoints + implementation
+  object).
+- Key fields:
+  - `type`: `POOL_FWD / P2P / SW`
+  - `proto`: SHM / RDMA / TCP / ...
   - `src_endpoint` / `dst_endpoint`
-  - `link_list`：多跳时的实际 Link 列表
-  - `comm_method`：具体通信实现对象（QP / socket / ring）
-  - `mct_map`：`{ msg_size: mct }`
+  - `link_list`: concrete link list for multi-hop
+  - `comm_method`: concrete implementation object (QP / socket / ring)
+  - `mct_map`: `{ msg_size: mct }`
 
-### Channel（路径）
-- 作用：从 src 到 dst 的一条具体路径（多跳 Connection 序列）。
-- 关键字段：
+### Channel (Path)
+
+- Role: one concrete path from source to destination (a sequence of Connection
+  hops).
+- Key fields:
   - `uuid`
   - `src_endpoint` / `dst_endpoint`
-  - `hop_list`：`[connection0, connection1, ...]`
+  - `hop_list`: `[connection0, connection1, ...]`
 
-### Communicator（点到点聚合）
-- 作用：一个 src ↔ dst 对之间的通信能力聚合，管理多条 Channel。
-- 关键字段：
+### Communicator (Point-to-Point Aggregation)
+
+- Role: communication-capability aggregation for one `src <-> dst` pair,
+  managing multiple channels.
+- Key fields:
   - `uuid`
   - `src_endpoint` / `dst_endpoint`
   - `channel_list`
-  - `mct_map`：`{ channel: { msg_size: mct } }`
+  - `mct_map`: `{ channel: { msg_size: mct } }`
 
-## Switch Endpoint / SW Link 的作用
+## Why Switch Endpoint / SW Link
 
-交换结构（PCIe switch、NVSwitch、网络交换机、bond/team 等）会导致端到端路径组合爆炸。引入 Switch Endpoint / SW Link 后：
+Switching structures (PCIe switch, NVSwitch, network switch, bond/team, etc.)
+otherwise trigger end-to-end path explosion. With Switch Endpoint / SW Link:
 
-- 拓扑以图形式表达，路径搜索在图上进行。
-- Link 代表可达性与属性，不再提前枚举所有端到端组合。
-- SW Link 下可挂多个 Connection，用于表达“同一拓扑边的多种实现”。
+- topology is represented as a graph and searched directly
+- links represent reachability and attributes without pre-enumerating all
+  endpoint pairs
+- one SW link can host multiple connections to represent multiple
+  implementations on the same topology edge
 
-# Multipath / Topology Routing / Failover 支撑
+# Multipath / Topology Routing / Failover Support
 
-该模型原生支持后续 TODO：
+This model natively supports future work:
 
-1. **Multipath**：Communicator 管理多条 Channel，可基于 `mct_map` 做 striping 和权重选择。
-2. **拓扑选路**：路径搜索可用 BW/latency/拥塞/失败率等作为代价函数，支持 k-shortest 或多约束搜索。
-3. **故障切换**：Link/Connection 健康状态变化时，路径搜索可回避故障边，并在 Communicator 中切换 Channel。
-4. **统计闭环**：`mct_map` 作为 per-connection / per-channel 成本缓存，配合 runtime 统计形成自适应路由。
+1. **Multipath**: Communicator manages multiple channels and can perform
+   striping and weighted selection via `mct_map`.
+2. **Topology-aware routing**: path search can use BW/latency/congestion/failure
+   rate as cost functions (k-shortest or constrained search).
+3. **Failover**: path search can avoid degraded edges and switch channels when
+   link/connection health changes.
+4. **Stats feedback loop**: `mct_map` acts as per-connection/per-channel cost
+   cache and can be combined with runtime stats for adaptive routing.
 
 # Error Model & Invariants
 
-- 图必须是可连通的（src/dst 至少存在一条可达路径）。
-- Switch Endpoint 只参与路径搜索，不直接承载传输对象。
-- Connection 的生命周期与底层传输对象一致，连接不可用应及时从路径候选集中剔除。
-- 路由选择失败必须降级：回退到单路径或现有默认直连策略。
+- The graph must remain connected (at least one reachable path for each
+  `src/dst` pair).
+- Switch Endpoint participates in path search only and does not carry transfer
+  objects directly.
+- Connection lifecycle must stay aligned with underlying transport object
+  lifecycle; unavailable connections must be removed from candidate paths in
+  time.
+- Routing selection failure must degrade safely to single path or existing
+  default direct-connection policy.
 
 # Schema Changes (if any)
 
-无。
+None.
 
 # Naming Compliance
 
-- 类/结构体（PascalCase）：`Pool`、`Endpoint`、`Link`、`Connection`、`Channel`、`Communicator`。
-- 函数/方法（snake_case）：`build_topology`、`find_channels`、`select_channel`、`update_mct`。
-- 常量/枚举（ALL_CAPS）：`SW_LINK`、`P2P_LINK`、`FORWARD_LINK`。
+- Classes/structs (PascalCase): `Pool`, `Endpoint`, `Link`, `Connection`,
+  `Channel`, `Communicator`.
+- Functions/methods (snake_case): `build_topology`, `find_channels`,
+  `select_channel`, `update_mct`.
+- Constants/enums (ALL_CAPS): `SW_LINK`, `P2P_LINK`, `FORWARD_LINK`.
 
 # Trade-offs & Risks
 
-- **复杂度增加**：引入拓扑图与路径搜索，需要严格的可视化与可观测性支撑。
-- **配置负担**：需要新的拓扑配置结构，必须提供兼容映射与默认生成策略。
-- **运行时开销**：路径搜索与统计更新需要边界控制（缓存、周期更新）。
+- **Higher complexity**: adding graph modeling and path search requires strong
+  observability and visualization support.
+- **Configuration overhead**: a new topology config structure is required and
+  must provide compatibility mapping and default generation.
+- **Runtime overhead**: path search and stats updates require bounded control
+  (cache and periodic refresh).
 
 # Compatibility & Acceptance Criteria
 
-- 现有 `Communicator::read_tensor` 等调用保持可用，默认行为不退化。
-- 新拓扑模型可在单机和多机环境下建立可达路径并找到至少一条 Channel。
-- 在模拟故障（断链、握手失败）下，路径可自动切换且不导致全局崩溃。
-- 统计数据可持续更新，并在路径选择中可见生效。
+- Existing calls such as `Communicator::read_tensor` remain available, with no
+  default behavior regression.
+- The new topology model can build reachable paths on both single-host and
+  multi-host environments and find at least one channel.
+- Under simulated failures (link down, handshake failure), route switching
+  works without global crash.
+- Stats continue to update and are visibly consumed by path selection.
 
 # References
 

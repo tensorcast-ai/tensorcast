@@ -16,6 +16,8 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/capability_token.h"
+#include "core/store/communication_types.h"
+#include "core/store/components/communication_manager.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "daemon/service/body_backing_types.h"
 #include "daemon/service/byte_artifact_body_handle.h"
@@ -42,6 +44,15 @@ class PayloadTransportBroker {
     std::uint64_t max_chunk_bytes{1ULL << 20};
     absl::Duration fetch_deadline{absl::Seconds(5)};
     absl::Duration cleanup_interval{absl::Minutes(1)};
+    std::uint64_t max_batch_payload_bytes{16ULL << 20};
+    std::uint32_t max_batch_items{256};
+    std::uint64_t max_batch_stage_bytes_per_peer{128ULL << 20};
+    std::uint32_t batch_transport_protocol_version{2};
+    bool communicator_source_enabled{true};
+    bool host_memory_export_enabled{true};
+    absl::Duration minimum_batch_transport_ttl{absl::Milliseconds(250)};
+    absl::Duration transport_release_guard{absl::Seconds(1)};
+    std::shared_ptr<store::components::CommunicationManager> comm_manager;
     std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials;
     DaemonOptions::InterDaemonGrpcSecurity inter_daemon_grpc_security{};
   };
@@ -61,6 +72,35 @@ class PayloadTransportBroker {
   struct ResolvedPayload {
     RefMetadata metadata;
     std::string payload;
+  };
+
+  struct BatchRefMetadata {
+    std::string issuer_daemon_id;
+    std::string transport_id;
+    std::string manifest_digest_hex;
+    std::string consumer_daemon_id;
+    std::uint64_t payload_size{0};
+    tensorcast::common::v1::PayloadRefDirection direction{tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED};
+    std::string operation_id;
+    absl::Time expires_at{absl::InfinitePast()};
+  };
+
+  struct ResolvedBatchPayload {
+    BatchRefMetadata metadata;
+    std::shared_ptr<const std::string> payload;
+    bool remote{false};
+  };
+
+  struct BatchCommunicatorExport {
+    BatchRefMetadata metadata;
+    std::string batch_payload_ref;
+    store::ExportRegistration export_registration;
+  };
+
+  struct BatchPayloadSource {
+    BatchRefMetadata metadata;
+    std::shared_ptr<store::loader::SeekableSource> source;
+    bool remote{false};
   };
 
   struct PayloadLoader {
@@ -113,8 +153,29 @@ class PayloadTransportBroker {
       std::string_view operation_id = "",
       absl::Time capability_expires_at = absl::InfiniteFuture());
 
+  [[nodiscard]] absl::StatusOr<std::string> issue_batch_payload_ref(
+      const v2::BatchPayloadManifest& manifest,
+      std::shared_ptr<const std::string> payload,
+      tensorcast::common::v1::PayloadRefDirection direction,
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture(),
+      std::string_view consumer_daemon_id = "");
+
+  [[nodiscard]] absl::StatusOr<BatchCommunicatorExport> issue_batch_payload_communicator_export(
+      const v2::BatchPayloadManifest& manifest,
+      std::shared_ptr<const std::string> payload,
+      tensorcast::common::v1::PayloadRefDirection direction,
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture(),
+      std::string_view consumer_daemon_id = "");
+
   [[nodiscard]] absl::StatusOr<RefMetadata> inspect_payload_ref(
       std::string_view payload_ref,
+      absl::Time now,
+      bool require_not_expired) const;
+
+  [[nodiscard]] absl::StatusOr<BatchRefMetadata> inspect_batch_payload_ref(
+      std::string_view batch_payload_ref,
       absl::Time now,
       bool require_not_expired) const;
 
@@ -183,6 +244,41 @@ class PayloadTransportBroker {
           tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
       std::string_view expected_operation_id = "");
 
+  struct BatchPayloadChunk {
+    BatchRefMetadata metadata;
+    std::string chunk;
+    bool eof{false};
+  };
+
+  [[nodiscard]] absl::StatusOr<BatchPayloadChunk> read_local_batch_payload_ref_chunk(
+      std::string_view batch_payload_ref,
+      absl::Time now,
+      std::uint64_t offset,
+      std::uint64_t max_bytes,
+      tensorcast::common::v1::PayloadRefDirection expected_direction =
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
+      std::string_view expected_operation_id = "");
+
+  [[nodiscard]] absl::StatusOr<ResolvedBatchPayload> fetch_batch_payload_ref(
+      WorkerDirectoryCache& worker_directory_cache,
+      absl::Time now,
+      absl::Duration worker_directory_staleness_budget,
+      std::string_view local_daemon_id,
+      std::string_view batch_payload_ref,
+      tensorcast::common::v1::PayloadRefDirection expected_direction =
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
+      std::string_view expected_operation_id = "");
+
+  [[nodiscard]] absl::StatusOr<BatchPayloadSource> open_batch_payload_communicator_source(
+      WorkerDirectoryCache& worker_directory_cache,
+      absl::Time now,
+      absl::Duration worker_directory_staleness_budget,
+      std::string_view local_daemon_id,
+      const v2::BatchPayloadTransport& transport,
+      tensorcast::common::v1::PayloadRefDirection expected_direction =
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_UNSPECIFIED,
+      std::string_view expected_operation_id = "");
+
   [[nodiscard]] absl::StatusOr<RoutedAuthorityRequest> build_payload_ref_issuer_routed_request(
       const RefMetadata& metadata,
       const FrontDoorCredentialContext& front_door_context,
@@ -201,6 +297,27 @@ class PayloadTransportBroker {
 
   [[nodiscard]] absl::Duration fetch_deadline() const {
     return options_.fetch_deadline;
+  }
+
+  [[nodiscard]] bool batch_transport_enabled() const {
+    return options_.batch_transport_protocol_version != 0;
+  }
+
+  [[nodiscard]] bool batch_transport_communicator_enabled() const {
+    return options_.batch_transport_protocol_version >= 2 && options_.communicator_source_enabled &&
+        options_.host_memory_export_enabled && options_.comm_manager != nullptr && options_.comm_manager->is_enabled();
+  }
+
+  [[nodiscard]] std::uint32_t batch_transport_protocol_version() const {
+    return options_.batch_transport_protocol_version;
+  }
+
+  [[nodiscard]] std::uint64_t max_batch_payload_bytes() const {
+    return options_.max_batch_payload_bytes;
+  }
+
+  [[nodiscard]] std::uint32_t max_batch_items() const {
+    return options_.max_batch_items;
   }
 
   [[nodiscard]] absl::StatusOr<OwnerStageReply> route_authority_stage(
@@ -232,6 +349,19 @@ class PayloadTransportBroker {
     SessionLifecycleManager::LeaseId lease_id{0};
   };
 
+  struct BatchRecord {
+    BatchRefMetadata metadata;
+    v2::BatchPayloadManifest manifest;
+    std::shared_ptr<const std::string> payload;
+    std::optional<store::ExportRegistration> communicator_export;
+    SessionLifecycleManager::LeaseId lease_id{0};
+  };
+
+  struct LocalResolvedBatchPayload {
+    BatchRefMetadata metadata;
+    std::shared_ptr<const std::string> payload;
+  };
+
   [[nodiscard]] absl::StatusOr<LocalResolvedPayload> resolve_local_payload_ref_record(
       std::string_view payload_ref,
       std::string_view expected_artifact_id,
@@ -258,6 +388,11 @@ class PayloadTransportBroker {
       const FrontDoorCredentialContext& front_door_context,
       absl::Time now,
       absl::Duration worker_directory_staleness_budget);
+  [[nodiscard]] absl::StatusOr<LocalResolvedBatchPayload> resolve_local_batch_payload_ref_record(
+      std::string_view batch_payload_ref,
+      absl::Time now,
+      tensorcast::common::v1::PayloadRefDirection expected_direction,
+      std::string_view expected_operation_id);
   [[nodiscard]] FrontDoorCredentialContext build_payload_ref_front_door_context(
       const RefMetadata& metadata,
       std::string_view payload_ref,
@@ -274,6 +409,7 @@ class PayloadTransportBroker {
   mutable absl::Mutex mu_;
   mutable absl::BitGen bitgen_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, Record> records_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, BatchRecord> batch_records_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon

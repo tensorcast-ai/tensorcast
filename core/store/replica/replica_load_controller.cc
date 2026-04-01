@@ -1503,6 +1503,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
             absl::Status exec_status;
             std::string actual_executor = requested_executor;
             std::string runtime_fallback_reason;
+            auto transfer_fanout_executor = self->async_runtime_->cpu_executor();
             if (collective_disk_load.has_value()) {
               auto collective_result = try_collective_disk_load(
                   CollectiveDiskLoadRequest{
@@ -1527,7 +1528,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                     target_location,
                     *source,
                     concurrency,
-                    self->async_runtime_->blocking_executor(),
+                    transfer_fanout_executor.copy(),
                     gpu_ptr,
                     gpu_allocation,
                     device_id);
@@ -1557,7 +1558,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                     target_location,
                     *source,
                     concurrency,
-                    self->async_runtime_->blocking_executor(),
+                    transfer_fanout_executor.copy(),
                     gpu_ptr,
                     gpu_allocation,
                     device_id);
@@ -1568,7 +1569,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                   target_location,
                   *source,
                   concurrency,
-                  self->async_runtime_->blocking_executor(),
+                  transfer_fanout_executor.copy(),
                   gpu_ptr,
                   gpu_allocation,
                   device_id);

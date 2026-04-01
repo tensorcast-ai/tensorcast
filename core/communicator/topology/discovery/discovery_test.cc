@@ -14,13 +14,13 @@
 namespace {
 
 using tensorcast::communicator::topology::Topology;
-using tensorcast::communicator::topology::discovery::LldpParseOptions;
 using tensorcast::communicator::topology::discovery::build_topology_from_discovery;
 using tensorcast::communicator::topology::discovery::build_topology_from_discovery_with_observability;
+using tensorcast::communicator::topology::discovery::LldpParseOptions;
 using tensorcast::communicator::topology::discovery::load_lldp_records_by_nic;
 using tensorcast::communicator::topology::discovery::load_nvlink_snapshot;
-using tensorcast::communicator::topology::discovery::parse_nvlink_runtime_probe_outputs;
 using tensorcast::communicator::topology::discovery::NvlinkSnapshotOptions;
+using tensorcast::communicator::topology::discovery::parse_nvlink_runtime_probe_outputs;
 using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::communicator::v1::NvlinkDiscoveryConfig;
 
@@ -54,9 +54,7 @@ CommunicatorConfig make_simple_numa_config() {
   return config;
 }
 
-std::vector<std::string> endpoint_pool_ids(
-    const Topology& topology,
-    const std::string& endpoint_id) {
+std::vector<std::string> endpoint_pool_ids(const Topology& topology, const std::string& endpoint_id) {
   const auto* endpoint = topology.find_endpoint(endpoint_id);
   if (endpoint == nullptr) {
     return {};
@@ -128,9 +126,7 @@ TEST_CASE("NVLINK runtime parser extracts GPU edges from topology matrix", "[com
       "Legend:\n";
 
   auto snapshot_or = parse_nvlink_runtime_probe_outputs(
-      gpu_query_output,
-      topology_matrix_output,
-      NvlinkSnapshotOptions{.strict = true});
+      gpu_query_output, topology_matrix_output, NvlinkSnapshotOptions{.strict = true});
   REQUIRE(snapshot_or.ok());
   const auto& snapshot = snapshot_or.value();
   REQUIRE(snapshot.gpus.size() == 3);
@@ -144,9 +140,7 @@ TEST_CASE("NVLINK runtime parser extracts GPU edges from topology matrix", "[com
   CHECK(snapshot.edges[1].link_count == 1);
 }
 
-TEST_CASE(
-    "NVLINK runtime parser strips ANSI topology header sequences",
-    "[communicator][topology][discovery]") {
+TEST_CASE("NVLINK runtime parser strips ANSI topology header sequences", "[communicator][topology][discovery]") {
   const std::string gpu_query_output =
       "0, GPU-0\n"
       "1, GPU-1\n"
@@ -164,9 +158,7 @@ TEST_CASE(
       "Legend:\n";
 
   auto snapshot_or = parse_nvlink_runtime_probe_outputs(
-      gpu_query_output,
-      topology_matrix_output,
-      NvlinkSnapshotOptions{.strict = true});
+      gpu_query_output, topology_matrix_output, NvlinkSnapshotOptions{.strict = true});
   REQUIRE(snapshot_or.ok());
   const auto& snapshot = snapshot_or.value();
   REQUIRE(snapshot.gpus.size() == 4);
@@ -322,9 +314,7 @@ TEST_CASE("Host topology builder supports NVLINK runtime probe source", "[commun
   CHECK(topology.find_link("nvlink_GPU-2_to_nvlink_GPU-1") != nullptr);
 }
 
-TEST_CASE(
-    "Host topology builder infers NIC GPU affinity from PCI paths",
-    "[communicator][topology][discovery]") {
+TEST_CASE("Host topology builder infers NIC GPU affinity from PCI paths", "[communicator][topology][discovery]") {
   CommunicatorConfig config = make_simple_numa_config();
   auto* discovery = config.mutable_topology_discovery();
   discovery->set_enable(true);

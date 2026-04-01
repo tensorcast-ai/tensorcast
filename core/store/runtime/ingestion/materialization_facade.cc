@@ -4144,13 +4144,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return init_spb_status;
   }
   loader::StreamingBufferAdapter adapter(session_spb);
+  loader::PumpDebugStats pump_debug_stats;
   auto pump_status = loader::pump_ranges(
       **mapped_or,
       sink,
       adapter,
       absl::MakeSpan(ranges),
       concurrency,
-      config_.runtime_context->async_runtime()->blocking_executor());
+      config_.runtime_context->async_runtime()->blocking_executor(),
+      &pump_debug_stats);
   if (!pump_status.ok()) {
     return absl::DataLossError(
         absl::StrCat("materialize_mapped_loader_into_target pump failed: ", pump_status.message()));
@@ -4171,6 +4173,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       .source_ordered = false,
       .dominant_executor = "MappedLoaderTargetExecutor",
       .selection_reason = "mapped_loader_target",
+      .debug_stats =
+          loading::MaterializeIntoTargetResult::DebugStats{
+              .produced_chunks = pump_debug_stats.produced_chunks,
+              .produced_bytes = pump_debug_stats.produced_bytes,
+              .source_read_at_us_total = pump_debug_stats.source_read_at_us_total,
+              .gpu_write_wait_us_total = pump_debug_stats.gpu_write_wait_us_total,
+              .gpu_write_bytes_total = pump_debug_stats.gpu_write_bytes_total,
+          },
   };
 }
 

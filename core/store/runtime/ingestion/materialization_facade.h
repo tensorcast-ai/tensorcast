@@ -145,6 +145,16 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind);
 
+  absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
+      std::string_view logical_artifact_id,
+      std::string_view physical_artifact_id,
+      const DeviceKey& target_device,
+      const loading::ReplicaTarget& target,
+      std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+
   absl::StatusOr<ArtifactLoweringResult> execute_artifact_lowering_plan(ArtifactLoweringPlan plan);
 
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
@@ -237,16 +247,6 @@ class MaterializationFacade : public materialization::control::MaterializationBa
 
   absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan(
       const materialization::runtime::pipeline::IngestionContext& ctx) const;
-
-  absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
-      std::string_view logical_artifact_id,
-      std::string_view physical_artifact_id,
-      const DeviceKey& target_device,
-      const loading::ReplicaTarget& target,
-      std::unique_ptr<IArtifactLoader> loader,
-      const loader::ByteRangeMap& mapping,
-      const loading::MaterializeHints& hints,
-      loading::MaterializationSource source_kind);
 
   std::string make_request_id(std::string_view prefix);
   [[nodiscard]] IngestionStartedEvent make_started_event(

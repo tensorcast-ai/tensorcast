@@ -154,12 +154,7 @@ TEST_CASE("NvlinkAdapter copies local GPU tensor across devices", "[communicator
   REQUIRE(tensorcast::cuda::memcpy(src_gpu, host_source.data(), bytes, cudaMemcpyHostToDevice).ok());
 
   auto register_status = engine->register_tensor_ex(
-      "gpu_tensor",
-      reinterpret_cast<uint64_t>(src_gpu),
-      bytes,
-      COMMUNICATE_ENGINE_DEV_GPU,
-      0,
-      no_mr_opts());
+      "gpu_tensor", reinterpret_cast<uint64_t>(src_gpu), bytes, COMMUNICATE_ENGINE_DEV_GPU, 0, no_mr_opts());
   REQUIRE(register_status.ok());
 
   ReadRequest request;

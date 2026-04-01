@@ -91,7 +91,7 @@ absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> BodyHandle::make_loader(
   return backing_->engine->open_local_replica_loader(backing_->replica_handle.key(), location());
 }
 
-absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::size_t bytes) const {
+absl::Status BodyHandle::read_into_range(std::uint64_t offset, void* dst, std::size_t bytes) const {
   if (empty()) {
     return absl::FailedPreconditionError("BodyHandle is empty");
   }
@@ -99,8 +99,11 @@ absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::si
     return absl::OutOfRangeError("BodyHandle offset exceeds payload size");
   }
   const std::size_t to_read = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, backing_->size_bytes - offset));
+  if (to_read != bytes) {
+    return absl::OutOfRangeError("BodyHandle read exceeds payload size");
+  }
   if (to_read == 0) {
-    return std::string();
+    return absl::OkStatus();
   }
 
   auto loader_or = make_loader();
@@ -116,14 +119,37 @@ absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::si
     return source_or.status();
   }
 
+  std::size_t copied = 0;
+  while (copied < to_read) {
+    auto read_or = (**source_or).read_at(offset + copied, static_cast<char*>(dst) + copied, to_read - copied);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    if (*read_or == 0) {
+      return absl::DataLossError("BodyHandle source terminated before requested range");
+    }
+    copied += *read_or;
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::size_t bytes) const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  if (offset > backing_->size_bytes) {
+    return absl::OutOfRangeError("BodyHandle offset exceeds payload size");
+  }
+  const std::size_t to_read = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, backing_->size_bytes - offset));
+  if (to_read == 0) {
+    return std::string();
+  }
+
   std::string payload;
   payload.resize(to_read);
-  auto read_or = (**source_or).read_at(offset, payload.data(), payload.size());
-  if (!read_or.ok()) {
-    return read_or.status();
-  }
-  if (*read_or != payload.size()) {
-    return absl::DataLossError("BodyHandle source terminated before requested range");
+  auto read_status = read_into_range(offset, payload.data(), payload.size());
+  if (!read_status.ok()) {
+    return read_status;
   }
   return payload;
 }

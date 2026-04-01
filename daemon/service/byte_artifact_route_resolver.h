@@ -71,8 +71,10 @@ class ByteArtifactRouteResolver {
 
   [[nodiscard]] absl::StatusOr<HomeLeaseDecision> ensure_home_lease(const v2::RouteFence& fence, absl::Time now);
 
+  void keepalive_owned_shard_leases_once(absl::Time now);
+
  private:
-  [[nodiscard]] absl::StatusOr<bool> is_expected_shard_home_owner(
+  [[nodiscard]] absl::StatusOr<std::string> expected_shard_home_owner_daemon_id(
       std::uint64_t shard_id,
       const store::components::RpcOptions& rpc_options) const;
 
@@ -89,7 +91,6 @@ class ByteArtifactRouteResolver {
   void cache_route_from_lease(
       std::uint64_t shard_id,
       const store::components::ShardHomeLeaseDescriptor& lease,
-      bool acquired,
       absl::Time now);
 
   ByteArtifactRuntimeState& state_;

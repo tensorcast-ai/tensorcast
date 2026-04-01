@@ -22,6 +22,10 @@ class WorkerDirectoryCache {
   struct Entry {
     std::string daemon_id;
     std::string worker_id;
+    std::string node_id;
+    std::string node_address;
+    uint32_t grpc_port{0};
+    uint32_t p2p_port{0};
     std::string address;
     uint64_t capability_flags{0};
   };
@@ -48,6 +52,11 @@ class WorkerDirectoryCache {
       absl::Duration staleness_budget);
 
   [[nodiscard]] absl::StatusOr<std::string> resolve_daemon_address(
+      std::string_view daemon_id,
+      absl::Time now,
+      absl::Duration staleness_budget);
+
+  [[nodiscard]] absl::StatusOr<Entry> resolve_daemon_entry(
       std::string_view daemon_id,
       absl::Time now,
       absl::Duration staleness_budget);

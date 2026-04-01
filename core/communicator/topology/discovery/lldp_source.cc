@@ -34,10 +34,8 @@ absl::StatusOr<LldpNicRecord> parse_lldp_line(const std::string& line, int line_
 
   const size_t first_comma = value.find(',');
   const size_t second_comma = value.find(',', first_comma == std::string::npos ? first_comma : first_comma + 1);
-  if (first_comma == std::string::npos || second_comma == std::string::npos ||
-      second_comma + 1 >= value.size()) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("line ", line_no, ": expected '<pci_bdf>,<nic_name>,<rail_id>'"));
+  if (first_comma == std::string::npos || second_comma == std::string::npos || second_comma + 1 >= value.size()) {
+    return absl::InvalidArgumentError(absl::StrCat("line ", line_no, ": expected '<pci_bdf>,<nic_name>,<rail_id>'"));
   }
 
   record.pci_bdf = std::string(absl::StripAsciiWhitespace(value.substr(0, first_comma)));
@@ -78,9 +76,7 @@ absl::Status handle_parse_error(const absl::Status& status, bool strict) {
 
 } // namespace
 
-absl::StatusOr<std::vector<LldpNicRecord>> load_lldp_records(
-    const std::string& file_path,
-    LldpParseOptions options) {
+absl::StatusOr<std::vector<LldpNicRecord>> load_lldp_records(const std::string& file_path, LldpParseOptions options) {
   std::ifstream input(file_path);
   if (!input.good()) {
     return absl::NotFoundError(absl::StrCat("LLDP file not found: ", file_path));
@@ -117,16 +113,17 @@ absl::StatusOr<std::vector<LldpNicRecord>> load_lldp_records(
       continue;
     }
 
-    const absl::Status conflict = absl::InvalidArgumentError(absl::StrCat(
-        "line ",
-        line_no,
-        ": conflicting LLDP entries for nic '",
-        record.nic_name,
-        "' (existing rail=",
-        it->second.rail_id,
-        ", new rail=",
-        record.rail_id,
-        ")"));
+    const absl::Status conflict = absl::InvalidArgumentError(
+        absl::StrCat(
+            "line ",
+            line_no,
+            ": conflicting LLDP entries for nic '",
+            record.nic_name,
+            "' (existing rail=",
+            it->second.rail_id,
+            ", new rail=",
+            record.rail_id,
+            ")"));
     absl::Status conflict_status = handle_parse_error(conflict, options.strict);
     if (!conflict_status.ok()) {
       return conflict_status;

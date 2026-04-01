@@ -426,6 +426,14 @@ Status StoreDaemonServiceImpl::FetchPayloadRefChunk(
   return transport_controller_->fetch_payload_ref_chunk(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::FetchBatchPayloadRefChunk(
+    grpc::ServerContext* ctx,
+    const v2::FetchBatchPayloadRefChunkRequest* req,
+    v2::FetchBatchPayloadRefChunkResponse* resp) {
+  RpcContext rctx{"FetchBatchPayloadRefChunk", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->fetch_batch_payload_ref_chunk(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::RouteAuthorityStage(
     grpc::ServerContext* ctx,
     const v2::RouteAuthorityStageRequest* req,

@@ -302,6 +302,23 @@ message DaemonConfig {
       uint64 max_chunk_bytes = 2;
       google.protobuf.Duration fetch_deadline = 3;
       google.protobuf.Duration cleanup_interval = 4;
+      // Max slab size for a single batch payload transport object.
+      uint64 max_batch_payload_bytes = 5;
+      // Max artifact count packed into one batch payload transport object.
+      uint32 max_batch_items = 6;
+      // Best-effort cap for locally staged batch slabs per remote peer.
+      uint64 max_batch_stage_bytes_per_peer = 7;
+      // 0 disables batch-native payload transport; 1 enables grpc_chunk_ref v1;
+      // 2 enables communicator_source v2 with grpc_chunk_ref fallback.
+      optional uint32 batch_transport_protocol_version = 8;
+      // Enable communicator_source export for batch-native payload transport.
+      optional bool communicator_source_enabled = 9;
+      // Enable host-memory export when serving communicator_source packs.
+      optional bool host_memory_export_enabled = 10;
+      // Optional stricter floor for remaining transport TTL at issue time.
+      google.protobuf.Duration minimum_batch_transport_ttl = 11;
+      // Optional grace window kept after the nominal expiry before release.
+      google.protobuf.Duration transport_release_guard = 12;
     }
 
     // Stable shard count for shard_id derivation.

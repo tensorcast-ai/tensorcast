@@ -3,10 +3,16 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
+#include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/body_backing_manager.h"
@@ -19,6 +25,7 @@
 #include "daemon/state/persistence_manager.h"
 #include "daemon/state/worker_directory_cache.h"
 #include "daemon/state/worker_identity_store.h"
+#include "folly/executors/CPUThreadPoolExecutor.h"
 #include "grpcpp/security/credentials.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -40,6 +47,7 @@ class ByteArtifactController {
 
     Routing routing{};
     bool gateway_ingress_enabled{false};
+    std::uint32_t batch_get_apply_threads{0};
   };
 
   struct Dep {
@@ -50,6 +58,7 @@ class ByteArtifactController {
     ExternalTargetAccessService& external_target_access_service;
     WorkerIdentityStore& identity_store;
     store::StoreEngine& engine;
+    common::AsyncRuntime& async_runtime;
     PersistenceManager* persistence_manager{nullptr};
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials;
@@ -89,6 +98,35 @@ class ByteArtifactController {
       v2::HomeBatchTouchTtlResponse& resp);
 
  private:
+  struct PeerBatchTransportSupport {
+    std::uint32_t protocol_version{0};
+    bool grpc_chunk_ref_enabled{false};
+    bool communicator_source_enabled{false};
+    bool host_memory_export_enabled{false};
+
+    [[nodiscard]] bool supports_v1() const {
+      return protocol_version >= 1 && grpc_chunk_ref_enabled;
+    }
+
+    [[nodiscard]] bool supports_v2() const {
+      return protocol_version >= 2 && communicator_source_enabled && host_memory_export_enabled;
+    }
+  };
+
+  struct PeerBatchTransportSupportCacheEntry {
+    PeerBatchTransportSupport support;
+    absl::Time expires_at{absl::UnixEpoch()};
+    bool refresh_in_flight{false};
+  };
+
+  struct PeerBatchTransportSupportAwaitContext {
+    const ByteArtifactController* self{nullptr};
+    const std::string* daemon_id{nullptr};
+  };
+
+  [[nodiscard]] static bool is_peer_batch_transport_support_refresh_complete(
+      const PeerBatchTransportSupportAwaitContext* ctx) ABSL_NO_THREAD_SAFETY_ANALYSIS;
+
   void reconcile_policy_visibility(
       const std::vector<std::string>& artifact_ids,
       const ByteArtifactAuthorityService::Context& context) const;
@@ -101,10 +139,21 @@ class ByteArtifactController {
       const ByteArtifactAuthorityService::Context& context,
       std::string_view operation_id) const;
 
+  [[nodiscard]] PeerBatchTransportSupport local_batch_transport_support() const;
+  [[nodiscard]] PeerBatchTransportSupport resolve_peer_batch_transport_support(
+      std::string_view daemon_id,
+      absl::Time now,
+      bool* cache_hit = nullptr) const;
+
   Dep d_;
   ByteArtifactAuthorityService authority_service_;
   BodyBackingManager body_backing_manager_;
   Options options_;
+  std::unique_ptr<folly::CPUThreadPoolExecutor> batch_get_apply_pool_;
+  std::uint32_t batch_get_apply_threads_{0};
+  mutable absl::Mutex peer_batch_transport_support_cache_mu_;
+  mutable absl::flat_hash_map<std::string, PeerBatchTransportSupportCacheEntry> peer_batch_transport_support_cache_
+      ABSL_GUARDED_BY(peer_batch_transport_support_cache_mu_);
 };
 
 } // namespace tensorcast::daemon

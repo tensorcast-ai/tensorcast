@@ -151,6 +151,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
           .external_target_access_service = *external_target_access_service,
           .identity_store = kernel->worker_identity_store(),
           .engine = kernel->engine(),
+          .async_runtime = kernel->async_runtime(),
           .persistence_manager = kernel->persistence_manager(),
           .global_store_client = global_store_client,
           .inter_daemon_channel_credentials = kernel->inter_daemon_channel_credentials(),
@@ -225,6 +226,17 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .start_time = kernel->start_time(),
       .local_handle_socket_path = options.local_handle_socket_path,
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
+      .batch_transport_protocol_version =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version,
+      .batch_payload_grpc_chunk_ref_enabled =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version > 0,
+      .batch_payload_communicator_source_enabled =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
+          options.byte_artifact_routing.payload_transport.communicator_source_enabled,
+      .batch_payload_host_memory_export_enabled =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
+          options.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+      .max_batch_payload_bytes = options.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
       .startup_coordinator = startup_coordinator,
       .worker_directory_cache = kernel->worker_directory_cache(),
       .instance_execution_directory_cache = kernel->instance_execution_directory_cache(),

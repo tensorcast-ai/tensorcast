@@ -17,7 +17,8 @@ namespace {
 
 constexpr int kCgidMinLength = 8;
 constexpr int kCgidMaxLength = 200;
-constexpr int kByteArtifactSegmentCount = 6;
+constexpr int kLegacyByteArtifactSegmentCount = 6;
+constexpr int kByteArtifactSegmentCount = 7;
 constexpr absl::string_view kB64uPrefix = "b64u.";
 
 bool is_ascii(absl::string_view value) {
@@ -87,10 +88,14 @@ absl::StatusOr<std::vector<absl::string_view>> split_byte_artifact_segments(absl
   }
   const absl::string_view suffix = artifact_id.substr(kCgidPrefix.size());
   std::vector<absl::string_view> segments = absl::StrSplit(suffix, '~');
-  if (segments.size() != kByteArtifactSegmentCount || segments[0] != kByteArtifactCgidNamespace) {
+  if ((segments.size() != kLegacyByteArtifactSegmentCount && segments.size() != kByteArtifactSegmentCount) ||
+      segments[0] != kByteArtifactCgidNamespace) {
     return absl::InvalidArgumentError(
         "byte artifact cgid must match "
-        "\"cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>\"");
+        "\"cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~"
+        "<layout_id>~<engine_key_enc>\" or "
+        "\"cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~"
+        "<model_version_enc>~<layout_id>~<engine_key_enc>\"");
   }
   for (const auto segment : segments) {
     if (!is_delimiter_safe_segment(segment)) {
@@ -132,8 +137,15 @@ absl::StatusOr<ByteArtifactCgidParts> parse_byte_artifact_cgid(absl::string_view
   out.namespace_name = std::string(segments[1]);
   out.engine = std::string(segments[2]);
   out.model_id_enc = std::string(segments[3]);
-  out.layout_id = std::string(segments[4]);
-  out.engine_key_enc = std::string(segments[5]);
+  if (segments.size() == kLegacyByteArtifactSegmentCount) {
+    out.model_version_enc = "";
+    out.layout_id = std::string(segments[4]);
+    out.engine_key_enc = std::string(segments[5]);
+  } else {
+    out.model_version_enc = std::string(segments[4]);
+    out.layout_id = std::string(segments[5]);
+    out.engine_key_enc = std::string(segments[6]);
+  }
   return out;
 }
 

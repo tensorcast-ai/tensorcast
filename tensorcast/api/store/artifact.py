@@ -190,6 +190,18 @@ def _build_subset_view_spec_proto(
     return proto
 
 
+def _extract_cached_mapping_artifact_id(value: object) -> str | None:
+    current = value
+    while isinstance(current, tuple):
+        if not current:
+            return None
+        current = current[0]
+    if current is None:
+        return None
+    resolved = str(current).strip()
+    return resolved or None
+
+
 @dataclass(frozen=True, slots=True)
 class PrefetchedReplica:
     artifact_id: str
@@ -2637,8 +2649,8 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                artifact_id, _disk_path = runtime.resolve_key_mapping_cached(
-                    key=self._key_hint
+                artifact_id = _extract_cached_mapping_artifact_id(
+                    runtime.resolve_key_mapping_cached(key=self._key_hint)
                 )
                 if not artifact_id:
                     raise ArtifactError(

@@ -58,6 +58,16 @@ struct MaterializeIntoTargetResult {
   bool source_ordered{false};
   std::string dominant_executor;
   std::string selection_reason;
+
+  struct DebugStats {
+    std::uint64_t produced_chunks{0};
+    std::uint64_t produced_bytes{0};
+    std::uint64_t source_read_at_us_total{0};
+    std::uint64_t gpu_write_wait_us_total{0};
+    std::uint64_t gpu_write_bytes_total{0};
+  };
+
+  std::optional<DebugStats> debug_stats;
 };
 
 struct IntoTargetStorage {

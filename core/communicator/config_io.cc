@@ -177,16 +177,15 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
   }
 
   // Handle boolean defaults that require presence checks on the original JSON
-  if (!(config_json->is_object()
-        && config_json->contains("stager") && (*config_json)["stager"].contains("stage_cpu_for_rdma"))) {
+  if (!(config_json->is_object() && config_json->contains("stager") &&
+        (*config_json)["stager"].contains("stage_cpu_for_rdma"))) {
     cfg.mutable_stager()->set_stage_cpu_for_rdma(true);
   }
-  if (!(config_json->is_object()
-        && config_json->contains("topology_discovery")
-        && (*config_json)["topology_discovery"].is_object()
-        && (*config_json)["topology_discovery"].contains("merge_policy")
-        && (*config_json)["topology_discovery"]["merge_policy"].is_object()
-        && (*config_json)["topology_discovery"]["merge_policy"].contains("emit_rail_switch_endpoints"))) {
+  if (!(config_json->is_object() && config_json->contains("topology_discovery") &&
+        (*config_json)["topology_discovery"].is_object() &&
+        (*config_json)["topology_discovery"].contains("merge_policy") &&
+        (*config_json)["topology_discovery"]["merge_policy"].is_object() &&
+        (*config_json)["topology_discovery"]["merge_policy"].contains("emit_rail_switch_endpoints"))) {
     cfg.mutable_topology_discovery()->mutable_merge_policy()->set_emit_rail_switch_endpoints(true);
   }
 

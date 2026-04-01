@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -19,6 +21,9 @@ namespace tensorcast::daemon {
 
 class ByteArtifactBodyStore {
  public:
+  static constexpr std::chrono::milliseconds kMaintenanceInterval{500};
+  static constexpr std::size_t kMaintenanceBatchSize{32};
+
   struct EntrySnapshot {
     BodyDescriptor descriptor;
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
@@ -53,6 +58,8 @@ class ByteArtifactBodyStore {
   };
 
   explicit ByteArtifactBodyStore(ByteArtifactRuntimeState& state);
+
+  void run_maintenance_once(std::size_t max_candidates = kMaintenanceBatchSize);
 
   [[nodiscard]] bool exists(
       std::string_view artifact_id,
