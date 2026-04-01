@@ -28,7 +28,8 @@ related_code:
 links:
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0113-step3p5-closure-and-sot-convergence.md
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -70,6 +71,12 @@ The main correction is:
 - remove workspace-driven canonical backfill,
 - and make the serving realization subject explicit and first-class.
 
+Execution-policy note:
+
+- `0112` owns shipped public ingress and same-binding correctness,
+- while active execution-policy rollout and TP startup convergence now track
+  through `0114` plan.
+
 # Implementation Status
 
 As of `2026-03-28`, the repository has landed the main repo-local contract
@@ -110,8 +117,19 @@ That shipped scope is explicit:
 - and `BindingRealizationPlan` is the public work-item-list contract that the
   repo now ships.
 
-The remaining work after this design closeout is performance work, not
-semantic blocker work.
+The remaining work after this design closeout is primarily execution-model
+convergence, performance, and delete-gate work, not shipped-correctness blocker
+work.
+
+In particular:
+
+- `0112` closed the correctness path for binding-native same-binding serving
+  startup,
+- but it did not attempt to make the source-bound realization path
+  `collective-first`,
+- and follow-on architecture work may still tighten how the shared runtime
+  strategy trunk should consume `BindingRealizationPlan` and
+  `RepresentationWorkPlan`.
 
 That remaining work is now tracked only in the `0113` closure design/plan.
 

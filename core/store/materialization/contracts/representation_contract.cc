@@ -90,6 +90,8 @@ std::string_view work_item_kind_name(RepresentationWorkItemKind kind) {
       return "scalar_broadcast_fill";
     case RepresentationWorkItemKind::kConstFill:
       return "const_fill";
+    case RepresentationWorkItemKind::kPadFill:
+      return "pad_fill";
   }
   return "tensor_copy";
 }
@@ -260,6 +262,14 @@ bool byte_range_map_equal(const loader::ByteRangeMap& lhs, const loader::ByteRan
     }
   }
   return true;
+}
+
+uint64_t byte_range_map_covered_bytes(const loader::ByteRangeMap& map) {
+  uint64_t total = 0;
+  for (const auto& segment : map.segments) {
+    total += segment.length;
+  }
+  return total;
 }
 
 std::string hash_serialized_payload(std::string_view version, const std::string& serialized) {
@@ -467,6 +477,96 @@ absl::StatusOr<uint64_t> slice_size_bytes(const RepresentationTensorSpec& spec, 
     total += span.length;
   }
   return total;
+}
+
+absl::Status add_spans_to_covered_ranges(
+    const std::vector<ByteSpan>& spans,
+    std::vector<std::pair<uint64_t, uint64_t>>* covered_ranges) {
+  if (covered_ranges == nullptr) {
+    return absl::InvalidArgumentError("covered range output must not be null");
+  }
+  for (const auto& span : spans) {
+    if (span.length == 0) {
+      continue;
+    }
+    covered_ranges->push_back({span.offset, span.offset + span.length});
+  }
+  return absl::OkStatus();
+}
+
+absl::Status validate_no_overlap_with_ranges(
+    const std::vector<std::pair<uint64_t, uint64_t>>& covered_ranges,
+    const loader::ByteRangeMap& map,
+    std::string_view map_name) {
+  if (map.segments.empty()) {
+    return absl::OkStatus();
+  }
+  for (const auto& segment : map.segments) {
+    if (segment.length == 0) {
+      continue;
+    }
+    const uint64_t begin = segment.dst_offset;
+    const uint64_t end = segment.dst_offset + segment.length;
+    for (const auto& range : covered_ranges) {
+      if (range.second <= begin || end <= range.first) {
+        continue;
+      }
+      return absl::FailedPreconditionError(absl::StrCat("typed work overlaps ", map_name, " coverage"));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status validate_work_plan_residual_coverage(const RepresentationWorkPlan& plan) {
+  std::vector<std::pair<uint64_t, uint64_t>> covered_ranges;
+  for (const auto& item : plan.items) {
+    switch (item.kind) {
+      case RepresentationWorkItemKind::kTensorCopy:
+      case RepresentationWorkItemKind::kConcatAssemble:
+      case RepresentationWorkItemKind::kScalarBroadcastFill:
+        for (const auto& source : item.sources) {
+          auto spans_or = build_coordinate_byte_spans(item.dst_spec, source.fragment.destination_range);
+          if (!spans_or.ok()) {
+            return spans_or.status();
+          }
+          auto status = add_spans_to_covered_ranges(*spans_or, &covered_ranges);
+          if (!status.ok()) {
+            return status;
+          }
+        }
+        break;
+      case RepresentationWorkItemKind::kConstFill:
+        if (!item.fill_rule.has_value()) {
+          return absl::InvalidArgumentError("const fill work item requires fill_rule");
+        }
+        {
+          auto spans_or = build_coordinate_byte_spans(item.dst_spec, item.fill_rule->destination_range);
+          if (!spans_or.ok()) {
+            return spans_or.status();
+          }
+          auto status = add_spans_to_covered_ranges(*spans_or, &covered_ranges);
+          if (!status.ok()) {
+            return status;
+          }
+        }
+        break;
+      case RepresentationWorkItemKind::kPadFill: {
+        auto overlap_status = validate_no_overlap_with_ranges(covered_ranges, item.byte_range_map, "typed work");
+        if (!overlap_status.ok()) {
+          return overlap_status;
+        }
+        for (const auto& segment : item.byte_range_map.segments) {
+          if (segment.length == 0) {
+            continue;
+          }
+          covered_ranges.push_back({segment.dst_offset, segment.dst_offset + segment.length});
+        }
+      } break;
+      case RepresentationWorkItemKind::kResidualByteRange:
+        break;
+    }
+  }
+  return validate_no_overlap_with_ranges(covered_ranges, plan.residual_fallback_map, "residual_fallback_map");
 }
 
 bool coordinate_less(const TensorCoordinateSpec& lhs, const TensorCoordinateSpec& rhs) {
@@ -1170,11 +1270,22 @@ absl::StatusOr<RepresentationWorkPlan> build_representation_work_plan(const Repr
     RepresentationWorkItem residual_item;
     residual_item.kind = RepresentationWorkItemKind::kResidualByteRange;
     residual_item.partition_kind = WorkPartitionKind::kUnknown;
-    residual_item.committed_bytes = plan.residual_fallback_map.total_bytes;
+    residual_item.byte_range_map = plan.residual_fallback_map;
+    residual_item.committed_bytes = byte_range_map_covered_bytes(plan.residual_fallback_map);
     plan.items.push_back(std::move(residual_item));
   }
 
+  auto coverage_status = validate_work_plan_residual_coverage(plan);
+  if (!coverage_status.ok()) {
+    return coverage_status;
+  }
   return plan;
+}
+
+bool RepresentationWorkItem::operator==(const RepresentationWorkItem& other) const {
+  return kind == other.kind && partition_kind == other.partition_kind && dst_name == other.dst_name &&
+      dst_spec == other.dst_spec && sources == other.sources && fill_rule == other.fill_rule &&
+      byte_range_map_equal(byte_range_map, other.byte_range_map) && committed_bytes == other.committed_bytes;
 }
 
 bool RepresentationWorkPlan::operator==(const RepresentationWorkPlan& other) const {

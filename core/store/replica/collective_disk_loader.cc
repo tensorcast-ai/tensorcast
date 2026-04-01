@@ -121,15 +121,6 @@ bool verbose_mapped_concat_diagnostics(const StrategyConfig& strategy) {
   return strategy.diagnostics_verbosity == StrategyConfig::DiagnosticsVerbosity::kVerbose;
 }
 
-bool byte_range_map_has_pad_segments(const loader::ByteRangeMap& map) {
-  for (const auto& segment : map.segments) {
-    if (segment.kind == loader::ByteRangeSegment::Kind::kPad && segment.length > 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool sync_after_single_range_concat_job(const StrategyConfig& strategy) {
   return strategy.sync_after_single_range_concat_job;
 }
@@ -398,6 +389,7 @@ struct ParsedMappedParticipant {
   int device_id{-1};
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
   RepresentationWorkPlan work_plan;
+  loader::ByteRangeMap collective_lane_map;
   loading::IntoTargetLayout target_layout;
   std::vector<TargetStorageSpan> storage_spans;
 };
@@ -2243,12 +2235,12 @@ absl::StatusOr<std::vector<MappedSegmentRef>> build_mapped_segment_refs(
     const std::vector<ParsedMappedParticipant>& participants) {
   std::vector<MappedSegmentRef> segments;
   for (const auto& participant : participants) {
-    if (participant.work_plan.residual_fallback_map.num_sources != 1) {
+    if (participant.collective_lane_map.num_sources != 1) {
       return absl::InvalidArgumentError("mapped collective load requires mapping.num_sources == 1");
     }
-    for (const auto& segment : participant.work_plan.residual_fallback_map.segments) {
+    for (const auto& segment : participant.collective_lane_map.segments) {
       if (segment.kind != loader::ByteRangeSegment::Kind::kData) {
-        return absl::UnimplementedError("mapped collective load does not support pad segments");
+        return absl::InvalidArgumentError("mapped collective load requires data-only collective lane map");
       }
       if (segment.source_index != 0) {
         return absl::InvalidArgumentError("mapped collective load requires source_index == 0");
@@ -4808,6 +4800,7 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
       .device_id = request.device_id,
       .disk_context = request.disk_context,
       .work_plan = request.representation_work_plan,
+      .collective_lane_map = request.collective_lane_map,
       .target_layout = request.target_layout,
       .storage_spans = std::move(*storage_spans_or),
   };
@@ -4950,25 +4943,19 @@ CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
     const CollectiveMappedTargetLoadOptions& options) {
   if (request.group.world_size <= 1 || request.device_id < 0 || request.disk_context == nullptr ||
       request.target_layout.storages.empty() ||
-      (request.representation_work_plan.items.empty() &&
-       request.representation_work_plan.residual_fallback_map.total_bytes == 0) ||
+      (request.representation_work_plan.items.empty() && request.collective_lane_map.total_bytes == 0) ||
       request.artifact_id.empty()) {
     LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id << " reason=request_incomplete"
               << " world_size=" << request.group.world_size << " device_id=" << request.device_id
               << " disk_context=" << (request.disk_context != nullptr)
               << " storages=" << request.target_layout.storages.size()
-              << " map_bytes=" << request.representation_work_plan.residual_fallback_map.total_bytes
+              << " map_bytes=" << request.collective_lane_map.total_bytes
               << " artifact_id=" << (!request.artifact_id.empty());
     return {.handled = false, .status = absl::OkStatus()};
   }
   if (!request.disk_context->is_safetensors()) {
     LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id
               << " reason=non_safetensors_source";
-    return {.handled = false, .status = absl::OkStatus()};
-  }
-  if (byte_range_map_has_pad_segments(request.representation_work_plan.residual_fallback_map)) {
-    LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id
-              << " reason=pad_segments_not_supported";
     return {.handled = false, .status = absl::OkStatus()};
   }
   return wait_for_mapped_group_and_maybe_execute(request, pinned_pool, pinned_timeout, options);

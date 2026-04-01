@@ -33,6 +33,7 @@ from tensorcast.types import (
     PartialSealResult,
     PublicDiskSourceHandle,
     ServingRuntimePolicyInput,
+    SourceBoundPlanDiagnostics,
     coerce_serving_runtime_policy,
 )
 
@@ -656,6 +657,13 @@ class Binding:
     def last_execution_diagnostics(self) -> ExecutionDiagnostics | None:
         diagnostics = getattr(self._slot, "last_execution_diagnostics", None)
         return diagnostics if isinstance(diagnostics, ExecutionDiagnostics) else None
+
+    @property
+    def last_source_bound_plan_diagnostics(self) -> SourceBoundPlanDiagnostics | None:
+        diagnostics = getattr(self._slot, "last_source_bound_plan_diagnostics", None)
+        return (
+            diagnostics if isinstance(diagnostics, SourceBoundPlanDiagnostics) else None
+        )
 
     def swap(
         self,

@@ -376,19 +376,6 @@ TEST_CASE("representation work plan preserves normalized residual fallback accou
   RepresentationTransformContract contract;
   contract.source_byte_space = canonical_byte_space();
   contract.target_representation.family = "ephemeral_into_target";
-  contract.tensor_bindings = {
-      RepresentationTensorBinding{
-          .dst_name = "copied",
-          .dst_spec = make_tensor_spec("copied", 0, 8, {4}, {1}),
-          .op_kind = BindingOpKind::kExactCopy,
-          .sources = {SourceFragment{
-              .source_spec = make_tensor_spec("copied", 0, 8, {4}, {1}),
-              .source_range = full_range(),
-              .destination_range = full_range(),
-              .role = SourceFragmentRole::kDefault,
-          }},
-      },
-  };
   contract.residual_fallback_map = loader::ByteRangeMap{
       .total_bytes = 8,
       .num_sources = 1,
@@ -433,10 +420,48 @@ TEST_CASE("representation work plan preserves normalized residual fallback accou
 
   auto plan_or = build_representation_work_plan(*normalized_or);
   REQUIRE(plan_or.ok());
-  REQUIRE(plan_or->items.size() == 2);
+  REQUIRE(plan_or->items.size() == 1);
   CHECK(plan_or->items.back().kind == RepresentationWorkItemKind::kResidualByteRange);
   CHECK(plan_or->items.back().committed_bytes == 8);
-  CHECK(plan_or->committed_bytes == 8);
+  CHECK(plan_or->committed_bytes == 0);
+}
+
+TEST_CASE("representation work plan rejects residual overlap with typed work", "[representation_contract]") {
+  RepresentationTransformContract contract;
+  contract.source_byte_space = canonical_byte_space();
+  contract.target_representation.family = "ephemeral_into_target";
+  contract.tensor_bindings = {
+      RepresentationTensorBinding{
+          .dst_name = "copied",
+          .dst_spec = make_tensor_spec("copied", 0, 8, {4}, {1}),
+          .op_kind = BindingOpKind::kExactCopy,
+          .sources = {SourceFragment{
+              .source_spec = make_tensor_spec("copied", 0, 8, {4}, {1}),
+              .source_range = full_range(),
+              .destination_range = full_range(),
+              .role = SourceFragmentRole::kDefault,
+          }},
+      },
+  };
+  contract.residual_fallback_map = loader::ByteRangeMap{
+      .total_bytes = 8,
+      .num_sources = 1,
+      .segments =
+          {
+              loader::ByteRangeSegment{
+                  .kind = loader::ByteRangeSegment::Kind::kData,
+                  .dst_offset = 0,
+                  .length = 8,
+                  .src_offset = 0,
+                  .source_index = 0,
+              },
+          },
+  };
+
+  auto normalized_or = normalize_representation_transform_contract(std::move(contract));
+  REQUIRE(normalized_or.ok());
+  auto plan_or = build_representation_work_plan(*normalized_or);
+  REQUIRE_FALSE(plan_or.ok());
 }
 
 } // namespace tensorcast::store::materialization::contracts

@@ -43,6 +43,7 @@ from tensorcast.types import (
     ExecutionDiagnostics,
     PublicDiskSourceHandle,
     ServingRuntimePolicy,
+    SourceBoundPlanDiagnostics,
 )
 
 if TYPE_CHECKING:
@@ -260,6 +261,22 @@ def _execution_diagnostics_from_response(
     return ExecutionDiagnostics.from_proto(diagnostics_proto)
 
 
+def _source_bound_plan_diagnostics_from_response(
+    response: object,
+) -> SourceBoundPlanDiagnostics | None:
+    diagnostics_proto = getattr(response, "source_bound_plan_diagnostics", None)
+    if diagnostics_proto is None:
+        return None
+    has_field = getattr(response, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field("source_bound_plan_diagnostics"):
+                return None
+        except ValueError:
+            pass
+    return SourceBoundPlanDiagnostics.from_proto(diagnostics_proto)
+
+
 class OwnedBindingSlot:
     """Stable, daemon-owned CUDA layout that can be refilled in-place."""
 
@@ -316,6 +333,9 @@ class OwnedBindingSlot:
         self._dirty = False
         self._closed = False
         self._last_execution_diagnostics: ExecutionDiagnostics | None = None
+        self._last_source_bound_plan_diagnostics: SourceBoundPlanDiagnostics | None = (
+            None
+        )
 
     @property
     def tensors(self) -> Mapping[str, torch.Tensor]:
@@ -374,6 +394,10 @@ class OwnedBindingSlot:
     @property
     def last_execution_diagnostics(self) -> ExecutionDiagnostics | None:
         return self._last_execution_diagnostics
+
+    @property
+    def last_source_bound_plan_diagnostics(self) -> SourceBoundPlanDiagnostics | None:
+        return self._last_source_bound_plan_diagnostics
 
     @property
     def byte_space(self) -> common_pb2.ByteSpaceRef:
@@ -686,6 +710,7 @@ class OwnedBindingSlot:
     ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
         self._ensure_open()
         self._last_execution_diagnostics = None
+        self._last_source_bound_plan_diagnostics = None
         timeout_s = _ctx_timeout_s(ctx)
         try:
             response = self._runtime.ensure_client().promote_binding_current_value(
@@ -722,6 +747,7 @@ class OwnedBindingSlot:
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
         )
+        self._last_source_bound_plan_diagnostics = None
         return response
 
     def realize_from(
@@ -756,6 +782,7 @@ class OwnedBindingSlot:
             ctx=ctx,
         )
         self._last_execution_diagnostics = None
+        self._last_source_bound_plan_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -836,6 +863,9 @@ class OwnedBindingSlot:
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
         )
+        self._last_source_bound_plan_diagnostics = (
+            _source_bound_plan_diagnostics_from_response(response)
+        )
 
     def swap(
         self,
@@ -872,6 +902,7 @@ class OwnedBindingSlot:
             ctx=ctx,
         )
         self._last_execution_diagnostics = None
+        self._last_source_bound_plan_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -939,6 +970,9 @@ class OwnedBindingSlot:
         self._current_value_metadata = metadata
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
+        )
+        self._last_source_bound_plan_diagnostics = (
+            _source_bound_plan_diagnostics_from_response(response)
         )
         if publish:
             self.publish_replica(

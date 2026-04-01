@@ -556,6 +556,25 @@ message ExecutionDiagnostics {
   uint32 hash_rounds = 10;
   HashLocation hash_location = 11;
   IdentityMintStrategy identity_mint_strategy = 12;
+  uint64 actual_collective_committed_bytes = 13;
+  uint64 actual_local_typed_bytes = 14;
+  uint64 actual_generic_backend_bytes = 15;
+}
+
+message SourceBoundPlanDiagnostics {
+  string execution_plan_kind = 1;
+  uint64 planned_collective_candidate_bytes = 2;
+  uint64 planned_collective_admitted_bytes = 3;
+  uint64 planned_local_typed_bytes = 4;
+  uint64 planned_non_admitted_typed_bytes = 5;
+  uint64 planned_generic_residual_bytes = 6;
+  uint64 compatibility_lowered_bytes = 7;
+  map<string, uint64> planner_reject_reason_buckets = 8;
+  string planner_version = 9;
+  string plan_hash = 10;
+  uint64 estimated_collective_peak_temporary_bytes = 11;
+  uint64 estimated_collective_batch_bytes = 12;
+  uint64 estimated_collective_dedup_saving_bytes = 13;
 }
 
 enum SourceBoundCapabilityFlag {
@@ -1234,6 +1253,7 @@ message RefillOwnedBindingResponse {
   BindingState state = 5;
   BindingValue current_value = 6;
   ExecutionDiagnostics execution_diagnostics = 7;
+  SourceBoundPlanDiagnostics source_bound_plan_diagnostics = 8;
 }
 
 message CloseOwnedBindingRequest {

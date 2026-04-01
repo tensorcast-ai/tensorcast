@@ -135,6 +135,7 @@ enum class RepresentationWorkItemKind : std::uint8_t {
   kResidualByteRange = 2,
   kScalarBroadcastFill = 3,
   kConstFill = 4,
+  kPadFill = 5,
 };
 
 enum class WorkPartitionKind : std::uint8_t {
@@ -161,9 +162,10 @@ struct RepresentationWorkItem {
   RepresentationTensorSpec dst_spec;
   std::vector<RepresentationWorkSourceFragment> sources;
   std::optional<FillRule> fill_rule;
+  loader::ByteRangeMap byte_range_map;
   uint64_t committed_bytes{0};
 
-  bool operator==(const RepresentationWorkItem&) const = default;
+  bool operator==(const RepresentationWorkItem& other) const;
 };
 
 struct RepresentationWorkPlan {

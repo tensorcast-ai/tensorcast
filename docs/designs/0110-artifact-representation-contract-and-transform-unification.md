@@ -31,7 +31,8 @@ related_code:
 links:
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0113-step3p5-closure-and-sot-convergence.md
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0055-programmable-framework.md
     - ./0078-selection-first-artifact-retrieval.md
@@ -561,10 +562,10 @@ Hard-cut target:
 - treat mapped binding, mapped-target, source-bind startup, and builder lowering
   as producers of that contract.
 
-### 5.2 Introduce one executor-neutral work IR
+### 5.2 Introduce one executor-neutral typed work inventory
 
 The strategy plane should lower the resolved representation contract plus source
-binding into one executor-neutral work IR, for example:
+binding into one executor-neutral typed work inventory, for example:
 
 ```cpp
 struct RepresentationWorkItem {
@@ -577,14 +578,30 @@ struct RepresentationWorkItem {
 
 Representative work kinds:
 
-- `direct_span_read`
-- `staged_pack`
+- `tensor_copy`
 - `concat_assemble`
-- `replicated_broadcast`
-- `collective_scatter`
+- `scalar_broadcast_fill`
+- `const_fill`
+- `pad_fill`
 - `residual_byte_range`
 
-These are strategy-plane work items, not public contracts.
+Normative rules:
+
+- these work kinds describe target-semantic intent, not transport shape,
+- executor-shaped forms such as direct span reads, staged pack, peer scatter,
+  or batch-local dedup remain strategy- or executor-private lowerings below this
+  shared work inventory,
+- `pad_fill` is derived during work-plan construction from coverage closure
+  implied by the semantic contract plus target layout, not by widening
+  `RepresentationTransformContract` into executor-shaped padding artifacts,
+- a typed work item that a preferred executor cannot currently admit remains
+  typed in shared planning and diagnostics until a later lane or
+  executor-private lowering decides how to execute it,
+- semantic contract hash stays attached to
+  `RepresentationTransformContract`, while plan hash may reflect derived
+  work-plan artifacts such as `pad_fill`,
+- only bytes with no typed execution equivalent may remain
+  `residual_byte_range`.
 
 ### 5.3 Executors simplify rather than multiply
 
@@ -649,6 +666,8 @@ The detailed builder and publication-lineage design for this bridge is defined i
   and execution strategy remain distinct,
 - semantically equivalent transform inputs normalize to the same representation
   contract before hashing,
+- typed work inventory and later lane planning remain distinct from
+  executor-private transport ops,
 - executor-private shapes do not appear in the common semantic contract,
 - destination coverage is either exact or has explicit residual fallback,
 - physical topology planning does not leak into the phase-1 semantic core,
@@ -727,6 +746,7 @@ Proposed interface names follow repository naming rules.
 | `RepresentationWorkItem` | C++ struct | `PascalCase` | pass |
 | `TopologyContract` | C++ struct | `PascalCase` | pass |
 | `BindingOpKind` | C++ enum | `PascalCase` | pass |
+| `pad_fill` | work-item field/value | `snake_case` | pass |
 | `transform_register` | Python method | `snake_case` | pass |
 | `transform_into` | Python method | `snake_case` | pass |
 | `representation_contract_hash` | field | `snake_case` | pass |

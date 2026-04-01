@@ -41,7 +41,8 @@ links:
     - ./0107-retrieval-policy-plane-cleanup.md
     - ./0109-batched-owner-file-collective-executor.md
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0113-step3p5-closure-and-sot-convergence.md
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0004-unified-runtime-config.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -83,9 +84,13 @@ The final model is:
   replica loads, target-backed materialization, and mapped-target flows.
 - common runtime lowers into one shared `ExecutionStrategyPlan` before executor
   choice.
+- strategy first allocates typed work into explicit lanes, then lowers those
+  lanes into executor-private planning artifacts.
 - one request may use mixed execution:
-  - tensor-aware local ops,
-  - owner-file collective ops,
+  - collective-admitted typed ops,
+  - local typed ops,
+  - deferred typed ops that keep typed identity while falling through to a
+    later backend-specific lowering,
   - residual generic byte-range fallback ops.
 - `ByteRangeMap` remains the canonical fallback IR and residual explainability
   surface, but no longer acts as the mandatory primary IR for all retrievals.
@@ -108,11 +113,12 @@ plane, but execution is now intentionally split:
   replica convergence work that previously lived in the deleted `0108` / `0108-01`
   companion plans is now folded back into this design's implementation record;
 - all remaining residual execution, delete gates, and Step3p5-oriented closure
-  work now live only in
-  `docs/designs/0113-step3p5-closure-and-sot-convergence.md` and
-  `docs/plans/0113-step3p5-closure-and-sot-convergence.md`;
+  work now live in
+  `docs/designs/0113-step3p5-closure-and-sot-convergence.md`, while active
+  execution tracking is centralized in
+  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
 - no new execution note should reopen the deleted `0108` companion plans unless
-  `0113` itself is revised first.
+  `0113` or `0114` is revised first.
 
 # Implementation Status
 
@@ -582,39 +588,51 @@ executor for all bytes.
 
 One request may use mixed execution:
 
-- tensor-aware local execution for ranges proven safe,
-- owner-file collective execution for ranges where cross-rank source ownership
-  wins,
-- residual generic byte-range execution for all remaining ranges.
+- collective lane for typed work admitted to owner-file collective or a later
+  collective executor,
+- local typed lane for cheap target-semantic typed work such as fill or pad,
+- deferred typed lane for work that remains typed in the shared plan even when a
+  preferred executor rejects it,
+- generic residual lane for bytes with no typed execution equivalent.
 
 This is the preferred long-term model because it preserves correctness while
 allowing near-optimal execution on irregular workloads.
 
 Current phase rule:
 
-- mixed execution is only valid when the strategy plane emits explicit generic
-  fallback ops or residual accounting before execution begins,
+- mixed execution is only valid when the strategy plane emits explicit lane
+  allocation plus residual accounting before execution begins,
 - executors must not partially execute a request and then implicitly reconstruct
   the remaining generic fallback ranges at runtime,
 - if a current executor cannot consume a request without such implicit widening,
   that executor is not eligible for that request.
+- bytes may enter the generic residual lane only when no typed execution
+  equivalent exists for them.
 
-### 5.2 Internal execution ops
+### 5.2 Lane planning sits between typed work and executor-private ops
 
-`ExecutionStrategyPlan` contains typed execution ops:
+`ExecutionStrategyPlan` should first allocate the shared typed work inventory
+into explicit strategy-owned lanes.
 
-- `DirectReadOp`
-  - read one contiguous source span directly into final target layout.
-- `Staged2DPackOp`
-  - read a contiguous row-block into staging, then GPU-pack into final layout.
-- `DedupCopyOp`
-  - reuse one already-read source slice and duplicate into other destinations.
-- `CollectiveScatterOp`
-  - assign source ownership and scatter to peers when cross-rank dedup is
-    beneficial.
-- `FallbackByteRangeOp`
-  - represent the residual ranges that must still use generic byte-range
-    execution.
+Representative lane families:
+
+- collective lane
+  - typed items admitted to collective execution
+- local typed lane
+  - typed items executed by a local typed backend
+- deferred typed lane
+  - typed items that keep typed identity in the shared plan while a later
+    backend-specific lowering chooses how to run them
+- generic residual lane
+  - byte ranges with no typed execution equivalent
+
+Only after lane allocation may the runtime derive executor-private ops such as:
+
+- direct span reads
+- staged pack jobs
+- peer scatter jobs
+- batch-local dedup jobs
+- generic byte-range fallback ops
 
 The common runtime may still expose dominant executor labels for diagnostics:
 
@@ -639,17 +657,21 @@ Normative rules:
 - `ArtifactSelection`, resolved `view_id`, resolved `ViewPlan`, resolved copy
   contract, and final target layout remain the only semantic truth for what
   bytes must appear in the destination.
-- executor plans are derived artifacts. They do not replace the resolved
-  selection or copy-contract truth.
+- typed work inventory and later lane allocation remain shared derived artifacts.
+  They do not replace the resolved selection or copy-contract truth.
+- executor-private plans are derived below lane allocation. They must not
+  replace either semantic truth or strategy-owned lane truth.
 - every execution strategy plan must carry explicit residual accounting:
-  - which destination byte ranges are proven equivalent and assigned to a
-    non-generic op,
+  - which typed items are assigned to collective, local typed, or deferred typed
+    lanes,
   - which destination byte ranges remain residual and must be executed via
-    `FallbackByteRangeOp`.
+    generic byte-range fallback.
 - the planner may exclude a byte range from generic fallback only if it has
   emitted a semantically equivalent internal op for that range.
 - the runtime may mark a byte range as completed only after the chosen executor
   has successfully committed that range.
+- bytes associated with a typed work item must not be relabeled as residual only
+  because a preferred executor rejected them.
 
 Introduce one internal reporting contract:
 
@@ -658,9 +680,17 @@ Introduce one internal reporting contract:
 `ExecutionCommitReport` exists to report:
 
 - committed ranges,
+- lane allocation summary,
 - residual fallback ranges,
 - executor path actually used,
 - explicit fallback work chosen during planning.
+
+Normative reporting split:
+
+- planner-owned lane intent, reject buckets, and cost estimates belong in a
+  source-bound-scoped planner diagnostics contract,
+- `ExecutionCommitReport` remains the carrier for actual execution facts and
+  backend reality.
 
 Commit semantics must also be explicit:
 
@@ -799,6 +829,7 @@ Required diagnostics:
 - resolved selection and copy-contract summary,
 - acquired source kind and source-layout facts,
 - execution environment facts and topology/locality summary,
+- lane allocation summary,
 - dominant executor label,
 - op mix,
 - residual fallback bytes,
@@ -825,6 +856,7 @@ repository style rules.
   - `ExecutionEnvironmentFacts`
   - `ExecutionStrategyPlan`
   - `ExecutionCommitReport`
+  - `DeferredTypedLane`
   - `TensorBatchedLocalExecutor`
   - `OwnerFileCollectiveExecutor`
   - `GenericByteRangeExecutor`
@@ -838,10 +870,12 @@ repository style rules.
   - `estimate_execution_strategy_cost`
   - `emit_execution_commit_report`
   - `execute_owner_file_collective`
+  - `allocate_execution_lanes`
 - Config fields:
   - `enable_local_tensor_execution`
   - `enable_owner_file_collective`
   - `allow_mixed_execution`
+  - `allow_deferred_typed_execution`
   - `diagnostics_verbosity`
 
 ## 13. Migration Constraints
@@ -1016,7 +1050,7 @@ Mitigations:
 - [`docs/designs/0084-binding-unified-model-and-contract.md`](/data/workspace/tensorcast-280/docs/designs/0084-binding-unified-model-and-contract.md)
 - [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
 - [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
+- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
 - [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
 - [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
 - [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)

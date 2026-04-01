@@ -936,6 +936,193 @@ bool is_collective_execution_failure(const absl::Status& status) {
   return absl::StrContains(status.message(), "collective execution failed:");
 }
 
+uint64_t byte_range_map_covered_bytes(const store::loader::ByteRangeMap& map) {
+  uint64_t total = 0;
+  for (const auto& segment : map.segments) {
+    total += segment.length;
+  }
+  return total;
+}
+
+void add_reject_reason_bytes(
+    absl::flat_hash_map<std::string, uint64_t>* buckets,
+    std::string_view reason,
+    uint64_t bytes) {
+  if (buckets == nullptr || reason.empty() || bytes == 0) {
+    return;
+  }
+  (*buckets)[std::string(reason)] += bytes;
+}
+
+absl::StatusOr<std::string> compute_source_bound_plan_hash(
+    const store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary& summary) {
+  std::vector<std::pair<std::string, uint64_t>> buckets(
+      summary.planner_reject_reason_buckets.begin(), summary.planner_reject_reason_buckets.end());
+  std::sort(buckets.begin(), buckets.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  std::string payload = absl::StrCat(
+      summary.execution_plan_kind,
+      "\n",
+      summary.planned_collective_candidate_bytes,
+      "\n",
+      summary.planned_collective_admitted_bytes,
+      "\n",
+      summary.planned_local_typed_bytes,
+      "\n",
+      summary.planned_non_admitted_typed_bytes,
+      "\n",
+      summary.planned_generic_residual_bytes,
+      "\n",
+      summary.compatibility_lowered_bytes,
+      "\n",
+      summary.estimated_collective_peak_temporary_bytes,
+      "\n",
+      summary.estimated_collective_batch_bytes,
+      "\n",
+      summary.estimated_collective_dedup_saving_bytes,
+      "\n",
+      summary.collective_lane_eligible ? "1" : "0",
+      "\n",
+      summary.strict_pure_collective_eligible ? "1" : "0");
+  for (const auto& [reason, bytes] : buckets) {
+    absl::StrAppend(&payload, "\n", reason, "=", bytes);
+  }
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return common::multibase_multihash_sha256(digest);
+}
+
+store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_source_bound_plan(
+    const store::runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+    const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
+    const store::loading::ExecutionTopologyContext& execution_topology,
+    v2::CollectivePolicy collective_policy,
+    bool disk_source_available) {
+  using Summary = store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary;
+  using WorkItemKind = store::materialization::contracts::RepresentationWorkItemKind;
+  using WorkPartitionKind = store::materialization::contracts::WorkPartitionKind;
+
+  Summary summary;
+  summary.planner_version = "source_bound_collective_first.v3";
+  if (!resolved_plan.representation_work_plan.has_value()) {
+    summary.execution_plan_kind = collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+        ? "pure_collective"
+        : "generic_only";
+    auto plan_hash_or = compute_source_bound_plan_hash(summary);
+    if (plan_hash_or.ok()) {
+      summary.plan_hash = *plan_hash_or;
+    }
+    return summary;
+  }
+
+  const auto& work_plan = *resolved_plan.representation_work_plan;
+  for (const auto& item : work_plan.items) {
+    switch (item.kind) {
+      case WorkItemKind::kTensorCopy:
+        if (item.partition_kind == WorkPartitionKind::kUnknown) {
+          summary.planned_non_admitted_typed_bytes += item.committed_bytes;
+          add_reject_reason_bytes(
+              &summary.planner_reject_reason_buckets, "tensor_copy_partition_unknown", item.committed_bytes);
+        } else {
+          summary.planned_collective_candidate_bytes += item.committed_bytes;
+        }
+        break;
+      case WorkItemKind::kConcatAssemble:
+        summary.planned_non_admitted_typed_bytes += item.committed_bytes;
+        add_reject_reason_bytes(&summary.planner_reject_reason_buckets, "concat_not_admitted", item.committed_bytes);
+        break;
+      case WorkItemKind::kConstFill:
+      case WorkItemKind::kScalarBroadcastFill:
+      case WorkItemKind::kPadFill:
+        summary.planned_local_typed_bytes += item.committed_bytes;
+        break;
+      case WorkItemKind::kResidualByteRange:
+        summary.planned_generic_residual_bytes += item.committed_bytes;
+        break;
+    }
+  }
+
+  if (resolved_plan.collective_compatibility_map.has_value()) {
+    summary.compatibility_lowered_bytes = byte_range_map_covered_bytes(*resolved_plan.collective_compatibility_map);
+  }
+
+  const bool has_collective_group = execution_topology.collective_load_group.has_value();
+  const uint32_t world_size = has_collective_group ? execution_topology.collective_load_group->world_size : 0;
+  const bool shared_source_proven =
+      execution_topology.source_locality == store::loading::SourceLocalityHint::kSharedSource ||
+      execution_topology.source_sharing_domain.has_value();
+  summary.estimated_collective_peak_temporary_bytes = summary.planned_collective_candidate_bytes;
+  summary.estimated_collective_batch_bytes = strategy_config.owner_file_collective_batch_bytes;
+  summary.estimated_collective_dedup_saving_bytes =
+      world_size > 1 ? summary.planned_collective_candidate_bytes * static_cast<uint64_t>(world_size - 1) : 0;
+
+  if (!strategy_config.enable_owner_file_collective) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets,
+        "collective_strategy_disabled",
+        summary.planned_collective_candidate_bytes);
+  } else if (!disk_source_available) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets, "disk_source_unavailable", summary.planned_collective_candidate_bytes);
+  } else if (!has_collective_group || world_size <= 1) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets, "collective_group_missing", summary.planned_collective_candidate_bytes);
+  } else if (
+      strategy_config.owner_file_collective_shared_fs_only &&
+      execution_topology.source_locality == store::loading::SourceLocalityHint::kHostLocal) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets,
+        "source_locality_host_local",
+        summary.planned_collective_candidate_bytes);
+  } else if (strategy_config.owner_file_collective_shared_fs_only && !shared_source_proven) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets, "shared_source_unproven", summary.planned_collective_candidate_bytes);
+  }
+
+  if (summary.planned_non_admitted_typed_bytes > 0) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets,
+        "typed_work_not_collective_admitted",
+        summary.planned_non_admitted_typed_bytes);
+  }
+  if (summary.planned_generic_residual_bytes > 0) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets,
+        "true_generic_residual_present",
+        summary.planned_generic_residual_bytes);
+  }
+  if (!strategy_config.allow_mixed_execution && summary.planned_local_typed_bytes > 0) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets,
+        "mixed_execution_disabled_for_local_typed",
+        summary.planned_local_typed_bytes);
+  }
+  if (collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE &&
+      summary.planned_local_typed_bytes > 0) {
+    add_reject_reason_bytes(
+        &summary.planner_reject_reason_buckets, "local_typed_work_present", summary.planned_local_typed_bytes);
+  }
+
+  const bool base_collective_prereqs_ok = strategy_config.enable_owner_file_collective && disk_source_available &&
+      has_collective_group && world_size > 1 &&
+      (!strategy_config.owner_file_collective_shared_fs_only || shared_source_proven) &&
+      execution_topology.source_locality != store::loading::SourceLocalityHint::kHostLocal;
+  summary.collective_lane_eligible = base_collective_prereqs_ok && summary.planned_collective_candidate_bytes > 0 &&
+      summary.planned_non_admitted_typed_bytes == 0 && summary.planned_generic_residual_bytes == 0 &&
+      (strategy_config.allow_mixed_execution || summary.planned_local_typed_bytes == 0);
+  summary.planned_collective_admitted_bytes =
+      summary.collective_lane_eligible ? summary.planned_collective_candidate_bytes : 0;
+  summary.strict_pure_collective_eligible = summary.collective_lane_eligible && summary.planned_local_typed_bytes == 0;
+  summary.execution_plan_kind = collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+      ? "pure_collective"
+      : summary.collective_lane_eligible ? "collective_first_mixed"
+                                         : "generic_only";
+  auto plan_hash_or = compute_source_bound_plan_hash(summary);
+  if (plan_hash_or.ok()) {
+    summary.plan_hash = *plan_hash_or;
+  }
+  return summary;
+}
+
 absl::StatusOr<std::vector<RegisterTensorAliasMeta>> build_binding_tensor_aliases(
     const BindingRegistry::Record& record) {
   auto offsets_or = resolve_target_offsets(record.target_layout);
@@ -1028,6 +1215,31 @@ v2::ExecutionDiagnostics build_binding_closeout_diagnostics(
       hash_rounds,
       hash_location,
       identity_mint_strategy);
+}
+
+v2::SourceBoundPlanDiagnostics build_source_bound_plan_diagnostics(
+    const std::optional<store::runtime::ingestion::strategy::ResolvedMaterializationPlan>& resolved_plan) {
+  v2::SourceBoundPlanDiagnostics diagnostics;
+  if (!resolved_plan.has_value() || !resolved_plan->source_bound_plan_summary.has_value()) {
+    return diagnostics;
+  }
+  const auto& summary = *resolved_plan->source_bound_plan_summary;
+  diagnostics.set_execution_plan_kind(summary.execution_plan_kind);
+  diagnostics.set_planned_collective_candidate_bytes(summary.planned_collective_candidate_bytes);
+  diagnostics.set_planned_collective_admitted_bytes(summary.planned_collective_admitted_bytes);
+  diagnostics.set_planned_local_typed_bytes(summary.planned_local_typed_bytes);
+  diagnostics.set_planned_non_admitted_typed_bytes(summary.planned_non_admitted_typed_bytes);
+  diagnostics.set_planned_generic_residual_bytes(summary.planned_generic_residual_bytes);
+  diagnostics.set_compatibility_lowered_bytes(summary.compatibility_lowered_bytes);
+  diagnostics.set_planner_version(summary.planner_version);
+  diagnostics.set_plan_hash(summary.plan_hash);
+  diagnostics.set_estimated_collective_peak_temporary_bytes(summary.estimated_collective_peak_temporary_bytes);
+  diagnostics.set_estimated_collective_batch_bytes(summary.estimated_collective_batch_bytes);
+  diagnostics.set_estimated_collective_dedup_saving_bytes(summary.estimated_collective_dedup_saving_bytes);
+  for (const auto& [reason, bytes] : summary.planner_reject_reason_buckets) {
+    (*diagnostics.mutable_planner_reject_reason_buckets())[reason] = bytes;
+  }
+  return diagnostics;
 }
 
 void fill_binding_value(const BindingRegistry::Record& record, v2::BindingValue& value) {
@@ -1539,6 +1751,12 @@ grpc::Status prepare_source_bound_execution(
     if (!resolved_plan_or.ok()) {
       return to_grpc_status(resolved_plan_or.status());
     }
+    resolved_plan_or->source_bound_plan_summary = summarize_source_bound_plan(
+        *resolved_plan_or,
+        d.engine.options().materialization_strategy,
+        prepared_plan.request_context.execution_topology,
+        prepared_plan.collective_policy,
+        prepared_plan.disk_source.has_value());
     out.resolved_plan = std::move(*resolved_plan_or);
     return Status::OK;
   }
@@ -2724,6 +2942,20 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   if (!execution_status.ok()) {
     return execution_status;
   }
+  if (prepared_plan.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE &&
+      prepared_execution.resolved_plan.has_value() &&
+      prepared_execution.resolved_plan->source_bound_plan_summary.has_value() &&
+      !prepared_execution.resolved_plan->source_bound_plan_summary->strict_pure_collective_eligible) {
+    {
+      absl::MutexLock lock(&record->mu);
+      mark_dirty(record.get());
+    }
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        annotate_collective_failure_message(
+            "collective requested but the source-bound plan is not pure-collective eligible",
+            v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE)};
+  }
 
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = use_mapped_materialization
       ? d_.engine.materialize_mapped_into_target(
@@ -2756,6 +2988,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       /*hash_rounds=*/0,
       v2::HashLocation::HASH_LOCATION_NONE,
       v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE);
+  const auto source_bound_plan_diagnostics = build_source_bound_plan_diagnostics(prepared_execution.resolved_plan);
   if (collective_policy_requests_collective(prepared_plan.collective_policy) &&
       execution_diagnostics.collective_requested() && !execution_diagnostics.collective_used() &&
       prepared_plan.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE) {
@@ -2817,6 +3050,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     local_ready_diagnostics.set_hash_location(v2::HashLocation::HASH_LOCATION_SEAL);
     local_ready_diagnostics.set_identity_mint_strategy(v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_MINT);
     resp.mutable_execution_diagnostics()->CopyFrom(local_ready_diagnostics);
+    resp.mutable_source_bound_plan_diagnostics()->CopyFrom(source_bound_plan_diagnostics);
     rctx.mark_success();
     return Status::OK;
   }
@@ -2867,6 +3101,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
   fill_binding_value(*record, *resp.mutable_current_value());
   resp.mutable_execution_diagnostics()->CopyFrom(execution_diagnostics);
+  resp.mutable_source_bound_plan_diagnostics()->CopyFrom(source_bound_plan_diagnostics);
   rctx.mark_success();
   return Status::OK;
 }

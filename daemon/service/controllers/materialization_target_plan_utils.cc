@@ -131,7 +131,7 @@ void patch_transform_contract_source_specs(
 absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_execution_representation_work_plan(
     const store::materialization::contracts::RepresentationTransformContract& transform_contract,
     const std::optional<CanonicalIndexTable>& physical_source_table,
-    std::optional<store::loader::ByteRangeMap> generic_fallback_map = std::nullopt) {
+    std::optional<store::loader::ByteRangeMap> compatibility_lowered_map = std::nullopt) {
   auto execution_contract = transform_contract;
   if (physical_source_table.has_value()) {
     patch_transform_contract_source_specs(*physical_source_table, &execution_contract);
@@ -140,14 +140,74 @@ absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_
   if (!work_plan_or.ok()) {
     return work_plan_or.status();
   }
-  if (generic_fallback_map.has_value()) {
-    auto normalized_map_or = store::loader::normalize_byte_range_map(std::move(*generic_fallback_map));
-    if (!normalized_map_or.ok()) {
-      return normalized_map_or.status();
+  if (compatibility_lowered_map.has_value()) {
+    store::loader::ByteRangeMap pad_map;
+    pad_map.total_bytes = compatibility_lowered_map->total_bytes;
+    pad_map.num_sources = compatibility_lowered_map->num_sources;
+    for (const auto& segment : compatibility_lowered_map->segments) {
+      if (segment.kind == store::loader::ByteRangeSegment::Kind::kPad) {
+        pad_map.segments.push_back(segment);
+      }
     }
-    work_plan_or->residual_fallback_map = std::move(*normalized_map_or);
+    if (!pad_map.segments.empty()) {
+      store::materialization::contracts::RepresentationWorkItem pad_item;
+      pad_item.kind = store::materialization::contracts::RepresentationWorkItemKind::kPadFill;
+      pad_item.partition_kind = store::materialization::contracts::WorkPartitionKind::kUnknown;
+      pad_item.byte_range_map = std::move(pad_map);
+      for (const auto& segment : pad_item.byte_range_map.segments) {
+        pad_item.committed_bytes += segment.length;
+      }
+      work_plan_or->committed_bytes += pad_item.committed_bytes;
+      work_plan_or->items.push_back(std::move(pad_item));
+    }
   }
   return std::move(*work_plan_or);
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> filter_byte_range_map(
+    const store::loader::ByteRangeMap& map,
+    store::loader::ByteRangeSegment::Kind kind) {
+  store::loader::ByteRangeMap filtered;
+  filtered.total_bytes = map.total_bytes;
+  filtered.num_sources = map.num_sources;
+  for (const auto& segment : map.segments) {
+    if (segment.kind == kind) {
+      filtered.segments.push_back(segment);
+    }
+  }
+  std::sort(filtered.segments.begin(), filtered.segments.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.dst_offset < rhs.dst_offset;
+  });
+  for (size_t index = 1; index < filtered.segments.size(); ++index) {
+    const auto& previous = filtered.segments[index - 1];
+    const auto& current = filtered.segments[index];
+    if (current.dst_offset < previous.dst_offset + previous.length) {
+      return absl::InvalidArgumentError("filtered byte range map contains overlapping segments");
+    }
+  }
+  return filtered;
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> merge_byte_range_maps(
+    const store::loader::ByteRangeMap& lhs,
+    const store::loader::ByteRangeMap& rhs) {
+  store::loader::ByteRangeMap merged;
+  merged.total_bytes = std::max(lhs.total_bytes, rhs.total_bytes);
+  merged.num_sources = std::max(lhs.num_sources, rhs.num_sources);
+  merged.segments.reserve(lhs.segments.size() + rhs.segments.size());
+  merged.segments.insert(merged.segments.end(), lhs.segments.begin(), lhs.segments.end());
+  merged.segments.insert(merged.segments.end(), rhs.segments.begin(), rhs.segments.end());
+  std::sort(merged.segments.begin(), merged.segments.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.dst_offset < rhs.dst_offset;
+  });
+  for (size_t index = 1; index < merged.segments.size(); ++index) {
+    const auto& previous = merged.segments[index - 1];
+    const auto& current = merged.segments[index];
+    if (current.dst_offset < previous.dst_offset + previous.length) {
+      return absl::InvalidArgumentError("merged byte range map contains overlapping segments");
+    }
+  }
+  return merged;
 }
 
 void record_error(RecordMaterializeResultFn record_result, std::string_view reason) {
@@ -1264,20 +1324,49 @@ build_resolved_mapped_materialization_plan(
   resolved_plan.target_layout = target_layout;
   resolved_plan.representation_transform_contract = mapped_plan.representation.transform_contract;
   if (resolved_plan.representation_transform_contract.has_value()) {
+    const store::loader::ByteRangeMap compatibility_map = [&]() {
+      if (!mapped_plan.representation.compatibility_lowered_map.segments.empty()) {
+        auto map = mapped_plan.representation.compatibility_lowered_map;
+        if (map.total_bytes == 0) {
+          map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+        }
+        return map;
+      }
+      auto map = mapped_plan.representation.generic_fallback_map;
+      if (!map.segments.empty() && map.total_bytes == 0) {
+        map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+      }
+      return map;
+    }();
     auto work_plan_or = build_execution_representation_work_plan(
         *resolved_plan.representation_transform_contract,
         physical_source_table,
-        [&]() -> std::optional<store::loader::ByteRangeMap> {
-          auto map = mapped_plan.representation.generic_fallback_map;
-          if (!map.segments.empty()) {
-            map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
-          }
-          return map;
-        }());
+        compatibility_map.segments.empty() ? std::nullopt
+                                           : std::optional<store::loader::ByteRangeMap>(compatibility_map));
     if (!work_plan_or.ok()) {
       return work_plan_or.status();
     }
     resolved_plan.representation_work_plan = std::move(*work_plan_or);
+    auto compatibility_data_map_or =
+        filter_byte_range_map(compatibility_map, store::loader::ByteRangeSegment::Kind::kData);
+    if (!compatibility_data_map_or.ok()) {
+      return compatibility_data_map_or.status();
+    }
+    if (!compatibility_data_map_or->segments.empty()) {
+      resolved_plan.collective_compatibility_map = *compatibility_data_map_or;
+    }
+    store::loader::ByteRangeMap compatibility_data_map;
+    if (!compatibility_data_map_or->segments.empty()) {
+      compatibility_data_map = *compatibility_data_map_or;
+    }
+    auto executor_map_or =
+        merge_byte_range_maps(compatibility_data_map, resolved_plan.representation_work_plan->residual_fallback_map);
+    if (!executor_map_or.ok()) {
+      return executor_map_or.status();
+    }
+    if (!executor_map_or->segments.empty()) {
+      resolved_plan.executor_private_generic_fallback_map = *executor_map_or;
+    }
   }
   return resolved_plan;
 }

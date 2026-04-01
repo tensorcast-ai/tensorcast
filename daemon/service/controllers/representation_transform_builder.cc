@@ -452,6 +452,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
   BuildRepresentationTransformResult result;
   result.generic_fallback_map.total_bytes = 0;
   result.generic_fallback_map.num_sources = 1;
+  result.compatibility_lowered_map.total_bytes = 0;
+  result.compatibility_lowered_map.num_sources = 1;
 
   std::vector<tensorcast::store::loader::ByteRangeSegment> mapped_segments;
   mapped_segments.reserve(copy_plan.entries_size());
@@ -558,6 +560,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
     }
   }
 
+  result.compatibility_lowered_map.segments = mapped_segments;
   result.generic_fallback_map.segments = std::move(mapped_segments);
   result.transform_contract.source_byte_space = source_byte_space;
   result.transform_contract.target_representation.family = std::string(representation_family);
@@ -919,27 +922,6 @@ absl::StatusOr<std::vector<tensorcast::store::loader::ByteRangeSegment>> build_c
   return segments;
 }
 
-absl::Status append_fill_pad_segments(
-    const RepresentationTensorSpec& dst_spec,
-    const TensorCoordinateSpec& destination_coordinate,
-    std::vector<tensorcast::store::loader::ByteRangeSegment>& out_segments) {
-  auto spans_or = build_tensor_byte_spans(dst_spec, destination_coordinate, /*include_storage_offset=*/false);
-  if (!spans_or.ok()) {
-    return spans_or.status();
-  }
-  for (const auto& span : *spans_or) {
-    out_segments.push_back(
-        tensorcast::store::loader::ByteRangeSegment{
-            .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kPad,
-            .dst_offset = span.offset,
-            .length = span.length,
-            .src_offset = 0,
-            .source_index = 0,
-        });
-  }
-  return absl::OkStatus();
-}
-
 absl::Status normalize_copy_realization_entry(
     int idx,
     const v2::BindingRealizationEntry& entry,
@@ -1075,6 +1057,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
   BuildRepresentationTransformResult result;
   result.generic_fallback_map.total_bytes = 0;
   result.generic_fallback_map.num_sources = 1;
+  result.compatibility_lowered_map.total_bytes = 0;
+  result.compatibility_lowered_map.num_sources = 1;
   result.transform_contract.source_byte_space = source_byte_space;
   result.transform_contract.target_representation.family = std::string(representation_family);
   result.transform_contract.target_representation.realization_kind = RealizationKind::kEphemeralIntoTarget;
@@ -1325,19 +1309,12 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
         uint64_t copied_bytes = 0;
         for (const auto& segment : *segments_or) {
           copied_bytes += segment.length;
+          result.compatibility_lowered_map.segments.push_back(segment);
           result.generic_fallback_map.segments.push_back(segment);
         }
         result.total_bytes_copied += copied_bytes;
         result.compatibility_stats.compatible_candidates += 1;
         result.compatibility_stats.compatible_bytes += copied_bytes;
-      }
-      if ((entry.op_kind == BindingOpKind::kConstFill || entry.op_kind == BindingOpKind::kScalarFromSource) &&
-          !result.generic_fallback_map.segments.empty()) {
-        auto status =
-            append_fill_pad_segments(full_dst_spec, entry.destination_coordinate, result.generic_fallback_map.segments);
-        if (!status.ok()) {
-          return status;
-        }
       }
     }
   }
