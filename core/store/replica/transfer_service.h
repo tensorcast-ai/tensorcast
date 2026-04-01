@@ -49,6 +49,7 @@ class TransferService {
   }
 
   [[nodiscard]] size_t get_pool_chunk_size() const;
+  [[nodiscard]] size_t get_session_chunk_count(uint64_t total_bytes) const;
 
   // Copies
   absl::Status copy_cpu_to_gpu_streaming(uint32_t device_id, gsl::not_null<void*> gpu_ptr, size_t total_bytes);
