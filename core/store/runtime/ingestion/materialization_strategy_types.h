@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/contracts/representation_contract.h"
@@ -34,6 +35,24 @@ struct ResolvedSourceBinding {
   bool collective_eligible{false};
 };
 
+struct SourceBoundExecutionPlanSummary {
+  std::string execution_plan_kind;
+  uint64_t planned_collective_candidate_bytes{0};
+  uint64_t planned_collective_admitted_bytes{0};
+  uint64_t planned_local_typed_bytes{0};
+  uint64_t planned_non_admitted_typed_bytes{0};
+  uint64_t planned_generic_residual_bytes{0};
+  uint64_t compatibility_lowered_bytes{0};
+  absl::flat_hash_map<std::string, uint64_t> planner_reject_reason_buckets;
+  std::string planner_version;
+  std::string plan_hash;
+  uint64_t estimated_collective_peak_temporary_bytes{0};
+  uint64_t estimated_collective_batch_bytes{0};
+  uint64_t estimated_collective_dedup_saving_bytes{0};
+  bool collective_lane_eligible{false};
+  bool strict_pure_collective_eligible{false};
+};
+
 struct ResolvedMaterializationPlan {
   std::string artifact_id;
   uint64_t generation{0};
@@ -42,6 +61,9 @@ struct ResolvedMaterializationPlan {
   loading::IntoTargetLayout target_layout;
   std::optional<materialization::contracts::RepresentationTransformContract> representation_transform_contract;
   std::optional<materialization::contracts::RepresentationWorkPlan> representation_work_plan;
+  std::optional<loader::ByteRangeMap> executor_private_generic_fallback_map;
+  std::optional<loader::ByteRangeMap> collective_compatibility_map;
+  std::optional<SourceBoundExecutionPlanSummary> source_bound_plan_summary;
 };
 
 enum class ExecutionStrategyExecutor : std::uint8_t {
@@ -119,6 +141,9 @@ struct ExecutionCommitReport {
   uint64_t committed_bytes{0};
   uint64_t fallback_bytes{0};
   uint64_t residual_bytes{0};
+  uint64_t actual_collective_committed_bytes{0};
+  uint64_t actual_local_typed_bytes{0};
+  uint64_t actual_generic_backend_bytes{0};
   bool collective_handled{false};
   bool direct_write_supported{false};
   bool source_ordered{false};

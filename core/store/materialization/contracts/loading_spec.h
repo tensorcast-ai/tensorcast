@@ -60,6 +60,9 @@ struct MaterializeIntoTargetResult {
   uint64_t committed_bytes{0};
   uint64_t fallback_bytes{0};
   uint64_t residual_bytes{0};
+  uint64_t actual_collective_committed_bytes{0};
+  uint64_t actual_local_typed_bytes{0};
+  uint64_t actual_generic_backend_bytes{0};
   bool collective_handled{false};
   bool direct_write_supported{false};
   bool source_ordered{false};

@@ -31,6 +31,7 @@ struct TransformWorkCompatibilityStats {
 };
 
 struct BuildRepresentationTransformResult {
+  tensorcast::store::loader::ByteRangeMap compatibility_lowered_map;
   tensorcast::store::loader::ByteRangeMap generic_fallback_map;
   tensorcast::store::materialization::contracts::RepresentationTransformContract transform_contract;
   uint64_t total_bytes_copied{0};

@@ -37,6 +37,7 @@ from tensorcast.types import (
     IdentityMintStrategy,
     PublishedModelVersion,
     ServingRuntimePolicy,
+    SourceBoundPlanDiagnostics,
     VramRegionHandle,
     build_serving_manifest_ref,
 )
@@ -110,6 +111,9 @@ class FakeBindingClient:
         ) = None
         self.refill_execution_diagnostics: (
             store_daemon_pb2.ExecutionDiagnostics | None
+        ) = None
+        self.refill_source_bound_plan_diagnostics: (
+            store_daemon_pb2.SourceBoundPlanDiagnostics | None
         ) = None
 
     def _make_binding_value(
@@ -373,6 +377,10 @@ class FakeBindingClient:
             )
             if self.refill_execution_diagnostics is not None:
                 response.execution_diagnostics = self.refill_execution_diagnostics
+            if self.refill_source_bound_plan_diagnostics is not None:
+                response.source_bound_plan_diagnostics = (
+                    self.refill_source_bound_plan_diagnostics
+                )
             return response
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(self._binding_selections[binding_id])
@@ -389,6 +397,10 @@ class FakeBindingClient:
         )
         if self.refill_execution_diagnostics is not None:
             response.execution_diagnostics = self.refill_execution_diagnostics
+        if self.refill_source_bound_plan_diagnostics is not None:
+            response.source_bound_plan_diagnostics = (
+                self.refill_source_bound_plan_diagnostics
+            )
         return response
 
     def close_owned_binding(self, *, binding_id: str, **_kwargs: Any) -> Any:
@@ -787,6 +799,46 @@ def test_binding_promote_tracks_last_execution_diagnostics(
     assert diagnostics is not None
     assert diagnostics.hash_location is HashLocation.NONE
     assert diagnostics.identity_mint_strategy is IdentityMintStrategy.NOT_APPLICABLE
+
+
+def test_binding_realize_from_tracks_source_bound_plan_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+    client.refill_source_bound_plan_diagnostics = (
+        store_daemon_pb2.SourceBoundPlanDiagnostics(
+            execution_plan_kind="collective_first_mixed",
+            planned_collective_candidate_bytes=128,
+            planned_collective_admitted_bytes=128,
+            planned_local_typed_bytes=16,
+            planner_reject_reason_buckets={"concat_not_admitted": 32},
+            planner_version="source_bound_collective_first.v3",
+            plan_hash="mh:test-plan",
+        )
+    )
+
+    binding.realize_from(
+        artifact,
+        realization_plan=(
+            store_mod.BindingRealizationEntry(
+                op="copy",
+                source_name="alpha",
+                dst_name="alpha",
+            ),
+        ),
+    )
+
+    diagnostics = binding.last_source_bound_plan_diagnostics
+    assert diagnostics is not None
+    assert isinstance(diagnostics, SourceBoundPlanDiagnostics)
+    assert diagnostics.execution_plan_kind == "collective_first_mixed"
+    assert diagnostics.planned_collective_candidate_bytes == 128
+    assert diagnostics.planned_local_typed_bytes == 16
+    assert diagnostics.planner_reject_reason_buckets == {"concat_not_admitted": 32}
+    assert diagnostics.plan_hash == "mh:test-plan"
 
 
 def test_binding_append_publish_uses_view_routing(

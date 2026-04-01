@@ -52,6 +52,7 @@ sc_header_only_library(
         "//core/store/materialization/contracts:representation_contract",
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/dataplane:disk_artifact_context",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/time",
     ],
 )

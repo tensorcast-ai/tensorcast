@@ -139,6 +139,9 @@ class ExecutionDiagnostics(BaseModel):
     direct_write_supported: bool = False
     fallback_bytes: int = 0
     residual_bytes: int = 0
+    actual_collective_committed_bytes: int = 0
+    actual_local_typed_bytes: int = 0
+    actual_generic_backend_bytes: int = 0
     hash_rounds: int = 0
     hash_location: HashLocation = HashLocation.NONE
     identity_mint_strategy: IdentityMintStrategy = IdentityMintStrategy.NOT_APPLICABLE
@@ -153,6 +156,11 @@ class ExecutionDiagnostics(BaseModel):
             direct_write_supported=bool(self.direct_write_supported),
             fallback_bytes=int(self.fallback_bytes),
             residual_bytes=int(self.residual_bytes),
+            actual_collective_committed_bytes=int(
+                self.actual_collective_committed_bytes
+            ),
+            actual_local_typed_bytes=int(self.actual_local_typed_bytes),
+            actual_generic_backend_bytes=int(self.actual_generic_backend_bytes),
             hash_rounds=int(self.hash_rounds),
             hash_location=_HASH_LOCATION_TO_PROTO[self.hash_location],
             identity_mint_strategy=_IDENTITY_MINT_STRATEGY_TO_PROTO[
@@ -189,6 +197,13 @@ class ExecutionDiagnostics(BaseModel):
             direct_write_supported=bool(proto.direct_write_supported),
             fallback_bytes=int(proto.fallback_bytes),
             residual_bytes=int(proto.residual_bytes),
+            actual_collective_committed_bytes=int(
+                getattr(proto, "actual_collective_committed_bytes", 0)
+            ),
+            actual_local_typed_bytes=int(getattr(proto, "actual_local_typed_bytes", 0)),
+            actual_generic_backend_bytes=int(
+                getattr(proto, "actual_generic_backend_bytes", 0)
+            ),
             hash_rounds=int(proto.hash_rounds),
             hash_location=_HASH_LOCATION_FROM_PROTO.get(
                 int(proto.hash_location),
@@ -197,6 +212,60 @@ class ExecutionDiagnostics(BaseModel):
             identity_mint_strategy=_IDENTITY_MINT_STRATEGY_FROM_PROTO.get(
                 int(proto.identity_mint_strategy),
                 IdentityMintStrategy.NOT_APPLICABLE,
+            ),
+        )
+
+
+class SourceBoundPlanDiagnostics(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    execution_plan_kind: str | None = None
+    planned_collective_candidate_bytes: int = 0
+    planned_collective_admitted_bytes: int = 0
+    planned_local_typed_bytes: int = 0
+    planned_non_admitted_typed_bytes: int = 0
+    planned_generic_residual_bytes: int = 0
+    compatibility_lowered_bytes: int = 0
+    planner_reject_reason_buckets: dict[str, int] = Field(default_factory=dict)
+    planner_version: str | None = None
+    plan_hash: str | None = None
+    estimated_collective_peak_temporary_bytes: int = 0
+    estimated_collective_batch_bytes: int = 0
+    estimated_collective_dedup_saving_bytes: int = 0
+
+    @classmethod
+    def from_proto(
+        cls,
+        proto: store_daemon_pb2.SourceBoundPlanDiagnostics,
+    ) -> "SourceBoundPlanDiagnostics":
+        return cls(
+            execution_plan_kind=str(proto.execution_plan_kind or "") or None,
+            planned_collective_candidate_bytes=int(
+                proto.planned_collective_candidate_bytes
+            ),
+            planned_collective_admitted_bytes=int(
+                proto.planned_collective_admitted_bytes
+            ),
+            planned_local_typed_bytes=int(proto.planned_local_typed_bytes),
+            planned_non_admitted_typed_bytes=int(
+                proto.planned_non_admitted_typed_bytes
+            ),
+            planned_generic_residual_bytes=int(proto.planned_generic_residual_bytes),
+            compatibility_lowered_bytes=int(proto.compatibility_lowered_bytes),
+            planner_reject_reason_buckets={
+                str(key): int(value)
+                for key, value in dict(proto.planner_reject_reason_buckets).items()
+            },
+            planner_version=str(proto.planner_version or "") or None,
+            plan_hash=str(proto.plan_hash or "") or None,
+            estimated_collective_peak_temporary_bytes=int(
+                proto.estimated_collective_peak_temporary_bytes
+            ),
+            estimated_collective_batch_bytes=int(
+                proto.estimated_collective_batch_bytes
+            ),
+            estimated_collective_dedup_saving_bytes=int(
+                proto.estimated_collective_dedup_saving_bytes
             ),
         )
 

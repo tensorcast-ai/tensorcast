@@ -47,6 +47,7 @@ struct CollectiveMappedTargetLoadRequest {
   loading::CollectiveLoadGroupHint group;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
   materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  loader::ByteRangeMap collective_lane_map;
   loading::IntoTargetLayout target_layout;
   int device_id{-1};
 };

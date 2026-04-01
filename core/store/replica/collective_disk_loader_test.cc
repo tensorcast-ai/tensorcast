@@ -50,7 +50,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "try_collective_mapped_target_load skips pad-segment maps",
+    "try_collective_mapped_target_load accepts local pad work when the collective lane map is data-only",
     "[collective_disk_loader][collective_mapped][fallback]") {
   CollectiveMappedTargetLoadRequest request{
       .artifact_id = "artifact_collective_mapped",
@@ -63,27 +63,42 @@ TEST_CASE(
       .disk_context = make_disk_context(),
       .representation_work_plan =
           materialization::contracts::RepresentationWorkPlan{
-              .residual_fallback_map =
-                  loader::ByteRangeMap{
-                      .total_bytes = 16,
-                      .num_sources = 1,
-                      .segments =
-                          {
-                              loader::ByteRangeSegment{
-                                  .kind = loader::ByteRangeSegment::Kind::kData,
-                                  .dst_offset = 0,
-                                  .length = 8,
-                                  .src_offset = 0,
-                                  .source_index = 0,
+              .items =
+                  {
+                      materialization::contracts::RepresentationWorkItem{
+                          .kind = materialization::contracts::RepresentationWorkItemKind::kPadFill,
+                          .byte_range_map =
+                              loader::ByteRangeMap{
+                                  .total_bytes = 16,
+                                  .num_sources = 1,
+                                  .segments =
+                                      {
+                                          loader::ByteRangeSegment{
+                                              .kind = loader::ByteRangeSegment::Kind::kPad,
+                                              .dst_offset = 8,
+                                              .length = 8,
+                                              .src_offset = 0,
+                                              .source_index = 0,
+                                          },
+                                      },
                               },
-                              loader::ByteRangeSegment{
-                                  .kind = loader::ByteRangeSegment::Kind::kPad,
-                                  .dst_offset = 8,
-                                  .length = 8,
-                                  .src_offset = 0,
-                                  .source_index = 0,
-                              },
-                          },
+                          .committed_bytes = 8,
+                      },
+                  },
+          },
+      .collective_lane_map =
+          loader::ByteRangeMap{
+              .total_bytes = 16,
+              .num_sources = 1,
+              .segments =
+                  {
+                      loader::ByteRangeSegment{
+                          .kind = loader::ByteRangeSegment::Kind::kData,
+                          .dst_offset = 0,
+                          .length = 8,
+                          .src_offset = 0,
+                          .source_index = 0,
+                      },
                   },
           },
       .target_layout =

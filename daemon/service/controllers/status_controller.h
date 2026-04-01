@@ -59,10 +59,10 @@ class StatusController {
   grpc::Status get_server_config(RpcContext& rctx, v2::GetServerConfigResponse& resp) {
     auto& e = d_.engine;
     (void)rctx;
-    // Contract version 2 includes truthful same-binding identity diagnostics
-    // (`seal_mint` vs `seal_reuse` vs `not_applicable`) and structured
-    // collective failure-class surfacing through SDK-visible errors.
-    constexpr uint32_t kSourceBoundContractVersion = 2;
+    // Contract version 3 adds source-bound planner diagnostics, true residual
+    // semantics, and strict collective preflight on the binding realization
+    // path while preserving the existing typed diagnostics capability bit.
+    constexpr uint32_t kSourceBoundContractVersion = 3;
     constexpr uint64_t kSourceBoundCapabilityFlags =
         static_cast<uint64_t>(
             v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_FIRST_CLASS_COLLECTIVE_INGRESS) |

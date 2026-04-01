@@ -13,6 +13,7 @@ related_code:
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
   - docs/designs/0111-source-to-serving-builder-and-representation-publication.md
   - docs/designs/0112-binding-native-serving-realization-and-publication.md
+  - docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/owned_binding_slot.py
@@ -24,7 +25,10 @@ related_code:
   - daemon/state/lip_manager.cc
   - /data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
 links:
-  plan: ../plans/0113-step3p5-closure-and-sot-convergence.md
+  plan: ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+  related:
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0001-docs-system-design.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -56,10 +60,12 @@ The key policy is:
 
 - `0107` through `0112` remain the architectural source of truth for the
   planes, contracts, and invariants they introduced;
-- the remaining undo items, delete gates, and execution ordering are now owned
-  by one active closure pair:
-  - `docs/designs/0113-step3p5-closure-and-sot-convergence.md`
-  - `docs/plans/0113-step3p5-closure-and-sot-convergence.md`
+- the remaining undo items, delete gates, capability handoff rules, and
+  execution-order constraints remain owned by this `0113` closure design;
+- the single active total execution checklist now lives in:
+  - `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+- `docs/plans/0113-step3p5-closure-and-sot-convergence.md` remains a historical
+  closure-handoff record rather than the active total plan;
 - the old split execution notes under `0108` through `0112` are folded back
   into their owning designs and deleted so they do not continue to compete as
   parallel SOT.
@@ -77,7 +83,7 @@ The remaining closure work has seven slices:
 ```mermaid
 flowchart LR
   A["0107-0112 Designs<br>durable architecture truth"] --> B["0113 Closure Design<br>execution ownership and delete gates"]
-  B --> C["0113 Closure Plan<br>single active checklist"]
+  B --> C["0114 Total Plan<br>single active checklist"]
   C --> D["Contract Cutover<br>first-class source-bound collective ingress"]
   C --> E["Diagnostics Freeze<br>typed quality and admission signals"]
   C --> F["Identity Cutover<br>single-mint and no second-stage hash"]
@@ -220,12 +226,21 @@ Revised:
 Normative rules after this change:
 
 1. `0107` through `0112` remain the design-level architecture authority.
-2. `0113` is the only active closure design/plan pair for the residual work
-   across those designs.
-3. The deleted `0108`-`0112` companion plans are historical only; they are no
-   longer active SOT.
-4. New closure work should update `0113` rather than creating another sibling
-   plan unless the architecture itself changes.
+2. `0113` remains the closure-design authority for capability handoff, identity
+   constraints, and delete gates across those designs.
+3. `0114` plan is the single active total execution checklist for the residual
+   work across those designs.
+4. The deleted `0108`-`0112` companion plans and the retained `0113` plan are
+   historical only; they are no longer active total SOT.
+5. New closure work should update `0113` design and `0114` plan rather than
+   creating another sibling active plan unless the architecture itself changes.
+6. Later architecture-correction designs may still revise the target shape of
+   the shared trunk when new evidence shows the accepted architecture is not yet
+   globally optimal.
+   - those designs must explicitly say which accepted designs remain the
+     long-term owners of the shared abstractions they touch,
+   - and they must not replace `0113` as the cross-design execution-tracking
+     SOT unless `0113` itself is revised.
 
 ## Downstream-Ready Completion Contract
 
@@ -367,10 +382,11 @@ Normative completion rules:
   - typed execution and hash diagnostics,
   - same-binding single-mint closeout;
 - additive semantic changes to that readiness surface must advance
-  `source_bound_contract_version`; the post-closeout-convergence surface in this
-  change set is version `2` because it corrects identity provenance semantics
-  (`seal_mint` / `seal_reuse` / `not_applicable`) beyond the initial additive
-  field landing.
+  `source_bound_contract_version`.
+- the current readiness surface for the collective-first binding-realization
+  convergence tracked in `0114` plan is version `3`, covering true residual
+  semantics, split planner/execution diagnostics, and strict source-bound
+  preflight.
 - downstream integrations must switch against that stable surface instead of
   inferring readiness from encoded `operation_id` tags, benchmark comments, or
   repo-version folklore;
@@ -491,4 +507,5 @@ or helper-only aliases that bypass these conventions.
 - [`docs/designs/0111-source-to-serving-builder-and-representation-publication.md`](/data/workspace/tensorcast-280/docs/designs/0111-source-to-serving-builder-and-representation-publication.md)
 - [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
 - [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
+- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
 - [`/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`](/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md)

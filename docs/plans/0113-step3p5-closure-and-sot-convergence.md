@@ -25,7 +25,15 @@ links:
 # Objective
 
 Finish the remaining Step3p5-facing closure work after the architectural cuts
-from `0107` through `0112`, while keeping one active execution SOT.
+from `0107` through `0112`, while preserving a clean handoff into the new total
+plan arrangement.
+
+Historical note:
+
+- active total execution tracking has moved to
+  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
+- this file remains as a closure-handoff record for already-landed work and for
+  the rationale behind the still-active `0113` closure design constraints.
 
 This plan owns:
 
@@ -118,7 +126,9 @@ Current SOT rule for this work:
 
 - architecture and invariants stay in `0107` through `0112` plus
   `0113` design;
-- active execution tracking stays only in this `0113` plan.
+- active execution tracking now stays in `0114` plan;
+- this `0113` plan is retained as historical context until the updated design
+  set is fully folded back and no active references remain.
 
 # Phases & Milestones
 
@@ -324,9 +334,9 @@ Current SOT rule for this work:
     `tc.collective_failure_class=...` marker through RPC errors so the SDK can
     surface typed `not_eligible` versus `execution_failed` failures without log
     parsing;
-  - `GetServerConfig.source_bound_contract_version` now advances to `2` to mark
-    the corrected identity-provenance and failure-class semantics beyond the
-    initial additive field landing;
+  - `GetServerConfig.source_bound_contract_version` now advances to `3`, which
+    marks the additive `0114` landing for true residual semantics, strict
+    preflight, and split planner/execution diagnostics;
   - `GetServerConfig` now advertises
     `SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT`, and the
     source-bound non-collective fallback path now reports typed executor names
@@ -339,10 +349,9 @@ Current SOT rule for this work:
   - repo-local source-bound compatibility lowering is now deleted on the
     TensorCast side; the remaining `operation_id` transport metadata surface is
     scoped to non-source-bound transport/tracing paths outside `0113`;
-  - `internal-vllm` now requires the first-class source-bound contract,
-    removes legacy bridge-only caller config, and keeps
-    `source_bound_contract_path=first_class_v2` as the only admitted profile
-    value in the supported path;
+  - the active downstream runtime surface has advanced under `0114` to
+    `source_bound_contract_version >= 3` with
+    `source_bound_contract_path=collective_first_v3`;
   - source-bound daemon tests now verify that `operation_id` collective
     metadata is ignored rather than treated as a compatibility collective
     ingress;

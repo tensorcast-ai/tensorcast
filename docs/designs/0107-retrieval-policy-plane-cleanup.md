@@ -30,7 +30,7 @@ links:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0109-batched-owner-file-collective-executor.md
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0113-step3p5-closure-and-sot-convergence.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   predecessors:
     - ./0071-managed-shared-disk-persistence.md
     - ./0078-selection-first-artifact-retrieval.md
@@ -765,7 +765,7 @@ Mitigations:
 - `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`
 - `docs/designs/0109-batched-owner-file-collective-executor.md`
 - `docs/designs/0113-step3p5-closure-and-sot-convergence.md`
-- `docs/plans/0113-step3p5-closure-and-sot-convergence.md`
+- `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`
 - `docs/designs/0104-artifact-realization-and-cluster-rollout.md`
 - `docs/architecture/api/api-design.md`
 - `docs/architecture/api/materialization-flow.md`

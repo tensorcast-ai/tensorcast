@@ -257,7 +257,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "binding realization mixed copy and const fill pads fill-covered target spans",
+    "binding realization mixed copy and const fill keeps fill-covered bytes out of residual fallback",
     "[materialization_target_plan]") {
   const std::string source_index_json = R"({"weight":[0,8,[4],[1],"torch.float16",0]})";
   auto source_table_or = parse_canonical_index(source_index_json);
@@ -308,13 +308,10 @@ TEST_CASE(
       "local_seal_then_promote");
   REQUIRE(result_or.ok());
   REQUIRE(result_or->transform_contract.tensor_bindings.size() == 2);
-  REQUIRE(result_or->generic_fallback_map.segments.size() == 2);
+  REQUIRE(result_or->generic_fallback_map.segments.size() == 1);
   CHECK(result_or->generic_fallback_map.segments[0].kind == ByteRangeSegment::Kind::kData);
   CHECK(result_or->generic_fallback_map.segments[0].dst_offset == 0);
   CHECK(result_or->generic_fallback_map.segments[0].length == 8);
-  CHECK(result_or->generic_fallback_map.segments[1].kind == ByteRangeSegment::Kind::kPad);
-  CHECK(result_or->generic_fallback_map.segments[1].dst_offset == 8);
-  CHECK(result_or->generic_fallback_map.segments[1].length == 4);
 
   MappedTargetMaterializationPlan mapped_plan;
   mapped_plan.representation = *result_or;
@@ -333,7 +330,7 @@ TEST_CASE(
       std::optional<std::string_view>(source_index_json));
   REQUIRE(resolved_plan_or.ok());
   REQUIRE(resolved_plan_or->representation_work_plan.has_value());
-  CHECK(resolved_plan_or->representation_work_plan->residual_fallback_map.total_bytes == 12);
+  CHECK(resolved_plan_or->representation_work_plan->residual_fallback_map.segments.empty());
   REQUIRE(resolved_plan_or->representation_work_plan->items.size() == 2);
   CHECK(
       resolved_plan_or->representation_work_plan->items[0].kind ==

@@ -26,7 +26,8 @@ links:
     - ./0113-step3p5-closure-and-sot-convergence.md
   related:
     - ./0107-retrieval-policy-plane-cleanup.md
-    - ../plans/0113-step3p5-closure-and-sot-convergence.md
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
     - ../internals/disk-load-strategy.md
     - ../internals/model-loading.md
     - ../benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
@@ -109,10 +110,15 @@ The phase-1 scope of this design is now landed in the repository:
 
 The implemented steady-state scope remains intentionally zero-residual-only:
 
-- owner-file collective eligibility still rejects requests with residual
-  fallback bytes
-- residual mixed execution therefore remains on local-batched or generic paths
-  rather than being synthesized at collective runtime
+- owner-file collective eligibility still rejects requests with true generic
+  residual bytes
+- mixed execution remains strategy-owned:
+  - local typed work must already be peeled off before this executor is chosen,
+  - typed work that is not admitted to the collective lane must remain typed in
+    shared planning rather than being silently recast as residual inside this
+    executor
+- collective runtime therefore remains collective-lane-only rather than
+  becoming the owner of mixed-execution semantics
 
 Residual execution tracking after this phase-1 landing is now centralized:
 
@@ -571,6 +577,7 @@ The planner should consume:
 
 - `ResolvedMaterializationPlan`
 - `RepresentationWorkPlan`
+- collective-lane-local lowering derived by the `0108` strategy plane
 - `ResolvedSourceBinding`
 - `ExecutionEnvironmentFacts`
 - typed materialization-strategy policy
@@ -580,6 +587,13 @@ This keeps:
 - semantic truth in `0108`,
 - topology/locality context in the `0107` execution-topology plane,
 - and executor-private batching inside this executor only.
+
+Normative rule:
+
+- this executor must not recover its primary request graph from
+  `residual_fallback_map`;
+- it consumes collective-admitted work only, while residual fallback remains
+  outside the executor as a separate lane.
 
 ### 2.2 Default routing and eligibility
 
@@ -637,6 +651,13 @@ shape.
 The planner stays executor-private and is derived inside the strategy plane.
 
 It should not become SDK or proto surface.
+
+It is also intentionally downstream of shared typed work and shared lane
+allocation:
+
+- `0110` owns the executor-neutral typed work inventory,
+- `0108` owns lane allocation and residual accounting,
+- `0109` owns only the executor-private plan for the collective-admitted lane.
 
 The planner should construct an internal batch plan family, for example:
 
@@ -704,6 +725,9 @@ Current phase rule:
   derive residual generic fallback at runtime,
 - residual generic work must already be explicit in the emitted work plan before
   execution begins,
+- typed work that is not admitted to this executor must remain typed in the
+  shared lane plan; it must not be relabeled as true residual by collective
+  code,
 - Phase 1 implementation may start with zero-residual-only eligibility,
 - but default graduation for shared-FS `AUTO` requires explicit mixed
   collective-plus-generic execution with preplanned residual coverage.
@@ -1068,7 +1092,7 @@ In short:
 - [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
 - [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
 - [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
+- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
 - [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
 - [`docs/internals/disk-load-strategy.md`](/data/workspace/tensorcast-280/docs/internals/disk-load-strategy.md)
 - [`core/store/replica/collective_disk_loader.cc`](/data/workspace/tensorcast-280/core/store/replica/collective_disk_loader.cc)
