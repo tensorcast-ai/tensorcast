@@ -33,6 +33,7 @@ class IpcMapping {
  public:
   IpcMapping() = default;
   explicit IpcMapping(void* ptr);
+  IpcMapping(void* ptr, int device_id);
   IpcMapping(IpcMapping&&) noexcept;
   IpcMapping& operator=(IpcMapping&&) noexcept;
   ~IpcMapping();
@@ -41,6 +42,7 @@ class IpcMapping {
   IpcMapping& operator=(const IpcMapping&) = delete;
 
   [[nodiscard]] void* get() const;
+  [[nodiscard]] absl::Status close();
   void reset();
 
   static absl::StatusOr<IpcMapping> open(const IpcHandleBytes& handle, OpenOptions opts = {});
@@ -50,6 +52,7 @@ class IpcMapping {
 
  private:
   void* ptr_{nullptr};
+  int device_id_{-1};
 };
 
 } // namespace tensorcast::cuda
