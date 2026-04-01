@@ -1467,6 +1467,12 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                         << " ranges=" << range_str;
             }
             absl::Status exec_status;
+            // Run pump_ranges() producer fanout on the CPU executor instead of
+            // the blocking executor that is already hosting this outer load
+            // task. Otherwise many concurrent load_async_from_source() calls
+            // can occupy the entire blocking pool and starve their own nested
+            // producer tasks, wedging staged CPU-target transfers.
+            auto transfer_fanout_executor = self->async_runtime_->cpu_executor();
             if (collective_disk_load.has_value()) {
               auto collective_result = try_collective_disk_load(
                   CollectiveDiskLoadRequest{
@@ -1491,7 +1497,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                     target_location,
                     *source,
                     concurrency,
-                    self->async_runtime_->blocking_executor(),
+                    transfer_fanout_executor.copy(),
                     gpu_ptr,
                     gpu_allocation,
                     device_id);
@@ -1521,7 +1527,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                     target_location,
                     *source,
                     concurrency,
-                    self->async_runtime_->blocking_executor(),
+                    transfer_fanout_executor.copy(),
                     gpu_ptr,
                     gpu_allocation,
                     device_id);
@@ -1532,7 +1538,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                   target_location,
                   *source,
                   concurrency,
-                  self->async_runtime_->blocking_executor(),
+                  transfer_fanout_executor.copy(),
                   gpu_ptr,
                   gpu_allocation,
                   device_id);
