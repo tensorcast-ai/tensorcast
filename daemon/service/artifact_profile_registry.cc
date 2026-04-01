@@ -113,12 +113,30 @@ class ByteArtifactProfileRuntime final : public ArtifactProfileRuntime {
     if (invariant.byte_length() != descriptor.size_bytes) {
       return absl::InvalidArgumentError("invariant.byte_length does not match payload size");
     }
+    if (descriptor.layout_id != invariant.layout_id()) {
+      return absl::InvalidArgumentError("invariant.layout_id does not match payload layout");
+    }
+    const auto verification_mode = invariant_verification_mode(invariant);
+    if (descriptor.verification_mode != verification_mode) {
+      return absl::InvalidArgumentError("descriptor.verification_mode does not match invariant");
+    }
+    const bool digest_pair_present = !invariant.payload_digest_alg().empty() || !invariant.payload_digest_hex().empty();
+    if (!invariant.payload_digest_alg().empty() != !invariant.payload_digest_hex().empty()) {
+      return absl::InvalidArgumentError(
+          "invariant.payload_digest_alg and invariant.payload_digest_hex must both be set");
+    }
+    if (!verification_mode_requires_payload_digest(verification_mode)) {
+      if (!digest_pair_present) {
+        return absl::OkStatus();
+      }
+      if (to_lower_copy(invariant.payload_digest_alg()) != "sha256") {
+        return absl::InvalidArgumentError("layout-and-size-only advisory payload_digest_alg must be sha256");
+      }
+      return absl::OkStatus();
+    }
     const std::string digest_alg = to_lower_copy(invariant.payload_digest_alg());
     if (digest_alg != "sha256") {
       return absl::InvalidArgumentError("invariant.payload_digest_alg must be sha256");
-    }
-    if (descriptor.layout_id != invariant.layout_id()) {
-      return absl::InvalidArgumentError("invariant.layout_id does not match payload layout");
     }
     if (descriptor.payload_digest_alg != digest_alg) {
       return absl::InvalidArgumentError("descriptor.digest_alg does not match invariant");

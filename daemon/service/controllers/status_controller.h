@@ -42,6 +42,11 @@ class StatusController {
     std::chrono::steady_clock::time_point start_time;
     std::string local_handle_socket_path;
     bool cpu_shared_memory_enabled{true};
+    uint32_t batch_transport_protocol_version{0};
+    bool batch_payload_grpc_chunk_ref_enabled{false};
+    bool batch_payload_communicator_source_enabled{false};
+    bool batch_payload_host_memory_export_enabled{false};
+    uint64_t max_batch_payload_bytes{0};
     std::shared_ptr<StartupCoordinator> startup_coordinator;
     WorkerDirectoryCache& worker_directory_cache;
     InstanceExecutionDirectoryCache& instance_execution_directory_cache;
@@ -61,6 +66,11 @@ class StatusController {
     resp.set_local_handle_socket_path(d_.local_handle_socket_path);
     resp.set_cpu_shared_memory_enabled(d_.cpu_shared_memory_enabled);
     resp.set_startup_phase(startup_phase_proto());
+    resp.set_batch_transport_protocol_version(d_.batch_transport_protocol_version);
+    resp.set_batch_payload_grpc_chunk_ref_enabled(d_.batch_payload_grpc_chunk_ref_enabled);
+    resp.set_batch_payload_communicator_source_enabled(d_.batch_payload_communicator_source_enabled);
+    resp.set_batch_payload_host_memory_export_enabled(d_.batch_payload_host_memory_export_enabled);
+    resp.set_max_batch_payload_bytes(d_.max_batch_payload_bytes);
     rctx.mark_success();
     return grpc::Status::OK;
   }

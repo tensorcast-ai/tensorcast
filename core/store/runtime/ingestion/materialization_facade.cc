@@ -2839,6 +2839,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
+  const absl::Time total_started_at = absl::Now();
+  absl::Duration init_loader_elapsed = absl::ZeroDuration();
+  absl::Duration open_source_elapsed = absl::ZeroDuration();
+  absl::Duration mapped_source_build_elapsed = absl::ZeroDuration();
+  absl::Duration session_spb_init_elapsed = absl::ZeroDuration();
+  absl::Duration pump_elapsed = absl::ZeroDuration();
+  absl::Duration sink_close_elapsed = absl::ZeroDuration();
   if (target_device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires GPU target device");
   }
@@ -2882,7 +2889,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("materialize_mapped_loader_into_target mapping total_bytes mismatch");
   }
 
+  const absl::Time init_loader_started_at = absl::Now();
   auto init_status = loader->initialize();
+  init_loader_elapsed = absl::Now() - init_loader_started_at;
   if (!init_status.ok()) {
     return init_status;
   }
@@ -2893,7 +2902,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (*source_size_or < total_size) {
     return absl::FailedPreconditionError("materialize_mapped_loader_into_target source is smaller than target mapping");
   }
+  const absl::Time open_source_started_at = absl::Now();
   auto source_or = loader->open_source();
+  open_source_elapsed = absl::Now() - open_source_started_at;
   if (!source_or.ok()) {
     return source_or.status();
   }
@@ -2901,6 +2912,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   std::vector<std::shared_ptr<loader::SeekableSource>> sources;
   sources.emplace_back(std::move(*source_or));
 
+  const absl::Time mapped_source_build_started_at = absl::Now();
   loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_mapped_loader_into_target");
   auto program_or = compiler.Compile(mapping);
   if (!program_or.ok()) {
@@ -2914,6 +2926,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (!mapped_or.ok()) {
     return mapped_or.status();
   }
+  mapped_source_build_elapsed = absl::Now() - mapped_source_build_started_at;
 
   const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
   if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
@@ -2951,29 +2964,66 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+  const absl::Time session_spb_init_started_at = absl::Now();
   auto init_spb_status = session_spb->initialize(
       timeout, make_materialize_into_target_pinned_wait_context(hints, target_device.ordinal, num_chunks, slice_bytes));
+  session_spb_init_elapsed = absl::Now() - session_spb_init_started_at;
   if (!init_spb_status.ok()) {
     return init_spb_status;
   }
   loader::StreamingBufferAdapter adapter(session_spb);
+  loader::PumpDebugStats pump_debug_stats;
+  const absl::Time pump_started_at = absl::Now();
   auto pump_status = loader::pump_ranges(
       **mapped_or,
       sink,
       adapter,
       absl::MakeSpan(ranges),
       concurrency,
-      config_.runtime_context->async_runtime()->blocking_executor());
+      config_.runtime_context->async_runtime()->blocking_executor(),
+      &pump_debug_stats);
+  pump_elapsed = absl::Now() - pump_started_at;
   if (!pump_status.ok()) {
     return absl::DataLossError(
         absl::StrCat("materialize_mapped_loader_into_target pump failed: ", pump_status.message()));
   }
+  const absl::Time sink_close_started_at = absl::Now();
   auto close_status = sink.close();
+  sink_close_elapsed = absl::Now() - sink_close_started_at;
   if (!close_status.ok()) {
     return absl::DataLossError(
         absl::StrCat("materialize_mapped_loader_into_target sink close failed: ", close_status.message()));
   }
-  return loading::MaterializeIntoTargetResult{.source = source_kind};
+  const absl::Duration total_elapsed = absl::Now() - total_started_at;
+  if (source_kind == loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(5)) {
+    LOG(INFO) << "materialize_mapped_loader_into_target_summary"
+              << " artifact_id=" << hints.artifact_id << " request_id=" << hints.transport_request_id
+              << " total_size=" << total_size << " slice_bytes=" << slice_bytes
+              << " chunk_size=" << config_.artifact_chunk_bytes << " concurrency=" << concurrency
+              << " num_chunks=" << num_chunks << " init_loader_ms=" << absl::ToDoubleMilliseconds(init_loader_elapsed)
+              << " open_source_ms=" << absl::ToDoubleMilliseconds(open_source_elapsed)
+              << " mapped_source_build_ms=" << absl::ToDoubleMilliseconds(mapped_source_build_elapsed)
+              << " session_spb_init_ms=" << absl::ToDoubleMilliseconds(session_spb_init_elapsed)
+              << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+              << " source_to_pinned_ms=" << (static_cast<double>(pump_debug_stats.source_read_at_us_total) / 1000.0)
+              << " pinned_to_gpu_ms=" << (static_cast<double>(pump_debug_stats.gpu_write_wait_us_total) / 1000.0)
+              << " staged_bytes=" << pump_debug_stats.produced_bytes
+              << " staged_chunks=" << pump_debug_stats.produced_chunks
+              << " gpu_write_bytes=" << pump_debug_stats.gpu_write_bytes_total
+              << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+  }
+  return loading::MaterializeIntoTargetResult{
+      .source = source_kind,
+      .debug_stats =
+          loading::MaterializeIntoTargetResult::DebugStats{
+              .produced_chunks = pump_debug_stats.produced_chunks,
+              .produced_bytes = pump_debug_stats.produced_bytes,
+              .source_read_at_us_total = pump_debug_stats.source_read_at_us_total,
+              .gpu_write_wait_us_total = pump_debug_stats.gpu_write_wait_us_total,
+              .gpu_write_bytes_total = pump_debug_stats.gpu_write_bytes_total,
+          },
+  };
 }
 
 absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_lowering_plan(

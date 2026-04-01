@@ -15,7 +15,7 @@ _CGID_MIN_LEN: int = 8
 _CGID_MAX_LEN: int = 200
 BYTE_ARTIFACT_CGID_NAMESPACE: str = "byte_artifact"
 _CGID_SEGMENT_DELIM: str = "~"
-_BYTE_ARTIFACT_SEGMENT_COUNT: int = 6
+_BYTE_ARTIFACT_SEGMENT_COUNT: int = 7
 _B64U_PREFIX: str = "b64u."
 
 
@@ -31,6 +31,7 @@ class ByteArtifactCgidParts:
     namespace: str
     engine: str
     model_id_enc: str
+    model_version_enc: str
     layout_id: str
     engine_key_enc: str
 
@@ -105,7 +106,8 @@ def parse_byte_artifact_cgid(artifact_id: str) -> ByteArtifactCgidParts:
     ):
         raise ValueError(
             "byte_artifact cgid must match "
-            "'cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>'"
+            "'cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~"
+            "<model_version_enc>~<layout_id>~<engine_key_enc>'"
         )
     if any(not segment for segment in segments):
         raise ValueError("byte_artifact cgid segments must be non-empty")
@@ -118,8 +120,9 @@ def parse_byte_artifact_cgid(artifact_id: str) -> ByteArtifactCgidParts:
         namespace=segments[1],
         engine=segments[2],
         model_id_enc=segments[3],
-        layout_id=segments[4],
-        engine_key_enc=segments[5],
+        model_version_enc=segments[4],
+        layout_id=segments[5],
+        engine_key_enc=segments[6],
     )
 
 
@@ -132,6 +135,7 @@ def build_byte_artifact_cgid(
     namespace: str,
     engine: str,
     model_id: bytes | str,
+    model_version: bytes | str,
     layout_id: str,
     engine_key: bytes | str,
 ) -> str:
@@ -155,6 +159,7 @@ def build_byte_artifact_cgid(
         f"{namespace}{_CGID_SEGMENT_DELIM}"
         f"{engine}{_CGID_SEGMENT_DELIM}"
         f"{encode_cgid_segment(model_id)}{_CGID_SEGMENT_DELIM}"
+        f"{encode_cgid_segment(model_version)}{_CGID_SEGMENT_DELIM}"
         f"{layout_id}{_CGID_SEGMENT_DELIM}"
         f"{encode_cgid_segment(engine_key)}"
     )

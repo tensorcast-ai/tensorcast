@@ -85,6 +85,7 @@ service StoreDaemonService {
   rpc HomeBatchPutIfAbsent(HomeBatchPutIfAbsentRequest) returns (HomeBatchPutIfAbsentResponse) {}
   rpc HomeBatchTouchTtl(HomeBatchTouchTtlRequest) returns (HomeBatchTouchTtlResponse) {}
   rpc FetchPayloadRefChunk(FetchPayloadRefChunkRequest) returns (FetchPayloadRefChunkResponse) {}
+  rpc FetchBatchPayloadRefChunk(FetchBatchPayloadRefChunkRequest) returns (FetchBatchPayloadRefChunkResponse) {}
   rpc RouteAuthorityStage(RouteAuthorityStageRequest) returns (RouteAuthorityStageResponse) {}
 
   // ========== Key mapping and publish ==========
@@ -180,6 +181,17 @@ message GetServerConfigResponse {
   bool cpu_shared_memory_enabled = 7;
   // Single source of truth for daemon startup visibility across CLI, SDK, and tests.
   DaemonStartupPhase startup_phase = 8;
+  // 0 disables batch-native payload transport; 1 enables grpc_chunk_ref v1;
+  // 2 enables communicator_source v2 with grpc_chunk_ref fallback.
+  uint32 batch_transport_protocol_version = 9;
+  // True when grpc_chunk_ref is served for batch-native payload transport.
+  bool batch_payload_grpc_chunk_ref_enabled = 10;
+  // Sender-side slab packing ceiling for one batch transport object.
+  uint64 max_batch_payload_bytes = 11;
+  // True when communicator_source is served for batch-native payload transport.
+  bool batch_payload_communicator_source_enabled = 12;
+  // True when host-memory export is enabled for communicator_source packs.
+  bool batch_payload_host_memory_export_enabled = 13;
 }
 
 message RegisterRequest {
@@ -607,11 +619,18 @@ message BatchItemOutcome {
   string message = 3;
 }
 
+enum ByteArtifactVerificationMode {
+  BYTE_ARTIFACT_VERIFICATION_MODE_UNSPECIFIED = 0;
+  BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256 = 1;
+  BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY = 2;
+}
+
 message PutIfAbsentInvariant {
   string layout_id = 1;
   uint64 byte_length = 2;
   string payload_digest_alg = 3;
   string payload_digest_hex = 4;
+  ByteArtifactVerificationMode verification_mode = 5;
 }
 
 message BatchExistsRequest {
@@ -670,6 +689,61 @@ message RouteFence {
   uint64 routing_epoch = 4;
 }
 
+message BatchPayloadEntry {
+  string artifact_id = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+  string digest_alg = 4;
+  string digest_hex = 5;
+}
+
+message BatchPayloadManifest {
+  repeated BatchPayloadEntry entries = 1;
+  uint64 total_size = 2;
+}
+
+message BatchPayloadGrpcChunkRef {
+  bytes batch_payload_ref = 1;
+  uint32 protocol_version = 2;
+}
+
+enum BatchPayloadMemoryLocation {
+  BATCH_PAYLOAD_MEMORY_LOCATION_UNSPECIFIED = 0;
+  BATCH_PAYLOAD_MEMORY_LOCATION_HOST = 1;
+  BATCH_PAYLOAD_MEMORY_LOCATION_GPU_VRAM = 2;
+}
+
+message BatchPayloadCommunicatorSource {
+  bytes batch_payload_ref = 1;
+  uint32 protocol_version = 2;
+  string producer_daemon_id = 3;
+  string consumer_daemon_id = 4;
+  string producer_host = 5;
+  uint32 producer_port = 6;
+  repeated string remote_memory_keys = 7;
+  repeated uint64 buffer_sizes = 8;
+  string remote_endpoint_id = 9;
+  string local_endpoint_id_hint = 10;
+  BatchPayloadMemoryLocation memory_location = 11;
+  uint64 total_payload_bytes = 12;
+}
+
+message BatchPayloadTransport {
+  string transport_id = 1;
+  BatchPayloadManifest manifest = 2;
+
+  oneof transport_kind {
+    BatchPayloadGrpcChunkRef grpc_chunk_ref = 3;
+    BatchPayloadCommunicatorSource communicator_source = 4;
+  }
+}
+
+message BatchPayloadSlice {
+  string transport_id = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+}
+
 message HomeBatchExistsRequest {
   RouteFence fence = 1;
   repeated string artifact_ids = 2;
@@ -684,6 +758,7 @@ message HomeBatchGetRequest {
   RouteFence fence = 1;
   repeated string artifact_ids = 2;
   optional string operation_id = 3;
+  optional string requester_daemon_id = 4;
 }
 
 message HomeBatchGetItem {
@@ -692,11 +767,13 @@ message HomeBatchGetItem {
   string message = 3;
   bytes inline_payload = 4;
   bytes payload_ref = 5;
+  BatchPayloadSlice batch_payload_slice = 6;
 }
 
 message HomeBatchGetResponse {
   repeated HomeBatchGetItem items = 1;
   RouteFence redirect = 2;
+  repeated BatchPayloadTransport batch_transports = 3;
 }
 
 message HomeBatchPutIfAbsentItem {
@@ -704,6 +781,7 @@ message HomeBatchPutIfAbsentItem {
   PutIfAbsentInvariant invariant = 2;
   bytes inline_payload = 3;
   bytes payload_ref = 4;
+  BatchPayloadSlice batch_payload_slice = 5;
 }
 
 message HomeBatchPutIfAbsentRequest {
@@ -711,6 +789,8 @@ message HomeBatchPutIfAbsentRequest {
   repeated HomeBatchPutIfAbsentItem items = 2;
   optional uint64 ttl_ms = 3;
   optional string operation_id = 4;
+  repeated BatchPayloadTransport batch_transports = 5;
+  optional string requester_daemon_id = 6;
 }
 
 message HomeBatchPutIfAbsentResponse {
@@ -738,6 +818,21 @@ message FetchPayloadRefChunkRequest {
 }
 
 message FetchPayloadRefChunkResponse {
+  BatchItemStatus status = 1;
+  string message = 2;
+  bytes chunk = 3;
+  uint64 total_size = 4;
+  bool eof = 5;
+}
+
+message FetchBatchPayloadRefChunkRequest {
+  bytes batch_payload_ref = 1;
+  uint64 offset = 2;
+  uint64 max_bytes = 3;
+  optional string operation_id = 4;
+}
+
+message FetchBatchPayloadRefChunkResponse {
   BatchItemStatus status = 1;
   string message = 2;
   bytes chunk = 3;

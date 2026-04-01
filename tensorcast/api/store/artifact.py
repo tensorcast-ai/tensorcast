@@ -2678,9 +2678,8 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                artifact_id, _disk_path = runtime.resolve_key_mapping_cached(
-                    key=self._key_hint
-                )
+                resolved = runtime.resolve_key_mapping_cached(key=self._key_hint)
+                artifact_id = resolved[0] if isinstance(resolved, tuple) else resolved
                 if not artifact_id:
                     raise ArtifactError(
                         f"Artifact key '{self._key_hint}' is not mapped",

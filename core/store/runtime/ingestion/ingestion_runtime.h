@@ -81,6 +81,16 @@ class IngestionRuntime {
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind);
 
+  absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
+      std::string_view logical_artifact_id,
+      std::string_view physical_artifact_id,
+      const DeviceKey& target_device,
+      const loading::ReplicaTarget& target,
+      std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+
   absl::StatusOr<ingestion::ArtifactLoweringResult> execute_artifact_lowering_plan(
       ingestion::ArtifactLoweringPlan plan);
 

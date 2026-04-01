@@ -1176,6 +1176,36 @@ int main(int argc, char** argv) {
       if (pt.has_cleanup_interval()) {
         daemon_opts.byte_artifact_routing.payload_transport.cleanup_interval = duration_to_absl(pt.cleanup_interval());
       }
+      if (pt.max_batch_payload_bytes() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_payload_bytes = pt.max_batch_payload_bytes();
+      }
+      if (pt.max_batch_items() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_items = pt.max_batch_items();
+      }
+      if (pt.max_batch_stage_bytes_per_peer() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_stage_bytes_per_peer =
+            pt.max_batch_stage_bytes_per_peer();
+      }
+      if (pt.has_batch_transport_protocol_version()) {
+        daemon_opts.byte_artifact_routing.payload_transport.batch_transport_protocol_version =
+            pt.batch_transport_protocol_version();
+      }
+      if (pt.has_communicator_source_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.communicator_source_enabled =
+            pt.communicator_source_enabled();
+      }
+      if (pt.has_host_memory_export_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled =
+            pt.host_memory_export_enabled();
+      }
+      if (pt.has_minimum_batch_transport_ttl()) {
+        daemon_opts.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl =
+            duration_to_absl(pt.minimum_batch_transport_ttl());
+      }
+      if (pt.has_transport_release_guard()) {
+        daemon_opts.byte_artifact_routing.payload_transport.transport_release_guard =
+            duration_to_absl(pt.transport_release_guard());
+      }
     }
   }
 
@@ -1257,23 +1287,24 @@ int main(int argc, char** argv) {
   auto to_ms = [](const google::protobuf::Duration& d) -> int {
     return static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
   };
+  auto assign_grpc_duration_if_enabled = [&to_ms](
+                                             const google::protobuf::Duration& duration, std::optional<int>* target) {
+    const int duration_ms = to_ms(duration);
+    if (duration_ms > 0) {
+      *target = duration_ms;
+    }
+  };
   if (cfg.server().grpc().has_keepalive_time()) {
-    grpc_opts.keepalive_time_ms = to_ms(cfg.server().grpc().keepalive_time());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().keepalive_time(), &grpc_opts.keepalive_time_ms);
   }
   if (cfg.server().grpc().has_keepalive_timeout()) {
-    grpc_opts.keepalive_timeout_ms = to_ms(cfg.server().grpc().keepalive_timeout());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().keepalive_timeout(), &grpc_opts.keepalive_timeout_ms);
   }
   if (cfg.server().grpc().has_max_connection_idle()) {
-    const int max_connection_idle_ms = to_ms(cfg.server().grpc().max_connection_idle());
-    if (max_connection_idle_ms > 0) {
-      grpc_opts.max_connection_idle_ms = max_connection_idle_ms;
-    }
+    assign_grpc_duration_if_enabled(cfg.server().grpc().max_connection_idle(), &grpc_opts.max_connection_idle_ms);
   }
   if (cfg.server().grpc().has_max_connection_age()) {
-    const int max_connection_age_ms = to_ms(cfg.server().grpc().max_connection_age());
-    if (max_connection_age_ms > 0) {
-      grpc_opts.max_connection_age_ms = max_connection_age_ms;
-    }
+    assign_grpc_duration_if_enabled(cfg.server().grpc().max_connection_age(), &grpc_opts.max_connection_age_ms);
   }
   grpc_opts.tcp_nodelay = cfg.server().grpc().tcp_nodelay();
   grpc_opts.so_reuseport = cfg.server().grpc().so_reuseport();

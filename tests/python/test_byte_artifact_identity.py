@@ -23,12 +23,14 @@ def test_byte_artifact_cgid_build_parse_and_decode_vectors() -> None:
         namespace="tenantA",
         engine="sglang",
         model_id="meta-llama/Llama-3.1-8B-Instruct",
+        model_version="v1",
         layout_id="layout_v1",
         engine_key="request-0001:blk-42",
     )
     assert (
         artifact_id == "cgid:byte_artifact~tenantA~sglang~"
         "b64u.bWV0YS1sbGFtYS9MbGFtYS0zLjEtOEItSW5zdHJ1Y3Q~"
+        "b64u.djE~"
         "layout_v1~b64u.cmVxdWVzdC0wMDAxOmJsay00Mg"
     )
 
@@ -39,6 +41,7 @@ def test_byte_artifact_cgid_build_parse_and_decode_vectors() -> None:
     assert decode_cgid_segment(parsed.model_id_enc).decode("utf-8") == (
         "meta-llama/Llama-3.1-8B-Instruct"
     )
+    assert decode_cgid_segment(parsed.model_version_enc).decode("utf-8") == "v1"
     assert decode_cgid_segment(parsed.engine_key_enc).decode("utf-8") == (
         "request-0001:blk-42"
     )
@@ -48,6 +51,7 @@ def test_byte_artifact_selection_profile_requires_canonical_full_selection() -> 
     artifact_id = (
         "cgid:byte_artifact~tenantA~sglang~"
         "b64u.bWV0YS1sbGFtYS9MbGFtYS0zLjEtOEItSW5zdHJ1Y3Q~"
+        "b64u.djE~"
         "layout_v1~b64u.cmVxdWVzdC0wMDAxOmJsay00Mg"
     )
     selection = build_artifact_selection(
@@ -89,6 +93,7 @@ def test_byte_artifact_selection_profile_rejects_view_and_non_payload_subset() -
     artifact_id = (
         "cgid:byte_artifact~tenantA~sglang~"
         "b64u.bWV0YS1sbGFtYS9MbGFtYS0zLjEtOEItSW5zdHJ1Y3Q~"
+        "b64u.djE~"
         "layout_v1~b64u.cmVxdWVzdC0wMDAxOmJsay00Mg"
     )
     with pytest.raises(ValueError, match="full selection only"):

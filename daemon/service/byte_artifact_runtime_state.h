@@ -64,11 +64,14 @@ struct ByteArtifactRuntimeState {
       absl::flat_hash_set<std::string>,
       store::runtime::ingestion::BackingIdentityHash>
       backing_authority_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>
+      orphan_backing_candidates ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<
       store::loading::ReplicaKey,
       absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>,
       store::loading::ReplicaKeyHash>
       replica_visibility_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<std::uint64_t, std::uint64_t> shard_authority_refcounts ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, ShardRouteCacheEntry> shard_routes ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, OwnedShardLeaseEntry> owned_shard_leases ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::string, DaemonEndpointCacheEntry> daemon_endpoints ABSL_GUARDED_BY(mu);

@@ -116,6 +116,14 @@ class StoreEngine {
   absl::StatusOr<runtime::ingestion::ArtifactLoweringResult> execute_artifact_lowering_plan(
       runtime::ingestion::ArtifactLoweringPlan plan);
 
+  [[nodiscard]] runtime::IngestionRuntime& ingestion_runtime() {
+    return *ingestion_runtime_;
+  }
+
+  [[nodiscard]] const runtime::IngestionRuntime& ingestion_runtime() const {
+    return *ingestion_runtime_;
+  }
+
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
       std::string_view target_artifact_id,

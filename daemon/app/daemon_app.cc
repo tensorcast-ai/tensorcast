@@ -180,6 +180,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
           .external_target_access_service = *app->external_target_access_service_,
           .identity_store = app->kernel_->worker_identity_store(),
           .engine = app->kernel_->engine(),
+          .async_runtime = app->kernel_->async_runtime(),
           .persistence_manager = app->kernel_->persistence_manager(),
           .global_store_client = app->options_.global_store_client,
           .inter_daemon_channel_credentials = app->kernel_->inter_daemon_channel_credentials(),
@@ -199,6 +200,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
                   .shard_home_eligible = app->options_.daemon_options.byte_artifact_routing.shard_home_eligible,
               },
           .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
+          .batch_get_apply_threads =
+              static_cast<std::uint32_t>(std::max(1, app->options_.engine->options().num_thread)),
       });
 
   if (app->options_.global_store_client && app->kernel_->persistence_manager()) {
@@ -266,6 +269,18 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .start_time = app->kernel_->start_time(),
       .local_handle_socket_path = app->options_.daemon_options.local_handle_socket_path,
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
+      .batch_transport_protocol_version =
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.batch_transport_protocol_version,
+      .batch_payload_grpc_chunk_ref_enabled =
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.batch_transport_protocol_version > 0,
+      .batch_payload_communicator_source_enabled =
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.communicator_source_enabled,
+      .batch_payload_host_memory_export_enabled =
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+      .max_batch_payload_bytes =
+          app->options_.daemon_options.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
       .startup_coordinator = app->options_.startup_coordinator,
       .worker_directory_cache = app->kernel_->worker_directory_cache(),
       .instance_execution_directory_cache = app->kernel_->instance_execution_directory_cache(),

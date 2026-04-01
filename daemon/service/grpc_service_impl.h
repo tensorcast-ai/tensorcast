@@ -401,6 +401,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::FetchPayloadRefChunkRequest* req,
       v2::FetchPayloadRefChunkResponse* resp) override;
 
+  grpc::Status FetchBatchPayloadRefChunk(
+      grpc::ServerContext* ctx,
+      const v2::FetchBatchPayloadRefChunkRequest* req,
+      v2::FetchBatchPayloadRefChunkResponse* resp) override;
+
   grpc::Status RouteAuthorityStage(
       grpc::ServerContext* ctx,
       const v2::RouteAuthorityStageRequest* req,
