@@ -499,10 +499,7 @@ absl::StatusOr<BodyBackingManager::StageResult> finalize_staged_replica(
     store::loading::ReplicaHandle replica_handle,
     store::runtime::ingestion::BackingIdentity backing_identity,
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor,
-    store::runtime::ingestion::VerificationRecord verification_record,
-    absl::Duration* stable_retention_elapsed = nullptr,
-    absl::Duration* inspect_backing_elapsed = nullptr,
-    absl::Duration* handle_create_elapsed = nullptr) {
+    store::runtime::ingestion::VerificationRecord verification_record) {
   if (backing_identity.replica_key.artifact_id.empty()) {
     backing_identity.replica_key = replica_handle.key();
   }
@@ -698,13 +695,6 @@ BodyBackingIntent BodyBackingManager::classify_intent(
 }
 
 absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(StageRequest request) const {
-  const absl::Time total_started_at = absl::Now();
-  absl::Duration resolve_policy_elapsed = absl::ZeroDuration();
-  absl::Duration lower_plan_elapsed = absl::ZeroDuration();
-  absl::Duration execute_plan_elapsed = absl::ZeroDuration();
-  absl::Duration stable_retention_elapsed = absl::ZeroDuration();
-  absl::Duration inspect_backing_elapsed = absl::ZeroDuration();
-  absl::Duration handle_create_elapsed = absl::ZeroDuration();
   if (request.artifact_id.empty()) {
     return absl::InvalidArgumentError("artifact_id is required for body staging");
   }
@@ -715,10 +705,8 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
     return absl::InvalidArgumentError("loader is required for body staging");
   }
 
-  const absl::Time resolve_policy_started_at = absl::Now();
   auto resolved_policy_or =
       resolve_body_store_policy(request.access_class, request.route_role, request.resolved_store_policy);
-  resolve_policy_elapsed = absl::Now() - resolve_policy_started_at;
   if (!resolved_policy_or.ok()) {
     return resolved_policy_or.status();
   }
@@ -729,7 +717,6 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   if (!verification_mode_requires_payload_digest(verification_mode)) {
     auto hints = build_lowering_hints(request.artifact_id, request.operation_id);
     const std::string physical_artifact_id = build_body_backing_artifact_id(request.artifact_id, request.invariant);
-    const absl::Time execute_plan_started_at = absl::Now();
     auto replica_handle_or = engine_.ingestion_runtime().ingest_mapped_loader_into_replica(
         request.artifact_id,
         physical_artifact_id,
@@ -739,7 +726,6 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
         build_identity_byte_range_map(request.invariant.byte_length()),
         hints,
         request.source_kind);
-    execute_plan_elapsed = absl::Now() - execute_plan_started_at;
     if (!replica_handle_or.ok()) {
       record_body_backing_metrics("stage", request.access_class, intent, "fast_ingest_error");
       return replica_handle_or.status();
@@ -757,32 +743,12 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
             .physical_artifact_id = physical_artifact_id,
         },
         build_invariant_verified_content_descriptor(request.invariant),
-        build_layout_and_size_verification_record(request.invariant.layout_id(), absl::Now()),
-        &stable_retention_elapsed,
-        &inspect_backing_elapsed,
-        &handle_create_elapsed);
+        build_layout_and_size_verification_record(request.invariant.layout_id(), absl::Now()));
     if (!stage_result_or.ok()) {
       return stage_result_or.status();
     }
-    const absl::Duration total_elapsed = absl::Now() - total_started_at;
-    if (request.source_kind == store::loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(1)) {
-      LOG(INFO) << "body_backing.stage_body_summary"
-                << " artifact_id=" << request.artifact_id << " operation_id=" << request.operation_id
-                << " size_bytes=" << request.invariant.byte_length()
-                << " source_kind=" << static_cast<int>(request.source_kind)
-                << " verification_mode=" << byte_artifact_verification_mode_label(verification_mode)
-                << " hash_bypassed=true"
-                << " resolve_policy_ms=" << absl::ToDoubleMilliseconds(resolve_policy_elapsed)
-                << " lower_plan_ms=" << absl::ToDoubleMilliseconds(lower_plan_elapsed)
-                << " execute_plan_ms=" << absl::ToDoubleMilliseconds(execute_plan_elapsed)
-                << " stable_retention_ms=" << absl::ToDoubleMilliseconds(stable_retention_elapsed)
-                << " inspect_backing_ms=" << absl::ToDoubleMilliseconds(inspect_backing_elapsed)
-                << " handle_create_ms=" << absl::ToDoubleMilliseconds(handle_create_elapsed)
-                << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
-    }
     return stage_result_or;
   }
-  const absl::Time lower_plan_started_at = absl::Now();
   auto plan_or = store::runtime::ingestion::lower_to_artifact_plan(
       store::runtime::ingestion::LowerToArtifactPlanRequest{
           .identity =
@@ -810,7 +776,6 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
           .source_kind = request.source_kind,
           .replica_target = build_replica_target(intent),
       });
-  lower_plan_elapsed = absl::Now() - lower_plan_started_at;
   if (!plan_or.ok()) {
     record_body_backing_metrics("stage", request.access_class, intent, "lowering_error");
     return plan_or.status();
@@ -818,9 +783,7 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   store::runtime::ingestion::ArtifactLoweringPlan plan = std::move(*plan_or);
 
   const std::string physical_artifact_id = plan.identity.physical_artifact_id;
-  const absl::Time execute_plan_started_at = absl::Now();
   auto result_or = engine_.execute_artifact_lowering_plan(std::move(plan));
-  execute_plan_elapsed = absl::Now() - execute_plan_started_at;
   if (!result_or.ok()) {
     record_body_backing_metrics("stage", request.access_class, intent, "error");
     return result_or.status();
@@ -846,28 +809,9 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
       std::move(*result_or->replica_handle),
       *result_or->backing_identity,
       *result_or->verified_content_descriptor,
-      *result_or->verification_record,
-      &stable_retention_elapsed,
-      &inspect_backing_elapsed,
-      &handle_create_elapsed);
+      *result_or->verification_record);
   if (!stage_result_or.ok()) {
     return stage_result_or.status();
-  }
-  const absl::Duration total_elapsed = absl::Now() - total_started_at;
-  if (request.source_kind == store::loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(1)) {
-    LOG(INFO) << "body_backing.stage_body_summary"
-              << " artifact_id=" << request.artifact_id << " operation_id=" << request.operation_id
-              << " size_bytes=" << request.invariant.byte_length()
-              << " source_kind=" << static_cast<int>(request.source_kind)
-              << " verification_mode=" << byte_artifact_verification_mode_label(verification_mode)
-              << " hash_bypassed=false"
-              << " resolve_policy_ms=" << absl::ToDoubleMilliseconds(resolve_policy_elapsed)
-              << " lower_plan_ms=" << absl::ToDoubleMilliseconds(lower_plan_elapsed)
-              << " execute_plan_ms=" << absl::ToDoubleMilliseconds(execute_plan_elapsed)
-              << " stable_retention_ms=" << absl::ToDoubleMilliseconds(stable_retention_elapsed)
-              << " inspect_backing_ms=" << absl::ToDoubleMilliseconds(inspect_backing_elapsed)
-              << " handle_create_ms=" << absl::ToDoubleMilliseconds(handle_create_elapsed)
-              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
   }
   return stage_result_or;
 }
@@ -881,12 +825,6 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
     BodyAccessClass access_class,
     BodyRouteRole route_role,
     std::optional<ResolvedStorePolicy> resolved_store_policy) const {
-  const absl::Time total_started_at = absl::Now();
-  absl::Duration resolve_policy_elapsed = absl::ZeroDuration();
-  absl::Duration ingest_elapsed = absl::ZeroDuration();
-  absl::Duration stable_retention_elapsed = absl::ZeroDuration();
-  absl::Duration inspect_backing_elapsed = absl::ZeroDuration();
-  absl::Duration handle_create_elapsed = absl::ZeroDuration();
   if (artifact_id.empty()) {
     return absl::InvalidArgumentError("artifact_id is required for fast CPU body staging");
   }
@@ -900,9 +838,7 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
     return absl::InvalidArgumentError("fast CPU body staging source size does not match invariant.byte_length");
   }
 
-  const absl::Time resolve_policy_started_at = absl::Now();
   auto resolved_policy_or = resolve_body_store_policy(access_class, route_role, resolved_store_policy);
-  resolve_policy_elapsed = absl::Now() - resolve_policy_started_at;
   if (!resolved_policy_or.ok()) {
     return resolved_policy_or.status();
   }
@@ -931,7 +867,6 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
   auto hints = build_lowering_hints(artifact_id, operation_id);
   hints.pipeline_concurrency = 1;
   const std::string physical_artifact_id = build_body_backing_artifact_id(artifact_id, invariant);
-  const absl::Time ingest_started_at = absl::Now();
   auto replica_handle_or = engine_.ingestion_runtime().ingest_mapped_loader_into_replica(
       artifact_id,
       physical_artifact_id,
@@ -941,7 +876,6 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
       build_identity_byte_range_map(invariant.byte_length()),
       hints,
       source_kind);
-  ingest_elapsed = absl::Now() - ingest_started_at;
   if (!replica_handle_or.ok()) {
     record_body_backing_metrics("stage", access_class, intent, "fast_ingest_error");
     return replica_handle_or.status();
@@ -982,28 +916,9 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
           .physical_artifact_id = physical_artifact_id,
       },
       std::move(verified_content_descriptor),
-      std::move(verification_record),
-      &stable_retention_elapsed,
-      &inspect_backing_elapsed,
-      &handle_create_elapsed);
+      std::move(verification_record));
   if (!stage_result_or.ok()) {
     return stage_result_or.status();
-  }
-
-  const absl::Duration total_elapsed = absl::Now() - total_started_at;
-  if (source_kind == store::loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(1)) {
-    LOG(INFO) << "body_backing.stage_body_fast_cpu_summary"
-              << " artifact_id=" << artifact_id << " operation_id=" << operation_id
-              << " size_bytes=" << invariant.byte_length() << " source_kind=" << static_cast<int>(source_kind)
-              << " verification_mode=" << byte_artifact_verification_mode_label(verification_mode)
-              << " hash_bypassed=" << (!verification_mode_requires_payload_digest(verification_mode))
-              << " streamed_bytes=" << (digest_state != nullptr ? digest_state->streamed_bytes() : 0)
-              << " resolve_policy_ms=" << absl::ToDoubleMilliseconds(resolve_policy_elapsed)
-              << " ingest_ms=" << absl::ToDoubleMilliseconds(ingest_elapsed)
-              << " stable_retention_ms=" << absl::ToDoubleMilliseconds(stable_retention_elapsed)
-              << " inspect_backing_ms=" << absl::ToDoubleMilliseconds(inspect_backing_elapsed)
-              << " handle_create_ms=" << absl::ToDoubleMilliseconds(handle_create_elapsed)
-              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
   }
   return stage_result_or;
 }
