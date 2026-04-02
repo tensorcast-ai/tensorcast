@@ -18,6 +18,8 @@ Understand how TensorCast works:
 - **[Binding Unified Model](designs/0084-binding-unified-model-and-contract.md)** - Canonical binding semantics, lifecycle, mapped binding, and publishability
 - **[Assembly Attempt Seal Remediation Handoff Plan](plans/0105-01-assembly-attempt-cut-driven-seal-remediation-handoff.md)** - Ordered execution handoff for finishing cut-driven seal, contract-family enforcement, and validation closure
 - **[Daemon-Served Directory and Target Resolution](designs/0106-daemon-served-directory-and-target-resolution.md)** - Stable worker or instance identity, bounded-staleness directory reads, and NodeAgentDirectory contract
+- **[Strategy-Guided Topology Plane](designs/0109-strategy-guided-topology-plane.md)** - Internal transfer-group planning that combines the `0108` strategy plane with topology-guided routed bootstrap and same-node fanout
+- **[Strategy-Guided Topology Plane Plan](plans/0109-strategy-guided-topology-plane.md)** - Execution phases for runtime topology bootstrap, topology-aware transfer grouping, rollout modes, and regression coverage
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
 - **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
 - **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics
