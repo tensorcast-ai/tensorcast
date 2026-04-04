@@ -55,15 +55,67 @@ absl::Status validate_batch_selection(const tensorcast::common::v1::ArtifactSele
   return byte_artifact_runtime().validate_batch_selection(selection);
 }
 
+struct BatchItemSlotToken {
+  std::optional<std::uint64_t> slot_index;
+  std::optional<std::uint64_t> slot_generation;
+};
+
+absl::flat_hash_map<std::string, BatchItemSlotToken> collect_batch_item_slot_tokens(const v2::TargetLayout& layout) {
+  absl::flat_hash_map<std::string, BatchItemSlotToken> tokens;
+  tokens.reserve(static_cast<std::size_t>(layout.offsets_size()));
+  for (const auto& offset : layout.offsets()) {
+    BatchItemSlotToken token;
+    if (offset.has_slot_index()) {
+      token.slot_index = offset.slot_index();
+    }
+    if (offset.has_slot_generation()) {
+      token.slot_generation = offset.slot_generation();
+    }
+    if (token.slot_index.has_value() || token.slot_generation.has_value()) {
+      tokens.emplace(offset.name(), std::move(token));
+    }
+  }
+  return tokens;
+}
+
+void attach_slot_tokens_to_outcomes(
+    const absl::flat_hash_map<std::string, BatchItemSlotToken>& slot_tokens,
+    google::protobuf::RepeatedPtrField<v2::BatchItemOutcome>* outcomes) {
+  if (outcomes == nullptr || slot_tokens.empty()) {
+    return;
+  }
+  for (auto& outcome : *outcomes) {
+    const auto it = slot_tokens.find(outcome.artifact_id());
+    if (it == slot_tokens.end()) {
+      continue;
+    }
+    if (it->second.slot_index.has_value()) {
+      outcome.set_slot_index(*it->second.slot_index);
+    }
+    if (it->second.slot_generation.has_value()) {
+      outcome.set_slot_generation(*it->second.slot_generation);
+    }
+  }
+}
+
 v2::BatchItemOutcome make_outcome(
     std::string_view artifact_id,
     v2::BatchItemStatus status,
-    std::string_view message = "") {
+    std::string_view message = "",
+    const BatchItemSlotToken* slot_token = nullptr) {
   v2::BatchItemOutcome outcome;
   outcome.set_artifact_id(std::string(artifact_id));
   outcome.set_status(status);
   if (!message.empty()) {
     outcome.set_message(std::string(message));
+  }
+  if (slot_token != nullptr) {
+    if (slot_token->slot_index.has_value()) {
+      outcome.set_slot_index(*slot_token->slot_index);
+    }
+    if (slot_token->slot_generation.has_value()) {
+      outcome.set_slot_generation(*slot_token->slot_generation);
+    }
   }
   return outcome;
 }
@@ -226,45 +278,6 @@ absl::StatusOr<store::runtime::ingestion::ArtifactLoweringPlan> build_into_targe
           .source_kind = source_kind,
           .into_target = target_layout,
       });
-}
-
-absl::Status materialize_loader_into_host_target(
-    std::unique_ptr<store::IArtifactLoader> loader,
-    const store::loading::IntoTargetLayout& target_layout,
-    std::uint64_t payload_bytes) {
-  if (loader == nullptr) {
-    return absl::InvalidArgumentError("HOST_SHARED target materialization requires loader");
-  }
-  if (target_layout.storages.size() != 1) {
-    return absl::InvalidArgumentError("HOST_SHARED byte-artifact target requires exactly one storage");
-  }
-  if (target_layout.storages.front().length < payload_bytes) {
-    return absl::InvalidArgumentError("HOST_SHARED target storage is smaller than payload");
-  }
-
-  auto init_status = loader->initialize();
-  if (!init_status.ok()) {
-    return init_status;
-  }
-  auto source_size_or = loader->get_artifact_size();
-  if (!source_size_or.ok()) {
-    return source_size_or.status();
-  }
-  if (*source_size_or < payload_bytes) {
-    return absl::FailedPreconditionError("HOST_SHARED target source is smaller than payload");
-  }
-  auto source_or = loader->open_source();
-  if (!source_or.ok()) {
-    return source_or.status();
-  }
-  auto read_or = (*source_or)->read_at(0, target_layout.storages.front().base_ptr.get(), payload_bytes);
-  if (!read_or.ok()) {
-    return read_or.status();
-  }
-  if (*read_or != payload_bytes) {
-    return absl::DataLossError("HOST_SHARED target read returned a short payload");
-  }
-  return absl::OkStatus();
 }
 
 struct LoaderSourceResolution {
@@ -2391,6 +2404,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   }
   const absl::Time now = absl::Now();
   const std::string local_daemon_id = d_.route_resolver.local_daemon_id();
+  const auto requested_slot_tokens = collect_batch_item_slot_tokens(req.target_layout());
 
   struct ShardRequest {
     std::vector<std::string> artifact_ids;
@@ -2856,17 +2870,32 @@ grpc::Status ByteArtifactController::batch_get_into_region(
 
       const absl::Time lowering_started_at = absl::Now();
       if (host_target_layout) {
-        auto host_materialize_status =
-            materialize_loader_into_host_target(std::move(loader), *item_target_layout_or, payload_bytes);
-        if (!host_materialize_status.ok()) {
+        auto materialize_or = d_.engine.materialize_mapped_loader_into_target(
+            store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""},
+            *item_target_layout_or,
+            std::move(loader),
+            store::loading::build_identity_byte_range_map(payload_bytes),
+            build_lowering_hints(item_ref.artifact_id, operation_id_owned),
+            source_kind);
+        if (!materialize_or.ok()) {
           push_outcome(make_outcome(
               item_ref.artifact_id,
-              batch_item_status_from_absl_status(host_materialize_status),
-              std::string(host_materialize_status.message())));
+              batch_item_status_from_absl_status(materialize_or.status()),
+              std::string(materialize_or.status().message())));
           return;
         }
         if (applied_transport_stats != nullptr) {
-          applied_transport_stats->staged_bytes += payload_bytes;
+          if (materialize_or->debug_stats.has_value()) {
+            const auto& debug_stats = *materialize_or->debug_stats;
+            applied_transport_stats->staged_bytes +=
+                debug_stats.produced_bytes == 0 ? payload_bytes : debug_stats.produced_bytes;
+            applied_transport_stats->gpu_write_bytes += debug_stats.gpu_write_bytes_total;
+            applied_transport_stats->source_stage_copy_elapsed +=
+                absl::Microseconds(debug_stats.source_read_at_us_total);
+            applied_transport_stats->gpu_write_elapsed += absl::Microseconds(debug_stats.gpu_write_wait_us_total);
+          } else {
+            applied_transport_stats->staged_bytes += payload_bytes;
+          }
         }
       } else {
         const auto target_device = store::DeviceRegistry::instance().gpu_key(target_layout.device_id());
@@ -3167,6 +3196,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     }
     execute_apply_work_units(std::move(all_work_units));
     log_transport_apply_stats();
+    attach_slot_tokens_to_outcomes(requested_slot_tokens, resp.mutable_outcomes());
     VLOG(1) << "byte_artifact.batch_get_into_region_summary"
             << " operation_id=" << (req.has_operation_id() ? req.operation_id() : "")
             << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
@@ -3510,6 +3540,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   execute_apply_work_units(std::move(all_work_units));
 
   log_transport_apply_stats();
+  attach_slot_tokens_to_outcomes(requested_slot_tokens, resp.mutable_outcomes());
   VLOG(1) << "byte_artifact.batch_get_into_region_summary"
           << " operation_id=" << (req.has_operation_id() ? req.operation_id() : "")
           << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
@@ -3542,6 +3573,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       req.has_ttl_ms() ? std::optional<std::uint64_t>(req.ttl_ms()) : std::nullopt;
   const std::string local_daemon_id = d_.route_resolver.local_daemon_id();
   const std::string operation_id = req.has_operation_id() ? req.operation_id() : "";
+  const auto requested_slot_tokens = collect_batch_item_slot_tokens(req.source_layout());
 
   struct PendingPut {
     std::string artifact_id;
@@ -5417,6 +5449,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
         "PutShardTask failed before producing an outcome");
   }
 
+  attach_slot_tokens_to_outcomes(requested_slot_tokens, resp.mutable_outcomes());
   VLOG(1) << "byte_artifact.batch_put_if_absent_from_region_summary"
           << " operation_id=" << operation_id << " items=" << req.items_size() << " shard_count=" << shard_tasks.size()
           << " max_parallel_put_shards=" << max_parallel_put_shards

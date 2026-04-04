@@ -13,6 +13,28 @@ namespace tensorcast::daemon {
 using materialization_target_storage::AcquireTargetStoragesError;
 using materialization_target_storage::TargetStorageLease;
 
+absl::Status validate_host_shared_target_region_classes(
+    IpcRegionRegistry& regions,
+    const v2::TargetLayout& layout,
+    std::string_view rpc_name) {
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_source_case() != v2::StorageEntry::kRegionRef ||
+        storage.region_ref().memory_kind() != v2::REGION_MEMORY_KIND_HOST_SHARED) {
+      continue;
+    }
+    auto desc_or = regions.describe(storage.region_ref().region_id());
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    if (desc_or->host_region_class == IpcRegionRegistry::HostRegionClass::kAllocator) {
+      return absl::InvalidArgumentError(
+          std::format(
+              "{} does not support generic target validation for allocator-backed HOST_SHARED regions", rpc_name));
+    }
+  }
+  return absl::OkStatus();
+}
+
 ExternalTargetAccessService::ExternalTargetAccessService(Dep d) : d_(d) {}
 
 absl::Status ExternalTargetAccessService::ensure_local_region_peer(std::string_view peer, std::string_view rpc_name)
@@ -49,6 +71,10 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
   auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), owner_pid, &acquire_error);
   if (!storage_lease_or.ok()) {
     return storage_lease_or.status();
+  }
+  auto host_region_class_status = validate_host_shared_target_region_classes(d_.regions, layout, rpc_name);
+  if (!host_region_class_status.ok()) {
+    return host_region_class_status;
   }
 
   return ValidatedTargetAccess{

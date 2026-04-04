@@ -103,6 +103,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:source_window_scheduler",
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
         "//core/store/materialization/dataplane:target_layout_gpu_sink",
+        "//core/store/materialization/dataplane:target_layout_host_sink",
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/materialization/dataplane:view_transform_executor",
         "//core/store/materialization/runtime/pipeline:ingestion_pipeline",

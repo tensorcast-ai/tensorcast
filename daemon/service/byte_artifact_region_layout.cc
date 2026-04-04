@@ -21,6 +21,22 @@ namespace {
 using materialization_target_storage::AcquireTargetStoragesError;
 using materialization_target_storage::TargetStorageLease;
 
+absl::StatusOr<std::optional<ByteArtifactRegionLayout::SlotToken>> parse_slot_token(
+    const v2::TargetTensorOffset& entry) {
+  const bool has_slot_index = entry.has_slot_index();
+  const bool has_slot_generation = entry.has_slot_generation();
+  if (has_slot_index != has_slot_generation) {
+    return absl::InvalidArgumentError("target_layout.offset slot_index and slot_generation must be specified together");
+  }
+  if (!has_slot_index) {
+    return std::nullopt;
+  }
+  return ByteArtifactRegionLayout::SlotToken{
+      .slot_index = entry.slot_index(),
+      .slot_generation = entry.slot_generation(),
+  };
+}
+
 absl::StatusOr<IpcRegionRegistry::MemoryKind> resolve_storage_memory_kind(const v2::StorageEntry& storage) {
   switch (storage.storage_source_case()) {
     case v2::StorageEntry::kVramRegionId:
@@ -35,6 +51,24 @@ absl::StatusOr<IpcRegionRegistry::MemoryKind> resolve_storage_memory_kind(const 
         default:
           return absl::InvalidArgumentError("region_ref.memory_kind must be specified");
       }
+    case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
+    default:
+      return absl::InvalidArgumentError("target_layout storages must reference a region");
+  }
+}
+
+absl::StatusOr<std::string> resolve_storage_region_id(const v2::StorageEntry& storage) {
+  switch (storage.storage_source_case()) {
+    case v2::StorageEntry::kVramRegionId:
+      if (storage.vram_region_id().empty()) {
+        return absl::InvalidArgumentError("vram_region_id must not be empty");
+      }
+      return storage.vram_region_id();
+    case v2::StorageEntry::kRegionRef:
+      if (storage.region_ref().region_id().empty()) {
+        return absl::InvalidArgumentError("region_ref.region_id must not be empty");
+      }
+      return storage.region_ref().region_id();
     case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
     default:
       return absl::InvalidArgumentError("target_layout storages must reference a region");
@@ -135,12 +169,28 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
 
   absl::flat_hash_map<std::string, std::size_t> storage_indices;
   storage_indices.reserve(layout.storages_size());
+  std::optional<IpcRegionRegistry::HostRegionClass> host_region_class;
   std::uint64_t logical_cursor = 0;
   for (int i = 0; i < layout.storages_size(); ++i) {
     const auto& storage = layout.storages(i);
     auto storage_memory_kind_or = resolve_storage_memory_kind(storage);
     if (!storage_memory_kind_or.ok()) {
       return storage_memory_kind_or.status();
+    }
+    if (*storage_memory_kind_or == IpcRegionRegistry::MemoryKind::kHostShared) {
+      auto region_id_or = resolve_storage_region_id(storage);
+      if (!region_id_or.ok()) {
+        return region_id_or.status();
+      }
+      auto region_desc_or = registry.describe(*region_id_or);
+      if (!region_desc_or.ok()) {
+        return region_desc_or.status();
+      }
+      if (!host_region_class.has_value()) {
+        host_region_class = region_desc_or->host_region_class;
+      } else if (*host_region_class != region_desc_or->host_region_class) {
+        return absl::InvalidArgumentError("byte artifact HOST_SHARED region layout must use one host_region_class");
+      }
     }
     result.storages_.push_back(
         StorageRange{
@@ -156,6 +206,11 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
   }
 
   if (layout.offsets_size() == 0) {
+    if (layout_memory_kind == IpcRegionRegistry::MemoryKind::kHostShared &&
+        host_region_class == IpcRegionRegistry::HostRegionClass::kAllocator) {
+      return absl::InvalidArgumentError(
+          "allocator-backed HOST_SHARED byte artifact layouts require explicit offsets with slot tokens");
+    }
     if (expected_lengths.size() != 1) {
       return absl::InvalidArgumentError(
           "target_layout.offsets are required for multi-item byte artifact region access");
@@ -174,6 +229,7 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
             .logical_offset = 0,
             .logical_length = logical_cursor,
             .storage_local_offset = 0,
+            .slot_token = std::nullopt,
         });
     return result;
   }
@@ -202,6 +258,15 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
     if (entry.logical_length() == 0) {
       return absl::InvalidArgumentError("target_layout.offset.logical_length must be > 0");
     }
+    auto slot_token_or = parse_slot_token(entry);
+    if (!slot_token_or.ok()) {
+      return slot_token_or.status();
+    }
+    if (layout_memory_kind == IpcRegionRegistry::MemoryKind::kHostShared &&
+        host_region_class == IpcRegionRegistry::HostRegionClass::kAllocator && !slot_token_or->has_value()) {
+      return absl::InvalidArgumentError(
+          "allocator-backed HOST_SHARED byte artifact layouts require slot_index and slot_generation on every offset");
+    }
     if (expected_it->second != 0 && expected_it->second != entry.logical_length()) {
       return absl::InvalidArgumentError("target_layout.offset.logical_length does not match expected byte length");
     }
@@ -216,6 +281,7 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
             .logical_offset = entry.storage_offset(),
             .logical_length = entry.logical_length(),
             .storage_local_offset = storage_local_offset,
+            .slot_token = std::move(*slot_token_or),
         });
     if (!inserted) {
       return absl::InvalidArgumentError("target_layout.offsets include duplicate artifact_id");
@@ -238,6 +304,15 @@ std::uint64_t ByteArtifactRegionLayout::expected_length(std::string_view artifac
 
 int ByteArtifactRegionLayout::device_id() const {
   return device_id_;
+}
+
+std::optional<ByteArtifactRegionLayout::SlotToken> ByteArtifactRegionLayout::slot_token(
+    std::string_view artifact_id) const {
+  const auto it = items_.find(std::string(artifact_id));
+  if (it == items_.end()) {
+    return std::nullopt;
+  }
+  return it->second.slot_token;
 }
 
 absl::StatusOr<store::loading::IntoTargetLayout> ByteArtifactRegionLayout::build_item_target_layout(

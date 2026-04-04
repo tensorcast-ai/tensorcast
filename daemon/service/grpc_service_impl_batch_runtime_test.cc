@@ -269,7 +269,9 @@ RegisteredRegion register_test_region(
 
 RegisteredHostSharedRegion register_test_host_shared_region(
     tensorcast::daemon::DaemonServiceHarness& harness,
-    std::uint64_t size_bytes) {
+    std::uint64_t size_bytes,
+    tensorcast::daemon::IpcRegionRegistry::HostRegionClass host_region_class =
+        tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kScratch) {
   tensorcast::daemon::IpcRegionRegistry::RegisterParams params;
   params.memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kHostShared;
   params.device_id = -1;
@@ -277,7 +279,7 @@ RegisteredHostSharedRegion register_test_host_shared_region(
   params.size_bytes = size_bytes;
   params.ttl_ms = 10'000;
   params.daemon_managed = true;
-  params.host_region_class = tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kScratch;
+  params.host_region_class = host_region_class;
   auto region_or = harness.kernel().region_registry().register_region(params);
   REQUIRE(region_or.ok());
 
@@ -717,19 +719,14 @@ TEST_CASE("BatchPutIfAbsentFromRegion supports HOST_SHARED source layouts", "[da
   REQUIRE(join_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
   REQUIRE(join_resp.outcomes(0).message() == "joined");
 
-  auto target_region = register_test_region(*harness, /*device_id=*/0, payload.size());
-  REQUIRE(tensorcast::cuda::memset(target_region.device_ptr, 0, payload.size()).ok());
+  auto target_region = register_test_host_shared_region(*harness, payload.size());
+  std::memset(target_region.base_ptr, 0, payload.size());
 
   BatchGetIntoRegionRequest get_req;
   get_req.add_selections()->set_artifact_id(artifact_id);
-  populate_single_region_layout(
-      get_req.mutable_target_layout(),
-      target_region,
-      artifact_id,
-      payload.size(),
-      /*device_id=*/0);
+  populate_single_host_shared_region_layout(
+      get_req.mutable_target_layout(), target_region, artifact_id, payload.size(), payload.size());
   get_req.set_pid(target_region.owner_pid);
-  get_req.set_device_uuid(target_region.device_uuid);
   get_req.set_operation_id("op-host-shared-put");
 
   BatchGetIntoRegionResponse get_resp;
@@ -737,12 +734,9 @@ TEST_CASE("BatchPutIfAbsentFromRegion supports HOST_SHARED source layouts", "[da
   REQUIRE(svc.BatchGetIntoRegion(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.outcomes_size() == 1);
   REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(std::memcmp(target_region.base_ptr, payload.data(), payload.size()) == 0);
 
-  std::vector<char> out(payload.size(), '\0');
-  REQUIRE(tensorcast::cuda::memcpy(out.data(), target_region.device_ptr, out.size(), cudaMemcpyDeviceToHost).ok());
-  REQUIRE(std::string(out.data(), out.size()) == payload);
-
-  release_test_region(*harness, target_region);
+  release_test_host_shared_region(*harness, target_region);
   release_test_host_shared_region(*harness, source_region);
 }
 
@@ -886,6 +880,156 @@ TEST_CASE("BatchGetIntoRegion supports HOST_SHARED target layouts", "[daemon][ba
   release_test_host_shared_region(*harness, target_region);
 }
 
+TEST_CASE("Batch* front-door echoes HOST_SHARED slot tokens in outcomes", "[daemon][batch][host_shared][slot_token]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_valid_byte_artifact_id(
+      "tenant", "sglang", "meta-llama/Llama-3.1-8B-Instruct", "default", "layout_v1", "request-host-slot-token:blk-1");
+  const std::string payload = "host-shared-slot-token-payload";
+  constexpr std::uint64_t kSlotIndex = 23;
+  constexpr std::uint64_t kSlotGeneration = 41;
+
+  auto source_region = register_test_host_shared_region(
+      *harness, payload.size(), tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memcpy(source_region.base_ptr, payload.data(), payload.size());
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* put_item = put_req.add_items();
+  put_item->mutable_selection()->set_artifact_id(artifact_id);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+  populate_single_host_shared_region_layout(
+      put_req.mutable_source_layout(), source_region, artifact_id, payload.size(), payload.size());
+  put_req.mutable_source_layout()->mutable_offsets(0)->set_slot_index(kSlotIndex);
+  put_req.mutable_source_layout()->mutable_offsets(0)->set_slot_generation(kSlotGeneration);
+  put_req.set_pid(source_region.owner_pid);
+  put_req.set_operation_id("op-host-shared-slot-token-put");
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(0).has_slot_index());
+  REQUIRE(put_resp.outcomes(0).has_slot_generation());
+  REQUIRE(put_resp.outcomes(0).slot_index() == kSlotIndex);
+  REQUIRE(put_resp.outcomes(0).slot_generation() == kSlotGeneration);
+
+  auto target_region = register_test_host_shared_region(
+      *harness, payload.size(), tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memset(target_region.base_ptr, 0, payload.size());
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(artifact_id);
+  populate_single_host_shared_region_layout(
+      get_req.mutable_target_layout(), target_region, artifact_id, payload.size(), payload.size());
+  get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_index(kSlotIndex);
+  get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_generation(kSlotGeneration);
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_operation_id("op-host-shared-slot-token-get");
+
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.BatchGetIntoRegion(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.outcomes_size() == 1);
+  REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.outcomes(0).has_slot_index());
+  REQUIRE(get_resp.outcomes(0).has_slot_generation());
+  REQUIRE(get_resp.outcomes(0).slot_index() == kSlotIndex);
+  REQUIRE(get_resp.outcomes(0).slot_generation() == kSlotGeneration);
+  REQUIRE(std::memcmp(target_region.base_ptr, payload.data(), payload.size()) == 0);
+
+  release_test_host_shared_region(*harness, target_region);
+  release_test_host_shared_region(*harness, source_region);
+}
+
+TEST_CASE(
+    "BatchPutIfAbsentFromRegion rejects allocator-backed HOST_SHARED source layouts without slot tokens",
+    "[daemon][batch][host_shared][allocator][put]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-allocator-put:blk-1");
+  const std::string payload = "allocator-source-without-slot-token";
+
+  auto source_region = register_test_host_shared_region(
+      *harness, payload.size(), tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memcpy(source_region.base_ptr, payload.data(), payload.size());
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* item = put_req.add_items();
+  item->mutable_selection()->set_artifact_id(artifact_id);
+  set_invariant(item->mutable_invariant(), "layout_v1", payload);
+  populate_single_host_shared_region_layout(
+      put_req.mutable_source_layout(), source_region, artifact_id, payload.size(), payload.size());
+  put_req.set_pid(source_region.owner_pid);
+  put_req.set_operation_id("op-host-allocator-put-missing-slot-token");
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+
+  release_test_host_shared_region(*harness, source_region);
+}
+
+TEST_CASE(
+    "BatchGetIntoRegion rejects allocator-backed HOST_SHARED target layouts without slot tokens",
+    "[daemon][batch][host_shared][allocator][get]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-allocator-get:blk-1");
+  const std::string payload = "allocator-target-without-slot-token";
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* put_item = put_req.add_items();
+  put_item->mutable_selection()->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto target_region = register_test_host_shared_region(
+      *harness, payload.size(), tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memset(target_region.base_ptr, 0, payload.size());
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(artifact_id);
+  populate_single_host_shared_region_layout(
+      get_req.mutable_target_layout(), target_region, artifact_id, payload.size(), payload.size());
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_operation_id("op-host-allocator-get-missing-slot-token");
+
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  const auto get_status = svc.BatchGetIntoRegion(&get_ctx, &get_req, &get_resp);
+  REQUIRE_FALSE(get_status.ok());
+  REQUIRE(get_status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+
+  release_test_host_shared_region(*harness, target_region);
+}
+
 TEST_CASE(
     "BatchGetIntoRegion preserves partial-hit semantics on HOST_SHARED targets",
     "[daemon][batch][host_shared][get]") {
@@ -953,6 +1097,251 @@ TEST_CASE(
   REQUIRE(retry_resp.outcomes_size() == 1);
   REQUIRE(retry_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
   REQUIRE(std::memcmp(target_region.base_ptr, hit_payload.data(), hit_payload.size()) == 0);
+
+  release_test_host_shared_region(*harness, target_region);
+}
+
+TEST_CASE(
+    "BatchGetIntoRegion echoes allocator slot tokens on partial-hit HOST_SHARED outcomes",
+    "[daemon][batch][host_shared][slot_token][partial]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string hit_artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-target-slot-hit:blk-1");
+  const std::string miss_artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-target-slot-miss:blk-2");
+  const std::string hit_payload = "host-target-slot-hit";
+  const std::size_t total_bytes = hit_payload.size() + 32;
+  constexpr std::uint64_t kHitSlotIndex = 17;
+  constexpr std::uint64_t kHitSlotGeneration = 101;
+  constexpr std::uint64_t kMissSlotIndex = 23;
+  constexpr std::uint64_t kMissSlotGeneration = 205;
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* put_item = put_req.add_items();
+  put_item->mutable_selection()->set_artifact_id(hit_artifact_id);
+  put_item->set_inline_payload(hit_payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", hit_payload);
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto target_region = register_test_host_shared_region(
+      *harness, total_bytes, tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memset(target_region.base_ptr, 0, total_bytes);
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(hit_artifact_id);
+  get_req.add_selections()->set_artifact_id(miss_artifact_id);
+  populate_two_item_host_shared_region_layout(
+      get_req.mutable_target_layout(),
+      target_region,
+      hit_artifact_id,
+      hit_payload.size(),
+      miss_artifact_id,
+      total_bytes - hit_payload.size());
+  get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_index(kHitSlotIndex);
+  get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_generation(kHitSlotGeneration);
+  get_req.mutable_target_layout()->mutable_offsets(1)->set_slot_index(kMissSlotIndex);
+  get_req.mutable_target_layout()->mutable_offsets(1)->set_slot_generation(kMissSlotGeneration);
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_operation_id("op-host-shared-get-partial-slot-token");
+
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.BatchGetIntoRegion(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.outcomes_size() == 2);
+  REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.outcomes(0).has_slot_index());
+  REQUIRE(get_resp.outcomes(0).has_slot_generation());
+  REQUIRE(get_resp.outcomes(0).slot_index() == kHitSlotIndex);
+  REQUIRE(get_resp.outcomes(0).slot_generation() == kHitSlotGeneration);
+  REQUIRE(get_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
+  REQUIRE(get_resp.outcomes(1).has_slot_index());
+  REQUIRE(get_resp.outcomes(1).has_slot_generation());
+  REQUIRE(get_resp.outcomes(1).slot_index() == kMissSlotIndex);
+  REQUIRE(get_resp.outcomes(1).slot_generation() == kMissSlotGeneration);
+  REQUIRE(std::memcmp(target_region.base_ptr, hit_payload.data(), hit_payload.size()) == 0);
+  const auto* miss_ptr = static_cast<const unsigned char*>(target_region.base_ptr) + hit_payload.size();
+  for (std::size_t i = 0; i < total_bytes - hit_payload.size(); ++i) {
+    REQUIRE(miss_ptr[i] == 0);
+  }
+
+  release_test_host_shared_region(*harness, target_region);
+}
+
+TEST_CASE(
+    "BatchGetIntoRegion echoes allocator slot tokens on partial-failure HOST_SHARED outcomes",
+    "[daemon][batch][host_shared][slot_token][failure]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string ok_artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-target-slot-ok:blk-1");
+  const std::string fail_artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-target-slot-fail:blk-2");
+  const std::string ok_payload = "host-target-slot-ok";
+  const std::string fail_payload = "host-target-slot-fail";
+  REQUIRE(fail_payload.size() > 1);
+  constexpr std::uint64_t kOkSlotIndex = 29;
+  constexpr std::uint64_t kOkSlotGeneration = 301;
+  constexpr std::uint64_t kFailSlotIndex = 31;
+  constexpr std::uint64_t kFailSlotGeneration = 407;
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* ok_put_item = put_req.add_items();
+  ok_put_item->mutable_selection()->set_artifact_id(ok_artifact_id);
+  ok_put_item->set_inline_payload(ok_payload);
+  set_invariant(ok_put_item->mutable_invariant(), "layout_v1", ok_payload);
+  auto* fail_put_item = put_req.add_items();
+  fail_put_item->mutable_selection()->set_artifact_id(fail_artifact_id);
+  fail_put_item->set_inline_payload(fail_payload);
+  set_invariant(fail_put_item->mutable_invariant(), "layout_v1", fail_payload);
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  const std::size_t fail_target_length = fail_payload.size() - 1;
+  auto target_region = register_test_host_shared_region(
+      *harness,
+      ok_payload.size() + fail_payload.size(),
+      tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memset(target_region.base_ptr, 0, target_region.size_bytes);
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(ok_artifact_id);
+  get_req.add_selections()->set_artifact_id(fail_artifact_id);
+  populate_two_item_host_shared_region_layout(
+      get_req.mutable_target_layout(),
+      target_region,
+      ok_artifact_id,
+      ok_payload.size(),
+      fail_artifact_id,
+      fail_target_length);
+  get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_index(kOkSlotIndex);
+  get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_generation(kOkSlotGeneration);
+  get_req.mutable_target_layout()->mutable_offsets(1)->set_slot_index(kFailSlotIndex);
+  get_req.mutable_target_layout()->mutable_offsets(1)->set_slot_generation(kFailSlotGeneration);
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_operation_id("op-host-shared-get-partial-failure-slot-token");
+
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.BatchGetIntoRegion(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.outcomes_size() == 2);
+
+  REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.outcomes(0).has_slot_index());
+  REQUIRE(get_resp.outcomes(0).has_slot_generation());
+  REQUIRE(get_resp.outcomes(0).slot_index() == kOkSlotIndex);
+  REQUIRE(get_resp.outcomes(0).slot_generation() == kOkSlotGeneration);
+
+  REQUIRE(get_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
+  REQUIRE(get_resp.outcomes(1).has_slot_index());
+  REQUIRE(get_resp.outcomes(1).has_slot_generation());
+  REQUIRE(get_resp.outcomes(1).slot_index() == kFailSlotIndex);
+  REQUIRE(get_resp.outcomes(1).slot_generation() == kFailSlotGeneration);
+  REQUIRE(get_resp.outcomes(1).message().find("payload size does not match target layout length") != std::string::npos);
+
+  REQUIRE(std::memcmp(target_region.base_ptr, ok_payload.data(), ok_payload.size()) == 0);
+  const auto* fail_ptr = static_cast<const unsigned char*>(target_region.base_ptr) + ok_payload.size();
+  for (std::size_t i = 0; i < fail_target_length; ++i) {
+    REQUIRE(fail_ptr[i] == 0);
+  }
+
+  release_test_host_shared_region(*harness, target_region);
+}
+
+TEST_CASE(
+    "BatchGetIntoRegion preserves requested slot_generation across allocator slot reuse",
+    "[daemon][batch][host_shared][slot_token][generation]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto harness = make_harness(engine, make_daemon_options());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_valid_byte_artifact_id(
+      "tenant",
+      "sglang",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "default",
+      "layout_v1",
+      "request-host-target-slot-generation:blk-1");
+  const std::string payload = "host-target-slot-generation";
+  constexpr std::uint64_t kSlotIndex = 43;
+  constexpr std::uint64_t kFirstGeneration = 501;
+  constexpr std::uint64_t kSecondGeneration = 502;
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* put_item = put_req.add_items();
+  put_item->mutable_selection()->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto target_region = register_test_host_shared_region(
+      *harness, payload.size(), tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+
+  const auto run_get = [&](std::uint64_t slot_generation, std::string_view operation_id) {
+    std::memset(target_region.base_ptr, 0, payload.size());
+
+    BatchGetIntoRegionRequest get_req;
+    get_req.add_selections()->set_artifact_id(artifact_id);
+    populate_single_host_shared_region_layout(
+        get_req.mutable_target_layout(), target_region, artifact_id, payload.size(), payload.size());
+    get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_index(kSlotIndex);
+    get_req.mutable_target_layout()->mutable_offsets(0)->set_slot_generation(slot_generation);
+    get_req.set_pid(target_region.owner_pid);
+    get_req.set_operation_id(std::string(operation_id));
+
+    BatchGetIntoRegionResponse get_resp;
+    grpc::ServerContext get_ctx;
+    REQUIRE(svc.BatchGetIntoRegion(&get_ctx, &get_req, &get_resp).ok());
+    REQUIRE(get_resp.outcomes_size() == 1);
+    REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+    REQUIRE(get_resp.outcomes(0).has_slot_index());
+    REQUIRE(get_resp.outcomes(0).has_slot_generation());
+    REQUIRE(get_resp.outcomes(0).slot_index() == kSlotIndex);
+    REQUIRE(get_resp.outcomes(0).slot_generation() == slot_generation);
+    REQUIRE(std::memcmp(target_region.base_ptr, payload.data(), payload.size()) == 0);
+  };
+
+  run_get(kFirstGeneration, "op-host-shared-get-slot-generation-first");
+  run_get(kSecondGeneration, "op-host-shared-get-slot-generation-second");
 
   release_test_host_shared_region(*harness, target_region);
 }

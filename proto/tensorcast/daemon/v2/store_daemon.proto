@@ -393,6 +393,8 @@ message TargetTensorOffset {
   string storage_id = 2;
   uint64 storage_offset = 3;
   uint64 logical_length = 4;
+  optional uint64 slot_index = 5;
+  optional uint64 slot_generation = 6;
 }
 
 enum RegionMemoryKind {
@@ -647,6 +649,8 @@ message BatchItemOutcome {
   string artifact_id = 1;
   BatchItemStatus status = 2;
   string message = 3;
+  optional uint64 slot_index = 4;
+  optional uint64 slot_generation = 5;
 }
 
 enum ByteArtifactVerificationMode {
