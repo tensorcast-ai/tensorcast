@@ -1259,17 +1259,17 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   const double materialize_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - materialize_start).count();
   const double total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
-  LOG(INFO) << "MaterializeIntoMappedTarget controller timings"
-            << " artifact_id=" << resolved_artifact_id << " copy_entries=" << req.copy_plan().entries_size()
-            << " dst_tensors=" << req.dst_tensors_size() << " storages=" << layout.storages_size()
-            << " common_sec=" << std::chrono::duration<double>(common_done - total_start).count()
-            << " target_validate_sec=" << std::chrono::duration<double>(target_validate_done - common_done).count()
-            << " offsets_sec=" << std::chrono::duration<double>(offsets_done - target_validate_done).count()
-            << " canonical_sec=" << std::chrono::duration<double>(canonical_done - offsets_done).count()
-            << " mapped_plan_sec=" << std::chrono::duration<double>(mapped_plan_done - canonical_done).count()
-            << " disk_metadata_sec=" << std::chrono::duration<double>(disk_metadata_done - mapped_plan_done).count()
-            << " engine_sec=" << std::chrono::duration<double>(engine_done - disk_metadata_done).count()
-            << " materialize_sec=" << materialize_sec << " total_sec=" << total_sec;
+  VLOG(2) << "MaterializeIntoMappedTarget controller timings"
+          << " artifact_id=" << resolved_artifact_id << " copy_entries=" << req.copy_plan().entries_size()
+          << " dst_tensors=" << req.dst_tensors_size() << " storages=" << layout.storages_size()
+          << " common_sec=" << std::chrono::duration<double>(common_done - total_start).count()
+          << " target_validate_sec=" << std::chrono::duration<double>(target_validate_done - common_done).count()
+          << " offsets_sec=" << std::chrono::duration<double>(offsets_done - target_validate_done).count()
+          << " canonical_sec=" << std::chrono::duration<double>(canonical_done - offsets_done).count()
+          << " mapped_plan_sec=" << std::chrono::duration<double>(mapped_plan_done - canonical_done).count()
+          << " disk_metadata_sec=" << std::chrono::duration<double>(disk_metadata_done - mapped_plan_done).count()
+          << " engine_sec=" << std::chrono::duration<double>(engine_done - disk_metadata_done).count()
+          << " materialize_sec=" << materialize_sec << " total_sec=" << total_sec;
   LOG(INFO) << "MaterializeIntoMappedTarget completed"
             << " artifact_id=" << resolved_artifact_id
             << " source_layout=" << (disk_metadata.has_value() && disk_metadata->source_index_json.has_value())

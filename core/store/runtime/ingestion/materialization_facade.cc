@@ -3011,22 +3011,22 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   }
   const absl::Duration total_elapsed = absl::Now() - total_started_at;
   if (source_kind == loading::MaterializationSource::kP2P && total_elapsed >= absl::Milliseconds(5)) {
-    LOG(INFO) << "materialize_mapped_loader_into_target_summary"
-              << " artifact_id=" << hints.artifact_id << " request_id=" << hints.transport_request_id
-              << " total_size=" << total_size << " slice_bytes=" << slice_bytes
-              << " chunk_size=" << config_.artifact_chunk_bytes << " concurrency=" << concurrency
-              << " num_chunks=" << num_chunks << " init_loader_ms=" << absl::ToDoubleMilliseconds(init_loader_elapsed)
-              << " open_source_ms=" << absl::ToDoubleMilliseconds(open_source_elapsed)
-              << " mapped_source_build_ms=" << absl::ToDoubleMilliseconds(mapped_source_build_elapsed)
-              << " session_spb_init_ms=" << absl::ToDoubleMilliseconds(session_spb_init_elapsed)
-              << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
-              << " source_to_pinned_ms=" << (static_cast<double>(pump_debug_stats.source_read_at_us_total) / 1000.0)
-              << " pinned_to_gpu_ms=" << (static_cast<double>(pump_debug_stats.gpu_write_wait_us_total) / 1000.0)
-              << " staged_bytes=" << pump_debug_stats.produced_bytes
-              << " staged_chunks=" << pump_debug_stats.produced_chunks
-              << " gpu_write_bytes=" << pump_debug_stats.gpu_write_bytes_total
-              << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
-              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+    VLOG(2) << "materialize_mapped_loader_into_target_summary"
+            << " artifact_id=" << hints.artifact_id << " request_id=" << hints.transport_request_id
+            << " total_size=" << total_size << " slice_bytes=" << slice_bytes
+            << " chunk_size=" << config_.artifact_chunk_bytes << " concurrency=" << concurrency
+            << " num_chunks=" << num_chunks << " init_loader_ms=" << absl::ToDoubleMilliseconds(init_loader_elapsed)
+            << " open_source_ms=" << absl::ToDoubleMilliseconds(open_source_elapsed)
+            << " mapped_source_build_ms=" << absl::ToDoubleMilliseconds(mapped_source_build_elapsed)
+            << " session_spb_init_ms=" << absl::ToDoubleMilliseconds(session_spb_init_elapsed)
+            << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+            << " source_to_pinned_ms=" << (static_cast<double>(pump_debug_stats.source_read_at_us_total) / 1000.0)
+            << " pinned_to_gpu_ms=" << (static_cast<double>(pump_debug_stats.gpu_write_wait_us_total) / 1000.0)
+            << " staged_bytes=" << pump_debug_stats.produced_bytes
+            << " staged_chunks=" << pump_debug_stats.produced_chunks
+            << " gpu_write_bytes=" << pump_debug_stats.gpu_write_bytes_total
+            << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+            << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
   }
   return loading::MaterializeIntoTargetResult{
       .source = source_kind,
