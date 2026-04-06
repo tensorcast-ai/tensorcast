@@ -143,6 +143,44 @@ uint64_t StableDramCacheManager::bytes_used() const {
   return bytes_used_.load();
 }
 
+std::optional<loading::ReplicaKey> StableDramCacheManager::find_entry_key_locked(const loading::ReplicaKey& key) const {
+  auto it = entries_.find(key);
+  if (it != entries_.end()) {
+    return it->first;
+  }
+  auto alias_it = entry_keys_by_lease_key_.find(key);
+  if (alias_it == entry_keys_by_lease_key_.end()) {
+    return std::nullopt;
+  }
+  for (const auto& entry_key : alias_it->second) {
+    if (entries_.contains(entry_key)) {
+      return entry_key;
+    }
+  }
+  return std::nullopt;
+}
+
+void StableDramCacheManager::index_entry_alias_locked(const CacheEntry& entry) {
+  if (!entry.stable_lease.has_value()) {
+    return;
+  }
+  entry_keys_by_lease_key_[entry.stable_lease->key].insert(entry.key);
+}
+
+void StableDramCacheManager::unindex_entry_alias_locked(const CacheEntry& entry) {
+  if (!entry.stable_lease.has_value()) {
+    return;
+  }
+  auto alias_it = entry_keys_by_lease_key_.find(entry.stable_lease->key);
+  if (alias_it == entry_keys_by_lease_key_.end()) {
+    return;
+  }
+  alias_it->second.erase(entry.key);
+  if (alias_it->second.empty()) {
+    entry_keys_by_lease_key_.erase(alias_it);
+  }
+}
+
 absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::admit(const AdmissionRequest& request) {
   AdmissionResult result;
   if (!request.replica) {
@@ -238,11 +276,10 @@ absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::
   bool inserted = false;
   {
     absl::MutexLock lock(&mu_);
-    if (entries_.contains(entry.key)) {
-      inserted = false;
-    } else {
-      entries_.emplace(entry.key, std::move(entry));
-      inserted = true;
+    auto [it, was_inserted] = entries_.emplace(entry.key, std::move(entry));
+    inserted = was_inserted;
+    if (inserted) {
+      index_entry_alias_locked(it->second);
     }
   }
 
@@ -315,9 +352,9 @@ bool StableDramCacheManager::is_evictable(const loading::ReplicaKey& key, absl::
   std::optional<CacheEntry> entry;
   {
     absl::MutexLock lock(&mu_);
-    auto it = entries_.find(key);
-    if (it != entries_.end()) {
-      entry = it->second;
+    auto resolved_entry_key = find_entry_key_locked(key);
+    if (resolved_entry_key.has_value()) {
+      entry = entries_.at(*resolved_entry_key);
     }
   }
 
@@ -385,20 +422,12 @@ void StableDramCacheManager::on_replica_evicted(
   loading::ReplicaKey entry_key = key;
   {
     absl::MutexLock lock(&mu_);
-    auto it = entries_.find(key);
-    if (it == entries_.end()) {
-      for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
-        if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
-          it = scan;
-          break;
-        }
-      }
-      if (it == entries_.end()) {
-        return;
-      }
+    auto resolved_entry_key = find_entry_key_locked(key);
+    if (!resolved_entry_key.has_value()) {
+      return;
     }
-    entry_key = it->first;
-    entry = it->second;
+    entry_key = *resolved_entry_key;
+    entry = entries_.at(entry_key);
   }
 
   std::shared_ptr<replica::Replica> release_source = replica;
@@ -427,20 +456,17 @@ void StableDramCacheManager::on_replica_evicted(
   bool found = false;
   {
     absl::MutexLock lock(&mu_);
+    auto resolved_entry_key = find_entry_key_locked(key);
+    if (!resolved_entry_key.has_value()) {
+      return;
+    }
+    entry_key = *resolved_entry_key;
     auto it = entries_.find(entry_key);
     if (it == entries_.end()) {
-      for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
-        if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
-          it = scan;
-          break;
-        }
-      }
-      if (it == entries_.end()) {
-        return;
-      }
+      return;
     }
-    entry_key = it->first;
     entry = it->second;
+    unindex_entry_alias_locked(it->second);
     entries_.erase(it);
     found = true;
   }
@@ -528,20 +554,12 @@ absl::Status StableDramCacheManager::evict_for_bytes(
     loading::ReplicaKey entry_key = key;
     {
       absl::MutexLock lock(&mu_);
-      auto it = entries_.find(key);
-      if (it == entries_.end()) {
-        for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
-          if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
-            it = scan;
-            break;
-          }
-        }
-        if (it == entries_.end()) {
-          continue;
-        }
+      auto resolved_entry_key = find_entry_key_locked(key);
+      if (!resolved_entry_key.has_value()) {
+        continue;
       }
-      entry_key = it->first;
-      entry = it->second;
+      entry_key = *resolved_entry_key;
+      entry = entries_.at(entry_key);
     }
     if (!is_entry_evictable(entry, now, mode)) {
       continue;
@@ -571,7 +589,11 @@ absl::Status StableDramCacheManager::evict_for_bytes(
 
     {
       absl::MutexLock lock(&mu_);
-      entries_.erase(entry_key);
+      auto it = entries_.find(entry_key);
+      if (it != entries_.end()) {
+        unindex_entry_alias_locked(it->second);
+        entries_.erase(it);
+      }
     }
     bytes_used_.fetch_sub(entry.stable_bytes);
     record_bytes_delta(-static_cast<int64_t>(entry.stable_bytes));

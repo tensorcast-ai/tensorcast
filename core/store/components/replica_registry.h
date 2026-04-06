@@ -104,18 +104,25 @@ class ReplicaRegistry {
       ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
-  void rebuild_indices_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void append_to_secondary_indices_locked(size_t idx) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void remove_from_artifact_bucket_locked(size_t idx) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void remove_from_device_bucket_locked(size_t idx) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void patch_moved_entry_indices_locked(size_t idx) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   mutable absl::Mutex mutex_;
 
   // ────────────────────────────────────────────────────────────────────────
-  // New multi-index storage (prototyped, not yet implemented)
+  // Multi-index storage for instance, artifact, and device lookups.
   // ────────────────────────────────────────────────────────────────────────
 
   struct Entry {
     loading::ReplicaKey key;
     std::shared_ptr<replica::Replica> replica;
     mutable std::chrono::time_point<std::chrono::system_clock> last_access;
+    // Reverse positions let erase() patch the two secondary buckets in-place
+    // instead of rebuilding every index after vector compaction.
+    size_t artifact_bucket_pos{0};
+    size_t device_bucket_pos{0};
   };
 
   std::vector<Entry> entries_ ABSL_GUARDED_BY(mutex_);

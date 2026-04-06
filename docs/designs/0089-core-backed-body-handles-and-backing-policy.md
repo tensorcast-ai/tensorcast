@@ -841,6 +841,24 @@ For a transient forwarding daemon:
 
 `TRANSIENT_FORWARD` must never silently become home retained truth.
 
+### 9.4.1 Future convergence for transient forwarding
+
+Current routed byte-artifact remote-home `put` may still materialize transient per-item bodies and temporarily route
+them through the shared retained-body execution machinery as an implementation shortcut. That shape is acceptable as a
+transitional execution detail, but it is not the desired long-term architecture.
+
+Long-term convergence rule:
+
+- transient forwarding bodies are transport-scoped execution objects, not retained store-owned truth,
+- transient forwarding must not permanently depend on the global retained-body registry hot path,
+- source-side remote-home `put` should converge toward direct source-bytes or source-region to pack, export, and
+  forward execution, without creating per-item retained-body registrations solely for forwarding,
+- home-daemon verification, per-item outcome accounting, routed authority ownership, and final retained-backing
+  installation remain unchanged.
+
+This evolution changes execution shape only. It does not relax artifact identity, authority, verification, or
+home-install semantics.
+
 ### 9.5 State machine
 
 ```mermaid

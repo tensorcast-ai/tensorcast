@@ -1337,6 +1337,9 @@ design delta.
   costs; it should be treated as an incremental step rather than the final cross-host performance target,
 - `v2 communicator_source` reduces that gap but still mirrors full remote packs into local host memory before per-item
   slicing, so there is remaining room for a reusable remote-slice lowering path,
+- source-side remote-home `put` may still use transient per-item forwarding bodies as a pack or export shortcut; future
+  evolution should separate those transport-scoped objects from the retained-body registry hot path and converge toward
+  direct pack or forward execution as described by `0089`,
 - `v2 communicator_source` introduces more coupling to communicator export lifecycle and requires careful convergence
   with the ordinary-artifact P2P stack without reviving Global Store coordination on the per-blob hot path,
 - signed-only payload transport depends on capability-token configuration being available where routed large-payload
