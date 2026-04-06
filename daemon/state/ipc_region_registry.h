@@ -144,7 +144,14 @@ class IpcRegionRegistry {
   struct RegionRecord {
     RegionDescriptor desc;
     std::string attachment_bytes;
+    // Total live holds for this region across acquire()/release(),
+    // host-shared attachment acquires, and daemon-local mappings.
     uint64_t refcount = 0;
+    // Sub-count for daemon-managed HOST_SHARED attachment acquires served by
+    // acquire_host_shared_attachment(). This lets release_host_shared_attachment()
+    // reject stray or duplicate releases instead of consuming unrelated region
+    // holds such as active local mappings.
+    uint64_t host_shared_attachment_refcount = 0;
     absl::Time inserted_at = absl::Now();
     bool poisoned = false;
     std::unique_ptr<DaemonManagedHostSharedSlab> daemon_host_shared_slab;

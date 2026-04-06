@@ -5,6 +5,7 @@
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
+#include "absl/status/status.h"
 #include "absl/time/clock.h"
 
 using tensorcast::daemon::IpcRegionRegistry;
@@ -226,6 +227,43 @@ TEST_CASE(
   expired = reg.sweep_expired(absl::Now());
   REQUIRE(expired.size() == 1);
   REQUIRE(expired[0].region_id == desc_or->region_id);
+}
+
+TEST_CASE("IpcRegionRegistry HOST_SHARED attachment release does not consume local mapping holds", "[daemon][region]") {
+  IpcRegionRegistry reg(IpcRegionRegistry::Options{});
+
+  IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = 31337;
+  params.size_bytes = 1 << 20;
+  params.ttl_ms = 1000;
+  params.daemon_managed = true;
+  params.host_region_class = IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+  REQUIRE_FALSE(desc_or->attach_token.empty());
+
+  auto attachment_or = reg.acquire_host_shared_attachment(desc_or->attach_token, params.owner_pid);
+  REQUIRE(attachment_or.ok());
+  auto mapping_or = reg.acquire_host_shared_local_mapping(desc_or->region_id, params.owner_pid);
+  REQUIRE(mapping_or.ok());
+
+  REQUIRE(reg.release_host_shared_attachment(desc_or->attach_token, params.owner_pid).ok());
+
+  auto duplicate_release = reg.release_host_shared_attachment(desc_or->attach_token, params.owner_pid);
+  REQUIRE_FALSE(duplicate_release.ok());
+  REQUIRE(absl::IsFailedPrecondition(duplicate_release));
+
+  auto unregister_busy_or = reg.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE_FALSE(unregister_busy_or.ok());
+
+  REQUIRE(reg.release(desc_or->region_id).ok());
+
+  auto unregister_or = reg.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE(unregister_or.ok());
+  REQUIRE(*unregister_or);
 }
 
 TEST_CASE("IpcRegionRegistry daemon-managed HOST_SHARED cleanup on pid exit", "[daemon][region]") {

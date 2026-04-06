@@ -201,6 +201,62 @@ TEST_CASE("LocalHandle serves daemon-managed HOST_SHARED region attachments", "[
 }
 
 TEST_CASE(
+    "LocalHandle duplicate HOST_SHARED release does not consume local mapping holds",
+    "[daemon][local_handle][host_shared][refcount]") {
+  tensorcast::daemon::IpcRegionRegistry registry(
+      tensorcast::daemon::IpcRegionRegistry::Options{
+          .capacity = 16,
+          .max_ttl = absl::Milliseconds(5000),
+      });
+  const auto socket_dir = make_socket_dir();
+  const std::string socket_path = (socket_dir / "local_handle_refcount.sock").string();
+
+  tensorcast::daemon::LocalHandleServer server(
+      tensorcast::daemon::LocalHandleServer::Options{
+          .socket_path = socket_path,
+          .cpu_shared_memory_enabled = true,
+      },
+      registry,
+      nullptr);
+  REQUIRE(server.start().ok());
+
+  tensorcast::daemon::IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = getpid();
+  params.size_bytes = kRegionBytes;
+  params.ttl_ms = 1000;
+  params.daemon_managed = true;
+  params.host_region_class = tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = registry.register_region(params);
+  REQUIRE(desc_or.ok());
+  REQUIRE_FALSE(desc_or->attach_token.empty());
+
+  auto fd_resp = local_handle_get_region_memfd_fd(socket_path, desc_or->attach_token);
+  REQUIRE(fd_resp.code == 0);
+  REQUIRE(fd_resp.fd >= 0);
+  REQUIRE(::close(fd_resp.fd) == 0);
+
+  auto mapping_or = registry.acquire_host_shared_local_mapping(desc_or->region_id, params.owner_pid);
+  REQUIRE(mapping_or.ok());
+
+  REQUIRE(local_handle_release_token(socket_path, desc_or->attach_token) == 0);
+  REQUIRE(local_handle_release_token(socket_path, desc_or->attach_token) != 0);
+
+  auto unregister_busy_or = registry.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE_FALSE(unregister_busy_or.ok());
+
+  REQUIRE(registry.release(desc_or->region_id).ok());
+
+  auto unregister_or = registry.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE(unregister_or.ok());
+  REQUIRE(*unregister_or);
+
+  server.stop();
+}
+
+TEST_CASE(
     "Daemon-managed HOST_SHARED region is cleaned up on owner exit",
     "[daemon][local_handle][host_shared][pid_exit]") {
   tensorcast::daemon::IpcRegionRegistry registry(

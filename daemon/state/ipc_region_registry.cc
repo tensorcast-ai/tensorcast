@@ -398,6 +398,7 @@ absl::StatusOr<IpcRegionRegistry::HostSharedAttachment> IpcRegionRegistry::acqui
     return absl::PermissionDeniedError("owner_pid mismatch");
   }
   ++rec.refcount;
+  ++rec.host_shared_attachment_refcount;
   if (rec.desc.ttl_ms == 0) {
     rec.desc.expires_at = absl::InfiniteFuture();
   } else {
@@ -430,9 +431,13 @@ absl::Status IpcRegionRegistry::release_host_shared_attachment(const std::string
   if (owner_pid <= 0 || owner_pid != rec.desc.owner_pid) {
     return absl::PermissionDeniedError("owner_pid mismatch");
   }
-  if (rec.refcount == 0) {
-    return absl::FailedPreconditionError("region refcount underflow");
+  if (rec.host_shared_attachment_refcount == 0) {
+    return absl::FailedPreconditionError("HOST_SHARED attachment was not acquired");
   }
+  if (rec.refcount == 0) {
+    return absl::InternalError("HOST_SHARED attachment bookkeeping is inconsistent");
+  }
+  --rec.host_shared_attachment_refcount;
   --rec.refcount;
   if (rec.refcount == 0) {
     if (rec.desc.ttl_ms == 0) {
