@@ -7,7 +7,10 @@ import pytest
 from tensorcast.api.errors import ArtifactError
 from tensorcast.engine_adapter.kvcache_adapter import (
     MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA,
+    PUBLISH_MANIFEST_SCHEMA,
+    EngineOwnedManifest,
     ManifestResult,
+    PublishManifest,
     compute_key_set_digest_hex,
     open_byte_artifact,
     seal_byte_artifact,
@@ -70,7 +73,9 @@ def test_manifest_result_helper_uses_key_set_digest() -> None:
     result = ManifestResult.from_artifact_ids(
         engine_request_id="rid-1",
         layout_id="layout-v1",
-        artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",),
+        artifact_ids=(
+            "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+        ),
     )
     assert result.key_set_digest_alg == "sha256"
     assert len(result.key_set_digest_hex) == 64
@@ -117,7 +122,9 @@ def test_manifest_result_require_bridge_fails_closed_when_missing() -> None:
     result = ManifestResult.from_artifact_ids(
         engine_request_id="rid-1",
         layout_id="layout-v1",
-        artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",),
+        artifact_ids=(
+            "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+        ),
     )
 
     with pytest.raises(
@@ -139,3 +146,60 @@ def test_seal_byte_artifact_direct_helper_matches_open_seal() -> None:
         payload=b"abc123",
     ).seal()
     assert direct.invariant == opened.invariant
+
+
+def test_publish_manifest_proto_roundtrip() -> None:
+    artifact_manifest = ManifestResult.from_artifact_ids(
+        engine_request_id="rid-1",
+        layout_id="layout-v1",
+        artifact_ids=(
+            "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+        ),
+    )
+    publish_manifest = PublishManifest(
+        artifact_manifest=artifact_manifest,
+        engine_owned_manifest=EngineOwnedManifest(
+            engine="sglang",
+            schema="sglang.engine_owned_manifest.v1",
+            version=1,
+            encoding="json",
+            created_at_ms=1234,
+            expires_at_ms=5678,
+            artifact_manifest_digest=artifact_manifest.key_set_digest_hex,
+            payload_sha256="f" * 64,
+            payload=b'{"logical_request_id":"rid-1"}',
+        ),
+    )
+
+    restored = PublishManifest.from_proto(publish_manifest.to_proto())
+
+    assert restored.schema == PUBLISH_MANIFEST_SCHEMA
+    assert restored.artifact_manifest == artifact_manifest
+    assert restored.engine_owned_manifest.engine == "sglang"
+    assert restored.engine_owned_manifest.payload == b'{"logical_request_id":"rid-1"}'
+
+
+def test_publish_manifest_rejects_digest_mismatch() -> None:
+    artifact_manifest = ManifestResult.from_artifact_ids(
+        engine_request_id="rid-1",
+        layout_id="layout-v1",
+        artifact_ids=(
+            "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+        ),
+    )
+
+    with pytest.raises(ArtifactError, match="bind the exact artifact manifest digest"):
+        PublishManifest(
+            artifact_manifest=artifact_manifest,
+            engine_owned_manifest=EngineOwnedManifest(
+                engine="sglang",
+                schema="sglang.engine_owned_manifest.v1",
+                version=1,
+                encoding="json",
+                created_at_ms=1234,
+                expires_at_ms=None,
+                artifact_manifest_digest="0" * 64,
+                payload_sha256=None,
+                payload=b"{}",
+            ),
+        )

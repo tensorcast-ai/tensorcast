@@ -17,9 +17,11 @@ from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
     EngineAdapter,
+    EngineOwnedManifest,
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.node_agent.executor import NodeAgentExecutor
@@ -70,6 +72,39 @@ def _selection() -> common_pb2.ArtifactSelection:
 
 def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
+
+
+def _sample_publish_manifest(*, rid: str = "rid-123") -> PublishManifest:
+    artifact_manifest = ManifestResult.from_artifact_selections(
+        engine_request_id=rid,
+        layout_id="layout-v1",
+        manifest_selection=common_pb2.ArtifactSelection(
+            artifact_id=f"engine-manifest:{rid}",
+            logical_layout_hash=b"manifest-logical",
+            selection_hash=b"manifest-selection",
+        ),
+        artifact_selections=(
+            common_pb2.ArtifactSelection(
+                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+                logical_layout_hash=b"logical-a",
+                selection_hash=b"selection-a",
+            ),
+        ),
+    )
+    return PublishManifest(
+        artifact_manifest=artifact_manifest,
+        engine_owned_manifest=EngineOwnedManifest(
+            engine="sglang",
+            schema="sglang.engine_owned_manifest.v1",
+            version=1,
+            encoding="json",
+            created_at_ms=1774223000123,
+            expires_at_ms=1774223060123,
+            artifact_manifest_digest=artifact_manifest.key_set_digest_hex,
+            payload_sha256="f" * 64,
+            payload=f'{{"logical_request_id":"{rid}"}}'.encode("utf-8"),
+        ),
+    )
 
 
 def test_node_agent_executes_instance_transform_into() -> None:
@@ -404,7 +439,9 @@ def test_node_agent_executes_artifact_actions() -> None:
         return ManifestResult.from_artifact_ids(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",),
+            artifact_ids=(
+                "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+            ),
         )
 
     def _publish(rid: str, ttl_ms: int | None, _sealed, _ctx):  # noqa: ANN001
@@ -412,7 +449,9 @@ def test_node_agent_executes_artifact_actions() -> None:
         manifest = ManifestResult.from_artifact_ids(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",),
+            artifact_ids=(
+                "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+            ),
         )
         return PublishResult(
             manifest=manifest,
@@ -422,9 +461,12 @@ def test_node_agent_executes_artifact_actions() -> None:
                     status_code="OK",
                 ),
             ),
+            publish_manifest=_sample_publish_manifest(rid=rid),
         )
 
-    def _hydrate(rid: str, _ctx):  # noqa: ANN001
+    def _hydrate(rid: str | None, publish_manifest, _ctx):  # noqa: ANN001
+        assert publish_manifest is None
+        assert rid is not None
         observed["hydrate"].append(rid)
         manifest = ManifestResult.from_artifact_ids(
             engine_request_id=rid,
@@ -494,6 +536,7 @@ def test_node_agent_executes_artifact_actions() -> None:
     publish_result = result.steps["s2"].artifact_result
     assert isinstance(publish_result, PublishResult)
     assert publish_result.put_outcomes[0].status_code == "OK"
+    assert publish_result.publish_manifest is not None
     hydrate_result = result.steps["s3"].artifact_result
     assert isinstance(hydrate_result, HydrateResult)
     assert hydrate_result.manifest is not None
@@ -504,6 +547,51 @@ def test_node_agent_executes_artifact_actions() -> None:
     assert observed["publish"] == ["rid-123:60000"]
     assert observed["hydrate"] == ["rid-123"]
     assert observed["evict"] == ["rid-123"]
+
+
+def test_node_agent_executes_hydrate_from_publish_manifest() -> None:
+    observed: list[PublishManifest] = []
+    adapter = EngineAdapter(
+        instance_id="inst-1", engine="test", register_identity_transform=False
+    )
+    publish_manifest = _sample_publish_manifest(rid="rid-transfer")
+
+    def _hydrate(
+        rid: str | None,
+        incoming_publish_manifest: PublishManifest | None,
+        _ctx,
+    ):  # noqa: ANN001
+        assert rid is None
+        assert incoming_publish_manifest is not None
+        observed.append(incoming_publish_manifest)
+        return HydrateResult(
+            manifest=incoming_publish_manifest.artifact_manifest,
+            get_outcomes=(),
+            missing_artifact_ids=(),
+        )
+
+    adapter.register_artifact_fns(hydrate=_hydrate)
+
+    spec = plan_pb2.PlanSpec(plan_id="plan-cache-hydrate-manifest")
+    spec.context.request_id = "req-cache-hydrate-manifest"
+    step = spec.steps.add()
+    step.step_id = "s1"
+    step.target.target_type = plan_pb2.TARGET_TYPE_INSTANCE
+    step.target.target_id = "inst-1"
+    step.action.hydrate.publish_manifest.CopyFrom(publish_manifest.to_proto())
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=adapter,
+        client_factory=lambda _addr: _DaemonStub(),
+    )
+    result = executor.execute_plan(spec)
+
+    assert result.ok is True
+    assert result.steps["s1"].status.state == "success"
+    assert observed == [publish_manifest]
 
 
 def test_node_agent_servicer_serializes_artifact_results() -> None:
@@ -531,22 +619,8 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
 
     def _publish(rid: str, ttl_ms: int | None, _sealed, _ctx):  # noqa: ANN001
         _ = ttl_ms
-        manifest = ManifestResult.from_artifact_selections(
-            engine_request_id=rid,
-            layout_id="layout-v1",
-            manifest_selection=common_pb2.ArtifactSelection(
-                artifact_id=f"engine-manifest:{rid}",
-                logical_layout_hash=b"manifest-logical",
-                selection_hash=b"manifest-selection",
-            ),
-            artifact_selections=(
-                common_pb2.ArtifactSelection(
-                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
-                    logical_layout_hash=b"logical-a",
-                    selection_hash=b"selection-a",
-                ),
-            ),
-        )
+        publish_manifest = _sample_publish_manifest(rid=rid)
+        manifest = publish_manifest.artifact_manifest
         return PublishResult(
             manifest=manifest,
             put_outcomes=(
@@ -556,6 +630,7 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
                     message="created",
                 ),
             ),
+            publish_manifest=publish_manifest,
         )
 
     adapter.register_artifact_fns(manifest=_manifest, publish=_publish)
@@ -596,6 +671,10 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
     assert response.steps[1].artifact_result.publish.manifest.layout_id == "layout-v1"
     assert response.steps[1].artifact_result.publish.manifest.HasField(
         "manifest_bridge"
+    )
+    assert (
+        response.steps[1].artifact_result.publish.publish_manifest.schema
+        == "tensorcast.publish_manifest.v1"
     )
     assert (
         response.steps[1].artifact_result.publish.put_outcomes[0].message == "created"

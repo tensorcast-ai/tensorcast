@@ -33,6 +33,7 @@ from tensorcast.engine_adapter import (
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.proto.common.v1 import common_pb2
@@ -845,10 +846,25 @@ class NodeAgentExecutor:
                 ttl_ms=None,
                 call_ctx=call_ctx,
             )
-            hydrate_result = engine_adapter.execute_hydrate(
-                engine_request_id=action.engine_request_id,
-                ctx=scoped_ctx,
-            )
+            request_source = action.WhichOneof("request_source")
+            if request_source == "engine_request_id":
+                hydrate_result = engine_adapter.execute_hydrate(
+                    engine_request_id=str(action.engine_request_id),
+                    ctx=scoped_ctx,
+                )
+            elif request_source == "publish_manifest":
+                hydrate_result = engine_adapter.execute_hydrate(
+                    publish_manifest=PublishManifest.from_proto(
+                        action.publish_manifest
+                    ),
+                    ctx=scoped_ctx,
+                )
+            else:
+                raise ArtifactError(
+                    "hydrate requires exactly one request source",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
         except ArtifactError as exc:
             return NodeAgentStepResult(
                 step_id=step.step_id,
