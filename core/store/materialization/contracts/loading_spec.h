@@ -53,6 +53,7 @@ struct MaterializeIntoTargetResult {
   uint64_t actual_collective_committed_bytes{0};
   uint64_t actual_local_typed_bytes{0};
   uint64_t actual_generic_backend_bytes{0};
+  std::string collective_skip_reason;
   bool collective_handled{false};
   bool direct_write_supported{false};
   bool source_ordered{false};
@@ -221,6 +222,7 @@ struct MaterializeHints {
   ExportPolicy export_policy{ExportPolicy::kNever};
   bool need_view_data_hash{true};
   SourceMutationPolicy source_mutation_policy{SourceMutationPolicy::kReadWrite};
+  bool require_collective_execution{false};
 
   std::optional<VariantIdentity> variant;
 

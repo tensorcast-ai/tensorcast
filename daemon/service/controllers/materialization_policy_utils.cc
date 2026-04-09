@@ -347,6 +347,7 @@ v2::ExecutionDiagnostics build_execution_diagnostics(
   diagnostics.set_actual_collective_committed_bytes(result->actual_collective_committed_bytes);
   diagnostics.set_actual_local_typed_bytes(result->actual_local_typed_bytes);
   diagnostics.set_actual_generic_backend_bytes(result->actual_generic_backend_bytes);
+  diagnostics.set_collective_skip_reason(result->collective_skip_reason);
   if (collective_requested && !result->collective_handled) {
     diagnostics.set_collective_failure_class(v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);
   }

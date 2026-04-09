@@ -55,6 +55,7 @@ struct CollectiveMappedTargetLoadRequest {
 struct CollectiveMappedTargetLoadResult {
   bool handled{false};
   absl::Status status{absl::OkStatus()};
+  std::string skip_reason;
 };
 
 struct LocalBatchedDiskLoadRequest {

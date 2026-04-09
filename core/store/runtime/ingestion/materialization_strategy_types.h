@@ -144,6 +144,7 @@ struct ExecutionCommitReport {
   uint64_t actual_collective_committed_bytes{0};
   uint64_t actual_local_typed_bytes{0};
   uint64_t actual_generic_backend_bytes{0};
+  std::string collective_skip_reason;
   bool collective_handled{false};
   bool direct_write_supported{false};
   bool source_ordered{false};

@@ -571,6 +571,7 @@ message ExecutionDiagnostics {
   uint64 actual_collective_committed_bytes = 13;
   uint64 actual_local_typed_bytes = 14;
   uint64 actual_generic_backend_bytes = 15;
+  string collective_skip_reason = 16;
 }
 
 message SourceBoundPlanDiagnostics {

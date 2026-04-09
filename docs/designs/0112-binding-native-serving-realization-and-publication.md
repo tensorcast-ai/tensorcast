@@ -715,6 +715,19 @@ Execution responsibility:
 
 The integration layer only prepares the plan and invokes framework finalize.
 
+Normative execution rule for the preferred same-binding builder path:
+
+- `Binding.realize_from(...)` / `Store.realize_into_binding(...)` are
+  execution-only ingress points;
+- they write source bytes into binding-backed target storage but do not
+  implicitly seal, mint identity, or return a publication-ready current value;
+- audited `BINDING_FINALIZE + SAME_BINDING_FAST_PATH` flows must therefore use
+  the explicit binding update window:
+  `begin_update(...) -> realize_from(...) -> framework finalize -> seal_current(...)`;
+- the public ingress remains one ingress, but its correct long-term semantics
+  are direct target-state semantics rather than compatibility-preserving
+  implicit sealing.
+
 # Disk and Source Resolution
 
 ## Long-term disk model
@@ -808,7 +821,7 @@ The binding-native path should not need:
 ## GPU hash rule
 
 If the promoted binding current value corresponds to the final canonical serving
-byte space, TensorCast should hash those bytes directly on GPU.
+byte space, TensorCast must hash those bytes directly on GPU.
 
 If a future promoted target layout is not identical to canonical logical byte
 order, TensorCast must hash the logical canonical byte stream implied by the
@@ -816,6 +829,14 @@ target layout and canonical index, not the raw storage order.
 
 Raw-storage hashing is only valid when raw storage order and canonical byte
 order are the same contract.
+
+For the audited same-binding `canonical_full` startup path, this rule is
+mandatory rather than opportunistic:
+
+- the single surviving identity-forming full-data hash must execute on GPU;
+- D2H/CPU hashing is not an equivalent success mode for that audited path;
+- if TensorCast cannot prove the GPU-hash preconditions for that path, the
+  operation must fail closed rather than silently downgrading.
 
 # Compatibility and Migration
 

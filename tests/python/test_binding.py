@@ -762,6 +762,7 @@ def test_binding_swap_tracks_last_execution_diagnostics(
         hash_rounds=1,
         hash_location=store_daemon_pb2.HASH_LOCATION_SEAL,
         identity_mint_strategy=store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_MINT,
+        collective_skip_reason="planner_collective_strategy_disabled",
     )
 
     binding = artifact1.bind(device="cuda:0", packing="byte_space")
@@ -771,6 +772,7 @@ def test_binding_swap_tracks_last_execution_diagnostics(
     assert diagnostics is not None
     assert diagnostics.collective_policy is CollectivePolicy.ALLOW_NOT_ELIGIBLE_FALLBACK
     assert diagnostics.collective_failure_class is CollectiveFailureClass.NOT_ELIGIBLE
+    assert diagnostics.collective_skip_reason == "planner_collective_strategy_disabled"
     assert diagnostics.hash_location is HashLocation.SEAL
     assert diagnostics.identity_mint_strategy is IdentityMintStrategy.SEAL_MINT
 
@@ -836,9 +838,61 @@ def test_binding_realize_from_tracks_source_bound_plan_diagnostics(
     assert isinstance(diagnostics, SourceBoundPlanDiagnostics)
     assert diagnostics.execution_plan_kind == "collective_first_mixed"
     assert diagnostics.planned_collective_candidate_bytes == 128
+    assert diagnostics.planned_collective_admitted_bytes == 128
     assert diagnostics.planned_local_typed_bytes == 16
     assert diagnostics.planner_reject_reason_buckets == {"concat_not_admitted": 32}
     assert diagnostics.plan_hash == "mh:test-plan"
+
+
+def test_binding_realize_from_strict_collective_failure_surfaces_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+    client.refill_error = ArtifactError(
+        "collective requested but the source-bound plan is not pure-collective eligible "
+        "(planned_local_typed_bytes=16, planned_non_admitted_typed_bytes=8, "
+        "planned_generic_residual_bytes=4, "
+        "pure_collective_blockers={local_typed_work_present=16,"
+        "true_generic_residual_present=4,typed_work_not_collective_admitted=8}, "
+        "planner_reject_reason_buckets={concat_not_admitted=8})",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.realize_from(
+            artifact,
+            realization_plan=(
+                store_mod.BindingRealizationEntry(
+                    op="copy",
+                    source_name="alpha",
+                    dst_name="alpha",
+                ),
+            ),
+            options=GetArtifactOptions(
+                execution_topology=ExecutionTopologyContext(
+                    collective_group=CollectiveLoadGroup(
+                        group_id="same-host-tp-load",
+                        world_size=8,
+                        rank=0,
+                    ),
+                    collective_policy="require_collective",
+                    source_locality="shared_source",
+                )
+            ),
+        )
+
+    message = str(excinfo.value)
+    assert "planned_local_typed_bytes=16" in message
+    assert "planned_non_admitted_typed_bytes=8" in message
+    assert "planned_generic_residual_bytes=4" in message
+    assert "pure_collective_blockers=" in message
+    assert "planner_reject_reason_buckets={concat_not_admitted=8}" in message
+    assert binding.last_execution_diagnostics is None
+    assert binding.last_source_bound_plan_diagnostics is None
 
 
 def test_binding_append_publish_uses_view_routing(

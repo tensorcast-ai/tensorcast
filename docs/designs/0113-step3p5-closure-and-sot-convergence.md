@@ -328,12 +328,14 @@ Normative completion rules:
   - `residual_bytes`
   - `hash_rounds`
   - `hash_location`
+  - `hash_backend`
+  - `identity_forming_hash_bytes`
+  - `identity_forming_hash_wall_time_ms`
   - `identity_mint_strategy`
 - `identity_mint_strategy` must distinguish at least:
   - `not_applicable` for already-existing artifacts where the current operation
     did not mint or reuse same-binding identity,
-  - `seal_mint` when same-binding identity is minted at seal or local-ready
-    time,
+  - `seal_mint` when same-binding identity is minted at the chosen seal point,
   - `seal_reuse` when promotion or binding-subject closeout reuses that
     seal-produced identity,
   - `closeout_mint` only for transitional fallback closeout minting.
@@ -346,15 +348,25 @@ Normative completion rules:
   reuse:
   - sealing is the only stage allowed to mint content identity for the finalized
     same-binding byte image,
+  - for `BINDING_FINALIZE` same-binding startup, that seal point is the
+    post-finalize seal over the final serving byte image rather than a
+    pre-finalize `local_only_ready` seal inside `realize_from(...)`,
   - binding-subject closeout may validate, publish, attach layout, or register
     metadata, but it must reuse the seal-produced identity and descriptor rather
     than reminting full-data identity from the same immutable bytes;
 - binding-subject closeout and promote must therefore achieve single-mint
   effect;
+- pre-finalize `local_only_ready` identity minting on the audited
+  same-binding `BINDING_FINALIZE` path is not an accepted steady-state variant;
+  it is behavior debt that must be removed rather than a semantics class to
+  preserve,
 - second-stage full-data hashing must disappear from the steady same-binding
   path;
 - if any transitional hash remains, it must be explicit, GPU-local where
   applicable, observable, and non-identity-forming for the steady path;
+- for the audited same-binding `canonical_full` startup path, the surviving
+  identity-forming hash must be GPU-backed and must fail closed rather than
+  silently downgrading to D2H/CPU hashing;
 - `0113` does not require immediate deletion of any separate GS-visible seal
   slot if one still exists internally, but it does require that downstream
   runtime truth and serving publication no longer depend on a second identity

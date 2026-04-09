@@ -1,10 +1,10 @@
 ---
 slug: collective-first-binding-realization-for-tp-serving-startup
 title: Collective-First Binding Realization for TP Serving Startup
-status: implemented
+status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
-last_updated: 2026-04-01
+last_updated: 2026-04-02
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0107-retrieval-policy-plane-cleanup.md
@@ -74,6 +74,70 @@ The new policy is:
   artifact-plane replica until publish/closeout succeeds;
 - strict `pure collective` remains supported, but only as an explicit
   execution-scoped mode with fail-fast semantics.
+
+# Implementation Status Note
+
+As of 2026-04-02, this design is accepted and its core behavior closures are
+landed in the repository, but rollout closure is still incomplete.
+
+The repository now contains the intended implementation for:
+
+- explicit local typed `pad fill`,
+- split source-bound planner and execution diagnostics,
+- `source_bound_contract_version = 3`,
+- strict preflight that preserves existing binding state and fails before
+  generic fallback for strict pure-collective requests,
+- runtime finalization of mapped collective lane maps against the selected
+  source byte space and source layout,
+- and collective-first mixed execution that continues from collective work into
+  generic residual bytes and then local typed overlay.
+
+The remaining gaps are not only rollout and evidence gates. One important
+source-bound behavior mismatch is still open on the audited same-binding
+startup path:
+
+- the current builder path still pays pre-finalize and post-finalize seal work
+  instead of converging to one post-finalize seal over the final serving byte
+  image;
+- and the surviving identity-forming hash on that audited path still does not
+  yet have a mandatory GPU-hash closure.
+
+So the remaining gaps are:
+
+- mounted TP-startup evidence still needs to show collective-lane-dominant
+  execution rather than generic-dominant execution;
+- a second representative `BINDING_FINALIZE` family such as Mixtral has not
+  yet been captured through a documented local mounted runbook in this
+  environment;
+- same-binding identity/hash convergence still needs to reach the `0112` /
+  `0113` target:
+  - the builder path must stop forcing a pre-finalize seal on the audited
+    same-binding `BINDING_FINALIZE` flow,
+  - binding-subject closeout must reuse that post-finalize seal instead of
+    paying a second full-data hash,
+  - and the surviving identity-forming hash on the audited
+    `canonical_full` startup path must be GPU-backed and fail closed if the GPU
+    hash cannot be proven;
+- mounted validation still needs executor evidence beyond current unit-test
+  coverage, including actual collective bytes, unique source bytes,
+  peer-transfer bytes, peak temporary bytes, batch count, and hash-backend
+  evidence;
+- and transitional delete gates remain blocked until those mounted-evidence
+  requirements pass.
+
+The 2026-04-02 Step3p5 mounted rerun confirms the current boundary precisely:
+
+- same-binding startup and serving readiness succeed on 8xH800,
+- the packaged operator config issue (`enable_owner_file_collective=false`) is
+  corrected,
+- but the rebuilt-daemon mounted sample still reports
+  `collective_handled=0`,
+  `collective_skip_reason=planner_typed_work_not_collective_admitted`,
+  and `dominant_executor=SourceOrderedMappedTargetExecutor`,
+- and the audited path still does not yet satisfy the intended one-hash
+  post-finalize GPU-hash end state,
+- so this design should still be treated as the active target model rather than
+  as a historical completed design.
 
 The intended steady state is:
 
@@ -898,6 +962,10 @@ Changed:
 
 - collective policy semantics are clarified,
 - diagnostics become additive,
+- the same public ingress is allowed to cut directly to execution-only
+  semantics so audited builder paths leave a realized binding unsealed before
+  post-bind finalize rather than preserving an implicit-seal compatibility
+  behavior,
 - no new public realization API is introduced.
 
 ## Controller / transform-builder layer

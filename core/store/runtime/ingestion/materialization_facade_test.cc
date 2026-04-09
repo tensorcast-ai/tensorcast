@@ -1442,6 +1442,390 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "MaterializationFacade strict collective mapped request fails before generic fallback",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_collective_strict");
+  std::vector<unsigned char> payload(8);
+  for (size_t index = 0; index < payload.size(); ++index) {
+    payload[index] = static_cast<unsigned char>(0x10 + index);
+  }
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[8],\"data_offsets\":[0,8]}}",
+      payload);
+
+  FacadeHarness harness(MakeOptions(artifact_root));
+  harness.initialize();
+  harness.hooks->collective_mapped_target_load_override =
+      [](const tensorcast::store::replica::CollectiveMappedTargetLoadRequest&,
+         const std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>&,
+         std::chrono::milliseconds,
+         const tensorcast::store::replica::CollectiveMappedTargetLoadOptions&) {
+        return tensorcast::store::replica::CollectiveMappedTargetLoadResult{
+            .handled = false,
+            .status = absl::OkStatus(),
+        };
+      };
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, 8);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+  std::array<uint8_t, 8> initial{};
+  initial.fill(0xAA);
+  REQUIRE(tensorcast::cuda::memcpy(gpu_buffer, initial.data(), initial.size(), cudaMemcpyHostToDevice).ok());
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{gpu_buffer},
+          .length = 8,
+      });
+  target_layout.total_size = 8;
+
+  tensorcast::store::loader::ByteRangeMap full_map;
+  full_map.total_bytes = 8;
+  full_map.num_sources = 1;
+  full_map.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 8,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_collective_strict";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,8,[8],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{};
+  resolved_plan.executor_private_generic_fallback_map = full_map;
+  resolved_plan.collective_compatibility_map = full_map;
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = resolved_plan.artifact_id;
+  hints.collective_load_group = loading::CollectiveLoadGroupHint{
+      .group_id = "strict-mapped",
+      .world_size = 2,
+      .rank = 0,
+  };
+  hints.require_collective_execution = true;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(
+      target_device, resolved_plan, hints, loading::DiskSource{.path = artifact_root, .expected_size = std::nullopt});
+  REQUIRE_FALSE(result_or.ok());
+  REQUIRE(absl::IsFailedPrecondition(result_or.status()));
+  CHECK(result_or.status().message().find("without generic fallback") != std::string::npos);
+
+  std::array<uint8_t, 8> host_out{};
+  REQUIRE(tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, host_out.size(), cudaMemcpyDeviceToHost).ok());
+  CHECK(host_out == initial);
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade finalizes mapped collective lane with source layout remap",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_collective_source_layout");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[8],\"data_offsets\":[0,8]}}",
+      std::vector<unsigned char>(8, 3));
+
+  FacadeHarness harness(MakeOptions(artifact_root));
+  harness.initialize();
+
+  std::optional<tensorcast::store::replica::CollectiveMappedTargetLoadRequest> captured_request;
+  harness.hooks->collective_mapped_target_load_override =
+      [&](const tensorcast::store::replica::CollectiveMappedTargetLoadRequest& request,
+          const std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>&,
+          std::chrono::milliseconds,
+          const tensorcast::store::replica::CollectiveMappedTargetLoadOptions&) {
+        captured_request = request;
+        return tensorcast::store::replica::CollectiveMappedTargetLoadResult{
+            .handled = false,
+            .status = absl::OkStatus(),
+        };
+      };
+
+  void* gpu_buffer = nullptr;
+  REQUIRE(tensorcast::cuda::malloc(&gpu_buffer, 4).ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{gpu_buffer},
+          .length = 4,
+      });
+  target_layout.total_size = 4;
+
+  tensorcast::store::loader::ByteRangeMap full_map;
+  full_map.total_bytes = 4;
+  full_map.num_sources = 1;
+  full_map.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_collective_source_layout";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,4,[4],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{};
+  resolved_plan.executor_private_generic_fallback_map = full_map;
+  resolved_plan.collective_compatibility_map = full_map;
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = resolved_plan.artifact_id;
+  hints.collective_load_group = loading::CollectiveLoadGroupHint{
+      .group_id = "source-layout-mapped",
+      .world_size = 2,
+      .rank = 0,
+  };
+  hints.require_collective_execution = true;
+  loading::DiskMetadata disk_metadata;
+  disk_metadata.source_index_json = R"({"tensor":[4,4,[4],[1],"torch.uint8",0]})";
+  hints.disk_metadata = disk_metadata;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(
+      target_device, resolved_plan, hints, loading::DiskSource{.path = artifact_root, .expected_size = std::nullopt});
+  REQUIRE_FALSE(result_or.ok());
+  REQUIRE(absl::IsFailedPrecondition(result_or.status()));
+  REQUIRE(captured_request.has_value());
+  REQUIRE(captured_request->collective_lane_map.segments.size() == 1);
+  CHECK(captured_request->collective_lane_map.segments.front().src_offset == 4);
+  CHECK(captured_request->collective_lane_map.segments.front().dst_offset == 0);
+  CHECK(captured_request->collective_lane_map.segments.front().length == 4);
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade continues generic residual execution after mapped collective success",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_collective_residual");
+  std::vector<unsigned char> payload(12);
+  for (size_t index = 0; index < payload.size(); ++index) {
+    payload[index] = static_cast<unsigned char>(0x10 + index);
+  }
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[12],\"data_offsets\":[0,12]}}",
+      payload);
+
+  FacadeHarness harness(MakeOptions(artifact_root));
+  harness.initialize();
+  harness.hooks->collective_mapped_target_load_override =
+      [](const tensorcast::store::replica::CollectiveMappedTargetLoadRequest& request,
+         const std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>&,
+         std::chrono::milliseconds,
+         const tensorcast::store::replica::CollectiveMappedTargetLoadOptions&) {
+        const std::array<uint8_t, 8> collective_bytes = {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7};
+        auto status = tensorcast::cuda::memcpy(
+            request.target_layout.storages.front().base_ptr.get(),
+            collective_bytes.data(),
+            collective_bytes.size(),
+            cudaMemcpyHostToDevice);
+        if (!status.ok()) {
+          return tensorcast::store::replica::CollectiveMappedTargetLoadResult{
+              .handled = true,
+              .status = status,
+          };
+        }
+        return tensorcast::store::replica::CollectiveMappedTargetLoadResult{
+            .handled = true,
+            .status = absl::OkStatus(),
+        };
+      };
+
+  void* gpu_buffer = nullptr;
+  REQUIRE(tensorcast::cuda::malloc(&gpu_buffer, 16).ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+  std::array<uint8_t, 16> initial{};
+  initial.fill(0xCC);
+  REQUIRE(tensorcast::cuda::memcpy(gpu_buffer, initial.data(), initial.size(), cudaMemcpyHostToDevice).ok());
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{gpu_buffer},
+          .length = 16,
+      });
+  target_layout.total_size = 16;
+
+  tensorcast::store::loader::ByteRangeMap executor_map;
+  executor_map.total_bytes = 16;
+  executor_map.num_sources = 1;
+  executor_map.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 12,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+  tensorcast::store::loader::ByteRangeMap collective_map;
+  collective_map.total_bytes = 16;
+  collective_map.num_sources = 1;
+  collective_map.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 8,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+  tensorcast::store::loader::ByteRangeMap residual_map;
+  residual_map.total_bytes = 16;
+  residual_map.num_sources = 1;
+  residual_map.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 8,
+          .length = 4,
+          .src_offset = 8,
+          .source_index = 0,
+      });
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_collective_residual";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,12,[12],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{
+      .items =
+          {
+              tensorcast::store::materialization::contracts::RepresentationWorkItem{
+                  .kind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill,
+                  .dst_name = "tail",
+                  .dst_spec =
+                      tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+                          .name = "tail",
+                          .shape = {4},
+                          .stride = {1},
+                          .dtype = "torch.uint8",
+                          .logical_offset = 12,
+                          .logical_length = 4,
+                          .storage_offset = 0,
+                          .element_size = 1,
+                      },
+                  .fill_rule =
+                      tensorcast::store::materialization::contracts::FillRule{
+                          .constant_value = {0xEE},
+                      },
+                  .committed_bytes = 4,
+              },
+          },
+      .residual_fallback_map = residual_map,
+  };
+  resolved_plan.executor_private_generic_fallback_map = executor_map;
+  resolved_plan.collective_compatibility_map = collective_map;
+  resolved_plan.source_bound_plan_summary =
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+          .collective_lane_eligible = true,
+      };
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = resolved_plan.artifact_id;
+  hints.collective_load_group = loading::CollectiveLoadGroupHint{
+      .group_id = "collective-residual",
+      .world_size = 2,
+      .rank = 0,
+  };
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(
+      target_device, resolved_plan, hints, loading::DiskSource{.path = artifact_root, .expected_size = std::nullopt});
+  REQUIRE(result_or.ok());
+  CHECK(result_or->collective_handled);
+  CHECK(result_or->actual_collective_committed_bytes == 8);
+  CHECK(result_or->actual_generic_backend_bytes == 4);
+  CHECK(result_or->actual_local_typed_bytes == 4);
+  CHECK(result_or->fallback_bytes == 4);
+  CHECK(result_or->committed_bytes == 16);
+  CHECK(result_or->selection_reason == "collective_first_mixed");
+
+  std::array<uint8_t, 16> host_out{};
+  REQUIRE(tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, host_out.size(), cudaMemcpyDeviceToHost).ok());
+  for (size_t index = 0; index < 8; ++index) {
+    CHECK(host_out[index] == static_cast<uint8_t>(0xA0 + index));
+  }
+  for (size_t index = 8; index < 12; ++index) {
+    CHECK(host_out[index] == static_cast<uint8_t>(0x10 + index));
+  }
+  for (size_t index = 12; index < 16; ++index) {
+    CHECK(host_out[index] == 0xEE);
+  }
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
     "MaterializationFacade executes mapped partial const fill without touching uncovered bytes",
     "[materialization_facade]") {
   SKIP_IF_NO_CUDA();

@@ -12,6 +12,7 @@
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/target_materialization_service.h"
 #include "daemon/service/rpc_context.h"
@@ -103,5 +104,16 @@ class OwnedBindingService {
   Dep d_;
   std::shared_ptr<ContributionLeaseKeepaliveTracker> contribution_keepalive_tracker_;
 };
+
+grpc::Status evaluate_strict_collective_preflight_for_testing(
+    const store::runtime::ingestion::strategy::ResolvedMaterializationPlan* resolved_plan,
+    v2::CollectivePolicy collective_policy);
+
+store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_source_bound_plan_for_testing(
+    const store::runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+    const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
+    const store::loading::ExecutionTopologyContext& execution_topology,
+    v2::CollectivePolicy collective_policy,
+    bool disk_source_available);
 
 } // namespace tensorcast::daemon

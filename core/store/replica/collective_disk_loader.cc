@@ -4792,7 +4792,11 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
     const CollectiveMappedTargetLoadOptions& options) {
   auto storage_spans_or = build_target_storage_spans(request.target_layout);
   if (!storage_spans_or.ok()) {
-    return {.handled = false, .status = storage_spans_or.status()};
+    return {
+        .handled = false,
+        .status = storage_spans_or.status(),
+        .skip_reason = "invalid_target_storage_layout",
+    };
   }
   auto parsed = ParsedMappedParticipant{
       .artifact_id = request.artifact_id,
@@ -4820,7 +4824,11 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
   {
     absl::MutexLock lock(&state->mu);
     if (request.group.rank >= state->world_size) {
-      return {.handled = false, .status = absl::InvalidArgumentError("mapped collective rank out of range")};
+      return {
+          .handled = false,
+          .status = absl::InvalidArgumentError("mapped collective rank out of range"),
+          .skip_reason = "collective_rank_out_of_range",
+      };
     }
     auto& slot = state->participants[request.group.rank];
     if (!slot.has_value()) {
@@ -4856,10 +4864,10 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
   if (erase_empty_group) {
     absl::MutexLock group_lock(&g_mapped_group_mu);
     g_mapped_groups.erase(request.group.group_id);
-    return {.handled = false, .status = absl::OkStatus()};
+    return {.handled = false, .status = absl::OkStatus(), .skip_reason = "group_assemble_timeout"};
   }
   if (timed_out) {
-    return {.handled = false, .status = absl::OkStatus()};
+    return {.handled = false, .status = absl::OkStatus(), .skip_reason = "group_assemble_timeout"};
   }
 
   if (leader) {
@@ -4951,12 +4959,12 @@ CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
               << " storages=" << request.target_layout.storages.size()
               << " map_bytes=" << request.collective_lane_map.total_bytes
               << " artifact_id=" << (!request.artifact_id.empty());
-    return {.handled = false, .status = absl::OkStatus()};
+    return {.handled = false, .status = absl::OkStatus(), .skip_reason = "request_incomplete"};
   }
   if (!request.disk_context->is_safetensors()) {
     LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id
               << " reason=non_safetensors_source";
-    return {.handled = false, .status = absl::OkStatus()};
+    return {.handled = false, .status = absl::OkStatus(), .skip_reason = "non_safetensors_source"};
   }
   return wait_for_mapped_group_and_maybe_execute(request, pinned_pool, pinned_timeout, options);
 }

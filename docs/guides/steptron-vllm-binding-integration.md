@@ -73,6 +73,38 @@ Concrete current anchors:
 This means the integration goal is not to redesign vLLM reload semantics. It is
 to make training publish the right versions in the right representation.
 
+## TensorCast-Side Readiness And Diagnostics Contract
+
+The current TensorCast-side source-bound readiness surface for this integration
+is `source_bound_contract_version >= 3`.
+
+For downstream consumers, that version now means:
+
+- strict `require_collective` requests fail before generic fallback begins;
+- default collective-first requests may execute through three ordered lanes:
+  collective, generic residual, and local typed overlay;
+- planner intent and actual execution are no longer conflated into one coarse
+  status blob.
+
+The public SDK surfaces to consume are:
+
+- `binding.last_execution_diagnostics`
+  - actual execution facts such as `actual_collective_committed_bytes`,
+    `actual_local_typed_bytes`, `actual_generic_backend_bytes`,
+    `collective_failure_class`, `dominant_executor`, and
+    `direct_write_supported`
+- `binding.last_source_bound_plan_diagnostics`
+  - planner facts such as `execution_plan_kind`,
+    `planned_collective_candidate_bytes`,
+    `planned_collective_admitted_bytes`,
+    `planned_local_typed_bytes`,
+    `planned_non_admitted_typed_bytes`,
+    `planned_generic_residual_bytes`,
+    `planner_reject_reason_buckets`, `planner_version`, and `plan_hash`
+
+Downstream integration summaries should prefer those typed surfaces rather than
+daemon log parsing or repo-version heuristics.
+
 ## Integration Principle
 
 The binding work should land around one simple separation:

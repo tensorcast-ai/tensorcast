@@ -142,6 +142,7 @@ class ExecutionDiagnostics(BaseModel):
     actual_collective_committed_bytes: int = 0
     actual_local_typed_bytes: int = 0
     actual_generic_backend_bytes: int = 0
+    collective_skip_reason: str | None = None
     hash_rounds: int = 0
     hash_location: HashLocation = HashLocation.NONE
     identity_mint_strategy: IdentityMintStrategy = IdentityMintStrategy.NOT_APPLICABLE
@@ -161,6 +162,7 @@ class ExecutionDiagnostics(BaseModel):
             ),
             actual_local_typed_bytes=int(self.actual_local_typed_bytes),
             actual_generic_backend_bytes=int(self.actual_generic_backend_bytes),
+            collective_skip_reason=str(self.collective_skip_reason or ""),
             hash_rounds=int(self.hash_rounds),
             hash_location=_HASH_LOCATION_TO_PROTO[self.hash_location],
             identity_mint_strategy=_IDENTITY_MINT_STRATEGY_TO_PROTO[
@@ -204,6 +206,10 @@ class ExecutionDiagnostics(BaseModel):
             actual_generic_backend_bytes=int(
                 getattr(proto, "actual_generic_backend_bytes", 0)
             ),
+            collective_skip_reason=str(
+                getattr(proto, "collective_skip_reason", "") or ""
+            )
+            or None,
             hash_rounds=int(proto.hash_rounds),
             hash_location=_HASH_LOCATION_FROM_PROTO.get(
                 int(proto.hash_location),
