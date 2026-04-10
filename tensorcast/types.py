@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Iterable, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -702,6 +703,32 @@ class RegisterTensorAlias(BaseModel):
     dtype: str
 
 
+class RegionMemoryKind(str, Enum):
+    VRAM = "VRAM"
+    HOST_SHARED = "HOST_SHARED"
+
+
+class HostSharedRegionClass(str, Enum):
+    SCRATCH = "SCRATCH"
+    ALLOCATOR = "ALLOCATOR"
+
+
+class LocalRegionHandle(BaseModel):
+    """Registered local region descriptor returned by the daemon."""
+
+    model_config = ConfigDict(frozen=True)
+
+    region_id: str
+    memory_kind: RegionMemoryKind
+    ttl_ms: int
+    size_bytes: int
+    device_id: int | None = None
+    attach_token: bytes = b""
+    daemon_managed: bool = False
+    host_shared_region_class: HostSharedRegionClass | None = None
+    expires_at: datetime | None = None
+
+
 class VramRegionHandle(BaseModel):
     """Registered VRAM region descriptor returned by the daemon."""
 
@@ -710,6 +737,17 @@ class VramRegionHandle(BaseModel):
     region_id: str
     ttl_ms: int
     expires_at: datetime | None = None
+
+
+class HostSharedRegionAttachment(BaseModel):
+    """Local memfd attachment returned for a daemon-managed HOST_SHARED region."""
+
+    model_config = ConfigDict(frozen=True)
+
+    region_id: str
+    size_bytes: int
+    attach_token: bytes
+    fd: int
 
 
 class DeregisterArtifactOutcome(BaseModel):
@@ -752,6 +790,10 @@ __all__ = [
     "LeaseSegment",
     "RegisterStorage",
     "RegisterTensorAlias",
+    "RegionMemoryKind",
+    "HostSharedRegionClass",
+    "HostSharedRegionAttachment",
+    "LocalRegionHandle",
     "VramRegionHandle",
     "DeregisterArtifactOutcome",
 ]

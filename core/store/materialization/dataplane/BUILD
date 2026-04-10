@@ -400,6 +400,18 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "target_layout_host_sink",
+    srcs = ["sinks/target_layout_host_sink.cc"],
+    hdrs = ["sinks/target_layout_host_sink.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sink",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
 ## Removed separate in-memory source targets in favor of local classes in source_hash.cc
 
 sc_cc_library(
@@ -807,6 +819,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@gsl",
+    ],
+)
+
+cc_test(
+    name = "target_layout_host_sink_test",
+    srcs = ["sinks/tests/target_layout_host_sink_test.cc"],
+    deps = [
+        ":target_layout_host_sink",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

@@ -357,6 +357,52 @@ absl::StatusOr<DrainedLeaseResolution> drain_lease_for_retire(
   return out;
 }
 
+IpcRegionRegistry::MemoryKind from_proto_region_memory_kind(v2::RegionMemoryKind kind) {
+  switch (kind) {
+    case v2::REGION_MEMORY_KIND_HOST_SHARED:
+      return IpcRegionRegistry::MemoryKind::kHostShared;
+    case v2::REGION_MEMORY_KIND_UNSPECIFIED:
+    case v2::REGION_MEMORY_KIND_VRAM:
+    default:
+      return IpcRegionRegistry::MemoryKind::kVram;
+  }
+}
+
+v2::RegionMemoryKind to_proto_region_memory_kind(IpcRegionRegistry::MemoryKind kind) {
+  switch (kind) {
+    case IpcRegionRegistry::MemoryKind::kHostShared:
+      return v2::REGION_MEMORY_KIND_HOST_SHARED;
+    case IpcRegionRegistry::MemoryKind::kVram:
+    default:
+      return v2::REGION_MEMORY_KIND_VRAM;
+  }
+}
+
+IpcRegionRegistry::HostRegionClass from_proto_host_region_class(v2::HostSharedRegionClass region_class) {
+  switch (region_class) {
+    case v2::HOST_SHARED_REGION_CLASS_SCRATCH:
+      return IpcRegionRegistry::HostRegionClass::kScratch;
+    case v2::HOST_SHARED_REGION_CLASS_ALLOCATOR:
+      return IpcRegionRegistry::HostRegionClass::kAllocator;
+    case v2::HOST_SHARED_REGION_CLASS_UNSPECIFIED:
+    default:
+      return IpcRegionRegistry::HostRegionClass::kNone;
+  }
+}
+
+void fill_region_ref(const IpcRegionRegistry::RegionDescriptor& desc, v2::RegionRef* out) {
+  out->set_region_id(desc.region_id);
+  out->set_memory_kind(to_proto_region_memory_kind(desc.memory_kind));
+  out->set_device_id(desc.device_id);
+  out->set_size_bytes(desc.size_bytes);
+}
+
+void fill_region_expiry(const IpcRegionRegistry::RegionDescriptor& desc, google::protobuf::Timestamp* expires_at) {
+  const int64_t micros = absl::ToUnixMicros(desc.expires_at);
+  expires_at->set_seconds(micros / 1'000'000);
+  expires_at->set_nanos(static_cast<int32_t>((micros % 1'000'000) * 1'000));
+}
+
 } // namespace
 
 StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
@@ -405,15 +451,15 @@ Status StoreDaemonServiceImpl::ClearMem(
   return {StatusCode::INTERNAL, absl::StrFormat("clear_mem() returned %d", rc)};
 }
 
-Status StoreDaemonServiceImpl::RegisterVramRegion(
+Status StoreDaemonServiceImpl::RegisterRegion(
     grpc::ServerContext* ctx,
-    const v2::RegisterVramRegionRequest* req,
-    v2::RegisterVramRegionResponse* resp) {
-  RpcContext rctx{"RegisterVramRegion", *ctx, opts_.allow_high_card_attrs};
+    const v2::RegisterRegionRequest* req,
+    v2::RegisterRegionResponse* resp) {
+  RpcContext rctx{"RegisterRegion", *ctx, opts_.allow_high_card_attrs};
   auto& span = rctx.span();
-  span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
   span->SetAttribute("tc.region.size_bytes", static_cast<int64_t>(req->size_bytes()));
   span->SetAttribute("tc.region.ttl_ms", static_cast<int64_t>(req->ttl_ms()));
+  span->SetAttribute("tc.region.memory_kind", static_cast<int64_t>(req->memory_kind()));
 
   if (shutdown_signal_->is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
@@ -424,17 +470,12 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
   if (req->owner_pid() <= 0) {
     return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
   }
-  if (req->device_id() < 0) {
-    return {StatusCode::INVALID_ARGUMENT, "device_id must be >= 0"};
-  }
   if (req->size_bytes() == 0) {
     return {StatusCode::INVALID_ARGUMENT, "size_bytes must be > 0"};
   }
-  if (req->cuda_ipc_handle().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "cuda_ipc_handle must not be empty"};
-  }
 
   IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = from_proto_region_memory_kind(req->memory_kind());
   params.device_id = req->device_id();
   params.owner_pid = req->owner_pid();
   params.size_bytes = req->size_bytes();
@@ -445,7 +486,34 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
   if (req->has_region_name()) {
     params.region_name = req->region_name();
   }
-  params.handle_bytes = std::string(req->cuda_ipc_handle());
+
+  switch (req->memory_kind()) {
+    case v2::REGION_MEMORY_KIND_VRAM:
+      span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
+      if (req->device_id() < 0) {
+        return {StatusCode::INVALID_ARGUMENT, "device_id must be >= 0"};
+      }
+      if (req->cuda_ipc_handle().empty()) {
+        return {StatusCode::INVALID_ARGUMENT, "cuda_ipc_handle must not be empty"};
+      }
+      params.attachment_bytes = std::string(req->cuda_ipc_handle());
+      break;
+    case v2::REGION_MEMORY_KIND_HOST_SHARED:
+      params.device_id = -1;
+      if (!req->has_host_shared()) {
+        return {StatusCode::INVALID_ARGUMENT, "host_shared must be set for HOST_SHARED regions"};
+      }
+      params.daemon_managed = req->host_shared().daemon_managed();
+      params.host_region_class = from_proto_host_region_class(req->host_shared().region_class());
+      if (params.daemon_managed && !req->host_shared().attach_token().empty()) {
+        return {StatusCode::INVALID_ARGUMENT, "daemon-managed HOST_SHARED regions must not provide attach_token"};
+      }
+      params.attachment_bytes = std::string(req->host_shared().attach_token());
+      break;
+    case v2::REGION_MEMORY_KIND_UNSPECIFIED:
+    default:
+      return {StatusCode::INVALID_ARGUMENT, "memory_kind is required"};
+  }
 
   auto desc_or = region_registry_->register_region(params);
   if (!desc_or.ok()) {
@@ -455,23 +523,37 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
   if (desc.ttl_ms == 0 && lifecycle_manager_ != nullptr) {
     lifecycle_manager_->watch_pid(static_cast<pid_t>(desc.owner_pid));
   }
-  resp->set_region_id(desc.region_id);
+  fill_region_ref(desc, resp->mutable_region());
   resp->set_ttl_ms(desc.ttl_ms);
   if (desc.expires_at != absl::InfiniteFuture()) {
-    const int64_t micros = absl::ToUnixMicros(desc.expires_at);
-    auto* ts = resp->mutable_expires_at();
-    ts->set_seconds(micros / 1'000'000);
-    ts->set_nanos(static_cast<int32_t>((micros % 1'000'000) * 1'000));
+    fill_region_expiry(desc, resp->mutable_expires_at());
+  }
+  if (desc.memory_kind == IpcRegionRegistry::MemoryKind::kHostShared) {
+    auto* host_shared = resp->mutable_host_shared();
+    host_shared->set_attach_token(desc.attach_token);
+    host_shared->set_daemon_managed(desc.daemon_managed);
+    switch (desc.host_region_class) {
+      case IpcRegionRegistry::HostRegionClass::kAllocator:
+        host_shared->set_region_class(v2::HOST_SHARED_REGION_CLASS_ALLOCATOR);
+        break;
+      case IpcRegionRegistry::HostRegionClass::kScratch:
+        host_shared->set_region_class(v2::HOST_SHARED_REGION_CLASS_SCRATCH);
+        break;
+      case IpcRegionRegistry::HostRegionClass::kNone:
+      default:
+        host_shared->set_region_class(v2::HOST_SHARED_REGION_CLASS_UNSPECIFIED);
+        break;
+    }
   }
   rctx.mark_success();
   return Status::OK;
 }
 
-Status StoreDaemonServiceImpl::UnregisterVramRegion(
+Status StoreDaemonServiceImpl::UnregisterRegion(
     grpc::ServerContext* ctx,
-    const v2::UnregisterVramRegionRequest* req,
-    v2::UnregisterVramRegionResponse* resp) {
-  RpcContext rctx{"UnregisterVramRegion", *ctx, opts_.allow_high_card_attrs};
+    const v2::UnregisterRegionRequest* req,
+    v2::UnregisterRegionResponse* resp) {
+  RpcContext rctx{"UnregisterRegion", *ctx, opts_.allow_high_card_attrs};
   auto& span = rctx.span();
   span->SetAttribute("tc.region.id", req->region_id());
 
@@ -495,6 +577,60 @@ Status StoreDaemonServiceImpl::UnregisterVramRegion(
     lifecycle_manager_->unwatch_pid(static_cast<pid_t>(req->owner_pid()));
   }
   rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::RegisterVramRegion(
+    grpc::ServerContext* ctx,
+    const v2::RegisterVramRegionRequest* req,
+    v2::RegisterVramRegionResponse* resp) {
+  v2::RegisterRegionRequest generic_req;
+  if (req->has_session_id()) {
+    generic_req.set_session_id(req->session_id());
+  }
+  generic_req.set_memory_kind(v2::REGION_MEMORY_KIND_VRAM);
+  generic_req.set_owner_pid(req->owner_pid());
+  generic_req.set_size_bytes(req->size_bytes());
+  generic_req.set_ttl_ms(req->ttl_ms());
+  if (req->has_region_name()) {
+    generic_req.set_region_name(req->region_name());
+  }
+  generic_req.set_device_id(req->device_id());
+  generic_req.set_cuda_ipc_handle(req->cuda_ipc_handle());
+
+  v2::RegisterRegionResponse generic_resp;
+  auto status = RegisterRegion(ctx, &generic_req, &generic_resp);
+  if (!status.ok()) {
+    return status;
+  }
+  resp->set_region_id(generic_resp.region().region_id());
+  resp->set_ttl_ms(generic_resp.ttl_ms());
+  if (generic_resp.has_expires_at()) {
+    *resp->mutable_expires_at() = generic_resp.expires_at();
+  }
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::UnregisterVramRegion(
+    grpc::ServerContext* ctx,
+    const v2::UnregisterVramRegionRequest* req,
+    v2::UnregisterVramRegionResponse* resp) {
+  v2::UnregisterRegionRequest generic_req;
+  if (req->has_session_id()) {
+    generic_req.set_session_id(req->session_id());
+  }
+  generic_req.set_region_id(req->region_id());
+  generic_req.set_owner_pid(req->owner_pid());
+  if (req->has_force()) {
+    generic_req.set_force(req->force());
+  }
+
+  v2::UnregisterRegionResponse generic_resp;
+  auto status = UnregisterRegion(ctx, &generic_req, &generic_resp);
+  if (!status.ok()) {
+    return status;
+  }
+  resp->set_released(generic_resp.released());
   return Status::OK;
 }
 

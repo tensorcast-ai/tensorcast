@@ -35,6 +35,12 @@ namespace {
 
 constexpr size_t kChunkBytes = 64;
 
+std::shared_ptr<tensorcast::common::memory::PinnedBufferPool> MakeTestPinnedBufferPool() {
+  tensorcast::common::memory::PinnedBufferPool::Options options;
+  options.register_on_create = false;
+  return std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20, std::move(options));
+}
+
 std::shared_ptr<Replica> MakeCpuReplica(
     const std::string& artifact_id,
     uint64_t size_bytes,
@@ -74,7 +80,7 @@ StableDramCachePolicy MakePolicy(StableRetentionPolicy retention, StableOverflow
 } // namespace
 
 TEST_CASE("StableDramCacheManager evicts best-effort entries on overflow", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -125,7 +131,7 @@ TEST_CASE("StableDramCacheManager evicts best-effort entries on overflow", "[sta
 }
 
 TEST_CASE("StableDramCacheManager rejects admission when overflow policy is reject", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -175,7 +181,7 @@ TEST_CASE("StableDramCacheManager rejects admission when overflow policy is reje
 }
 
 TEST_CASE("StableDramCacheManager honors TTL and pinned retention", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 4, 0);
   ReplicaRegistry registry;
@@ -230,7 +236,7 @@ TEST_CASE("StableDramCacheManager honors TTL and pinned retention", "[stable_cac
 }
 
 TEST_CASE("StableDramCacheManager upgrades retention on re-admit", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 4, 0);
   ReplicaRegistry registry;
@@ -273,7 +279,7 @@ TEST_CASE("StableDramCacheManager upgrades retention on re-admit", "[stable_cach
 }
 
 TEST_CASE("StableDramCacheManager rejects admission when required pinned entries fill budget", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -325,7 +331,7 @@ TEST_CASE("StableDramCacheManager rejects admission when required pinned entries
 }
 
 TEST_CASE("StableDramCacheManager spill fails closed when shared disk is unavailable", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -377,7 +383,7 @@ TEST_CASE("StableDramCacheManager spill fails closed when shared disk is unavail
 }
 
 TEST_CASE("StableDramCacheManager spill rejects when no durable entries exist", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -429,7 +435,7 @@ TEST_CASE("StableDramCacheManager spill rejects when no durable entries exist", 
 }
 
 TEST_CASE("StableDramCacheManager spill evicts when shared disk is available", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -483,7 +489,7 @@ TEST_CASE("StableDramCacheManager spill evicts when shared disk is available", "
 }
 
 TEST_CASE("StableDramCacheManager admits logical alias key for physical UMA replica", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
   ReplicaRegistry registry;
@@ -523,7 +529,7 @@ TEST_CASE("StableDramCacheManager admits logical alias key for physical UMA repl
 }
 
 TEST_CASE("StableDramCacheManager releases stable lease when registry entry is removed", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
   ReplicaRegistry registry;
@@ -564,7 +570,7 @@ TEST_CASE("StableDramCacheManager releases stable lease when registry entry is r
 }
 
 TEST_CASE("StableDramCacheManager defers eviction when runtime event lacks replica source", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
   ReplicaRegistry registry;
@@ -609,7 +615,7 @@ TEST_CASE("StableDramCacheManager defers eviction when runtime event lacks repli
 }
 
 TEST_CASE("StableDramCacheManager evicts alias entry when LRU key is physical", "[stable_cache]") {
-  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto pool = MakeTestPinnedBufferPool();
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
   auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
   ReplicaRegistry registry;
@@ -650,4 +656,59 @@ TEST_CASE("StableDramCacheManager evicts alias entry when LRU key is physical", 
   REQUIRE(evict_status.ok());
   REQUIRE(cache.bytes_used() == 0);
   REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
+}
+
+TEST_CASE("StableDramCacheManager releases multiple logical alias entries by physical lease key", "[stable_cache]") {
+  auto pool = MakeTestPinnedBufferPool();
+  auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
+  ReplicaRegistry registry;
+
+  StableDramCacheManager cache(
+      StableDramCacheManager::Config{
+          .registry = gsl::not_null<ReplicaRegistry*>{&registry},
+          .memory_tier_budget = budget,
+      });
+
+  auto replica = MakeCpuReplica(
+      "mem_reg:multi-alias-release",
+      kChunkBytes,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{runtime},
+      budget);
+  const ReplicaKey physical_key = replica->replica_key();
+
+  ReplicaKey logical_key_1 = physical_key;
+  logical_key_1.artifact_id = "cgid:multi-alias-1";
+  ReplicaKey logical_key_2 = physical_key;
+  logical_key_2.artifact_id = "cgid:multi-alias-2";
+
+  REQUIRE(registry.emplace(physical_key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+  REQUIRE(registry.emplace(logical_key_1, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+  REQUIRE(registry.emplace(logical_key_2, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+
+  StableDramCacheManager::AdmissionRequest request_1;
+  request_1.key = logical_key_1;
+  request_1.replica = replica;
+  request_1.size_bytes = kChunkBytes;
+  request_1.policy = MakePolicy(StableRetentionPolicy::kPinned, StableOverflowPolicy::kEvict);
+  auto admit_1 = cache.admit(request_1);
+  REQUIRE(admit_1.ok());
+  REQUIRE(admit_1->admitted);
+
+  StableDramCacheManager::AdmissionRequest request_2;
+  request_2.key = logical_key_2;
+  request_2.replica = replica;
+  request_2.size_bytes = kChunkBytes;
+  request_2.policy = MakePolicy(StableRetentionPolicy::kPinned, StableOverflowPolicy::kEvict);
+  auto admit_2 = cache.admit(request_2);
+  REQUIRE(admit_2.ok());
+  REQUIRE(admit_2->admitted);
+  REQUIRE(cache.bytes_used() == kChunkBytes * 2);
+
+  cache.on_replica_evicted(physical_key, "first_alias_release");
+  REQUIRE(cache.bytes_used() == kChunkBytes);
+
+  cache.on_replica_evicted(physical_key, "second_alias_release");
+  REQUIRE(cache.bytes_used() == 0);
 }

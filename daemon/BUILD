@@ -2280,6 +2280,27 @@ cc_test(
 )
 
 cc_test(
+    name = "local_handle_region_attach_test",
+    srcs = ["state/local_handle_region_attach_test.cc"],
+    deps = [
+        ":ipc_region_registry_lib",
+        ":local_handle_server_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "byte_artifact_region_layout_host_shared_test",
+    srcs = ["service/byte_artifact_region_layout_host_shared_test.cc"],
+    deps = [
+        ":external_target_access_service_lib",
+        ":ipc_region_registry_lib",
+        "//core/store:device_registry",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_replica_status_test",
     srcs = ["service/grpc_service_impl_replica_status_test.cc"],
     deps = [

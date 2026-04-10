@@ -50,6 +50,7 @@ class TargetStorageLease {
  private:
   struct RegionMapping {
     IpcRegionRegistry::RegionDescriptor desc;
+    void* base_ptr{nullptr};
     std::unique_ptr<cuda::IpcMapping> mapping;
   };
 

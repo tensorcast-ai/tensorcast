@@ -274,6 +274,21 @@ sc_cc_library(
 )
 
 cc_test(
+    name = "replica_registry_test",
+    srcs = ["components/replica_registry_test.cc"],
+    deps = [
+        ":replica_registry",
+        "//core/common:async_runtime_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store/replica",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "eviction_service_test",
     srcs = ["components/eviction_service_test.cc"],
     deps = [

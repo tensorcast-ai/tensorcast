@@ -5,6 +5,7 @@
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
+#include "absl/status/status.h"
 #include "absl/time/clock.h"
 
 using tensorcast::daemon::IpcRegionRegistry;
@@ -63,6 +64,40 @@ TEST_CASE("IpcRegionRegistry basic register/describe/unregister", "[daemon][regi
   auto unreg2_or = reg.unregister_region(desc.region_id, params.owner_pid, /*force=*/false);
   REQUIRE(unreg2_or.ok());
   REQUIRE(*unreg2_or);
+}
+
+TEST_CASE("IpcRegionRegistry host shared register/describe/unregister", "[daemon][region]") {
+  IpcRegionRegistry reg(
+      IpcRegionRegistry::Options{
+          .capacity = 16,
+          .max_ttl = absl::Milliseconds(5000),
+      });
+
+  IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = 5150;
+  params.size_bytes = 2 << 20;
+  params.ttl_ms = 1000;
+  params.session_id = "host-session";
+  params.region_name = "host-slab";
+  params.daemon_managed = true;
+  params.host_region_class = IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+  REQUIRE(desc_or->memory_kind == IpcRegionRegistry::MemoryKind::kHostShared);
+  REQUIRE(desc_or->device_id == -1);
+  REQUIRE(desc_or->daemon_managed);
+  REQUIRE(desc_or->host_region_class == IpcRegionRegistry::HostRegionClass::kScratch);
+
+  auto desc2_or = reg.describe(desc_or->region_id);
+  REQUIRE(desc2_or.ok());
+  REQUIRE(desc2_or->memory_kind == IpcRegionRegistry::MemoryKind::kHostShared);
+
+  auto unreg_or = reg.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE(unreg_or.ok());
+  REQUIRE(*unreg_or);
 }
 
 TEST_CASE("IpcRegionRegistry TTL refresh and sweep", "[daemon][region]") {
@@ -153,4 +188,103 @@ TEST_CASE("IpcRegionRegistry poison blocks acquire", "[daemon][region]") {
   REQUIRE(reg.is_poisoned(region_id));
   auto acq_or = reg.acquire(region_id, params.owner_pid);
   REQUIRE_FALSE(acq_or.ok());
+}
+
+TEST_CASE(
+    "IpcRegionRegistry daemon-managed HOST_SHARED attachment keeps lease alive until release",
+    "[daemon][region]") {
+  IpcRegionRegistry reg(
+      IpcRegionRegistry::Options{
+          .capacity = 16,
+          .max_ttl = absl::Milliseconds(500),
+      });
+
+  IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = 31337;
+  params.size_bytes = 1 << 20;
+  params.ttl_ms = 100;
+  params.daemon_managed = true;
+  params.host_region_class = IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+  REQUIRE_FALSE(desc_or->attach_token.empty());
+
+  auto attachment_or = reg.acquire_host_shared_attachment(desc_or->attach_token, params.owner_pid);
+  REQUIRE(attachment_or.ok());
+  REQUIRE(attachment_or->fd >= 0);
+  REQUIRE(attachment_or->size_bytes == params.size_bytes);
+
+  absl::SleepFor(absl::Milliseconds(150));
+  auto expired = reg.sweep_expired(absl::Now());
+  REQUIRE(expired.empty());
+
+  REQUIRE(reg.release_host_shared_attachment(desc_or->attach_token, params.owner_pid).ok());
+
+  absl::SleepFor(absl::Milliseconds(150));
+  expired = reg.sweep_expired(absl::Now());
+  REQUIRE(expired.size() == 1);
+  REQUIRE(expired[0].region_id == desc_or->region_id);
+}
+
+TEST_CASE("IpcRegionRegistry HOST_SHARED attachment release does not consume local mapping holds", "[daemon][region]") {
+  IpcRegionRegistry reg(IpcRegionRegistry::Options{});
+
+  IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = 31337;
+  params.size_bytes = 1 << 20;
+  params.ttl_ms = 1000;
+  params.daemon_managed = true;
+  params.host_region_class = IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+  REQUIRE_FALSE(desc_or->attach_token.empty());
+
+  auto attachment_or = reg.acquire_host_shared_attachment(desc_or->attach_token, params.owner_pid);
+  REQUIRE(attachment_or.ok());
+  auto mapping_or = reg.acquire_host_shared_local_mapping(desc_or->region_id, params.owner_pid);
+  REQUIRE(mapping_or.ok());
+
+  REQUIRE(reg.release_host_shared_attachment(desc_or->attach_token, params.owner_pid).ok());
+
+  auto duplicate_release = reg.release_host_shared_attachment(desc_or->attach_token, params.owner_pid);
+  REQUIRE_FALSE(duplicate_release.ok());
+  REQUIRE(absl::IsFailedPrecondition(duplicate_release));
+
+  auto unregister_busy_or = reg.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE_FALSE(unregister_busy_or.ok());
+
+  REQUIRE(reg.release(desc_or->region_id).ok());
+
+  auto unregister_or = reg.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/false);
+  REQUIRE(unregister_or.ok());
+  REQUIRE(*unregister_or);
+}
+
+TEST_CASE("IpcRegionRegistry daemon-managed HOST_SHARED cleanup on pid exit", "[daemon][region]") {
+  IpcRegionRegistry reg(IpcRegionRegistry::Options{});
+
+  IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = 42424;
+  params.size_bytes = 1 << 20;
+  params.ttl_ms = 0;
+  params.daemon_managed = true;
+  params.host_region_class = IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+
+  auto removed = reg.handle_pid_exit(params.owner_pid);
+  REQUIRE(removed.size() == 1);
+  REQUIRE(removed[0].region_id == desc_or->region_id);
+
+  auto attachment_or = reg.acquire_host_shared_attachment(desc_or->attach_token, params.owner_pid);
+  REQUIRE_FALSE(attachment_or.ok());
 }
