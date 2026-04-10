@@ -1,10 +1,10 @@
 ---
 slug: collective-first-binding-realization-for-tp-serving-startup
 title: Collective-First Binding Realization for TP Serving Startup
-status: accepted
+status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
-last_updated: 2026-04-02
+last_updated: 2026-04-10
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0107-retrieval-policy-plane-cleanup.md
@@ -25,7 +25,6 @@ related_code:
   - core/store/replica/collective_disk_loader.cc
   - /data/workspace/internal-vllm/docs/design/tensorcast_collective_first_binding_realization_plan.md
 links:
-  plan: ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -40,7 +39,7 @@ links:
     - ./0112-binding-native-serving-realization-and-publication.md
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0112-binding-native-serving-realization-and-publication.md
 ---
 
 # Summary
@@ -77,14 +76,19 @@ The new policy is:
 
 # Implementation Status Note
 
-As of 2026-04-02, this design is accepted and its core behavior closures are
-landed in the repository, but rollout closure is still incomplete.
+As of 2026-04-10, this design is implemented for its intended audited scope:
+the real Step3p5 same-binding TP-serving startup path now runs on the shared
+collective-first trunk, reaches serving readiness, and closes the one-hash
+post-finalize GPU-hash path for the surviving same-binding seal identity.
 
 The repository now contains the intended implementation for:
 
 - explicit local typed `pad fill`,
 - split source-bound planner and execution diagnostics,
-- `source_bound_contract_version = 3`,
+- `source_bound_contract_version = 4`, which preserves the additive `v3`
+  planner/execution split semantics and additionally hard-cuts same-binding
+  `realize_from(...)` to execution-only `BindingUpdateEpoch` behavior with
+  typed hash diagnostics,
 - strict preflight that preserves existing binding state and fails before
   generic fallback for strict pure-collective requests,
 - runtime finalization of mapped collective lane maps against the selected
@@ -92,52 +96,62 @@ The repository now contains the intended implementation for:
 - and collective-first mixed execution that continues from collective work into
   generic residual bytes and then local typed overlay.
 
-The remaining gaps are not only rollout and evidence gates. One important
-source-bound behavior mismatch is still open on the audited same-binding
-startup path:
+The 2026-04-09 repo closures also landed the previously open same-binding
+builder and hash steps on the audited path:
 
-- the current builder path still pays pre-finalize and post-finalize seal work
-  instead of converging to one post-finalize seal over the final serving byte
-  image;
-- and the surviving identity-forming hash on that audited path still does not
-  yet have a mandatory GPU-hash closure.
+- `Binding.realize_from(...)` no longer performs an implicit pre-finalize seal;
+- binding-subject closeout now reuses the sealed binding identity before the
+  seal worker would mint a second full-data hash;
+- and the surviving identity-forming seal hash on the audited same-binding
+  `canonical_full` path is now GPU-backed and fail-closed in real CUDA mode.
 
-So the remaining gaps are:
+The final audited Step3p5 closure evidence on the real operator path is:
 
-- mounted TP-startup evidence still needs to show collective-lane-dominant
-  execution rather than generic-dominant execution;
-- a second representative `BINDING_FINALIZE` family such as Mixtral has not
-  yet been captured through a documented local mounted runbook in this
-  environment;
-- same-binding identity/hash convergence still needs to reach the `0112` /
-  `0113` target:
-  - the builder path must stop forcing a pre-finalize seal on the audited
-    same-binding `BINDING_FINALIZE` flow,
-  - binding-subject closeout must reuse that post-finalize seal instead of
-    paying a second full-data hash,
-  - and the surviving identity-forming hash on the audited
-    `canonical_full` startup path must be GPU-backed and fail closed if the GPU
-    hash cannot be proven;
-- mounted validation still needs executor evidence beyond current unit-test
-  coverage, including actual collective bytes, unique source bytes,
-  peer-transfer bytes, peak temporary bytes, batch count, and hash-backend
-  evidence;
-- and transitional delete gates remain blocked until those mounted-evidence
-  requirements pass.
+- CLI-started daemon from `internal-vllm` packaged config plus
+  `vllm serve ... tensorcast_init_mode=connect`,
+- daemon `materialize_mapped_into_target execution_commit ...` showing
+  `collective_handled=1`,
+  `actual_collective_committed_bytes=25550556928`,
+  and `dominant_executor=OwnerFileCollectiveExecutor`,
+- the 2026-04-10 mounted rerun now surfaces the executor-side evidence as
+  explicit worker success lines rather than a single mixed summary:
+  `realize_execution` reports
+  `actual_collective_committed_bytes=25550556928`,
+  `actual_local_typed_bytes=920`,
+  `actual_generic_backend_bytes=0`,
+  `planned_collective_admitted_bytes=8029077248`,
+  `estimated_collective_peak_temporary_bytes=8029077248`,
+  `estimated_collective_batch_bytes=536870912`,
+  and `estimated_collective_dedup_saving_bytes=56203540736`,
+- mounted same-binding startup success with eight workers logging
+  `Tensorcast bootstrap realized SAME_BINDING_FAST_PATH`,
+- operator-visible success logs surfacing
+  `publish_hash_rounds=0`,
+  `publish_hash_location=seal`,
+  `publish_hash_backend=gpu`,
+  `publish_hash_bytes=25550557848`,
+  `publish_hash_wall_time_ms` in the `1294..3852` range across workers,
+  and `publish_hash_identity_forming=True`,
+- `/health` returning `200`,
+- and `/v1/models` exposing
+  `/mnt/step3-alignment/checkpoints/step3p5_flash_release_hf_mtp3_fp8`.
 
-The 2026-04-02 Step3p5 mounted rerun confirms the current boundary precisely:
+This design is therefore complete as an architecture correction for the
+audited Step3p5 path. The remaining work is intentionally no longer owned
+here:
 
-- same-binding startup and serving readiness succeed on 8xH800,
-- the packaged operator config issue (`enable_owner_file_collective=false`) is
-  corrected,
-- but the rebuilt-daemon mounted sample still reports
-  `collective_handled=0`,
-  `collective_skip_reason=planner_typed_work_not_collective_admitted`,
-  and `dominant_executor=SourceOrderedMappedTargetExecutor`,
-- and the audited path still does not yet satisfy the intended one-hash
-  post-finalize GPU-hash end state,
-- so this design should still be treated as the active target model rather than
-  as a historical completed design.
+- the 2026-04-10 local closeout also removed the stale pre-v4
+  source-bound path label from `internal-vllm`,
+  hard-cut bridge-named publication helpers to canonical `*_publication`
+  names, and demoted `0113` to historical-only documentation navigation;
+- `0115` is now implemented as the explicit source-bound execution-plan and
+  fail-fast lane-selection closure that removed the remaining runtime implicit
+  fallback and contract drift from the source-bound path,
+- the same-binding seal-identity/metadata convergence closure is now folded
+  back into `0112` as part of the binding-native same-binding closeout
+  contract,
+- and `0117` owns post-0114 multi-family mounted rollout, richer mounted
+  evidence, and delete-gate cleanup.
 
 The intended steady state is:
 
@@ -160,11 +174,10 @@ shared abstractions it touches:
 - `0110` remains the owner of the shared semantic core and typed work inventory,
 - `0108` remains the owner of lane planning and mixed-execution strategy,
 - `0109` remains the owner of the owner-file collective executor,
-- `0113` remains the owner of the cross-design closure constraints, capability
-  and version handoff, and delete-gate invariants for the residual Step3p5
-  work,
-- and the paired `0114` plan is the single active total execution plan for this
-  work family.
+- `0113` now remains historical closure context for the original capability
+  handoff and delete-gate framing rather than an active rollout owner,
+- and the former `0114` companion plan has now been folded back into this
+  design and deleted rather than kept as a second long-lived execution record.
 
 ## Current vs Target Flow
 
@@ -735,7 +748,7 @@ Normative rule:
 On the current public wire, the collective policy model should converge to
 three stable meanings:
 
-- existing `ALLOW_NOT_ELIGIBLE_FALLBACK`
+- existing `COLLECTIVE_FIRST`
   - means collective-first mixed execution
   - collective is the preferred main lane, but local typed and true residual
     execution remain admitted when required
@@ -1041,7 +1054,7 @@ style rules.
 
 | Proposed symbol | Kind | Required style | Result |
 | --- | --- | --- | --- |
-| `COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK` | proto enum value | `ALL_CAPS` | pass |
+| `COLLECTIVE_POLICY_COLLECTIVE_FIRST` | proto enum value | `ALL_CAPS` | pass |
 | `COLLECTIVE_POLICY_REQUIRE_COLLECTIVE` | proto enum value | `ALL_CAPS` | pass |
 | `SourceBoundPlanDiagnostics` | proto/message name | `PascalCase` | pass |
 | `execution_plan_kind` | field | `snake_case` | pass |
@@ -1095,5 +1108,9 @@ This design is complete only when all of the following are true.
 7. `source_bound_contract_version = 3` marks the additive contract landing for
    true residual semantics, strict preflight, and split planner/execution
    diagnostics on this path.
-8. downstream `internal-vllm` integration remains on the shared TensorCast
+8. `source_bound_contract_version = 4` marks the hard cut to execution-only
+   binding realization plus typed hash diagnostics, and downstream
+   same-binding builder integrations gate on that stable surface rather than
+   inferring readiness from SDK response shapes.
+9. downstream `internal-vllm` integration remains on the shared TensorCast
    runtime trunk and does not introduce a private execution fork.

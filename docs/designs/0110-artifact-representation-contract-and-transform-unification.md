@@ -32,7 +32,6 @@ links:
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0055-programmable-framework.md
     - ./0078-selection-first-artifact-retrieval.md

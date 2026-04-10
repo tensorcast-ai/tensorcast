@@ -22,6 +22,9 @@
 namespace {
 
 namespace v2 = tensorcast::daemon::v2;
+using ByteRangeMap = tensorcast::store::loader::ByteRangeMap;
+using ByteRangeSegment = tensorcast::store::loader::ByteRangeSegment;
+using SourceBoundLoweringArtifacts = tensorcast::store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts;
 
 std::filesystem::path test_tmpdir() {
   const char* env = std::getenv("TEST_TMPDIR");
@@ -73,6 +76,23 @@ v2::TargetLayout make_target_layout() {
   offset->set_storage_offset(0);
   offset->set_logical_length(4);
   return layout;
+}
+
+ByteRangeMap make_data_map(uint64_t total_bytes) {
+  ByteRangeMap map;
+  map.total_bytes = total_bytes;
+  map.num_sources = total_bytes > 0 ? 1 : 0;
+  if (total_bytes > 0) {
+    map.segments.push_back(
+        ByteRangeSegment{
+            .kind = ByteRangeSegment::Kind::kData,
+            .dst_offset = 0,
+            .length = total_bytes,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return map;
 }
 
 class BindingContributionGuardClient final : public tensorcast::store::testing::GlobalStoreClientStub {
@@ -367,21 +387,19 @@ TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifac
   Fixture fix;
   const auto record = fix.insert_ready_artifact_record();
 
-  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
-  resolved_plan.source_bound_plan_summary =
-      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
-          .planned_collective_candidate_bytes = 4,
-          .planned_collective_admitted_bytes = 4,
-          .planned_local_typed_bytes = 0,
-          .planned_non_admitted_typed_bytes = 0,
-          .planned_generic_residual_bytes = 0,
-          .planner_reject_reason_buckets = {{"source_locality_host_local", 4}},
-          .collective_lane_eligible = false,
-          .strict_pure_collective_eligible = false,
-      };
+  const auto plan_summary = tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+      .planned_collective_candidate_bytes = 4,
+      .planned_collective_admitted_bytes = 4,
+      .planned_local_typed_bytes = 0,
+      .planned_non_admitted_typed_bytes = 0,
+      .planned_generic_residual_bytes = 0,
+      .planner_reject_reason_buckets = {{"source_locality_host_local", 4}},
+      .collective_lane_eligible = false,
+      .strict_pure_collective_eligible = false,
+  };
 
   const auto status = tensorcast::daemon::evaluate_strict_collective_preflight_for_testing(
-      &resolved_plan, v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
+      &plan_summary, v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
 
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
@@ -430,11 +448,16 @@ TEST_CASE("SourceBoundPlanSummary keeps collective lane eligibility separate fro
       tensorcast::store::loading::CollectiveLoadGroupHint{.group_id = "group-a", .world_size = 4, .rank = 1};
   execution_topology.source_locality = tensorcast::store::loading::SourceLocalityHint::kSharedSource;
 
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(12);
+
   const auto summary = tensorcast::daemon::summarize_source_bound_plan_for_testing(
       resolved_plan,
+      lowering_artifacts,
       strategy_config,
       execution_topology,
-      v2::CollectivePolicy::COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
       /*disk_source_available=*/true);
 
   CHECK(summary.collective_lane_eligible);
@@ -479,11 +502,16 @@ TEST_CASE(
       tensorcast::store::loading::CollectiveLoadGroupHint{.group_id = "group-a", .world_size = 4, .rank = 1};
   execution_topology.source_locality = tensorcast::store::loading::SourceLocalityHint::kSharedSource;
 
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(12);
+
   const auto summary = tensorcast::daemon::summarize_source_bound_plan_for_testing(
       resolved_plan,
+      lowering_artifacts,
       strategy_config,
       execution_topology,
-      v2::CollectivePolicy::COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
       /*disk_source_available=*/true);
 
   CHECK(summary.collective_lane_eligible);

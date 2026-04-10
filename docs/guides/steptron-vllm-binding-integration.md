@@ -76,17 +76,18 @@ to make training publish the right versions in the right representation.
 ## TensorCast-Side Readiness And Diagnostics Contract
 
 The current TensorCast-side source-bound readiness surface for this integration
-is `source_bound_contract_version >= 3`.
+has one active cut point:
 
-For downstream consumers, that version now means:
+- `source_bound_contract_version >= 4`
+  - same-binding `Binding.realize_from(...)` /
+    `Store.realize_into_binding(...)` are execution-only ingress points that
+    return `BindingUpdateEpoch` rather than a sealed current value;
+  - typed hash diagnostics on the surviving seal path are part of the stable
+    downstream contract;
+  - downstream builder code must gate on this version before depending on the
+    `update_epoch` response shape.
 
-- strict `require_collective` requests fail before generic fallback begins;
-- default collective-first requests may execute through three ordered lanes:
-  collective, generic residual, and local typed overlay;
-- planner intent and actual execution are no longer conflated into one coarse
-  status blob.
-
-The public SDK surfaces to consume are:
+The public SDK surfaces to consume for those cut points are:
 
 - `binding.last_execution_diagnostics`
   - actual execution facts such as `actual_collective_committed_bytes`,

@@ -119,21 +119,22 @@ TEST_CASE(
       std::nullopt,
       std::optional<std::string_view>(physical_source_index_json));
   REQUIRE(resolved_plan_or.ok());
-  REQUIRE(resolved_plan_or->representation_transform_contract.has_value());
-  REQUIRE(resolved_plan_or->representation_work_plan.has_value());
+  REQUIRE(resolved_plan_or->resolved_plan.representation_transform_contract.has_value());
+  REQUIRE(resolved_plan_or->resolved_plan.representation_work_plan.has_value());
 
   CHECK(
-      resolved_plan_or->representation_transform_contract->target_representation.representation_contract_hash ==
-      original_hash);
+      resolved_plan_or->resolved_plan.representation_transform_contract->target_representation
+          .representation_contract_hash == original_hash);
   CHECK(
-      resolved_plan_or->representation_transform_contract->tensor_bindings.front()
+      resolved_plan_or->resolved_plan.representation_transform_contract->tensor_bindings.front()
           .sources.front()
           .source_spec.logical_offset == 0);
-  REQUIRE(resolved_plan_or->representation_work_plan->items.size() == 1);
-  REQUIRE(resolved_plan_or->representation_work_plan->items.front().sources.size() == 1);
+  REQUIRE(resolved_plan_or->resolved_plan.representation_work_plan->items.size() == 1);
+  REQUIRE(resolved_plan_or->resolved_plan.representation_work_plan->items.front().sources.size() == 1);
   CHECK(
-      resolved_plan_or->representation_work_plan->items.front().sources.front().fragment.source_spec.logical_offset ==
-      32);
+      resolved_plan_or->resolved_plan.representation_work_plan->items.front()
+          .sources.front()
+          .fragment.source_spec.logical_offset == 32);
 }
 
 TEST_CASE("binding realization copy ranges convert without descriptor mismatch", "[materialization_target_plan]") {
@@ -329,11 +330,11 @@ TEST_CASE(
       std::nullopt,
       std::optional<std::string_view>(source_index_json));
   REQUIRE(resolved_plan_or.ok());
-  REQUIRE(resolved_plan_or->representation_work_plan.has_value());
-  CHECK(resolved_plan_or->representation_work_plan->residual_fallback_map.segments.empty());
-  REQUIRE(resolved_plan_or->representation_work_plan->items.size() == 2);
+  REQUIRE(resolved_plan_or->resolved_plan.representation_work_plan.has_value());
+  CHECK(resolved_plan_or->resolved_plan.representation_work_plan->residual_fallback_map.segments.empty());
+  REQUIRE(resolved_plan_or->resolved_plan.representation_work_plan->items.size() == 2);
   CHECK(
-      resolved_plan_or->representation_work_plan->items[0].kind ==
+      resolved_plan_or->resolved_plan.representation_work_plan->items[0].kind ==
       tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill);
 }
 

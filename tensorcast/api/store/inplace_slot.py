@@ -102,6 +102,20 @@ def _selection_publishable(
     return bool(view_id)
 
 
+def _raise_if_published_for_mutation(
+    *,
+    op_name: str,
+    published_lease_id: str | None,
+) -> None:
+    if published_lease_id is None:
+        return
+    raise ArtifactError(
+        f"{op_name}() requires an unpublished binding; call retire() first",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
+
+
 def _is_region_error(error: ArtifactError) -> bool:
     return error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION", "NOT_FOUND"}
 
@@ -496,14 +510,10 @@ class InplaceSlot:
         from tensorcast.api.store.binding import BindingUpdateEpoch
 
         self._ensure_open()
-        operation_id = uuid.uuid4().hex
-        if self._published_lease_id is not None:
-            self._retire_published(
-                operation_id=operation_id,
-                wait=True,
-                drain_timeout_s=drain_timeout_s,
-                ctx=ctx,
-            )
+        _raise_if_published_for_mutation(
+            op_name="begin_update",
+            published_lease_id=self._published_lease_id,
+        )
         timeout_s = _ctx_timeout_s(ctx)
         response = self._runtime.ensure_client().begin_binding_update(
             binding_id=self._binding_id,

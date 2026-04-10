@@ -30,8 +30,10 @@ plan arrangement.
 
 Historical note:
 
-- active total execution tracking has moved to
-  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
+- the completed `0114` and `0115` execution records have now been folded back
+  into their implemented designs and their companion plans have been deleted;
+- active rollout and cleanup tracking for the remaining work now lives in
+  `docs/plans/0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md`;
 - this file remains as a closure-handoff record for already-landed work and for
   the rationale behind the still-active `0113` closure design constraints.
 
@@ -350,8 +352,9 @@ Current SOT rule for this work:
     TensorCast side; the remaining `operation_id` transport metadata surface is
     scoped to non-source-bound transport/tracing paths outside `0113`;
   - the active downstream runtime surface has advanced under `0114` to
-    `source_bound_contract_version >= 3` with
-    `source_bound_contract_path=collective_first_v3`;
+    `source_bound_contract_version >= 4`, preserving the historical additive
+    collective-first planner/execution split semantics while hard-cutting same-binding
+    `realize_from(...)` to execution-only `BindingUpdateEpoch` behavior;
   - source-bound daemon tests now verify that `operation_id` collective
     metadata is ignored rather than treated as a compatibility collective
     ingress;

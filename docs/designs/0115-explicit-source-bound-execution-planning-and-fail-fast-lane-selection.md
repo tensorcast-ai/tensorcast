@@ -1,10 +1,10 @@
 ---
 slug: explicit-source-bound-execution-planning-and-fail-fast-lane-selection
 title: Explicit Source-Bound Execution Planning and Fail-Fast Lane Selection
-status: proposed
+status: implemented
 areas: ["core", "daemon", "docs", "tests", "sdk"]
 created: 2026-04-02
-last_updated: 2026-04-02
+last_updated: 2026-04-10
 related_code:
   - docs/designs/0108-tensor-aware-materialization-strategy-plane.md
   - docs/designs/0109-batched-owner-file-collective-executor.md
@@ -16,6 +16,8 @@ related_code:
   - daemon/service/controllers/materialization_target_plan_utils.cc
   - daemon/service/controllers/owned_binding_service.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
+  - core/store/runtime/ingestion/source_bound_strategy_planner.h
+  - core/store/runtime/ingestion/source_bound_strategy_planner.cc
   - core/store/runtime/ingestion/materialization_facade.h
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/store_engine.h
@@ -23,7 +25,6 @@ related_code:
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - tensorcast/types.py
 links:
-  plan: ../plans/0115-explicit-source-bound-execution-planning-and-fail-fast-lane-selection.md
   dependencies:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0109-batched-owner-file-collective-executor.md
@@ -32,8 +33,7 @@ links:
   predecessors:
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
   related:
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0115-explicit-source-bound-execution-planning-and-fail-fast-lane-selection.md
+    - ./0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md
 ---
 
 # Summary
@@ -59,6 +59,32 @@ This preserves the accepted `0108` and `0114` architecture while removing the
 remaining ambiguity from the current source-bound implementation, where
 optional maps and `value_or(...)` decisions still let runtime behavior drift
 away from planner intent.
+
+As of 2026-04-10, the Phase 3 cutover is implemented in the runtime:
+
+- `materialize_mapped_into_target(...)` now requires an explicit
+  `PreparedSourceBoundExecutionPlan.strategy_plan` for every source-bound
+  mapped request;
+- the shared planner now emits explicit `reject` outcomes when coverage is not
+  proven or strict pure-collective policy cannot be satisfied, and runtime
+  fails those plans before source setup;
+- runtime lane ownership now comes from `strategy_plan.lane_plan` only, not
+  from missing lowering artifacts or summary-only fallback;
+- owned-binding and target-materialization product paths now consume
+  controller lowering artifacts only during planning; after `strategy_plan`
+  is built, runtime handoff, preflight, and diagnostics all use
+  `strategy_plan.summary` / `strategy_plan.lane_plan` as the single product
+  truth;
+- explicit collective lane plans no longer allow local-canonical or P2P source
+  selection to steal the request into a generic path; they stay disk-owned and
+  fail fast if collective execution cannot be honored;
+- and explicit generic plans still preserve the source-ordered disk fast path.
+
+This design is therefore implemented for the intended source-bound mapped and
+binding execution closure. Remaining work after this point is no longer about
+lane-selection truth or implicit fallback removal; it belongs to adjacent
+follow-up cleanup or rollout owners. The completed companion `0115` plan has
+been folded back into this design and deleted.
 
 # Goals / Non-Goals
 
@@ -214,7 +240,7 @@ The module split after this design is:
 The daemon proto keeps the current public wire enum:
 
 - `REQUIRE_COLLECTIVE`
-- `ALLOW_NOT_ELIGIBLE_FALLBACK`
+- `COLLECTIVE_FIRST`
 - `DISABLE_COLLECTIVE`
 
 The source-bound runtime must not depend on daemon proto enums directly.
@@ -232,7 +258,7 @@ enum class SourceBoundPolicy : std::uint8_t {
 Controller mapping:
 
 - `REQUIRE_COLLECTIVE` -> `kRequirePureCollective`
-- `ALLOW_NOT_ELIGIBLE_FALLBACK` -> `kCollectiveFirst`
+- `COLLECTIVE_FIRST` -> `kCollectiveFirst`
 - `DISABLE_COLLECTIVE` -> `kDisableCollective`
 
 This keeps public API compatibility while making runtime policy independent

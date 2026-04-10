@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-03-31
+last_updated: 2026-04-10
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -24,12 +24,17 @@ related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - daemon/service/controllers/owned_binding_service.cc
   - daemon/service/controllers/assembly_operation_service.cc
+  - daemon/service/controllers/assembly_closeout_identity_utils.cc
+  - daemon/service/controllers/assembly_closeout_identity_utils.h
+  - daemon/service/assembly_closeout_identity_utils_test.cc
+  - daemon/service/grpc_service_impl_start_seal_assembly_test.cc
   - daemon/service/controllers/target_materialization_service.cc
+  - tests/python/test_assembly_attempt.py
 links:
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -74,8 +79,9 @@ The main correction is:
 Execution-policy note:
 
 - `0112` owns shipped public ingress and same-binding correctness,
-- while active execution-policy rollout and TP startup convergence now track
-  through `0114` plan.
+- while `0114` and `0115` now carry the implemented audited startup and
+  explicit-planning closure, the remaining active rollout and delete-gate
+  follow-up now tracks through `0117` plan.
 
 # Implementation Status
 
@@ -277,8 +283,8 @@ However, the current implementation still combines that intended shape with an
 older scratch-style publication flow:
 
 - vLLM and the SDK can still build finalized serving tensors in memory and call
-  `Store.register_binding_finalize_publication_bridge(...)` or
-  `Store.complete_binding_finalize_publication_bridge(...)`, which first registers a
+  `Store.register_binding_finalize_publication(...)` or
+  `Store.complete_binding_finalize_publication(...)`, which first registers a
   new serving artifact from those tensors and only then performs
   `representation_publish`.
 - canonical-full contribution still re-materializes publication tensors into a
@@ -536,7 +542,7 @@ This operation:
 7. returns a durable `RegisteredArtifact` or equivalent descriptor.
 
 This is the key architectural replacement for the current
-`register_binding_finalize_publication_bridge(tensors=...)` path.
+`register_binding_finalize_publication(tensors=...)` path.
 
 Normative rules:
 
@@ -838,6 +844,37 @@ mandatory rather than opportunistic:
 - if TensorCast cannot prove the GPU-hash preconditions for that path, the
   operation must fail closed rather than silently downgrading.
 
+## Same-Binding Seal-Reuse Metadata Convergence
+
+The same-binding seal-reuse closeout contract also requires one canonical-index
+byte truth after the surviving seal identity already exists.
+
+Normative rules:
+
+- when same-binding `canonical_full` closeout reuses a sealed binding identity,
+  the canonical-index bytes carried by that reused identity are the single
+  canonical-index truth for closeout metadata;
+- artifact descriptor materialization and GS memory-replica registration must
+  agree with the reused `artifact_id` / `index_multihash`;
+- and if TensorCast cannot prove that agreement, closeout must fail closed
+  rather than publishing mixed metadata.
+
+Implemented on `2026-04-10`:
+
+- same-binding closeout now resolves one registration canonical-index payload
+  from the reused sealed identity when present, rather than falling back to
+  `snapshot.target_index_json`;
+- closeout now rejects:
+  - reused seal identities missing `canonical_index_json`,
+  - canonical-index bytes whose recomputed `index_multihash` would diverge
+    from the published artifact identity,
+  - and any closeout result that mutates the reused
+    `artifact_id` / `index_multihash` / `data_multihash`;
+- repo coverage for this invariant now lives in:
+  - [assembly_closeout_identity_utils_test.cc](/data/workspace/tensorcast-280/daemon/service/assembly_closeout_identity_utils_test.cc)
+  - [grpc_service_impl_start_seal_assembly_test.cc](/data/workspace/tensorcast-280/daemon/service/grpc_service_impl_start_seal_assembly_test.cc)
+  - [test_assembly_attempt.py](/data/workspace/tensorcast-280/tests/python/test_assembly_attempt.py)
+
 # Compatibility and Migration
 
 ## Keep existing offline publication path
@@ -860,10 +897,10 @@ The current helpers should be classified as follows:
 - `Store.complete_binding_finalize_publication_from_binding(...)`
   - preferred same-binding closeout entry for `BINDING_FINALIZE`
   - subject-first closeout on the sealed binding current value
-- `Store.register_binding_finalize_publication_bridge(tensors=...)`
+- `Store.register_binding_finalize_publication(tensors=...)`
   - explicit bridge path
   - not the long-term same-binding publication architecture
-- `Store.complete_binding_finalize_publication_bridge(tensors=...)`
+- `Store.complete_binding_finalize_publication(tensors=...)`
   - same explicit bridge status
 - `Store.from_disk(...)`
   - remains an import-oriented API

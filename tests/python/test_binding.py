@@ -26,6 +26,7 @@ from tensorcast.api.store.owned_binding_layout import (
     build_mapped_tensor_spec,
     build_owned_layout,
 )
+from tensorcast.api.store.types import StoreCapabilities
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
@@ -33,10 +34,13 @@ from tensorcast.types import (
     ArtifactDescriptor,
     CollectiveFailureClass,
     CollectivePolicy,
+    HashBackend,
     HashLocation,
     IdentityMintStrategy,
     PublishedModelVersion,
+    ServerConfig,
     ServingRuntimePolicy,
+    SourceBoundCapability,
     SourceBoundPlanDiagnostics,
     VramRegionHandle,
     build_serving_manifest_ref,
@@ -370,10 +374,7 @@ class FakeBindingClient:
         if kwargs.get("realization_plan") is not None:
             response = types.SimpleNamespace(
                 artifact_id=str(kwargs["artifact_id"]),
-                current_value=self._make_binding_value(
-                    binding_id=binding_id,
-                    selection=None,
-                ),
+                update_epoch=f"bue:{binding_id}:realize",
             )
             if self.refill_execution_diagnostics is not None:
                 response.execution_diagnostics = self.refill_execution_diagnostics
@@ -482,6 +483,24 @@ class FakeRuntime:
         self.closed = False
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self._cache: dict[str, ArtifactCacheEntry] = {}
+        self.capabilities = StoreCapabilities(
+            mem_pool_bytes=0,
+            tx_slice_bytes=0,
+            artifact_chunk_bytes=0,
+            server_config=ServerConfig(
+                tx_slice_bytes=0,
+                mem_pool_size=0,
+                artifact_chunk_bytes=0,
+                local_handle_socket_path="",
+                cpu_shared_memory_enabled=True,
+                source_bound_capability_flags=(
+                    int(SourceBoundCapability.FIRST_CLASS_COLLECTIVE_INGRESS)
+                    | int(SourceBoundCapability.TYPED_EXECUTION_DIAGNOSTICS)
+                    | int(SourceBoundCapability.SINGLE_MINT_BINDING_CLOSEOUT)
+                ),
+                source_bound_contract_version=4,
+            ),
+        )
 
     def ensure_client(self) -> FakeBindingClient:
         return self._client
@@ -753,13 +772,17 @@ def test_binding_swap_tracks_last_execution_diagnostics(
         collective_requested=True,
         collective_acknowledged=True,
         collective_used=False,
-        collective_policy=store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+        collective_policy=store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST,
         collective_failure_class=store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE,
         dominant_executor="SourceOrderedMappedTargetExecutor",
         direct_write_supported=False,
         fallback_bytes=128,
         residual_bytes=0,
         hash_rounds=1,
+        hash_backend=store_daemon_pb2.HASH_BACKEND_D2H_CPU,
+        hash_bytes=128,
+        hash_wall_time_ms=7,
+        hash_identity_forming=True,
         hash_location=store_daemon_pb2.HASH_LOCATION_SEAL,
         identity_mint_strategy=store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_MINT,
         collective_skip_reason="planner_collective_strategy_disabled",
@@ -770,9 +793,13 @@ def test_binding_swap_tracks_last_execution_diagnostics(
 
     diagnostics = binding.last_execution_diagnostics
     assert diagnostics is not None
-    assert diagnostics.collective_policy is CollectivePolicy.ALLOW_NOT_ELIGIBLE_FALLBACK
+    assert diagnostics.collective_policy is CollectivePolicy.COLLECTIVE_FIRST
     assert diagnostics.collective_failure_class is CollectiveFailureClass.NOT_ELIGIBLE
     assert diagnostics.collective_skip_reason == "planner_collective_strategy_disabled"
+    assert diagnostics.hash_backend is HashBackend.D2H_CPU
+    assert diagnostics.hash_bytes == 128
+    assert diagnostics.hash_wall_time_ms == 7
+    assert diagnostics.hash_identity_forming is True
     assert diagnostics.hash_location is HashLocation.SEAL
     assert diagnostics.identity_mint_strategy is IdentityMintStrategy.SEAL_MINT
 
@@ -817,7 +844,7 @@ def test_binding_realize_from_tracks_source_bound_plan_diagnostics(
             planned_collective_admitted_bytes=128,
             planned_local_typed_bytes=16,
             planner_reject_reason_buckets={"concat_not_admitted": 32},
-            planner_version="source_bound_collective_first.v3",
+            planner_version="source_bound_collective_first.v4",
             plan_hash="mh:test-plan",
         )
     )
@@ -972,7 +999,7 @@ def test_create_binding_treats_empty_current_value_as_absent(
     assert created.artifact_id is None
 
 
-def test_binding_realize_from_sets_local_current_value(
+def test_binding_realize_from_returns_update_epoch_and_leaves_binding_unsealed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, _runtime, client = _setup_store(monkeypatch)
@@ -980,7 +1007,7 @@ def test_binding_realize_from_sets_local_current_value(
     layout = artifact.bind(device="cuda:0", packing="byte_space").layout
     binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
 
-    sealed = binding.realize_from(
+    update_epoch = binding.realize_from(
         artifact,
         realization_plan=(
             store_mod.BindingRealizationEntry(
@@ -996,9 +1023,12 @@ def test_binding_realize_from_sets_local_current_value(
         ),
     )
 
-    assert sealed.is_artifact_backed is False
-    assert binding.current_value is not None
+    assert isinstance(update_epoch, BindingUpdateEpoch)
+    assert str(update_epoch.update_epoch).startswith("bue:")
+    assert binding.current_value is None
     assert binding.artifact_id is None
+    sealed = binding.seal_current(update_epoch=update_epoch)
+    assert sealed.is_artifact_backed is False
     assert len(client.refill_calls) == 1
     realization_plan = client.refill_calls[0]["realization_plan"]
     assert (
@@ -1212,7 +1242,7 @@ def test_binding_realize_from_accepts_public_disk_source_handle(
         verify_checksums=False,
     )
 
-    sealed = binding.realize_from(
+    update_epoch = binding.realize_from(
         disk_source,
         realization_plan=(
             store_mod.BindingRealizationEntry(
@@ -1223,7 +1253,7 @@ def test_binding_realize_from_accepts_public_disk_source_handle(
         ),
     )
 
-    assert sealed.is_artifact_backed is False
+    assert isinstance(update_epoch, BindingUpdateEpoch)
     assert len(client.refill_calls) == 1
     assert client.refill_calls[0]["artifact_id"] == ""
     public_disk_source = client.refill_calls[0]["public_disk_source"]
@@ -1313,6 +1343,93 @@ def test_binding_rejects_wrong_binding_update_epoch(
 
     sealed = binding.seal_current(update_epoch=correct_epoch)
     assert sealed.binding_id == binding.binding_id
+
+
+def test_binding_begin_update_rejects_published_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    binding = store.artifact(artifact_id="artifact-1").bind(
+        device="cuda:0",
+        packing="byte_space",
+    )
+    binding._slot._published_lease_id = "lease-1"
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.begin_update()
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert "call retire() first" in str(excinfo.value)
+    assert client.retire_calls == []
+    assert client.begin_update_calls == []
+
+
+def test_binding_realize_from_rejects_published_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+    binding._slot._published_lease_id = "lease-1"
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.realize_from(
+            artifact,
+            realization_plan=(
+                store_mod.BindingRealizationEntry(
+                    op="copy",
+                    source_name="alpha",
+                    dst_name="alpha",
+                ),
+            ),
+        )
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert "call retire() first" in str(excinfo.value)
+    assert client.retire_calls == []
+    assert client.refill_calls == []
+
+
+def test_binding_realize_from_requires_source_bound_contract_v4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+    runtime.capabilities = StoreCapabilities(
+        mem_pool_bytes=0,
+        tx_slice_bytes=0,
+        artifact_chunk_bytes=0,
+        server_config=ServerConfig(
+            tx_slice_bytes=0,
+            mem_pool_size=0,
+            artifact_chunk_bytes=0,
+            local_handle_socket_path="",
+            cpu_shared_memory_enabled=True,
+            source_bound_capability_flags=int(
+                SourceBoundCapability.FIRST_CLASS_COLLECTIVE_INGRESS
+            ),
+            source_bound_contract_version=3,
+        ),
+    )
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.realize_from(
+            artifact,
+            realization_plan=(
+                store_mod.BindingRealizationEntry(
+                    op="copy",
+                    source_name="alpha",
+                    dst_name="alpha",
+                ),
+            ),
+        )
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert "contract v4" in str(excinfo.value)
+    assert client.refill_calls == []
 
 
 def test_binding_failed_refill_clears_current_value_and_marks_dirty(

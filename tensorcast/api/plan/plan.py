@@ -153,11 +153,6 @@ class PlanResult:
             )
         return step.artifact_result
 
-    def require_pure_transform_publication(
-        self, ref: PlanStepRef[Any]
-    ) -> RepresentationPublishSpec:
-        return self.require_representation_publish_spec(ref)
-
     @classmethod
     def from_node_agent_response(
         cls, response: node_agent_pb2.ExecutePlanResponse

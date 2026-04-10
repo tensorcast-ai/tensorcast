@@ -59,6 +59,23 @@ using representation_layout::ViewNarrowSpec;
 using representation_transform_builder::build_representation_transform_contract;
 using store::loader::ViewSpec;
 
+store::runtime::ingestion::strategy::SourceBoundLoweringStats to_source_bound_lowering_stats(
+    const representation_transform_builder::TransformWorkCompatibilityStats& stats) {
+  return store::runtime::ingestion::strategy::SourceBoundLoweringStats{
+      .total_dst_tensors = stats.total_dst_tensors,
+      .compatible_candidates = stats.compatible_candidates,
+      .compatible_bytes = stats.compatible_bytes,
+      .concat_candidates = stats.concat_candidates,
+      .concat_bytes = stats.concat_bytes,
+      .rejected_mixed_src_or_dim = stats.rejected_mixed_src_or_dim,
+      .rejected_mixed_src_or_dim_bytes = stats.rejected_mixed_src_or_dim_bytes,
+      .rejected_non_contiguous = stats.rejected_non_contiguous,
+      .rejected_non_contiguous_bytes = stats.rejected_non_contiguous_bytes,
+      .rejected_unsupported_distribution = stats.rejected_unsupported_distribution,
+      .rejected_unsupported_distribution_bytes = stats.rejected_unsupported_distribution_bytes,
+  };
+}
+
 absl::StatusOr<std::string> build_mapped_target_selected_index_json(const ValidatedMappedTargetLayout& mapped_layout) {
   std::vector<std::string> ordered_names;
   ordered_names.reserve(mapped_layout.dst_specs.size());
@@ -1297,7 +1314,7 @@ Status build_binding_realization_materialization_plan(
   return Status::OK;
 }
 
-absl::StatusOr<store::runtime::ingestion::strategy::ResolvedMaterializationPlan>
+absl::StatusOr<store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan>
 build_resolved_mapped_materialization_plan(
     std::string_view resolved_artifact_id,
     uint64_t generation,
@@ -1305,6 +1322,7 @@ build_resolved_mapped_materialization_plan(
     const MappedTargetMaterializationPlan& mapped_plan,
     const std::optional<store::loading::VariantIdentity>& variant,
     std::optional<std::string_view> source_index_json) {
+  using PreparedExecutionPlan = store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan;
   using StrategyPlan = store::runtime::ingestion::strategy::ResolvedMaterializationPlan;
 
   std::optional<CanonicalIndexTable> physical_source_table;
@@ -1316,7 +1334,8 @@ build_resolved_mapped_materialization_plan(
     physical_source_table = std::move(*physical_source_table_or);
   }
 
-  StrategyPlan resolved_plan;
+  PreparedExecutionPlan prepared_execution;
+  StrategyPlan& resolved_plan = prepared_execution.resolved_plan;
   resolved_plan.artifact_id = std::string(resolved_artifact_id);
   resolved_plan.generation = generation;
   resolved_plan.variant = variant;
@@ -1324,6 +1343,9 @@ build_resolved_mapped_materialization_plan(
   resolved_plan.target_layout = target_layout;
   resolved_plan.representation_transform_contract = mapped_plan.representation.transform_contract;
   if (resolved_plan.representation_transform_contract.has_value()) {
+    prepared_execution.lowering_artifacts = store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts{
+        .lowering_stats = to_source_bound_lowering_stats(mapped_plan.representation.compatibility_stats),
+    };
     const store::loader::ByteRangeMap compatibility_map = [&]() {
       if (!mapped_plan.representation.compatibility_lowered_map.segments.empty()) {
         auto map = mapped_plan.representation.compatibility_lowered_map;
@@ -1353,7 +1375,7 @@ build_resolved_mapped_materialization_plan(
       return compatibility_data_map_or.status();
     }
     if (!compatibility_data_map_or->segments.empty()) {
-      resolved_plan.collective_compatibility_map = *compatibility_data_map_or;
+      prepared_execution.lowering_artifacts->collective_data_map = *compatibility_data_map_or;
     }
     store::loader::ByteRangeMap compatibility_data_map;
     if (!compatibility_data_map_or->segments.empty()) {
@@ -1365,10 +1387,10 @@ build_resolved_mapped_materialization_plan(
       return executor_map_or.status();
     }
     if (!executor_map_or->segments.empty()) {
-      resolved_plan.executor_private_generic_fallback_map = *executor_map_or;
+      prepared_execution.lowering_artifacts->executor_generic_data_map = *executor_map_or;
     }
   }
-  return resolved_plan;
+  return prepared_execution;
 }
 
 } // namespace tensorcast::daemon::materialization_target_plan

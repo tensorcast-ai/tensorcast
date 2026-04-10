@@ -35,6 +35,16 @@ struct OperationTransportContext {
   std::optional<store::loading::TransportSchedulingGroupHint> transport_scheduling_group;
 };
 
+struct HashExecutionDetails {
+  uint32_t hash_rounds{0};
+  v2::HashLocation hash_location{v2::HashLocation::HASH_LOCATION_NONE};
+  v2::HashBackend hash_backend{v2::HashBackend::HASH_BACKEND_NONE};
+  uint64_t hash_bytes{0};
+  uint64_t hash_wall_time_ms{0};
+  bool hash_identity_forming{false};
+  v2::IdentityMintStrategy identity_mint_strategy{v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE};
+};
+
 store::loading::SourcePreference to_hint_preference(v2::SourcePreference preference);
 
 store::loading::ExportPolicy to_hint_export_policy(v2::ExportPolicy policy);
@@ -49,6 +59,8 @@ absl::StatusOr<ExecutionTopologyContext> resolve_source_execution_topology(const
 absl::StatusOr<v2::CollectivePolicy> resolve_collective_policy(
     v2::CollectivePolicy requested,
     const ExecutionTopologyContext& execution_topology);
+
+v2::CollectivePolicy default_collective_policy_for_mapped_target(const ExecutionTopologyContext& execution_topology);
 
 bool collective_policy_requests_collective(v2::CollectivePolicy policy);
 
@@ -73,9 +85,7 @@ v2::ExecutionDiagnostics build_execution_diagnostics(
     const store::loading::MaterializeIntoTargetResult* result,
     v2::CollectivePolicy collective_policy,
     const ExecutionTopologyContext& execution_topology,
-    uint32_t hash_rounds,
-    v2::HashLocation hash_location,
-    v2::IdentityMintStrategy identity_mint_strategy);
+    const HashExecutionDetails& hash_details = {});
 
 absl::StatusOr<ViewSpec> convert_view_spec(const tensorcast::common::v1::ViewSpec& proto);
 

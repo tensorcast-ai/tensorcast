@@ -27,6 +27,7 @@
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/runtime/ingestion/materialization_strategy_types.h"
+#include "core/store/runtime/ingestion/source_bound_strategy_planner.h"
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
@@ -58,6 +59,7 @@ using materialization_layout::resolve_target_offsets;
 using materialization_payload::compute_generation_from_index;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::default_collective_policy_for_mapped_target;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::OperationTransportContext;
 using materialization_policy::resolve_materialization_request_context;
@@ -1015,7 +1017,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
   const uint64_t generation = compute_generation_from_index(canonical_index_json);
-  auto resolved_plan_or = build_resolved_mapped_materialization_plan(
+  auto prepared_execution_or = build_resolved_mapped_materialization_plan(
       resolved_artifact_id,
       generation,
       target_layout,
@@ -1034,12 +1036,31 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
       disk_metadata.has_value() && disk_metadata->source_index_json.has_value()
           ? std::optional<std::string_view>(*disk_metadata->source_index_json)
           : std::nullopt);
-  if (!resolved_plan_or.ok()) {
-    return to_grpc_status(resolved_plan_or.status());
+  if (!prepared_execution_or.ok()) {
+    return to_grpc_status(prepared_execution_or.status());
   }
-  auto resolved_plan = std::move(*resolved_plan_or);
+  auto prepared_execution = std::move(*prepared_execution_or);
+  // Mapped-target RPCs only carry collective topology via operation metadata, so the
+  // best-effort default must stay collective-first rather than source-bound strict mode.
+  const auto collective_policy = default_collective_policy_for_mapped_target(request_context.execution_topology);
+  auto strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
+      prepared_execution.resolved_plan,
+      prepared_execution.lowering_artifacts,
+      collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+          ? store::runtime::ingestion::strategy::SourceBoundPolicy::kRequirePureCollective
+          : collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE
+          ? store::runtime::ingestion::strategy::SourceBoundPolicy::kDisableCollective
+          : store::runtime::ingestion::strategy::SourceBoundPolicy::kCollectiveFirst,
+      d_.engine.options().materialization_strategy,
+      request_context.execution_topology,
+      disk_source.has_value());
+  if (!strategy_plan_or.ok()) {
+    return to_grpc_status(strategy_plan_or.status());
+  }
+  prepared_execution.strategy_plan = *strategy_plan_or;
+  prepared_execution.lowering_artifacts.reset();
   const auto materialize_start = std::chrono::steady_clock::now();
-  auto result_or = d_.engine.materialize_mapped_into_target(device, resolved_plan, hints, disk_source);
+  auto result_or = d_.engine.materialize_mapped_into_target(device, prepared_execution, hints, disk_source);
   const auto engine_done = std::chrono::steady_clock::now();
   if (!result_or.ok()) {
     LOG(ERROR) << "MaterializeIntoMappedTarget engine failure"

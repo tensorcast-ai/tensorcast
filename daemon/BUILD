@@ -1191,6 +1191,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:index_reader",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/random:random",
@@ -1201,10 +1202,23 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "assembly_closeout_identity_utils_lib",
+    srcs = ["service/controllers/assembly_closeout_identity_utils.cc"],
+    hdrs = ["service/controllers/assembly_closeout_identity_utils.h"],
+    deps = [
+        ":types_hdr",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
+        "//core/store:global_store_client",
+    ],
+)
+
+sc_cc_library(
     name = "assembly_operation_service_lib",
     srcs = ["service/controllers/assembly_operation_service.cc"],
     hdrs = ["service/controllers/assembly_operation_service.h"],
     deps = [
+        ":assembly_closeout_identity_utils_lib",
         ":assembly_coordination_utils_lib",
         ":binding_registry_lib",
         ":daemon_options_hdr",
@@ -1327,6 +1341,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store:view_utils",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "//proto/tensorcast/operation/v1:operation_cc",
         "@abseil-cpp//absl/random:random",
@@ -2386,6 +2401,27 @@ cc_test(
         "//core/store:testing_recording_global_store_client",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "assembly_closeout_identity_utils_test",
+    srcs = ["service/assembly_closeout_identity_utils_test.cc"],
+    deps = [
+        ":assembly_closeout_identity_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:testing_global_store_client_stub",
+        "//core/store:testing_recording_global_store_client",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_policy_utils_test",
+    srcs = ["service/materialization_policy_utils_test.cc"],
+    deps = [
+        ":materialization_policy_utils_lib",
         "@catch2//:catch2_main",
     ],
 )

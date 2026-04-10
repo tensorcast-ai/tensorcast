@@ -730,7 +730,7 @@ class Binding:
         realization_plan: object,
         options: "GetArtifactOptions | None" = None,
         ctx: CallContext | None = None,
-    ) -> SealedBindingValue:
+    ) -> BindingUpdateEpoch:
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
             ctx=ctx,
@@ -744,21 +744,20 @@ class Binding:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        realize(
+        update_epoch = realize(
             artifact,
             realization_plan=realization_plan,
             options=options,
             ctx=ctx,
             operation_id=operation_id,
         )
-        current_value = self.current_value
-        if current_value is None:
+        if not isinstance(update_epoch, BindingUpdateEpoch):
             raise ArtifactError(
-                "realize_from() completed without a current sealed value",
+                "realize_from() completed without a binding update epoch",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
-        return current_value
+        return update_epoch
 
     def begin_update(
         self,

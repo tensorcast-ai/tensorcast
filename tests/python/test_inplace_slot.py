@@ -508,6 +508,33 @@ def test_binding_publish_operation_uses_operation_ref_metadata(
     assert binding._slot.published_replica_id == "replica-1"
 
 
+def test_binding_begin_update_rejects_published_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+    binding._slot._published_lease_id = "lease-1"
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.begin_update()
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert "call retire() first" in str(excinfo.value)
+    assert client.retire_calls == []
+    assert client.begin_update_calls == []
+
+
 def test_bind_into_failed_materialize_clears_current_value_and_marks_dirty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

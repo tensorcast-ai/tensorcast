@@ -22,7 +22,7 @@ related_code:
 links:
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0110-artifact-representation-contract-and-transform-unification.md
     - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md

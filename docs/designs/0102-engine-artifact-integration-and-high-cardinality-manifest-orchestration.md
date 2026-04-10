@@ -11,7 +11,7 @@ areas:
 created: 2026-03-17
 last_updated: 2026-03-27
 related_code:
-  - tensorcast/engine_adapter/kvcache_adapter.py
+  - tensorcast/engine_adapter/artifact_api.py
   - tensorcast/node_agent/executor.py
   - tensorcast/node_agent/server.py
   - tensorcast/api/plan/plan.py
@@ -65,7 +65,7 @@ The canonical integration model is therefore:
 
 Current code already points in this direction:
 
-- the file `tensorcast/engine_adapter/kvcache_adapter.py` defines generic artifact lifecycle result types,
+- the file `tensorcast/engine_adapter/artifact_api.py` defines generic artifact lifecycle result types,
 - NodeAgent preserves `manifest/publish/hydrate/evict_local` results,
 - and plan execution already aligns around those canonical action names.
 
@@ -231,8 +231,9 @@ and as the canonical adapter protocol:
 
 - `EngineArtifactAdapter`
 
-Even though the current module path is `tensorcast/engine_adapter/kvcache_adapter.py`, the semantic contract is already
-generic artifact lifecycle projection rather than framework-owned KV semantics.
+The canonical module path is `tensorcast/engine_adapter/artifact_api.py`, and
+the semantic contract is generic artifact lifecycle projection rather than
+framework-owned KV semantics.
 
 Normative rules:
 
@@ -596,7 +597,6 @@ Proto and SDK additions that follow from this design should remain generic:
 # Trade-offs and Risks
 
 - Canonical artifact actions are less domain-friendly than business-specific aliases, so helper layers remain useful.
-- The current filename `kvcache_adapter.py` can mislead readers into over-ascribing KV semantics to the core contract.
 - Some engines may need richer adapter-local preconditions than others; that complexity belongs in integrations, not in
   framework core.
 - Current code still carries `engine_request_id` through instance-action request shapes; the documentation must not

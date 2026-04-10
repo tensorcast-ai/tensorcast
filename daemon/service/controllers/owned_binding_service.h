@@ -106,11 +106,12 @@ class OwnedBindingService {
 };
 
 grpc::Status evaluate_strict_collective_preflight_for_testing(
-    const store::runtime::ingestion::strategy::ResolvedMaterializationPlan* resolved_plan,
+    const store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary* plan_summary,
     v2::CollectivePolicy collective_policy);
 
 store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_source_bound_plan_for_testing(
     const store::runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+    const std::optional<store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts>& lowering_artifacts,
     const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
     const store::loading::ExecutionTopologyContext& execution_topology,
     v2::CollectivePolicy collective_policy,

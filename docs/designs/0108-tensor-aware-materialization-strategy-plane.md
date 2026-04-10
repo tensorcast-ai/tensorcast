@@ -42,7 +42,7 @@ links:
     - ./0109-batched-owner-file-collective-executor.md
     - ./0113-step3p5-closure-and-sot-convergence.md
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0115-explicit-source-bound-execution-planning-and-fail-fast-lane-selection.md
   dependencies:
     - ./0004-unified-runtime-config.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -112,13 +112,12 @@ plane, but execution is now intentionally split:
 - the mapped-target, semantic-contract, typed-config extraction, and ordinary
   replica convergence work that previously lived in the deleted `0108` / `0108-01`
   companion plans is now folded back into this design's implementation record;
-- all remaining residual execution, delete gates, and Step3p5-oriented closure
-  work now live in
-  `docs/designs/0113-step3p5-closure-and-sot-convergence.md`, while active
-  execution tracking is centralized in
-  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
+- the Step3p5-oriented architecture corrections that mattered for this design
+  have now landed under the implemented `0114` and `0115` designs, while the
+  remaining active rollout and delete-gate follow-up is tracked in
+  `docs/plans/0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md`;
 - no new execution note should reopen the deleted `0108` companion plans unless
-  `0113` or `0114` is revised first.
+  `0113` or `0117` is revised first.
 
 # Implementation Status
 
@@ -1050,7 +1049,7 @@ Mitigations:
 - [`docs/designs/0084-binding-unified-model-and-contract.md`](/data/workspace/tensorcast-280/docs/designs/0084-binding-unified-model-and-contract.md)
 - [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
 - [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)
 - [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
 - [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
 - [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)

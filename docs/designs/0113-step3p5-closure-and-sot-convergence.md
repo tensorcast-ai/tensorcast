@@ -4,7 +4,7 @@ title: Step3p5 Closure and Single-SOT Convergence for 0107-0112
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
-last_updated: 2026-03-31
+last_updated: 2026-04-10
 related_code:
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0107-retrieval-policy-plane-cleanup.md
@@ -25,10 +25,10 @@ related_code:
   - daemon/state/lip_manager.cc
   - /data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
 links:
-  plan: ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   related:
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0115-explicit-source-bound-execution-planning-and-fail-fast-lane-selection.md
+    - ../plans/0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md
   dependencies:
     - ./0001-docs-system-design.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -62,8 +62,11 @@ The key policy is:
   planes, contracts, and invariants they introduced;
 - the remaining undo items, delete gates, capability handoff rules, and
   execution-order constraints remain owned by this `0113` closure design;
-- the single active total execution checklist now lives in:
-  - `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+- the completed `0114` and `0115` execution records are now folded back into
+  their implemented designs and their companion plans have been deleted;
+- the single active total execution checklist for residual rollout and cleanup
+  work now lives in:
+  - `docs/plans/0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md`
 - `docs/plans/0113-step3p5-closure-and-sot-convergence.md` remains a historical
   closure-handoff record rather than the active total plan;
 - the old split execution notes under `0108` through `0112` are folded back
@@ -83,14 +86,15 @@ The remaining closure work has seven slices:
 ```mermaid
 flowchart LR
   A["0107-0112 Designs<br>durable architecture truth"] --> B["0113 Closure Design<br>execution ownership and delete gates"]
-  B --> C["0114 Total Plan<br>single active checklist"]
-  C --> D["Contract Cutover<br>first-class source-bound collective ingress"]
-  C --> E["Diagnostics Freeze<br>typed quality and admission signals"]
-  C --> F["Identity Cutover<br>single-mint and no second-stage hash"]
-  C --> G["Executor Convergence<br>leave generic dominant path"]
-  C --> H["Capability Handoff<br>downstream-ready integration switch"]
-  C --> I["Helper Demotion<br>bridge and compatibility cleanup"]
-  C --> J["Evidence And Deletion<br>benchmarks, serving gates, doc cleanup"]
+  B --> C["0114 and 0115 Implemented Designs<br>folded-back execution record"]
+  C --> K["0117 Active Plan<br>rollout and delete-gate checklist"]
+  K --> D["Contract Cutover<br>first-class source-bound collective ingress"]
+  K --> E["Diagnostics Freeze<br>typed quality and admission signals"]
+  K --> F["Identity Cutover<br>single-mint and no second-stage hash"]
+  K --> G["Executor Convergence<br>leave generic dominant path"]
+  K --> H["Capability Handoff<br>downstream-ready integration switch"]
+  K --> I["Helper Demotion<br>bridge and compatibility cleanup"]
+  K --> J["Evidence And Deletion<br>benchmarks, serving gates, doc cleanup"]
 ```
 
 # Goals / Non-Goals
@@ -228,13 +232,15 @@ Normative rules after this change:
 1. `0107` through `0112` remain the design-level architecture authority.
 2. `0113` remains the closure-design authority for capability handoff, identity
    constraints, and delete gates across those designs.
-3. `0114` plan is the single active total execution checklist for the residual
-   work across those designs.
-4. The deleted `0108`-`0112` companion plans and the retained `0113` plan are
+3. The completed `0114` and `0115` companion plans are deleted; their landed
+   implementation state now lives only in the implemented designs.
+4. `0117` plan is the single active total execution checklist for the remaining
+   residual rollout and delete-gate work across those designs.
+5. The deleted `0108`-`0112` companion plans and the retained `0113` plan are
    historical only; they are no longer active total SOT.
-5. New closure work should update `0113` design and `0114` plan rather than
+6. New closure work should update `0113` design and `0117` plan rather than
    creating another sibling active plan unless the architecture itself changes.
-6. Later architecture-correction designs may still revise the target shape of
+7. Later architecture-correction designs may still revise the target shape of
    the shared trunk when new evidence shows the accepted architecture is not yet
    globally optimal.
    - those designs must explicitly say which accepted designs remain the
@@ -294,12 +300,12 @@ Normative completion rules:
 
 - typed collective policy must become part of the contract:
   - `require_collective`
-  - `allow_not_eligible_fallback`
+  - `collective_first`
   - `disable_collective`
 - policy semantics are normative:
   - `require_collective` means preflight, ingress, or execution failure is fatal
     for this request;
-  - `allow_not_eligible_fallback` means only an admitted
+  - `collective_first` means only an admitted
     `collective_failure_class=not_eligible` outcome may fall back;
   - `disable_collective` means collective is not requested and no fallback
     reason should be synthesized.
@@ -395,10 +401,18 @@ Normative completion rules:
   - same-binding single-mint closeout;
 - additive semantic changes to that readiness surface must advance
   `source_bound_contract_version`.
-- the current readiness surface for the collective-first binding-realization
-  convergence tracked in `0114` plan is version `3`, covering true residual
+- the historical additive readiness surface for the collective-first
+  binding-realization convergence was version `3`, covering true residual
   semantics, split planner/execution diagnostics, and strict source-bound
-  preflight.
+  preflight;
+- the current readiness surface is version `4`, which preserves the version
+  `3` guarantees and additionally hard-cuts same-binding
+  `Binding.realize_from(...)` / `Store.realize_into_binding(...)` to
+  execution-only `BindingUpdateEpoch` semantics plus typed hash diagnostics;
+- downstream same-binding builder integrations must require
+  `source_bound_contract_version >= 4` before depending on that execution-only
+  ingress rather than discovering the mismatch from missing response fields at
+  runtime;
 - downstream integrations must switch against that stable surface instead of
   inferring readiness from encoded `operation_id` tags, benchmark comments, or
   repo-version folklore;
@@ -519,5 +533,5 @@ or helper-only aliases that bypass these conventions.
 - [`docs/designs/0111-source-to-serving-builder-and-representation-publication.md`](/data/workspace/tensorcast-280/docs/designs/0111-source-to-serving-builder-and-representation-publication.md)
 - [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
 - [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/plans/0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md`](/data/workspace/tensorcast-280/docs/plans/0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md)
 - [`/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`](/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md)

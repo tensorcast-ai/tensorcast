@@ -135,13 +135,13 @@ class MaterializationFacade : public materialization::control::MaterializationBa
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const strategy::ResolvedMaterializationPlan& resolved_plan,
+      const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const strategy::ResolvedMaterializationPlan& resolved_plan,
+      const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(

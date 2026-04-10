@@ -81,7 +81,7 @@ grpc::Status build_binding_realization_materialization_plan(
     RecordMaterializeResultFn record_result,
     MappedTargetMaterializationPlan& plan);
 
-absl::StatusOr<store::runtime::ingestion::strategy::ResolvedMaterializationPlan>
+absl::StatusOr<store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan>
 build_resolved_mapped_materialization_plan(
     std::string_view resolved_artifact_id,
     uint64_t generation,

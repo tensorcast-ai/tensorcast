@@ -126,10 +126,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "RegisteredServingPublication",
     ),
-    "RegisteredPureTransformPublication": (
-        "tensorcast.api",
-        "RegisteredPureTransformPublication",
-    ),
     "RegisteredLease": ("tensorcast.api", "RegisteredLease"),
     "RegistrationResult": ("tensorcast.api", "RegistrationResult"),
     "SealAssemblyResult": ("tensorcast.api", "SealAssemblyResult"),
@@ -172,18 +168,12 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "PreparedServingRegistration",
     ),
-    "PreparedPureTransformServingRegistration": (
-        "tensorcast.api",
-        "PreparedPureTransformServingRegistration",
-    ),
     "PublishedModelVersion": ("tensorcast.api", "PublishedModelVersion"),
     "ExecutionDiagnostics": ("tensorcast.api", "ExecutionDiagnostics"),
+    "BindingUpdateEpoch": ("tensorcast.api", "BindingUpdateEpoch"),
+    "HashBackend": ("tensorcast.api", "HashBackend"),
     "HashLocation": ("tensorcast.api", "HashLocation"),
     "IdentityMintStrategy": ("tensorcast.api", "IdentityMintStrategy"),
-    "PureTransformPublicationBundle": (
-        "tensorcast.api",
-        "PureTransformPublicationBundle",
-    ),
     "RealizationProtocol": ("tensorcast.api", "RealizationProtocol"),
     "RepresentationPublishContract": (
         "tensorcast.api",
@@ -202,7 +192,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "SERVING_BUILD_DIGEST_VERSION",
     ),
     "ServingBuildIntent": ("tensorcast.api", "ServingBuildIntent"),
-    "ServingPublicationBundle": ("tensorcast.api", "ServingPublicationBundle"),
     "ServingRuntimePolicy": ("tensorcast.api", "ServingRuntimePolicy"),
     "ServingSupportLevel": ("tensorcast.api", "ServingSupportLevel"),
     "Instance": ("tensorcast.api", "Instance"),
@@ -245,13 +234,13 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "register_async": ("tensorcast.api.store", "register_async"),
     "register_view": ("tensorcast.api.store", "register_view"),
     "register_piece": ("tensorcast.api.store", "register_piece"),
-    "register_binding_finalize_publication_bridge": (
+    "register_binding_finalize_publication": (
         "tensorcast.api.store",
-        "register_binding_finalize_publication_bridge",
+        "register_binding_finalize_publication",
     ),
-    "register_pure_transform_publication_bridge": (
+    "register_pure_transform_publication": (
         "tensorcast.api.store",
-        "register_pure_transform_publication_bridge",
+        "register_pure_transform_publication",
     ),
     "register_vram_region": ("tensorcast.api.store", "register_vram_region"),
     "resolve_public_disk_source": (
@@ -332,17 +321,17 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api.store",
         "complete_canonical_representation_publish_attempt",
     ),
-    "complete_binding_finalize_publication_bridge": (
+    "complete_binding_finalize_publication": (
         "tensorcast.api.store",
-        "complete_binding_finalize_publication_bridge",
+        "complete_binding_finalize_publication",
     ),
     "complete_binding_finalize_publication_from_binding": (
         "tensorcast.api.store",
         "complete_binding_finalize_publication_from_binding",
     ),
-    "complete_pure_transform_publication_bridge": (
+    "complete_pure_transform_publication": (
         "tensorcast.api.store",
-        "complete_pure_transform_publication_bridge",
+        "complete_pure_transform_publication",
     ),
     "complete_pure_transform_publication_from_binding": (
         "tensorcast.api.store",
@@ -454,7 +443,6 @@ if TYPE_CHECKING:
         RegisterArtifactOptions,
         RegisteredArtifact,
         RegisteredLease,
-        RegisteredPureTransformPublication,
         RegisteredServingPublication,
         RegistrationResult,
         RetentionHandle,
@@ -482,7 +470,7 @@ if TYPE_CHECKING:
         artifact_async,
         build_serving_publication_bundle,
         build_serving_publication_bundle_from_registered_artifact,
-        complete_pure_transform_publication_bridge,
+        complete_pure_transform_publication,
         deregister_artifact,
         from_disk,
         persistence_operation,
@@ -492,7 +480,7 @@ if TYPE_CHECKING:
         query_persistence_status,
         register,
         register_async,
-        register_pure_transform_publication_bridge,
+        register_pure_transform_publication,
         register_view,
         register_vram_region,
         store,
@@ -514,7 +502,7 @@ __all__ = [
     "Store",
     "StoreOptions",
     "RegisteredArtifact",
-    "RegisteredPureTransformPublication",
+    "RegisteredServingPublication",
     "ArtifactError",
     "ArtifactFuture",
     "BindingValueRef",
@@ -534,6 +522,8 @@ __all__ = [
     "CallContext",
     "CollectiveLoadGroup",
     "ExecutionDiagnostics",
+    "BindingUpdateEpoch",
+    "HashBackend",
     "Operation",
     "OperationError",
     "OperationStatus",

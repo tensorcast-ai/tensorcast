@@ -65,6 +65,7 @@ using RepresentationWorkItemKind = materialization::contracts::RepresentationWor
 using RepresentationWorkPlan = materialization::contracts::RepresentationWorkPlan;
 using TensorAxisRange = materialization::contracts::TensorAxisRange;
 using TensorCoordinateSpec = materialization::contracts::TensorCoordinateSpec;
+using WorkPartitionKind = materialization::contracts::WorkPartitionKind;
 
 bool prefer_local_canonical_source_for_mapped(const StrategyConfig& strategy_config) {
   return strategy_config.prefer_local_canonical_for_mapped;
@@ -349,6 +350,42 @@ uint64_t local_typed_work_bytes(const RepresentationWorkPlan& plan) {
     }
   }
   return total;
+}
+
+bool work_plan_requires_explicit_executor_data_map(const RepresentationWorkPlan& plan) {
+  return std::any_of(plan.items.begin(), plan.items.end(), [](const RepresentationWorkItem& item) {
+    return item.kind == RepresentationWorkItemKind::kTensorCopy ||
+        item.kind == RepresentationWorkItemKind::kConcatAssemble ||
+        item.kind == RepresentationWorkItemKind::kResidualByteRange;
+  });
+}
+
+bool source_bound_execution_mode_uses_collective(strategy::SourceBoundExecutionMode mode) {
+  return mode == strategy::SourceBoundExecutionMode::kPureCollective ||
+      mode == strategy::SourceBoundExecutionMode::kCollectiveFirstMixed;
+}
+
+bool source_bound_execution_mode_requires_executor_source_map(strategy::SourceBoundExecutionMode mode) {
+  return mode == strategy::SourceBoundExecutionMode::kPureCollective ||
+      mode == strategy::SourceBoundExecutionMode::kCollectiveFirstMixed ||
+      mode == strategy::SourceBoundExecutionMode::kGenericOnly;
+}
+
+std::string format_reject_reason_buckets(const absl::flat_hash_map<std::string, uint64_t>& buckets) {
+  if (buckets.empty()) {
+    return "{}";
+  }
+  std::vector<std::pair<std::string, uint64_t>> ordered(buckets.begin(), buckets.end());
+  std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  std::string rendered = "{";
+  for (size_t index = 0; index < ordered.size(); ++index) {
+    if (index > 0) {
+      rendered.append(",");
+    }
+    absl::StrAppend(&rendered, ordered[index].first, "=", ordered[index].second);
+  }
+  rendered.push_back('}');
+  return rendered;
 }
 
 uint64_t byte_range_map_covered_bytes(const loader::ByteRangeMap& map) {
@@ -3678,24 +3715,61 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const strategy::ResolvedMaterializationPlan& resolved_plan,
+    const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints,
     std::optional<loading::DiskSource> disk_source) {
+  const auto& resolved_plan = prepared_execution.resolved_plan;
+  const auto* source_bound_strategy =
+      prepared_execution.strategy_plan.has_value() ? &*prepared_execution.strategy_plan : nullptr;
   auto effective_hints_or = build_effective_mapped_hints(resolved_plan, hints);
   if (!effective_hints_or.ok()) {
     return effective_hints_or.status();
   }
   const loading::MaterializeHints& request_hints = *effective_hints_or;
+  if (source_bound_strategy == nullptr) {
+    return absl::FailedPreconditionError("materialize_mapped_into_target requires explicit source_bound_strategy_plan");
+  }
+  const strategy::SourceBoundLanePlan& source_bound_lane_plan = source_bound_strategy->lane_plan;
+  if (source_bound_lane_plan.mode == strategy::SourceBoundExecutionMode::kRejected) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "materialize_mapped_into_target source_bound_strategy_plan rejected request before execution setup "
+            "(planner_reject_reason_buckets=",
+            format_reject_reason_buckets(source_bound_strategy->summary.planner_reject_reason_buckets),
+            ")"));
+  }
   const loading::IntoTargetLayout& target_layout = resolved_plan.target_layout;
   const std::string_view canonical_index_json = resolved_plan.canonical_index_json;
   const uint64_t generation = resolved_plan.generation;
   const auto& representation_work_plan = *resolved_plan.representation_work_plan;
+  const bool strategy_uses_collective_lane = source_bound_execution_mode_uses_collective(source_bound_lane_plan.mode);
+  const bool require_explicit_executor_map =
+      source_bound_execution_mode_requires_executor_source_map(source_bound_lane_plan.mode) ||
+      work_plan_requires_explicit_executor_data_map(representation_work_plan);
+  if (require_explicit_executor_map && source_bound_lane_plan.generic_backend_map.segments.empty()) {
+    return absl::FailedPreconditionError(
+        "materialize_mapped_into_target explicit source_bound_strategy_plan is missing executor fallback map for "
+        "source-bound data lanes");
+  }
+  if (strategy_uses_collective_lane && source_bound_lane_plan.collective_lane_map.segments.empty()) {
+    return absl::FailedPreconditionError(
+        "materialize_mapped_into_target explicit source_bound_strategy_plan is missing collective compatibility map "
+        "for collective-admitted source-bound lanes");
+  }
+  if (strategy_uses_collective_lane && !request_hints.collective_load_group.has_value()) {
+    return absl::FailedPreconditionError(
+        "materialize_mapped_into_target explicit source_bound_strategy_plan selected a collective lane but "
+        "collective_load_group is missing");
+  }
+  if (strategy_uses_collective_lane && !disk_source.has_value()) {
+    return absl::FailedPreconditionError(
+        "materialize_mapped_into_target explicit source_bound_strategy_plan selected a collective lane but no disk "
+        "source was provided");
+  }
   const bool has_fill_items = work_plan_has_fill_items(representation_work_plan);
   const loader::ByteRangeMap semantic_residual_map = representation_work_plan.residual_fallback_map;
-  const loader::ByteRangeMap executor_private_map =
-      resolved_plan.executor_private_generic_fallback_map.value_or(semantic_residual_map);
-  const loader::ByteRangeMap collective_compatibility_map =
-      resolved_plan.collective_compatibility_map.value_or(executor_private_map);
+  const loader::ByteRangeMap& executor_private_map = source_bound_lane_plan.generic_backend_map;
+  const loader::ByteRangeMap& collective_data_map = source_bound_lane_plan.collective_lane_map;
   const uint64_t semantic_residual_bytes = byte_range_map_covered_bytes(semantic_residual_map);
   const uint64_t local_typed_bytes = local_typed_work_bytes(representation_work_plan);
 
@@ -3885,7 +3959,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
     auto effective_maps_or = derive_effective_source_maps(
         executor_private_map,
-        collective_compatibility_map,
+        collective_data_map,
         local_typed_pad_map,
         source_exposes_target_byte_space,
         view_plan,
@@ -3949,8 +4023,6 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       direct_write_supported = plan_source->supports_direct_write_at();
       map_build_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - map_build_start).count();
     }
-    const bool summary_collective_eligible = resolved_plan.source_bound_plan_summary.has_value() &&
-        resolved_plan.source_bound_plan_summary->collective_lane_eligible;
     const strategy::ResolvedSourceBinding source_binding{
         .source = source_kind,
         .source_byte_space = source_byte_space,
@@ -3958,8 +4030,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .direct_write_capable = direct_write_supported,
         .collective_eligible = source_kind == loading::MaterializationSource::kDisk &&
             request_hints.collective_load_group.has_value() && allow_collective_mapped_executor(strategy_config) &&
-            (resolved_plan.source_bound_plan_summary.has_value() ? summary_collective_eligible
-                                                                 : (semantic_residual_bytes == 0)),
+            strategy_uses_collective_lane,
     };
 
     const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
@@ -3991,7 +4062,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
     std::string collective_skip_reason = source_binding.collective_eligible
         ? std::string{}
-        : dominant_collective_reject_reason(resolved_plan.source_bound_plan_summary);
+        : dominant_collective_reject_reason(source_bound_strategy->summary);
 
     auto execute_local_typed_work = [&](loader::TargetLayoutGpuSink& sink) -> absl::Status {
       if (has_fill_items) {
@@ -4092,7 +4163,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .direct_write_supported = false,
                 .source_ordered = false,
                 .dominant_executor = "OwnerFileCollectiveExecutor",
-                .selection_reason = "collective_first_mixed",
+                .selection_reason = !source_bound_lane_plan.selection_reason.empty()
+                    ? source_bound_lane_plan.selection_reason
+                    : "collective_first_mixed",
             };
             LOG(INFO) << "materialize_mapped_into_target execution_commit"
                       << " source_kind=" << static_cast<int>(collective_report.source)
@@ -4121,12 +4194,19 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           }
           collective_skip_reason =
               collective_result.skip_reason.empty() ? "collective_executor_unhandled" : collective_result.skip_reason;
+          if (strategy_uses_collective_lane) {
+            return absl::FailedPreconditionError(
+                absl::StrCat(
+                    "collective lane selected by explicit source-bound strategy plan but collective executor returned "
+                    "handled=false: ",
+                    collective_skip_reason));
+          }
         }
       } else {
         collective_skip_reason = "disk_loader_unavailable";
       }
     }
-    if (request_hints.require_collective_execution) {
+    if (request_hints.require_collective_execution || source_bound_lane_plan.require_collective_success) {
       return absl::FailedPreconditionError(
           collective_skip_reason.empty()
               ? "collective requested but the selected source could not be handled without generic fallback"
@@ -4231,7 +4311,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .direct_write_supported = source_binding.direct_write_capable,
         .source_ordered = source_ordered,
         .dominant_executor = source_ordered ? "SourceOrderedMappedTargetExecutor" : "MappedTargetStreamingExecutor",
-        .selection_reason = source_ordered ? "source_ordered_mapped_target" : "mapped_target_streaming",
+        .selection_reason = !source_bound_lane_plan.selection_reason.empty() ? source_bound_lane_plan.selection_reason
+            : source_ordered                                                 ? "source_ordered_mapped_target"
+                                                                             : "mapped_target_streaming",
     };
     LOG(INFO) << "materialize_mapped_into_target source execution"
               << " source_kind=" << static_cast<int>(source_kind)
@@ -4276,7 +4358,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   };
 
   const bool local_canonical_override = prefer_local_canonical_source_for_mapped(strategy_config);
-  const bool try_local_canonical_source = !source_index_json.has_value() || local_canonical_override;
+  const bool try_local_canonical_source =
+      !strategy_uses_collective_lane && (!source_index_json.has_value() || local_canonical_override);
   if (try_local_canonical_source) {
     auto local_source_or = make_local_canonical_source(
         config_.replica_runtime->registry(), request_hints.artifact_id, target_device, canonical_total_size);
@@ -4308,6 +4391,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool allow_p2p = retrieval_policy.allow_p2p;
   const bool allow_disk = retrieval_policy.allow_disk;
   const bool has_disk_source = disk_source.has_value();
+  if (strategy_uses_collective_lane && (!allow_disk || !has_disk_source)) {
+    return absl::FailedPreconditionError(
+        "materialize_mapped_into_target explicit source_bound_strategy_plan selected a collective lane but disk "
+        "execution is unavailable");
+  }
   components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
   if (!is_local_identity(local_identity)) {
     const auto& options = config_.runtime_context->options();
@@ -4349,7 +4437,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       : std::string_view(request_hints.transport_requester_worker_id);
   const std::string_view transport_request_id = request_hints.transport_request_id;
 
-  if (allow_p2p && gs_connected && !request_hints.artifact_id.empty()) {
+  if (!strategy_uses_collective_lane && allow_p2p && gs_connected && !request_hints.artifact_id.empty()) {
     bool used_canonical_transport_fallback = false;
     auto request_transport = [&]() -> absl::StatusOr<components::TransportSession> {
       const uint32_t wait_timeout_ms = resolve_transport_wait_timeout_ms(request_hints);
@@ -4476,9 +4564,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const strategy::ResolvedMaterializationPlan& resolved_plan,
+    const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints) {
-  return materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  return materialize_mapped_into_target(target_device, prepared_execution, hints, std::nullopt);
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_loader_into_target(
@@ -5884,15 +5972,18 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   const DeviceKey target_device = *target_device_or;
   auto registry = &config_.replica_runtime->registry();
 
-  absl::StatusOr<std::vector<AssemblyTargetRange>> target_ranges_or = absl::UnknownError("uninitialized");
-  {
-    SC_TRACE_SCOPE("seal_from_cut.build_target_ranges");
-    target_ranges_or = build_target_ranges_for_canonical(canonical_index_json, canonical_total_size);
+  std::vector<AssemblyTargetRange> target_ranges;
+  if (!(cut_input.canonical_full && !publish_canonical)) {
+    absl::StatusOr<std::vector<AssemblyTargetRange>> target_ranges_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("seal_from_cut.build_target_ranges");
+      target_ranges_or = build_target_ranges_for_canonical(canonical_index_json, canonical_total_size);
+    }
+    if (!target_ranges_or.ok()) {
+      return target_ranges_or.status();
+    }
+    target_ranges = std::move(*target_ranges_or);
   }
-  if (!target_ranges_or.ok()) {
-    return target_ranges_or.status();
-  }
-  std::vector<AssemblyTargetRange> target_ranges = std::move(*target_ranges_or);
 
   AssemblyPlan plan;
   std::shared_ptr<loader::SeekableSource> canonical_source;

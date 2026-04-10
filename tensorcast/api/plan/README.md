@@ -55,21 +55,18 @@ Repository rule:
   IR while preserving typed publish intent (`layout_id`, `requirements`,
   `readiness_policy`, version keys, manifest ref, and contract family) on the
   plan wire.
-- After execution, the returned `RepresentationPublishSpec`
-  (`PureTransformPublicationBundle` compatibility alias) can now be
-  passed directly to `Store.start_representation_publish_attempt(...)` or
+- After execution, the returned `RepresentationPublishSpec` can now be passed
+  directly to `Store.start_representation_publish_attempt(...)` or
   `Store.complete_representation_publish_attempt(...)` to run the typed
   `representation_publish` closeout path. If that spec points back to a
   source artifact with exactly one attached layout, the Store helper can infer
   `layout_id`; otherwise the same typed carrier can already bring explicit
   attempt inputs through the plan / node-agent path.
-- `PlanResult.require_representation_publish_spec(...)` now provides the typed
-  extraction path for that spec, and
-  `PlanResult.require_pure_transform_publication(...)` remains as a compatibility
-  alias. Likewise,
+- `PlanResult.require_representation_publish_spec(...)` provides the typed
+  extraction path for that spec. Likewise,
   `Store.start_plan_repo_owned_representation_publish_attempt(...)` /
   `Store.complete_plan_repo_owned_representation_publish_attempt(...)` can
-  bridge the `transform_register_pure_transform(...)` result into the same
+  route the `transform_register_pure_transform(...)` result into the same
   repo-owned publish helpers without manually unpacking `artifact_result`.
 - For the current single-rank canonical publish shape, the same bundle can go
   through `Store.start_canonical_representation_publish_attempt(...)` or
@@ -85,8 +82,8 @@ Repository rule:
   `Store.complete_repo_owned_representation_publish_attempt(...)`.
 - If the builder is not running through `transform_register`, the same serving
   publication semantics are also available through
-  `Store.register_pure_transform_publication_bridge(...)` and
-  `Store.complete_pure_transform_publication_bridge(...)` on top of already-built
+  `Store.register_pure_transform_publication(...)` and
+  `Store.complete_pure_transform_publication(...)` on top of already-built
   in-memory tensors. For the current canonical single-source path, that
   one-shot helper can also contribute the source artifact before sealing when
   `source_contribution_device=...` is provided. Structural `pp` / `ep` publish
