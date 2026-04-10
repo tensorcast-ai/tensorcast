@@ -32,9 +32,8 @@ related_code:
   - tests/python/test_assembly_attempt.py
 links:
   related:
-    - ./0113-step3p5-closure-and-sot-convergence.md
-    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ./0117-post-0114-mounted-rollout-and-delete-gate-cleanup.md
+    - ./0108-tensor-aware-materialization-strategy-plane.md
+    - ../plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -78,17 +77,18 @@ The main correction is:
 
 Execution-policy note:
 
-- `0112` owns shipped public ingress and same-binding correctness,
-- while `0114` and `0115` now carry the implemented audited startup and
-  explicit-planning closure, the remaining active rollout and delete-gate
-  follow-up now tracks through `0117` plan.
+- `0112` owns shipped public ingress, same-binding correctness, and the audited
+  same-binding serving-path closure,
+- `0108` now owns the shared strategy and explicit lane-planning rules that the
+  source-bound path consumes,
+- and the remaining mounted rollout and delete-gate cleanup now track through
+  `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`.
 
 # Implementation Status
 
-As of `2026-03-28`, the repository has landed the main repo-local contract
-and ingress pieces for `0112`, and the audited Step3p5 mounted 8xH800 path has
-been validated end-to-end through
-`/data/tc/s35-0112/tc-20260328-054200`:
+As of `2026-04-10`, the repository has landed the main repo-local contract and
+ingress pieces for `0112`, and the audited Step3p5 same-binding mounted path is
+closed end-to-end:
 
 - `RepresentationPublishContract` is no longer artifact-id-only; it now carries
   a first-class `ServingPublicationSubject` / `BindingValueRef` union in proto
@@ -110,7 +110,16 @@ been validated end-to-end through
   ingress, `BindingRealizationPlan`, binding-subject publication, and
   fail-closed canonical-full seal without taking runtime fallback.
 - the ready service also serves a real validation completion request, so the
-  current blocker set is no longer correctness but performance.
+  path is no longer blocked on correctness.
+- the audited mounted operator packet now includes collective-dominant
+  realization evidence:
+  - `collective_handled=1`,
+  - `actual_collective_committed_bytes=25550556928`,
+  - `dominant_executor=OwnerFileCollectiveExecutor`,
+  - `publish_hash_rounds=0`,
+  - `publish_hash_location=seal`,
+  - `publish_hash_backend=gpu`,
+  - and `publish_hash_identity_forming=True`.
 
 `0112` is now complete at its shipped scope.
 
@@ -123,26 +132,22 @@ That shipped scope is explicit:
 - and `BindingRealizationPlan` is the public work-item-list contract that the
   repo now ships.
 
-The remaining work after this design closeout is primarily execution-model
-convergence, performance, and delete-gate work, not shipped-correctness blocker
-work.
+The remaining work after this design closeout is no longer shipped-correctness
+blocker work. It is:
+
+- shared strategy-plane follow-up owned by `0108`,
+- owner-file collective executor rollout owned by `0109`,
+- and mounted rollout plus delete-gate cleanup tracked by the `0112-01`
+  companion plan.
 
 In particular:
 
 - `0112` closed the correctness path for binding-native same-binding serving
-  startup,
-- but it did not attempt to make the source-bound realization path
-  `collective-first`,
-- and follow-on architecture work may still tighten how the shared runtime
-  strategy trunk should consume `BindingRealizationPlan` and
-  `RepresentationWorkPlan`.
-
-That remaining work is now tracked only in the `0113` closure design/plan.
-
-- the deleted `0112` companion plan and Step3p5 performance follow-up note are
-  no longer active execution SOT;
-- source-bound collective contract cutover, single-mint closeout, executor
-  convergence, and final legacy deletion now belong to `0113`.
+  startup and now also records the audited Step3p5 same-binding closure result,
+- while the shared runtime strategy trunk that feeds that path is owned by
+  `0108`,
+- and the remaining path-level rollout and delete-gate work is tracked by
+  `0112-01`.
 
 # Closure Summary
 
@@ -222,34 +227,24 @@ legacy `tensor_dict/materialize_subset(...)`.
 What remains after this closure is not "remove one more bridge." What remains
 is optimize the slow but now-correct path.
 
-## 7. Performance follow-up
+## 7. Audited mounted closure and remaining follow-up
 
-The current mounted 8xH800 evidence gives a clear performance picture:
+For the audited Step3p5 same-binding path, the old "generic-dominant mounted
+baseline" is no longer the current state. The closure packet now shows:
 
-- TensorCast cold-start case `/data/tc/s35-0112/tc-20260328-054200` reaches
-  ready in about `402.45s`.
-- Same-worker default baseline
-  `/data/tc/s35-default/default-20260328-055149` reaches ready in about
-  `212.44s`.
-- The TensorCast delta is therefore about `190s`.
+- collective-dominant realization on the audited operator path,
+- same-binding serving readiness through the binding-native publication subject,
+- one surviving identity-forming seal hash on the audited path,
+- and operator-visible typed execution plus hash facts sufficient to treat the
+  audited closure as complete.
 
-That delta is now well localized:
+What remains after that audited closure is not new `0112` architecture work.
+The remaining work is:
 
-- `materialize_mapped_into_target` averages about `142.36s/rank` and still runs
-  on `GenericByteRangeExecutor(source_ordered)` with
-  `direct_write_supported=0` and `collective_handled=0`.
-- binding-subject publication still spends about `37.35s/rank` in
-  `publication.wait_assembly_attempt`.
-- daemon closeout breakdown shows about `15.41s` in
-  `seal_from_cut.compute_data_multihash` and about `21.60s` in
-  `assembly_attempt.finalize_dependency_ready_closeout`.
-
-These are the next `0112`-consistent optimization targets:
-
-- make mapped disk realization enter a faster executor shape,
-- and remove duplicate closeout-time hashing / sealing work that is now
-  provably redundant once the serving subject has already been promoted from
-  the same immutable binding current value.
+- broader mounted evidence hardening and delete-gate cleanup under the
+  `0112-01` companion plan,
+- shared strategy or local-executor follow-up under `0108`,
+- and owner-file collective executor rollout under `0109`.
 
 ## Secondary closure items
 

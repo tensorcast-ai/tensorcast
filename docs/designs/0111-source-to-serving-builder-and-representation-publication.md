@@ -21,8 +21,8 @@ related_code:
   - daemon/service/controllers/serving_artifact_manifest_utils.{h,cc}
 links:
   related:
-    - ./0113-step3p5-closure-and-sot-convergence.md
-    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0108-tensor-aware-materialization-strategy-plane.md
+    - ./0112-binding-native-serving-realization-and-publication.md
   dependencies:
     - ./0110-artifact-representation-contract-and-transform-unification.md
     - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md

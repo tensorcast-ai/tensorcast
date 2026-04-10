@@ -11,7 +11,7 @@ model loading, with emphasis on:
 
 - TP-aware rank-local slicing in the current internal-vLLM TensorCast loader,
 - local SSD versus shared filesystem behavior,
-- daemon-side executor selection under the converged `0108-01` strategy plane,
+- daemon-side executor selection under the converged `0108` strategy plane,
 - the difference between ordinary `tensor_dict` startup and mapped `into-target` paths.
 
 Related docs:
@@ -52,7 +52,7 @@ The current disk strategy is split into four boundaries:
 4. Replica/runtime execution consumes the selected plan; it is no longer the
    architecture owner of `AUTO`.
 
-This is the important post-`0108-01` ownership split:
+This is the important post-`0108` ownership split:
 
 - integrations still own TP-local selection shaping,
 - daemon normalization owns policy/topology separation,
@@ -73,8 +73,9 @@ Important boundaries:
 
 ## Typed Daemon Defaults
 
-The default `0108-01` strategy entry point is daemon config, not ad-hoc environment
-variables:
+The strategy entry point is daemon config, not ad-hoc environment variables.
+The example below matches the generic repository sample config rather than the
+audited `internal-vllm` packaged serving config:
 
 ```yaml
 engine:
@@ -344,7 +345,9 @@ flowchart TD
 Current defaults and caveats:
 
 - `enable_owner_file_collective` exists,
-- the default daemon config keeps it `false`,
+- the generic sample config shown above keeps it `false`, while the audited
+  `internal-vllm` packaged serving config may enable it for the same-binding
+  mounted path,
 - owner-file batch planning is now the steady-state owner collective path,
 - eager `owned_payload` preload and root whole-source preload are explicitly
   legacy fallback scaffolding,

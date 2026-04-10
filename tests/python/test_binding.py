@@ -1589,6 +1589,32 @@ def test_create_client_binding_uses_region_backed_layout_on_rpc(
     ]
 
 
+def test_create_daemon_binding_uses_physical_device_id_on_rpc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setattr(store_mod, "device_uuid_for", lambda device_id: "gpu-visible-0")
+    layout = store_mod.build_owned_layout(
+        entries=canonical_index_from_bytes(_make_index_bytes()).entries,
+        device_id=0,
+        index_kind=(store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED),
+        logical_layout_hash=None,
+        separate_storages=True,
+    )
+
+    created = store.create_binding(layout, ownership="daemon", device="cuda:0")
+
+    assert created.binding_layout_id == layout.binding_layout_id
+    assert len(client.create_binding_calls) == 1
+    create_call = client.create_binding_calls[0]
+    assert create_call["device_uuid"] == "gpu-visible-0"
+    storages = list(create_call["target_layout"].storages)
+    assert len(storages) == 2
+    assert [storage.device_id for storage in storages] == [1, 1]
+    assert next(iter(created.tensors.values())).device == torch.device("cuda", 0)
+
+
 def test_sealed_binding_value_contributes_piece_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

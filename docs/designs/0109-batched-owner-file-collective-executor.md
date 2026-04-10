@@ -23,10 +23,10 @@ related_code:
 links:
   dependencies:
     - ./0108-tensor-aware-materialization-strategy-plane.md
-    - ./0113-step3p5-closure-and-sot-convergence.md
   related:
     - ./0107-retrieval-policy-plane-cleanup.md
-    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0112-binding-native-serving-realization-and-publication.md
+    - ../plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md
     - ../internals/disk-load-strategy.md
     - ../internals/model-loading.md
     - ../benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
@@ -121,9 +121,26 @@ The implemented steady-state scope remains intentionally zero-residual-only:
 
 Residual execution tracking after this phase-1 landing is now centralized:
 
-- the deleted `0109` companion plan is no longer the active execution owner;
+- the deleted earlier `0109` companion plan is no longer the active execution
+  owner;
 - mixed-residual policy, benchmark recapture, serving graduation evidence, and
-  prototype-deletion gates now live only in the `0113` design/plan pair.
+  prototype-deletion gates now live in
+  `docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`;
+- `0108` remains the sole strategy-plane owner, and `0112` remains the
+  same-binding serving-path owner; this design owns only the executor-specific
+  collective behavior on top of that shared trunk.
+
+## Remaining Active Work
+
+The remaining `0109`-owned work is executor-specific rather than architectural:
+
+- decide and document the mixed-residual policy for owner-file collective
+  requests,
+- recapture shared-source benchmark and serving evidence for the bounded batched
+  executor,
+- freeze the defaulting and backout policy for shared-source workloads,
+- and delete the remaining eager owner preload and root whole-source fallback
+  scaffolding once the bounded path is proven.
 
 # Sequencing Note
 
@@ -362,7 +379,7 @@ But it remains single-rank and does not solve the cross-rank shared source
 duplication problem. On shared filesystems that still leaves real performance on
 the table.
 
-Current runtime starting point after `0108-01`:
+Current runtime starting point after the converged `0108` strategy seam:
 
 - ordinary disk startup already builds a common-runtime `ExecutionStrategyPlan`,
 - `AUTO` currently prefers `TensorBatchedLocalExecutor` before the collective
@@ -1090,8 +1107,8 @@ In short:
 
 - [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
 - [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
-- [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
+- [`docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`](/data/workspace/tensorcast-280/docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md)
 - [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
 - [`docs/internals/disk-load-strategy.md`](/data/workspace/tensorcast-280/docs/internals/disk-load-strategy.md)
 - [`core/store/replica/collective_disk_loader.cc`](/data/workspace/tensorcast-280/core/store/replica/collective_disk_loader.cc)

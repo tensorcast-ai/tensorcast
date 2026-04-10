@@ -20,7 +20,11 @@ from tensorcast._c_ext import (
     get_cuda_memory_handle_with_offset,
 )
 from tensorcast.api._config import RegisterArtifactOptions, StorePolicy
-from tensorcast.api._device import device_uuid_for, resolve_device
+from tensorcast.api._device import (
+    device_uuid_for,
+    protocol_device_id_for,
+    resolve_device,
+)
 from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
@@ -75,6 +79,7 @@ from tensorcast.api.store.mapped_binding import (
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.owned_binding_layout import (
     BindingLayout,
+    build_binding_layout,
     build_owned_layout,
 )
 from tensorcast.api.store.owned_binding_slot import (
@@ -792,6 +797,18 @@ def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
     return inferred or ArtifactIdKind.MI2
 
 
+def _target_layout_with_protocol_device_id(
+    layout: BindingLayout,
+    *,
+    device_id: int,
+) -> store_daemon_pb2.TargetLayout:
+    target_layout = store_daemon_pb2.TargetLayout()
+    target_layout.CopyFrom(layout.target_layout)
+    for storage in target_layout.storages:
+        storage.device_id = int(device_id)
+    return target_layout
+
+
 def _decode_published_model_version_from_response(
     resp: operation_pb2.GetOperationResponse, *, assembly_id: str
 ) -> PublishedModelVersion:
@@ -1262,9 +1279,13 @@ class Store:
                 )
             device_obj = torch.device(device)
             device_id = resolve_device(device_obj, allow_cpu=False)
+            protocol_device_id = protocol_device_id_for(device_id)
             response = client.create_binding(
                 ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_DAEMON,
-                target_layout=layout.target_layout,
+                target_layout=_target_layout_with_protocol_device_id(
+                    layout,
+                    device_id=protocol_device_id,
+                ),
                 target_index_bytes=layout.target_index_bytes,
                 device_uuid=device_uuid_for(device_id),
                 binding_layout_id=layout.binding_layout_id,
@@ -1410,13 +1431,23 @@ class Store:
                 pipeline=self._materialization,
                 expected_index=expected_index,
             )
+            protocol_device_id = protocol_device_id_for(device_id)
             response = client.create_binding(
                 ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_CLIENT,
                 # Client-owned bindings need a readable source layout on the
                 # daemon side so later SubmitBindingContribution calls can lower
                 # directly from the live tensors without fabricating an
                 # allocation-backed handle path.
-                target_layout=readable_layout.layout,
+                target_layout=_target_layout_with_protocol_device_id(
+                    build_binding_layout(
+                        target_layout=readable_layout.layout,
+                        target_index_bytes=layout.target_index_bytes,
+                        dst_specs=layout.dst_specs
+                        if copy_plan_proto is not None
+                        else None,
+                    ),
+                    device_id=protocol_device_id,
+                ),
                 target_index_bytes=layout.target_index_bytes,
                 device_uuid=device_uuid_for(device_id),
                 binding_layout_id=layout.binding_layout_id,

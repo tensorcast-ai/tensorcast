@@ -30,8 +30,8 @@ related_code:
   - daemon/service/controllers/materialization_target_plan_utils.cc
 links:
   related:
-    - ./0113-step3p5-closure-and-sot-convergence.md
-    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0108-tensor-aware-materialization-strategy-plane.md
+    - ./0112-binding-native-serving-realization-and-publication.md
   dependencies:
     - ./0055-programmable-framework.md
     - ./0078-selection-first-artifact-retrieval.md
