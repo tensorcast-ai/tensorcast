@@ -77,11 +77,17 @@ class Runtime:
                 "Daemon ingress currently supports terminal_only execution only"
             )
         resolved_plan_spec = self._rewrite_compat_hydrate_actions(plan_spec)
-        response = self._client.execute_plan(
-            plan=resolved_plan_spec,
-            execution_class=execution_class,
-            dry_run=dry_run,
-        )
+        execute_plan_kwargs: dict[str, object] = {
+            "plan": resolved_plan_spec,
+            "execution_class": execution_class,
+            "dry_run": dry_run,
+        }
+        if resolved_plan_spec.context.HasField("deadline_ms"):
+            execute_plan_kwargs["timeout_s"] = max(
+                0.001,
+                float(resolved_plan_spec.context.deadline_ms) / 1000.0,
+            )
+        response = self._client.execute_plan(**execute_plan_kwargs)
         result = PlanResult.from_node_agent_response(response)
         self._remember_publish_manifests_from_result(result)
         return result

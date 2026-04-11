@@ -10,7 +10,7 @@ import pytest
 import tensorcast
 from tensorcast.api.context import CallContext, GovernanceContext
 from tensorcast.api.errors import ArtifactError
-from tensorcast.api.plan import Instance, PlanResult
+from tensorcast.api.plan import Instance, PlanFailedError, PlanResult
 from tensorcast.api.runtime import connect
 from tensorcast.engine_adapter.artifact_api import (
     EngineOwnedManifest,
@@ -56,6 +56,7 @@ class _FakeDaemonClient:
     last_plan = None
     last_execution_class: str | None = None
     last_dry_run: bool | None = None
+    last_timeout_s: float | None = None
 
     def execute_plan(
         self,
@@ -63,10 +64,12 @@ class _FakeDaemonClient:
         plan,
         execution_class: str = "terminal_only",
         dry_run: bool = False,
+        timeout_s: float = 30.0,
     ) -> node_agent_pb2.ExecutePlanResponse:
         self.last_plan = plan
         self.last_execution_class = execution_class
         self.last_dry_run = dry_run
+        self.last_timeout_s = timeout_s
         if self.response_factory is not None:
             return self.response_factory(plan)
         response = node_agent_pb2.ExecutePlanResponse(
@@ -108,9 +111,27 @@ def test_connect_registers_active_runtime_and_plan_uses_ingress() -> None:
     assert isinstance(result, PlanResult)
     assert client.last_execution_class == "terminal_only"
     assert client.last_dry_run is False
+    assert client.last_timeout_s == 30.0
     assert client.last_plan is not None
     assert client.last_plan.context.request_id == "req-runtime"
     assert client.last_plan.governance.lane == "runtime-lane"
+    runtime.close()
+
+
+def test_runtime_execute_plan_propagates_call_deadline_to_daemon_timeout() -> None:
+    client = _FakeDaemonClient("127.0.0.1:50051")
+    runtime = connect(
+        daemon_address="127.0.0.1:50051",
+        client_factory=lambda address: client,
+    )
+    plan = runtime.plan(
+        CallContext(request_id="req-runtime-deadline", deadline_ms=120_000)
+    )
+
+    result = plan.run()
+
+    assert result.ok is True
+    assert client.last_timeout_s == 120.0
     runtime.close()
 
 
@@ -225,6 +246,90 @@ def test_runtime_caches_publish_manifest_from_publish_result() -> None:
     assert publish_result.ok is True
     resolved = runtime.resolve_publish_manifest(engine_request_id="rid-publish-cache")
     assert resolved == publish_manifest
+    runtime.close()
+
+
+def test_runtime_publish_failure_surfaces_to_controller() -> None:
+    def _response_factory(plan) -> node_agent_pb2.ExecutePlanResponse:  # noqa: ANN001
+        response = node_agent_pb2.ExecutePlanResponse(
+            request_id=plan.context.request_id,
+            ok=False,
+        )
+        response.steps.add(
+            step_id=str(plan.steps[0].step_id),
+            target_id=str(plan.steps[0].target.target_id),
+            action="publish",
+            status=node_agent_pb2.OperationStatus(
+                state=node_agent_pb2.OPERATION_STATE_FAILED,
+                message="publish failed closed",
+            ),
+        )
+        return response
+
+    client = _FakeDaemonClient(
+        "127.0.0.1:50051",
+        response_factory=_response_factory,
+    )
+    runtime = connect(
+        daemon_address="127.0.0.1:50051",
+        client_factory=lambda address: client,
+    )
+    plan = runtime.plan(CallContext(request_id="req-runtime-publish-fail"))
+    plan.on_instance(
+        Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    ).publish(engine_request_id="rid-publish-fail")
+
+    with pytest.raises(PlanFailedError) as exc_info:
+        plan.run()
+
+    result = exc_info.value.result
+    assert result.ok is False
+    assert result.steps["step-0001"].action == "publish"
+    assert result.steps["step-0001"].status.state == "failed"
+    assert result.steps["step-0001"].status.message == "publish failed closed"
+    runtime.close()
+
+
+def test_runtime_hydrate_failure_surfaces_to_controller() -> None:
+    publish_manifest = _sample_publish_manifest(rid="rid-hydrate-fail")
+
+    def _response_factory(plan) -> node_agent_pb2.ExecutePlanResponse:  # noqa: ANN001
+        response = node_agent_pb2.ExecutePlanResponse(
+            request_id=plan.context.request_id,
+            ok=False,
+        )
+        response.steps.add(
+            step_id=str(plan.steps[0].step_id),
+            target_id=str(plan.steps[0].target.target_id),
+            action="hydrate",
+            status=node_agent_pb2.OperationStatus(
+                state=node_agent_pb2.OPERATION_STATE_FAILED,
+                message="hydrate failed closed",
+            ),
+        )
+        return response
+
+    client = _FakeDaemonClient(
+        "127.0.0.1:50051",
+        response_factory=_response_factory,
+    )
+    runtime = connect(
+        daemon_address="127.0.0.1:50051",
+        client_factory=lambda address: client,
+    )
+    plan = runtime.plan(CallContext(request_id="req-runtime-hydrate-fail"))
+    plan.on_instance(
+        Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    ).hydrate(publish_manifest=publish_manifest)
+
+    with pytest.raises(PlanFailedError) as exc_info:
+        plan.run()
+
+    result = exc_info.value.result
+    assert result.ok is False
+    assert result.steps["step-0001"].action == "hydrate"
+    assert result.steps["step-0001"].status.state == "failed"
+    assert result.steps["step-0001"].status.message == "hydrate failed closed"
     runtime.close()
 
 
