@@ -115,6 +115,11 @@ TEST_CASE(
   auto address_or = cache.resolve_daemon_address("daemon-a", now, staleness_budget);
   REQUIRE(address_or.ok());
   REQUIRE(*address_or == "127.0.0.1:50051");
+
+  auto entry_or = cache.resolve_daemon_entry("daemon-a", now, staleness_budget);
+  REQUIRE(entry_or.ok());
+  REQUIRE(entry_or->address == "127.0.0.1:50051");
+  REQUIRE(entry_or->node_address == local_default_ip);
 }
 
 } // namespace

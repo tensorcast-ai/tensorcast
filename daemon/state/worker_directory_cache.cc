@@ -40,13 +40,6 @@ std::string canonicalize_same_host_address(std::string_view address) {
 
 WorkerDirectoryCache::Entry canonicalize_entry(WorkerDirectoryCache::Entry entry) {
   entry.address = canonicalize_same_host_address(entry.address);
-  if (!entry.node_address.empty() && entry.p2p_port != 0) {
-    entry.node_address = canonicalize_same_host_address(absl::StrCat(entry.node_address, ":", entry.p2p_port));
-    const std::size_t port_sep = entry.node_address.rfind(':');
-    if (port_sep != std::string::npos) {
-      entry.node_address = entry.node_address.substr(0, port_sep);
-    }
-  }
   return entry;
 }
 
