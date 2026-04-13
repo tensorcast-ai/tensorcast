@@ -19,6 +19,7 @@ namespace {
 using RepresentationWorkItem = materialization::contracts::RepresentationWorkItem;
 using RepresentationWorkItemKind = materialization::contracts::RepresentationWorkItemKind;
 using RepresentationWorkPlan = materialization::contracts::RepresentationWorkPlan;
+using RepresentationWorkSourceFragment = materialization::contracts::RepresentationWorkSourceFragment;
 using WorkPartitionKind = materialization::contracts::WorkPartitionKind;
 
 uint64_t byte_range_map_covered_bytes(const loader::ByteRangeMap& map) {
@@ -98,11 +99,30 @@ void summarize_work_plan(
           summary->planned_collective_candidate_bytes += item.committed_bytes;
         }
         break;
-      case RepresentationWorkItemKind::kConcatAssemble:
-        summary->planned_non_admitted_typed_bytes += item.committed_bytes;
-        lane_plan->deferred_typed_bytes += item.committed_bytes;
-        add_reject_reason_bytes(&summary->planner_reject_reason_buckets, "concat_not_admitted", item.committed_bytes);
-        break;
+      case RepresentationWorkItemKind::kConcatAssemble: {
+        const bool concat_collective_compatible = [&]() {
+          if (item.sources.empty()) {
+            return false;
+          }
+          for (const RepresentationWorkSourceFragment& source : item.sources) {
+            if (source.fragment.source_range.axes.size() != 1 || source.fragment.destination_range.axes.size() != 1) {
+              return false;
+            }
+            if (source.fragment.source_range.axes.front().dim != 0 ||
+                source.fragment.destination_range.axes.front().dim != 0) {
+              return false;
+            }
+          }
+          return true;
+        }();
+        if (concat_collective_compatible) {
+          summary->planned_collective_candidate_bytes += item.committed_bytes;
+        } else {
+          summary->planned_non_admitted_typed_bytes += item.committed_bytes;
+          lane_plan->deferred_typed_bytes += item.committed_bytes;
+          add_reject_reason_bytes(&summary->planner_reject_reason_buckets, "concat_not_admitted", item.committed_bytes);
+        }
+      } break;
       case RepresentationWorkItemKind::kConstFill:
       case RepresentationWorkItemKind::kScalarBroadcastFill:
         summary->planned_local_typed_bytes += item.committed_bytes;
@@ -197,6 +217,13 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
         "typed_work_not_collective_admitted",
         strategy_plan.summary.planned_non_admitted_typed_bytes);
   }
+  if (strategy_plan.summary.planned_generic_residual_bytes > 0 &&
+      !strategy_config.owner_file_collective_allow_mixed_residual) {
+    add_reject_reason_bytes(
+        &strategy_plan.summary.planner_reject_reason_buckets,
+        "mixed_generic_residual_policy_disabled",
+        strategy_plan.summary.planned_generic_residual_bytes);
+  }
 
   const bool base_collective_prereqs_ok = strategy_config.enable_owner_file_collective && disk_source_available &&
       has_collective_group && world_size > 1 &&
@@ -209,7 +236,10 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
   strategy_plan.summary.strict_pure_collective_eligible = strategy_plan.summary.collective_lane_eligible &&
       strategy_plan.summary.planned_non_admitted_typed_bytes == 0 &&
       strategy_plan.summary.planned_local_typed_bytes == 0 && strategy_plan.summary.planned_generic_residual_bytes == 0;
+  const bool mixed_generic_residual_allowed = strategy_plan.summary.planned_generic_residual_bytes == 0 ||
+      strategy_config.owner_file_collective_allow_mixed_residual;
   const bool can_execute_collective_plan = strategy_plan.summary.collective_lane_eligible &&
+      mixed_generic_residual_allowed &&
       (strategy_config.allow_mixed_execution || strategy_plan.summary.strict_pure_collective_eligible);
   const uint64_t required_data_bytes = strategy_plan.summary.planned_collective_candidate_bytes +
       strategy_plan.summary.planned_non_admitted_typed_bytes + strategy_plan.summary.planned_generic_residual_bytes;

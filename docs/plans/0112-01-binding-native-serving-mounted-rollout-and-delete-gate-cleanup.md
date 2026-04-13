@@ -4,7 +4,7 @@ title: Binding-Native Serving Mounted Rollout and Delete-Gate Cleanup Plan
 status: in_progress
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "serving"]
 created: 2026-04-10
-last_updated: 2026-04-10
+last_updated: 2026-04-13
 related_code:
   - docs/designs/0112-binding-native-serving-realization-and-publication.md
   - daemon/service/controllers/assembly_operation_service.cc
@@ -40,18 +40,78 @@ checklist.
   - harden the operator-visible mounted evidence packet,
   - clean up transitional bridge and delete-gate logic once evidence is
     sufficient,
-  - and keep second-family `BINDING_FINALIZE` validation explicitly deferred
-    until a locally runnable family exists.
+  - and treat second-family `BINDING_FINALIZE` validation as a rollout-quality
+    gate rather than an environment-availability gap now that qwen2.5 is
+    locally runnable.
+- The operator-visible typed packet now also carries actual collective evidence
+  beyond the Step3p5 minimum:
+  - collective unique-source bytes,
+  - peer-transfer bytes,
+  - peak temporary bytes,
+  - batch count,
+  - dedup savings,
+  - and the existing hash backend/location/identity facts.
 - The local qwen3 `PURE_TRANSFORM` reference slice is already captured as a
   mounted evidence-hardening sample, but it is not a substitute for a second
   representative `BINDING_FINALIZE` family.
+- The provided local `Qwen2.5-32B-Instruct` checkpoint is useful for `0108` /
+  `0109` host-local trace and benchmark work, but the current
+  `internal-vllm` qwen2 family gate is no longer the blocker:
+  - repo-local family readiness now admits qwen2 to the same PURE_TRANSFORM
+    serving-only runtime allowlist as qwen3,
+  - `2026-04-13` local debugging first showed three distinct outcomes:
+    - `TP=1` with generic `vllm serve --load-format dummy` can reach
+      readiness when `--kv-cache-memory-bytes=8GiB` is supplied,
+    - `TP=1` with `--load-format tensorcast` still fails during
+      `CreateBinding` with daemon-side `cudaErrorMemoryAllocation` because the
+      same-binding target allocation cannot coexist with the already-materialized
+      ~61 GiB runtime model on one H800,
+    - `TP>=2` fails before ready even under generic
+      `vllm serve --load-format dummy`, with worker death during distributed
+      engine startup (`determine_available_memory` / KV-cache init path) and
+      allocator corruption signals outside TensorCast,
+  - the distributed-runtime instability is now worked around on this host class
+    with the safe TP4 serving flags already captured in local debug logs, and
+    both `--load-format tensorcast` and `--load-format safetensors` can reach
+    `/health=200`,
+  - the remaining qwen2.5 blocker is not readiness but evidence quality:
+    the first TP4 TensorCast packet showed `planned_collective_admitted_bytes`
+    near `1.3MiB` while runtime executed `actual_collective_committed_bytes`
+    near `16.38GiB`,
+  - repo-local debugging traced that mismatch to copy-plan lowering feeding the
+    whole mapped byte space into `compatibility_lowered_map` instead of only the
+    compatibility-admitted subset, which in turn over-selected
+    `OwnerFileCollectiveExecutor`,
+  - fixing that seam exposed a second repo-local bug where
+    `executor_generic_data_map` was derived from the narrowed compatibility map
+    rather than the full `generic_fallback_map`, so the updated daemon then
+    failed closed with `generic_backend_coverage_unproven`,
+  - both daemon-side lowering seams are now fixed in repo-local code with
+    targeted regression coverage,
+  - and `2026-04-13` refreshed mounted qwen2.5 TP4 evidence now shows:
+    - `/health=200`, `/v1/models`, and `/v1/completions`,
+    - `Tensorcast bootstrap realized SAME_BINDING_FAST_PATH: family=qwen2`,
+    - `planned_collective_admitted_bytes=16382928896`,
+    - `actual_collective_committed_bytes=16382928896`,
+    - `actual_generic_backend_bytes=0`,
+    - `dominant_executor=OwnerFileCollectiveExecutor`,
+    - `publish_hash_location=seal`,
+    - `publish_hash_backend=gpu`,
+    - and `publish_hash_identity_forming=True`,
+  - but that second representative family is still not cleanup-ready:
+    - the same safe TP4 `safetensors` baseline loads in about `6.36s` to
+      `6.41s`,
+    - while TensorCast remains about `84.6s` to `85.4s`,
+    - and the mounted logs still show slow `ResolvePublicDiskSource`
+      (~`54s`) plus slow `RefillOwnedBinding` (~`38s` to `47s`) before serving
+      readiness.
 
 # Phases & Milestones
 
-- [ ] Phase 1: Evidence Surface Hardening
-  - [ ] Milestone 1.1: surface any remaining operator-visible mounted metrics
+- [x] Phase 1: Evidence Surface Hardening
+  - [x] Milestone 1.1: surface any remaining operator-visible mounted metrics
     required beyond the Step3p5 minimum packet.
-  - [ ] Milestone 1.2: make the mounted evidence packet stable enough that
+  - [x] Milestone 1.2: make the mounted evidence packet stable enough that
     delete-gate cleanup can depend on it.
   - [x] Milestone 1.3: capture one local mounted reference slice beyond Step3p5
     without treating it as a `BINDING_FINALIZE` substitute.
@@ -71,7 +131,7 @@ checklist.
 
 # Tasks
 
-- [ ] Audit mounted operator-visible surfaces for any remaining missing metrics:
+- [x] Audit mounted operator-visible surfaces for any remaining missing metrics:
   - collective unique-source bytes
   - peer-transfer bytes
   - peak temporary bytes
@@ -99,8 +159,9 @@ checklist.
   - historical closure references in TensorCast docs
   - surviving cross-repo references under `internal-vllm`
 
-- [ ] Keep the second representative `BINDING_FINALIZE` family explicitly
-  deferred until it becomes locally runnable.
+- [ ] Keep the second representative `BINDING_FINALIZE` mounted packet current
+  now that qwen2.5 is locally runnable, but do not treat mere readiness as
+  sufficient evidence for delete-gate cleanup.
 
 ## Qwen3 Mounted Reference Slice
 

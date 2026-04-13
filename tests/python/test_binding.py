@@ -778,6 +778,11 @@ def test_binding_swap_tracks_last_execution_diagnostics(
         direct_write_supported=False,
         fallback_bytes=128,
         residual_bytes=0,
+        collective_unique_source_bytes=256,
+        collective_peer_transfer_bytes=96,
+        collective_peak_temporary_bytes=512,
+        collective_batch_count=3,
+        collective_dedup_saving_bytes=160,
         hash_rounds=1,
         hash_backend=store_daemon_pb2.HASH_BACKEND_D2H_CPU,
         hash_bytes=128,
@@ -796,6 +801,11 @@ def test_binding_swap_tracks_last_execution_diagnostics(
     assert diagnostics.collective_policy is CollectivePolicy.COLLECTIVE_FIRST
     assert diagnostics.collective_failure_class is CollectiveFailureClass.NOT_ELIGIBLE
     assert diagnostics.collective_skip_reason == "planner_collective_strategy_disabled"
+    assert diagnostics.collective_unique_source_bytes == 256
+    assert diagnostics.collective_peer_transfer_bytes == 96
+    assert diagnostics.collective_peak_temporary_bytes == 512
+    assert diagnostics.collective_batch_count == 3
+    assert diagnostics.collective_dedup_saving_bytes == 160
     assert diagnostics.hash_backend is HashBackend.D2H_CPU
     assert diagnostics.hash_bytes == 128
     assert diagnostics.hash_wall_time_ms == 7

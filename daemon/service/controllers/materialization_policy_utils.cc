@@ -355,6 +355,11 @@ v2::ExecutionDiagnostics build_execution_diagnostics(
   diagnostics.set_actual_collective_committed_bytes(result->actual_collective_committed_bytes);
   diagnostics.set_actual_local_typed_bytes(result->actual_local_typed_bytes);
   diagnostics.set_actual_generic_backend_bytes(result->actual_generic_backend_bytes);
+  diagnostics.set_collective_unique_source_bytes(result->collective_unique_source_bytes);
+  diagnostics.set_collective_peer_transfer_bytes(result->collective_peer_transfer_bytes);
+  diagnostics.set_collective_peak_temporary_bytes(result->collective_peak_temporary_bytes);
+  diagnostics.set_collective_batch_count(result->collective_batch_count);
+  diagnostics.set_collective_dedup_saving_bytes(result->collective_dedup_saving_bytes);
   diagnostics.set_collective_skip_reason(result->collective_skip_reason);
   if (collective_requested && !result->collective_handled) {
     diagnostics.set_collective_failure_class(v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);

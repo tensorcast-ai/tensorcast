@@ -767,6 +767,123 @@ TEST_CASE(
   std::filesystem::remove_all(artifact_root, cleanup_ec);
 }
 
+TEST_CASE(
+    "MaterializationFacade AUTO keeps dim1-amplified host-local workloads on exact generic execution",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_dim1_auto");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[4,16],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 5));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = false;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(harness, artifact_root, loading::SourceLocalityHint::kHostLocal, std::nullopt);
+  REQUIRE(ctx.hints.variant.has_value());
+  ctx.hints.variant->view_id = "view:dim1";
+  ctx.hints.variant->view_spec = view_contracts::ViewSpec{
+      .tensors =
+          {
+              {
+                  "tensor",
+                  view_contracts::TensorViewOps{
+                      .ops =
+                          {
+                              view_contracts::ViewOp::Narrow(
+                                  view_contracts::NarrowOp{.dim = 1, .start = 0, .length = 4}),
+                          },
+                  },
+              },
+          },
+  };
+  ctx.resolved_view_plan = view_contracts::ViewPlan{
+      .is_identity = false,
+      .view_size_bytes = 16,
+      .view_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
+  };
+
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kGenericByteRange);
+  REQUIRE(plan_or->candidates.size() == 3);
+  CHECK(plan_or->candidates[1].eligible);
+  CHECK(plan_or->candidates[1].reason == "eligible");
+  CHECK(plan_or->selection_reason.find("local_source_amplification_exceeds_generic") != std::string::npos);
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade explicit tensor-aware-local preference still allows dim1-amplified workloads",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_dim1_force_local");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[4,16],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 9));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = false;
+  opts.materialization_strategy.executor_preference =
+      StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kTensorAwareLocal;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(harness, artifact_root, loading::SourceLocalityHint::kHostLocal, std::nullopt);
+  REQUIRE(ctx.hints.variant.has_value());
+  ctx.hints.variant->view_id = "view:dim1";
+  ctx.hints.variant->view_spec = view_contracts::ViewSpec{
+      .tensors =
+          {
+              {
+                  "tensor",
+                  view_contracts::TensorViewOps{
+                      .ops =
+                          {
+                              view_contracts::ViewOp::Narrow(
+                                  view_contracts::NarrowOp{.dim = 1, .start = 0, .length = 4}),
+                          },
+                  },
+              },
+          },
+  };
+  ctx.resolved_view_plan = view_contracts::ViewPlan{
+      .is_identity = false,
+      .view_size_bytes = 16,
+      .view_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
+  };
+
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  CHECK(plan_or->selection_reason == "executor_preference_tensor_aware_local");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
 TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stale", "[materialization_facade]") {
   SKIP_IF_NO_CUDA();
 
@@ -1756,6 +1873,131 @@ TEST_CASE(
   std::array<uint8_t, 8> host_out{};
   REQUIRE(tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, host_out.size(), cudaMemcpyDeviceToHost).ok());
   CHECK(host_out == initial);
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade surfaces collective execution metrics on handled mapped collective execution",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_collective_metrics");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[8],\"data_offsets\":[0,8]}}",
+      std::vector<unsigned char>(8, 0x5A));
+
+  FacadeHarness harness(MakeOptions(artifact_root));
+  harness.initialize();
+  harness.hooks->collective_mapped_target_load_override =
+      [](const tensorcast::store::replica::CollectiveMappedTargetLoadRequest&,
+         const std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>&,
+         std::chrono::milliseconds,
+         const tensorcast::store::replica::CollectiveMappedTargetLoadOptions&) {
+        return tensorcast::store::replica::CollectiveMappedTargetLoadResult{
+            .handled = true,
+            .status = absl::OkStatus(),
+            .metrics =
+                tensorcast::store::runtime::ingestion::strategy::CollectiveExecutionMetrics{
+                    .unique_source_bytes = 64,
+                    .peer_transfer_bytes = 32,
+                    .peak_temporary_bytes = 128,
+                    .batch_count = 2,
+                    .dedup_saving_bytes = 16,
+                },
+        };
+      };
+
+  void* gpu_buffer = nullptr;
+  REQUIRE(tensorcast::cuda::malloc(&gpu_buffer, 8).ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{gpu_buffer},
+          .length = 8,
+      });
+  target_layout.total_size = 8;
+
+  tensorcast::store::loader::ByteRangeMap full_map;
+  full_map.total_bytes = 8;
+  full_map.num_sources = 1;
+  full_map.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 8,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+
+  ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_collective_metrics";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,8,[8],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{};
+  auto prepared_execution = make_prepared_source_bound_execution_plan(resolved_plan, full_map, full_map);
+  prepared_execution.strategy_plan = make_source_bound_strategy_plan(
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionMode::kPureCollective,
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundLanePlan{
+          .collective_lane_map = full_map,
+          .generic_backend_map = full_map,
+          .require_collective_success = true,
+          .selection_reason = "pure_collective",
+      },
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+          .execution_plan_kind = "pure_collective",
+          .planned_collective_candidate_bytes = 8,
+          .planned_collective_admitted_bytes = 8,
+          .collective_lane_eligible = true,
+          .strict_pure_collective_eligible = true,
+      });
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = resolved_plan.artifact_id;
+  hints.collective_load_group = loading::CollectiveLoadGroupHint{
+      .group_id = "collective-metrics",
+      .world_size = 2,
+      .rank = 0,
+  };
+  hints.require_collective_execution = true;
+  loading::DiskMetadata disk_metadata;
+  disk_metadata.source_index_json = R"({"tensor":[0,8,[8],[1],"torch.uint8",0]})";
+  hints.disk_metadata = disk_metadata;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(
+      target_device,
+      prepared_execution,
+      hints,
+      loading::DiskSource{.path = artifact_root, .expected_size = std::nullopt});
+  REQUIRE(result_or.ok());
+  CHECK(result_or->collective_handled);
+  CHECK(result_or->actual_collective_committed_bytes == 8);
+  CHECK(result_or->collective_unique_source_bytes == 64);
+  CHECK(result_or->collective_peer_transfer_bytes == 32);
+  CHECK(result_or->collective_peak_temporary_bytes == 128);
+  CHECK(result_or->collective_batch_count == 2);
+  CHECK(result_or->collective_dedup_saving_bytes == 16);
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();

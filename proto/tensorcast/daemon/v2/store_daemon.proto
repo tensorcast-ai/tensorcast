@@ -584,6 +584,11 @@ message ExecutionDiagnostics {
   uint64 hash_bytes = 18;
   uint64 hash_wall_time_ms = 19;
   bool hash_identity_forming = 20;
+  uint64 collective_unique_source_bytes = 21;
+  uint64 collective_peer_transfer_bytes = 22;
+  uint64 collective_peak_temporary_bytes = 23;
+  uint64 collective_batch_count = 24;
+  uint64 collective_dedup_saving_bytes = 25;
 }
 
 message SourceBoundPlanDiagnostics {

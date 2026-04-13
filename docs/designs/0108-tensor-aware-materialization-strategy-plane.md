@@ -177,10 +177,11 @@ Partially implemented in this repository:
 - ordinary replica local-batched and collective executors now consume shared
   work-plan items and common-runtime-selected plan ownership instead of
   recovering semantic truth in executor-local code.
-- the current owner-file collective implementation still lives as a replica-side
-  prototype with eager `owned_payload` preload and optional root whole-source
-  preload, but it is now explicitly non-default prototype scaffolding rather
-  than the owner of ordinary startup routing.
+- the current owner-file collective implementation now uses the bounded batched
+  owner-file steady path without eager `owned_payload` residency or root
+  whole-source preload on the selected route, and ordinary host-local
+  local-batched selection is now driven by a shared planner/executor admission
+  summary rather than a late replica fallback.
 - ordinary non-collective `into_target` still executes through the generic
   byte-range backend after shared lowering.
 - `ExecutionCommitReport` and ordinary strategy-plan diagnostics now apply to

@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
+#include "core/store/runtime/ingestion/source_bound_strategy_planner.h"
+#include "core/store/store_engine_options.h"
 
 namespace tensorcast::daemon::materialization_target_plan {
 namespace {
@@ -60,6 +62,14 @@ tensorcast::common::v1::ByteSpaceRef canonical_byte_space() {
   tensorcast::common::v1::ByteSpaceRef out;
   out.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   return out;
+}
+
+uint64_t covered_bytes(const ByteRangeMap& map) {
+  uint64_t total = 0;
+  for (const auto& segment : map.segments) {
+    total += segment.length;
+  }
+  return total;
 }
 
 } // namespace
@@ -336,6 +346,170 @@ TEST_CASE(
   CHECK(
       resolved_plan_or->resolved_plan.representation_work_plan->items[0].kind ==
       tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill);
+}
+
+TEST_CASE(
+    "copy-plan collective compatibility map only keeps compatibility-admitted tensors",
+    "[materialization_target_plan]") {
+  const std::string source_index_json = R"({
+    "copy":[0,8,[4],[1],"torch.float16",0],
+    "left":[8,4,[2],[1],"torch.float16",0],
+    "right":[12,4,[2],[1],"torch.float16",0]
+  })";
+  auto source_table_or = parse_canonical_index(source_index_json);
+  REQUIRE(source_table_or.ok());
+  auto canonical_source_table_or = parse_canonical_index(source_index_json);
+  REQUIRE(canonical_source_table_or.ok());
+
+  absl::flat_hash_map<std::string, TensorLayoutSpec> dst_specs;
+  dst_specs.emplace("copy_dst", make_layout_spec(8, {4}, {1}));
+  dst_specs.emplace("concat_dst", make_layout_spec(8, {4}, {1}));
+  absl::flat_hash_map<std::string, uint64_t> dst_base_offsets;
+  dst_base_offsets.emplace("copy_dst", 0);
+  dst_base_offsets.emplace("concat_dst", 8);
+  absl::flat_hash_map<std::string, representation_layout::ViewNarrowSpec> view_narrows;
+
+  v2::CopyPlan copy_plan;
+  copy_plan.set_version(1);
+  {
+    auto* entry = copy_plan.add_entries();
+    entry->set_ckpt_name("copy");
+    entry->set_dst_name("copy_dst");
+  }
+  {
+    auto* entry = copy_plan.add_entries();
+    entry->set_ckpt_name("left");
+    entry->set_dst_name("concat_dst");
+    auto* src_range = entry->mutable_ckpt_range();
+    src_range->set_dim(0);
+    src_range->set_start(0);
+    src_range->set_end(2);
+    auto* dst_range = entry->mutable_dst_range();
+    dst_range->set_dim(0);
+    dst_range->set_start(0);
+    dst_range->set_end(2);
+  }
+  {
+    auto* entry = copy_plan.add_entries();
+    entry->set_ckpt_name("right");
+    entry->set_dst_name("concat_dst");
+    auto* src_range = entry->mutable_ckpt_range();
+    src_range->set_dim(0);
+    src_range->set_start(0);
+    src_range->set_end(2);
+    auto* dst_range = entry->mutable_dst_range();
+    dst_range->set_dim(0);
+    dst_range->set_start(2);
+    dst_range->set_end(4);
+  }
+
+  auto transform_or = representation_transform_builder::build_representation_transform_contract(
+      copy_plan,
+      *source_table_or,
+      *canonical_source_table_or,
+      dst_specs,
+      dst_base_offsets,
+      view_narrows,
+      canonical_byte_space(),
+      "local_seal_then_promote");
+  REQUIRE(transform_or.ok());
+  CHECK(transform_or->compatibility_stats.compatible_candidates == 1);
+  CHECK(transform_or->compatibility_stats.concat_candidates == 1);
+  CHECK(covered_bytes(transform_or->generic_fallback_map) == 16);
+  CHECK(covered_bytes(transform_or->compatibility_lowered_map) == 16);
+  REQUIRE(transform_or->compatibility_lowered_map.segments.size() == 3);
+
+  MappedTargetMaterializationPlan mapped_plan;
+  mapped_plan.representation = *transform_or;
+  mapped_plan.canonical_index_json =
+      R"({"copy_dst":[0,8,[4],[1],"torch.float16",0],"concat_dst":[8,8,[4],[1],"torch.float16",0]})";
+  mapped_plan.logical_total_size = 16;
+
+  store::loading::IntoTargetLayout target_layout;
+  target_layout.total_size = 16;
+  auto prepared_or = build_resolved_mapped_materialization_plan(
+      "artifact",
+      /*generation=*/13,
+      target_layout,
+      mapped_plan,
+      std::nullopt,
+      std::optional<std::string_view>(source_index_json));
+  REQUIRE(prepared_or.ok());
+  REQUIRE(prepared_or->lowering_artifacts.has_value());
+  REQUIRE(prepared_or->lowering_artifacts->collective_data_map.has_value());
+  CHECK(covered_bytes(*prepared_or->lowering_artifacts->collective_data_map) == 16);
+  REQUIRE(prepared_or->lowering_artifacts->executor_generic_data_map.has_value());
+  CHECK(covered_bytes(*prepared_or->lowering_artifacts->executor_generic_data_map) == 16);
+
+  store::StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  strategy_config.enable_owner_file_collective = true;
+  strategy_config.allow_mixed_execution = true;
+
+  store::loading::ExecutionTopologyContext topology;
+  topology.collective_load_group = store::loading::CollectiveLoadGroupHint{
+      .group_id = "group",
+      .world_size = 2,
+      .rank = 0,
+  };
+  topology.source_locality = store::loading::SourceLocalityHint::kSharedSource;
+  topology.source_sharing_domain = "shared-fs";
+
+  auto strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
+      prepared_or->resolved_plan,
+      prepared_or->lowering_artifacts,
+      store::runtime::ingestion::strategy::SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      topology,
+      /*disk_source_available=*/true);
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(
+      strategy_plan_or->lane_plan.mode ==
+      store::runtime::ingestion::strategy::SourceBoundExecutionMode::kCollectiveFirstMixed);
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 16);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 0);
+  CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 16);
+  CHECK(covered_bytes(strategy_plan_or->lane_plan.collective_lane_map) == 16);
+  CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
+}
+
+TEST_CASE("copy-plan compatibility map admits source-only dim1 shard copies", "[materialization_target_plan]") {
+  const std::string source_index_json = R"({
+    "down":[0,32,[2,8],[8,1],"torch.float16",0]
+  })";
+  auto source_table_or = parse_canonical_index(source_index_json);
+  REQUIRE(source_table_or.ok());
+  auto canonical_source_table_or = parse_canonical_index(source_index_json);
+  REQUIRE(canonical_source_table_or.ok());
+
+  absl::flat_hash_map<std::string, TensorLayoutSpec> dst_specs;
+  dst_specs.emplace("down", make_layout_spec(16, {2, 4}, {4, 1}));
+  absl::flat_hash_map<std::string, uint64_t> dst_base_offsets;
+  dst_base_offsets.emplace("down", 0);
+  absl::flat_hash_map<std::string, representation_layout::ViewNarrowSpec> view_narrows;
+
+  v2::CopyPlan copy_plan;
+  copy_plan.set_version(1);
+  auto* entry = copy_plan.add_entries();
+  entry->set_ckpt_name("down");
+  entry->set_dst_name("down");
+  auto* src_range = entry->mutable_ckpt_range();
+  src_range->set_dim(1);
+  src_range->set_start(0);
+  src_range->set_end(4);
+
+  auto transform_or = representation_transform_builder::build_representation_transform_contract(
+      copy_plan,
+      *source_table_or,
+      *canonical_source_table_or,
+      dst_specs,
+      dst_base_offsets,
+      view_narrows,
+      canonical_byte_space(),
+      "local_seal_then_promote");
+  REQUIRE(transform_or.ok());
+  CHECK(transform_or->compatibility_stats.compatible_candidates == 1);
+  CHECK(transform_or->compatibility_stats.compatible_bytes == 16);
+  CHECK(covered_bytes(transform_or->compatibility_lowered_map) == 16);
 }
 
 } // namespace tensorcast::daemon::materialization_target_plan

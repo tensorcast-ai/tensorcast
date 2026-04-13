@@ -209,6 +209,14 @@ struct ExecutionStrategyPlan {
   std::optional<SourceBoundLanePlan> source_bound_lane_plan;
 };
 
+struct CollectiveExecutionMetrics {
+  uint64_t unique_source_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+  uint64_t batch_count{0};
+  uint64_t dedup_saving_bytes{0};
+};
+
 struct ExecutionCommitReport {
   loading::MaterializationSource source{loading::MaterializationSource::kDisk};
   uint64_t requested_bytes{0};
@@ -218,6 +226,7 @@ struct ExecutionCommitReport {
   uint64_t actual_collective_committed_bytes{0};
   uint64_t actual_local_typed_bytes{0};
   uint64_t actual_generic_backend_bytes{0};
+  CollectiveExecutionMetrics collective_metrics;
   std::string collective_skip_reason;
   bool collective_handled{false};
   bool direct_write_supported{false};

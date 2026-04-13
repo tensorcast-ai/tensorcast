@@ -1815,6 +1815,8 @@ cc_test(
     srcs = ["service/controllers/materialization_target_plan_utils_test.cc"],
     deps = [
         ":materialization_target_plan_utils_lib",
+        "//core/store:store_engine_options",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "@catch2//:catch2_main",
     ],
 )

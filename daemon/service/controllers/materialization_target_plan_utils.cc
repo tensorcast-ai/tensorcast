@@ -1360,6 +1360,13 @@ build_resolved_mapped_materialization_plan(
       }
       return map;
     }();
+    const store::loader::ByteRangeMap generic_fallback_map = [&]() {
+      auto map = mapped_plan.representation.generic_fallback_map;
+      if (!map.segments.empty() && map.total_bytes == 0) {
+        map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+      }
+      return map;
+    }();
     auto work_plan_or = build_execution_representation_work_plan(
         *resolved_plan.representation_transform_contract,
         physical_source_table,
@@ -1381,8 +1388,19 @@ build_resolved_mapped_materialization_plan(
     if (!compatibility_data_map_or->segments.empty()) {
       compatibility_data_map = *compatibility_data_map_or;
     }
+    auto generic_data_map_or =
+        filter_byte_range_map(generic_fallback_map, store::loader::ByteRangeSegment::Kind::kData);
+    if (!generic_data_map_or.ok()) {
+      return generic_data_map_or.status();
+    }
+    store::loader::ByteRangeMap generic_data_map;
+    if (!generic_data_map_or->segments.empty()) {
+      generic_data_map = *generic_data_map_or;
+    } else if (!compatibility_data_map.segments.empty()) {
+      generic_data_map = compatibility_data_map;
+    }
     auto executor_map_or =
-        merge_byte_range_maps(compatibility_data_map, resolved_plan.representation_work_plan->residual_fallback_map);
+        merge_byte_range_maps(generic_data_map, resolved_plan.representation_work_plan->residual_fallback_map);
     if (!executor_map_or.ok()) {
       return executor_map_or.status();
     }

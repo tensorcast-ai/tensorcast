@@ -53,6 +53,11 @@ struct MaterializeIntoTargetResult {
   uint64_t actual_collective_committed_bytes{0};
   uint64_t actual_local_typed_bytes{0};
   uint64_t actual_generic_backend_bytes{0};
+  uint64_t collective_unique_source_bytes{0};
+  uint64_t collective_peer_transfer_bytes{0};
+  uint64_t collective_peak_temporary_bytes{0};
+  uint64_t collective_batch_count{0};
+  uint64_t collective_dedup_saving_bytes{0};
   std::string collective_skip_reason;
   bool collective_handled{false};
   bool direct_write_supported{false};

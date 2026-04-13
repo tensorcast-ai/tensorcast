@@ -154,11 +154,24 @@ std::string format_execution_strategy_candidates(const std::vector<strategy::Exe
   return out;
 }
 
+std::optional<std::string> local_auto_reject_reason(
+    const strategy::ExecutionStrategyCostEstimate& generic_estimate,
+    const strategy::ExecutionStrategyCostEstimate& local_estimate,
+    const std::optional<replica::LocalBatchedPlanSummary>& local_plan_summary) {
+  if (!local_plan_summary.has_value() || !local_plan_summary->eligible) {
+    return std::nullopt;
+  }
+  if (local_estimate.unique_source_bytes > generic_estimate.unique_source_bytes) {
+    return std::string("local_source_amplification_exceeds_generic");
+  }
+  return std::nullopt;
+}
+
 std::string dominant_collective_reject_reason(const std::optional<strategy::SourceBoundExecutionPlanSummary>& summary) {
   if (!summary.has_value()) {
     return {};
   }
-  if (summary->collective_lane_eligible) {
+  if (summary->execution_plan_kind == "pure_collective" || summary->execution_plan_kind == "collective_first_mixed") {
     return {};
   }
   if (summary->planner_reject_reason_buckets.empty()) {
@@ -2910,6 +2923,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
   strategy::ExecutionStrategyCostEstimate local_estimate = generic_estimate;
   strategy::ExecutionStrategyCostEstimate collective_estimate = generic_estimate;
   bool shared_source_proven = false;
+  std::optional<replica::LocalBatchedPlanSummary> local_plan_summary;
 
   if (ctx.target_is_gpu) {
     local_reason = "strategy_disabled";
@@ -2980,26 +2994,47 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
     const uint64_t local_peak_bytes = std::min<uint64_t>(
         environment.requested_bytes,
         std::max<uint64_t>(config_.artifact_chunk_bytes, ctx.runtime_context->tx_slice_bytes()));
+    if (plan.representation_work_plan.has_value() && !has_fill_items && !has_residual_fallback &&
+        !environment.requires_server_transform) {
+      auto local_summary_or =
+          replica::summarize_local_batched_disk_load(*plan.representation_work_plan, strategy_config);
+      if (local_summary_or.ok()) {
+        local_plan_summary = std::move(*local_summary_or);
+      } else if (strategy_diagnostics_verbose_enabled(strategy_config)) {
+        LOG(INFO) << "materialize_replica local_batched summary unavailable"
+                  << " artifact_id=" << ctx.artifact_identifier << " status=" << local_summary_or.status();
+      }
+    }
+
     local_estimate = strategy::ExecutionStrategyCostEstimate{
-        .requested_source_bytes = environment.requested_bytes,
-        .unique_source_bytes = environment.requested_bytes,
-        .estimated_peak_temporary_bytes = local_peak_bytes,
+        .requested_source_bytes = local_plan_summary.has_value() && local_plan_summary->requested_source_bytes > 0
+            ? local_plan_summary->requested_source_bytes
+            : environment.requested_bytes,
+        .unique_source_bytes = local_plan_summary.has_value() && local_plan_summary->unique_source_bytes > 0
+            ? local_plan_summary->unique_source_bytes
+            : environment.requested_bytes,
+        .estimated_peak_temporary_bytes = local_plan_summary.has_value()
+            ? std::max<uint64_t>(local_peak_bytes, local_plan_summary->peak_temporary_bytes)
+            : local_peak_bytes,
         .estimated_batch_bytes = local_peak_bytes,
         .estimated_owner_skew_ratio = 1.0,
-        .estimated_dedup_saving_bytes = 0,
+        .estimated_dedup_saving_bytes = local_plan_summary.has_value() ? local_plan_summary->dedup_saving_bytes : 0,
     };
 
     const bool local_prereqs_ready = strategy_config.enable_local_batched_disk_load && ctx.disk.is_safetensors &&
         plan.disk_context != nullptr && plan.representation_work_plan.has_value() && !has_fill_items &&
-        !has_residual_fallback && !environment.requires_server_transform;
+        !has_residual_fallback && !environment.requires_server_transform && local_plan_summary.has_value() &&
+        local_plan_summary->eligible;
     if (local_prereqs_ready) {
-      local_reason = "eligible";
+      local_reason = local_plan_summary->reason;
     } else if (!strategy_config.enable_local_batched_disk_load) {
       local_reason = "strategy_disabled";
     } else if (!ctx.disk.is_safetensors) {
       local_reason = "non_safetensors_source";
     } else if (plan.disk_context == nullptr) {
       local_reason = "shared_disk_context_unavailable";
+    } else if (local_plan_summary.has_value() && !local_plan_summary->eligible) {
+      local_reason = local_plan_summary->reason;
     } else {
       local_reason = representation_reason;
     }
@@ -3086,6 +3121,9 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
   };
   const bool local_eligible = plan.candidates[1].eligible;
   const bool collective_eligible = plan.candidates[2].eligible;
+  const std::optional<std::string> local_auto_reject =
+      local_eligible ? local_auto_reject_reason(generic_estimate, local_estimate, local_plan_summary) : std::nullopt;
+  const bool auto_prefers_local = local_eligible && !local_auto_reject.has_value();
   switch (strategy_config.executor_preference) {
     case StrategyConfig::ExecutorPreference::kGenericByteRange:
       choose_generic("executor_preference_generic");
@@ -3115,14 +3153,19 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       if (collective_eligible && shared_source_proven) {
         plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
         plan.selection_reason = "auto_prefers_owner_file_collective_shared_source";
-      } else if (local_eligible) {
+      } else if (auto_prefers_local) {
         plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
         plan.selection_reason = "auto_prefers_local_batched";
       } else if (collective_eligible) {
         plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
         plan.selection_reason = "auto_collective_after_local_rejection";
       } else {
-        choose_generic(absl::StrCat("auto_generic:", local_reason, ",", collective_reason));
+        choose_generic(
+            absl::StrCat(
+                "auto_generic:",
+                local_auto_reject.has_value() ? *local_auto_reject : local_reason,
+                ",",
+                collective_reason));
       }
       break;
   }
@@ -3452,6 +3495,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .committed_bytes = effective_map.total_bytes,
                 .fallback_bytes = 0,
                 .residual_bytes = 0,
+                .actual_collective_committed_bytes = effective_map.total_bytes,
+                .actual_local_typed_bytes = 0,
+                .actual_generic_backend_bytes = 0,
+                .collective_unique_source_bytes = collective_result.metrics.unique_source_bytes,
+                .collective_peer_transfer_bytes = collective_result.metrics.peer_transfer_bytes,
+                .collective_peak_temporary_bytes = collective_result.metrics.peak_temporary_bytes,
+                .collective_batch_count = collective_result.metrics.batch_count,
+                .collective_dedup_saving_bytes = collective_result.metrics.dedup_saving_bytes,
                 .collective_skip_reason = {},
                 .collective_handled = true,
                 .direct_write_supported = false,
@@ -4158,6 +4209,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .actual_collective_committed_bytes = collective_bytes,
                 .actual_local_typed_bytes = effective_local_typed_bytes,
                 .actual_generic_backend_bytes = generic_residual_bytes,
+                .collective_metrics = collective_result.metrics,
                 .collective_skip_reason = {},
                 .collective_handled = true,
                 .direct_write_supported = false,
@@ -4184,6 +4236,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .actual_collective_committed_bytes = collective_report.actual_collective_committed_bytes,
                 .actual_local_typed_bytes = collective_report.actual_local_typed_bytes,
                 .actual_generic_backend_bytes = collective_report.actual_generic_backend_bytes,
+                .collective_unique_source_bytes = collective_report.collective_metrics.unique_source_bytes,
+                .collective_peer_transfer_bytes = collective_report.collective_metrics.peer_transfer_bytes,
+                .collective_peak_temporary_bytes = collective_report.collective_metrics.peak_temporary_bytes,
+                .collective_batch_count = collective_report.collective_metrics.batch_count,
+                .collective_dedup_saving_bytes = collective_report.collective_metrics.dedup_saving_bytes,
                 .collective_skip_reason = collective_report.collective_skip_reason,
                 .collective_handled = collective_report.collective_handled,
                 .direct_write_supported = collective_report.direct_write_supported,
@@ -4306,6 +4363,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .actual_collective_committed_bytes = 0,
         .actual_local_typed_bytes = effective_local_typed_bytes,
         .actual_generic_backend_bytes = byte_range_map_covered_bytes(effective_data_map),
+        .collective_metrics = {},
         .collective_skip_reason = collective_skip_reason,
         .collective_handled = false,
         .direct_write_supported = source_binding.direct_write_capable,
@@ -4348,6 +4406,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .actual_collective_committed_bytes = commit_report.actual_collective_committed_bytes,
         .actual_local_typed_bytes = commit_report.actual_local_typed_bytes,
         .actual_generic_backend_bytes = commit_report.actual_generic_backend_bytes,
+        .collective_unique_source_bytes = commit_report.collective_metrics.unique_source_bytes,
+        .collective_peer_transfer_bytes = commit_report.collective_metrics.peer_transfer_bytes,
+        .collective_peak_temporary_bytes = commit_report.collective_metrics.peak_temporary_bytes,
+        .collective_batch_count = commit_report.collective_metrics.batch_count,
+        .collective_dedup_saving_bytes = commit_report.collective_metrics.dedup_saving_bytes,
         .collective_skip_reason = commit_report.collective_skip_reason,
         .collective_handled = commit_report.collective_handled,
         .direct_write_supported = commit_report.direct_write_supported,

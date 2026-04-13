@@ -104,8 +104,8 @@ Operationally, this means:
 - local-batched disk load is enabled by default,
 - tensor-aware mapped execution remains available for eligible mapped paths,
 - owner-file collective now uses a bounded batched executor when selected,
-- eager owner-file preload and root whole-source preload remain only as legacy
-  collective fallback scaffolding and are explicitly not the preferred route.
+- eager owner-file preload and root whole-source preload are no longer part of
+  the selected collective steady path.
 
 ## End-To-End Decision Tree For Ordinary Disk Startup
 
@@ -287,6 +287,25 @@ to the next candidate.
 If the planner rejects it, the request falls through to generic execution with
 an explicit selection reason.
 
+Under `AUTO`, local-batched is now also cost-gated against the exact generic
+path:
+
+- the daemon keeps host-local requests on `GenericByteRangeExecutor` when the
+  local-batched planner estimate would read more unique source bytes than the
+  exact generic fallback,
+- this currently protects dim1-staged host-local views whose row-block staging
+  would amplify source IO beyond the rank-local slice coverage,
+- explicit `executor_preference = TENSOR_AWARE_LOCAL` can still force the local
+  executor for targeted experiments.
+
+Important current invariant:
+
+- the same local-batched admission summary is now used by both ordinary
+  strategy planning and executor execution,
+- unsupported local tensor-job shapes are rejected at planning time,
+- and selecting `TensorBatchedLocalExecutor` no longer relies on a late
+  replica-layer "try local then silently hand off to generic" fallback.
+
 ### Generic Fallback
 
 `GenericByteRangeExecutor` remains the correctness backstop:
@@ -319,6 +338,8 @@ Operationally:
 
 - replicated and dim0-partitioned regions are lowered into direct source
   segments and pumped efficiently,
+- identical direct source slices are now deduplicated into one primary source
+  read plus GPU D2D reuse when possible,
 - dim1-partitioned tensors use a dedicated execution path,
 - the daemon emits `local_batched_disk_load timings` with job counts and
   timing breakdowns for verification.
@@ -334,12 +355,9 @@ cooperatively.
 flowchart TD
     A["collective_disk_load"] --> B{"owner-file collective enabled?"}
     B -- "yes" --> C["batched owner-file path\nweighted ownership + bounded staging"]
-    B -- "no" --> D["regular collective path"]
+    B -- "no" --> D["request is not admitted to collective executor"]
 
     C --> E["peer distribution via NCCL send/recv or broadcast"]
-    D --> F{"whole-source preload enabled?"}
-    F -- "yes" --> G["root rank preloads source\nthen distributes"]
-    F -- "no" --> H["streaming pinned buffer\nexecute jobs directly"]
 ```
 
 Current defaults and caveats:
@@ -349,11 +367,13 @@ Current defaults and caveats:
   `internal-vllm` packaged serving config may enable it for the same-binding
   mounted path,
 - owner-file batch planning is now the steady-state owner collective path,
-- eager `owned_payload` preload and root whole-source preload are explicitly
-  legacy fallback scaffolding,
+- once the owner-file collective route is selected, planner failure no longer
+  drops the request back to legacy whole-source collective scaffolding,
 - group-assemble timeout is now typed config,
-- the current owner-file rollout remains zero-residual-only; requests with
-  residual fallback bytes stay on local-batched or generic execution.
+- the current owner-file rollout remains zero-residual-only by explicit policy
+  unless `owner_file_collective_allow_mixed_residual=true`,
+- requests with residual fallback bytes therefore stay on local-batched or
+  generic execution by default.
 
 As with local-batched, collective execution is still tensor-aware:
 
@@ -371,7 +391,10 @@ Expected behavior:
 
 - no collective hint from the loader,
 - TP ranks still perform rank-local `subset + slice` shaping,
-- daemon usually lands on `local_batched_disk_load`,
+- daemon usually lands on `local_batched_disk_load` for direct, dim0, and
+  dedup-friendly requests,
+- daemon stays on `GenericByteRangeExecutor` when the admissible local-batched
+  plan would amplify host-local source IO beyond the exact generic path,
 - generic fallback is only the residual safety path.
 
 This is the current best-known default path for ordinary host-local startup.
@@ -463,6 +486,12 @@ For mapped `into-target` requests:
   - `direct_write_supported`,
   - `source_ordered`,
   - `dominant_executor`.
+- when collective is used, also inspect typed execution diagnostics for:
+  - `collective_unique_source_bytes`
+  - `collective_peer_transfer_bytes`
+  - `collective_peak_temporary_bytes`
+  - `collective_batch_count`
+  - `collective_dedup_saving_bytes`
 
 ## Current Intended Defaults
 
@@ -471,7 +500,10 @@ The intended operator-facing behavior today is:
 - ordinary host-local disk startup:
   - use `tensor_dict` path,
   - rely on rank-local trace slicing,
-  - let the daemon select local-batched disk load,
+  - let the daemon select local-batched disk load only when it does not lose to
+    the exact generic path on source-byte cost,
+  - otherwise keep `AUTO` on exact generic execution and treat local-batched as
+    an explicit experiment-only override for that workload,
 - shared filesystem startup:
   - still default to non-collective startup today,
   - reserve collective for explicit experiments until owner-file collective is

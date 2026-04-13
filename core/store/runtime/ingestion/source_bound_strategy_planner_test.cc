@@ -12,6 +12,11 @@ namespace {
 using RepresentationWorkItem = materialization::contracts::RepresentationWorkItem;
 using RepresentationWorkItemKind = materialization::contracts::RepresentationWorkItemKind;
 using RepresentationWorkPlan = materialization::contracts::RepresentationWorkPlan;
+using RepresentationWorkSourceFragment = materialization::contracts::RepresentationWorkSourceFragment;
+using RepresentationTensorSpec = materialization::contracts::RepresentationTensorSpec;
+using SourceFragment = materialization::contracts::SourceFragment;
+using TensorAxisRange = materialization::contracts::TensorAxisRange;
+using TensorCoordinateSpec = materialization::contracts::TensorCoordinateSpec;
 using WorkPartitionKind = materialization::contracts::WorkPartitionKind;
 
 loader::ByteRangeMap make_data_map(uint64_t total_bytes) {
@@ -109,11 +114,14 @@ TEST_CASE("Source-bound strategy planner emits collective_first_mixed mode", "[s
   lowering_artifacts.collective_data_map = make_data_map(8);
   lowering_artifacts.executor_generic_data_map = make_data_map(12);
 
+  auto strategy_config = make_strategy_config();
+  strategy_config.owner_file_collective_allow_mixed_residual = true;
+
   auto strategy_plan_or = build_source_bound_execution_strategy_plan(
       plan,
       lowering_artifacts,
       SourceBoundPolicy::kCollectiveFirst,
-      make_strategy_config(),
+      strategy_config,
       make_collective_topology(),
       /*disk_source_available=*/true);
   REQUIRE(strategy_plan_or.ok());
@@ -123,6 +131,76 @@ TEST_CASE("Source-bound strategy planner emits collective_first_mixed mode", "[s
   CHECK(strategy_plan_or->summary.planned_generic_residual_bytes == 4);
   CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 8);
   CHECK_FALSE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("generic_backend_coverage_unproven"));
+}
+
+TEST_CASE(
+    "Source-bound strategy planner keeps zero-residual-only owner-file collective policy by default",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kTensorCopy,
+          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .committed_bytes = 8,
+      });
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kResidualByteRange,
+          .committed_bytes = 4,
+      });
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(12);
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      make_strategy_config(),
+      make_collective_topology(),
+      /*disk_source_available=*/true);
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kGenericOnly);
+  REQUIRE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("mixed_generic_residual_policy_disabled"));
+  CHECK(strategy_plan_or->lane_plan.reject_reason_buckets.at("mixed_generic_residual_policy_disabled") == 4);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner allows mixed residual when owner-file collective policy opts in",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kTensorCopy,
+          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .committed_bytes = 8,
+      });
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kResidualByteRange,
+          .committed_bytes = 4,
+      });
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(12);
+
+  auto strategy_config = make_strategy_config();
+  strategy_config.owner_file_collective_allow_mixed_residual = true;
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      make_collective_topology(),
+      /*disk_source_available=*/true);
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kCollectiveFirstMixed);
+  CHECK_FALSE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("mixed_generic_residual_policy_disabled"));
 }
 
 TEST_CASE(
@@ -210,6 +288,79 @@ TEST_CASE("Source-bound strategy planner tracks deferred typed bytes", "[source_
   CHECK(strategy_plan_or->lane_plan.deferred_typed_bytes == 4);
   REQUIRE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("concat_not_admitted"));
   CHECK(strategy_plan_or->lane_plan.reject_reason_buckets.at("concat_not_admitted") == 4);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner admits dim0 concat work when shared lowering already proves compatibility",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  RepresentationWorkItem concat_item;
+  concat_item.kind = RepresentationWorkItemKind::kConcatAssemble;
+  concat_item.committed_bytes = 8;
+  concat_item.sources = {
+      RepresentationWorkSourceFragment{
+          .fragment =
+              SourceFragment{
+                  .source_spec =
+                      RepresentationTensorSpec{
+                          .name = "left",
+                          .shape = {4},
+                          .stride = {1},
+                          .dtype = "torch.float16",
+                          .logical_length = 8,
+                          .element_size = 2,
+                      },
+                  .source_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 4}},
+                      },
+                  .destination_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 4}},
+                      },
+              },
+      },
+      RepresentationWorkSourceFragment{
+          .fragment =
+              SourceFragment{
+                  .source_spec =
+                      RepresentationTensorSpec{
+                          .name = "right",
+                          .shape = {4},
+                          .stride = {1},
+                          .dtype = "torch.float16",
+                          .logical_length = 8,
+                          .element_size = 2,
+                      },
+                  .source_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 4}},
+                      },
+                  .destination_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 4, .end = 8}},
+                      },
+              },
+      },
+  };
+  work_plan.items.push_back(std::move(concat_item));
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(8);
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      make_strategy_config(),
+      make_collective_topology(),
+      /*disk_source_available=*/true);
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 8);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 0);
+  CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("concat_not_admitted"));
 }
 
 TEST_CASE(

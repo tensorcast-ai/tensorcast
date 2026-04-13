@@ -442,6 +442,7 @@ TEST_CASE("SourceBoundPlanSummary keeps collective lane eligibility separate fro
   tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   strategy_config.enable_owner_file_collective = true;
   strategy_config.allow_mixed_execution = true;
+  strategy_config.owner_file_collective_allow_mixed_residual = true;
 
   tensorcast::store::loading::ExecutionTopologyContext execution_topology;
   execution_topology.collective_load_group =

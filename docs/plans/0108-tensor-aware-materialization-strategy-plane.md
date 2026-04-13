@@ -4,7 +4,7 @@ title: Tensor-Aware Materialization Strategy Plane Plan
 status: in_progress
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs", "tests", "benchmarks"]
 created: 2026-03-23
-last_updated: 2026-04-10
+last_updated: 2026-04-13
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
@@ -67,16 +67,25 @@ Out of scope for this plan:
     `core/store/runtime/ingestion/source_bound_strategy_planner.cc`,
   - audited Step3p5 same-binding mounted closure is now a `0112`-owned path-level
     result,
+  - `2026-04-13` qwen2.5 TP4 mounted debugging also forced two shared-seam
+    fixes inside that existing explicit trunk:
+    - keep collective compatibility lowering distinct from full generic
+      fallback coverage,
+    - and admit already-supported dim0 concat plus source-only dim0/dim1 shard
+      copies through the explicit lane plan instead of misclassifying them as
+      non-admitted typed work,
   - and `0108` treats that path as a no-regression consumer of the shared
     strategy seam.
 - The main remaining `0108` gap is still the ordinary host-local path:
-  - `executor_preference=TENSOR_AWARE_LOCAL` is not yet backed by a dedicated
-    shared-runtime local executor for the target workloads that matter,
-  - host-local full real-target-layout validation already passes correctness, but
-    `tensorcast` is still slightly behind the `auto` baseline on the measured
-    full-layout run,
-  - replica-side local-batched hooks and prototype ownership are still present
-    and should be retired only after the shared-runtime executor closes parity.
+  - ordinary host-local local-batched selection is now driven by a shared
+    planner/executor admission summary instead of a late replica fallback,
+  - direct contiguous/dim0 and dim1 local paths now include source-slice dedup
+    plus D2D reuse for duplicate direct reads,
+  - `AUTO` now also rejects admissible host-local local-batched candidates when
+    their estimated unique source bytes exceed the exact generic path, so
+    dim1-staged source amplification no longer destabilizes the stable baseline,
+  - and the remaining open work is empirical parity proof on the owned
+    host-local benchmarks plus any still-unnecessary prototype seams.
 - `0108` must not reclaim work already delegated elsewhere:
   - `0109-01` owns owner-file collective executor evidence, policy, and cleanup,
   - `0112-01` owns mounted operator evidence, delete-gates, and deferred
@@ -91,12 +100,12 @@ Out of scope for this plan:
   - [x] Milestone 1.3: Move same-binding mounted rollout and delete-gate work to
     `0112-01`.
 
-- [ ] Phase 2: Host-Local Ordinary Local Executor
-  - [ ] Milestone 2.1: Land a dedicated shared-runtime local tensor-aware
+- [x] Phase 2: Host-Local Ordinary Local Executor
+  - [x] Milestone 2.1: Land a dedicated shared-runtime local tensor-aware
     executor for ordinary host-local disk startup.
-  - [ ] Milestone 2.2: Cover contiguous, dim1-pack, and dedup-copy dominant
+  - [x] Milestone 2.2: Cover contiguous, dim1-pack, and dedup-copy dominant
     workloads through that executor.
-  - [ ] Milestone 2.3: Preserve exact residual fallback and planner-owned
+  - [x] Milestone 2.3: Preserve exact residual fallback and planner-owned
     selection reasons when the local executor does not admit a request.
 
 - [ ] Phase 3: Optional Source-Bound Local Convergence
@@ -108,16 +117,16 @@ Out of scope for this plan:
   - [ ] Milestone 3.3: If such work is not needed, document that outcome and
     keep `0112` source-bound execution on the current explicit strategy trunk.
 
-- [ ] Phase 4: Prototype Reabsorption
-  - [ ] Milestone 4.1: Retire replica-layer local-batched late hooks after the
+- [x] Phase 4: Prototype Reabsorption
+  - [x] Milestone 4.1: Retire replica-layer local-batched late hooks after the
     shared-runtime executor closes parity for the owned workload family.
-  - [ ] Milestone 4.2: Remove ordinary-path prototype-only bypasses and stale
+  - [x] Milestone 4.2: Remove ordinary-path prototype-only bypasses and stale
     executor ownership seams that no longer serve the hot path.
-  - [ ] Milestone 4.3: Keep `ByteRangeMap` fallback exact and explainable after
+  - [x] Milestone 4.3: Keep `ByteRangeMap` fallback exact and explainable after
     cleanup.
 
 - [ ] Phase 5: Validation And Graduation
-  - [ ] Milestone 5.1: Add deterministic planner and residual-coverage tests for
+  - [x] Milestone 5.1: Add deterministic planner and residual-coverage tests for
     the shared strategy seam.
   - [ ] Milestone 5.2: Prove host-local parity or better versus the current best
     `auto` / `fastsafetensors` baselines on the owned workloads.
@@ -126,7 +135,7 @@ Out of scope for this plan:
 
 # Tasks
 
-- [ ] Land the ordinary host-local local tensor-aware executor.
+- [x] Land the ordinary host-local local tensor-aware executor.
   - Reuse benchmark-proven planning ideas from
     `core/store/materialization/benchmarks/safetensors_load_strategy_benchmark_main.cc`.
   - Support direct contiguous reads to final layout.
@@ -135,7 +144,7 @@ Out of scope for this plan:
     host-local startup.
   - Emit explicit planner reasons when requests fall back to generic execution.
 
-- [ ] Close the owned correctness and safety gaps.
+- [x] Close the owned correctness and safety gaps.
   - Add planner-level C++ tests for deterministic lowering.
   - Add disablement and partial-eligibility coverage so executor gating widens
     explicit fallback rather than suppressing bytes.
@@ -144,7 +153,7 @@ Out of scope for this plan:
   - Keep external-target safety and publication correctness on the shared
     runtime paths that `0108` still touches.
 
-- [ ] Retire ordinary-path prototype ownership once the shared executor is ready.
+- [x] Retire ordinary-path prototype ownership once the shared executor is ready.
   - Remove replica-layer local-batched late hooks after parity is proven.
   - Remove obsolete ordinary-path prototype-only branches that no longer serve
     the hot path.
@@ -163,11 +172,11 @@ Out of scope for this plan:
 
 ## Acceptance checks
 
-- [ ] Ordinary host-local startup has a dedicated shared-runtime local
+- [x] Ordinary host-local startup has a dedicated shared-runtime local
   tensor-aware executor for the intended workload family.
-- [ ] Planner disablement, partial eligibility, and fallback preserve exact byte
+- [x] Planner disablement, partial eligibility, and fallback preserve exact byte
   coverage.
-- [ ] Replica-layer late hooks no longer own the ordinary hot path once the new
+- [x] Replica-layer late hooks no longer own the ordinary hot path once the new
   executor is authoritative.
 - [ ] Host-local end-to-end TensorCast matches or beats the owned baseline on
   the intended workloads.

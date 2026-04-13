@@ -46,6 +46,12 @@ TensorCoordinateSpec dim0_range(int64_t start, int64_t end) {
   return out;
 }
 
+TensorCoordinateSpec dim1_range(int64_t start, int64_t end) {
+  TensorCoordinateSpec out;
+  out.axes.push_back(TensorAxisRange{.dim = 1, .start = start, .end = end});
+  return out;
+}
+
 TensorCoordinateSpec multi_range(std::initializer_list<TensorAxisRange> axes) {
   TensorCoordinateSpec out;
   out.axes.assign(axes.begin(), axes.end());
@@ -370,6 +376,44 @@ TEST_CASE("representation work plan accepts multi-axis slice copy coordinates", 
   CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kTensorCopy);
   CHECK(plan_or->items.front().committed_bytes == 640);
   CHECK(plan_or->items.front().partition_kind == WorkPartitionKind::kUnknown);
+}
+
+TEST_CASE("representation work plan infers source-only shard partition kinds", "[representation_contract]") {
+  RepresentationTransformContract contract;
+  contract.source_byte_space = canonical_byte_space();
+  contract.target_representation.family = "ephemeral_into_target";
+  contract.tensor_bindings = {
+      RepresentationTensorBinding{
+          .dst_name = "dim0_dst",
+          .dst_spec = make_tensor_spec("dim0_dst", 0, 8, {4}, {1}),
+          .op_kind = BindingOpKind::kSliceCopy,
+          .sources = {SourceFragment{
+              .source_spec = make_tensor_spec("dim0_src", 32, 16, {8}, {1}),
+              .source_range = dim0_range(0, 4),
+              .destination_range = full_range(),
+              .role = SourceFragmentRole::kDefault,
+          }},
+      },
+      RepresentationTensorBinding{
+          .dst_name = "dim1_dst",
+          .dst_spec = make_tensor_spec("dim1_dst", 8, 16, {2, 4}, {4, 1}),
+          .op_kind = BindingOpKind::kSliceCopy,
+          .sources = {SourceFragment{
+              .source_spec = make_tensor_spec("dim1_src", 48, 32, {2, 8}, {8, 1}),
+              .source_range = dim1_range(0, 4),
+              .destination_range = full_range(),
+              .role = SourceFragmentRole::kDefault,
+          }},
+      },
+  };
+
+  auto normalized_or = normalize_representation_transform_contract(std::move(contract));
+  REQUIRE(normalized_or.ok());
+  auto plan_or = build_representation_work_plan(*normalized_or);
+  REQUIRE(plan_or.ok());
+  REQUIRE(plan_or->items.size() == 2);
+  CHECK(plan_or->items[0].partition_kind == WorkPartitionKind::kDim0Partitioned);
+  CHECK(plan_or->items[1].partition_kind == WorkPartitionKind::kDim1Partitioned);
 }
 
 TEST_CASE("representation work plan preserves normalized residual fallback accounting", "[representation_contract]") {

@@ -104,8 +104,10 @@ The phase-1 scope of this design is now landed in the repository:
   owner staging
 - replicated, dim0, and dim1 collective tensor work now execute through the
   owner rank without eager `owned_payload` residency
-- root whole-source preload is skipped on the owner-file batched path and
-  remains only as legacy fallback scaffolding
+- the selected owner-file batched route no longer drops back to root
+  whole-source preload scaffolding, and execution diagnostics now surface
+  actual unique-source bytes, peer-transfer bytes, peak temporary bytes, batch
+  count, and dedup savings
 
 The implemented steady-state scope remains intentionally zero-residual-only:
 
@@ -139,8 +141,8 @@ The remaining `0109`-owned work is executor-specific rather than architectural:
 - recapture shared-source benchmark and serving evidence for the bounded batched
   executor,
 - freeze the defaulting and backout policy for shared-source workloads,
-- and delete the remaining eager owner preload and root whole-source fallback
-  scaffolding once the bounded path is proven.
+- and retire any remaining stale rollout notes that still describe deleted
+  preload-based collective scaffolding as part of the steady path.
 
 # Sequencing Note
 

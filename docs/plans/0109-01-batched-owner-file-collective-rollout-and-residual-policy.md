@@ -4,7 +4,7 @@ title: Batched Owner-File Collective Rollout and Residual Policy Plan
 status: in_progress
 areas: ["core", "daemon", "docs", "tests", "benchmarks", "serving"]
 created: 2026-04-10
-last_updated: 2026-04-10
+last_updated: 2026-04-13
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
@@ -33,16 +33,63 @@ documentation reorganization that makes:
     owner-file collective becomes eligible under `AUTO`,
   - `collective_disk_load` already has bounded owner batches and no longer
     depends on eager whole-owner payload residency for the intended path,
-  - root whole-source preload remains only as legacy fallback scaffolding.
+  - and the selected owner-file collective route no longer falls back to root
+    whole-source preload when bounded owner planning is chosen.
 - The current shipped executor scope is intentionally narrow:
   - the collective runtime is still collective-lane-only,
   - true generic residual bytes still reject collective eligibility,
   - mixed execution remains strategy-owned above the executor.
+- The current repo-local executor policy is now explicit rather than implicit:
+  - source-bound owner-file collective remains zero-residual-only by default,
+  - enabling mixed residual requires typed config
+    `owner_file_collective_allow_mixed_residual=true`,
+  - and operator-visible execution diagnostics now expose actual unique-source
+    bytes, peer-transfer bytes, peak temporary bytes, batch count, and dedup
+    savings.
 - The active follow-up items are executor-specific:
   - mixed-residual policy,
   - shared-FS and JFS evidence recapture,
   - default-policy graduation,
   - and final deletion of legacy owner preload scaffolding.
+- Current host-local evidence remains intentionally separate:
+  - qwen2.5 TP-local host-local benchmarking currently favors the exact generic
+    path over dim1-staged local execution,
+  - so `0109-01` must continue to treat host-local no-regression as a hard gate
+    and must not infer any broader `AUTO` preference change from shared-source
+    wins alone.
+- Current shared-source qwen2.5 TP4 serving evidence also needs refreshed
+  capture after a repo-local executor-seam fix:
+  - the first safe TP4 mounted packet reached readiness and showed
+    `OwnerFileCollectiveExecutor`, but it also showed a planning/execution
+    mismatch (`planned_collective_admitted_bytes ~= 1.3MiB` vs
+    `actual_collective_committed_bytes ~= 16.38GiB`),
+  - local debugging traced that mismatch to copy-plan lowering sending the
+    entire mapped byte space into `compatibility_lowered_map`,
+  - fixing that seam exposed a second repo-local bug where
+    `executor_generic_data_map` was derived from the narrowed compatibility map
+    rather than the full `generic_fallback_map`, so source-bound plans
+    correctly failed closed with `generic_backend_coverage_unproven`,
+  - the current repo-local fixes now:
+    - keep compatibility maps scoped to compatibility-admitted bytes,
+    - derive executor generic coverage from the full generic fallback map,
+    - admit dim0 concat work to the collective lane where runtime support
+      already exists,
+    - and infer source-only dim0/dim1 shard copies as partitioned typed work,
+  - `2026-04-13` rerun evidence on the updated daemon now shows planning and
+    execution aligned again on qwen2.5 TP4:
+    - `planned_collective_admitted_bytes=16382928896`,
+    - `actual_collective_committed_bytes=16382928896`,
+    - `actual_generic_backend_bytes=0`,
+    - `dominant_executor=OwnerFileCollectiveExecutor`,
+    - and mounted startup reaches `/health=200`, `/v1/models`, and
+      `/v1/completions`,
+  - but the executor is still not rollout-ready on this workload:
+    - TensorCast startup remains about `84.6s` to `85.4s`,
+    - while the same safe TP4 `safetensors` baseline remains about `6.36s` to
+      `6.41s`,
+    - and the dominant slow phases visible in the mounted logs are still
+      `ResolvePublicDiskSource` (~`54s`) followed by `RefillOwnedBinding`
+      (~`38s` to `47s`).
 - This plan should not absorb strategy-plane redesign work from `0108` or
   mounted same-binding path ownership from `0112`.
 
@@ -51,9 +98,9 @@ documentation reorganization that makes:
 - [ ] Phase 1: Evidence And Policy Baseline
   - [ ] Milestone 1.1: recapture exact-workload and serving evidence for the
     current owner-file batched executor on the intended shared-source workloads.
-  - [ ] Milestone 1.2: make mixed-residual policy decisions against measured
+  - [x] Milestone 1.2: make mixed-residual policy decisions against measured
     evidence instead of leaving them implicit.
-  - [ ] Milestone 1.3: freeze the executor-side delete gates for legacy preload
+  - [x] Milestone 1.3: freeze the executor-side delete gates for legacy preload
     scaffolding.
 
 - [ ] Phase 2: Rollout And Graduation
@@ -65,14 +112,14 @@ documentation reorganization that makes:
     serving and benchmark matrix.
 
 - [ ] Phase 3: Cleanup
-  - [ ] Milestone 3.1: delete eager owner preload and related prototype-only
+  - [x] Milestone 3.1: delete eager owner preload and related prototype-only
     collective scaffolding once the bounded batched path is authoritative.
   - [ ] Milestone 3.2: retire stale docs and rollout notes that still describe a
     closure-only document as the execution owner.
 
 # Tasks
 
-- [ ] Decide the mixed-residual policy explicitly.
+- [x] Decide the mixed-residual policy explicitly.
   - Keep zero-residual-only if evidence still shows it is the correct executor
     boundary.
   - Or document and implement a bounded mixed-residual policy if evidence shows
@@ -86,12 +133,12 @@ documentation reorganization that makes:
   - Explicit measurements for unique-source bytes, peer-transfer bytes, peak
     temporary bytes, batch counts, and dedup savings.
 
-- [ ] Freeze the defaulting and backout policy.
+- [x] Freeze the defaulting and backout policy.
   - Document when `AUTO` may prefer owner-file collective.
   - Keep host-local or unproven-source workloads on local or generic execution.
   - Preserve typed backout through config instead of branch-order policy.
 
-- [ ] Delete legacy collective scaffolding after proof.
+- [x] Delete legacy collective scaffolding after proof.
   - Remove eager owner payload preload from any still-supported steady path.
   - Remove root whole-source preload from the final default collective route.
   - Retire prototype-only executor branches that no longer serve the active
@@ -101,7 +148,7 @@ documentation reorganization that makes:
 
 ## Acceptance checks
 
-- [ ] The owner-file batched executor has an explicit residual policy and delete
+- [x] The owner-file batched executor has an explicit residual policy and delete
   gate.
 - [ ] Shared-source evidence is sufficient to justify its intended rollout.
 - [ ] Host-local workloads that should stay local do not regress.
