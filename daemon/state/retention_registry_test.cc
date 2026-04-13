@@ -85,6 +85,7 @@ TEST_CASE("RetentionRegistry downgrades policy on last release", "[daemon][reten
       tensorcast::daemon::IpcRegionRegistry::Options{.capacity = 16, .max_ttl = absl::Minutes(10)});
   tensorcast::daemon::LipManager lip_manager(engine, &region_registry);
   tensorcast::daemon::SessionLifecycleManager lifecycle(sessions, refs, lip_manager, *engine);
+  tensorcast::daemon::LifecycleKernel lifecycle_kernel("daemon-test");
 
   auto backend = std::make_unique<FakeRetentionBackend>();
   backend->target.key = tensorcast::store::loading::ReplicaKey{
@@ -106,7 +107,8 @@ TEST_CASE("RetentionRegistry downgrades policy on last release", "[daemon][reten
   opts.default_ttl = absl::Seconds(5);
   opts.max_ttl = absl::Minutes(5);
 
-  tensorcast::daemon::RetentionRegistry registry(opts, std::move(backend), lifecycle, &token_mgr, "daemon-test");
+  tensorcast::daemon::RetentionRegistry registry(
+      opts, std::move(backend), lifecycle, lifecycle_kernel, &token_mgr, "daemon-test");
 
   tensorcast::common::v1::ArtifactSelection selection;
   selection.set_artifact_id("mi2:retention:artifact");
@@ -143,6 +145,7 @@ TEST_CASE("RetentionRegistry classifies invalid tokens", "[daemon][retention]") 
       tensorcast::daemon::IpcRegionRegistry::Options{.capacity = 16, .max_ttl = absl::Minutes(10)});
   tensorcast::daemon::LipManager lip_manager(engine, &region_registry);
   tensorcast::daemon::SessionLifecycleManager lifecycle(sessions, refs, lip_manager, *engine);
+  tensorcast::daemon::LifecycleKernel lifecycle_kernel("daemon-test");
 
   auto backend = std::make_unique<FakeRetentionBackend>();
   backend->target.key = tensorcast::store::loading::ReplicaKey{
@@ -163,7 +166,8 @@ TEST_CASE("RetentionRegistry classifies invalid tokens", "[daemon][retention]") 
   opts.default_ttl = absl::Seconds(5);
   opts.max_ttl = absl::Minutes(5);
 
-  tensorcast::daemon::RetentionRegistry registry(opts, std::move(backend), lifecycle, &token_mgr, "daemon-test");
+  tensorcast::daemon::RetentionRegistry registry(
+      opts, std::move(backend), lifecycle, lifecycle_kernel, &token_mgr, "daemon-test");
 
   auto invalid = registry.renew("not-a-token", 1000);
   REQUIRE_FALSE(invalid.ok());
@@ -191,6 +195,7 @@ TEST_CASE("RetentionRegistry keys selections by typed SelectionIdentity", "[daem
       tensorcast::daemon::IpcRegionRegistry::Options{.capacity = 16, .max_ttl = absl::Minutes(10)});
   tensorcast::daemon::LipManager lip_manager(engine, &region_registry);
   tensorcast::daemon::SessionLifecycleManager lifecycle(sessions, refs, lip_manager, *engine);
+  tensorcast::daemon::LifecycleKernel lifecycle_kernel("daemon-test");
 
   auto backend = std::make_unique<FakeRetentionBackend>();
   backend->target.key = tensorcast::store::loading::ReplicaKey{
@@ -212,7 +217,8 @@ TEST_CASE("RetentionRegistry keys selections by typed SelectionIdentity", "[daem
   opts.default_ttl = absl::Seconds(5);
   opts.max_ttl = absl::Minutes(5);
 
-  tensorcast::daemon::RetentionRegistry registry(opts, std::move(backend), lifecycle, &token_mgr, "daemon-test");
+  tensorcast::daemon::RetentionRegistry registry(
+      opts, std::move(backend), lifecycle, lifecycle_kernel, &token_mgr, "daemon-test");
 
   tensorcast::common::v1::ArtifactSelection selection_a;
   selection_a.set_artifact_id("mi2:retention:artifact_a");

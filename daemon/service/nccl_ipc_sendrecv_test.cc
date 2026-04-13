@@ -89,6 +89,11 @@ class NcclPair final {
 } // namespace
 
 TEST_CASE("nccl sendrecv can write into ipc-mapped peer memory", "[daemon][nccl][ipc]") {
+  if (tensorcast::cuda::is_fake()) {
+    WARN("Skipping NCCL IPC send/recv under fake CUDA backend.");
+    return;
+  }
+
   int device_count = 0;
   REQUIRE(tensorcast::cuda::get_device_count(&device_count).ok());
   if (device_count < 2) {
