@@ -158,8 +158,9 @@ def test_compose_view_cache_uses_selected_index_bytes_semantics() -> None:
     )
 
     assert cache is not None
-    assert cache.selected_index is None
+    assert cache.selected_index is not None
     selected_index = canonical_index_from_bytes(cache.view_index_bytes)
+    assert cache.selected_index == selected_index
     selected_entry = selected_index.entries[0]
     assert selected_entry.name == "w"
     assert selected_entry.shape == (4, 4)

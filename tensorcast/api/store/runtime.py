@@ -399,6 +399,8 @@ class StoreRuntimeContext:
                 return config
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                if isinstance(exc, (AttributeError, NotImplementedError)):
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break

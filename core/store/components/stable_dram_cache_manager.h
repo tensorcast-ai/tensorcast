@@ -9,6 +9,7 @@
 #include <optional>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -94,6 +95,10 @@ class StableDramCacheManager {
   absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> acquire_stable_lease(
       const loading::ReplicaKey& key,
       const std::shared_ptr<replica::Replica>& replica) const;
+  std::optional<loading::ReplicaKey> find_entry_key_locked(const loading::ReplicaKey& key) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void index_entry_alias_locked(const CacheEntry& entry) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void unindex_entry_alias_locked(const CacheEntry& entry) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   absl::Status evict_for_bytes(
       uint64_t required_bytes,
@@ -118,6 +123,14 @@ class StableDramCacheManager {
 
   mutable absl::Mutex mu_;
   absl::flat_hash_map<loading::ReplicaKey, CacheEntry, loading::ReplicaKeyHash> entries_ ABSL_GUARDED_BY(mu_);
+  // Reverse lookup from the underlying UMA stable-lease key back to the tracked stable-cache entry.
+  // This avoids repeatedly scanning the full cache on eviction/preemption paths that only know the
+  // physical lease key (for example, transient forwarder cleanup retiring a physical CPU replica).
+  absl::flat_hash_map<
+      loading::ReplicaKey,
+      absl::flat_hash_set<loading::ReplicaKey, loading::ReplicaKeyHash>,
+      loading::ReplicaKeyHash>
+      entry_keys_by_lease_key_ ABSL_GUARDED_BY(mu_);
   std::atomic<uint64_t> bytes_used_{0};
 };
 

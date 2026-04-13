@@ -597,7 +597,7 @@ def test_complete_binding_finalize_publication_runs_register_and_closeout() -> N
     assert len(client.wait_calls) == 1
 
 
-def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors_for_contribution() -> (
+def test_complete_pure_transform_publication_canonical_full_routes_source_artifact_contribution() -> (
     None
 ):
     store_ref = _StoreStub()
@@ -650,14 +650,9 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
             requirements=AssemblyRequirementSetRef.canonical_full(),
         )
 
-    def _contribute_canonical(**kwargs: object) -> object:
-        captured["canonical_kwargs"] = kwargs
-        return object()
-
     def _contribute_source(**kwargs: object) -> tuple[object, ...]:
-        raise AssertionError(
-            "canonical_full publication should not contribute source artifacts"
-        )
+        captured["source_kwargs"] = kwargs
+        return ()
 
     def _seal_attempt(
         attempt: AssemblyAttemptRef,
@@ -690,8 +685,7 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
 
     store.register_pure_transform_publication = _register  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
-    store._contribute_canonical_publish_tensors_to_attempt = _contribute_canonical  # type: ignore[method-assign]
-    store._contribute_source_artifacts_to_attempt = _contribute_source  # type: ignore[method-assign]
+    store._contribute_source_current_values_to_attempt_and_keep_bindings = _contribute_source  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
@@ -707,14 +701,11 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
 
     assert result.serving_artifact_id == "mi2:test:serving"
     assert captured["start_kwargs"]["source_artifact"] is source_artifact
-    assert captured["canonical_kwargs"]["publication"].registered_artifact.artifact_id == "mi2:test:serving"
-    prepared_tensors = captured["canonical_kwargs"]["publication"].prepared_registration.tensors
-    assert "w" in prepared_tensors
-    assert "__tensorcast_meta__.manifest_json" in prepared_tensors
-    assert captured["canonical_kwargs"]["device"] == "cuda:0"
+    assert captured["source_kwargs"]["source_artifacts"] == (source_artifact,)
+    assert captured["source_kwargs"]["device"] == "cuda:0"
 
 
-def test_complete_binding_finalize_publication_canonical_full_uses_publish_tensors_for_contribution() -> (
+def test_complete_binding_finalize_publication_canonical_full_routes_source_artifact_contribution() -> (
     None
 ):
     store_ref = _StoreStub()
@@ -770,14 +761,9 @@ def test_complete_binding_finalize_publication_canonical_full_uses_publish_tenso
             requirements=AssemblyRequirementSetRef.canonical_full(),
         )
 
-    def _contribute_canonical(**kwargs: object) -> object:
-        captured["canonical_kwargs"] = kwargs
-        return object()
-
     def _contribute_source(**kwargs: object) -> tuple[object, ...]:
-        raise AssertionError(
-            "canonical_full binding_finalize publication should not contribute source artifacts"
-        )
+        captured["source_kwargs"] = kwargs
+        return ()
 
     def _seal_attempt(
         attempt: AssemblyAttemptRef,
@@ -810,8 +796,7 @@ def test_complete_binding_finalize_publication_canonical_full_uses_publish_tenso
 
     store.register_binding_finalize_publication = _register  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
-    store._contribute_canonical_publish_tensors_to_attempt = _contribute_canonical  # type: ignore[method-assign]
-    store._contribute_source_artifacts_to_attempt = _contribute_source  # type: ignore[method-assign]
+    store._contribute_source_current_values_to_attempt_and_keep_bindings = _contribute_source  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
@@ -829,14 +814,11 @@ def test_complete_binding_finalize_publication_canonical_full_uses_publish_tenso
 
     assert result.serving_artifact_id == "mi2:test:serving-binding"
     assert captured["start_kwargs"]["source_artifact"] is source_artifact
-    assert captured["canonical_kwargs"]["publication"].registered_artifact.artifact_id == "mi2:test:serving-binding"
-    prepared_tensors = captured["canonical_kwargs"]["publication"].prepared_registration.tensors
-    assert "w" in prepared_tensors
-    assert "__tensorcast_meta__.manifest_json" in prepared_tensors
-    assert captured["canonical_kwargs"]["device"] == "cuda:0"
+    assert captured["source_kwargs"]["source_artifacts"] == (source_artifact,)
+    assert captured["source_kwargs"]["device"] == "cuda:0"
 
 
-def test_complete_binding_finalize_publication_canonical_full_keeps_binding_alive_until_wait() -> (
+def test_complete_binding_finalize_publication_canonical_full_contributes_before_wait() -> (
     None
 ):
     store_ref = _StoreStub()
@@ -859,42 +841,10 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
     )
 
     events: list[str] = []
-    fake_binding: object | None = None
-
-    class _FakeSealed:
-        def contribute_to_assembly(
-            self,
-            *,
-            attempt: AssemblyAttemptRef,
-            ctx: object | None = None,
-        ) -> object:
-            del attempt
-            del ctx
-            events.append("contribute")
-            assert fake_binding is not None
-            assert fake_binding.closed is False
-            return object()
 
     class _FakeBinding:
         def __init__(self) -> None:
             self.closed = False
-
-        def begin_update(self, ctx: object | None = None) -> str:
-            del ctx
-            events.append("begin_update")
-            return "epoch-1"
-
-        def seal_current(
-            self,
-            *,
-            update_epoch: str,
-            ctx: object | None = None,
-        ) -> _FakeSealed:
-            del update_epoch
-            del ctx
-            events.append("seal_current")
-            assert self.closed is False
-            return _FakeSealed()
 
         def close(self) -> None:
             events.append("close")
@@ -933,12 +883,12 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
             requirements=AssemblyRequirementSetRef.canonical_full(),
         )
 
-    def _create_binding(layout: object, **kwargs: object) -> _FakeBinding:
-        del layout
+    live_binding = _FakeBinding()
+
+    def _contribute_source(**kwargs: object) -> tuple[object, ...]:
         del kwargs
-        nonlocal fake_binding
-        fake_binding = _FakeBinding()
-        return fake_binding
+        events.append("contribute_source")
+        return (live_binding,)
 
     def _seal_attempt(
         attempt: AssemblyAttemptRef,
@@ -947,8 +897,6 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
     ) -> object:
         del ctx
         events.append("seal_attempt")
-        assert fake_binding is not None
-        assert fake_binding.closed is False
         return client.seal_assembly_attempt(attempt_id=attempt.attempt_id)
 
     def _wait_attempt(
@@ -961,8 +909,6 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
         del timeout_s
         del ctx
         events.append("wait_attempt")
-        assert fake_binding is not None
-        assert fake_binding.closed is False
         return PublishedModelVersion(
             assembly_id="cgid:assembly-3",
             source_artifact_id="mi2:test:source",
@@ -976,7 +922,7 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
 
     store.register_binding_finalize_publication = _register  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
-    store.create_binding = _create_binding  # type: ignore[method-assign]
+    store._contribute_source_current_values_to_attempt_and_keep_bindings = _contribute_source  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
@@ -993,12 +939,8 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
     )
 
     assert result.serving_artifact_id == "mi2:test:serving-binding"
-    assert fake_binding is not None
-    assert fake_binding.closed is True
     assert events == [
-        "begin_update",
-        "seal_current",
-        "contribute",
+        "contribute_source",
         "seal_attempt",
         "wait_attempt",
         "close",

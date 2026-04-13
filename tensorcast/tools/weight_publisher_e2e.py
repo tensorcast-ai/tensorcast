@@ -57,6 +57,14 @@ RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S = 0.05
 TP_BIND_PER_RANK_TIMEOUT_MIN_S = 20.0
 TP_BIND_PER_RANK_TIMEOUT_FLOOR_S = 8.0
 TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR = 12.0
+DEFAULT_RECEIVER_MATERIALIZE_OPTIONS = GetArtifactOptions(
+    source={
+        "preference": "prefer_p2p",
+        "allow_p2p": True,
+        "allow_disk": False,
+    },
+    verify_checksums=False,
+)
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -949,7 +957,7 @@ class WeightUpdatePublisher:
         model_name: str,
         key_template: str,
         keep_last: int,
-        pre_publish_trim_margin: int,
+        pre_publish_trim_margin: int = 1,
         history_path: Path,
         run_root: Path,
         check_poll_interval_s: float,
@@ -1226,6 +1234,8 @@ class WeightUpdatePublisher:
 
 
 class WeightUpdateReceiver:
+    _materialize_options = DEFAULT_RECEIVER_MATERIALIZE_OPTIONS
+
     def __init__(
         self,
         *,
@@ -1254,14 +1264,7 @@ class WeightUpdateReceiver:
         self._key_template = key_template
         self._poll_interval_s = poll_interval_s
         self._per_version_timeout_s = per_version_timeout_s
-        self._materialize_options = GetArtifactOptions(
-            source={
-                "preference": "prefer_p2p",
-                "allow_p2p": True,
-                "allow_disk": False,
-            },
-            verify_checksums=False,
-        )
+        self._materialize_options = DEFAULT_RECEIVER_MATERIALIZE_OPTIONS
         self._materialize_device = _materialization_device(materialize_device)
         self._apply_mode = str(apply_mode).strip()
         self._allow_version_skip = bool(allow_version_skip)

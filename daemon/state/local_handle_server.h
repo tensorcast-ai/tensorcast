@@ -8,6 +8,7 @@
 
 #include "absl/status/status.h"
 #include "daemon/state/handle_lease_registry.h"
+#include "daemon/state/ipc_region_registry.h"
 
 namespace tensorcast::daemon {
 
@@ -24,7 +25,7 @@ class LocalHandleServer final {
     bool cpu_shared_memory_enabled{true};
   };
 
-  LocalHandleServer(Options opts, HandleLeaseRegistry& leases);
+  LocalHandleServer(Options opts, IpcRegionRegistry& regions, HandleLeaseRegistry* leases);
   ~LocalHandleServer();
 
   LocalHandleServer(const LocalHandleServer&) = delete;
@@ -34,7 +35,7 @@ class LocalHandleServer final {
   void stop();
 
  private:
-  enum class OpCode : uint8_t { kGetCpuMemfdFd = 1, kReleaseHandle = 2 };
+  enum class OpCode : uint8_t { kGetCpuMemfdFd = 1, kReleaseHandle = 2, kGetRegionMemfdFd = 3 };
   enum class RespCode : uint8_t {
     kOk = 0,
     kNotFound = 1,
@@ -56,6 +57,7 @@ class LocalHandleServer final {
   [[nodiscard]] absl::Status handle_conn_(int conn_fd);
 
   Options opts_;
+  IpcRegionRegistry* regions_;
   HandleLeaseRegistry* leases_;
 
   std::atomic<bool> running_{false};

@@ -48,8 +48,14 @@ class _FakeArtifact:
             ),
         )
 
-    def tensor_dict_with_diagnostics(self, *, device: str) -> Any:
+    def tensor_dict_with_diagnostics(
+        self,
+        *,
+        device: str,
+        options: Any | None = None,
+    ) -> Any:
         _ = device
+        _ = options
         return self._result
 
 

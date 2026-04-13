@@ -720,7 +720,7 @@ class RemotePayloadRefSource final : public store::loader::SeekableSource {
         break;
       }
     }
-    VLOG(1) << "payload_ref.remote_fetch_summary"
+    VLOG(2) << "payload_ref.remote_fetch_summary"
             << " direction=" << payload_direction_label(options_.direction) << " operation_id=" << options_.operation_id
             << " artifact_id=" << options_.artifact_id << " issuer_address=" << options_.address
             << " payload_bytes=" << options_.metadata.payload_size << " requested_bytes=" << target_bytes
@@ -853,7 +853,7 @@ class RemoteBatchPayloadRefSource final : public store::loader::SeekableSource {
         break;
       }
     }
-    VLOG(1) << "batch_payload_ref.remote_fetch_summary"
+    VLOG(2) << "batch_payload_ref.remote_fetch_summary"
             << " direction=" << payload_direction_label(options_.direction) << " operation_id=" << options_.operation_id
             << " transport_id=" << options_.metadata.transport_id << " issuer_address=" << options_.address
             << " payload_bytes=" << options_.metadata.payload_size << " requested_bytes=" << target_bytes
@@ -1608,7 +1608,7 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
     }
     it->second.communicator_export = *registration_or;
   }
-  VLOG(1) << "batch_payload_ref.communicator_export_summary"
+  VLOG(2) << "batch_payload_ref.communicator_export_summary"
           << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
           << " transport_id=" << metadata_or->transport_id << " payload_bytes=" << metadata_or->payload_size
           << " remote_keys=" << registration_or->remote_memory_keys.size()
@@ -2684,12 +2684,11 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
     if (!local_or.ok()) {
       return local_or.status();
     }
-    LOG(INFO) << "batch_payload_ref.communicator_open_summary"
-              << " direction=" << payload_direction_label(expected_direction)
-              << " operation_id=" << expected_operation_id << " transport_id=" << metadata_or->transport_id
-              << " remote=false"
-              << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
-              << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size();
+    VLOG(2) << "batch_payload_ref.communicator_open_summary"
+            << " direction=" << payload_direction_label(expected_direction) << " operation_id=" << expected_operation_id
+            << " transport_id=" << metadata_or->transport_id << " remote=false"
+            << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
+            << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size();
     return BatchPayloadSource{
         .metadata = local_or->metadata,
         .source =
@@ -2764,14 +2763,14 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
       .request_budget = std::chrono::milliseconds(absl::ToInt64Milliseconds(options_.fetch_deadline)),
       .artifact_id = metadata_or->transport_id,
   };
-  LOG(INFO) << "batch_payload_ref.communicator_open_summary"
-            << " direction=" << payload_direction_label(expected_direction) << " operation_id=" << expected_operation_id
-            << " transport_id=" << metadata_or->transport_id << " remote=true"
-            << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
-            << " producer_host=" << producer_host << " producer_port=" << producer_port
-            << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size()
-            << " endpoint_resolve_ms=" << absl::ToDoubleMilliseconds(endpoint_resolve_elapsed)
-            << " total_open_ms=" << absl::ToDoubleMilliseconds(absl::Now() - open_started_at);
+  VLOG(2) << "batch_payload_ref.communicator_open_summary"
+          << " direction=" << payload_direction_label(expected_direction) << " operation_id=" << expected_operation_id
+          << " transport_id=" << metadata_or->transport_id << " remote=true"
+          << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
+          << " producer_host=" << producer_host << " producer_port=" << producer_port
+          << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size()
+          << " endpoint_resolve_ms=" << absl::ToDoubleMilliseconds(endpoint_resolve_elapsed)
+          << " total_open_ms=" << absl::ToDoubleMilliseconds(absl::Now() - open_started_at);
   return BatchPayloadSource{
       .metadata = *metadata_or,
       .source =

@@ -359,6 +359,7 @@ class OwnedBindingSlot:
         device: torch.device,
         device_id: int,
         target_publication_token: bytes | None,
+        target_publication_operation_id: str | None = None,
     ) -> None:
         if not tensors:
             raise ArtifactError(
@@ -388,6 +389,11 @@ class OwnedBindingSlot:
         self._device_id = int(device_id)
         self._target_publication_token = (
             bytes(target_publication_token) if target_publication_token else None
+        )
+        self._target_publication_operation_id = (
+            str(target_publication_operation_id)
+            if target_publication_operation_id
+            else None
         )
         self._seal_generation_counter = (
             int(current_value_metadata.seal_generation)
@@ -517,6 +523,7 @@ class OwnedBindingSlot:
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
+        operation_id = self._target_publication_operation_id or uuid.uuid4().hex
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
@@ -524,6 +531,7 @@ class OwnedBindingSlot:
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
+                operation_id=operation_id,
                 timeout_s=timeout_s if timeout_s is not None else 60.0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -595,7 +603,7 @@ class OwnedBindingSlot:
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
-        operation_id = uuid.uuid4().hex
+        operation_id = self._target_publication_operation_id or uuid.uuid4().hex
         client = self._runtime.ensure_client()
         try:
             start_resp = client.start_publish_target_replica(
@@ -718,6 +726,7 @@ class OwnedBindingSlot:
         self._current_value_metadata = None
         self._selection = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = False
         return BindingUpdateEpoch(
             binding_id=self._binding_id,
@@ -765,6 +774,7 @@ class OwnedBindingSlot:
         self._current_value_metadata = metadata
         self._selection = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = False
 
     def promote_current_value(
@@ -808,6 +818,7 @@ class OwnedBindingSlot:
         self._contribution_selection = clone_selection(metadata.selection)
         self._contribution_source_artifact_id = metadata.source_artifact_id
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = False
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
@@ -926,6 +937,7 @@ class OwnedBindingSlot:
         self._contribution_selection = None
         self._contribution_source_artifact_id = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._current_value_metadata = None
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
@@ -1024,6 +1036,11 @@ class OwnedBindingSlot:
             if getattr(response, "target_publication_token", b"")
             else None
         )
+        self._target_publication_operation_id = (
+            str(operation_id)
+            if operation_id and self._target_publication_token
+            else None
+        )
         metadata = parse_binding_value_or_raise(
             response.current_value if hasattr(response, "current_value") else None,
             rpc_name="RefillOwnedBinding",
@@ -1109,6 +1126,7 @@ class OwnedBindingSlot:
         self._current_value_metadata = None
         self._selection = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = True
 
 

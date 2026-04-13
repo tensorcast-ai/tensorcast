@@ -176,6 +176,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::LockTransportChunksRequest* req,
       v2::LockTransportChunksResponse* resp) override;
 
+  grpc::Status RegisterRegion(
+      grpc::ServerContext* ctx,
+      const v2::RegisterRegionRequest* req,
+      v2::RegisterRegionResponse* resp) override;
+
+  grpc::Status UnregisterRegion(
+      grpc::ServerContext* ctx,
+      const v2::UnregisterRegionRequest* req,
+      v2::UnregisterRegionResponse* resp) override;
+
   grpc::Status RegisterVramRegion(
       grpc::ServerContext* ctx,
       const v2::RegisterVramRegionRequest* req,

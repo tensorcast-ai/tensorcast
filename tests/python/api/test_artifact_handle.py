@@ -138,7 +138,7 @@ class _RuntimeStub:
         self._artifact_cache = ArtifactCache(
             daemon_endpoint="daemon", ttl_seconds=10, max_entries=8
         )
-        self._key_cache: dict[str, str | None] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
         self._client = client
 
     def ensure_client(self) -> _ClientStub:
@@ -158,12 +158,18 @@ class _RuntimeStub:
     def resolve_key_mapping_cached(
         self, *, key: str
     ) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key), None
+        return self._key_cache.get(key, (None, None))
 
     def cache_key_mapping(
-        self, key: str, *, artifact_id: str | None, ttl_override=None
+        self,
+        key: str,
+        *,
+        artifact_id: str | None,
+        disk_path: str | None = None,
+        ttl_override=None,
     ) -> None:
-        self._key_cache[key] = artifact_id
+        del ttl_override
+        self._key_cache[key] = (artifact_id, disk_path)
 
 
 class _PipelineStub:

@@ -4,7 +4,7 @@ title: Core-Backed Body Handles and Backing Policy
 status: completed
 areas: ["core", "daemon", "sdk", "docs"]
 created: 2026-03-08
-last_updated: 2026-03-08
+last_updated: 2026-04-06
 related_code:
   - docs/designs/0034-stable-memory-tiers.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -756,9 +756,11 @@ This design must stay aligned with existing local external-target and handle-exp
 
 Rules:
 
-- local CPU zero-copy exposure continues to use the existing CPU memfd handle-lease path,
+- local CPU zero-copy exposure continues to use the existing CPU memfd handle-lease path and
+  `HOST_SHARED` region registration when the caller supplies a mutable shared host window,
 - local GPU zero-copy exposure continues to use the existing CUDA IPC and region/binding path,
-- region-backed writes remain the only mutable external-target path for caller-owned CUDA memory,
+- region-backed writes remain the only mutable external-target path for caller-owned local regions
+  (`VRAM` and `HOST_SHARED`),
 - `BodyStore` and `BodyHandle` must not introduce a second local-export protocol.
 
 Implication:
@@ -840,6 +842,24 @@ For a transient forwarding daemon:
 5. retire the local staging body after success or failure cleanup.
 
 `TRANSIENT_FORWARD` must never silently become home retained truth.
+
+### 9.4.1 Future convergence for transient forwarding
+
+Current routed byte-artifact remote-home `put` may still materialize transient per-item bodies and temporarily route
+them through the shared retained-body execution machinery as an implementation shortcut. That shape is acceptable as a
+transitional execution detail, but it is not the desired long-term architecture.
+
+Long-term convergence rule:
+
+- transient forwarding bodies are transport-scoped execution objects, not retained store-owned truth,
+- transient forwarding must not permanently depend on the global retained-body registry hot path,
+- source-side remote-home `put` should converge toward direct source-bytes or source-region to pack, export, and
+  forward execution, without creating per-item retained-body registrations solely for forwarding,
+- home-daemon verification, per-item outcome accounting, routed authority ownership, and final retained-backing
+  installation remain unchanged.
+
+This evolution changes execution shape only. It does not relax artifact identity, authority, verification, or
+home-install semantics.
 
 ### 9.5 State machine
 

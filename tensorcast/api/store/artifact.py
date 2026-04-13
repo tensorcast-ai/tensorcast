@@ -190,18 +190,6 @@ def _build_subset_view_spec_proto(
     return proto
 
 
-def _extract_cached_mapping_artifact_id(value: object) -> str | None:
-    current = value
-    while isinstance(current, tuple):
-        if not current:
-            return None
-        current = current[0]
-    if current is None:
-        return None
-    resolved = str(current).strip()
-    return resolved or None
-
-
 @dataclass(frozen=True, slots=True)
 class PrefetchedReplica:
     artifact_id: str
@@ -1840,6 +1828,10 @@ class Artifact:
 
         source_policy = _resolve_source_policy_from_options(options)
         rpc_timeout_s = _ctx_timeout_s(ctx)
+        operation_id = _build_transport_operation_id(
+            base_operation_id=uuid.uuid4().hex,
+            ctx=ctx,
+        )
         try:
             with tensorcast_profile_stage(
                 "tensorcast",
@@ -1863,10 +1855,7 @@ class Artifact:
                     serving_runtime_policy=serving_runtime_policy,
                     copy_plan=copy_plan_proto,
                     dst_specs=dst_specs,
-                    operation_id=_build_transport_operation_id(
-                        base_operation_id=uuid.uuid4().hex,
-                        ctx=ctx,
-                    ),
+                    operation_id=operation_id,
                     timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )
                 if profile is not None:
@@ -1964,6 +1953,7 @@ class Artifact:
             target_publication_token=getattr(
                 response, "target_publication_token", None
             ),
+            target_publication_operation_id=operation_id,
         )
         if slot.current_value_metadata is None:
             with contextlib.suppress(Exception):
@@ -2649,8 +2639,8 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                artifact_id = _extract_cached_mapping_artifact_id(
-                    runtime.resolve_key_mapping_cached(key=self._key_hint)
+                artifact_id, _disk_path = runtime.resolve_key_mapping_cached(
+                    key=self._key_hint
                 )
                 if not artifact_id:
                     raise ArtifactError(

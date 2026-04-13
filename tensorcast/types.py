@@ -299,33 +299,42 @@ class SourceBoundPlanDiagnostics(BaseModel):
         proto: store_daemon_pb2.SourceBoundPlanDiagnostics,
     ) -> "SourceBoundPlanDiagnostics":
         return cls(
-            execution_plan_kind=str(proto.execution_plan_kind or "") or None,
+            execution_plan_kind=str(getattr(proto, "execution_plan_kind", "") or "")
+            or None,
             planned_collective_candidate_bytes=int(
-                proto.planned_collective_candidate_bytes
+                getattr(proto, "planned_collective_candidate_bytes", 0)
             ),
             planned_collective_admitted_bytes=int(
-                proto.planned_collective_admitted_bytes
+                getattr(proto, "planned_collective_admitted_bytes", 0)
             ),
-            planned_local_typed_bytes=int(proto.planned_local_typed_bytes),
+            planned_local_typed_bytes=int(
+                getattr(proto, "planned_local_typed_bytes", 0)
+            ),
             planned_non_admitted_typed_bytes=int(
-                proto.planned_non_admitted_typed_bytes
+                getattr(proto, "planned_non_admitted_typed_bytes", 0)
             ),
-            planned_generic_residual_bytes=int(proto.planned_generic_residual_bytes),
-            compatibility_lowered_bytes=int(proto.compatibility_lowered_bytes),
+            planned_generic_residual_bytes=int(
+                getattr(proto, "planned_generic_residual_bytes", 0)
+            ),
+            compatibility_lowered_bytes=int(
+                getattr(proto, "compatibility_lowered_bytes", 0)
+            ),
             planner_reject_reason_buckets={
                 str(key): int(value)
-                for key, value in dict(proto.planner_reject_reason_buckets).items()
+                for key, value in dict(
+                    getattr(proto, "planner_reject_reason_buckets", {}) or {}
+                ).items()
             },
-            planner_version=str(proto.planner_version or "") or None,
-            plan_hash=str(proto.plan_hash or "") or None,
+            planner_version=str(getattr(proto, "planner_version", "") or "") or None,
+            plan_hash=str(getattr(proto, "plan_hash", "") or "") or None,
             estimated_collective_peak_temporary_bytes=int(
-                proto.estimated_collective_peak_temporary_bytes
+                getattr(proto, "estimated_collective_peak_temporary_bytes", 0)
             ),
             estimated_collective_batch_bytes=int(
-                proto.estimated_collective_batch_bytes
+                getattr(proto, "estimated_collective_batch_bytes", 0)
             ),
             estimated_collective_dedup_saving_bytes=int(
-                proto.estimated_collective_dedup_saving_bytes
+                getattr(proto, "estimated_collective_dedup_saving_bytes", 0)
             ),
         )
 
@@ -1631,6 +1640,8 @@ class RepresentationPublishContract(BaseModel):
             representation_contract_hash=str(self.representation_contract_hash),
             serving_build_digest=str(self.serving_build_digest),
         )
+        if self.serving_artifact_id is not None:
+            proto.serving_artifact_id = str(self.serving_artifact_id)
         proto.subject.CopyFrom(self.subject.to_store_proto())
         if self.serving_build_digest_version is not None:
             proto.serving_build_digest_version = str(self.serving_build_digest_version)
@@ -1706,6 +1717,8 @@ class RepresentationPublishContract(BaseModel):
             representation_contract_hash=str(self.representation_contract_hash),
             serving_build_digest=str(self.serving_build_digest),
         )
+        if self.serving_artifact_id is not None:
+            proto.serving_artifact_id = str(self.serving_artifact_id)
         proto.subject.CopyFrom(self.subject.to_proto())
         if self.serving_build_digest_version is not None:
             proto.serving_build_digest_version = str(self.serving_build_digest_version)
@@ -2318,6 +2331,32 @@ class RegisterTensorAlias(BaseModel):
     dtype: str
 
 
+class RegionMemoryKind(str, Enum):
+    VRAM = "VRAM"
+    HOST_SHARED = "HOST_SHARED"
+
+
+class HostSharedRegionClass(str, Enum):
+    SCRATCH = "SCRATCH"
+    ALLOCATOR = "ALLOCATOR"
+
+
+class LocalRegionHandle(BaseModel):
+    """Registered local region descriptor returned by the daemon."""
+
+    model_config = ConfigDict(frozen=True)
+
+    region_id: str
+    memory_kind: RegionMemoryKind
+    ttl_ms: int
+    size_bytes: int
+    device_id: int | None = None
+    attach_token: bytes = b""
+    daemon_managed: bool = False
+    host_shared_region_class: HostSharedRegionClass | None = None
+    expires_at: datetime | None = None
+
+
 class VramRegionHandle(BaseModel):
     """Registered VRAM region descriptor returned by the daemon."""
 
@@ -2326,6 +2365,17 @@ class VramRegionHandle(BaseModel):
     region_id: str
     ttl_ms: int
     expires_at: datetime | None = None
+
+
+class HostSharedRegionAttachment(BaseModel):
+    """Local memfd attachment returned for a daemon-managed HOST_SHARED region."""
+
+    model_config = ConfigDict(frozen=True)
+
+    region_id: str
+    size_bytes: int
+    attach_token: bytes
+    fd: int
 
 
 class DeregisterArtifactOutcome(BaseModel):
@@ -2344,6 +2394,7 @@ __all__ = [
     "SourceBoundCapability",
     "CollectivePolicy",
     "CollectiveFailureClass",
+    "HashBackend",
     "HashLocation",
     "IdentityMintStrategy",
     "ExecutionDiagnostics",
@@ -2391,6 +2442,10 @@ __all__ = [
     "LeaseSegment",
     "RegisterStorage",
     "RegisterTensorAlias",
+    "RegionMemoryKind",
+    "HostSharedRegionClass",
+    "HostSharedRegionAttachment",
+    "LocalRegionHandle",
     "VramRegionHandle",
     "DeregisterArtifactOutcome",
     "build_serving_manifest_ref",

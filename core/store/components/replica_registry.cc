@@ -9,20 +9,63 @@
 
 namespace tensorcast::store::components {
 
-void ReplicaRegistry::rebuild_indices_locked() {
-  by_instance_.clear();
-  by_artifact_.clear();
-  by_device_.clear();
+void ReplicaRegistry::append_to_secondary_indices_locked(size_t idx) {
+  auto& entry = entries_[idx];
+  auto& artifact_bucket = by_artifact_[entry.key.artifact_id];
+  entry.artifact_bucket_pos = artifact_bucket.size();
+  artifact_bucket.push_back(idx);
 
-  by_instance_.reserve(entries_.size());
-  by_artifact_.reserve(entries_.size());
-  by_device_.reserve(entries_.size());
-  for (size_t idx = 0; idx < entries_.size(); ++idx) {
-    const auto& entry = entries_[idx];
-    by_instance_.insert_or_assign(entry.key, idx);
-    by_artifact_[entry.key.artifact_id].push_back(idx);
-    by_device_[entry.key.device].push_back(idx);
+  auto& device_bucket = by_device_[entry.key.device];
+  entry.device_bucket_pos = device_bucket.size();
+  device_bucket.push_back(idx);
+}
+
+void ReplicaRegistry::remove_from_artifact_bucket_locked(size_t idx) {
+  Entry& entry = entries_[idx];
+  auto it = by_artifact_.find(entry.key.artifact_id);
+  DCHECK(it != by_artifact_.end());
+  auto& bucket = it->second;
+  DCHECK_LT(entry.artifact_bucket_pos, bucket.size());
+  const size_t swapped_idx = bucket.back();
+  bucket[entry.artifact_bucket_pos] = swapped_idx;
+  bucket.pop_back();
+  if (entry.artifact_bucket_pos < bucket.size()) {
+    entries_[swapped_idx].artifact_bucket_pos = entry.artifact_bucket_pos;
   }
+  if (bucket.empty()) {
+    by_artifact_.erase(it);
+  }
+}
+
+void ReplicaRegistry::remove_from_device_bucket_locked(size_t idx) {
+  Entry& entry = entries_[idx];
+  auto it = by_device_.find(entry.key.device);
+  DCHECK(it != by_device_.end());
+  auto& bucket = it->second;
+  DCHECK_LT(entry.device_bucket_pos, bucket.size());
+  const size_t swapped_idx = bucket.back();
+  bucket[entry.device_bucket_pos] = swapped_idx;
+  bucket.pop_back();
+  if (entry.device_bucket_pos < bucket.size()) {
+    entries_[swapped_idx].device_bucket_pos = entry.device_bucket_pos;
+  }
+  if (bucket.empty()) {
+    by_device_.erase(it);
+  }
+}
+
+void ReplicaRegistry::patch_moved_entry_indices_locked(size_t idx) {
+  const Entry& entry = entries_[idx];
+  by_instance_.insert_or_assign(entry.key, idx);
+  auto artifact_it = by_artifact_.find(entry.key.artifact_id);
+  DCHECK(artifact_it != by_artifact_.end());
+  DCHECK_LT(entry.artifact_bucket_pos, artifact_it->second.size());
+  artifact_it->second[entry.artifact_bucket_pos] = idx;
+
+  auto device_it = by_device_.find(entry.key.device);
+  DCHECK(device_it != by_device_.end());
+  DCHECK_LT(entry.device_bucket_pos, device_it->second.size());
+  device_it->second[entry.device_bucket_pos] = idx;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,10 +81,14 @@ absl::Status ReplicaRegistry::emplace(
   }
 
   const size_t idx = entries_.size();
-  entries_.push_back(Entry{.key = key, .replica = std::move(replica), .last_access = std::chrono::system_clock::now()});
+  entries_.push_back(
+      Entry{
+          .key = key,
+          .replica = std::move(replica),
+          .last_access = std::chrono::system_clock::now(),
+      });
   by_instance_.emplace(key, idx);
-  by_artifact_[key.artifact_id].push_back(idx);
-  by_device_[key.device].push_back(idx);
+  append_to_secondary_indices_locked(idx);
 
   return absl::OkStatus();
 }
@@ -138,13 +185,22 @@ std::optional<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>>
   }
 
   const size_t idx = it->second;
+  const size_t last_idx = entries_.size() - 1;
   Entry removed_entry{
       .key = entries_[idx].key,
       .replica = std::move(entries_[idx].replica),
       .last_access = entries_[idx].last_access,
+      .artifact_bucket_pos = entries_[idx].artifact_bucket_pos,
+      .device_bucket_pos = entries_[idx].device_bucket_pos,
   };
-  entries_.erase(entries_.begin() + idx);
-  rebuild_indices_locked();
+  remove_from_artifact_bucket_locked(idx);
+  remove_from_device_bucket_locked(idx);
+  by_instance_.erase(it);
+  if (idx != last_idx) {
+    entries_[idx] = std::move(entries_[last_idx]);
+    patch_moved_entry_indices_locked(idx);
+  }
+  entries_.pop_back();
   return std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>{
       std::move(removed_entry.key),
       std::move(removed_entry.replica),

@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/external_target_access_service.h"
 
 #include <format>
+#include <optional>
 
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
@@ -39,14 +40,9 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
   if (layout.storages_size() == 0) {
     return absl::InvalidArgumentError("target_layout must include at least one storage entry");
   }
-  if (device_uuid.empty()) {
-    return absl::InvalidArgumentError("device_uuid is required");
-  }
-
-  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, device_uuid, std::nullopt);
-  auto device_status = validate_target_storage_device(layout, device, rpc_name);
-  if (!device_status.ok()) {
-    return device_status;
+  auto device_or = resolve_target_storage_device(layout, device_uuid, rpc_name);
+  if (!device_or.ok()) {
+    return device_or.status();
   }
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
@@ -56,7 +52,7 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
   }
 
   return ValidatedTargetAccess{
-      .device = device,
+      .device = *device_or,
       .storage_lease = std::move(*storage_lease_or),
   };
 }
@@ -83,22 +79,48 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedSourceAccess> ExternalTarge
   return ValidatedSourceAccess{.layout = std::move(*layout_or)};
 }
 
-absl::Status ExternalTargetAccessService::validate_target_storage_device(
+absl::StatusOr<store::DeviceKey> ExternalTargetAccessService::resolve_target_storage_device(
     const v2::TargetLayout& layout,
-    const store::DeviceKey& device,
+    std::string_view device_uuid,
     std::string_view /*rpc_name*/) const {
+  std::optional<int32_t> vram_device_id;
+  for (const auto& storage : layout.storages()) {
+    switch (storage.storage_source_case()) {
+      case v2::StorageEntry::kVramRegionId:
+        if (storage.vram_region_id().empty()) {
+          return absl::InvalidArgumentError("vram_region_id must not be empty");
+        }
+        break;
+      case v2::StorageEntry::kCudaIpcHandle:
+        return absl::InvalidArgumentError("target storage must reference a managed vram region");
+        break;
+      case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
+      default:
+        return absl::InvalidArgumentError("target storage must reference a region");
+    }
+    if (storage.device_id() < 0) {
+      return absl::InvalidArgumentError("storage.device_id must be >= 0");
+    }
+    if (device_uuid.empty()) {
+      return absl::InvalidArgumentError("device_uuid is required for VRAM target layouts");
+    }
+    if (!vram_device_id.has_value()) {
+      vram_device_id = storage.device_id();
+    } else if (*vram_device_id != storage.device_id()) {
+      return absl::InvalidArgumentError("target_layout must use one VRAM device_id");
+    }
+  }
+  if (!vram_device_id.has_value()) {
+    return absl::InvalidArgumentError("target_layout must include at least one storage entry");
+  }
+  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, device_uuid, std::nullopt);
   if (device.type != DeviceType::GPU || device.ordinal < 0) {
     return absl::InvalidArgumentError("device_uuid must resolve to a GPU device");
   }
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
-      return absl::InvalidArgumentError("Target storage must reference a vram_region_id");
-    }
-    if (storage.device_id() != device.ordinal) {
-      return absl::InvalidArgumentError("storage.device_id does not match device_uuid");
-    }
+  if (vram_device_id.has_value() && *vram_device_id != device.ordinal) {
+    return absl::InvalidArgumentError("storage.device_id does not match device_uuid");
   }
-  return absl::OkStatus();
+  return device;
 }
 
 } // namespace tensorcast::daemon

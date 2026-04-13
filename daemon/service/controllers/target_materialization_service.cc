@@ -481,7 +481,20 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout must include at least one storage entry"};
   }
 
-  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
+  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
+      rctx.server_context().peer(), "MaterializeIntoTarget", layout, req.pid(), req.device_uuid());
+  if (!validated_target_or.ok()) {
+    record_materialize_into_target(
+        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(validated_target_or.status());
+  }
+  auto validated_target = std::move(*validated_target_or);
+  const auto device = validated_target.device;
+  if (device.type != DeviceType::GPU || device.ordinal < 0) {
+    record_materialize_into_target(
+        "error", "target_kind_unsupported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "HOST_SHARED target_layout is not supported for MaterializeIntoTarget"};
+  }
 
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
@@ -533,15 +546,6 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   if (!build_plan_status.ok()) {
     return build_plan_status;
   }
-
-  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
-      rctx.server_context().peer(), "MaterializeIntoTarget", layout, req.pid(), req.device_uuid());
-  if (!validated_target_or.ok()) {
-    record_materialize_into_target(
-        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(validated_target_or.status());
-  }
-  auto validated_target = std::move(*validated_target_or);
 
   const auto& resolved_selection = plan.resolved_selection;
   const bool has_subset = resolved_selection.tensor_names_size() > 0;

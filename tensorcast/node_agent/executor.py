@@ -321,7 +321,7 @@ class NodeAgentExecutor:
                 self._daemon_address,
                 runtime=StoreRuntimeContext(
                     self._daemon_address,
-                    client_factory=self._client_factory,
+                    client_factory=lambda _addr: self._client,
                 ),
             )
         return self._store

@@ -1,12 +1,26 @@
 ---
 title: Region Backed Registration
-description: Region registration, LIP reuse, and deregistration
+description: Region registration, local shared-region access, LIP reuse, and deregistration
 ---
 
 # Region Backed Registration
 
 This document explains region-backed registration, lease reuse, and quiesced
 cleanup flows.
+
+Current status:
+
+- `RegisterRegion` is the canonical local region-registration surface and
+  supports both `VRAM` and `HOST_SHARED`,
+- `RegisterVramRegion` / `UnregisterVramRegion` remain compatibility wrappers
+  for existing VRAM callers,
+- byte-artifact `BatchGetIntoRegion` /
+  `BatchPutIfAbsentFromRegion` accept region-backed layouts over both `VRAM`
+  and `HOST_SHARED`,
+- `HOST_SHARED` widens only the local placement layer; it does not change
+  artifact identity, routed authority, or inter-daemon transport semantics,
+- `MaterializeIntoMappedTarget` remains a separate mapped-target path and
+  currently rejects `HOST_SHARED` target layouts.
 
 Related docs:
 
@@ -17,6 +31,30 @@ Related docs:
 - Failure semantics: [Error, Retry, Observability](./error-retry-observability.md)
 - Strategy-plane design: [0108 Tensor-Aware Materialization Strategy Plane](../../designs/0108-tensor-aware-materialization-strategy-plane.md)
 
+## What is a region?
+
+A region is a daemon-tracked local shared byte window with:
+
+- one memory kind,
+- one owner PID or local lifecycle authority,
+- explicit bounds,
+- and a TTL or lease-scoped lifetime.
+
+Live region kinds:
+
+- `VRAM`, backed by CUDA IPC handle bytes and tracked in
+  `IpcRegionRegistry`,
+- `HOST_SHARED`, backed by daemon-managed or otherwise locally shared host
+  memory and tracked by the same registry.
+
+Why regions exist:
+
+- region-backed placement lets a caller and the local daemon agree on one
+  mutable byte window without making that window part of artifact identity,
+- regions amortize registration and safety checks across many item placements,
+- many applications naturally manage slabs and offsets rather than one isolated
+  allocation per artifact.
+
 ## What is a “VRAM region”?
 
 A VRAM region is a daemon-tracked handle to a long-lived CUDA allocation (via
@@ -26,22 +64,102 @@ CUDA IPC handle bytes), scoped to:
 - an owner PID (for safety)
 - a TTL (to prevent leaks)
 
-Why regions exist:
+Why this current live flavor exists:
 
 - LIP registration requires CUDA IPC handles for client-owned VRAM.
-- Creating/transporting handles per tensor/storage is expensive and error-prone.
+- Creating or transporting handles per tensor or storage is expensive and
+  error-prone.
 - Many applications already allocate “slabs” and carve them into many tensors;
   region-backed registration turns those into offset-based references.
 
-## Register VRAM Region
+## Register Region
 
-The SDK registers reusable CUDA IPC regions using:
+The canonical SDK and RPC surface is:
+
+- `RegisterRegion` RPC
+- `Store.register_region(...)` API
+
+A region is scoped to an owner PID, explicit bounds, and TTL. The daemon stores
+region metadata in `IpcRegionRegistry` and resolves the concrete attachment
+mechanism from `memory_kind`.
+
+### RegisterRegionRequest (field reference)
+
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
+
+| Field | What it does | Why it exists |
+|---|---|---|
+| `session_id` | Optional client session tag. | Diagnostics and ownership correlation. |
+| `memory_kind` | Selects `VRAM` or `HOST_SHARED`. | One local-only region model across both memory kinds. |
+| `device_id` | GPU ordinal for VRAM regions. Ignored for `HOST_SHARED`. | Validate/route CUDA IPC usage. |
+| `cuda_ipc_handle` | CUDA IPC handle bytes for a VRAM base allocation. | The attachment the daemon needs for VRAM mapping. |
+| `host_shared` | `HOST_SHARED` region spec. | Declares attach metadata, daemon-managed export, and host region class. |
+| `size_bytes` | Region size. | Bounds checks for offsets and storages. |
+| `ttl_ms` | Region TTL. | Auto-cleanup in crash/leak scenarios. |
+| `owner_pid` | Owner process id. | Prevent other processes from hijacking lifecycle. |
+| `region_name` | Optional tag. | Operator-friendly debugging (e.g. “model_weights_slab”). |
+
+`HostSharedRegionSpec` carries:
+
+- `attach_token`: opaque local-only attach metadata returned by the daemon or
+  supplied by the caller,
+- `daemon_managed`: whether the daemon owns the underlying shared host slab,
+- `region_class`: `SCRATCH` or `ALLOCATOR`.
+
+Memory-kind rules:
+
+1. `VRAM` requires `device_id >= 0` and a non-empty `cuda_ipc_handle`.
+2. `HOST_SHARED` requires `host_shared` and is recorded internally with
+   `device_id = -1`.
+3. Regions remain local-only mutable placement state; they are not part of
+   artifact identity or routed authority truth.
+
+Example (`VRAM`):
+
+```python
+import tensorcast
+
+tensorcast.init(mode="connect")
+# handle_bytes should come from the local CUDA IPC export helper for slab_ptr.
+handle = tensorcast.register_region(
+    memory_kind=tensorcast.RegionMemoryKind.VRAM,
+    size_bytes=slab_bytes,
+    ttl_ms=60_000,
+    device_id=0,
+    cuda_ipc_handle=handle_bytes,
+    name="weights_slab",
+)
+```
+
+Example (`HOST_SHARED`, daemon-managed):
+
+```python
+import mmap
+import tensorcast
+
+tensorcast.init(mode="connect")
+handle = tensorcast.register_region(
+    memory_kind=tensorcast.RegionMemoryKind.HOST_SHARED,
+    size_bytes=64 << 20,
+    ttl_ms=60_000,
+    daemon_managed=True,
+    host_shared_region_class=tensorcast.HostSharedRegionClass.SCRATCH,
+    name="host_scratch",
+)
+attachment = tensorcast.attach_host_shared_region(handle)
+host_mapping = mmap.mmap(attachment.fd, attachment.size_bytes)
+```
+
+## Register VRAM Region Compatibility Wrapper
+
+The SDK still exposes:
 
 - `RegisterVramRegion` RPC
 - `Store.register_vram_region(...)` API
 
-A region is scoped to a device and owner PID and is protected by TTL. The daemon
-stores region metadata and handle bytes in `IpcRegionRegistry`.
+These are compatibility wrappers over the same region registry and remain useful
+for existing callers that already hold a base VRAM pointer and want the SDK to
+mint CUDA IPC handle bytes for them.
 
 ### RegisterVramRegionRequest (field reference)
 
@@ -51,36 +169,87 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 |---|---|---|
 | `session_id` | Optional client session tag. | Diagnostics and ownership correlation. |
 | `device_id` | GPU ordinal for the region. | Validate/route IPC handle usage. |
-| `cuda_ipc_handle` | CUDA IPC handle bytes for the base allocation. | The core “capability” the daemon needs to export/resolve. |
+| `cuda_ipc_handle` | CUDA IPC handle bytes for the base allocation. | The core VRAM attachment the daemon needs to map. |
 | `size_bytes` | Region size. | Bounds checks for offsets and storages. |
 | `ttl_ms` | Region TTL. | Auto-cleanup in crash/leak scenarios. |
 | `owner_pid` | Owner process id. | Prevent other processes from hijacking lifecycle. |
 | `region_name` | Optional tag. | Operator-friendly debugging (e.g. “model_weights_slab”). |
 
-Example:
+## HOST_SHARED semantics
 
-```python
-import tensorcast
+`HOST_SHARED` keeps the same local-only region model:
 
-tensorcast.init(mode="connect")
-handle = tensorcast.register_vram_region(
-    device_id=0,
-    base_ptr=int(slab_ptr),
-    size_bytes=slab_bytes,
-    ttl_ms=60_000,
-    name="weights_slab",
-)
-```
+1. It is a local mutable placement window, not part of artifact identity or
+   routed truth.
+2. It carries explicit bounds, owner PID, TTL, and poison state in the same
+   registry as `VRAM`.
+3. It may be daemon-managed or caller-attached through opaque local-only attach
+   metadata.
+4. Host pinning is optional performance policy. It is not part of region
+   correctness.
 
-### UnregisterVramRegionRequest (field reference)
+Current live `HOST_SHARED` classes:
+
+- `SCRATCH`: a general local shared host window for staging or direct region
+  placement,
+- `ALLOCATOR`: a caller-managed shared host region whose offsets are interpreted
+  together with explicit slot tokens.
+
+For allocator-backed layouts, `slot_index` and `slot_generation` are
+caller-supplied lifetime labels:
+
+- TensorCast validates that both are present when required,
+- TensorCast echoes them back in per-item outcomes,
+- TensorCast does not own slot allocation, slot retirement, or stale-completion
+  filtering.
+
+## Region-backed byte-artifact batch IO
+
+`BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` now accept `TargetLayout`
+storages that reference either:
+
+- `StorageEntry.vram_region_id`, or
+- `StorageEntry.region_ref` with `memory_kind = VRAM | HOST_SHARED`.
+
+Normative rules:
+
+1. These RPCs remain loopback or UDS-only. Remote or home daemons never write
+   directly into caller-visible regions.
+2. A single byte-artifact region layout must use one memory kind. Mixed
+   `VRAM` and `HOST_SHARED` layouts are rejected.
+3. Pure `HOST_SHARED` layouts require `storage.device_id = -1` and empty
+   `device_uuid`.
+4. `BatchPutIfAbsentFromRegion` reads bytes from the local region mapping
+   selected by `TargetLayout`.
+5. `BatchGetIntoRegion` writes bytes directly into the local region mapping
+   selected by `TargetLayout`.
+6. Verification modes, routed authority, `HomeBatch*`, and inter-daemon
+   transport semantics are unchanged by the local memory kind.
+7. For allocator-backed `HOST_SHARED` byte-artifact layouts, every offset must
+   be explicit and must carry `slot_index` plus `slot_generation`.
+
+## HOST_SHARED attach and release
+
+Daemon-managed `HOST_SHARED` regions use the existing local handle plane:
+
+- `RegisterRegion(..., daemon_managed=True, ...)` returns an attach token,
+- `attach_host_shared_region(...)` resolves that token to a local memfd,
+- `release_host_shared_region(...)` releases the local attachment,
+- unregistration or TTL expiry eventually lets the daemon reap the region.
+
+This attach path is local-only. It is not a remote transport mechanism.
+
+### UnregisterRegionRequest (field reference)
 
 Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 | Field | What it does | Notes |
 |---|---|---|
-| `region_id` | Region identifier returned by `RegisterVramRegion`. | Required. |
+| `region_id` | Region identifier returned by `RegisterRegion` or `RegisterVramRegion`. | Required. |
 | `owner_pid` | Owner PID verification. | Safety: mismatches fail. |
 | `force` | Best-effort release even if TTL expired. | Useful for cleanup; use with care. |
+
+`UnregisterVramRegion` remains a compatibility wrapper for VRAM-only callers.
 
 ## Region Referenced LIP Storage
 
@@ -108,12 +277,20 @@ path from LIP registration. The daemon writes directly into existing CUDA
 regions when the target layout is coalesced and matches the selected
 byte-space (canonical or view-indexed). No replica is allocated.
 
+Current limitation:
+
+- `MaterializeIntoTarget` / `MaterializeIntoMappedTarget` still treat this as a
+  VRAM-region path.
+- `HOST_SHARED` direct-write currently enters through byte-artifact
+  `BatchGetIntoRegion`, not the generic mapped-target API.
+
 Boundary note:
 
 - This API is a local external-target front-door only (caller/instance-agent ->
   local daemon).
 - Cross-node cache routing must not bypass this boundary: remote/home daemons
-  never write directly into caller-owned CUDA regions.
+  never write directly into caller-visible local regions, whether `VRAM` or
+  `HOST_SHARED`.
 
 ### SDK preconditions
 
@@ -229,5 +406,8 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 - Region registry: [daemon/state/ipc_region_registry.h](../../../daemon/state/ipc_region_registry.h)
 - LIP manager: [daemon/state/lip_manager.cc](../../../daemon/state/lip_manager.cc)
 - Daemon RPC wiring: [daemon/service/grpc_service_impl.cc](../../../daemon/service/grpc_service_impl.cc)
+- Byte-artifact region layout validation: [daemon/service/byte_artifact_region_layout.cc](../../../daemon/service/byte_artifact_region_layout.cc)
+- Target-storage region acquisition: [daemon/service/controllers/materialization_target_storage_utils.cc](../../../daemon/service/controllers/materialization_target_storage_utils.cc)
 - SDK region cache: [tensorcast/api/_region_cache.py](../../../tensorcast/api/_region_cache.py)
 - SDK APIs: [tensorcast/api/store/__init__.py](../../../tensorcast/api/store/__init__.py)
+- Local handle client helpers: [tensorcast/daemon_ctl.py](../../../tensorcast/daemon_ctl.py)

@@ -4,7 +4,7 @@ title: Unified Artifact Runtime and Routed Byte Artifact Architecture
 status: implemented
 areas: ["daemon", "sdk", "global_store", "proto", "core", "integrations", "docs"]
 created: 2026-03-08
-last_updated: 2026-03-30
+last_updated: 2026-04-06
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0056-programmable-framework-adv.md
@@ -18,18 +18,26 @@ related_code:
   - daemon/state/worker_directory_cache.h
   - daemon/service/artifact_profile_registry.h
   - daemon/service/byte_artifact_body_store.h
+  - daemon/service/byte_artifact_region_layout.h
+  - daemon/service/byte_artifact_region_layout.cc
   - daemon/service/byte_artifact_route_resolver.h
   - daemon/service/controllers/byte_artifact_controller.h
   - daemon/service/controllers/external_target_access_service.h
+  - daemon/service/controllers/materialization_target_storage_utils.h
+  - daemon/service/controllers/materialization_target_storage_utils.cc
   - daemon/service/controllers/materialization_controller.cc
   - daemon/service/controllers/target_materialization_service.cc
   - daemon/service/controllers/target_publish_service.cc
   - daemon/service/controllers/transport_controller.cc
   - daemon/service/grpc_service_impl_rpc_delegates.cc
+  - daemon/state/ipc_region_registry.h
+  - daemon/state/ipc_region_registry.cc
   - daemon/service/payload_transport_broker.h
   - daemon/state/daemon_kernel.cc
   - core/store/communication_types.h
   - core/store/components/communication_manager.h
+  - core/store/materialization/dataplane/sinks/target_layout_host_sink.h
+  - core/store/materialization/dataplane/sinks/target_layout_host_sink.cc
   - core/store/materialization/dataplane/loaders/p2p_loader.cc
   - core/store/materialization/dataplane/sources/remote_key_source.cc
   - core/store/materialization/runtime/pipeline/source_adapter.cc
@@ -37,11 +45,14 @@ related_code:
   - proto/tensorcast/config/v1/daemon_config.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/node_agent/v1/node_agent.proto
+  - tensorcast/api/store/__init__.py
   - tensorcast/common/identity.py
   - tensorcast/common/selection_contract.py
   - tensorcast/common/selection_identity.py
+  - tensorcast/daemon_ctl.py
   - tensorcast/node_agent/executor.py
   - tensorcast/node_agent/server.py
+  - tensorcast/types.py
 links:
   dependencies:
     - ./0004-unified-runtime-config.md
@@ -67,7 +78,7 @@ The unified model is:
 - `WriteMode`: overwrite or `PUT_IF_ABSENT_JOIN`.
 
 `byte_artifact` is a profile, not a parallel runtime. The final daemon shape keeps routed byte-artifact authority,
-caller-owned region access, payload transport, and publication capabilities in separate modules with explicit trust
+local shared-region access, payload transport, and publication capabilities in separate modules with explicit trust
 boundaries.
 
 Engine-oriented alias policy and manifest-oriented integration guidance live in
@@ -76,7 +87,7 @@ authoritative for the artifact value model and routed byte-artifact runtime itse
 
 # Current Implementation Snapshot
 
-As of 2026-03-30, the live implementation matches this design:
+As of 2026-04-06, the live implementation matches this design:
 
 - `StoreDaemonServiceImpl` delegates `Batch*`, `HomeBatch*`, `FetchPayloadRefChunk`, and `FetchBatchPayloadRefChunk`
   through controller entrypoints.
@@ -87,8 +98,10 @@ As of 2026-03-30, the live implementation matches this design:
   `PayloadTransportBroker`.
 - `DaemonKernel` owns long-lived routed byte-artifact state: runtime state, body store, route resolver, payload
   transport broker, and shared worker directory cache.
-- `ExternalTargetAccessService` is the shared caller-owned region boundary used by both materialization flows and
+- `ExternalTargetAccessService` is the shared local region boundary used by both materialization flows and
   byte-artifact ingress flows.
+- `RegisterRegion(memory_kind=VRAM|HOST_SHARED)` is live, and byte-artifact batch ingress accepts `RegionRef`
+  layouts over both memory kinds.
 - `TargetPublicationScope`, `TargetPublicationRegistry`, `target_publication_token`, `PayloadRefScope`, and
   `BatchPayloadRefScope` are the live capability contracts.
 - `BatchGetIntoRegionRequest` no longer exposes `preference` or `source_policy`.
@@ -102,7 +115,7 @@ Goals
 - Keep one artifact-first semantic model for weights, structured artifacts, and routed byte artifacts.
 - Keep `ArtifactSelection` as the only selection envelope across SDK, daemon, NodeAgent, and plans.
 - Keep routed byte-artifact truth off the Global Store per-blob hot path.
-- Keep caller-owned region reads and writes inside one daemon-local safety boundary.
+- Keep caller-accessible local region reads and writes inside one daemon-local safety boundary.
 - Keep payload transport reusable and capability-scoped.
 - Keep plan and NodeAgent artifact actions aligned with canonical `manifest/publish/hydrate/evict_local` semantics.
 
@@ -332,13 +345,19 @@ Rules:
 
 Rules:
 
-- these RPCs remain loopback or UDS-only because they touch caller-owned regions,
+- these RPCs remain loopback or UDS-only because they touch caller-accessible local shared regions,
 - they validate `pid`, `device_uuid`, and `TargetLayout` through `ExternalTargetAccessService`,
 - `BatchGetIntoRegionRequest` carries only `selections`, `target_layout`, `pid`, `device_uuid`, and optional
   `operation_id`,
 - `BatchPutIfAbsentFromRegionRequest` carries item selections plus invariants or payload refs, `source_layout`, optional
   `ttl_ms`, `pid`, `device_uuid`, and optional `operation_id`,
 - `preference` and `source_policy` are not part of the final `BatchGetIntoRegion` contract.
+
+Current live implementation note:
+
+- current region-backed byte-artifact ingress supports both `VRAM` and `HOST_SHARED`,
+- `HOST_SHARED` widens only the local placement layer,
+- it does not change routed authority, `RouteFence`, per-item outcome shape, or transport ownership.
 
 ### 5.3 Home-scoped fenced authority RPCs
 
@@ -651,7 +670,7 @@ sequenceDiagram
 Put-path rules:
 
 1. Source-side batching is grouped by remote home bucket first; a transport pack must not mix different home daemons.
-2. The source daemon must not expose caller-owned regions directly as a remote fetch source after the local ingress RPC
+2. The source daemon must not expose caller-accessible local regions directly as a remote fetch source after the local ingress RPC
    returns.
 3. Before issuing a batch capability on the put path, the source daemon must adopt or stage the bytes into daemon-owned
    transport state.
@@ -881,6 +900,76 @@ Rules:
 9. `v1 grpc_chunk_ref` is the required fallback realization whenever peers do not jointly advertise
    `v2 communicator_source`.
 
+#### 5.5.13 Implemented local `HOST_SHARED` region support for byte-artifact batch ingress
+
+The local region-backed placement surface now supports `HOST_SHARED` in
+addition to `VRAM`.
+
+Live surface:
+
+- `RegisterRegion(memory_kind=VRAM|HOST_SHARED)` is the canonical registration
+  API,
+- `RegisterVramRegion` remains a compatibility wrapper for VRAM callers,
+- `StorageEntry.region_ref` is the generic storage reference for region-backed
+  placement,
+- daemon-managed `HOST_SHARED` regions are attached and released through the
+  local handle plane using opaque attach tokens.
+
+Normative rules:
+
+1. `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` remain loopback or
+   UDS-only. Remote or home daemons never write directly into a caller-visible
+   region.
+2. `HOST_SHARED` widens only the local source or target placement type. It does
+   not alter `HomeBatch*`, `FetchBatchPayloadRefChunk`,
+   `communicator_source`, shard-home leases, or routed authority ownership.
+3. A pure `HOST_SHARED` byte-artifact layout uses
+   `StorageEntry.region_ref.memory_kind = HOST_SHARED`,
+   `storage.device_id = -1`, and an empty `device_uuid`.
+4. One byte-artifact region layout must use one memory kind. Mixed `VRAM` and
+   `HOST_SHARED` layouts are rejected.
+5. A region remains local placement state only. It is not part of artifact
+   identity, routing truth, authority truth, or publication truth.
+6. `BatchPutIfAbsentFromRegion` reads bytes from the local host or VRAM region
+   mapping selected by `TargetLayout`.
+7. `BatchGetIntoRegion` writes bytes directly into the local host or VRAM
+   region mapping selected by `TargetLayout`.
+8. Verification modes are unchanged. `HOST_SHARED` composes with both strict
+   digest validation and layout-and-size-only validation.
+9. For `HOST_SHARED` regions marked `ALLOCATOR`, every offset must be explicit
+   and must carry `slot_index` plus `slot_generation`.
+10. Slot tokens are caller-owned lifetime labels. TensorCast validates their
+    presence and echoes them in per-item outcomes, but slot allocation,
+    recycling, and stale-completion filtering remain caller responsibilities.
+11. Host pinning is an optional performance policy on the caller mapping. It is
+    not part of `HOST_SHARED` correctness.
+12. `MaterializeIntoMappedTarget` remains a separate mapped-target path and
+    currently rejects `HOST_SHARED` target layouts. `HOST_SHARED` direct-write
+    is currently defined for byte-artifact batch ingress, not the generic
+    mapped-target API.
+
+Current data flow:
+
+```mermaid
+flowchart LR
+    A["Local caller VRAM or HOST_SHARED region"] -->|"BatchPutIfAbsentFromRegion"| B["Local daemon ingress validation"]
+    B --> C["Existing routed byte-artifact authority + transport"]
+    C --> D["Home daemon commit or join"]
+
+    E["Local daemon ingress validation"] -->|"BatchGetIntoRegion"| F["Local caller VRAM or HOST_SHARED region"]
+```
+
+Implementation notes:
+
+- `ExternalTargetAccessService` remains the shared trust boundary for local
+  region validation,
+- `ByteArtifactRegionLayout` owns byte-artifact layout validation for source and
+  target region access,
+- host-backed target writes lower through `TargetLayoutHostSink`,
+- daemon-managed `HOST_SHARED` slabs are still ordinary local regions with the
+  same TTL, bounds, and poison semantics as other region-backed placement
+  surfaces.
+
 ## 6. Final daemon layering and state ownership
 
 ```mermaid
@@ -1098,6 +1187,9 @@ design delta.
   costs; it should be treated as an incremental step rather than the final cross-host performance target,
 - `v2 communicator_source` reduces that gap but still mirrors full remote packs into local host memory before per-item
   slicing, so there is remaining room for a reusable remote-slice lowering path,
+- source-side remote-home `put` may still use transient per-item forwarding bodies as a pack or export shortcut; future
+  evolution should separate those transport-scoped objects from the retained-body registry hot path and converge toward
+  direct pack or forward execution as described by `0089`,
 - `v2 communicator_source` introduces more coupling to communicator export lifecycle and requires careful convergence
   with the ordinary-artifact P2P stack without reviving Global Store coordination on the per-blob hot path,
 - signed-only payload transport depends on capability-token configuration being available where routed large-payload
@@ -1108,7 +1200,8 @@ design delta.
 
 - `ArtifactSelection` remains the only selection contract across SDK, daemon, plan, and NodeAgent paths.
 - `cgid:byte_artifact~...` remains excluded from Global Store per-blob artifact and replica catalogs.
-- `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` remain local-only because they operate on caller-owned regions.
+- `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` remain local-only because they operate on caller-accessible
+  local shared regions.
 - `BatchGetIntoRegionRequest` does not reintroduce `preference` or `source_policy`.
 - `StoreDaemonServiceImpl` keeps delegate-only live paths for `Batch*`, `HomeBatch*`, `FetchPayloadRefChunk`, and
   `FetchBatchPayloadRefChunk`.

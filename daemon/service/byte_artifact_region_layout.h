@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +21,11 @@ namespace tensorcast::daemon {
 
 class ByteArtifactRegionLayout {
  public:
+  struct SlotToken {
+    std::optional<std::uint64_t> slot_index;
+    std::optional<std::uint64_t> slot_generation;
+  };
+
   ByteArtifactRegionLayout() = default;
   ByteArtifactRegionLayout(const ByteArtifactRegionLayout&) = delete;
   ByteArtifactRegionLayout& operator=(const ByteArtifactRegionLayout&) = delete;
@@ -37,6 +43,7 @@ class ByteArtifactRegionLayout {
   [[nodiscard]] bool contains(std::string_view artifact_id) const;
   [[nodiscard]] std::uint64_t expected_length(std::string_view artifact_id) const;
   [[nodiscard]] int device_id() const;
+  [[nodiscard]] std::optional<SlotToken> slot_token(std::string_view artifact_id) const;
   [[nodiscard]] absl::StatusOr<store::loading::IntoTargetLayout> build_item_target_layout(
       std::string_view artifact_id) const;
   [[nodiscard]] absl::StatusOr<std::shared_ptr<store::loader::SeekableSource>> open_item_source(
@@ -47,7 +54,9 @@ class ByteArtifactRegionLayout {
     std::string storage_id;
     std::uint64_t logical_base{0};
     std::uint64_t length{0};
+    IpcRegionRegistry::MemoryKind memory_kind{IpcRegionRegistry::MemoryKind::kVram};
     void* base_ptr{nullptr};
+    int device_id{-1};
   };
 
   struct ItemRange {
@@ -55,6 +64,7 @@ class ByteArtifactRegionLayout {
     std::uint64_t logical_offset{0};
     std::uint64_t logical_length{0};
     std::uint64_t storage_local_offset{0};
+    std::optional<SlotToken> slot_token;
   };
 
   materialization_target_storage::TargetStorageLease storage_lease_;

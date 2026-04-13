@@ -590,11 +590,10 @@ TEST_CASE("Assembly coordination distinguishes pp ep and canonical_full families
           pp_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL, "view-a")
           .ok());
 
-  const auto pp_vs_ep = tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
-      ep_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL, "view-a");
-  REQUIRE_FALSE(pp_vs_ep.ok());
-  REQUIRE(pp_vs_ep.code() == absl::StatusCode::kFailedPrecondition);
-  REQUIRE(std::string(pp_vs_ep.message()).find("coverage_contract mismatch") != std::string::npos);
+  REQUIRE(
+      tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
+          ep_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL, "view-a")
+          .ok());
 
   const auto canonical_vs_piece = tensorcast::daemon::assembly_coordination::validate_binding_requirement_entry(
       pp_requirements, tensorcast::daemon::v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL, "");

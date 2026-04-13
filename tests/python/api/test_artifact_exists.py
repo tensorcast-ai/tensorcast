@@ -41,7 +41,7 @@ class _RuntimeStub:
             daemon_endpoint="daemon", ttl_seconds=5, max_entries=4
         )
         self._client = client
-        self._key_cache: dict[str, str | None] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
 
     def ensure_client(self) -> _ClientStub:
         return self._client
@@ -60,12 +60,18 @@ class _RuntimeStub:
     def resolve_key_mapping_cached(
         self, *, key: str
     ) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key), None
+        return self._key_cache.get(key, (None, None))
 
     def cache_key_mapping(
-        self, key: str, *, artifact_id: str | None, ttl_override=None
+        self,
+        key: str,
+        *,
+        artifact_id: str | None,
+        disk_path: str | None = None,
+        ttl_override=None,
     ) -> None:
-        self._key_cache[key] = artifact_id
+        del ttl_override
+        self._key_cache[key] = (artifact_id, disk_path)
 
 
 class _StoreStub:
@@ -102,7 +108,11 @@ def test_exists_handles_tuple_key_mapping_cache_result():
     client = _ClientStub(canonical_bytes)
     runtime = _RuntimeStub(client)
     store = _StoreStub(runtime)
-    runtime._key_cache["mapped"] = ("aid", "/tmp/cached.index")
+    runtime.cache_key_mapping(
+        "mapped",
+        artifact_id="aid",
+        disk_path="/tmp/cached.index",
+    )
     artifact = Artifact(store_ref=weakref.ref(store), key="mapped")
 
     assert artifact.exists() is True

@@ -619,11 +619,12 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
       if (!spans_or.ok()) {
         return spans_or.status();
       }
-      input.canonical_index_json = std::string(binding_seal_identity_canonical_index_json(*record));
       if (record->sealed_commit_result.has_value() && !record->sealed_commit_result->artifact_id.empty()) {
         input.canonical_artifact_id = record->sealed_commit_result->artifact_id;
       } else if (!record->current_artifact_id.empty()) {
         input.canonical_artifact_id = record->current_artifact_id;
+      } else {
+        input.canonical_index_json = std::string(binding_seal_identity_canonical_index_json(*record));
       }
       input.bound_canonical_spans = std::move(*spans_or);
     }

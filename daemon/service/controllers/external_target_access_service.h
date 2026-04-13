@@ -52,9 +52,9 @@ class ExternalTargetAccessService {
       const absl::flat_hash_map<std::string, std::uint64_t>& expected_lengths) const;
 
  private:
-  [[nodiscard]] absl::Status validate_target_storage_device(
+  [[nodiscard]] absl::StatusOr<store::DeviceKey> resolve_target_storage_device(
       const v2::TargetLayout& layout,
-      const store::DeviceKey& device,
+      std::string_view device_uuid,
       std::string_view rpc_name) const;
 
   Dep d_;

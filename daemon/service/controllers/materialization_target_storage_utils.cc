@@ -11,6 +11,34 @@
 
 namespace tensorcast::daemon::materialization_target_storage {
 
+namespace {
+
+struct ResolvedStorageSource {
+  std::string region_id;
+  tensorcast::daemon::IpcRegionRegistry::MemoryKind memory_kind{
+      tensorcast::daemon::IpcRegionRegistry::MemoryKind::kVram};
+};
+
+absl::StatusOr<ResolvedStorageSource> resolve_storage_source(const v2::StorageEntry& storage) {
+  switch (storage.storage_source_case()) {
+    case v2::StorageEntry::kVramRegionId:
+      if (storage.vram_region_id().empty()) {
+        return absl::InvalidArgumentError("vram_region_id must not be empty");
+      }
+      return ResolvedStorageSource{
+          .region_id = storage.vram_region_id(),
+          .memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kVram,
+      };
+    case v2::StorageEntry::kCudaIpcHandle:
+      return absl::InvalidArgumentError("storage entry must reference a managed vram region");
+    case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
+    default:
+      return absl::InvalidArgumentError("storage entry must reference a region");
+  }
+}
+
+} // namespace
+
 std::string_view acquire_error_reason(AcquireTargetStoragesError error) {
   switch (error) {
     case AcquireTargetStoragesError::kRegionPoisoned:
@@ -80,50 +108,82 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
   lease.storages_.reserve(storages.size());
 
   for (const auto& storage : storages) {
-    auto it = lease.region_map_.find(storage.vram_region_id());
+    auto storage_source_or = resolve_storage_source(storage);
+    if (!storage_source_or.ok()) {
+      return storage_source_or.status();
+    }
+    const auto& storage_source = *storage_source_or;
+    auto it = lease.region_map_.find(storage_source.region_id);
     if (it == lease.region_map_.end()) {
-      auto region_desc_or = registry.acquire(storage.vram_region_id(), owner_pid);
-      if (!region_desc_or.ok()) {
-        if (error != nullptr) {
-          const bool poisoned = absl::IsFailedPrecondition(region_desc_or.status()) &&
-              region_desc_or.status().message() == "region is poisoned";
-          *error = poisoned ? AcquireTargetStoragesError::kRegionPoisoned : AcquireTargetStoragesError::kRegionMissing;
+      RegionMapping mapping;
+      if (storage_source.memory_kind == IpcRegionRegistry::MemoryKind::kVram) {
+        auto region_desc_or = registry.acquire(storage_source.region_id, owner_pid);
+        if (!region_desc_or.ok()) {
+          if (error != nullptr) {
+            const bool poisoned = absl::IsFailedPrecondition(region_desc_or.status()) &&
+                region_desc_or.status().message() == "region is poisoned";
+            *error =
+                poisoned ? AcquireTargetStoragesError::kRegionPoisoned : AcquireTargetStoragesError::kRegionMissing;
+          }
+          return region_desc_or.status();
         }
-        return region_desc_or.status();
-      }
-      auto handle_or = registry.get_handle_bytes(storage.vram_region_id());
-      if (!handle_or.ok()) {
-        if (error != nullptr) {
-          *error = AcquireTargetStoragesError::kRegionMissing;
+        auto handle_or = registry.get_handle_bytes(storage_source.region_id);
+        if (!handle_or.ok()) {
+          if (error != nullptr) {
+            *error = AcquireTargetStoragesError::kRegionMissing;
+          }
+          return handle_or.status();
         }
-        return handle_or.status();
-      }
-      auto set_device_status = cuda::set_device(storage.device_id());
-      if (!set_device_status.ok()) {
-        if (error != nullptr) {
-          *error = AcquireTargetStoragesError::kMapFailed;
+        auto set_device_status = cuda::set_device(storage.device_id());
+        if (!set_device_status.ok()) {
+          if (error != nullptr) {
+            *error = AcquireTargetStoragesError::kMapFailed;
+          }
+          return set_device_status;
         }
-        return set_device_status;
-      }
-      auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
-      if (!map_or.ok()) {
-        if (error != nullptr) {
-          *error = AcquireTargetStoragesError::kMapFailed;
+        auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
+        if (!map_or.ok()) {
+          if (error != nullptr) {
+            *error = AcquireTargetStoragesError::kMapFailed;
+          }
+          return map_or.status();
         }
-        return map_or.status();
+        mapping.desc = *region_desc_or;
+        mapping.mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
+        mapping.base_ptr = mapping.mapping->get();
+      } else {
+        auto local_mapping_or = registry.acquire_host_shared_local_mapping(storage_source.region_id, owner_pid);
+        if (!local_mapping_or.ok()) {
+          if (error != nullptr) {
+            const bool poisoned = absl::IsFailedPrecondition(local_mapping_or.status()) &&
+                local_mapping_or.status().message() == "region is poisoned";
+            *error =
+                poisoned ? AcquireTargetStoragesError::kRegionPoisoned : AcquireTargetStoragesError::kRegionMissing;
+          }
+          return local_mapping_or.status();
+        }
+        mapping.desc = local_mapping_or->region;
+        mapping.base_ptr = local_mapping_or->base_ptr;
       }
-      RegionMapping mapping{.desc = *region_desc_or, .mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or))};
-      auto [inserted_it, _] = lease.region_map_.emplace(storage.vram_region_id(), std::move(mapping));
+
+      auto [inserted_it, _] = lease.region_map_.emplace(storage_source.region_id, std::move(mapping));
       it = inserted_it;
-      lease.acquired_region_ids_.push_back(storage.vram_region_id());
+      lease.acquired_region_ids_.push_back(storage_source.region_id);
     }
 
     const auto& region_desc = it->second.desc;
-    if (region_desc.device_id != storage.device_id()) {
+    if (region_desc.memory_kind == IpcRegionRegistry::MemoryKind::kVram) {
+      if (region_desc.device_id != storage.device_id()) {
+        if (error != nullptr) {
+          *error = AcquireTargetStoragesError::kDeviceMismatch;
+        }
+        return absl::FailedPreconditionError("region device does not match storage device");
+      }
+    } else if (storage.device_id() != -1) {
       if (error != nullptr) {
         *error = AcquireTargetStoragesError::kDeviceMismatch;
       }
-      return absl::FailedPreconditionError("region device does not match storage device");
+      return absl::FailedPreconditionError("HOST_SHARED storage.device_id must be -1");
     }
 
     const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
@@ -134,8 +194,15 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
       return absl::FailedPreconditionError("region-backed storage exceeds region bounds");
     }
 
+    if (it->second.base_ptr == nullptr) {
+      if (error != nullptr) {
+        *error = AcquireTargetStoragesError::kMapFailed;
+      }
+      return absl::FailedPreconditionError("region base pointer is unavailable");
+    }
+
     void* region_base_ptr =
-        static_cast<uint8_t*>(it->second.mapping->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
+        static_cast<uint8_t*>(it->second.base_ptr) + static_cast<uint64_t>(storage.mapping_base_offset());
     lease.storages_.push_back(
         store::loading::IntoTargetStorage{
             .base_ptr = gsl::not_null<void*>{region_base_ptr},

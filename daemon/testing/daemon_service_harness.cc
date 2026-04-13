@@ -317,11 +317,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
         .socket_path = options.local_handle_socket_path,
         .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
     };
-    auto* leases = kernel->handle_leases();
-    if (leases == nullptr) {
-      return absl::FailedPreconditionError("handle leases unavailable for local handle server");
-    }
-    local_handle_server = std::make_unique<LocalHandleServer>(lh_opts, *leases);
+    local_handle_server =
+        std::make_unique<LocalHandleServer>(lh_opts, kernel->region_registry(), kernel->handle_leases());
   }
 
   return std::unique_ptr<DaemonServiceHarness>(new DaemonServiceHarness(
