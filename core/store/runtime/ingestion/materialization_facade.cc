@@ -40,6 +40,7 @@
 #include "core/store/materialization/dataplane/runtime/pump.h"
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
 #include "core/store/materialization/dataplane/sinks/target_layout_gpu_sink.h"
+#include "core/store/materialization/dataplane/sinks/target_layout_host_sink.h"
 #include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
 #include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
 #include "core/store/materialization/dataplane/sources/byte_range_program.h"
@@ -4639,8 +4640,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
-  if (target_device.type != DeviceType::GPU) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires GPU target device");
+  if (target_device.type != DeviceType::GPU && target_device.type != DeviceType::CPU) {
+    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires GPU or CPU target device");
   }
   if (loader == nullptr) {
     return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires a source loader");
@@ -4722,8 +4723,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const std::chrono::milliseconds timeout =
       hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
 
-  std::vector<loader::TargetStorage> storages;
-  storages.reserve(target_layout.storages.size());
+  std::vector<loader::TargetStorage> gpu_storages;
+  std::vector<loader::HostTargetStorage> host_storages;
+  gpu_storages.reserve(target_layout.storages.size());
+  host_storages.reserve(target_layout.storages.size());
   std::vector<loader::Range> ranges;
   ranges.reserve(target_layout.storages.size());
   uint64_t range_cursor = 0;
@@ -4731,7 +4734,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (storage.length > std::numeric_limits<size_t>::max()) {
       return absl::OutOfRangeError("materialize_mapped_loader_into_target storage length exceeds host limits");
     }
-    storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
+    if (target_device.type == DeviceType::GPU) {
+      gpu_storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
+    } else {
+      host_storages.push_back(loader::HostTargetStorage{storage.base_ptr, storage.length});
+    }
     ranges.emplace_back(range_cursor, static_cast<size_t>(storage.length));
     range_cursor += storage.length;
   }
@@ -4739,12 +4746,20 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("materialize_mapped_loader_into_target storage ranges do not span total_size");
   }
 
-  loader::TargetLayoutGpuSink::Options sink_opts{
-      .storages = std::move(storages),
-      .chunk_size = config_.artifact_chunk_bytes,
-      .device_id = target_device.ordinal,
-  };
-  loader::TargetLayoutGpuSink sink(std::move(sink_opts));
+  std::unique_ptr<loader::PositionedSink> sink;
+  if (target_device.type == DeviceType::GPU) {
+    loader::TargetLayoutGpuSink::Options sink_opts{
+        .storages = std::move(gpu_storages),
+        .chunk_size = config_.artifact_chunk_bytes,
+        .device_id = target_device.ordinal,
+    };
+    sink = std::make_unique<loader::TargetLayoutGpuSink>(std::move(sink_opts));
+  } else {
+    loader::TargetLayoutHostSink::Options sink_opts{
+        .storages = std::move(host_storages),
+    };
+    sink = std::make_unique<loader::TargetLayoutHostSink>(std::move(sink_opts));
+  }
 
   const int concurrency =
       hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency) : std::max(1, config_.num_threads);
@@ -4760,7 +4775,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   loader::PumpDebugStats pump_debug_stats;
   auto pump_status = loader::pump_ranges(
       **mapped_or,
-      sink,
+      *sink,
       adapter,
       absl::MakeSpan(ranges),
       concurrency,
@@ -4770,7 +4785,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::DataLossError(
         absl::StrCat("materialize_mapped_loader_into_target pump failed: ", pump_status.message()));
   }
-  auto close_status = sink.close();
+  auto close_status = sink->close();
   if (!close_status.ok()) {
     return absl::DataLossError(
         absl::StrCat("materialize_mapped_loader_into_target sink close failed: ", close_status.message()));
