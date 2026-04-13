@@ -604,9 +604,10 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
       if (!spans_or.ok()) {
         return spans_or.status();
       }
-      input.canonical_index_json = record->target_index_json;
       if (!record->current_artifact_id.empty()) {
         input.canonical_artifact_id = record->current_artifact_id;
+      } else {
+        input.canonical_index_json = record->target_index_json;
       }
       input.bound_canonical_spans = std::move(*spans_or);
     }

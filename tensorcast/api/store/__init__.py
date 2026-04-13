@@ -75,7 +75,6 @@ from tensorcast.api.store.mapped_binding import (
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.owned_binding_layout import (
     BindingLayout,
-    build_owned_layout,
 )
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
@@ -159,18 +158,18 @@ from tensorcast.types import (
     BindingValueRef,
     BuilderMode,
     DeregisterArtifactOutcome,
-    HostSharedRegionAttachment,
-    HostSharedRegionClass,
-    LocalRegionHandle,
-    RegionMemoryKind,
     ExecutionDiagnostics,
     FinalizeClass,
     HashLocation,
+    HostSharedRegionAttachment,
+    HostSharedRegionClass,
     IdentityMintStrategy,
+    LocalRegionHandle,
     PartialSealResult,
     PublicDiskSourceHandle,
     PublishedModelVersion,
     RealizationProtocol,
+    RegionMemoryKind,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     SealAssemblyResult,
@@ -1942,25 +1941,24 @@ class Store:
         if resolved_contract_family == "canonical_full":
             with tensorcast_profile_stage(
                 "tensorcast",
-                "publication.contribute_canonical_publish_tensors_to_attempt",
+                "publication.contribute_source_current_values_to_attempt_and_keep_bindings",
                 logger=logger,
                 extra={
                     "contract_family": resolved_contract_family,
                     "source_contribution_device": source_contribution_device,
+                    "contribution_artifact_count": len(contribution_artifacts),
                 },
             ) as profile:
-                contribution_binding = (
-                    self._contribute_canonical_publish_tensors_to_attempt(
-                        publication=publication,
+                live_bindings = (
+                    self._contribute_source_current_values_to_attempt_and_keep_bindings(
+                        source_artifacts=contribution_artifacts,
                         attempt=attempt,
                         device=source_contribution_device,
                         ctx=ctx,
                     )
                 )
                 if profile is not None:
-                    profile["binding_layout_id"] = getattr(
-                        contribution_binding, "binding_layout_id", None
-                    )
+                    profile["live_binding_count"] = len(live_bindings)
             try:
                 with tensorcast_profile_stage(
                     "tensorcast",
@@ -1985,9 +1983,7 @@ class Store:
                     },
                 ) as profile:
                     result = self.wait_assembly_attempt(
-                        operation,
-                        timeout_s=timeout_s,
-                        ctx=ctx,
+                        operation, timeout_s=timeout_s, ctx=ctx
                     )
                     if profile is not None:
                         profile["serving_artifact_id"] = getattr(
@@ -1998,8 +1994,8 @@ class Store:
                         )
                     return result
             finally:
-                with contextlib.suppress(Exception):
-                    contribution_binding.close()
+                for binding in live_bindings:
+                    binding.close()
         with tensorcast_profile_stage(
             "tensorcast",
             "publication.contribute_source_artifacts_to_attempt",
@@ -2207,47 +2203,37 @@ class Store:
                     binding.close()
         return tuple(results)
 
-    def _contribute_canonical_publish_tensors_to_attempt(
+    def _contribute_source_current_values_to_attempt_and_keep_bindings(
         self,
         *,
-        publication: RegisteredPureTransformPublication | RegisteredServingPublication,
+        source_artifacts: Sequence[Artifact],
         attempt: AssemblyAttemptRef,
         device: str | int,
         ctx: CallContext | None = None,
-    ) -> Binding:
-        tensors = dict(publication.prepared_registration.tensors)
-        if not tensors:
-            raise ArtifactError(
-                "canonical_full contribution requires non-empty tensors",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
-        device_obj = torch.device(device)
-        device_id = resolve_device(device_obj, allow_cpu=False)
-        canonical_index = publication.prepared_registration.canonical_index
-        layout = build_owned_layout(
-            entries=canonical_index.entries,
-            device_id=device_id,
-            index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
-            logical_layout_hash=None,
-            separate_storages=True,
-        )
-        binding = self.create_binding(
-            layout,
-            ownership="client",
-            target_tensors=tensors,
-            device=device_obj,
-        )
+    ) -> tuple[Binding, ...]:
+        live_bindings: list[Binding] = []
         try:
-            sealed = binding.seal_current(
-                update_epoch=binding.begin_update(ctx=ctx),
-                ctx=ctx,
-            )
-            sealed.contribute_to_assembly(attempt=attempt, ctx=ctx)
-            return binding
+            for source_artifact in source_artifacts:
+                binding = source_artifact.bind(device=device, packing="byte_space")
+                try:
+                    current_value = binding.current_value
+                    if current_value is None:
+                        raise ArtifactError(
+                            "source contribution binding is missing current_value",
+                            status_code="FAILED_PRECONDITION",
+                            retryable=False,
+                        )
+                    current_value.contribute_to_assembly(attempt=attempt, ctx=ctx)
+                    live_bindings.append(binding)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        binding.close()
+                    raise
+            return tuple(live_bindings)
         except Exception:
-            with contextlib.suppress(Exception):
-                binding.close()
+            for binding in live_bindings:
+                with contextlib.suppress(Exception):
+                    binding.close()
             raise
 
     def _resolve_bound_publication_subject(
@@ -2807,6 +2793,18 @@ class Store:
         op_id = task_id or f"persist:{artifact_id or ''}"
         created_at = time.monotonic()
 
+        def _persistence_error_context(
+            *,
+            task_id_value: str,
+            artifact_id_value: str,
+        ) -> dict[str, str]:
+            return {
+                "operation_kind": "persistence_task",
+                "task_id": task_id_value,
+                "artifact_id": artifact_id_value,
+                "target_artifact_id": artifact_id_value,
+            }
+
         def _ctx_remaining_timeout_s() -> float | None:
             if ctx is None or ctx.deadline_ms is None:
                 return None
@@ -2841,10 +2839,10 @@ class Store:
                         status_code="DEADLINE_EXCEEDED",
                         message="CallContext deadline exceeded",
                         retryable=True,
-                        context={
-                            "task_id": task_id or "",
-                            "artifact_id": artifact_id or "",
-                        },
+                        context=_persistence_error_context(
+                            task_id_value=task_id or "",
+                            artifact_id_value=artifact_id or "",
+                        ),
                     ),
                 )
             try:
@@ -2859,10 +2857,10 @@ class Store:
                         status_code="DEADLINE_EXCEEDED",
                         message=str(exc),
                         retryable=True,
-                        context={
-                            "task_id": task_id or "",
-                            "artifact_id": artifact_id or "",
-                        },
+                        context=_persistence_error_context(
+                            task_id_value=task_id or "",
+                            artifact_id_value=artifact_id or "",
+                        ),
                     ),
                 )
             state: str
@@ -2889,10 +2887,10 @@ class Store:
                     else "DEADLINE_EXCEEDED",
                     message=message,
                     retryable=True,
-                    context={
-                        "task_id": result.task_id,
-                        "artifact_id": result.artifact_id,
-                    },
+                    context=_persistence_error_context(
+                        task_id_value=result.task_id,
+                        artifact_id_value=result.artifact_id,
+                    ),
                 )
             return OperationStatus(
                 state=state,  # type: ignore[arg-type]

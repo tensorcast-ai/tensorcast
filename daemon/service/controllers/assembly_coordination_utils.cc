@@ -55,19 +55,6 @@ absl::Time timestamp_to_absl(const google::protobuf::Timestamp& ts) {
   return absl::UnixEpoch() + absl::Nanoseconds(nanos);
 }
 
-absl::StatusOr<std::string_view> expected_coverage_contract_for_binding_contribution(
-    v2::BindingContributionKind contribution_kind) {
-  switch (contribution_kind) {
-    case v2::BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL:
-      return kPpStructuralViewCoverageContract;
-    case v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL:
-      return kCanonicalFullCoverageContract;
-    case v2::BINDING_CONTRIBUTION_KIND_UNSPECIFIED:
-    default:
-      return absl::InvalidArgumentError("unsupported binding contribution kind");
-  }
-}
-
 pubv1::BindingValueRef canonicalize_binding_value_ref(const pubv1::BindingValueRef& ref) {
   pubv1::BindingValueRef canonical;
   canonical.set_binding_id(ref.binding_id());
@@ -408,10 +395,6 @@ absl::Status validate_binding_requirement_entry(
     const v2::AssemblyRequirementSetRef& requirements,
     v2::BindingContributionKind contribution_kind,
     std::string_view structural_view_id) {
-  auto expected_coverage_or = expected_coverage_contract_for_binding_contribution(contribution_kind);
-  if (!expected_coverage_or.ok()) {
-    return expected_coverage_or.status();
-  }
   const std::string expected_slot_id = contribution_slot_key(contribution_kind, structural_view_id);
   for (const auto& requirement : collect_requirements(requirements)) {
     auto coverage_or = canonicalize_coverage_contract(requirement.coverage_contract());
@@ -428,24 +411,37 @@ absl::Status validate_binding_requirement_entry(
       if (requirement.target().structural_view_id() != structural_view_id) {
         continue;
       }
+      if (*coverage_or != kPpStructuralViewCoverageContract && *coverage_or != kEpStructuralViewCoverageContract) {
+        return absl::FailedPreconditionError(
+            absl::StrCat(
+                "binding contribution coverage_contract mismatch for slot_id=",
+                expected_slot_id,
+                " expected=",
+                kPpStructuralViewCoverageContract,
+                " or ",
+                kEpStructuralViewCoverageContract,
+                " actual=",
+                *coverage_or));
+      }
+      return absl::OkStatus();
     } else if (contribution_kind == v2::BINDING_CONTRIBUTION_KIND_CANONICAL_FULL) {
       if (requirement.target().kind() != v2::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT) {
         continue;
       }
+      if (*coverage_or != kCanonicalFullCoverageContract) {
+        return absl::FailedPreconditionError(
+            absl::StrCat(
+                "binding contribution coverage_contract mismatch for slot_id=",
+                expected_slot_id,
+                " expected=",
+                kCanonicalFullCoverageContract,
+                " actual=",
+                *coverage_or));
+      }
+      return absl::OkStatus();
     } else {
       continue;
     }
-    if (*coverage_or != *expected_coverage_or) {
-      return absl::FailedPreconditionError(
-          absl::StrCat(
-              "binding contribution coverage_contract mismatch for slot_id=",
-              expected_slot_id,
-              " expected=",
-              *expected_coverage_or,
-              " actual=",
-              *coverage_or));
-    }
-    return absl::OkStatus();
   }
   return absl::FailedPreconditionError(
       absl::StrCat("binding contribution is not part of the snapped requirements for slot_id=", expected_slot_id));
