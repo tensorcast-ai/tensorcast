@@ -545,15 +545,6 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return build_plan_status;
   }
 
-  auto validated_target_or = d_.external_target_access_service.validate_local_target_layout(
-      rctx.server_context().peer(), "MaterializeIntoTarget", layout, req.pid(), req.device_uuid());
-  if (!validated_target_or.ok()) {
-    record_materialize_into_target(
-        "error", "target_access_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(validated_target_or.status());
-  }
-  auto validated_target = std::move(*validated_target_or);
-
   const auto& resolved_selection = plan.resolved_selection;
   const bool has_subset = resolved_selection.tensor_names_size() > 0;
   auto& view_spec = plan.view_spec;

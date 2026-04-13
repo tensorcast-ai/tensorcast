@@ -148,7 +148,11 @@ def test_node_agent_executes_instance_transform_into() -> None:
         called["into"] = True
 
     adapter.register_transform_fn("noop.v1", into=_into)
-    target = adapter.mint_target("target", {"w": torch.zeros(1)})
+    target = adapter.mint_target(
+        "target",
+        {"w": torch.zeros(1)},
+        ttl_ms=300_000,
+    )
 
     spec = plan_pb2.PlanSpec(plan_id="plan-1")
     spec.context.request_id = "req-1"
@@ -252,7 +256,11 @@ def test_node_agent_marks_dependents_cancelled_on_failure() -> None:
         instance_id="inst-1", engine="test", register_identity_transform=False
     )
     adapter.register_transform_fn("noop.v1", into=lambda _ctx: None)
-    target = adapter.mint_target("target", {"w": torch.zeros(1)})
+    target = adapter.mint_target(
+        "target",
+        {"w": torch.zeros(1)},
+        ttl_ms=300_000,
+    )
 
     spec = plan_pb2.PlanSpec(plan_id="plan-2")
     spec.context.request_id = "req-2"
@@ -836,7 +844,7 @@ def test_node_agent_servicer_serializes_pure_transform_publication_result() -> N
     assert response.steps[0].HasField("artifact_result")
     pure_result = response.steps[0].artifact_result.representation_publish
     assert (
-        pure_result.representation_publish_contract.serving_artifact_id
+        pure_result.representation_publish_contract.subject.serving_artifact_id
         == "mi2:test:serving"
     )
     assert (
