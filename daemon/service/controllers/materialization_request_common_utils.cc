@@ -343,13 +343,12 @@ absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry
     store::components::IGlobalStoreClient* global_store_client,
     const std::filesystem::path& storage_path,
     std::string_view resolved_artifact_id,
-    int wait_for_shared_disk_ms,
-    bool allow_disk,
+    const materialization_policy::NormalizedMaterializationRequestContext& request_context,
     const grpc::ServerContext& server_context,
     std::optional<std::filesystem::path>& normalized_disk_path,
     const MaterializeAttemptFn& materialize_retry_once,
     const PrepareRetryDiskSourceFn& prepare_retry_disk_source) {
-  if (wait_for_shared_disk_ms <= 0 || !allow_disk) {
+  if (request_context.wait_for_shared_disk_ms <= 0 || !request_context.retrieval_policy.allow_disk) {
     return initial_status;
   }
 
@@ -357,7 +356,7 @@ absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry
       global_store_client,
       storage_path,
       resolved_artifact_id,
-      std::chrono::milliseconds(wait_for_shared_disk_ms),
+      std::chrono::milliseconds(request_context.wait_for_shared_disk_ms),
       server_context);
   if (!wait_or.ok()) {
     if (absl::IsUnavailable(wait_or.status())) {

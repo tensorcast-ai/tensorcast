@@ -20,11 +20,25 @@ from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
 from tensorcast.api.store.owned_binding_slot import OwnedBindingSlot
 from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.types import ArtifactError
+from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import AssemblyAttemptRef, PartialSealResult
+from tensorcast.types import (
+    ArtifactDescriptor as TypedArtifactDescriptor,
+)
+from tensorcast.types import (
+    AssemblyAttemptRef,
+    BindingValueRef,
+    ExecutionDiagnostics,
+    PartialSealResult,
+    PublicDiskSourceHandle,
+    ServingRuntimePolicyInput,
+    SourceBoundPlanDiagnostics,
+    coerce_serving_runtime_policy,
+)
 
 if TYPE_CHECKING:
+    from tensorcast.api._config import GetArtifactOptions
     from tensorcast.api.store.artifact import Artifact
     from tensorcast.api.store.owned_binding_layout import BindingLayout
     from tensorcast.api.store.runtime import StoreRuntimeContext
@@ -47,6 +61,59 @@ _CANONICAL_FULL_CONTRIBUTION_VIEW_ID = "__canonical_full__"
 _ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
 )
+
+
+def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
+    if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2:
+        return ArtifactIdKind.MI2
+    if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID:
+        return ArtifactIdKind.CGID
+    inferred = infer_artifact_id_kind(artifact_id)
+    return inferred or ArtifactIdKind.MI2
+
+
+def _typed_descriptor_from_proto(
+    descriptor: common_pb2.ArtifactDescriptor | None,
+) -> TypedArtifactDescriptor:
+    artifact_id = (
+        "" if descriptor is None else str(getattr(descriptor, "artifact_id", "") or "")
+    )
+    if not artifact_id:
+        raise ArtifactError(
+            "PromoteBindingCurrentValue returned empty artifact_descriptor",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    return TypedArtifactDescriptor(
+        artifact_id=artifact_id,
+        index_multihash=(
+            None
+            if descriptor is None
+            else str(getattr(descriptor, "index_multihash", "") or "") or None
+        ),
+        data_multihash=(
+            None
+            if descriptor is None
+            else str(getattr(descriptor, "data_multihash", "") or "") or None
+        ),
+        schema_version=(
+            None
+            if descriptor is None
+            else str(getattr(descriptor, "schema_version", "") or "") or None
+        ),
+        encoding=None
+        if descriptor is None
+        else str(getattr(descriptor, "encoding", "") or "") or None,
+        total_size=0
+        if descriptor is None
+        else int(getattr(descriptor, "total_size", 0) or 0),
+        id_kind=_artifact_id_kind_from_proto(
+            int(common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_UNSPECIFIED)
+            if descriptor is None
+            else int(getattr(descriptor, "id_kind", 0) or 0),
+            artifact_id,
+        ),
+    )
 
 
 def _sanitize_operation_token(value: str | None) -> str:
@@ -89,6 +156,7 @@ def _build_transport_operation_id(
     *,
     base_operation_id: str,
     ctx: CallContext | None,
+    include_collective: bool = True,
 ) -> str:
     if ctx is None:
         return base_operation_id
@@ -116,16 +184,17 @@ def _build_transport_operation_id(
     collective_group_id = ""
     collective_world_size = 0
     collective_rank = 0
-    collective = ctx.collective
-    if collective is not None:
-        collective_group_id = _sanitize_operation_token(collective.group_id)
-        try:
-            collective_world_size = int(collective.world_size)
-            collective_rank = int(collective.rank)
-        except (TypeError, ValueError):
-            collective_group_id = ""
-            collective_world_size = 0
-            collective_rank = 0
+    if include_collective:
+        collective = ctx.collective
+        if collective is not None:
+            collective_group_id = _sanitize_operation_token(collective.group_id)
+            try:
+                collective_world_size = int(collective.world_size)
+                collective_rank = int(collective.rank)
+            except (TypeError, ValueError):
+                collective_group_id = ""
+                collective_world_size = 0
+                collective_rank = 0
 
     metadata_parts: list[str] = []
     if group_kind and group_id and part_id and total_parts > 0:
@@ -389,6 +458,25 @@ class SealedBindingValue:
         binding = self._require_current_binding()
         return binding.publish_replica_operation(ctx=ctx)
 
+    def promote_serving_artifact(
+        self,
+        *,
+        ctx: CallContext | None = None,
+    ) -> TypedArtifactDescriptor:
+        binding = self._require_current_binding()
+        return binding.promote_current_value(
+            binding_value_id=self.binding_value_id,
+            ctx=ctx,
+        )
+
+    def to_binding_value_ref(self) -> BindingValueRef:
+        return BindingValueRef(
+            binding_id=str(self.binding_id),
+            binding_layout_id=str(self.binding_layout_id),
+            binding_value_id=str(self.binding_value_id),
+            seal_generation=int(self.seal_generation),
+        )
+
     def activate_key(
         self,
         key: str,
@@ -565,11 +653,25 @@ class Binding:
             return None
         return current_value.selection
 
+    @property
+    def last_execution_diagnostics(self) -> ExecutionDiagnostics | None:
+        diagnostics = getattr(self._slot, "last_execution_diagnostics", None)
+        return diagnostics if isinstance(diagnostics, ExecutionDiagnostics) else None
+
+    @property
+    def last_source_bound_plan_diagnostics(self) -> SourceBoundPlanDiagnostics | None:
+        diagnostics = getattr(self._slot, "last_source_bound_plan_diagnostics", None)
+        return (
+            diagnostics if isinstance(diagnostics, SourceBoundPlanDiagnostics) else None
+        )
+
     def swap(
         self,
         artifact: "Artifact | str",
         *,
+        options: "GetArtifactOptions | None" = None,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         activate_key: str | None = None,
         expected_active_artifact_id: str | None = None,
         expected_active_generation: int | None = None,
@@ -577,15 +679,21 @@ class Binding:
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
     ) -> SealedBindingValue:
+        include_collective = not isinstance(self._slot, OwnedBindingSlot)
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
             ctx=ctx,
+            include_collective=include_collective,
         )
         self._stop_keepalive()
         try:
             self._slot.swap(
                 artifact,
+                options=options,
                 publish=publish,
+                serving_runtime_policy=coerce_serving_runtime_policy(
+                    serving_runtime_policy
+                ),
                 wait=wait,
                 drain_timeout_s=drain_timeout_s,
                 ctx=ctx,
@@ -610,6 +718,43 @@ class Binding:
         if current_value is None:
             raise ArtifactError(
                 "swap() completed without a current sealed value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return current_value
+
+    def realize_from(
+        self,
+        artifact: "Artifact | PublicDiskSourceHandle | str",
+        *,
+        realization_plan: object,
+        options: "GetArtifactOptions | None" = None,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue:
+        operation_id = _build_transport_operation_id(
+            base_operation_id=uuid.uuid4().hex,
+            ctx=ctx,
+            include_collective=False,
+        )
+        self._stop_keepalive()
+        realize = getattr(self._slot, "realize_from", None)
+        if not callable(realize):
+            raise ArtifactError(
+                "realize_from() requires a daemon-owned binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        realize(
+            artifact,
+            realization_plan=realization_plan,
+            options=options,
+            ctx=ctx,
+            operation_id=operation_id,
+        )
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "realize_from() completed without a current sealed value",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
@@ -647,6 +792,39 @@ class Binding:
                 retryable=False,
             )
         return current_value
+
+    def promote_current_value(
+        self,
+        *,
+        binding_value_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> TypedArtifactDescriptor:
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "promote_current_value() requires a current sealed value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        resolved_binding_value_id = str(
+            binding_value_id or current_value.binding_value_id
+        )
+        promote = getattr(self._slot, "promote_current_value", None)
+        if not callable(promote):
+            raise ArtifactError(
+                "promote_current_value() requires a daemon-owned binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        response = promote(
+            binding_value_id=resolved_binding_value_id,
+            ctx=ctx,
+        )
+        return _typed_descriptor_from_proto(
+            response.artifact_descriptor
+            if hasattr(response, "artifact_descriptor")
+            else None
+        )
 
     def close(self) -> None:
         self._stop_keepalive()

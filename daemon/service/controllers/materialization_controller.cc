@@ -64,7 +64,10 @@ MaterializationController::MaterializationController(Dep d)
               .shutdown_signal = d.shutdown_signal,
               .async_runtime = d.async_runtime,
               .identity = d.identity,
+              .bindings = d.binding_registry,
               .global_store_client = d.global_store_client,
+              .lip_manager = &d.lip_manager,
+              .lifecycle = d.lifecycle,
               .post_seal_policy = d.post_seal_policy,
           }),
       disk_artifact_service_(
@@ -217,6 +220,13 @@ grpc::Status MaterializationController::seal_binding(
   return owner_binding_service_.seal_binding(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::promote_binding_current_value(
+    RpcContext& rctx,
+    const v2::PromoteBindingCurrentValueRequest& req,
+    v2::PromoteBindingCurrentValueResponse& resp) {
+  return owner_binding_service_.promote_binding_current_value(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::refill_owned_binding(
     RpcContext& rctx,
     const v2::RefillOwnedBindingRequest& req,
@@ -278,6 +288,13 @@ grpc::Status MaterializationController::import_artifact_from_path(
   return disk_artifact_service_.import_artifact_from_path(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::resolve_public_disk_source(
+    RpcContext& rctx,
+    const v2::ResolvePublicDiskSourceRequest& req,
+    v2::ResolvePublicDiskSourceResponse& resp) {
+  return disk_artifact_service_.resolve_public_disk_source(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::import_artifact_from_path_stream(
     RpcContext& rctx,
     const v2::ImportArtifactFromPathRequest& req,
@@ -290,6 +307,28 @@ grpc::Status MaterializationController::get_artifact_index_by_id(
     const v2::GetArtifactIndexByIdRequest& req,
     v2::GetArtifactIndexByIdResponse& resp) {
   return disk_artifact_service_.get_artifact_index_by_id(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::list_artifact_layouts(
+    RpcContext& rctx,
+    const v2::ListArtifactLayoutsRequest& req,
+    v2::ListArtifactLayoutsResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.artifact.id", req.artifact_id());
+  if (req.artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+  auto layouts_or = global_store_client_->list_artifact_layouts(req.artifact_id());
+  if (!layouts_or.ok()) {
+    return to_grpc_status(layouts_or.status());
+  }
+  for (const auto& layout_id : *layouts_or) {
+    resp.add_layout_ids(layout_id);
+  }
+  return grpc::Status::OK;
 }
 
 grpc::Status MaterializationController::seal_assembly(

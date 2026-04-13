@@ -26,7 +26,10 @@ from tensorcast.api.store import (
     AssemblyCloseoutContract,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    BuilderMode,
+    ServingBuildIntent,
     Store,
+    build_serving_manifest_ref,
 )
 from tensorcast.api.store.view_composer import compute_index_multihash, compute_view_id
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
@@ -562,6 +565,8 @@ def _seal_two_piece_assembly(
     assembly_id: str,
     canonical_index_bytes: bytes,
     canonical_size_bytes: int,
+    weights: list[float] | None = None,
+    bias: list[float] | None = None,
 ) -> tuple[str, str, str]:
     seed_port = _get_free_port()
     worker_resp = gs_stub.RegisterWorker(
@@ -600,8 +605,16 @@ def _seal_two_piece_assembly(
     view_spec_b = _make_view_spec(bias_start=4, bias_length=4)
     view_id_b = compute_view_id(view_spec_b, canonical_index_bytes)
 
-    weights = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-    bias = [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    weights = (
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        if weights is None
+        else [float(value) for value in weights]
+    )
+    bias = (
+        [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        if bias is None
+        else [float(value) for value in bias]
+    )
     piece_a = _pack_floats(bias[:4]) + _pack_floats(weights)
     piece_b = _pack_floats(bias[4:]) + _pack_floats(weights)
 
@@ -962,6 +975,273 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
         with contextlib.suppress(Exception):
             if binding is not None:
                 binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_complete_pure_transform_publication_publishes_serving_lineage(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[],
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
+
+        result = store.complete_pure_transform_publication_bridge(
+            source_tensors,
+            build_intent=ServingBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_id,
+            ),
+            source_artifact=source_artifact,
+            contract_family="canonical_full",
+            layout_id=layout_id,
+            source_contribution_device="cuda:0",
+            source_version_key="models/demo/source/v1",
+            serving_version_key="models/demo/serving/v1",
+            timeout_s=60.0,
+        )
+
+        assert result.source_artifact_id == source_artifact_id
+        assert result.source_version_key == "models/demo/source/v1"
+        assert result.serving_version_key == "models/demo/serving/v1"
+        assert result.serving_artifact_id is not None
+        assert result.representation_contract_hash is not None
+        assert result.serving_build_digest is not None
+        assert result.serving_manifest_ref == build_serving_manifest_ref()
+
+        serving_mapping = gs_stub.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key="models/demo/serving/v1")
+        )
+        assert serving_mapping.status == global_store_pb2.Status.STATUS_OK
+        assert serving_mapping.artifact_id == result.serving_artifact_id
+
+        serving_tensors = _artifact_tensor_dict(
+            store, artifact_id=str(result.serving_artifact_id)
+        )
+        assert torch.equal(serving_tensors["weights"], source_tensors["weights"])
+        assert torch.equal(serving_tensors["bias"], source_tensors["bias"])
+        assert "__tensorcast_meta__.manifest_json" in serving_tensors
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_complete_pure_transform_publication_structural_pp_publishes_serving_lineage(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish-pp",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
+        source_view_a = source_artifact.view(slices={"bias": (slice(0, 4),)})
+        source_view_b = source_artifact.view(slices={"bias": (slice(4, 8),)})
+        view_id_a = source_view_a._ensure_view_metadata_cache(require_view_id=True).view_id
+        view_id_b = source_view_b._ensure_view_metadata_cache(require_view_id=True).view_id
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[str(view_id_a), str(view_id_b)],
+            replicated_tensors=["weights"],
+        )
+
+        result = store.complete_pure_transform_publication_bridge(
+            source_tensors,
+            build_intent=ServingBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_id,
+            ),
+            source_artifact=source_artifact,
+            contract_family="pp",
+            source_contribution_device="cuda:0",
+            source_contribution_artifacts=(source_view_a, source_view_b),
+            layout_id=layout_id,
+            source_version_key="models/demo/source/pp/v1",
+            serving_version_key="models/demo/serving/pp/v1",
+            timeout_s=60.0,
+        )
+
+        assert result.source_artifact_id == source_artifact_id
+        assert result.source_version_key == "models/demo/source/pp/v1"
+        assert result.serving_version_key == "models/demo/serving/pp/v1"
+        assert result.serving_artifact_id is not None
+        assert result.serving_manifest_ref == build_serving_manifest_ref()
+
+        serving_mapping = gs_stub.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key="models/demo/serving/pp/v1")
+        )
+        assert serving_mapping.status == global_store_pb2.Status.STATUS_OK
+        assert serving_mapping.artifact_id == result.serving_artifact_id
+
+        serving_tensors = _artifact_tensor_dict(
+            store, artifact_id=str(result.serving_artifact_id)
+        )
+        assert torch.equal(serving_tensors["weights"], source_tensors["weights"])
+        assert torch.equal(serving_tensors["bias"], source_tensors["bias"])
+        assert "__tensorcast_meta__.manifest_json" in serving_tensors
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_complete_pure_transform_publication_serving_binding_swap(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    binding = None
+    try:
+        source_artifact_v1, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish-swap-v1",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+            weights=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            bias=[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        )
+        layout_id_v1 = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_v1,
+            expected_view_ids=[],
+        )
+        source_handle_v1 = store.artifact(artifact_id=source_artifact_v1)
+        result_v1 = store.complete_pure_transform_publication_bridge(
+            _artifact_tensor_dict(store, artifact_id=source_artifact_v1),
+            build_intent=ServingBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_v1,
+            ),
+            source_artifact=source_handle_v1,
+            contract_family="canonical_full",
+            source_contribution_device="cuda:0",
+            layout_id=layout_id_v1,
+            source_version_key="models/demo/source/swap/v1",
+            serving_version_key="models/demo/serving/swap/v1",
+            timeout_s=60.0,
+        )
+
+        source_artifact_v2, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish-swap-v2",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+            weights=[21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0],
+            bias=[29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0],
+        )
+        layout_id_v2 = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_v2,
+            expected_view_ids=[],
+        )
+        source_handle_v2 = store.artifact(artifact_id=source_artifact_v2)
+        result_v2 = store.complete_pure_transform_publication_bridge(
+            _artifact_tensor_dict(store, artifact_id=source_artifact_v2),
+            build_intent=ServingBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_v2,
+            ),
+            source_artifact=source_handle_v2,
+            contract_family="canonical_full",
+            source_contribution_device="cuda:0",
+            layout_id=layout_id_v2,
+            source_version_key="models/demo/source/swap/v2",
+            serving_version_key="models/demo/serving/swap/v2",
+            timeout_s=60.0,
+        )
+
+        assert result_v1.serving_artifact_id is not None
+        assert result_v2.serving_artifact_id is not None
+
+        binding = store.artifact(key="models/demo/serving/swap/v1").bind(
+            device="cuda:0",
+            packing="byte_space",
+            serving_runtime_policy=result_v1.require_serving_runtime_policy(),
+        )
+        torch.testing.assert_close(
+            binding.tensors["weights"].cpu(),
+            torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=torch.float32),
+        )
+        torch.testing.assert_close(
+            binding.tensors["bias"].cpu(),
+            torch.tensor([9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0], dtype=torch.float32),
+        )
+        binding.swap(
+            store.artifact(artifact_id=str(result_v2.serving_artifact_id)),
+            serving_runtime_policy=result_v2.require_serving_runtime_policy(),
+        )
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            binding.tensors["weights"].cpu(),
+            torch.tensor([21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], dtype=torch.float32),
+        )
+        torch.testing.assert_close(
+            binding.tensors["bias"].cpu(),
+            torch.tensor([29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0], dtype=torch.float32),
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            if binding is not None:
+                binding.close()
+        with contextlib.suppress(Exception):
+            channel.close()
         with contextlib.suppress(Exception):
             store.close()
         gs_channel.close()

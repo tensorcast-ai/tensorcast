@@ -38,6 +38,7 @@ from tensorcast.api.store.artifact import (
     PrefetchedReplica,
     _decode_capability_token,
 )
+from tensorcast.api.store.serving_builder import build_pure_transform_transform_spec
 from tensorcast.api.store.view_composer import compute_view_id
 from tensorcast.engine_adapter.artifact_api import (
     BatchOutcome,
@@ -51,12 +52,27 @@ from tensorcast.engine_adapter.artifact_api import (
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import (
+    AssemblyCloseoutContract,
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
+    RepresentationPublishContract,
+    RepresentationPublishSpec,
+    ServingArtifactManifest,
+)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
+    from tensorcast.types import ServingBuildIntent
 
 T = TypeVar("T")
-ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
+ArtifactActionResult = (
+    ManifestResult
+    | PublishResult
+    | HydrateResult
+    | BatchResult
+    | RepresentationPublishSpec
+)
 PlanExecutionClass = str
 
 _TERMINAL_ONLY_EXECUTION_CLASS = "terminal_only"
@@ -113,6 +129,35 @@ class PlanResult:
 
     def step(self, ref: PlanStepRef[Any]) -> PlanStepResult:
         return self.steps[ref.step_id]
+
+    def require_representation_publish_spec(
+        self, ref: PlanStepRef[Any]
+    ) -> RepresentationPublishSpec:
+        step = self.steps.get(ref.step_id)
+        if step is None:
+            raise ArtifactError(
+                f"Unknown plan step id: {ref.step_id}",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if step.status.state != "success":
+            raise ArtifactError(
+                f"Plan step {ref.step_id} did not succeed; pure-transform publication is unavailable",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if not isinstance(step.artifact_result, RepresentationPublishSpec):
+            raise ArtifactError(
+                f"Plan step {ref.step_id} does not carry a RepresentationPublishSpec",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return step.artifact_result
+
+    def require_pure_transform_publication(
+        self, ref: PlanStepRef[Any]
+    ) -> RepresentationPublishSpec:
+        return self.require_representation_publish_spec(ref)
 
     @classmethod
     def from_node_agent_response(
@@ -327,6 +372,8 @@ def _artifact_result_from_proto(
     kind = result.WhichOneof("result")
     if kind == "manifest":
         return _manifest_result_from_proto(result.manifest)
+    if kind == "representation_publish":
+        return RepresentationPublishSpec.from_proto(result.representation_publish)
     if kind == "publish":
         return PublishResult(
             manifest=_manifest_result_from_proto(result.publish.manifest),
@@ -362,6 +409,41 @@ def _artifact_result_from_proto(
             ),
             outcomes=tuple(
                 _batch_outcome_from_proto(item) for item in result.evict_local.outcomes
+            ),
+        )
+    if kind == "pure_transform_publication":
+        return RepresentationPublishSpec(
+            serving_artifact_id=(
+                str(result.pure_transform_publication.serving_artifact_id) or None
+            ),
+            serving_manifest_ref=str(
+                result.pure_transform_publication.serving_manifest_ref
+            ),
+            serving_manifest=ServingArtifactManifest.from_bytes(
+                bytes(result.pure_transform_publication.serving_manifest_bytes)
+            ),
+            serving_manifest_bytes=bytes(
+                result.pure_transform_publication.serving_manifest_bytes
+            ),
+            source_artifact_ref=(
+                str(result.pure_transform_publication.source_artifact_ref)
+                if result.pure_transform_publication.HasField("source_artifact_ref")
+                else None
+            ),
+            contract_family=(
+                str(result.pure_transform_publication.contract_family)
+                if result.pure_transform_publication.HasField("contract_family")
+                else None
+            ),
+            structural_view_ids=tuple(
+                str(item)
+                for item in result.pure_transform_publication.structural_view_ids
+            ),
+            representation_publish_contract=RepresentationPublishContract.from_proto(
+                result.pure_transform_publication.representation_publish_contract
+            ),
+            closeout_contract=AssemblyCloseoutContract.from_proto(
+                result.pure_transform_publication.closeout_contract
             ),
         )
     return None
@@ -546,7 +628,6 @@ def _clone_artifact_for_store(artifact: Artifact, store: "Store") -> Artifact:
         store_ref=weakref.ref(store),
         artifact_id=artifact._artifact_id,
         key=artifact._key_hint,
-        fallback=artifact._fallback,
         canonical_index_bytes=artifact._canonical_index_bytes,
         canonical_index=artifact._canonical_index,
         generation=artifact._generation,
@@ -892,6 +973,54 @@ class InstanceStepBuilder:
                 out_key=out_key,
                 policy=policy,
             ),
+            depends_on=depends_on,
+        )
+
+    def transform_register_pure_transform(
+        self,
+        art: Artifact,
+        *,
+        build_intent: "ServingBuildIntent",
+        contract_family: str | None = None,
+        out_key: str,
+        transform_name: str = "identity.v1",
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+        layout_id: str | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        transform_args: dict[str, str | int] | None = None,
+        layout_hash: str | None = None,
+        policy: StorePolicy | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[RepresentationPublishSpec]:
+        spec = build_pure_transform_transform_spec(
+            transform_name=transform_name,
+            build_intent=build_intent,
+            contract_family=contract_family,
+            source_version_key=source_version_key,
+            serving_version_key=serving_version_key,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=serving_manifest_ref,
+            layout_id=layout_id,
+            requirements=requirements,
+            readiness_policy=readiness_policy,
+            structural_view_ids=tuple(
+                str(view_id).strip()
+                for view_id in (structural_view_ids or ())
+                if str(view_id).strip()
+            ),
+            transform_args=transform_args,
+            layout_hash=layout_hash,
+        )
+        return self.transform_register(
+            art,
+            spec=spec,
+            out_key=out_key,
+            policy=policy,
             depends_on=depends_on,
         )
 

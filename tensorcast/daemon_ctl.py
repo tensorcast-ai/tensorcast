@@ -73,8 +73,10 @@ from tensorcast.types import (
     RegionMemoryKind,
     RegisterStorage,
     RegisterTensorAlias,
+    RepresentationPublishSpec,
     SealAssemblyResult,
     ServerConfig,
+    ServingRuntimePolicy,
     StableDramHandshake,
     VramRegionHandle,
 )
@@ -133,6 +135,20 @@ def _grpc_details(err: grpc.RpcError) -> str:
 def _grpc_message(err: grpc.RpcError, *, fallback: str) -> str:
     details = _grpc_details(err)
     return details if details else fallback
+
+
+def _normalize_source_policy(
+    source_policy: store_daemon_pb2.SourcePolicy | None = None,
+) -> store_daemon_pb2.SourcePolicy:
+    resolved = store_daemon_pb2.SourcePolicy()
+    if source_policy is not None:
+        resolved.CopyFrom(source_policy)
+    if (
+        resolved.preference
+        == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+    ):
+        resolved.preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+    return resolved
 
 
 def _parse_env_float(name: str, default: float, *, min_value: float) -> float:
@@ -812,7 +828,7 @@ class DaemonCtl:
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse | bytes | tuple[bytes, int]:
         """Materialize a replica by content-addressed artifact_id via daemon.
 
@@ -837,6 +853,7 @@ class DaemonCtl:
                 selection.view_spec.CopyFrom(view)
             elif view_id:
                 selection.view_id = view_id
+            resolved_source_policy = _normalize_source_policy(source_policy)
             request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
                 selection=selection,
@@ -846,8 +863,7 @@ class DaemonCtl:
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
                 wait_for_completion=wait_for_completion,
             )
-            if preference is not None:
-                request.preference = preference
+            request.source_policy.CopyFrom(resolved_source_policy)
             if placement is not None:
                 request.placement = placement
             try:
@@ -923,8 +939,8 @@ class DaemonCtl:
         selection: common_pb2.ArtifactSelection,
         target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -939,27 +955,18 @@ class DaemonCtl:
             raise ValueError("device_uuid is required")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
-            if preference is not None:
-                preference_value = preference
-            elif (
-                source_policy is not None
-                and source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-            ):
-                preference_value = source_policy.preference
-            else:
-                preference_value = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                )
+            resolved_source_policy = _normalize_source_policy(source_policy)
             request = store_daemon_pb2.MaterializeIntoTargetRequest(
                 selection=selection,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
                 pid=pid_value,
-                preference=preference_value,
             )
-            if source_policy is not None:
-                request.source_policy.CopyFrom(source_policy)
+            request.source_policy.CopyFrom(resolved_source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -1002,8 +1009,8 @@ class DaemonCtl:
         device_uuid: str,
         copy_plan,
         dst_tensors: Mapping[str, torch.Tensor],
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -1023,24 +1030,12 @@ class DaemonCtl:
         normalized_plan = normalize_copy_plan(copy_plan)
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoMappedTarget") as span:
-            if preference is not None:
-                preference_value = preference
-            elif (
-                source_policy is not None
-                and source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-            ):
-                preference_value = source_policy.preference
-            else:
-                preference_value = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                )
+            resolved_source_policy = _normalize_source_policy(source_policy)
             request = store_daemon_pb2.MaterializeIntoMappedTargetRequest(
                 selection=selection,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
                 pid=pid_value,
-                preference=preference_value,
             )
             plan_proto = store_daemon_pb2.CopyPlan(version=1)
             for entry in normalized_plan:
@@ -1068,8 +1063,11 @@ class DaemonCtl:
                 spec.shape.extend(int(v) for v in tensor.shape)
                 spec.stride.extend(int(v) for v in tensor.stride())
                 request.dst_tensors.append(spec)
-            if source_policy is not None:
-                request.source_policy.CopyFrom(source_policy)
+            request.source_policy.CopyFrom(resolved_source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -1116,8 +1114,8 @@ class DaemonCtl:
         target_index_bytes: bytes,
         device_uuid: str,
         binding_layout_id: str,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         copy_plan: store_daemon_pb2.CopyPlan | None = None,
         dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
@@ -1137,18 +1135,7 @@ class DaemonCtl:
             raise ValueError("binding_layout_id is required")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/CreateOwnedBinding") as span:
-            if preference is not None:
-                preference_value = preference
-            elif (
-                source_policy is not None
-                and source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-            ):
-                preference_value = source_policy.preference
-            else:
-                preference_value = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                )
+            resolved_source_policy = _normalize_source_policy(source_policy)
             request = store_daemon_pb2.CreateOwnedBindingRequest(
                 source_selection=source_selection,
                 target_layout=target_layout,
@@ -1156,10 +1143,12 @@ class DaemonCtl:
                 device_uuid=device_uuid,
                 binding_layout_id=str(binding_layout_id),
                 pid=pid_value,
-                preference=preference_value,
             )
-            if source_policy is not None:
-                request.source_policy.CopyFrom(source_policy)
+            request.source_policy.CopyFrom(resolved_source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if copy_plan is not None:
@@ -1355,41 +1344,83 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def promote_binding_current_value(
+        self,
+        *,
+        binding_id: str,
+        binding_value_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not binding_value_id:
+            raise ValueError("binding_value_id is required")
+        with self._client_span("Client/PromoteBindingCurrentValue") as span:
+            request = store_daemon_pb2.PromoteBindingCurrentValueRequest(
+                binding_id=str(binding_id),
+                binding_value_id=str(binding_value_id),
+            )
+            try:
+                response: store_daemon_pb2.PromoteBindingCurrentValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.PromoteBindingCurrentValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="PromoteBindingCurrentValue RPC failed",
+                    )
+                ) from e
+        return response
+
     def refill_owned_binding(
         self,
         *,
         binding_id: str,
         artifact_id: str,
-        preference: store_daemon_pb2.SourcePreference | None = None,
+        public_disk_source: store_daemon_pb2.PublicDiskSourceHandle | None = None,
+        source_selection: common_pb2.ArtifactSelection | None = None,
+        realization_plan: store_daemon_pb2.BindingRealizationPlan | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        execution_topology: store_daemon_pb2.SourceExecutionTopology | None = None,
+        collective_policy: store_daemon_pb2.CollectivePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         operation_id: str | None = None,
         timeout_s: float = 600.0,
     ) -> store_daemon_pb2.RefillOwnedBindingResponse:
         if not binding_id:
             raise ValueError("binding_id is required")
-        if not artifact_id:
-            raise ValueError("artifact_id is required")
+        if not artifact_id and public_disk_source is None:
+            raise ValueError("artifact_id is required unless public_disk_source is set")
         with self._client_span("Client/RefillOwnedBinding") as span:
-            if preference is not None:
-                preference_value = preference
-            elif (
-                source_policy is not None
-                and source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-            ):
-                preference_value = source_policy.preference
-            else:
-                preference_value = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                )
+            resolved_source_policy = _normalize_source_policy(source_policy)
             request = store_daemon_pb2.RefillOwnedBindingRequest(
                 binding_id=str(binding_id),
                 artifact_id=str(artifact_id),
-                preference=preference_value,
             )
-            if source_policy is not None:
-                request.source_policy.CopyFrom(source_policy)
+            if public_disk_source is not None:
+                request.public_disk_source.CopyFrom(public_disk_source)
+            if source_selection is not None:
+                request.source_selection.CopyFrom(source_selection)
+            if realization_plan is not None:
+                request.realization_plan.CopyFrom(realization_plan)
+            request.source_policy.CopyFrom(resolved_source_policy)
+            if execution_topology is not None:
+                request.execution_topology.CopyFrom(execution_topology)
+            if collective_policy is not None:
+                request.collective_policy = collective_policy
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -1950,8 +1981,8 @@ class DaemonCtl:
         wait_for_shared_disk_ms: int = 0,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[True],
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1973,8 +2004,8 @@ class DaemonCtl:
         wait_for_shared_disk_ms: int = 0,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1996,7 +2027,6 @@ class DaemonCtl:
         wait_for_shared_disk_ms: int = 0,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
@@ -2017,8 +2047,8 @@ class DaemonCtl:
         wait_for_shared_disk_ms: int = 0,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -2043,18 +2073,7 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeReplicaV2") as span:
-            if preference is not None:
-                preference_value = preference
-            elif (
-                source_policy is not None
-                and source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-            ):
-                preference_value = source_policy.preference
-            else:
-                preference_value = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                )
+            resolved_source_policy = _normalize_source_policy(source_policy)
             device_uuid_value = (
                 ""
                 if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
@@ -2067,15 +2086,17 @@ class DaemonCtl:
                 device_uuid=device_uuid_value,
                 target_device_type=target_device_type,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-                preference=preference_value,
                 lease_mode=lease_mode,
             )
             if collective_load_group is not None:
                 request.collective_load_group.CopyFrom(collective_load_group)
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
-            if source_policy is not None:
-                request.source_policy.CopyFrom(source_policy)
+            request.source_policy.CopyFrom(resolved_source_policy)
+            if serving_runtime_policy is not None:
+                request.serving_artifact_policy.CopyFrom(
+                    serving_runtime_policy.to_proto()
+                )
             if export_policy is not None:
                 request.export_policy = export_policy
             if not need_view_data_hash:
@@ -2215,6 +2236,34 @@ class DaemonCtl:
 
         return _event_iter()
 
+    def resolve_public_disk_source(
+        self,
+        *,
+        path: str,
+        verify_checksums: bool = True,
+    ) -> store_daemon_pb2.ResolvePublicDiskSourceResponse:
+        if not path:
+            raise ValueError("path is required")
+        with self._client_span("Client/ResolvePublicDiskSource") as span:
+            request = store_daemon_pb2.ResolvePublicDiskSourceRequest(
+                path=path,
+                verify_checksums=bool(verify_checksums),
+            )
+            try:
+                response: store_daemon_pb2.ResolvePublicDiskSourceResponse = (
+                    self._unary_call(
+                        self.stub_v2.ResolvePublicDiskSource,
+                        request,
+                        timeout=_import_artifact_from_path_timeout_seconds(),
+                        span=span,
+                        retries=_import_artifact_from_path_retries(),
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                _raise_import_artifact_from_path_rpc_error(self.server_address, e)
+            return response
+
     def confirm_replica_loaded(
         self,
         disk_path: str,
@@ -2278,7 +2327,7 @@ class DaemonCtl:
                 logger.error(f"Error: {e}")
                 raise RuntimeError("GetServerConfig failed") from e
             else:
-                # Map both legacy and new fields for smooth migration
+                # Older daemons may omit optional local socket metadata.
                 local_handle_socket_path = str(
                     getattr(response, "local_handle_socket_path", "") or ""
                 )
@@ -2307,6 +2356,12 @@ class DaemonCtl:
                     ),
                     local_handle_socket_path=local_handle_socket_path,
                     cpu_shared_memory_enabled=cpu_shared_memory_enabled,
+                    source_bound_capability_flags=int(
+                        getattr(response, "source_bound_capability_flags", 0)
+                    ),
+                    source_bound_contract_version=int(
+                        getattr(response, "source_bound_contract_version", 0)
+                    ),
                 )
 
     def execute_plan(
@@ -3749,30 +3804,56 @@ class DaemonCtl:
             )
             return resp.tensor_index_data
 
+    def list_artifact_layouts(
+        self, artifact_id: str, *, timeout_s: float = 10.0
+    ) -> list[str]:
+        """Fetch layout ids currently attached to an artifact via daemon."""
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        with self._client_span("Client/ListArtifactLayouts") as span:
+            request = store_daemon_pb2.ListArtifactLayoutsRequest(
+                artifact_id=artifact_id
+            )
+            resp = self._unary_call(
+                self.stub.ListArtifactLayouts,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+            return [str(item) for item in resp.layout_ids]
+
     def start_assembly_attempt(
         self,
         *,
-        layout_id: str,
+        layout_id: str | None = None,
         requirements: AssemblyRequirementSetRef | None = None,
         readiness_policy: AssemblyReadinessPolicy | None = None,
         closeout_contract: AssemblyCloseoutContract | None = None,
+        representation_publish_spec: RepresentationPublishSpec | None = None,
         timeout_s: float = 30.0,
     ) -> AssemblyAttemptRef:
-        if not layout_id:
-            raise ValueError("layout_id is required")
-        if requirements is None:
-            raise ValueError(
-                "requirements are required; construct them explicitly with "
-                "AssemblyRequirementSetRef.pp_from_structural_views(...), "
-                "AssemblyRequirementSetRef.ep_from_structural_views(...), "
-                "or AssemblyRequirementSetRef.canonical_full()"
+        if representation_publish_spec is not None:
+            req = store_daemon_pb2.StartAssemblyAttemptRequest()
+            req.representation_publish_spec.CopyFrom(
+                representation_publish_spec.to_proto()
             )
-        req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
-        req.requirements.CopyFrom(requirements.to_proto())
-        if readiness_policy is not None:
-            req.readiness_policy.CopyFrom(readiness_policy.to_proto())
-        if closeout_contract is not None:
-            req.closeout_contract.CopyFrom(closeout_contract.to_proto())
+        else:
+            if not layout_id:
+                raise ValueError("layout_id is required")
+            if requirements is None:
+                raise ValueError(
+                    "requirements are required; construct them explicitly with "
+                    "AssemblyRequirementSetRef.pp_from_structural_views(...), "
+                    "AssemblyRequirementSetRef.ep_from_structural_views(...), "
+                    "or AssemblyRequirementSetRef.canonical_full()"
+                )
+            req = store_daemon_pb2.StartAssemblyAttemptRequest(layout_id=str(layout_id))
+            req.requirements.CopyFrom(requirements.to_proto())
+            if readiness_policy is not None:
+                req.readiness_policy.CopyFrom(readiness_policy.to_proto())
+            if closeout_contract is not None:
+                req.closeout_contract.CopyFrom(closeout_contract.to_proto())
         with self._client_span("Client/StartAssemblyAttempt") as span:
             resp = self._unary_call(
                 self.stub.StartAssemblyAttempt,

@@ -880,6 +880,15 @@ absl::StatusOr<components::KeyMappingSwapResult> StoreEngine::swap_key_mapping(
   return metadata_gateway_->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
 }
 
+absl::StatusOr<tensorcast::common::v1::ArtifactDescriptor> StoreEngine::get_artifact_descriptor(
+    std::string_view artifact_id) {
+  auto client = runtime_env_->runtime_context().global_store_client();
+  if (!client || !client->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  return client->get_artifact_descriptor(artifact_id);
+}
+
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
   auto local_or = [&]() -> absl::StatusOr<std::string> {
     auto keys = replica_runtime_->registry().find_by_artifact(artifact_id);

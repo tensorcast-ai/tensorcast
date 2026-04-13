@@ -49,7 +49,11 @@ sc_header_only_library(
     deps = [
         "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:representation_contract",
         "//core/store/materialization/contracts:view_plan",
+        "//core/store/materialization/dataplane:disk_artifact_context",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -86,6 +90,7 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/common:trace_macros_lib",
         "//core/store:device_types",
         "//core/store:endpoint_id",
         "//core/store:replica_registry",

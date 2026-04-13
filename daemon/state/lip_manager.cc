@@ -90,6 +90,10 @@ absl::StatusOr<cuda::IpcMapping*> GetOrOpenMappingForStorage(
 
   std::unique_ptr<cuda::IpcMapping> mapping;
   if (storage.has_handle()) {
+    cuda::DeviceGuard guard(storage.device_id);
+    if (!guard.status().ok()) {
+      return guard.status();
+    }
     auto map_or =
         cuda::IpcMapping::open(storage.handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok())
@@ -105,6 +109,10 @@ absl::StatusOr<cuda::IpcMapping*> GetOrOpenMappingForStorage(
     auto handle_or = registry->get_handle_bytes(storage.region_id);
     if (!handle_or.ok())
       return handle_or.status();
+    cuda::DeviceGuard guard(storage.device_id);
+    if (!guard.status().ok()) {
+      return guard.status();
+    }
     auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok())
       return map_or.status();
@@ -889,20 +897,18 @@ bool LipManager::wait_exports_drained(const ArtifactDeviceKey& key, absl::Time d
   return false;
 }
 
-absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
-    const std::string& registration_id,
+absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
     int device_id,
     int owner_pid,
-    uint32_t ttl_ms,
-    uint64_t epoch,
     uint64_t total_size,
     tensorcast::common::ArtifactIdKind id_kind,
     const std::string& client_artifact_id,
     const std::string& index_data,
     const std::string& index_key_hex,
-    std::vector<LeaseSegMeta>&& segments,
-    std::vector<RegisterStorageMeta>&& storages,
-    std::vector<RegisterTensorAliasMeta>&& aliases) {
+    absl::Span<const LeaseSegMeta> segments,
+    absl::Span<const RegisterStorageMeta> storages,
+    absl::Span<const RegisterTensorAliasMeta> aliases,
+    const std::optional<CommitLeaseResult>& identity_override) {
   std::string canonical_index_json = index_data;
   if (!storages.empty() && !aliases.empty()) {
     auto rebuilt_or = build_canonical_index_from_metadata(
@@ -916,8 +922,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     } else {
       auto stable_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device_id);
       if (stable_or.ok() && *stable_or != rebuilt) {
-        LOG(WARNING) << "Rebuilt canonical index differs from client-provided data; "
-                     << "preferring rebuilt version for registration_id=" << registration_id;
+        LOG(WARNING) << "Rebuilt canonical index differs from client-provided data; preferring rebuilt version";
       }
       canonical_index_json = rebuilt;
     }
@@ -1079,7 +1084,28 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   }
   index_multihash = *index_mh_or;
 
-  if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
+  if (identity_override.has_value()) {
+    out = *identity_override;
+    if (out.artifact_id.empty()) {
+      return absl::InvalidArgumentError("identity_override.artifact_id is required");
+    }
+    if (out.index_multihash.empty()) {
+      return absl::InvalidArgumentError("identity_override.index_multihash is required");
+    }
+    if (out.id_kind == common::ArtifactIdKind::kMi2 && out.data_multihash.empty()) {
+      return absl::InvalidArgumentError("identity_override.data_multihash is required for MI2");
+    }
+    if (out.index_multihash != index_multihash) {
+      return absl::FailedPreconditionError("identity_override index multihash does not match canonical index");
+    }
+    out.total_size = total_size;
+    if (out.schema_version.empty()) {
+      out.schema_version = "v3";
+    }
+    if (out.encoding.empty()) {
+      out.encoding = "json";
+    }
+  } else if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
     auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
     if (!data_mh_or.ok())
       return data_mh_or.status();
@@ -1096,9 +1122,81 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     out.id_kind = common::ArtifactIdKind::kCgid;
   }
 
-  out.schema_version = "v3";
-  out.encoding = "json";
+  if (out.schema_version.empty()) {
+    out.schema_version = "v3";
+  }
+  if (out.encoding.empty()) {
+    out.encoding = "json";
+  }
   out.total_size = total_size;
+
+  // Verification JSON: read three 8-byte values (start/middle/end) if possible.
+  auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
+    uint64_t v = 0;
+    auto st = src.read_at(off, &v, sizeof(v));
+    if (!st.ok()) {
+      return std::nullopt;
+    }
+    if (*st != sizeof(v)) {
+      return std::nullopt;
+    }
+    return v;
+  };
+  if (total_size >= 8) {
+    auto v0 = read_u64(0);
+    auto v1 = read_u64(total_size / 2);
+    auto v2 = read_u64(total_size - 8);
+    if (v0 && v1 && v2) {
+      nlohmann::json jv;
+      jv["artifact_size"] = total_size;
+      jv["key_values"] = {*v0, *v1, *v2};
+      out.verification_json = jv.dump();
+    }
+  }
+
+  return out;
+}
+
+absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
+    const std::string& registration_id,
+    int device_id,
+    int owner_pid,
+    uint32_t ttl_ms,
+    uint64_t epoch,
+    uint64_t total_size,
+    tensorcast::common::ArtifactIdKind id_kind,
+    const std::string& client_artifact_id,
+    const std::string& index_data,
+    const std::string& index_key_hex,
+    std::vector<LeaseSegMeta>&& segments,
+    std::vector<RegisterStorageMeta>&& storages,
+    std::vector<RegisterTensorAliasMeta>&& aliases,
+    const std::optional<CommitLeaseResult>& identity_override) {
+  auto out_or = build_commit_lease_result(
+      device_id,
+      owner_pid,
+      total_size,
+      id_kind,
+      client_artifact_id,
+      index_data,
+      index_key_hex,
+      absl::MakeSpan(segments),
+      absl::MakeSpan(storages),
+      absl::MakeSpan(aliases),
+      identity_override);
+  if (!out_or.ok()) {
+    return out_or.status();
+  }
+  CommitLeaseResult out = *out_or;
+  std::string canonical_index_json = index_data;
+  if (!storages.empty() && !aliases.empty()) {
+    auto rebuilt_or = build_canonical_index_from_metadata(
+        absl::MakeSpan(segments), absl::MakeSpan(storages), absl::MakeSpan(aliases), device_id);
+    if (!rebuilt_or.ok()) {
+      return rebuilt_or.status();
+    }
+    canonical_index_json = *rebuilt_or;
+  }
 
   // Enforce device-unique commit for VRAM_LEASED: (artifact_id, device_id)
   {
@@ -1112,28 +1210,6 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
         return absl::AlreadyExistsError(
             absl::StrCat("lease already exists for artifact on device (pid=", it->second.owner_pid, ")"));
       }
-    }
-  }
-
-  // Verification JSON: read three 8-byte values (start/middle/end) if possible
-  auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
-    uint64_t v = 0;
-    auto st = src.read_at(off, &v, sizeof(v));
-    if (!st.ok())
-      return std::nullopt;
-    if (*st != sizeof(v))
-      return std::nullopt;
-    return v;
-  };
-  if (total_size >= 8) {
-    auto v0 = read_u64(0);
-    auto v1 = read_u64(total_size / 2);
-    auto v2 = read_u64(total_size - 8);
-    if (v0 && v1 && v2) {
-      nlohmann::json jv;
-      jv["artifact_size"] = total_size;
-      jv["key_values"] = {*v0, *v1, *v2};
-      out.verification_json = jv.dump();
     }
   }
 
@@ -1407,10 +1483,210 @@ absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::commit_routable_view
       rec.opened_maps.push_back(std::move(*kv.second));
     }
     rec.tensor_keys = std::move(tensor_keys);
+    rec.buffer_sizes = buffer_sizes;
     routable_exports_[key] = std::move(rec);
   }
 
   // Success: prevent cleanup of registered keys.
+  guard.release();
+
+  RoutableLeaseResult result;
+  result.key = key;
+  result.remote_memory_keys = std::move(remote_memory_keys);
+  result.buffer_sizes = std::move(buffer_sizes);
+  return result;
+}
+
+absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::publish_committed_lease_routable(
+    std::string_view registration_id) {
+  const auto key_or = find_key_by_registration_id(registration_id);
+  if (!key_or.has_value()) {
+    return absl::NotFoundError("registration_id does not reference an active committed lease");
+  }
+  const ArtifactDeviceKey key = *key_or;
+  auto lease_or = find_active_by_key(key);
+  if (!lease_or.has_value()) {
+    return absl::NotFoundError("committed lease is no longer active");
+  }
+  const LipLeaseEntry& lease = *lease_or;
+  if (lease.segments.empty()) {
+    return absl::InvalidArgumentError("committed lease has no segments");
+  }
+  if (lease.storages.empty()) {
+    return absl::InvalidArgumentError("committed lease has no storage metadata");
+  }
+
+  {
+    absl::MutexLock lk(&routable_mu_);
+    auto it = routable_exports_.find(key);
+    if (it != routable_exports_.end()) {
+      RoutableLeaseResult result;
+      result.key = key;
+      result.remote_memory_keys = it->second.tensor_keys;
+      result.buffer_sizes = it->second.buffer_sizes;
+      return result;
+    }
+  }
+
+  auto comm_mgr = engine_->get_shared_comm_manager();
+  if (!comm_mgr->is_enabled()) {
+    return absl::UnavailableError("communication engine not enabled");
+  }
+  auto& comm_engine = comm_mgr->get_engine();
+
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  storage_by_id.reserve(lease.storages.size());
+  for (const auto& storage : lease.storages) {
+    storage_by_id.emplace(storage.storage_id, &storage);
+  }
+
+  struct OpenedSeg {
+    int device_id;
+    cuda::IpcMapping* map;
+    uint64_t base;
+    uint64_t len;
+    uint64_t dst;
+  };
+
+  RegionAcquireGuard region_guard(region_registry_);
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
+  mapping_cache.reserve(lease.storages.size());
+  absl::flat_hash_map<std::string, uint32_t> region_hold_counts;
+
+  std::vector<OpenedSeg> opened;
+  opened.reserve(lease.segments.size());
+  for (const auto& seg : lease.segments) {
+    auto it = storage_by_id.find(seg.storage_id);
+    if (it == storage_by_id.end()) {
+      return absl::InvalidArgumentError("committed lease segment references unknown storage_id");
+    }
+    const RegisterStorageMeta* storage = it->second;
+    if (seg.length == 0) {
+      continue;
+    }
+    if (seg.length > lease.total_size || seg.artifact_offset > lease.total_size ||
+        seg.artifact_offset + seg.length > lease.total_size) {
+      return absl::OutOfRangeError("committed lease segment range is out of bounds");
+    }
+    if (storage->device_id != lease.device_id) {
+      return absl::FailedPreconditionError("committed lease storage device_id mismatch");
+    }
+    if (storage->has_region()) {
+      const std::string region_key = absl::StrCat("r:", storage->region_id);
+      if (mapping_cache.find(region_key) == mapping_cache.end()) {
+        ++region_hold_counts[storage->region_id];
+      }
+    }
+    auto map_or = GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, lease.owner_pid);
+    if (!map_or.ok()) {
+      return map_or.status();
+    }
+    opened.push_back(
+        OpenedSeg{
+            .device_id = storage->device_id,
+            .map = *map_or,
+            .base = storage->mapping_base_offset + seg.storage_offset,
+            .len = seg.length,
+            .dst = seg.artifact_offset,
+        });
+  }
+
+  std::sort(opened.begin(), opened.end(), [](const OpenedSeg& a, const OpenedSeg& b) { return a.dst < b.dst; });
+  uint64_t cursor = 0;
+  for (const auto& seg : opened) {
+    if (seg.dst != cursor) {
+      return absl::FailedPreconditionError("committed lease requires dense segment coverage for routable export");
+    }
+    cursor = seg.dst + seg.len;
+  }
+  if (cursor != lease.total_size) {
+    return absl::FailedPreconditionError("committed lease has tail gap for routable export");
+  }
+
+  if (!region_hold_counts.empty()) {
+    if (region_registry_ == nullptr) {
+      return absl::FailedPreconditionError("region registry unavailable");
+    }
+    for (const auto& kv : region_hold_counts) {
+      for (uint32_t i = 0; i < kv.second; ++i) {
+        auto desc_or = region_registry_->acquire(kv.first, lease.owner_pid);
+        if (!desc_or.ok()) {
+          return desc_or.status();
+        }
+      }
+    }
+  }
+
+  std::vector<std::string> tensor_keys;
+  std::vector<std::string> remote_memory_keys;
+  std::vector<uint64_t> buffer_sizes;
+  tensor_keys.reserve(opened.size());
+  remote_memory_keys.reserve(opened.size());
+  buffer_sizes.reserve(opened.size());
+
+  struct KeysGuard {
+    communicator::engine::Communicator* comm_engine{nullptr};
+    std::vector<std::string>* keys{nullptr};
+
+    ~KeysGuard() {
+      if (comm_engine == nullptr || keys == nullptr) {
+        return;
+      }
+      for (const auto& key : *keys) {
+        auto st = comm_engine->unregister_tensor(key);
+        if (!st.ok()) {
+          LOG(WARNING) << "LIP KeysGuard: unregister_tensor failed for key=" << key << ": " << st;
+        }
+      }
+    }
+
+    void release() {
+      comm_engine = nullptr;
+      keys = nullptr;
+    }
+  } guard{.comm_engine = &comm_engine, .keys = &tensor_keys};
+
+  for (size_t i = 0; i < opened.size(); ++i) {
+    const auto& seg = opened[i];
+    const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(seg.map->get()) + seg.base);
+    std::string tensor_key = format_tensor_key(lease.artifact_id, lease.view_id, absl::StrCat("GPU_seg_", i));
+    communicator::engine::Communicator::RegisterTensorOptions opts;
+    opts.register_mr = comm_engine.is_rdma_enabled();
+    opts.needs_staging = !comm_engine.is_rdma_enabled();
+    opts.async = false;
+    opts.direct_rdma_enabled = comm_engine.is_rdma_enabled();
+    auto st = comm_engine.register_tensor_ex(
+        tensor_key,
+        addr,
+        static_cast<size_t>(seg.len),
+        communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+        seg.device_id,
+        opts);
+    if (!st.ok()) {
+      release_region_refs(region_registry_, region_hold_counts);
+      return st;
+    }
+    tensor_keys.push_back(tensor_key);
+    remote_memory_keys.push_back(tensor_key);
+    buffer_sizes.push_back(seg.len);
+  }
+
+  {
+    absl::MutexLock lk(&routable_mu_);
+    LipExportRecord rec;
+    rec.artifact_id = lease.artifact_id;
+    rec.view_id = lease.view_id;
+    rec.device_id = lease.device_id;
+    rec.region_registry = region_registry_;
+    rec.held_region_refs = std::move(region_hold_counts);
+    for (auto& kv : mapping_cache) {
+      rec.opened_maps.push_back(std::move(*kv.second));
+    }
+    rec.tensor_keys = tensor_keys;
+    rec.buffer_sizes = buffer_sizes;
+    routable_exports_[key] = std::move(rec);
+  }
+
   guard.release();
 
   RoutableLeaseResult result;

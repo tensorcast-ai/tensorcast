@@ -444,6 +444,13 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   if (reg.device_id < 0) {
     return absl::InvalidArgumentError("device_id must be >= 0");
   }
+  if (stable_dram && reg.stable_dram.stage_on_gpu) {
+    // Ban whole-replica GPU staging until the hashing/materialization contract
+    // is redesigned to avoid this path entirely.
+    return absl::InvalidArgumentError(
+        "stable_dram.stage_on_gpu is disabled: whole-replica GPU staging must not be used; "
+        "use stage_on_gpu=false");
+  }
   if (stable_dram) {
     auto guard_status = enforce_stable_begin_runtime_memory_guard(reg.total_size_bytes, memory_tier_budget_);
     if (!guard_status.ok()) {
@@ -751,6 +758,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (entry->view_state && entry->view_state->options.placement == ViewPlacement::kServer) {
+    SC_TRACE_SCOPE("registration_commit.view_finalize_server");
     auto& view_state = *entry->view_state;
     if (!view_state.executor) {
       return absl::FailedPreconditionError("view executor missing for server placement registration");
@@ -772,6 +780,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (entry->view_state && entry->view_state->options.registration_kind == ViewRegistrationKind::kPiece) {
+    SC_TRACE_SCOPE("registration_commit.view_zero_padding");
     const auto location =
         (entry->plan == PendingRegistrationContext::Plan::kStableDram && !entry->stable_dram.stage_on_gpu)
         ? common::memory::MemoryLocation::CPU
@@ -799,6 +808,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
 
   if (entry->plan == PendingRegistrationContext::Plan::kStableDram) {
     if (entry->stable_dram.stage_on_gpu) {
+      SC_TRACE_SCOPE("registration_commit.stable_dram.stage_gpu_copy");
       if (entry->gpu_ptr == nullptr) {
         return absl::FailedPreconditionError("Stable DRAM staging pointer is null");
       }
@@ -822,6 +832,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       LOG(INFO) << "Stable DRAM commit path=staging_gpu bytes=" << entry->size_bytes
                 << " device_id=" << entry->device_id;
     } else {
+      SC_TRACE_SCOPE("registration_commit.stable_dram.validate_stream_ingest");
       uint64_t stream_ingested_bytes = 0;
       uint64_t stream_copied_bytes = 0;
       uint64_t stream_chunk_count = 0;
@@ -939,8 +950,11 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     entry->artifact_id = *entry->artifact_id_override;
     entry->id_kind = common::ArtifactIdKind::kMi2;
   } else {
-    absl::StatusOr<std::string> index_mh_or =
-        common::compute_index_multihash(entry->tensor_index_data, entry->tensor_index_key);
+    absl::StatusOr<std::string> index_mh_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("registration_commit.hash.index");
+      index_mh_or = common::compute_index_multihash(entry->tensor_index_data, entry->tensor_index_key);
+    }
     if (!index_mh_or.ok()) {
       return index_mh_or.status();
     }
@@ -962,7 +976,11 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
           return absl::FailedPreconditionError("CPU data pointer unavailable for hashing");
         }
         gsl::not_null<const void*> cpu_base{static_cast<const void*>(cpu_ptrs[0])};
-        auto mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_base, entry->size_bytes);
+        absl::StatusOr<std::string> mh_or = absl::UnknownError("uninitialized");
+        {
+          SC_TRACE_SCOPE("registration_commit.hash.data.cpu");
+          mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_base, entry->size_bytes);
+        }
         if (!mh_or.ok()) {
           return mh_or.status();
         }
@@ -996,14 +1014,21 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
           if (!mapped_or.ok()) {
             return mapped_or.status();
           }
-          auto mh_or =
-              loader::compute_data_multihash_from_seekable_source(*mapped_or.value(), canonical_map->total_bytes);
+          absl::StatusOr<std::string> mh_or = absl::UnknownError("uninitialized");
+          {
+            SC_TRACE_SCOPE("registration_commit.hash.data.gpu_mapped");
+            mh_or = loader::compute_data_multihash_from_seekable_source(*mapped_or.value(), canonical_map->total_bytes);
+          }
           if (!mh_or.ok()) {
             return mh_or.status();
           }
           data_mh_or = *mh_or;
         } else {
-          auto mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry->size_bytes, entry->device_id);
+          absl::StatusOr<std::string> mh_or = absl::UnknownError("uninitialized");
+          {
+            SC_TRACE_SCOPE("registration_commit.hash.data.gpu");
+            mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry->size_bytes, entry->device_id);
+          }
           if (!mh_or.ok()) {
             return mh_or.status();
           }
@@ -1045,6 +1070,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
   if (!reuse_existing) {
+    SC_TRACE_SCOPE("registration_commit.registry_insert_or_reuse");
     absl::Status emplace_status =
         replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry->replica});
     if (absl::IsAlreadyExists(emplace_status)) {
@@ -1163,6 +1189,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     release_replica_memory(entry->replica, committed_location);
   });
   if (entry->view_state) {
+    SC_TRACE_SCOPE("registration_commit.view_publish_preparation");
     view_spec_json =
         view::build_view_spec_json(entry->view_state->options.spec, entry->view_state->options.tensor_names);
     leaf_chunk_bytes = artifact_chunk_bytes_ == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : artifact_chunk_bytes_;
@@ -1198,15 +1225,20 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
             gsl::not_null<void*>{base_ptr}, entry->device_id, entry->view_state->view_size_bytes);
       }
       const std::string canonical_index_json = entry->tensor_index_data.value_or(std::string{});
-      auto piece_payload_or = store::materialization::common::build_piece_view_state_payload(
-          store::materialization::common::PieceViewStateRequest{
-              .canonical_index_json = canonical_index_json,
-              .view_id = entry->view_state->options.view_id,
-              .plan = entry->view_state->plan,
-              .view_source = *piece_view_source,
-              .leaf_chunk_bytes = *leaf_chunk_bytes,
-              .canonical_size_bytes = entry->view_state->options.canonical_size_bytes,
-          });
+      absl::StatusOr<store::materialization::common::PieceViewStatePayload> piece_payload_or =
+          absl::UnknownError("uninitialized");
+      {
+        SC_TRACE_SCOPE("registration_commit.view_piece_payload");
+        piece_payload_or = store::materialization::common::build_piece_view_state_payload(
+            store::materialization::common::PieceViewStateRequest{
+                .canonical_index_json = canonical_index_json,
+                .view_id = entry->view_state->options.view_id,
+                .plan = entry->view_state->plan,
+                .view_source = *piece_view_source,
+                .leaf_chunk_bytes = *leaf_chunk_bytes,
+                .canonical_size_bytes = entry->view_state->options.canonical_size_bytes,
+            });
+      }
       if (!piece_payload_or.ok()) {
         return piece_payload_or.status();
       }
@@ -1250,8 +1282,12 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
               if (!view_source) {
                 LOG(WARNING) << "Failed to build view plan source for view hash";
               } else {
-                auto view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
-                    *view_source, view_total, *leaf_chunk_bytes);
+                absl::StatusOr<loader::verification::ViewHashResult> view_hash_or = absl::UnknownError("uninitialized");
+                {
+                  SC_TRACE_SCOPE("registration_commit.view_tree_hash");
+                  view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
+                      *view_source, view_total, *leaf_chunk_bytes);
+                }
                 if (view_hash_or.ok()) {
                   view_data_hash = view_hash_or->multihash;
                   const auto& digests = view_hash_or->leaf_digests;
@@ -1300,8 +1336,12 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       canonical_view.base_ptr = gpu_ptr;
     }
 
-    auto canonical_digest_or = loader::verification::compute_canonical_leaf_digests(
-        canonical_view, absl::Span<const uint64_t>(canonical_leaf_indices), *leaf_chunk_bytes);
+    absl::StatusOr<std::vector<std::vector<uint8_t>>> canonical_digest_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("registration_commit.view_canonical_leaf_digests");
+      canonical_digest_or = loader::verification::compute_canonical_leaf_digests(
+          canonical_view, absl::Span<const uint64_t>(canonical_leaf_indices), *leaf_chunk_bytes);
+    }
     if (!canonical_digest_or.ok()) {
       LOG(WARNING) << "Failed to compute canonical leaf digests for view registration: "
                    << canonical_digest_or.status();
@@ -1335,6 +1375,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (entry->view_state && !entry->view_state->options.view_id.empty() && publisher_) {
+    SC_TRACE_SCOPE("registration_commit.publisher.update_view_state");
     components::ViewStateUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
@@ -1398,6 +1439,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
 
   if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
       stable_cache_manager_) {
+    SC_TRACE_SCOPE("registration_commit.stable_cache_admit");
     components::StableDramCacheManager::AdmissionRequest admit_request;
     admit_request.key = mi2_key;
     admit_request.replica = entry->replica;
@@ -1439,6 +1481,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   maybe_attach_registration_verification(result, index_multihash, data_multihash);
 
   if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
+    SC_TRACE_SCOPE("registration_commit.enable_remote_memory_access");
     auto reg_info_or =
         entry->replica->enable_remote_memory_access(committed_location, communication_manager_->get_engine());
     if (!reg_info_or.ok()) {
@@ -1464,6 +1507,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (promotion_manager_ && export_registration.has_value()) {
+    SC_TRACE_SCOPE("registration_commit.promotion_record_export");
     auto promotion_status =
         promotion_manager_->record_export_registration(mi2_key, *export_registration, verification_json);
     if (!promotion_status.ok()) {
@@ -1472,6 +1516,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (publisher_) {
+    SC_TRACE_SCOPE("registration_commit.publisher.publish_registration");
     RegistrationPublication publication{
         .artifact_id = entry->artifact_id,
         .device = device,
@@ -1511,6 +1556,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   {
+    SC_TRACE_SCOPE("registration_commit.mark_loaded");
     auto mark_status = entry->replica->mark_loaded(committed_location);
     if (!mark_status.ok()) {
       return mark_status;

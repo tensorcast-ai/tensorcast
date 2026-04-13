@@ -299,22 +299,20 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // 1. Preference handling and Global Store connectivity guard
   // ------------------------------------------------------------------
   const bool gs_connected = gs_client_->is_connected();
-  const auto preference = hints.source_preference;
+  const auto retrieval_policy = hints.retrieval_policy();
+  const auto preference = retrieval_policy.preference;
   const bool has_disk_source = disk_source.has_value();
   const bool has_artifact_id_hint = !hints.artifact_id.empty();
-  const bool allow_p2p = hints.allow_p2p;
-  const bool allow_disk = hints.allow_disk;
+  const bool allow_p2p = retrieval_policy.allow_p2p;
+  const bool allow_disk = retrieval_policy.allow_disk;
   if (!allow_p2p && !allow_disk) {
     return absl::FailedPreconditionError("source_policy disallows both P2P and disk materialization");
   }
+  if (auto policy_status = loading::validate_retrieval_policy(retrieval_policy); !policy_status.ok()) {
+    return policy_status;
+  }
   if (preference == loading::SourcePreference::kPreferP2P && !has_artifact_id_hint) {
     return absl::InvalidArgumentError("preference=PREFER_P2P requires a canonical artifact_id");
-  }
-  if (preference == loading::SourcePreference::kPreferP2P && !allow_p2p) {
-    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
-  }
-  if (preference == loading::SourcePreference::kPreferDisk && !allow_disk) {
-    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
   }
   if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
@@ -472,37 +470,6 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     }
     const auto& session = *transport_or;
     const auto& remote = session.remote_replica;
-
-    if (is_local_replica(remote, local_identity_)) {
-      record_stale_source_detected("local_route", view_id.has_value(), reselection_attempt);
-      LOG(WARNING) << "Global Store returned local replica for artifact_id=" << artifact_id
-                   << "; treating route as stale";
-      absl::Status comp_status = gs_client_->complete_replica_transport(
-          session.transport_id, components::TransportCompletionOutcome::kFailed, "stale_local_route");
-      if (!comp_status.ok()) {
-        LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
-      }
-      last_p2p_status = stale_local_route_status(artifact_id);
-      if (can_retry_source_selection(
-              last_p2p_status, reselection_attempt, request_deadline, max_reselection_attempts)) {
-        reselection_attempt += 1;
-        record_source_reselection_attempt("local_route", view_id.has_value(), reselection_attempt);
-        if (should_log_reselection_attempt(reselection_attempt)) {
-          const std::chrono::milliseconds retry_remaining = remaining_request_budget(request_deadline);
-          const std::string remaining_label = retry_remaining == std::chrono::milliseconds::max()
-              ? "unbounded"
-              : std::to_string(retry_remaining.count());
-          LOG(WARNING) << "Retrying source selection after stale local route: artifact_id=" << artifact_id
-                       << " attempt=" << reselection_attempt << "/" << max_reselection_attempts
-                       << " remaining_budget_ms=" << remaining_label;
-        }
-        continue;
-      }
-      last_p2p_status =
-          source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
-      record_source_reselection_exhausted("local_route", view_id.has_value(), reselection_attempt);
-      break;
-    }
 
     // Build P2PSource from server-selected remote replica
     P2PSource p2p_src;

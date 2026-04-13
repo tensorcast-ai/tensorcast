@@ -33,6 +33,23 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "representation_contract",
+    srcs = ["representation_contract.cc"],
+    hdrs = ["representation_contract.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":byte_range_map",
+        ":view_id",
+        "//core/common:artifact_hash_lib",
+        "//proto/tensorcast/common/v1:common_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
+    ],
+)
+
 sc_header_only_library(
     name = "view_id",
     hdrs = ["view/view_id.h"],
@@ -103,6 +120,16 @@ cc_test(
     deps = [
         ":materialization_request",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "representation_contract_test",
+    srcs = ["representation_contract_test.cc"],
+    deps = [
+        ":representation_contract",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )

@@ -4,7 +4,9 @@ package tensorcast.node_agent.v1;
 
 import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/daemon/v2/store_daemon.proto";
 import "tensorcast/plan/v1/plan.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 service NodeAgentService {
   rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
@@ -45,6 +47,18 @@ message ArtifactBatchResult {
   repeated ArtifactBatchOutcome outcomes = 2;
 }
 
+message PureTransformPublicationResult {
+  string serving_artifact_id = 1;
+  string serving_manifest_ref = 2;
+  string manifest_tensor_name = 3;
+  bytes serving_manifest_bytes = 4;
+  tensorcast.daemon.v2.RepresentationPublishContract representation_publish_contract = 5;
+  tensorcast.daemon.v2.AssemblyCloseoutContract closeout_contract = 6;
+  optional string source_artifact_ref = 7;
+  optional string contract_family = 8;
+  repeated string structural_view_ids = 9;
+}
+
 message ArtifactSetItemResult {
   tensorcast.common.v1.SelectionIdentity item_identity = 1;
   optional string artifact_id = 2;
@@ -62,6 +76,8 @@ message ArtifactActionResult {
     ArtifactPublishResult publish = 2;
     ArtifactHydrateResult hydrate = 3;
     ArtifactBatchResult evict_local = 4;
+    PureTransformPublicationResult pure_transform_publication = 5;
+    tensorcast.publication.v1.RepresentationPublishSpec representation_publish = 6;
   }
 }
 

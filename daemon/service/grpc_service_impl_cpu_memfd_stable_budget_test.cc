@@ -175,7 +175,7 @@ TEST_CASE("CPU memfd materialization is gated by stable_bytes", "[daemon][cpu_me
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   req.set_wait_for_completion(true);
   req.set_pid(getpid());
   req.set_replica_uuid("cpu_memfd_stable_budget_replica");
@@ -237,7 +237,8 @@ TEST_CASE("CPU memfd stable_bytes recovers after lease release", "[daemon][cpu_m
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);
     req.set_pid(getpid());
     req.set_replica_uuid(replica_uuid);

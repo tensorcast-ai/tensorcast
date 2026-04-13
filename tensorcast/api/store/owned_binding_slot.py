@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Mapping
 import torch
 
 from tensorcast._c_ext import get_cuda_memory_ptr, restore_tensors
+from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import _tensor_payload_from_proto
 from tensorcast.api.context import CallContext
@@ -31,12 +32,19 @@ from tensorcast.api.store.inplace_slot import (
     _normalize_view_id,
     _selection_publishable,
 )
-from tensorcast.api.store.materialization import _build_source_policy
+from tensorcast.api.store.materialization import _resolve_source_policy_from_options
 from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.realization_plan import binding_realization_plan_to_proto
 from tensorcast.api.store.retry import map_materialization_error
-from tensorcast.api.store.types import ArtifactError, FallbackOptions
+from tensorcast.api.store.types import ArtifactError
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import (
+    ExecutionDiagnostics,
+    PublicDiskSourceHandle,
+    ServingRuntimePolicy,
+    SourceBoundPlanDiagnostics,
+)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -114,6 +122,161 @@ def restore_owned_binding_tensors(
     )
 
 
+def _collective_group_to_proto(
+    group: object | None,
+) -> store_daemon_pb2.CollectiveLoadGroup | None:
+    if group is None:
+        return None
+    group_id = str(getattr(group, "group_id", "") or "")
+    raw_world_size = getattr(group, "world_size", 0)
+    world_size = 0 if raw_world_size is None else int(raw_world_size)
+    # rank=0 is valid for collective ingress; avoid falsy normalization that
+    # rewrites it to -1.
+    raw_rank = getattr(group, "rank", -1)
+    rank = -1 if raw_rank is None else int(raw_rank)
+    if not group_id:
+        return None
+    if world_size <= 1 or rank < 0 or rank >= world_size:
+        raise ArtifactError(
+            "collective_group requires a non-empty group_id with world_size > 1 and a valid rank",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    proto = store_daemon_pb2.CollectiveLoadGroup()
+    proto.group_id = group_id
+    proto.world_size = world_size
+    proto.rank = rank
+    return proto
+
+
+def _source_locality_to_proto(
+    value: object,
+) -> store_daemon_pb2.SourceLocality:
+    normalized = str(getattr(value, "value", value) or "auto").strip().lower()
+    if normalized == "host_local":
+        return store_daemon_pb2.SOURCE_LOCALITY_HOST_LOCAL
+    if normalized == "shared_source":
+        return store_daemon_pb2.SOURCE_LOCALITY_SHARED_SOURCE
+    return store_daemon_pb2.SOURCE_LOCALITY_AUTO
+
+
+def _build_source_execution_contract(
+    *,
+    options: GetArtifactOptions | None,
+    ctx: CallContext | None,
+) -> tuple[
+    store_daemon_pb2.SourceExecutionTopology | None,
+    store_daemon_pb2.CollectivePolicy | None,
+]:
+    execution_topology = None if options is None else options.execution_topology
+    explicit_collective_group = (
+        None if execution_topology is None else execution_topology.collective_group
+    )
+    ctx_collective_group = None if ctx is None else ctx.collective
+    if ctx_collective_group is not None:
+        raise ArtifactError(
+            "ctx.collective is no longer accepted for daemon-owned source-bound "
+            "materialization; use options.execution_topology.collective_group",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    policy_mode = (
+        None
+        if execution_topology is None
+        else getattr(execution_topology, "collective_policy", None)
+    )
+    if policy_mode is None and explicit_collective_group is not None:
+        from tensorcast.api._config import CollectivePolicyMode
+
+        policy_mode = CollectivePolicyMode.REQUIRE_COLLECTIVE
+
+    if str(getattr(policy_mode, "value", policy_mode) or "") == "disable_collective":
+        if explicit_collective_group is not None:
+            raise ArtifactError(
+                "collective_policy=disable_collective conflicts with a collective group",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+    elif policy_mode is not None and explicit_collective_group is None:
+        raise ArtifactError(
+            "collective_policy requires execution_topology.collective_group",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    topology_proto: store_daemon_pb2.SourceExecutionTopology | None = None
+    source_locality = (
+        execution_topology.source_locality if execution_topology is not None else None
+    )
+    source_sharing_domain = (
+        None
+        if execution_topology is None
+        else str(execution_topology.source_sharing_domain or "") or None
+    )
+    if (
+        explicit_collective_group is not None
+        or source_locality is not None
+        or source_sharing_domain is not None
+    ):
+        topology_proto = store_daemon_pb2.SourceExecutionTopology()
+        collective_group_proto = _collective_group_to_proto(explicit_collective_group)
+        if collective_group_proto is not None:
+            topology_proto.collective_load_group.CopyFrom(collective_group_proto)
+        if source_locality is not None:
+            topology_proto.source_locality = _source_locality_to_proto(source_locality)
+        if source_sharing_domain is not None:
+            topology_proto.source_sharing_domain = source_sharing_domain
+
+    if policy_mode is None:
+        return topology_proto, None
+
+    normalized_policy = str(getattr(policy_mode, "value", policy_mode)).strip().lower()
+    if normalized_policy == "require_collective":
+        return (
+            topology_proto,
+            store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+        )
+    if normalized_policy == "allow_not_eligible_fallback":
+        return (
+            topology_proto,
+            store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+        )
+    return topology_proto, store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
+
+
+def _execution_diagnostics_from_response(
+    response: object,
+) -> ExecutionDiagnostics | None:
+    diagnostics_proto = getattr(response, "execution_diagnostics", None)
+    if diagnostics_proto is None:
+        return None
+    has_field = getattr(response, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field("execution_diagnostics"):
+                return None
+        except ValueError:
+            pass
+    return ExecutionDiagnostics.from_proto(diagnostics_proto)
+
+
+def _source_bound_plan_diagnostics_from_response(
+    response: object,
+) -> SourceBoundPlanDiagnostics | None:
+    diagnostics_proto = getattr(response, "source_bound_plan_diagnostics", None)
+    if diagnostics_proto is None:
+        return None
+    has_field = getattr(response, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field("source_bound_plan_diagnostics"):
+                return None
+        except ValueError:
+            pass
+    return SourceBoundPlanDiagnostics.from_proto(diagnostics_proto)
+
+
 class OwnedBindingSlot:
     """Stable, daemon-owned CUDA layout that can be refilled in-place."""
 
@@ -128,7 +291,6 @@ class OwnedBindingSlot:
         current_value_metadata: BindingValueMetadata | None,
         device: torch.device,
         device_id: int,
-        fallback: FallbackOptions | None,
         target_publication_token: bytes | None,
     ) -> None:
         if not tensors:
@@ -157,7 +319,6 @@ class OwnedBindingSlot:
         )
         self._device = device
         self._device_id = int(device_id)
-        self._fallback = fallback
         self._target_publication_token = (
             bytes(target_publication_token) if target_publication_token else None
         )
@@ -171,6 +332,10 @@ class OwnedBindingSlot:
         self._published_replica_id: str | None = None
         self._dirty = False
         self._closed = False
+        self._last_execution_diagnostics: ExecutionDiagnostics | None = None
+        self._last_source_bound_plan_diagnostics: SourceBoundPlanDiagnostics | None = (
+            None
+        )
 
     @property
     def tensors(self) -> Mapping[str, torch.Tensor]:
@@ -225,6 +390,14 @@ class OwnedBindingSlot:
     @property
     def dirty(self) -> bool:
         return self._dirty
+
+    @property
+    def last_execution_diagnostics(self) -> ExecutionDiagnostics | None:
+        return self._last_execution_diagnostics
+
+    @property
+    def last_source_bound_plan_diagnostics(self) -> SourceBoundPlanDiagnostics | None:
+        return self._last_source_bound_plan_diagnostics
 
     @property
     def byte_space(self) -> common_pb2.ByteSpaceRef:
@@ -529,11 +702,178 @@ class OwnedBindingSlot:
         self._target_publication_token = None
         self._dirty = False
 
+    def promote_current_value(
+        self,
+        *,
+        binding_value_id: str,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
+        self._ensure_open()
+        self._last_execution_diagnostics = None
+        self._last_source_bound_plan_diagnostics = None
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().promote_binding_current_value(
+                binding_id=self._binding_id,
+                binding_value_id=str(binding_value_id),
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="PromoteBindingCurrentValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            raise ArtifactError(
+                "PromoteBindingCurrentValue returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._selection = clone_selection(metadata.selection)
+        self._contribution_selection = clone_selection(metadata.selection)
+        self._contribution_source_artifact_id = metadata.source_artifact_id
+        self._target_publication_token = None
+        self._dirty = False
+        self._last_execution_diagnostics = _execution_diagnostics_from_response(
+            response
+        )
+        self._last_source_bound_plan_diagnostics = None
+        return response
+
+    def realize_from(
+        self,
+        artifact: "Artifact | PublicDiskSourceHandle | str",
+        *,
+        realization_plan: object,
+        options: GetArtifactOptions | None = None,
+        ctx: CallContext | None = None,
+        operation_id: str | None = None,
+    ) -> None:
+        self._ensure_open()
+        public_disk_source = (
+            artifact if isinstance(artifact, PublicDiskSourceHandle) else None
+        )
+        resolved = (
+            None if public_disk_source is not None else self._resolve_artifact(artifact)
+        )
+        if resolved is not None:
+            store, _, _ = resolved._require_components()
+            if store is not self._store:
+                raise ArtifactError(
+                    "Realization source artifact must come from the same Store",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+        else:
+            resolved = None
+        source_policy = _resolve_source_policy_from_options(options)
+        execution_topology, collective_policy = _build_source_execution_contract(
+            options=options,
+            ctx=ctx,
+        )
+        self._last_execution_diagnostics = None
+        self._last_source_bound_plan_diagnostics = None
+        rpc_timeout_s = _ctx_timeout_s(ctx)
+        try:
+            source_selection = None
+            if resolved is not None and hasattr(
+                resolved, "_build_owner_source_selection"
+            ):
+                ensure_metadata = getattr(resolved, "_ensure_metadata", None)
+                if callable(ensure_metadata):
+                    ensure_metadata()
+                canonical_index_bytes = getattr(
+                    resolved, "_canonical_index_bytes", None
+                )
+                if canonical_index_bytes is not None:
+                    view_spec_proto = (
+                        resolved._view_spec.proto
+                        if getattr(resolved, "_view_spec", None) is not None
+                        else None
+                    )
+                    source_selection = resolved._build_owner_source_selection(
+                        packing="byte_space",
+                        view_spec_proto=view_spec_proto,
+                        canonical_index_bytes=canonical_index_bytes,
+                    )
+            response = self._runtime.ensure_client().refill_owned_binding(
+                binding_id=self._binding_id,
+                artifact_id=(
+                    ""
+                    if public_disk_source is None
+                    else str(public_disk_source.artifact_id or "")
+                )
+                if resolved is None
+                else resolved._ensure_identified(),
+                public_disk_source=(
+                    None
+                    if public_disk_source is None
+                    else public_disk_source.to_proto()
+                ),
+                source_selection=source_selection,
+                realization_plan=binding_realization_plan_to_proto(
+                    realization_plan,
+                    target_index_bytes=self._layout.target_index_bytes,
+                ),
+                source_policy=source_policy,
+                execution_topology=execution_topology,
+                collective_policy=collective_policy,
+                operation_id=operation_id,
+                timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = map_materialization_error(exc)
+            if error.status_code == "DATA_LOSS":
+                self._enter_dirty_state()
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=False,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="RefillOwnedBinding",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "RefillOwnedBinding returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._dirty = False
+        self._selection = None
+        self._contribution_selection = None
+        self._contribution_source_artifact_id = None
+        self._target_publication_token = None
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._last_execution_diagnostics = _execution_diagnostics_from_response(
+            response
+        )
+        self._last_source_bound_plan_diagnostics = (
+            _source_bound_plan_diagnostics_from_response(response)
+        )
+
     def swap(
         self,
         artifact: "Artifact | str",
         *,
+        options: GetArtifactOptions | None = None,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicy | None = None,
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
@@ -556,14 +896,42 @@ class OwnedBindingSlot:
                 drain_timeout_s=drain_timeout_s,
                 ctx=ctx,
             )
-        preference, source_policy = self._resolve_source_policy(resolved._fallback)
+        source_policy = _resolve_source_policy_from_options(options)
+        execution_topology, collective_policy = _build_source_execution_contract(
+            options=options,
+            ctx=ctx,
+        )
+        self._last_execution_diagnostics = None
+        self._last_source_bound_plan_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
+            source_selection = None
+            if hasattr(resolved, "_build_owner_source_selection"):
+                ensure_metadata = getattr(resolved, "_ensure_metadata", None)
+                if callable(ensure_metadata):
+                    ensure_metadata()
+                canonical_index_bytes = getattr(
+                    resolved, "_canonical_index_bytes", None
+                )
+                if canonical_index_bytes is not None:
+                    view_spec_proto = (
+                        resolved._view_spec.proto
+                        if getattr(resolved, "_view_spec", None) is not None
+                        else None
+                    )
+                    source_selection = resolved._build_owner_source_selection(
+                        packing="byte_space",
+                        view_spec_proto=view_spec_proto,
+                        canonical_index_bytes=canonical_index_bytes,
+                    )
             response = self._runtime.ensure_client().refill_owned_binding(
                 binding_id=self._binding_id,
                 artifact_id=resolved._ensure_identified(),
-                preference=preference,
+                source_selection=source_selection,
                 source_policy=source_policy,
+                execution_topology=execution_topology,
+                collective_policy=collective_policy,
+                serving_runtime_policy=serving_runtime_policy,
                 operation_id=operation_id,
                 timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
             )
@@ -600,6 +968,12 @@ class OwnedBindingSlot:
             )
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
+        self._last_execution_diagnostics = _execution_diagnostics_from_response(
+            response
+        )
+        self._last_source_bound_plan_diagnostics = (
+            _source_bound_plan_diagnostics_from_response(response)
+        )
         if publish:
             self.publish_replica(
                 ttl_ms=publish_ttl_ms,
@@ -634,36 +1008,6 @@ class OwnedBindingSlot:
         if isinstance(artifact, str):
             return self._store.artifact(ref=str(artifact))
         return artifact
-
-    def _resolve_source_policy(
-        self, fallback: FallbackOptions | None
-    ) -> tuple[
-        store_daemon_pb2.SourcePreference,
-        store_daemon_pb2.SourcePolicy,
-    ]:
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = fallback.prefer if fallback is not None else "auto"
-        if fallback is not None:
-            if fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-        allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if fallback is None else bool(fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
-        return preference, source_policy
 
     def _normalize_update_epoch(
         self,

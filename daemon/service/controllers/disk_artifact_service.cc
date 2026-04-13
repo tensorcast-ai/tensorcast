@@ -122,6 +122,20 @@ void fill_import_response(
   resp.set_import_state(v2::IMPORT_ARTIFACT_STATE_READY);
 }
 
+void fill_public_disk_source_response(
+    const materialization_disk_resolve::ImportArtifactFromPathResult& imported,
+    bool verify_checksums,
+    v2::ResolvePublicDiskSourceResponse& resp) {
+  auto* source = resp.mutable_source();
+  source->set_path(imported.normalized_path.string());
+  source->set_canonical_index_bytes(imported.canonical_index_json);
+  source->set_generation(imported.generation);
+  source->set_verify_checksums(verify_checksums);
+  if (!imported.artifact_id.empty()) {
+    source->set_artifact_id(imported.artifact_id);
+  }
+}
+
 grpc::Status to_import_grpc_status(const absl::Status& status) {
   using materialization_disk_resolve::ImportArtifactErrorCode;
   const auto code = materialization_disk_resolve::classify_import_error(status);
@@ -458,6 +472,49 @@ grpc::Status DiskArtifactService::import_artifact_from_path(
           .updated_at = absl::Now(),
       });
 
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+grpc::Status DiskArtifactService::resolve_public_disk_source(
+    RpcContext& rctx,
+    const v2::ResolvePublicDiskSourceRequest& req,
+    v2::ResolvePublicDiskSourceResponse& resp) {
+  auto& span = rctx.span();
+  const bool verify_checksums = req.verify_checksums();
+  if (req.path().empty()) {
+    materialization_disk_resolve::record_disk_import_outcome("invalid_argument");
+    return {StatusCode::INVALID_ARGUMENT, "path is required"};
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    materialization_disk_resolve::record_disk_import_outcome("unavailable");
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
+  if (!loopback_peer) {
+    materialization_disk_resolve::record_disk_import_outcome("permission_denied");
+    return {StatusCode::PERMISSION_DENIED, "ResolvePublicDiskSource is local-only (loopback/UDS)"};
+  }
+
+  auto normalized_or = normalize_disk_import_path(req.path(), storage_path_);
+  if (!normalized_or.ok()) {
+    materialization_disk_resolve::record_disk_import_outcome("invalid_argument");
+    return to_grpc_status(normalized_or.status());
+  }
+
+  span->SetAttribute("tc.store.verify_checksums", verify_checksums);
+  auto imported_or = import_artifact_from_path_cached(*normalized_or, verify_checksums);
+  if (!imported_or.ok()) {
+    return to_import_grpc_status(imported_or.status());
+  }
+
+  fill_public_disk_source_response(*imported_or, verify_checksums, resp);
+  if (rctx.allow_high_card_attrs()) {
+    span->SetAttribute("tc.disk.path", imported_or->normalized_path.string());
+    span->SetAttribute("tc.artifact.id", imported_or->artifact_id);
+  }
+  span->SetAttribute("tc.artifact.generation", static_cast<std::int64_t>(imported_or->generation));
   rctx.mark_success();
   return grpc::Status::OK;
 }

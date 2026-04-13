@@ -11,7 +11,7 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
-#include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
+#include "daemon/service/controllers/representation_transform_builder.h"
 #include "daemon/state/types.h"
 #include "grpcpp/support/status.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
@@ -42,7 +42,7 @@ struct MappedTargetMaterializationPlan {
   std::optional<store::loader::ViewSpec> view_spec;
   std::optional<store::loader::ViewPlan> view_plan;
   tensorcast::common::v1::ArtifactSelection resolved_selection;
-  materialization_mapped_copy_plan::BuildCopyPlanResult copy_plan;
+  representation_transform_builder::BuildRepresentationTransformResult representation;
   std::string canonical_index_json;
   std::string selected_index_json;
   std::vector<RegisterStorageMeta> publish_storages;
@@ -64,6 +64,18 @@ grpc::Status build_mapped_target_materialization_plan(
     store::StoreEngine& engine,
     const v2::MaterializeIntoMappedTargetRequest& req,
     std::string_view resolved_artifact_id,
+    const std::vector<materialization_layout::TargetOffsetEntry>& offsets,
+    std::string canonical_index_json,
+    RecordMaterializeResultFn record_result,
+    MappedTargetMaterializationPlan& plan);
+
+grpc::Status build_binding_realization_materialization_plan(
+    store::StoreEngine& engine,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const v2::BindingRealizationPlan& realization_plan,
+    std::string_view resolved_artifact_id,
+    const v2::TargetLayout& target_layout,
+    std::string_view target_index_json,
     const std::vector<materialization_layout::TargetOffsetEntry>& offsets,
     std::string canonical_index_json,
     RecordMaterializeResultFn record_result,

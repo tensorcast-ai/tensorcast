@@ -4,7 +4,7 @@ title: Tensor-Aware Materialization Strategy Plane
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs"]
 created: 2026-03-23
-last_updated: 2026-03-24
+last_updated: 2026-03-31
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_service.cc
@@ -14,8 +14,14 @@ related_code:
   - core/store/materialization/dataplane/view/view_plan_source.cc
   - core/store/materialization/benchmarks/safetensors_load_strategy_benchmark_main.cc
   - core/store/replica/collective_disk_loader.cc
+  - core/store/replica/replica.cc
+  - core/store/replica/replica_load_controller.cc
+  - core/store/store_engine_options.h
   - daemon/service/controllers/materialization_target_plan_utils.cc
-  - daemon/service/controllers/materialization_mapped_copy_plan_utils.cc
+  - daemon/service/controllers/replica_materialization_service.cc
+  - daemon/service/controllers/owned_binding_service.cc
+  - daemon/service/controllers/representation_layout_types.h
+  - daemon/service/controllers/representation_transform_builder.cc
   - daemon/service/controllers/target_materialization_service.cc
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/materialization.py
@@ -31,9 +37,15 @@ related_code:
   - ../architecture/api/materialization-flow.md
   - ../architecture/api/region-backed.md
 links:
-  plan: ../plans/0108-tensor-aware-materialization-strategy-plane.md
+  related:
+    - ./0107-retrieval-policy-plane-cleanup.md
+    - ./0109-batched-owner-file-collective-executor.md
+    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0004-unified-runtime-config.md
+    - ./0107-retrieval-policy-plane-cleanup.md
     - ./0078-selection-first-artifact-retrieval.md
     - ./0084-binding-unified-model-and-contract.md
     - ./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
@@ -56,17 +68,29 @@ The final model is:
   `MaterializeIntoMappedTarget` keep the same public API shapes.
 - semantic truth remains separate from execution strategy:
   - resolved selection and view identity,
-  - resolved copy contract,
+  - resolved representation-transform contract,
   - target layout and verification or publication requirements.
 - source acquisition remains separate from execution strategy:
   - existing replica or local alias,
   - P2P transport,
   - disk or local file source.
+- execution environment facts remain separate from both semantic truth and
+  retrieval policy:
+  - collective group or topology context,
+  - source locality and source-sharing domain,
+  - planner cache and budget-relevant capabilities.
 - `MaterializationFacade` becomes the lowering boundary from resolved semantic
-  truth plus acquired source capabilities into executor strategy.
+  truth plus acquired source capabilities into executor strategy for ordinary
+  replica loads, target-backed materialization, and mapped-target flows.
+- common runtime lowers into one shared `ExecutionStrategyPlan` before executor
+  choice.
+- strategy first allocates typed work into explicit lanes, then lowers those
+  lanes into executor-private planning artifacts.
 - one request may use mixed execution:
-  - tensor-aware local ops,
-  - owner-file collective ops,
+  - collective-admitted typed ops,
+  - local typed ops,
+  - deferred typed ops that keep typed identity while falling through to a
+    later backend-specific lowering,
   - residual generic byte-range fallback ops.
 - `ByteRangeMap` remains the canonical fallback IR and residual explainability
   surface, but no longer acts as the mandatory primary IR for all retrievals.
@@ -78,6 +102,24 @@ and exists to close the remaining host-local gap against `fastsafetensors`
 while preserving TensorCast's selection-first, artifact-first, and
 binding-aware architecture.
 
+# Plan Ownership
+
+This design remains the authoritative architectural record for the strategy
+plane, but execution is now intentionally split:
+
+- the request-normalization prerequisite remains owned by
+  `docs/designs/0107-retrieval-policy-plane-cleanup.md`;
+- the mapped-target, semantic-contract, typed-config extraction, and ordinary
+  replica convergence work that previously lived in the deleted `0108` / `0108-01`
+  companion plans is now folded back into this design's implementation record;
+- all remaining residual execution, delete gates, and Step3p5-oriented closure
+  work now live in
+  `docs/designs/0113-step3p5-closure-and-sot-convergence.md`, while active
+  execution tracking is centralized in
+  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
+- no new execution note should reopen the deleted `0108` companion plans unless
+  `0113` or `0114` is revised first.
+
 # Implementation Status
 
 Partially implemented in this repository:
@@ -85,13 +127,23 @@ Partially implemented in this repository:
 - core-owned internal strategy-plane contracts now live in
   `core/store/runtime/ingestion/materialization_strategy_types.h`:
   - `ResolvedMaterializationPlan`
-  - `MappedCopyContract`
+  - `RepresentationTransformContract`
+  - `RepresentationWorkPlan`
   - `ResolvedSourceBinding`
+  - `ExecutionEnvironmentFacts`
+  - `ExecutionStrategyPlan`
   - `ExecutionCommitReport`
+- ordinary `materialize_replica` disk startup now reaches a common-runtime
+  strategy seam in `MaterializationFacade` before final executor choice, and
+  `Replica` / `ReplicaLoadController` consume the selected plan rather than
+  owning `AUTO`.
 - mapped-target controller lowering now builds the internal resolved plan and
   passes it directly into the common runtime as the authoritative semantic
   contract, with the runtime validating request hints against that plan instead
   of accepting duplicate semantic inputs.
+- source-bound binding startup/refill and ordinary `into_target` lowering now
+  reuse the same semantic-core family instead of carrying a separate
+  mapped-only builder path.
 - typed rollout config now lives under
   `engine.materialization_strategy` in
   `proto/tensorcast/config/v1/daemon_config.proto` and is mapped into
@@ -102,11 +154,21 @@ Partially implemented in this repository:
   0108 defaults instead of silently disabling local batched disk load.
 - the common-runtime mapped-target path currently lands:
   - source acquisition selection,
+  - shared `RepresentationWorkPlan` derivation,
   - owner-file collective handoff,
   - residual generic byte-range fallback.
-- the dedicated common-runtime local tensor-aware executor described by this
-  design remains follow-up work; the current implementation does not yet route
-  mapped-target requests into a distinct local tensor-aware executor.
+- ordinary replica local-batched and collective executors now consume shared
+  work-plan items and common-runtime-selected plan ownership instead of
+  recovering semantic truth in executor-local code.
+- the current owner-file collective implementation still lives as a replica-side
+  prototype with eager `owned_payload` preload and optional root whole-source
+  preload, but it is now explicitly non-default prototype scaffolding rather
+  than the owner of ordinary startup routing.
+- ordinary non-collective `into_target` still executes through the generic
+  byte-range backend after shared lowering.
+- `ExecutionCommitReport` and ordinary strategy-plan diagnostics now apply to
+  ordinary disk startup as well as mapped-target execution, though `0109` still
+  owns the follow-on batch-level owner-file executor semantics.
 - public SDK retrieval APIs remain unchanged.
 
 Remaining follow-up work after this implementation is operational validation on
@@ -114,18 +176,26 @@ the Step3p5 benchmark, full vLLM serving matrix described in the companion
 plan, and landing the common-runtime local tensor-aware executor that fully
 reabsorbs the remaining replica-side prototype behavior.
 
+Normative sequencing rule:
+
+- no owner-file collective executor may become the default `AUTO` choice until
+  request normalization, execution-environment facts, ordinary replica strategy
+  ownership, and typed cost-model policy have all converged on the common
+  runtime boundary.
+
 ```mermaid
 flowchart LR
   A["ArtifactSelection<br>view + subset + target contract"] --> B["Controller Safety Boundary<br>selection validation + region safety + publication policy"]
   B --> C["ResolvedMaterializationPlan<br>semantic truth"]
   C --> D["Source Acquisition<br>existing replica or p2p or disk"]
-  D --> E["MaterializationFacade<br>strategy plane"]
-  E --> F["TensorBatchedLocalExecutor"]
-  E --> G["OwnerFileCollectiveExecutor"]
-  E --> H["GenericByteRangeExecutor"]
-  F --> I["final target layout"]
-  G --> I
-  H --> I
+  D --> E["ExecutionEnvironmentFacts<br>topology + locality + sharing"]
+  E --> F["MaterializationFacade<br>strategy plane"]
+  F --> G["TensorBatchedLocalExecutor"]
+  F --> H["OwnerFileCollectiveExecutor"]
+  F --> I["GenericByteRangeExecutor"]
+  G --> J["final target layout"]
+  H --> J
+  I --> J
 ```
 
 # Problem Statement
@@ -170,6 +240,14 @@ There is a second structural issue for mapped-target paths:
 - while replica-layer and runtime env-gated prototypes each own different parts
   of the hot path.
 
+There is a third structural issue for ordinary replica startup:
+
+- the long-term design says strategy selection belongs in common runtime,
+- but current `GPU <- DISK` ordinary startup still makes key executor choices
+  inside replica-layer `collective -> local_batched -> generic` branches,
+- and the current owner-file prototype remains embedded in
+  `collective_disk_loader.cc` rather than consuming a shared strategy-plan IR.
+
 This makes the project inconsistent with its broader architecture:
 
 - `0078` requires one selection contract,
@@ -191,8 +269,13 @@ This makes the project inconsistent with its broader architecture:
 - Keep semantic truth separate from:
   - source acquisition,
   - executor lowering,
+  - execution topology context,
   - rollout policy,
   - publication side effects.
+- Converge ordinary replica GPU<-DISK startup and target materialization onto
+  the same strategy-plane architecture.
+- Make executor choice depend on explicit execution environment facts and typed
+  cost-model policy rather than replica-layer branch order or ambient state.
 - Reach host-local performance at or below `fastsafetensors` for the same
   end-to-end workload, while preserving current JFS advantages.
 - Make the optimization reusable across TensorDict, region-backed materialize,
@@ -206,6 +289,7 @@ This makes the project inconsistent with its broader architecture:
 - Introduce model-name or tensor-name hardcoding into runtime strategy
   selection.
 - Collapse source acquisition and execution strategy into one opaque planner.
+- Treat topology/group context as semantic truth or retrieval policy.
 - Remove `ByteRangeMap`, `ByteRangeProgram`, or `ByteRangeMappedSource`.
 - Redefine selection identity, `view_id`, `view_subset_hash`,
   `selection_hash`, or `logical_layout_hash`.
@@ -229,19 +313,24 @@ The relevant path today is:
    `ByteRangeCompiler`, and `ByteRangeMappedSource`.
 4. late runtime or replica-layer helpers then try to recover tensor-aware or
    owner-file opportunities.
+5. ordinary replica startup still performs final executor selection in
+   replica-layer code after common-runtime lowering has already split.
 
 Important current sites:
 
 - selection-first and target-layout resolution:
   - `daemon/service/controllers/materialization_target_plan_utils.cc`
-- mapped copy-plan shaping:
-  - `daemon/service/controllers/materialization_mapped_copy_plan_utils.cc`
+- representation-transform shaping:
+  - `daemon/service/controllers/representation_transform_builder.cc`
 - source acquisition for replica materialization:
   - `core/store/runtime/ingestion/materialization_service.cc`
 - generic lowering and mapped-target execution:
   - `core/store/runtime/ingestion/materialization_facade.cc`
 - late prototype collective and local-batched paths:
   - `core/store/replica/collective_disk_loader.cc`
+- ordinary replica branch ordering and fallback:
+  - `core/store/replica/replica.cc`
+  - `core/store/replica/replica_load_controller.cc`
 
 ## Why the current shape is insufficient
 
@@ -255,6 +344,13 @@ weight-loading cases. In particular it does not naturally express:
 - repeated-source dedup opportunities,
 - owner-file or owner-segment collective ownership,
 - direct-write-to-final-layout opportunities as first-class plan items.
+
+The ordinary replica path has a parallel problem:
+
+- shared `RepresentationWorkPlan` lowering already exists,
+- but the final strategy decision still depends on replica-layer branch order,
+- so cost-model-driven `AUTO` selection cannot yet evaluate all executors from
+  one shared planning boundary.
 
 The mapped-target prototype has a second issue:
 
@@ -318,14 +414,14 @@ Normative rules:
 - semantic truth remains separate from source acquisition,
 - semantic truth remains separate from rollout policy.
 
-## 2. Copy-contract boundary
+## 2. Representation-transform boundary
 
-This design aligns with `0087`, which treats copy contract as distinct from
-selection and placement.
+This design aligns with `0087`, which treats transform semantics as distinct
+from selection and placement.
 
 ### 2.1 Canonical or view into-target
 
-For `MaterializeIntoTarget`, the copy contract is:
+For `MaterializeIntoTarget`, the semantic contract may be trivial:
 
 - resolved selected ByteSpace,
 - coalesced `IntoTargetLayout`,
@@ -333,14 +429,12 @@ For `MaterializeIntoTarget`, the copy contract is:
 
 ### 2.2 Mapped-target
 
-For `MaterializeIntoMappedTarget`, the copy contract must preserve more than
+For `MaterializeIntoMappedTarget`, the semantic contract must preserve more than
 flat target storage spans.
 
-Introduce one core-owned internal copy-contract family:
+- `RepresentationTransformContract`
 
-- `MappedCopyContract`
-
-`MappedCopyContract` must preserve:
+The long-term semantic family must preserve:
 
 - source and destination tensor specs,
 - range and dim semantics,
@@ -361,10 +455,17 @@ Required migration interpretation:
   `MappedTargetMaterializationPlan` are useful prototypes of semantic
   resolution,
 - current `BuildCopyPlanResult` is a useful prototype but mixes two concerns:
-  - semantic copy contract,
+  - semantic transform contract,
   - executor compatibility analysis,
-- long term, semantic copy contract belongs in a core-owned internal contract
-  library, while executor compatibility analysis belongs in the strategy plane.
+- long term, normalized representation-transform semantics belong in a
+  core-owned internal contract library, while executor compatibility analysis
+  belongs in the strategy plane.
+
+Phase boundary rule:
+
+- physical topology, participant assignment, communicator routing, and
+  topology-scoped reshard execution remain follow-on work above this semantic
+  seam rather than part of the first `0108` convergence wave.
 
 ## 3. Source acquisition plane
 
@@ -399,6 +500,31 @@ Required interpretation:
 - source acquisition describes where those bytes will come from,
 - strategy selection describes how those bytes will be moved and packed.
 
+### 3.1 Execution environment facts
+
+Introduce one internal runtime context family:
+
+- `ExecutionEnvironmentFacts`
+
+`ExecutionEnvironmentFacts` captures executor-relevant context that is neither
+semantic truth nor retrieval policy:
+
+- collective group or equivalent topology context when present,
+- whether the source media is host-local, shared-source, or unknown,
+- source-sharing domain or dedup domain when known,
+- planner-cache and budget-relevant capabilities,
+- coordinator availability and executor-specific memory budgets.
+
+Normative rules:
+
+- execution environment facts are derived after request normalization and source
+  acquisition,
+- execution environment facts must not modify selection identity or copy truth,
+- execution environment facts are separate from `RetrievalPolicy` as described
+  by `0107`,
+- `AUTO` executor choice must consume explicit environment facts rather than
+  ambient process state.
+
 ## 4. Strategy plane placement
 
 The strategy plane lives in `MaterializationFacade`, not in client code and not
@@ -408,6 +534,7 @@ in late replica-layer helpers.
 
 - `ResolvedMaterializationPlan`,
 - `ResolvedSourceBinding`,
+- `ExecutionEnvironmentFacts`,
 - typed rollout policy,
 
 into one internal executor-lowered family:
@@ -419,39 +546,93 @@ Normative rule:
 - strategy selection must happen before the request is irreversibly lowered into
   generic `ByteRangeMap` / `ByteRangeMappedSource` execution for all ranges.
 
+Required convergence rule:
+
+- ordinary `materialize_replica` GPU<-DISK startup, `MaterializeIntoTarget`,
+  and `MaterializeIntoMappedTarget` must all reach the same strategy-plane
+  boundary before executor choice,
+- current replica-layer `collective -> local_batched -> generic` ordering is
+  temporary migration scaffolding, not the long-term owner of `AUTO`
+  selection.
+
+### 4.1 Cost model and plan cache
+
+`AUTO` strategy choice must be an explicit cost-model decision, not executor
+trial order.
+
+The planner may estimate at least:
+
+- requested source bytes,
+- unique source bytes after dedup,
+- dim1 or staging amplification,
+- peer-transfer bytes,
+- owner skew or per-rank load skew,
+- planner overhead and batch count,
+- peak temporary memory for each candidate.
+
+Normative rules:
+
+- typed config may influence thresholds, budgets, and preference ordering,
+- cost-model policy may change executor candidacy but must not change semantic
+  truth,
+- strategy planning may use cacheable derived state keyed by semantic identity
+  plus execution environment facts,
+- planner cache is an optimization only; cache miss must not change semantics.
+
 ## 5. Execution model
 
-### 5.1 Mixed execution is allowed
+### 5.1 Mixed execution is allowed, but it must be explicit
 
 This design rejects the assumption that every request must choose exactly one
 executor for all bytes.
 
 One request may use mixed execution:
 
-- tensor-aware local execution for ranges proven safe,
-- owner-file collective execution for ranges where cross-rank source ownership
-  wins,
-- residual generic byte-range execution for all remaining ranges.
+- collective lane for typed work admitted to owner-file collective or a later
+  collective executor,
+- local typed lane for cheap target-semantic typed work such as fill or pad,
+- deferred typed lane for work that remains typed in the shared plan even when a
+  preferred executor rejects it,
+- generic residual lane for bytes with no typed execution equivalent.
 
 This is the preferred long-term model because it preserves correctness while
 allowing near-optimal execution on irregular workloads.
 
-### 5.2 Internal execution ops
+Current phase rule:
 
-`ExecutionStrategyPlan` contains typed execution ops:
+- mixed execution is only valid when the strategy plane emits explicit lane
+  allocation plus residual accounting before execution begins,
+- executors must not partially execute a request and then implicitly reconstruct
+  the remaining generic fallback ranges at runtime,
+- if a current executor cannot consume a request without such implicit widening,
+  that executor is not eligible for that request.
+- bytes may enter the generic residual lane only when no typed execution
+  equivalent exists for them.
 
-- `DirectReadOp`
-  - read one contiguous source span directly into final target layout.
-- `Staged2DPackOp`
-  - read a contiguous row-block into staging, then GPU-pack into final layout.
-- `DedupCopyOp`
-  - reuse one already-read source slice and duplicate into other destinations.
-- `CollectiveScatterOp`
-  - assign source ownership and scatter to peers when cross-rank dedup is
-    beneficial.
-- `FallbackByteRangeOp`
-  - represent the residual ranges that must still use generic byte-range
-    execution.
+### 5.2 Lane planning sits between typed work and executor-private ops
+
+`ExecutionStrategyPlan` should first allocate the shared typed work inventory
+into explicit strategy-owned lanes.
+
+Representative lane families:
+
+- collective lane
+  - typed items admitted to collective execution
+- local typed lane
+  - typed items executed by a local typed backend
+- deferred typed lane
+  - typed items that keep typed identity in the shared plan while a later
+    backend-specific lowering chooses how to run them
+- generic residual lane
+  - byte ranges with no typed execution equivalent
+
+Only after lane allocation may the runtime derive executor-private ops such as:
+
+- direct span reads
+- staged pack jobs
+- peer scatter jobs
+- batch-local dedup jobs
+- generic byte-range fallback ops
 
 The common runtime may still expose dominant executor labels for diagnostics:
 
@@ -461,6 +642,10 @@ The common runtime may still expose dominant executor labels for diagnostics:
 
 But those labels are diagnostic summaries, not an architectural requirement that
 all bytes in a request use only one executor.
+
+A future topology-scoped or group-reshard executor may later be added to this
+family, but it must still consume the same normalized semantic contract rather
+than recreate a second semantic stack.
 
 ## 6. Single semantic truth and residual coverage
 
@@ -472,17 +657,21 @@ Normative rules:
 - `ArtifactSelection`, resolved `view_id`, resolved `ViewPlan`, resolved copy
   contract, and final target layout remain the only semantic truth for what
   bytes must appear in the destination.
-- executor plans are derived artifacts. They do not replace the resolved
-  selection or copy-contract truth.
+- typed work inventory and later lane allocation remain shared derived artifacts.
+  They do not replace the resolved selection or copy-contract truth.
+- executor-private plans are derived below lane allocation. They must not
+  replace either semantic truth or strategy-owned lane truth.
 - every execution strategy plan must carry explicit residual accounting:
-  - which destination byte ranges are proven equivalent and assigned to a
-    non-generic op,
+  - which typed items are assigned to collective, local typed, or deferred typed
+    lanes,
   - which destination byte ranges remain residual and must be executed via
-    `FallbackByteRangeOp`.
+    generic byte-range fallback.
 - the planner may exclude a byte range from generic fallback only if it has
   emitted a semantically equivalent internal op for that range.
 - the runtime may mark a byte range as completed only after the chosen executor
   has successfully committed that range.
+- bytes associated with a typed work item must not be relabeled as residual only
+  because a preferred executor rejected them.
 
 Introduce one internal reporting contract:
 
@@ -491,16 +680,50 @@ Introduce one internal reporting contract:
 `ExecutionCommitReport` exists to report:
 
 - committed ranges,
+- lane allocation summary,
 - residual fallback ranges,
 - executor path actually used,
-- failure reason for ranges that had to widen back to fallback.
+- explicit fallback work chosen during planning.
+
+Normative reporting split:
+
+- planner-owned lane intent, reject buckets, and cost estimates belong in a
+  source-bound-scoped planner diagnostics contract,
+- `ExecutionCommitReport` remains the carrier for actual execution facts and
+  backend reality.
+
+Commit semantics must also be explicit:
+
+- each non-generic executor must define its commit unit,
+- a commit unit is complete only when all destination bytes in that unit are
+  visible and semantically equivalent to the resolved request,
+- temporary staging lifetime must extend until commit of the covered unit,
+- failed units remain uncommitted and must follow explicit retry, poison, or
+  fallback policy.
 
 Required interpretation:
 
 - feature gating or rollout gating may change executor candidacy,
 - feature gating may not change requested byte semantics,
-- disabling one executor path must only increase residual fallback work, never
-  suppress required bytes.
+- disabling one executor path must only increase explicitly planned fallback
+  work, never suppress required bytes,
+- runtime execution must not invent new fallback ranges that were not already
+  present in the emitted execution plan.
+
+### 6.1 Coordinator boundary
+
+Group assembly, clique lifecycle, and participant synchronization are part of a
+shared runtime coordination boundary, not executor-private semantic truth.
+
+Normative rules:
+
+- executor planning may depend on coordinator capabilities,
+- coordinator state must not redefine what bytes are required,
+- group timeout and fail-open or fail-closed behavior must be typed policy, not
+  hard-coded runtime folklore,
+- future owner-file collective and topology-scoped reshard executors should
+  reuse one coordination surface rather than open-coding their own group state
+  machines.
 
 ## 7. Relationship to `ByteRangeMap`
 
@@ -583,7 +806,7 @@ Normative rules:
   daemon or runtime process behavior must not depend on ambient environment for
   semantic decisions,
 - rollout controls may gate executor eligibility, diagnostics verbosity, and
-  default preference ordering,
+  default preference ordering, budgets, and topology-related thresholds,
 - rollout controls must not alter selection identity, copy-contract semantics,
   target-layout semantics, or residual fallback correctness.
 
@@ -591,8 +814,8 @@ Recommended configuration direction:
 
 - extend `tensorcast.config.v1.DaemonConfig.engine` with one typed strategy
   subsection, for example `MaterializationStrategy`,
-- keep executor enablement, mixed-execution policy, diagnostics verbosity, and
-  owner-collective policy under that typed config,
+- keep executor enablement, mixed-execution policy, diagnostics verbosity,
+  owner-collective policy, and cost-model budgets under that typed config,
 - remove common-runtime dependency on ambient env switches once the typed
   controls exist.
 
@@ -605,6 +828,8 @@ Required diagnostics:
 
 - resolved selection and copy-contract summary,
 - acquired source kind and source-layout facts,
+- execution environment facts and topology/locality summary,
+- lane allocation summary,
 - dominant executor label,
 - op mix,
 - residual fallback bytes,
@@ -624,25 +849,33 @@ repository style rules.
 
 - Classes or structs:
   - `ResolvedMaterializationPlan`
-  - `MappedCopyContract`
+  - `RepresentationDescriptor`
+  - `RepresentationTensorBinding`
+  - `RepresentationTransformContract`
   - `ResolvedSourceBinding`
+  - `ExecutionEnvironmentFacts`
   - `ExecutionStrategyPlan`
   - `ExecutionCommitReport`
+  - `DeferredTypedLane`
   - `TensorBatchedLocalExecutor`
   - `OwnerFileCollectiveExecutor`
   - `GenericByteRangeExecutor`
   - `MaterializationStrategy`
 - Functions or methods:
   - `build_resolved_materialization_plan`
-  - `build_mapped_copy_contract`
+  - `build_representation_transform_contract`
   - `acquire_resolved_source_binding`
+  - `build_execution_environment_facts`
   - `build_execution_strategy_plan`
+  - `estimate_execution_strategy_cost`
   - `emit_execution_commit_report`
   - `execute_owner_file_collective`
+  - `allocate_execution_lanes`
 - Config fields:
   - `enable_local_tensor_execution`
   - `enable_owner_file_collective`
   - `allow_mixed_execution`
+  - `allow_deferred_typed_execution`
   - `diagnostics_verbosity`
 
 ## 13. Migration Constraints
@@ -654,13 +887,18 @@ permanent interface.
 Required migration order:
 
 1. define core-owned internal semantic contracts,
-2. split mapped-target semantic copy contract from executor compatibility
-   analysis,
-3. make source-acquisition inputs explicit,
-4. add strategy-plane lowering in `MaterializationFacade`,
-5. keep `ByteRangeMap` fallback exact and always available,
-6. re-express current useful fast-path ideas as internal executor behavior,
-7. remove executor-private request hints from shared runtime contracts.
+2. replace mapped-target prototype copy-contract naming with normalized
+   representation-transform semantics,
+3. split executor compatibility analysis out of the shared semantic contract,
+4. make source-acquisition inputs explicit,
+5. introduce `ExecutionEnvironmentFacts` as a separate strategy input,
+6. converge ordinary replica executor choice into `MaterializationFacade`,
+7. add strategy-plane lowering in `MaterializationFacade`,
+8. keep `ByteRangeMap` fallback exact and always available,
+9. re-express current useful fast-path ideas as internal executor behavior,
+10. remove executor-private request hints from shared runtime contracts,
+11. defer topology-scoped participant execution to a follow-on design until the
+   semantic core is authoritative.
 
 ### 13.1 Mapped-target specific rules
 
@@ -693,11 +931,13 @@ Required cleanup sequence:
    in the strategy plane,
 2. retire naive owner-file preload prototypes once owner-file collective is
    represented as a real planner plus executor path,
-3. retire mapped fast-path env policy switches after mapped-target lowering is
+3. retire root whole-source preload and eager `owned_payload` preload from the
+   default collective candidate set once batched owner execution exists,
+4. retire mapped fast-path env policy switches after mapped-target lowering is
    reabsorbed into common runtime planning,
-4. converge any remaining generic fallback execution overrides only after the
+5. converge any remaining generic fallback execution overrides only after the
    new strategy plane has replaced prototype coexistence,
-5. remove executor-shaped fields from `MaterializeHints` once core-owned
+6. remove executor-shaped fields from `MaterializeHints` once core-owned
    semantic contracts are authoritative.
 
 # Trade-offs & Risks
@@ -736,8 +976,8 @@ Required cleanup sequence:
 
 Mitigations:
 
-- planner must be expressed purely in terms of metadata, copy-contract, and
-  topology semantics, not model names,
+- planner must be expressed purely in terms of metadata, normalized
+  representation-transform semantics, and source facts, not model names,
 - semantic contract extraction must precede hint cleanup,
 - planner must emit explicit fallback ops for anything not proven safe,
 - executor coverage reporting must be derived from actual committed plan items,
@@ -772,8 +1012,12 @@ Mitigations:
   - strategy selection occurs in common runtime, not in vLLM integration code
     and not as a late replica-layer patch,
   - source acquisition remains explicit and distinct from execution strategy,
+  - execution environment facts remain explicit and distinct from both
+    retrieval policy and semantic truth,
   - common runtime consumes a core-owned semantic plan instead of
     controller-private or hint-private execution artifacts,
+  - ordinary replica GPU<-DISK startup no longer performs final `AUTO`
+    strategy choice in replica-layer branch ordering,
   - mapped-target copy-contract truth no longer relies on
     `MaterializeHints.mapped_tensor_jobs` or
     `MaterializeHints.mapped_concat_jobs`,
@@ -801,10 +1045,12 @@ Mitigations:
 
 - [`docs/designs/0001-docs-system-design.md`](/data/workspace/tensorcast-280/docs/designs/0001-docs-system-design.md)
 - [`docs/designs/0004-unified-runtime-config.md`](/data/workspace/tensorcast-280/docs/designs/0004-unified-runtime-config.md)
+- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
 - [`docs/designs/0078-selection-first-artifact-retrieval.md`](/data/workspace/tensorcast-280/docs/designs/0078-selection-first-artifact-retrieval.md)
 - [`docs/designs/0084-binding-unified-model-and-contract.md`](/data/workspace/tensorcast-280/docs/designs/0084-binding-unified-model-and-contract.md)
 - [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
-- [`docs/plans/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/plans/0108-tensor-aware-materialization-strategy-plane.md)
+- [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
+- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
 - [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
 - [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
 - [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)
@@ -812,4 +1058,4 @@ Mitigations:
 - [`core/store/runtime/ingestion/materialization_facade.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_facade.cc)
 - [`core/store/runtime/ingestion/materialization_service.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_service.cc)
 - [`daemon/service/controllers/materialization_target_plan_utils.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/materialization_target_plan_utils.cc)
-- [`daemon/service/controllers/materialization_mapped_copy_plan_utils.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/materialization_mapped_copy_plan_utils.cc)
+- [`daemon/service/controllers/representation_transform_builder.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/representation_transform_builder.cc)

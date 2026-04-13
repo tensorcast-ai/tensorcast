@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
-#include "core/store/materialization/contracts/view/view_spec.h"
 
 namespace tensorcast::store::replica {
 
@@ -27,19 +26,10 @@ std::shared_ptr<const loader::DiskArtifactContext> make_disk_context() {
       std::vector<loader::SharedSafetensorsSegment>{});
 }
 
-loading::VariantIdentity make_transpose_variant() {
-  loading::VariantIdentity variant;
-  variant.view_spec.emplace();
-  materialization::view::TensorViewOps ops;
-  ops.ops.push_back(materialization::view::ViewOp::Transpose(materialization::view::TransposeOp{.dim0 = 0, .dim1 = 1}));
-  variant.view_spec->tensors.emplace("tensor", std::move(ops));
-  return variant;
-}
-
 } // namespace
 
 TEST_CASE(
-    "try_local_batched_disk_load falls back on unsupported view ops",
+    "try_local_batched_disk_load falls back when representation work is unavailable",
     "[collective_disk_loader][local_batched][fallback]") {
   StoreEngineOptions::MaterializationStrategyConfig strategy;
   strategy.enable_local_batched_disk_load = true;
@@ -47,9 +37,6 @@ TEST_CASE(
   LocalBatchedDiskLoadRequest request{
       .replica_key = loading::ReplicaKey{.artifact_id = "artifact_local_batched"},
       .disk_context = make_disk_context(),
-      .source_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
-      .view_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
-      .variant_identity = make_transpose_variant(),
       .strategy_config = strategy,
       .gpu_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(1)),
       .device_id = 0,
@@ -57,6 +44,80 @@ TEST_CASE(
 
   std::shared_ptr<common::memory::PinnedBufferPool> pinned_pool;
   const auto result = try_local_batched_disk_load(request, pinned_pool, std::chrono::milliseconds(0));
+
+  REQUIRE_FALSE(result.handled);
+  REQUIRE(result.status.ok());
+}
+
+TEST_CASE(
+    "try_collective_mapped_target_load accepts local pad work when the collective lane map is data-only",
+    "[collective_disk_loader][collective_mapped][fallback]") {
+  CollectiveMappedTargetLoadRequest request{
+      .artifact_id = "artifact_collective_mapped",
+      .group =
+          loading::CollectiveLoadGroupHint{
+              .group_id = "mapped-group",
+              .world_size = 8,
+              .rank = 0,
+          },
+      .disk_context = make_disk_context(),
+      .representation_work_plan =
+          materialization::contracts::RepresentationWorkPlan{
+              .items =
+                  {
+                      materialization::contracts::RepresentationWorkItem{
+                          .kind = materialization::contracts::RepresentationWorkItemKind::kPadFill,
+                          .byte_range_map =
+                              loader::ByteRangeMap{
+                                  .total_bytes = 16,
+                                  .num_sources = 1,
+                                  .segments =
+                                      {
+                                          loader::ByteRangeSegment{
+                                              .kind = loader::ByteRangeSegment::Kind::kPad,
+                                              .dst_offset = 8,
+                                              .length = 8,
+                                              .src_offset = 0,
+                                              .source_index = 0,
+                                          },
+                                      },
+                              },
+                          .committed_bytes = 8,
+                      },
+                  },
+          },
+      .collective_lane_map =
+          loader::ByteRangeMap{
+              .total_bytes = 16,
+              .num_sources = 1,
+              .segments =
+                  {
+                      loader::ByteRangeSegment{
+                          .kind = loader::ByteRangeSegment::Kind::kData,
+                          .dst_offset = 0,
+                          .length = 8,
+                          .src_offset = 0,
+                          .source_index = 0,
+                      },
+                  },
+          },
+      .target_layout =
+          loading::IntoTargetLayout{
+              .storages =
+                  {
+                      loading::IntoTargetStorage{
+                          .base_ptr = gsl::not_null<void*>{reinterpret_cast<void*>(0x1)},
+                          .length = 16,
+                      },
+                  },
+              .total_size = 16,
+          },
+      .device_id = 0,
+  };
+
+  std::shared_ptr<common::memory::PinnedBufferPool> pinned_pool;
+  const auto result = try_collective_mapped_target_load(
+      request, pinned_pool, std::chrono::milliseconds(0), CollectiveMappedTargetLoadOptions{});
 
   REQUIRE_FALSE(result.handled);
   REQUIRE(result.status.ok());

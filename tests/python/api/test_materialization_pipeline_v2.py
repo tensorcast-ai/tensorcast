@@ -11,6 +11,7 @@ from typing import Callable
 import pytest
 import torch
 
+from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._materialize import (
     MaterializationPayload,
     TensorPayloadDescriptor,
@@ -22,7 +23,6 @@ from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import (
     ArtifactError,
-    FallbackOptions,
     StoreCapabilities,
     StoreOptions,
 )
@@ -375,8 +375,13 @@ def test_disk_fallback_verify_flag_passed():
         return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
-    pipeline.get(artifact_id="aid", fallback=fallback)
+    pipeline.get(
+        artifact_id="aid",
+        options=GetArtifactOptions(
+            source="disk_first",
+            verify_checksums=False,
+        ),
+    )
     runtime.close()
 
     assert captured["verify_checksums"] is False
@@ -395,8 +400,13 @@ def test_disk_fallback_allows_local_replica_source():
         )
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
-    result = pipeline.get(artifact_id="aid", fallback=fallback)
+    result = pipeline.get(
+        artifact_id="aid",
+        options=GetArtifactOptions(
+            source="disk_first",
+            verify_checksums=False,
+        ),
+    )
     runtime.close()
 
     assert torch.equal(result["a"], torch.ones(1))
@@ -409,7 +419,6 @@ def test_prefer_disk_sets_source_policy():
     captured: dict[str, object] = {}
 
     def fake_materialize(**kwargs):
-        captured["preference"] = kwargs.get("preference")
         source_policy = kwargs.get("source_policy")
         captured["allow_disk"] = (
             bool(source_policy.allow_disk) if source_policy is not None else None
@@ -422,15 +431,12 @@ def test_prefer_disk_sets_source_policy():
         artifact_id="aid",
         key=None,
         device=0,
-        fallback=FallbackOptions(prefer="disk"),
+        options=GetArtifactOptions(source="disk_first"),
         tensor_names=None,
     )
     runtime.close()
 
-    assert (
-        captured["preference"]
-        == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-    )
+    assert captured["artifact_id"] == "aid"
     assert captured["allow_disk"] is True
     assert materialized.replica_uuid == "disk"
 
@@ -446,7 +452,6 @@ def test_materialize_subset_preserves_generation():
         artifact_id="aid",
         key=None,
         device=0,
-        fallback=None,
         tensor_names=["a"],
     )
     runtime.close()

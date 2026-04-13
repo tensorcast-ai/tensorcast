@@ -107,6 +107,22 @@ class LipManager {
   // computing the artifact descriptor using index/data multihashes streamed
   // from the leased GPU segments. Stores the lease for keepalive/revoke and
   // returns descriptor fields and an optional verification JSON.
+  [[nodiscard]] absl::StatusOr<CommitLeaseResult> build_commit_lease_result(
+      int device_id,
+      int owner_pid,
+      uint64_t total_size,
+      tensorcast::common::ArtifactIdKind id_kind,
+      const std::string& client_artifact_id,
+      const std::string& index_data,
+      const std::string& index_key_hex,
+      absl::Span<const LeaseSegMeta> segments,
+      absl::Span<const RegisterStorageMeta> storages,
+      absl::Span<const RegisterTensorAliasMeta> aliases,
+      const std::optional<CommitLeaseResult>& identity_override = std::nullopt);
+
+  // Commit a LIP (lease in-place) registration into a persistent lease entry,
+  // optionally reusing a pre-minted identity instead of hashing the same bytes
+  // a second time.
   [[nodiscard]] absl::StatusOr<CommitLeaseResult> commit_lease_in_place(
       const std::string& registration_id,
       int device_id,
@@ -120,7 +136,8 @@ class LipManager {
       const std::string& index_key_hex, // precomputed index sha256 hex (may be empty)
       std::vector<LeaseSegMeta>&& segments,
       std::vector<RegisterStorageMeta>&& storages,
-      std::vector<RegisterTensorAliasMeta>&& aliases);
+      std::vector<RegisterTensorAliasMeta>&& aliases,
+      const std::optional<CommitLeaseResult>& identity_override = std::nullopt);
 
   // Commit a view-scoped routable LIP lease (used for piece registrations).
   // This registers long-lived communicator keys over the leased view ByteSpace
@@ -136,6 +153,10 @@ class LipManager {
       uint64_t total_size,
       std::vector<LeaseSegMeta>&& segments,
       std::vector<RegisterStorageMeta>&& storages);
+
+  // Export an already committed lease as a routable replica without creating a
+  // second lease entry. Used by full-artifact binding-subject publication.
+  [[nodiscard]] absl::StatusOr<RoutableLeaseResult> publish_committed_lease_routable(std::string_view registration_id);
 
   // Attach a Global Store replica_id to a committed LIP lease for best-effort cleanup.
   void attach_replica_id(const std::string& registration_id, std::string replica_id);

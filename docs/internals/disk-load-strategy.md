@@ -11,7 +11,7 @@ model loading, with emphasis on:
 
 - TP-aware rank-local slicing in the current internal-vLLM TensorCast loader,
 - local SSD versus shared filesystem behavior,
-- daemon-side executor selection under the `0108` strategy plane,
+- daemon-side executor selection under the converged `0108-01` strategy plane,
 - the difference between ordinary `tensor_dict` startup and mapped `into-target` paths.
 
 Related docs:
@@ -26,8 +26,8 @@ In scope:
 
 - Ordinary disk-backed startup through `Artifact.tensor_dict(...)`.
 - TP-aware request shaping before materialization.
-- Automatic collective versus non-collective selection.
-- Daemon-side choice between collective, local-batched, and generic fallback executors.
+- Explicit separation between retrieval policy and execution-topology context.
+- Common-runtime strategy planning for generic, local-batched, and collective executors.
 - Disk-backed `MaterializeIntoTarget` / mapped binding strategy.
 
 Out of scope:
@@ -38,31 +38,42 @@ Out of scope:
 
 ## Layered View
 
-The current strategy is split into two layers:
+The current disk strategy is split into four boundaries:
 
-1. The integration loader decides what the current rank actually needs and,
-   if desired, whether to synthesize an explicit per-call collective hint.
-2. The daemon chooses the actual disk executor based on metadata completeness,
-   target/source type, and typed `engine.materialization_strategy` config.
+1. Integration-side request shaping decides what the current rank needs and
+   whether to attach explicit same-host collective context.
+2. Daemon normalization lowers retrieval policy and execution-topology context
+   separately into one internal request object.
+3. Common runtime builds one `ExecutionStrategyPlan` from:
+   - resolved semantic/view truth,
+   - acquired source capabilities,
+   - execution-topology and locality facts,
+   - typed `engine.materialization_strategy` policy.
+4. Replica/runtime execution consumes the selected plan; it is no longer the
+   architecture owner of `AUTO`.
 
-This separation is intentional after `0108`:
+This is the important post-`0108-01` ownership split:
 
-- integration side handles TP-local request shaping and any integration-owned
-  collective hint policy,
-- daemon side owns executor rollout and data-plane choice.
+- integrations still own TP-local selection shaping,
+- daemon normalization owns policy/topology separation,
+- `MaterializationFacade` owns ordinary disk executor candidacy and selection,
+- `Replica` / `ReplicaLoadController` execute the selected plan and emit commit
+  diagnostics.
 
-Important boundary:
+Important boundaries:
 
-- the generic TensorCast SDK does not auto-infer collective mode from ambient
-  environment or filesystem state,
-- integrations such as internal-vLLM may choose to synthesize an explicit
-  `CallContext.collective`,
-- the daemon and common runtime still treat collective as an explicit request
-  hint plus typed strategy config.
+- the generic TensorCast SDK does not infer collective mode from ambient
+  environment,
+- `collective_load_group`, source locality, and source-sharing hints are
+  execution-topology facts, not retrieval policy,
+- executor-private work items do not travel through SDK or proto request
+  surfaces,
+- ordinary disk startup and mapped-target execution now use the same strategy
+  family contracts.
 
 ## Typed Daemon Defaults
 
-The default `0108` strategy entry point is daemon config, not ad-hoc environment
+The default `0108-01` strategy entry point is daemon config, not ad-hoc environment
 variables:
 
 ```yaml
@@ -73,6 +84,16 @@ engine:
     allow_mixed_execution: true
     enable_owner_file_collective: false
     executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
+    owner_file_collective_peak_bytes_budget: 8GB
+    owner_file_collective_batch_bytes: 512MB
+    owner_file_collective_dim1_staging_bytes: 256MB
+    owner_file_collective_max_inflight_batches: 1
+    owner_file_collective_shared_fs_only: true
+    owner_file_collective_max_owner_skew_ratio: 1.5
+    owner_file_collective_min_dedup_saving_bytes: 64MB
+    owner_file_collective_group_assemble_timeout: 2s
+    owner_file_collective_allow_mixed_residual: false
+    owner_file_collective_planner_cache_entries: 256
 ```
 
 See `examples/config/store_daemon_config.yaml`.
@@ -81,7 +102,9 @@ Operationally, this means:
 
 - local-batched disk load is enabled by default,
 - tensor-aware mapped execution remains available for eligible mapped paths,
-- owner-file collective exists but is not the default rollout path.
+- owner-file collective now uses a bounded batched executor when selected,
+- eager owner-file preload and root whole-source preload remain only as legacy
+  collective fallback scaffolding and are explicitly not the preferred route.
 
 ## End-To-End Decision Tree For Ordinary Disk Startup
 
@@ -104,11 +127,13 @@ flowchart TD
     F --> I["daemon disk materialization"]
     H --> I
 
-    I --> J{"collective eligible?"}
-    J -- "yes" --> K["collective_disk_load"]
-    J -- "no" --> L{"local_batched eligible?"}
-    L -- "yes" --> M["local_batched_disk_load"]
-    L -- "no" --> N["generic byte-range / mapped fallback"]
+    I --> J["daemon normalization<br>retrieval policy + execution topology"]
+    J --> K["common runtime<br>ExecutionEnvironmentFacts"]
+    K --> L["MaterializationFacade<br>ExecutionStrategyPlan"]
+    L --> M{"selected executor"}
+    M -- "TensorBatchedLocalExecutor" --> N["local_batched_disk_load"]
+    M -- "OwnerFileCollectiveExecutor" --> O["collective_disk_load batched owner-file path"]
+    M -- "GenericByteRangeExecutor" --> P["generic byte-range / mapped fallback"]
 ```
 
 ## Step 1: TP-Aware Request Shaping In The internal-vLLM Loader
@@ -165,11 +190,11 @@ Current rule:
   - default to `collective = false`
 - anything else:
   - currently also defaults to `collective = false`
-  - reason: current shared-fs ordinary disk startup still regresses badly when
-    the loader eagerly supplies a collective hint and the request lands on the
-    existing `collective_disk_load` path
-  - explicit overrides remain available for collective experiments while the
-    owner-file collective strategy is not yet production-ready
+  - reason: integration-side collective hint rollout remains conservative until
+    the shared-FS benchmark and serving matrix is fully recaptured
+  - explicit overrides remain available, and once the request carries explicit
+    shared-source proof the daemon-side owner-file batched executor is now the
+    preferred collective route
 
 This is not a hard-coded `JuiceFS` or `JFS` special case by name. The current
 internal-vLLM loader treats them through filesystem type detection:
@@ -208,62 +233,70 @@ the control surface for collective selection. The current intended behavior is:
 - allow integrations to synthesize explicit per-call hints when they have the
   right TP topology context,
 - keep daemon-side executor policy centralized in typed strategy config,
-- avoid forcing shared-fs collective by default until the owner-file path is
-  production-ready.
+- avoid forcing shared-fs collective from ambient loader heuristics until the
+  benchmark and serving rollout gates are fully recaptured.
 
-## Step 3: Daemon Executor Selection For `tensor_dict`
+## Step 3: Common-Runtime Strategy Planning For `tensor_dict`
 
-Once the disk request reaches the daemon, executor selection happens in this
-order:
+Once the disk request reaches the daemon, ordinary executor selection is owned
+by common runtime rather than replica-layer branch order.
 
-1. try `collective_disk_load`,
-2. otherwise try `local_batched_disk_load`,
-3. otherwise fall back to generic byte-range/mapped execution.
+`MaterializationFacade` now builds one `ExecutionStrategyPlan` for ordinary
+`GPU <- DISK` startup and evaluates three candidates:
+
+1. `GenericByteRangeExecutor`
+2. `TensorBatchedLocalExecutor`
+3. `OwnerFileCollectiveExecutor`
+
+The chosen executor is logged together with selection reason, rejected
+candidates, residual bytes, and commit accounting. `Replica` and
+`ReplicaLoadController` consume that selected plan; they do not own `AUTO`.
 
 ### Collective Eligibility
 
-`collective_disk_load` is only considered when all of the following hold:
+`OwnerFileCollectiveExecutor` is only considered when all of the following hold:
 
 - target is `GPU <- DISK`,
 - the request carries a `collective_load_group`,
+- execution-topology locality policy does not reject collective for host-local
+  media,
 - `canonical_index_json` is available,
 - `source_index_json` is available,
 - `variant_identity` is available,
 - the requested view does not require extra server-side materialization
   transform,
-- the source is backed by a `DiskLoader` with usable shared context.
+ - the source is backed by a `DiskLoader` with usable shared context,
+ - typed budget and threshold checks pass.
 
 If any of these fail, the daemon logs why collective was skipped and continues
-to the next strategy.
+to the next candidate.
 
 ### Local-Batched Eligibility
 
-If collective is not used, the daemon next tries `local_batched_disk_load`.
-
-It requires:
+`TensorBatchedLocalExecutor` is considered when:
 
 - target is GPU,
 - `canonical_index_json` is available,
 - `source_index_json` is available,
 - `variant_identity` is available,
 - `DiskLoader` shared context is available,
-- `enable_local_batched_disk_load = true`.
+- `enable_local_batched_disk_load = true`,
+- no residual/fill-only/server-transform constraint forces generic fallback.
 
-If the metadata is incomplete or the loader cannot expose the required disk
-context, the request falls through again.
+If the planner rejects it, the request falls through to generic execution with
+an explicit selection reason.
 
 ### Generic Fallback
 
-If neither collective nor local-batched can run, the daemon builds a generic
-`ByteRangeMap` path:
+`GenericByteRangeExecutor` remains the correctness backstop:
 
 - canonical index and source index are composed when available,
 - view selection is composed if needed,
 - the request is lowered through `ByteRangeMappedSource`,
 - transfer runs through the generic pump path.
 
-This fallback remains the correctness backstop, but it is no longer the primary
-intended hot path for disk-backed startup.
+It is still the dominant fallback IR and explainability surface, but it is no
+longer the architecture owner of ordinary disk `AUTO`.
 
 ## Internal Shape Of `local_batched_disk_load`
 
@@ -291,13 +324,15 @@ Operationally:
 
 ## Internal Shape Of `collective_disk_load`
 
-`collective_disk_load` is designed for same-host TP groups. The ranks form a
-collective clique and execute tensor jobs cooperatively.
+`collective_disk_load` is the executor runtime used by the current same-host
+collective path. When owner-file collective is selected, the ranks form a
+same-host clique, build weighted owner batches, and execute tensor jobs
+cooperatively.
 
 ```mermaid
 flowchart TD
     A["collective_disk_load"] --> B{"owner-file collective enabled?"}
-    B -- "yes" --> C["owner-file path\noptimized for replicated + dim0"]
+    B -- "yes" --> C["batched owner-file path\nweighted ownership + bounded staging"]
     B -- "no" --> D["regular collective path"]
 
     C --> E["peer distribution via NCCL send/recv or broadcast"]
@@ -306,11 +341,16 @@ flowchart TD
     F -- "no" --> H["streaming pinned buffer\nexecute jobs directly"]
 ```
 
-Current defaults matter here:
+Current defaults and caveats:
 
 - `enable_owner_file_collective` exists,
-- but the default daemon config keeps it `false`,
-- so owner-file collective is not the default production path today.
+- the default daemon config keeps it `false`,
+- owner-file batch planning is now the steady-state owner collective path,
+- eager `owned_payload` preload and root whole-source preload are explicitly
+  legacy fallback scaffolding,
+- group-assemble timeout is now typed config,
+- the current owner-file rollout remains zero-residual-only; requests with
+  residual fallback bytes stay on local-batched or generic execution.
 
 As with local-batched, collective execution is still tensor-aware:
 
@@ -354,20 +394,27 @@ used by `MaterializeIntoTarget`, `bind(...)`, and `bind_into(...)` flows.
 
 ```mermaid
 flowchart TD
-    A["disk-backed mapped into-target request"] --> B{"disk + collective hint + mapped copy contract?"}
+    A["disk-backed mapped into-target request"] --> B{"disk + collective hint + representation work plan?"}
     B -- "yes" --> C["try collective mapped executor"]
     B -- "no" --> D{"source-ordered path available?"}
-    D -- "yes" --> E["GenericByteRangeExecutor(source_ordered)"]
-    D -- "no" --> F["ByteRangeMappedSource + GenericByteRangeExecutor"]
+    D -- "yes" --> E["SourceOrderedMappedTargetExecutor"]
+    D -- "no" --> F["MappedTargetStreamingExecutor"]
 ```
 
 The key differences from ordinary `tensor_dict` startup are:
 
 - the request already arrives as a mapped target layout,
 - the runtime considers source-ordered execution using source layout metadata,
-- collective mapped execution is only possible when a mapped copy contract and
+- collective mapped execution is only possible when a derived representation
+  work plan and
   collective group are both present,
-- otherwise the residual executor is still the generic byte-range engine.
+- owner-file or collective mapped execution is only eligible when the emitted
+  work plan already has zero residual generic fallback,
+- runtime execution must not partially execute mapped work and then implicitly
+  derive new residual fallback at execution time,
+- otherwise the residual executor is still the byte-range fallback path, but it
+  now reports through typed source-bound executor names rather than the generic
+  replica-path label.
 
 ## Runtime Binding And Ordinary Disk Startup
 

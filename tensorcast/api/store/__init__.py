@@ -10,7 +10,9 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
+import grpc
 import torch
 
 from tensorcast._c_ext import (
@@ -57,7 +59,10 @@ from tensorcast.api.store.batch_context import (
 from tensorcast.api.store.binding import Binding, BindingUpdateEpoch, SealedBindingValue
 from tensorcast.api.store.binding_state import parse_binding_value_or_raise
 from tensorcast.api.store.cache import ArtifactCacheEntry
-from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.inplace_slot import InplaceSlot, _ctx_timeout_s
 from tensorcast.api.store.mapped_binding import (
@@ -68,10 +73,19 @@ from tensorcast.api.store.mapped_binding import (
     normalize_copy_plan,
 )
 from tensorcast.api.store.materialization import MaterializationPipeline
-from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.owned_binding_layout import (
+    BindingLayout,
+    build_owned_layout,
+)
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
     restore_owned_binding_tensors,
+)
+from tensorcast.api.store.realization_plan import (
+    BindingRealizationEntry,
+    BindingRealizationPlan,
+    binding_realization_plan_to_proto,
+    normalize_binding_realization_plan,
 )
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.registration import RegistrationPipeline
@@ -82,12 +96,35 @@ from tensorcast.api.store.runtime import (
 from tensorcast.api.store.runtime import (
     get_context as get_runtime_context,
 )
+from tensorcast.api.store.serving_builder import (
+    PreparedPureTransformServingRegistration,
+    PreparedServingRegistration,
+    PureTransformPublicationBundle,
+    RegisteredPureTransformPublication,
+    RegisteredServingPublication,
+    ServingPublicationBundle,
+    build_binding_finalize_admission_facts,
+    build_binding_finalize_publication_bundle,
+    build_binding_finalize_publication_bundle_from_registered_artifact,
+    build_pure_transform_publication_bundle,
+    build_pure_transform_publication_bundle_from_registered_artifact,
+    build_pure_transform_publication_spec,
+    build_pure_transform_serving_args,
+    build_pure_transform_transform_spec,
+    build_serving_publication_bundle,
+    build_serving_publication_bundle_from_registered_artifact,
+    compute_pure_transform_representation_contract_hash,
+    compute_serving_tensor_schema_hash,
+    count_canonical_serving_tensors,
+    prepare_binding_finalize_serving_registration,
+    prepare_pure_transform_serving_registration,
+    prepare_serving_registration,
+)
 from tensorcast.api.store.types import (
     ArtifactError,
     ArtifactStatusCode,
     CanonicalIndex,
     CanonicalIndexEntry,
-    FallbackOptions,
     LeaseHandle,
     PersistenceShardStatus,
     PersistenceStatusResult,
@@ -97,32 +134,503 @@ from tensorcast.api.store.types import (
     StoreOptions,
     TensorDict,
 )
+from tensorcast.api.store.view_composer import compute_index_multihash
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
 from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.daemon_ctl import get_daemon_client
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
+from tensorcast.profile_utils import (
+    emit_tensorcast_profile_event,
+    tensorcast_profile_stage,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.proto.layout.v1 import layout_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
-    ArtifactDescriptor as TypedArtifactDescriptor,
-)
-from tensorcast.types import (
+    SERVING_BUILD_DIGEST_VERSION,
+    SERVING_MANIFEST_TENSOR_NAME,
     AssemblyAttemptRef,
     AssemblyCloseoutContract,
+    AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    BindingValueRef,
+    BuilderMode,
     DeregisterArtifactOutcome,
     HostSharedRegionAttachment,
     HostSharedRegionClass,
     LocalRegionHandle,
-    PartialSealResult,
-    PublishedModelVersion,
     RegionMemoryKind,
+    ExecutionDiagnostics,
+    FinalizeClass,
+    HashLocation,
+    IdentityMintStrategy,
+    PartialSealResult,
+    PublicDiskSourceHandle,
+    PublishedModelVersion,
+    RealizationProtocol,
+    RepresentationPublishContract,
+    RepresentationPublishSpec,
     SealAssemblyResult,
+    ServingAdmissionFacts,
+    ServingArtifactManifest,
+    ServingBuildIntent,
+    ServingPublicationSubject,
+    ServingRuntimePolicy,
+    ServingRuntimePolicyInput,
+    ServingSupportLevel,
+    SourceBoundCapability,
+    SourceBoundPlanDiagnostics,
     VramRegionHandle,
+    build_serving_manifest_ref,
+    coerce_serving_runtime_policy,
+    parse_serving_manifest_ref,
+)
+from tensorcast.types import (
+    ArtifactDescriptor as TypedArtifactDescriptor,
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from tensorcast.api.plan import PlanResult, PlanStepRef
+
+
+def _coerce_representation_publish_closeout(
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+) -> AssemblyCloseoutContract:
+    if isinstance(publication, PureTransformPublicationBundle):
+        closeout_contract = publication.closeout_contract
+    elif isinstance(publication, AssemblyCloseoutContract):
+        closeout_contract = publication
+    else:
+        raise ArtifactError(
+            "representation publication requires PureTransformPublicationBundle or AssemblyCloseoutContract",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    if closeout_contract.kind != "representation_publish":
+        raise ArtifactError(
+            "representation publication helpers require AssemblyCloseoutContract(kind='representation_publish')",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    if closeout_contract.representation_publish_contract is None:
+        raise ArtifactError(
+            "representation publication helpers require representation_publish_contract",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    return closeout_contract
+
+
+def _coerce_representation_publish_spec(
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+) -> RepresentationPublishSpec | None:
+    if isinstance(publication, PureTransformPublicationBundle):
+        return publication
+    return None
+
+
+def _resolve_runtime_global_store_address() -> str | None:
+    with contextlib.suppress(Exception):
+        import tensorcast.runtime as tensorcast_runtime
+
+        session = tensorcast_runtime.reconcile()
+        if session is not None and session.global_store_address:
+            return str(session.global_store_address)
+    for env_name in ("TENSORCAST_GLOBAL_STORE_ADDRESS", "TENSORCAST_GLOBAL_STORE"):
+        raw = os.getenv(env_name)
+        if raw:
+            resolved = str(raw).strip()
+            if resolved:
+                return resolved
+    return None
+
+
+def _artifact_index_multihash_for_layout_provision(
+    store: "Store",
+    *,
+    artifact_id: str,
+) -> str:
+    index_multihash, _ = _split_mi2_artifact_id(artifact_id)
+    if index_multihash:
+        return str(index_multihash)
+    index_bytes = store._runtime.ensure_client().get_artifact_index_by_id(artifact_id)
+    if not index_bytes:
+        raise ArtifactError(
+            f"canonical index bytes missing for artifact '{artifact_id}'",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    return compute_index_multihash(index_bytes)
+
+
+def _ensure_canonical_layout_for_index(
+    *,
+    canonical_index: CanonicalIndex,
+) -> str:
+    global_store_address = _resolve_runtime_global_store_address()
+    if not global_store_address:
+        raise ArtifactError(
+            "Global Store address unavailable while provisioning canonical layout "
+            "for publication canonical index",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
+    canonical_index_data = canonical_index_to_bytes(canonical_index)
+    index_multihash = compute_index_multihash(canonical_index_data)
+    channel = grpc.insecure_channel(global_store_address)
+    try:
+        stub = GlobalStoreCompositeStub(channel)
+        layout = layout_pb2.LayoutSpec(
+            layout_schema_version=1,
+            index_multihash=index_multihash,
+        )
+        put_resp = stub.PutLayoutSpec(
+            global_store_pb2.PutLayoutSpecRequest(
+                layout=layout,
+                canonical_index_data=canonical_index_data,
+            ),
+            timeout=10.0,
+        )
+        if (
+            put_resp.status != global_store_pb2.Status.STATUS_OK
+            or not put_resp.layout_id
+        ):
+            raise ArtifactError(
+                "failed to register canonical layout spec for representation publication",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return str(put_resp.layout_id)
+    except grpc.RpcError as exc:
+        message = exc.details() or str(exc)
+        raise ArtifactError(
+            "failed to provision canonical layout for representation publication: "
+            f"{message}",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        ) from exc
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+
+
+def _ensure_canonical_layout_for_artifact(
+    store: "Store",
+    *,
+    artifact_id: str,
+) -> str:
+    attached_layout_ids = tuple(store.list_artifact_layouts(artifact_id))
+    if len(attached_layout_ids) == 1:
+        return str(attached_layout_ids[0])
+    if len(attached_layout_ids) > 1:
+        raise ArtifactError(
+            "representation publication layout inference is ambiguous for "
+            f"{artifact_id}: {', '.join(attached_layout_ids)}; pass layout_id explicitly",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
+    global_store_address = _resolve_runtime_global_store_address()
+    if not global_store_address:
+        raise ArtifactError(
+            "Global Store address unavailable while provisioning canonical layout "
+            f"for '{artifact_id}'",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
+    channel = grpc.insecure_channel(global_store_address)
+    try:
+        stub = GlobalStoreCompositeStub(channel)
+        layout = layout_pb2.LayoutSpec(
+            layout_schema_version=1,
+            index_multihash=_artifact_index_multihash_for_layout_provision(
+                store,
+                artifact_id=artifact_id,
+            ),
+        )
+        put_resp = stub.PutLayoutSpec(
+            global_store_pb2.PutLayoutSpecRequest(layout=layout),
+            timeout=10.0,
+        )
+        if (
+            put_resp.status != global_store_pb2.Status.STATUS_OK
+            or not put_resp.layout_id
+        ):
+            raise ArtifactError(
+                f"failed to register canonical layout spec for '{artifact_id}'",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        attach_resp = stub.AttachLayoutToArtifact(
+            global_store_pb2.AttachLayoutToArtifactRequest(
+                mi2_id=artifact_id,
+                layout_id=str(put_resp.layout_id),
+            ),
+            timeout=10.0,
+        )
+        if attach_resp.status != global_store_pb2.Status.STATUS_OK:
+            raise ArtifactError(
+                f"failed to attach canonical layout spec to '{artifact_id}'",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return str(put_resp.layout_id)
+    except grpc.RpcError as exc:
+        message = exc.details() or str(exc)
+        raise ArtifactError(
+            "failed to provision canonical layout for representation publication: "
+            f"{message}",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        ) from exc
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+
+
+def _resolve_representation_publish_layout_id(
+    store: "Store",
+    *,
+    layout_id: str | None,
+    layout_artifact_id: str | None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+) -> str:
+    if layout_id:
+        return str(layout_id)
+    if (
+        isinstance(publication, PureTransformPublicationBundle)
+        and publication.layout_id is not None
+    ):
+        return str(publication.layout_id)
+    if (
+        isinstance(publication, PureTransformPublicationBundle)
+        and publication.contract_family == "canonical_full"
+        and publication.representation_publish_contract.binding_value_ref is not None
+        and publication.canonical_index is not None
+    ):
+        return _ensure_canonical_layout_for_index(
+            canonical_index=publication.canonical_index,
+        )
+    if (
+        isinstance(publication, PureTransformPublicationBundle)
+        and publication.contract_family == "canonical_full"
+    ):
+        auto_artifact_id = (
+            str(layout_artifact_id).strip()
+            if layout_artifact_id
+            else str(
+                publication.source_artifact_ref
+                or publication.serving_manifest.source_artifact_ref
+                or ""
+            ).strip()
+        )
+        if auto_artifact_id:
+            return _ensure_canonical_layout_for_artifact(
+                store,
+                artifact_id=auto_artifact_id,
+            )
+
+    candidate_artifact_ids: list[str] = []
+    if layout_artifact_id:
+        candidate_artifact_ids.append(str(layout_artifact_id))
+    if isinstance(publication, PureTransformPublicationBundle):
+        if publication.serving_manifest.source_artifact_ref:
+            candidate_artifact_ids.append(
+                str(publication.serving_manifest.source_artifact_ref)
+            )
+        if publication.serving_artifact_id is not None:
+            candidate_artifact_ids.append(str(publication.serving_artifact_id))
+
+    seen_artifact_ids: set[str] = set()
+    for artifact_id in candidate_artifact_ids:
+        normalized_artifact_id = str(artifact_id).strip()
+        if not normalized_artifact_id or normalized_artifact_id in seen_artifact_ids:
+            continue
+        seen_artifact_ids.add(normalized_artifact_id)
+        layout_ids = tuple(store.list_artifact_layouts(normalized_artifact_id))
+        if len(layout_ids) == 1:
+            return str(layout_ids[0])
+        if len(layout_ids) > 1:
+            raise ArtifactError(
+                "representation publication layout inference is ambiguous for "
+                f"{normalized_artifact_id}: {', '.join(layout_ids)}; pass layout_id explicitly",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+    raise ArtifactError(
+        "layout_id is required for representation publication when no unique artifact-attached layout can be inferred",
+        status_code="INVALID_ARGUMENT",
+        retryable=False,
+    )
+
+
+def _resolve_representation_publish_requirements(
+    *,
+    requirements: AssemblyRequirementSetRef | None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+) -> AssemblyRequirementSetRef | None:
+    if requirements is not None:
+        return requirements
+    if isinstance(publication, PureTransformPublicationBundle):
+        return publication.requirements
+    return None
+
+
+def _resolve_representation_publish_readiness_policy(
+    *,
+    readiness_policy: AssemblyReadinessPolicy | None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+) -> AssemblyReadinessPolicy | None:
+    if readiness_policy is not None:
+        return readiness_policy
+    if isinstance(publication, PureTransformPublicationBundle):
+        return publication.readiness_policy
+    return None
+
+
+def _resolve_representation_publish_structural_view_ids(
+    *,
+    publication: PureTransformPublicationBundle
+    | AssemblyCloseoutContract
+    | None = None,
+    source_artifact: Artifact | None,
+    structural_view_ids: Sequence[str] | None,
+) -> tuple[str, ...]:
+    explicit_view_ids = tuple(
+        str(view_id).strip()
+        for view_id in (structural_view_ids or ())
+        if str(view_id).strip()
+    )
+    if explicit_view_ids:
+        return explicit_view_ids
+    if isinstance(publication, PureTransformPublicationBundle):
+        bundled_view_ids = tuple(
+            str(view_id).strip()
+            for view_id in publication.structural_view_ids
+            if str(view_id).strip()
+        )
+        if bundled_view_ids:
+            return bundled_view_ids
+    if source_artifact is None:
+        raise ArtifactError(
+            "structural representation publication requires source_artifact or structural_view_ids",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    view_metadata = source_artifact._ensure_view_metadata_cache(require_view_id=True)
+    view_id = (
+        str(view_metadata.view_id).strip()
+        if view_metadata and view_metadata.view_id
+        else ""
+    )
+    if not view_id:
+        raise ArtifactError(
+            "source_artifact does not carry a structural view_id; pass structural_view_ids explicitly or use the canonical helper",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    if view_id.startswith("mapped:v1:"):
+        raise ArtifactError(
+            "mapped view ids are not admitted as structural assembly requirements; pass structural_view_ids explicitly",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    return (view_id,)
+
+
+def build_representation_publish_requirements(
+    *,
+    contract_family: AssemblyContractFamily,
+    publication: PureTransformPublicationBundle
+    | AssemblyCloseoutContract
+    | None = None,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+) -> AssemblyRequirementSetRef:
+    if contract_family == "canonical_full":
+        return AssemblyRequirementSetRef.canonical_full()
+    return AssemblyRequirementSetRef.from_contract_family(
+        family=contract_family,
+        structural_view_ids=_resolve_representation_publish_structural_view_ids(
+            publication=publication,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+        ),
+    )
+
+
+def _resolve_repo_owned_contract_family(
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    contract_family: AssemblyContractFamily | str | None,
+) -> AssemblyContractFamily:
+    explicit_family = (
+        str(contract_family).strip() if contract_family is not None else ""
+    )
+    if explicit_family:
+        if explicit_family not in {"pp", "ep", "canonical_full"}:
+            raise ArtifactError(
+                "contract_family must be one of: pp, ep, canonical_full",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return explicit_family  # type: ignore[return-value]
+    if (
+        isinstance(publication, PureTransformPublicationBundle)
+        and publication.contract_family
+    ):
+        bundled_family = str(publication.contract_family).strip()
+        if bundled_family in {"pp", "ep", "canonical_full"}:
+            return bundled_family  # type: ignore[return-value]
+    raise ArtifactError(
+        "repo-owned representation publication requires contract_family on the bundle or as an explicit argument",
+        status_code="INVALID_ARGUMENT",
+        retryable=False,
+    )
+
+
+def _resolve_plan_publication_bundle(
+    *,
+    plan_result: "PlanResult",
+    publication_step: "PlanStepRef[PureTransformPublicationBundle]",
+) -> PureTransformPublicationBundle:
+    return plan_result.require_pure_transform_publication(publication_step)
+
+
+def _resolve_source_contribution_view_ids(
+    artifacts: Sequence[Artifact] | None,
+) -> tuple[str, ...]:
+    if not artifacts:
+        return ()
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for artifact in artifacts:
+        view_cache = artifact._ensure_view_metadata_cache(require_view_id=True)
+        if view_cache is None or not view_cache.view_id:
+            raise ArtifactError(
+                "source contribution artifacts must expose deterministic view_id metadata",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        view_id = str(view_cache.view_id).strip()
+        if not view_id or view_id.startswith("mapped:v1:"):
+            raise ArtifactError(
+                "source contribution artifacts must expose structural view_id metadata",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if view_id in seen:
+            continue
+        seen.add(view_id)
+        resolved.append(view_id)
+    return tuple(resolved)
 
 
 def _copy_plan_to_proto(
@@ -186,6 +694,52 @@ def _normalize_target_layout_contract(
     )
 
 
+def _build_bound_publication_canonical_index(layout: BindingLayout) -> CanonicalIndex:
+    base_index = canonical_index_from_bytes(layout.target_index_bytes)
+    entry_by_name = {str(entry.name): entry for entry in base_index.entries}
+    storage_offsets: dict[str, int] = {}
+    storage_lengths: dict[str, int] = {}
+    cursor = 0
+    for storage in layout.target_layout.storages:
+        storage_id = str(storage.storage_id)
+        storage_offsets[storage_id] = int(cursor)
+        storage_lengths[storage_id] = int(storage.storage_length)
+        cursor += int(storage.storage_length)
+    entries: list[CanonicalIndexEntry] = []
+    for offset in sorted(layout.target_layout.offsets, key=lambda item: str(item.name)):
+        name = str(offset.name)
+        meta = entry_by_name.get(name)
+        if meta is None:
+            raise ArtifactError(
+                f"binding target_index_bytes missing tensor entry for {name}",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        storage_id = str(offset.storage_id)
+        if storage_id not in storage_offsets or storage_id not in storage_lengths:
+            raise ArtifactError(
+                f"binding target_layout missing storage entry for {storage_id}",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        entries.append(
+            CanonicalIndexEntry(
+                name=name,
+                dtype=meta.dtype,
+                shape=tuple(int(v) for v in meta.shape),
+                stride=tuple(int(v) for v in meta.stride),
+                storage_offset=int(offset.storage_offset),
+                segment_offset=int(storage_offsets[storage_id]),
+                size_bytes=int(storage_lengths[storage_id]),
+            )
+        )
+    return CanonicalIndex(
+        entries=tuple(entries),
+        total_size_bytes=int(cursor),
+        avbs_hash=str(base_index.avbs_hash or ""),
+    )
+
+
 def _validate_client_binding_targets(
     *,
     layout: BindingLayout,
@@ -193,7 +747,7 @@ def _validate_client_binding_targets(
     device_id: int,
     pipeline: MaterializationPipeline,
     expected_index: CanonicalIndex,
-) -> None:
+) -> object:
     if layout.target_layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW:
         selection_order = tuple(
             str(offset.name) for offset in layout.target_layout.offsets
@@ -237,6 +791,7 @@ def _validate_client_binding_targets(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
+    return derived_layout
 
 
 def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
@@ -314,7 +869,13 @@ def _decode_published_model_version_from_response(
         representation_contract_hash=(
             str(payload.representation_contract_hash or "") or None
         ),
+        serving_build_digest=str(payload.serving_build_digest or "") or None,
         serving_manifest_ref=str(payload.serving_manifest_ref or "") or None,
+        serving_execution_diagnostics=(
+            ExecutionDiagnostics.from_proto(payload.serving_execution_diagnostics)
+            if payload.HasField("serving_execution_diagnostics")
+            else None
+        ),
     )
 
 
@@ -470,6 +1031,10 @@ def _consume_import_artifact_stream(
             retryable=False,
         )
     return final_response
+
+
+def _is_import_startup_in_progress_error(exc: BaseException) -> bool:
+    return "startup still in progress" in str(exc).lower()
 
 
 class Store:
@@ -689,12 +1254,6 @@ class Store:
                     retryable=False,
                 )
             copy_plan_proto = _copy_plan_to_proto(normalized_mapping)
-        elif layout.dst_specs:
-            raise ArtifactError(
-                "mapped BindingLayout requires mapping",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
         runtime = self._runtime
         client = runtime.ensure_client()
         timeout_s = _ctx_timeout_s(ctx)
@@ -721,7 +1280,7 @@ class Store:
                 device_uuid=device_uuid_for(device_id),
                 binding_layout_id=layout.binding_layout_id,
                 copy_plan=copy_plan_proto,
-                dst_specs=layout.dst_specs if copy_plan_proto is not None else None,
+                dst_specs=layout.dst_specs if layout.dst_specs else None,
                 timeout_s=timeout_s if timeout_s is not None else 600.0,
             )
             try:
@@ -751,7 +1310,6 @@ class Store:
                 current_value_metadata=current_value_metadata,
                 device=device_obj,
                 device_id=device_id,
-                fallback=None,
                 target_publication_token=None,
             )
             return Binding(slot)
@@ -760,6 +1318,12 @@ class Store:
             raise ArtifactError(
                 "ownership must be 'daemon' or 'client'",
                 status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if layout.dst_specs and copy_plan_proto is None:
+            raise ArtifactError(
+                "mapped BindingLayout requires mapping for client-owned bindings",
+                status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
         if not target_tensors:
@@ -850,7 +1414,7 @@ class Store:
                     ttl_ms=0,
                 )
                 region_ids.append(handle.region_id)
-            _validate_client_binding_targets(
+            readable_layout = _validate_client_binding_targets(
                 layout=layout,
                 target_tensors=target_tensors,
                 device_id=device_id,
@@ -859,7 +1423,11 @@ class Store:
             )
             response = client.create_binding(
                 ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_CLIENT,
-                target_layout=layout.target_layout,
+                # Client-owned bindings need a readable source layout on the
+                # daemon side so later SubmitBindingContribution calls can lower
+                # directly from the live tensors without fabricating an
+                # allocation-backed handle path.
+                target_layout=readable_layout.layout,
                 target_index_bytes=layout.target_index_bytes,
                 device_uuid=device_uuid_for(device_id),
                 binding_layout_id=layout.binding_layout_id,
@@ -902,7 +1470,6 @@ class Store:
             view_id=str(layout.target_layout.view_id or "") or None,
             view_subset_hash=None,
             view_spec=None,
-            fallback=None,
             current_value_metadata=current_value_metadata,
             target_publication_token=None,
             copy_plan=normalized_mapping,
@@ -1031,16 +1598,797 @@ class Store:
             shards=tuple(shards),
         )
 
+    def register_pure_transform_publication_bridge(
+        self,
+        tensors: TensorDict,
+        *,
+        build_intent: ServingBuildIntent,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        contract_family: AssemblyContractFamily | str | None = None,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        policy: StorePolicy | str | None = None,
+        device: int | torch.device | None = None,
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+    ) -> RegisteredPureTransformPublication:
+        prepared = prepare_pure_transform_serving_registration(
+            build_intent=build_intent,
+            source_artifact=source_artifact,
+            tensors=tensors,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=serving_manifest_ref,
+        )
+        registered_artifact = self.put(
+            prepared.tensors,
+            artifact_id=artifact_id,
+            key=key,
+            policy=policy,
+            device=device,
+        )
+        publication = build_pure_transform_publication_bundle_from_registered_artifact(
+            build_intent=build_intent,
+            source_artifact=source_artifact,
+            contract_family=contract_family,
+            serving_artifact=registered_artifact,
+            source_version_key=source_version_key,
+            serving_version_key=serving_version_key,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=prepared.serving_manifest_ref,
+        )
+        return RegisteredPureTransformPublication(
+            registered_artifact=registered_artifact,
+            prepared_registration=prepared,
+            publication=publication,
+        )
+
+    def register_binding_finalize_publication_bridge(
+        self,
+        tensors: TensorDict,
+        *,
+        build_intent: ServingBuildIntent,
+        admission_facts: ServingAdmissionFacts,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        contract_family: AssemblyContractFamily | str | None = None,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        policy: StorePolicy | str | None = None,
+        device: int | torch.device | None = None,
+        representation_contract_hash: str | None = None,
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+    ) -> RegisteredServingPublication:
+        prepared = prepare_binding_finalize_serving_registration(
+            build_intent=build_intent,
+            tensors=tensors,
+            representation_contract_hash=representation_contract_hash,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=serving_manifest_ref,
+        )
+        registered_artifact = self.put(
+            prepared.tensors,
+            artifact_id=artifact_id,
+            key=key,
+            policy=policy,
+            device=device,
+        )
+        publication = (
+            build_binding_finalize_publication_bundle_from_registered_artifact(
+                build_intent=build_intent,
+                admission_facts=admission_facts,
+                source_artifact=source_artifact,
+                contract_family=contract_family,
+                serving_artifact=registered_artifact,
+                representation_contract_hash=prepared.representation_contract_hash,
+                source_version_key=source_version_key,
+                serving_version_key=serving_version_key,
+                logical_topology_json=logical_topology_json,
+                serving_manifest_ref=prepared.serving_manifest_ref,
+            )
+        )
+        return RegisteredServingPublication(
+            registered_artifact=registered_artifact,
+            prepared_registration=prepared,
+            publication=publication,
+        )
+
+    def complete_pure_transform_publication_bridge(
+        self,
+        tensors: TensorDict,
+        *,
+        build_intent: ServingBuildIntent,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        contract_family: AssemblyContractFamily | str | None = None,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        policy: StorePolicy | str | None = None,
+        device: int | torch.device | None = None,
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        source_contribution_device: str | int | None = None,
+        source_contribution_artifacts: Sequence[Artifact] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.register_pure_transform_publication_bridge",
+            logger=logger,
+            extra={
+                "tensor_count": len(tensors),
+                "device": None if device is None else str(device),
+                "contract_family": contract_family,
+            },
+        ) as profile:
+            publication = self.register_pure_transform_publication_bridge(
+                tensors,
+                build_intent=build_intent,
+                source_artifact=source_artifact,
+                contract_family=contract_family,
+                artifact_id=artifact_id,
+                key=key,
+                policy=policy,
+                device=device,
+                source_version_key=source_version_key,
+                serving_version_key=serving_version_key,
+                logical_topology_json=logical_topology_json,
+                serving_manifest_ref=serving_manifest_ref,
+            )
+            if profile is not None:
+                profile["serving_artifact_id"] = getattr(
+                    publication.publication, "serving_artifact_id", None
+                )
+        return self._complete_registered_representation_publication(
+            publication=publication,
+            contract_family=contract_family,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+            source_contribution_device=source_contribution_device,
+            source_contribution_artifacts=source_contribution_artifacts,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def complete_pure_transform_publication_from_binding(
+        self,
+        binding: Binding | SealedBindingValue,
+        *,
+        build_intent: ServingBuildIntent,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        resolved_binding, current_value = self._resolve_bound_publication_subject(
+            binding
+        )
+        publication_subject = current_value.to_binding_value_ref()
+        authoritative_canonical_index = _build_bound_publication_canonical_index(
+            resolved_binding.layout
+        )
+        prepared = prepare_pure_transform_serving_registration(
+            build_intent=build_intent,
+            source_artifact=source_artifact,
+            tensors=dict(resolved_binding.tensors),
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=serving_manifest_ref,
+        )
+        publication = build_pure_transform_publication_bundle(
+            build_intent=build_intent,
+            source_artifact=source_artifact,
+            contract_family=contract_family,
+            publication_subject=publication_subject,
+            canonical_index=authoritative_canonical_index,
+            source_version_key=source_version_key,
+            serving_version_key=serving_version_key,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=prepared.serving_manifest_ref,
+            layout_id=layout_id,
+            readiness_policy=readiness_policy,
+        )
+        return self._complete_bound_representation_publication(
+            binding=resolved_binding,
+            current_value=current_value,
+            publication=publication,
+            contract_family=contract_family,
+            source_artifact=source_artifact,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def _complete_registered_representation_publication(
+        self,
+        *,
+        publication: RegisteredPureTransformPublication | RegisteredServingPublication,
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        source_contribution_device: str | int | None = None,
+        source_contribution_artifacts: Sequence[Artifact] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        resolved_contract_family = _resolve_repo_owned_contract_family(
+            publication.publication,
+            contract_family,
+        )
+        resolved_structural_view_ids = tuple(
+            str(view_id).strip() for view_id in (structural_view_ids or ())
+        )
+        if (
+            not resolved_structural_view_ids
+            and resolved_contract_family != "canonical_full"
+        ):
+            resolved_structural_view_ids = _resolve_source_contribution_view_ids(
+                source_contribution_artifacts
+            )
+        if source_contribution_device is None:
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "publication.complete_repo_owned_representation_publish_attempt",
+                logger=logger,
+                extra={
+                    "contract_family": resolved_contract_family,
+                    "has_source_contribution_device": False,
+                    "structural_view_count": len(resolved_structural_view_ids),
+                },
+            ) as profile:
+                result = self.complete_repo_owned_representation_publish_attempt(
+                    publication=publication.publication,
+                    contract_family=contract_family,
+                    source_artifact=(
+                        source_artifact
+                        if isinstance(source_artifact, Artifact)
+                        else None
+                    ),
+                    structural_view_ids=resolved_structural_view_ids or None,
+                    layout_id=layout_id,
+                    layout_artifact_id=layout_artifact_id,
+                    readiness_policy=readiness_policy,
+                    timeout_s=timeout_s,
+                    ctx=ctx,
+                )
+                if profile is not None:
+                    profile["serving_artifact_id"] = getattr(
+                        result, "serving_artifact_id", None
+                    )
+                    profile["serving_manifest_ref"] = getattr(
+                        result, "serving_manifest_ref", None
+                    )
+                return result
+        resolved_contribution_artifacts = tuple(source_contribution_artifacts or ())
+        if resolved_contribution_artifacts:
+            contribution_artifacts = resolved_contribution_artifacts
+        elif isinstance(source_artifact, Artifact):
+            contribution_artifacts = (source_artifact,)
+        else:
+            contribution_artifacts = ()
+        if not contribution_artifacts:
+            raise ArtifactError(
+                "source_contribution_device requires source_artifact or source_contribution_artifacts",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.start_repo_owned_representation_publish_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+                "has_source_contribution_device": True,
+                "source_contribution_device": source_contribution_device,
+                "structural_view_count": len(resolved_structural_view_ids),
+                "contribution_artifact_count": len(contribution_artifacts),
+            },
+        ) as profile:
+            attempt = self.start_repo_owned_representation_publish_attempt(
+                publication=publication.publication,
+                contract_family=contract_family,
+                source_artifact=source_artifact,
+                structural_view_ids=resolved_structural_view_ids or None,
+                layout_id=layout_id,
+                layout_artifact_id=layout_artifact_id,
+                readiness_policy=readiness_policy,
+                ctx=ctx,
+            )
+            if profile is not None:
+                profile["attempt_id"] = getattr(attempt, "operation_id", None)
+        if resolved_contract_family == "canonical_full":
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "publication.contribute_canonical_publish_tensors_to_attempt",
+                logger=logger,
+                extra={
+                    "contract_family": resolved_contract_family,
+                    "source_contribution_device": source_contribution_device,
+                },
+            ) as profile:
+                contribution_binding = (
+                    self._contribute_canonical_publish_tensors_to_attempt(
+                        publication=publication,
+                        attempt=attempt,
+                        device=source_contribution_device,
+                        ctx=ctx,
+                    )
+                )
+                if profile is not None:
+                    profile["binding_layout_id"] = getattr(
+                        contribution_binding, "binding_layout_id", None
+                    )
+            try:
+                with tensorcast_profile_stage(
+                    "tensorcast",
+                    "publication.seal_assembly_attempt",
+                    logger=logger,
+                    extra={
+                        "contract_family": resolved_contract_family,
+                    },
+                ) as profile:
+                    operation = self.seal_assembly_attempt(attempt, ctx=ctx)
+                    if profile is not None:
+                        profile["operation_id"] = getattr(
+                            operation, "operation_id", None
+                        )
+                with tensorcast_profile_stage(
+                    "tensorcast",
+                    "publication.wait_assembly_attempt",
+                    logger=logger,
+                    extra={
+                        "contract_family": resolved_contract_family,
+                        "timeout_s": timeout_s,
+                    },
+                ) as profile:
+                    result = self.wait_assembly_attempt(
+                        operation,
+                        timeout_s=timeout_s,
+                        ctx=ctx,
+                    )
+                    if profile is not None:
+                        profile["serving_artifact_id"] = getattr(
+                            result, "serving_artifact_id", None
+                        )
+                        profile["serving_manifest_ref"] = getattr(
+                            result, "serving_manifest_ref", None
+                        )
+                    return result
+            finally:
+                with contextlib.suppress(Exception):
+                    contribution_binding.close()
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.contribute_source_artifacts_to_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+                "source_contribution_device": source_contribution_device,
+                "contribution_artifact_count": len(contribution_artifacts),
+            },
+        ):
+            self._contribute_source_artifacts_to_attempt(
+                source_artifacts=contribution_artifacts,
+                attempt=attempt,
+                device=source_contribution_device,
+                ctx=ctx,
+            )
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.seal_assembly_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+            },
+        ) as profile:
+            operation = self.seal_assembly_attempt(attempt, ctx=ctx)
+            if profile is not None:
+                profile["operation_id"] = getattr(operation, "operation_id", None)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.wait_assembly_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+                "timeout_s": timeout_s,
+            },
+        ) as profile:
+            result = self.wait_assembly_attempt(operation, timeout_s=timeout_s, ctx=ctx)
+            if profile is not None:
+                profile["serving_artifact_id"] = getattr(
+                    result, "serving_artifact_id", None
+                )
+                profile["serving_manifest_ref"] = getattr(
+                    result, "serving_manifest_ref", None
+                )
+            return result
+
+    def complete_binding_finalize_publication_bridge(
+        self,
+        tensors: TensorDict,
+        *,
+        build_intent: ServingBuildIntent,
+        admission_facts: ServingAdmissionFacts,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        contract_family: AssemblyContractFamily | str | None = None,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        policy: StorePolicy | str | None = None,
+        device: int | torch.device | None = None,
+        representation_contract_hash: str | None = None,
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        source_contribution_device: str | int | None = None,
+        source_contribution_artifacts: Sequence[Artifact] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.register_binding_finalize_publication_bridge",
+            logger=logger,
+            extra={
+                "tensor_count": len(tensors),
+                "device": None if device is None else str(device),
+                "contract_family": contract_family,
+            },
+        ) as profile:
+            publication = self.register_binding_finalize_publication_bridge(
+                tensors,
+                build_intent=build_intent,
+                admission_facts=admission_facts,
+                source_artifact=source_artifact,
+                contract_family=contract_family,
+                artifact_id=artifact_id,
+                key=key,
+                policy=policy,
+                device=device,
+                representation_contract_hash=representation_contract_hash,
+                source_version_key=source_version_key,
+                serving_version_key=serving_version_key,
+                logical_topology_json=logical_topology_json,
+                serving_manifest_ref=serving_manifest_ref,
+            )
+            if profile is not None:
+                profile["serving_artifact_id"] = getattr(
+                    publication.publication, "serving_artifact_id", None
+                )
+        return self._complete_registered_representation_publication(
+            publication=publication,
+            contract_family=contract_family,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+            source_contribution_device=source_contribution_device,
+            source_contribution_artifacts=source_contribution_artifacts,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def complete_binding_finalize_publication_from_binding(
+        self,
+        binding: Binding | SealedBindingValue,
+        *,
+        build_intent: ServingBuildIntent,
+        admission_facts: ServingAdmissionFacts,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        contract_family: AssemblyContractFamily | str | None = None,
+        representation_contract_hash: str | None = None,
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        resolved_binding, current_value = self._resolve_bound_publication_subject(
+            binding
+        )
+        publication_subject = current_value.to_binding_value_ref()
+        authoritative_canonical_index = _build_bound_publication_canonical_index(
+            resolved_binding.layout
+        )
+        prepared = prepare_binding_finalize_serving_registration(
+            build_intent=build_intent,
+            tensors=dict(resolved_binding.tensors),
+            representation_contract_hash=representation_contract_hash,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=serving_manifest_ref,
+        )
+        publication = build_binding_finalize_publication_bundle(
+            build_intent=build_intent,
+            source_artifact=source_artifact,
+            contract_family=contract_family,
+            publication_subject=publication_subject,
+            canonical_index=authoritative_canonical_index,
+            representation_contract_hash=representation_contract_hash,
+            source_version_key=source_version_key,
+            serving_version_key=serving_version_key,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=prepared.serving_manifest_ref,
+            layout_id=layout_id,
+            readiness_policy=readiness_policy,
+            admission_facts=admission_facts,
+        )
+        return self._complete_bound_representation_publication(
+            binding=resolved_binding,
+            current_value=current_value,
+            publication=publication,
+            contract_family=contract_family,
+            source_artifact=source_artifact,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def _contribute_source_artifacts_to_attempt(
+        self,
+        *,
+        source_artifacts: Sequence[Artifact],
+        attempt: AssemblyAttemptRef,
+        device: str | int,
+        ctx: CallContext | None = None,
+    ) -> tuple[PartialSealResult, ...]:
+        results: list[PartialSealResult] = []
+        for source_artifact in source_artifacts:
+            binding = source_artifact.bind(device=device, packing="byte_space")
+            try:
+                sealed = binding.seal_current(
+                    update_epoch=binding.begin_update(ctx=ctx),
+                    ctx=ctx,
+                )
+                results.append(sealed.contribute_to_assembly(attempt=attempt, ctx=ctx))
+            finally:
+                with contextlib.suppress(Exception):
+                    binding.close()
+        return tuple(results)
+
+    def _contribute_canonical_publish_tensors_to_attempt(
+        self,
+        *,
+        publication: RegisteredPureTransformPublication | RegisteredServingPublication,
+        attempt: AssemblyAttemptRef,
+        device: str | int,
+        ctx: CallContext | None = None,
+    ) -> Binding:
+        tensors = dict(publication.prepared_registration.tensors)
+        if not tensors:
+            raise ArtifactError(
+                "canonical_full contribution requires non-empty tensors",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        device_obj = torch.device(device)
+        device_id = resolve_device(device_obj, allow_cpu=False)
+        canonical_index = publication.prepared_registration.canonical_index
+        layout = build_owned_layout(
+            entries=canonical_index.entries,
+            device_id=device_id,
+            index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
+            logical_layout_hash=None,
+            separate_storages=True,
+        )
+        binding = self.create_binding(
+            layout,
+            ownership="client",
+            target_tensors=tensors,
+            device=device_obj,
+        )
+        try:
+            sealed = binding.seal_current(
+                update_epoch=binding.begin_update(ctx=ctx),
+                ctx=ctx,
+            )
+            sealed.contribute_to_assembly(attempt=attempt, ctx=ctx)
+            return binding
+        except Exception:
+            with contextlib.suppress(Exception):
+                binding.close()
+            raise
+
+    def _resolve_bound_publication_subject(
+        self,
+        binding: Binding | SealedBindingValue,
+    ) -> tuple[Binding, SealedBindingValue]:
+        if isinstance(binding, Binding):
+            current_value = binding.current_value
+            if current_value is None:
+                raise ArtifactError(
+                    "binding publication requires a current sealed value",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            return binding, current_value
+        if isinstance(binding, SealedBindingValue):
+            return binding._require_current_binding(), binding
+        raise ArtifactError(
+            "binding publication requires a Binding or SealedBindingValue",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    def _complete_bound_representation_publication(
+        self,
+        *,
+        binding: Binding,
+        current_value: SealedBindingValue,
+        publication: RepresentationPublishSpec,
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_artifact: Artifact
+        | RegisteredArtifact
+        | CanonicalIndex
+        | object
+        | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        del binding
+        resolved_contract_family = _resolve_repo_owned_contract_family(
+            publication,
+            contract_family,
+        )
+        if resolved_contract_family != "canonical_full":
+            raise ArtifactError(
+                "binding-native publication currently requires contract_family='canonical_full'",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.start_bound_representation_publish_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+                "binding_id": current_value.binding_id,
+                "binding_value_id": current_value.binding_value_id,
+            },
+        ) as profile:
+            attempt = self.start_repo_owned_representation_publish_attempt(
+                publication=publication,
+                contract_family=contract_family,
+                source_artifact=(
+                    source_artifact if isinstance(source_artifact, Artifact) else None
+                ),
+                structural_view_ids=None,
+                layout_id=layout_id,
+                layout_artifact_id=layout_artifact_id,
+                readiness_policy=readiness_policy,
+                ctx=ctx,
+            )
+            if profile is not None:
+                profile["attempt_id"] = getattr(attempt, "attempt_id", None)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.contribute_binding_current_value_to_attempt",
+            logger=logger,
+            extra={
+                "binding_id": current_value.binding_id,
+                "binding_value_id": current_value.binding_value_id,
+            },
+        ):
+            current_value.contribute_to_assembly(attempt=attempt, ctx=ctx)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.seal_assembly_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+            },
+        ) as profile:
+            operation = self.seal_assembly_attempt(attempt, ctx=ctx)
+            if profile is not None:
+                profile["operation_id"] = getattr(operation, "operation_id", None)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "publication.wait_assembly_attempt",
+            logger=logger,
+            extra={
+                "contract_family": resolved_contract_family,
+                "timeout_s": timeout_s,
+            },
+        ) as profile:
+            result = self.wait_assembly_attempt(
+                operation,
+                timeout_s=timeout_s,
+                ctx=ctx,
+            )
+            if profile is not None:
+                profile["serving_artifact_id"] = getattr(
+                    result, "serving_artifact_id", None
+                )
+                profile["serving_manifest_ref"] = getattr(
+                    result, "serving_manifest_ref", None
+                )
+            return result
+
     def start_assembly_attempt(
         self,
         *,
-        layout_id: str,
+        layout_id: str | None = None,
         requirements: AssemblyRequirementSetRef | None = None,
         readiness_policy: AssemblyReadinessPolicy | None = None,
         closeout_contract: AssemblyCloseoutContract | None = None,
+        representation_publish_spec: RepresentationPublishSpec | None = None,
         ctx: CallContext | None = None,
     ) -> AssemblyAttemptRef:
         del ctx
+        if representation_publish_spec is not None:
+            return self._runtime.ensure_client().start_assembly_attempt(
+                layout_id=representation_publish_spec.layout_id,
+                requirements=representation_publish_spec.requirements,
+                readiness_policy=representation_publish_spec.readiness_policy,
+                closeout_contract=representation_publish_spec.closeout_contract,
+                representation_publish_spec=representation_publish_spec,
+            )
+        if not layout_id:
+            raise ValueError("layout_id is required")
         if requirements is None:
             raise ValueError(
                 "requirements are required; construct them explicitly with "
@@ -1055,6 +2403,322 @@ class Store:
         if closeout_contract is not None:
             kwargs["closeout_contract"] = closeout_contract
         return self._runtime.ensure_client().start_assembly_attempt(**kwargs)
+
+    def list_artifact_layouts(
+        self,
+        artifact_id: str,
+        *,
+        ctx: CallContext | None = None,
+    ) -> tuple[str, ...]:
+        del ctx
+        if not artifact_id:
+            raise ArtifactError(
+                "artifact_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return tuple(
+            str(layout_id)
+            for layout_id in self._runtime.ensure_client().list_artifact_layouts(
+                artifact_id
+            )
+        )
+
+    def start_representation_publish_attempt(
+        self,
+        *,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        ctx: CallContext | None = None,
+    ) -> AssemblyAttemptRef:
+        resolved_layout_id = _resolve_representation_publish_layout_id(
+            self,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            publication=publication,
+        )
+        resolved_requirements = _resolve_representation_publish_requirements(
+            requirements=requirements,
+            publication=publication,
+        )
+        resolved_readiness_policy = _resolve_representation_publish_readiness_policy(
+            readiness_policy=readiness_policy,
+            publication=publication,
+        )
+        publication_spec = _coerce_representation_publish_spec(publication)
+        if publication_spec is not None:
+            if resolved_requirements is None:
+                raise ArtifactError(
+                    "representation publication requires explicit requirements or a RepresentationPublishSpec carrying requirements",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return self.start_assembly_attempt(
+                representation_publish_spec=publication_spec.with_attempt_inputs(
+                    layout_id=resolved_layout_id,
+                    requirements=resolved_requirements,
+                    readiness_policy=resolved_readiness_policy,
+                ),
+                ctx=ctx,
+            )
+        closeout_contract = _coerce_representation_publish_closeout(publication)
+        return self.start_assembly_attempt(
+            layout_id=resolved_layout_id,
+            requirements=resolved_requirements,
+            readiness_policy=resolved_readiness_policy,
+            closeout_contract=closeout_contract,
+            ctx=ctx,
+        )
+
+    def complete_representation_publish_attempt(
+        self,
+        *,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        attempt = self.start_representation_publish_attempt(
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            requirements=requirements,
+            publication=publication,
+            readiness_policy=readiness_policy,
+            ctx=ctx,
+        )
+        operation = self.seal_assembly_attempt(attempt, ctx=ctx)
+        return self.wait_assembly_attempt(operation, timeout_s=timeout_s, ctx=ctx)
+
+    def start_canonical_representation_publish_attempt(
+        self,
+        *,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        ctx: CallContext | None = None,
+    ) -> AssemblyAttemptRef:
+        return self.start_representation_publish_attempt(
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            requirements=AssemblyRequirementSetRef.canonical_full(),
+            publication=publication,
+            readiness_policy=readiness_policy,
+            ctx=ctx,
+        )
+
+    def complete_canonical_representation_publish_attempt(
+        self,
+        *,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        return self.complete_representation_publish_attempt(
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            requirements=AssemblyRequirementSetRef.canonical_full(),
+            publication=publication,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def start_structural_representation_publish_attempt(
+        self,
+        *,
+        contract_family: AssemblyContractFamily,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        source_artifact: Artifact | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        ctx: CallContext | None = None,
+    ) -> AssemblyAttemptRef:
+        requirements = build_representation_publish_requirements(
+            contract_family=contract_family,
+            publication=publication,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+        )
+        return self.start_representation_publish_attempt(
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            requirements=requirements,
+            publication=publication,
+            readiness_policy=readiness_policy,
+            ctx=ctx,
+        )
+
+    def complete_structural_representation_publish_attempt(
+        self,
+        *,
+        contract_family: AssemblyContractFamily,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        source_artifact: Artifact | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        requirements = build_representation_publish_requirements(
+            contract_family=contract_family,
+            publication=publication,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+        )
+        return self.complete_representation_publish_attempt(
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            requirements=requirements,
+            publication=publication,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def start_repo_owned_representation_publish_attempt(
+        self,
+        *,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_artifact: Artifact | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        ctx: CallContext | None = None,
+    ) -> AssemblyAttemptRef:
+        resolved_contract_family = _resolve_repo_owned_contract_family(
+            publication,
+            contract_family,
+        )
+        if resolved_contract_family == "canonical_full":
+            return self.start_canonical_representation_publish_attempt(
+                layout_id=layout_id,
+                layout_artifact_id=layout_artifact_id,
+                publication=publication,
+                readiness_policy=readiness_policy,
+                ctx=ctx,
+            )
+        return self.start_structural_representation_publish_attempt(
+            contract_family=resolved_contract_family,
+            publication=publication,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            ctx=ctx,
+        )
+
+    def complete_repo_owned_representation_publish_attempt(
+        self,
+        *,
+        publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_artifact: Artifact | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        resolved_contract_family = _resolve_repo_owned_contract_family(
+            publication,
+            contract_family,
+        )
+        if resolved_contract_family == "canonical_full":
+            return self.complete_canonical_representation_publish_attempt(
+                layout_id=layout_id,
+                layout_artifact_id=layout_artifact_id,
+                publication=publication,
+                readiness_policy=readiness_policy,
+                timeout_s=timeout_s,
+                ctx=ctx,
+            )
+        return self.complete_structural_representation_publish_attempt(
+            contract_family=resolved_contract_family,
+            publication=publication,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
+
+    def start_plan_repo_owned_representation_publish_attempt(
+        self,
+        *,
+        plan_result: "PlanResult",
+        publication_step: "PlanStepRef[PureTransformPublicationBundle]",
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_artifact: Artifact | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        ctx: CallContext | None = None,
+    ) -> AssemblyAttemptRef:
+        publication = _resolve_plan_publication_bundle(
+            plan_result=plan_result,
+            publication_step=publication_step,
+        )
+        return self.start_repo_owned_representation_publish_attempt(
+            publication=publication,
+            contract_family=contract_family,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            ctx=ctx,
+        )
+
+    def complete_plan_repo_owned_representation_publish_attempt(
+        self,
+        *,
+        plan_result: "PlanResult",
+        publication_step: "PlanStepRef[PureTransformPublicationBundle]",
+        contract_family: AssemblyContractFamily | str | None = None,
+        source_artifact: Artifact | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        layout_id: str | None = None,
+        layout_artifact_id: str | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> PublishedModelVersion:
+        publication = _resolve_plan_publication_bundle(
+            plan_result=plan_result,
+            publication_step=publication_step,
+        )
+        return self.complete_repo_owned_representation_publish_attempt(
+            publication=publication,
+            contract_family=contract_family,
+            source_artifact=source_artifact,
+            structural_view_ids=structural_view_ids,
+            layout_id=layout_id,
+            layout_artifact_id=layout_artifact_id,
+            readiness_policy=readiness_policy,
+            timeout_s=timeout_s,
+            ctx=ctx,
+        )
 
     def seal_assembly_attempt(
         self,
@@ -1257,19 +2921,16 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
-        fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         artifact_id, key = _parse_artifact_ref(
             ref,
             artifact_id=artifact_id,
             key=key,
         )
-        effective_fallback = FallbackOptions.parse(fallback)
         return Artifact(
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
             key=key,
-            fallback=effective_fallback,
         )
 
     async def artifact_async(
@@ -1278,13 +2939,11 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
-        fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         return self.artifact(
             ref,
             artifact_id=artifact_id,
             key=key,
-            fallback=fallback,
         )
 
     def from_disk(
@@ -1300,17 +2959,88 @@ class Store:
             raise ValueError("path is required")
         client = self._runtime.ensure_client()
         use_progress = _should_show_from_disk_progress(show_progress)
-        stream = client.import_artifact_from_path_stream_v2(
-            path=disk_path,
-            verify_checksums=bool(verify_checksums),
-        )
-        if use_progress:
-            response = _consume_import_artifact_stream_with_tqdm(
-                stream,
-                disk_path=disk_path,
-            )
-        else:
-            response = _consume_import_artifact_stream(stream)
+        response = None
+        deadline = time.monotonic() + 30.0
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "store.from_disk",
+            logger=logger,
+            extra={
+                "path": disk_path,
+                "verify_checksums": bool(verify_checksums),
+                "show_progress": use_progress,
+                "daemon_endpoint": self._runtime.daemon_endpoint,
+            },
+        ) as profile:
+            startup_retry_count = 0
+            while response is None:
+                try:
+                    stream = client.import_artifact_from_path_stream_v2(
+                        path=disk_path,
+                        verify_checksums=bool(verify_checksums),
+                    )
+
+                    if profile is not None:
+                        event_count = 0
+                        processed_bytes = 0
+                        total_bytes = 0
+                        messages: list[str] = []
+
+                        def _profiled_stream(
+                            *,
+                            bound_stream=stream,
+                            bound_messages=messages,
+                        ):
+                            nonlocal event_count, processed_bytes, total_bytes
+                            for event in bound_stream:
+                                event_count += 1
+                                total_bytes = int(
+                                    getattr(event, "total_bytes", 0) or total_bytes
+                                )
+                                processed_bytes = int(
+                                    getattr(event, "processed_bytes", 0)
+                                    or processed_bytes
+                                )
+                                message = str(getattr(event, "message", "") or "")
+                                if message and (
+                                    not bound_messages or bound_messages[-1] != message
+                                ):
+                                    bound_messages.append(message)
+                                yield event
+
+                        stream_to_consume = _profiled_stream()
+                    else:
+                        stream_to_consume = stream
+
+                    if use_progress:
+                        response = _consume_import_artifact_stream_with_tqdm(
+                            stream_to_consume,
+                            disk_path=disk_path,
+                        )
+                    else:
+                        response = _consume_import_artifact_stream(stream_to_consume)
+                    if profile is not None:
+                        profile["stream_event_count"] = event_count
+                        profile["processed_bytes"] = processed_bytes
+                        profile["total_bytes"] = total_bytes
+                        profile["message_samples"] = messages[:20]
+                except RuntimeError as exc:
+                    remaining = deadline - time.monotonic()
+                    if not _is_import_startup_in_progress_error(exc) or remaining <= 0:
+                        raise
+                    startup_retry_count += 1
+                    if profile is not None:
+                        profile["startup_retry_count"] = startup_retry_count
+                    logger.info(
+                        "store.from_disk_retry_startup",
+                        extra={
+                            "tc.store.daemon": self._runtime.daemon_endpoint,
+                            "path": disk_path,
+                            "remaining_s": round(remaining, 3),
+                        },
+                        exc_info=exc,
+                    )
+                    time.sleep(min(1.0, remaining))
         artifact_id = response.artifact_id or ""
         if not artifact_id:
             raise ArtifactError(
@@ -1337,6 +3067,18 @@ class Store:
             expires_at=time.monotonic(),
         )
         self._runtime.cache_artifact_index(entry)
+        emit_tensorcast_profile_event(
+            "tensorcast",
+            "store.from_disk.summary",
+            logger=logger,
+            payload={
+                "path": disk_path,
+                "artifact_id": artifact_id,
+                "tensor_count": len(canonical_index.entries),
+                "total_size_bytes": canonical_index.total_size_bytes,
+                "daemon_endpoint": self._runtime.daemon_endpoint,
+            },
+        )
         if key:
             index_multihash, data_multihash = _split_mi2_artifact_id(artifact_id)
             id_kind = infer_artifact_id_kind(artifact_id) or ArtifactIdKind.MI2
@@ -1365,10 +3107,62 @@ class Store:
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
             key=key,
-            fallback=None,
             canonical_index_bytes=canonical_index_bytes or None,
             canonical_index=canonical_index,
             generation=generation_value,
+        )
+
+    def resolve_public_disk_source(
+        self,
+        path: str,
+        *,
+        verify_checksums: bool = True,
+    ) -> PublicDiskSourceHandle:
+        disk_path = os.fspath(path)
+        if not disk_path:
+            raise ValueError("path is required")
+        try:
+            response = self._runtime.ensure_client().resolve_public_disk_source(
+                path=disk_path,
+                verify_checksums=bool(verify_checksums),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ArtifactError(
+                f"ResolvePublicDiskSource RPC failed for {disk_path}",
+                status_code="UNAVAILABLE",
+                retryable=True,
+            ) from exc
+        has_source = (
+            response.HasField("source")
+            if hasattr(response, "HasField")
+            else getattr(response, "source", None) is not None
+        )
+        if not has_source:
+            raise ArtifactError(
+                "ResolvePublicDiskSource returned empty source",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return PublicDiskSourceHandle.from_proto(response.source)
+
+    def realize_into_binding(
+        self,
+        binding: Binding,
+        source: Artifact | PublicDiskSourceHandle | str,
+        *,
+        realization_plan: object,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue:
+        if not isinstance(binding, Binding):
+            raise ArtifactError(
+                "realize_into_binding() requires a Binding",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return binding.realize_from(
+            source,
+            realization_plan=realization_plan,
+            ctx=ctx,
         )
 
     # ------------------------------------------------------------------
@@ -1702,6 +3496,264 @@ def register_piece(
     )
 
 
+def register_pure_transform_publication_bridge(
+    tensors: TensorDict,
+    *,
+    build_intent: ServingBuildIntent,
+    source_artifact: Artifact
+    | RegisteredArtifact
+    | CanonicalIndex
+    | object
+    | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    policy: StorePolicy | str | None = None,
+    device: int | torch.device | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+) -> RegisteredPureTransformPublication:
+    return _coerce_store().register_pure_transform_publication_bridge(
+        tensors,
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        artifact_id=artifact_id,
+        key=key,
+        policy=policy,
+        device=device,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+    )
+
+
+def complete_pure_transform_publication_bridge(
+    tensors: TensorDict,
+    *,
+    build_intent: ServingBuildIntent,
+    source_artifact: Artifact
+    | RegisteredArtifact
+    | CanonicalIndex
+    | object
+    | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    policy: StorePolicy | str | None = None,
+    device: int | torch.device | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    source_contribution_device: str | int | None = None,
+    source_contribution_artifacts: Sequence[Artifact] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_pure_transform_publication_bridge(
+        tensors,
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        artifact_id=artifact_id,
+        key=key,
+        policy=policy,
+        device=device,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        structural_view_ids=structural_view_ids,
+        source_contribution_device=source_contribution_device,
+        source_contribution_artifacts=source_contribution_artifacts,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def complete_pure_transform_publication_from_binding(
+    binding: Binding | SealedBindingValue,
+    *,
+    build_intent: ServingBuildIntent,
+    source_artifact: Artifact
+    | RegisteredArtifact
+    | CanonicalIndex
+    | object
+    | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_pure_transform_publication_from_binding(
+        binding,
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def register_binding_finalize_publication_bridge(
+    tensors: TensorDict,
+    *,
+    build_intent: ServingBuildIntent,
+    admission_facts: ServingAdmissionFacts,
+    source_artifact: Artifact
+    | RegisteredArtifact
+    | CanonicalIndex
+    | object
+    | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    policy: StorePolicy | str | None = None,
+    device: int | torch.device | None = None,
+    representation_contract_hash: str | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+) -> RegisteredServingPublication:
+    return _coerce_store().register_binding_finalize_publication_bridge(
+        tensors,
+        build_intent=build_intent,
+        admission_facts=admission_facts,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        artifact_id=artifact_id,
+        key=key,
+        policy=policy,
+        device=device,
+        representation_contract_hash=representation_contract_hash,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+    )
+
+
+def complete_binding_finalize_publication_bridge(
+    tensors: TensorDict,
+    *,
+    build_intent: ServingBuildIntent,
+    admission_facts: ServingAdmissionFacts,
+    source_artifact: Artifact
+    | RegisteredArtifact
+    | CanonicalIndex
+    | object
+    | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    policy: StorePolicy | str | None = None,
+    device: int | torch.device | None = None,
+    representation_contract_hash: str | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    source_contribution_device: str | int | None = None,
+    source_contribution_artifacts: Sequence[Artifact] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_binding_finalize_publication_bridge(
+        tensors,
+        build_intent=build_intent,
+        admission_facts=admission_facts,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        artifact_id=artifact_id,
+        key=key,
+        policy=policy,
+        device=device,
+        representation_contract_hash=representation_contract_hash,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        structural_view_ids=structural_view_ids,
+        source_contribution_device=source_contribution_device,
+        source_contribution_artifacts=source_contribution_artifacts,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def complete_binding_finalize_publication_from_binding(
+    binding: Binding | SealedBindingValue,
+    *,
+    build_intent: ServingBuildIntent,
+    admission_facts: ServingAdmissionFacts,
+    source_artifact: Artifact
+    | RegisteredArtifact
+    | CanonicalIndex
+    | object
+    | None = None,
+    contract_family: AssemblyContractFamily | str | None = None,
+    representation_contract_hash: str | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    logical_topology_json: str | None = None,
+    serving_manifest_ref: str | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_binding_finalize_publication_from_binding(
+        binding,
+        build_intent=build_intent,
+        admission_facts=admission_facts,
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        representation_contract_hash=representation_contract_hash,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
 def register_vram_region(
     *,
     device_id: int,
@@ -1869,10 +3921,11 @@ def persistence_operation(
 
 def start_assembly_attempt(
     *,
-    layout_id: str,
+    layout_id: str | None = None,
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     closeout_contract: AssemblyCloseoutContract | None = None,
+    representation_publish_spec: RepresentationPublishSpec | None = None,
     ctx: CallContext | None = None,
 ) -> AssemblyAttemptRef:
     return _coerce_store().start_assembly_attempt(
@@ -1880,6 +3933,26 @@ def start_assembly_attempt(
         requirements=requirements,
         readiness_policy=readiness_policy,
         closeout_contract=closeout_contract,
+        representation_publish_spec=representation_publish_spec,
+        ctx=ctx,
+    )
+
+
+def start_representation_publish_attempt(
+    *,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    requirements: AssemblyRequirementSetRef | None = None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    ctx: CallContext | None = None,
+) -> AssemblyAttemptRef:
+    return _coerce_store().start_representation_publish_attempt(
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        requirements=requirements,
+        publication=publication,
+        readiness_policy=readiness_policy,
         ctx=ctx,
     )
 
@@ -1903,6 +3976,219 @@ def wait_assembly_attempt(
         timeout_s=timeout_s,
         ctx=ctx,
     )
+
+
+def complete_representation_publish_attempt(
+    *,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    requirements: AssemblyRequirementSetRef | None = None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_representation_publish_attempt(
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        requirements=requirements,
+        publication=publication,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def start_canonical_representation_publish_attempt(
+    *,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    ctx: CallContext | None = None,
+) -> AssemblyAttemptRef:
+    return _coerce_store().start_canonical_representation_publish_attempt(
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        publication=publication,
+        readiness_policy=readiness_policy,
+        ctx=ctx,
+    )
+
+
+def complete_canonical_representation_publish_attempt(
+    *,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_canonical_representation_publish_attempt(
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        publication=publication,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def start_structural_representation_publish_attempt(
+    *,
+    contract_family: AssemblyContractFamily,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    ctx: CallContext | None = None,
+) -> AssemblyAttemptRef:
+    return _coerce_store().start_structural_representation_publish_attempt(
+        contract_family=contract_family,
+        publication=publication,
+        source_artifact=source_artifact,
+        structural_view_ids=structural_view_ids,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        ctx=ctx,
+    )
+
+
+def complete_structural_representation_publish_attempt(
+    *,
+    contract_family: AssemblyContractFamily,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_structural_representation_publish_attempt(
+        contract_family=contract_family,
+        publication=publication,
+        source_artifact=source_artifact,
+        structural_view_ids=structural_view_ids,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def start_repo_owned_representation_publish_attempt(
+    *,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    contract_family: AssemblyContractFamily | str | None = None,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    ctx: CallContext | None = None,
+) -> AssemblyAttemptRef:
+    return _coerce_store().start_repo_owned_representation_publish_attempt(
+        publication=publication,
+        contract_family=contract_family,
+        source_artifact=source_artifact,
+        structural_view_ids=structural_view_ids,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        ctx=ctx,
+    )
+
+
+def complete_repo_owned_representation_publish_attempt(
+    *,
+    publication: PureTransformPublicationBundle | AssemblyCloseoutContract,
+    contract_family: AssemblyContractFamily | str | None = None,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_repo_owned_representation_publish_attempt(
+        publication=publication,
+        contract_family=contract_family,
+        source_artifact=source_artifact,
+        structural_view_ids=structural_view_ids,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def start_plan_repo_owned_representation_publish_attempt(
+    *,
+    plan_result: "PlanResult",
+    publication_step: "PlanStepRef[PureTransformPublicationBundle]",
+    contract_family: AssemblyContractFamily | str | None = None,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    ctx: CallContext | None = None,
+) -> AssemblyAttemptRef:
+    return _coerce_store().start_plan_repo_owned_representation_publish_attempt(
+        plan_result=plan_result,
+        publication_step=publication_step,
+        contract_family=contract_family,
+        source_artifact=source_artifact,
+        structural_view_ids=structural_view_ids,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        ctx=ctx,
+    )
+
+
+def complete_plan_repo_owned_representation_publish_attempt(
+    *,
+    plan_result: "PlanResult",
+    publication_step: "PlanStepRef[PureTransformPublicationBundle]",
+    contract_family: AssemblyContractFamily | str | None = None,
+    source_artifact: Artifact | None = None,
+    structural_view_ids: Sequence[str] | None = None,
+    layout_id: str | None = None,
+    layout_artifact_id: str | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
+    timeout_s: float | None = None,
+    ctx: CallContext | None = None,
+) -> PublishedModelVersion:
+    return _coerce_store().complete_plan_repo_owned_representation_publish_attempt(
+        plan_result=plan_result,
+        publication_step=publication_step,
+        contract_family=contract_family,
+        source_artifact=source_artifact,
+        structural_view_ids=structural_view_ids,
+        layout_id=layout_id,
+        layout_artifact_id=layout_artifact_id,
+        readiness_policy=readiness_policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
+def list_artifact_layouts(
+    artifact_id: str,
+    *,
+    ctx: CallContext | None = None,
+) -> tuple[str, ...]:
+    return _coerce_store().list_artifact_layouts(artifact_id, ctx=ctx)
 
 
 def seal_assembly(
@@ -1929,20 +4215,17 @@ def artifact(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
-    fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
     store = _coerce_store()
     if ref is None:
         return store.artifact(
             artifact_id=artifact_id,
             key=key,
-            fallback=fallback,
         )
     return store.artifact(
         ref=ref,
         artifact_id=artifact_id,
         key=key,
-        fallback=fallback,
     )
 
 
@@ -1951,20 +4234,17 @@ async def artifact_async(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
-    fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
     store = _coerce_store()
     if ref is None:
         return await store.artifact_async(
             artifact_id=artifact_id,
             key=key,
-            fallback=fallback,
         )
     return await store.artifact_async(
         ref=ref,
         artifact_id=artifact_id,
         key=key,
-        fallback=fallback,
     )
 
 
@@ -1983,6 +4263,32 @@ def from_disk(
     )
 
 
+def resolve_public_disk_source(
+    path: str,
+    *,
+    verify_checksums: bool = True,
+) -> PublicDiskSourceHandle:
+    return _coerce_store().resolve_public_disk_source(
+        path,
+        verify_checksums=verify_checksums,
+    )
+
+
+def realize_into_binding(
+    binding: Binding,
+    source: Artifact | PublicDiskSourceHandle | str,
+    *,
+    realization_plan: object,
+    ctx: CallContext | None = None,
+) -> SealedBindingValue:
+    return _coerce_store().realize_into_binding(
+        binding,
+        source,
+        realization_plan=realization_plan,
+        ctx=ctx,
+    )
+
+
 __all__ = [
     "Artifact",
     "ArtifactDescriptor",
@@ -1994,13 +4300,15 @@ __all__ = [
     "AssemblyReadinessPolicy",
     "AssemblyRequirementSetRef",
     "Binding",
+    "BindingValueRef",
     "BindingLayout",
     "BindingUpdateEpoch",
+    "BuilderMode",
     "CanonicalIndex",
     "CanonicalIndexEntry",
     "CopyPlan",
     "CopyPlanEntry",
-    "FallbackOptions",
+    "FinalizeClass",
     "LeaseHandle",
     "MaterializationPayload",
     "MaterializationDiagnostics",
@@ -2008,19 +4316,76 @@ __all__ = [
     "PlacementPin",
     "PrefetchedReplica",
     "PartialSealResult",
+    "PublicDiskSourceHandle",
+    "PreparedServingRegistration",
+    "PreparedPureTransformServingRegistration",
     "PublishedModelVersion",
+    "ExecutionDiagnostics",
+    "SourceBoundPlanDiagnostics",
+    "HashLocation",
+    "IdentityMintStrategy",
+    "PureTransformPublicationBundle",
+    "RealizationProtocol",
+    "RegisteredServingPublication",
+    "RegisteredPureTransformPublication",
     "RegisteredArtifact",
+    "RepresentationPublishContract",
+    "RepresentationPublishSpec",
+    "SourceBoundCapability",
+    "ServingPublicationSubject",
     "ReplicaInfo",
     "RetryPolicy",
+    "SERVING_MANIFEST_TENSOR_NAME",
     "SealedBindingValue",
+    "ServingArtifactManifest",
+    "ServingAdmissionFacts",
+    "ServingBuildIntent",
+    "SERVING_BUILD_DIGEST_VERSION",
+    "ServingRuntimePolicy",
+    "ServingRuntimePolicyInput",
+    "ServingSupportLevel",
     "StoreCapabilities",
     "Store",
     "StoreOptions",
+    "ServingPublicationBundle",
     "TensorMeta",
     "TensorDictMaterializationResult",
     "TensorDict",
     "TransformPlacement",
     "Range",
+    "BindingRealizationEntry",
+    "BindingRealizationPlan",
+    "binding_realization_plan_to_proto",
+    "normalize_binding_realization_plan",
+    "build_binding_finalize_admission_facts",
+    "build_binding_finalize_publication_bundle",
+    "build_binding_finalize_publication_bundle_from_registered_artifact",
+    "build_serving_publication_bundle",
+    "build_serving_publication_bundle_from_registered_artifact",
+    "build_pure_transform_publication_bundle",
+    "build_pure_transform_publication_bundle_from_registered_artifact",
+    "build_pure_transform_publication_spec",
+    "build_pure_transform_serving_args",
+    "build_pure_transform_transform_spec",
+    "build_representation_publish_requirements",
+    "complete_binding_finalize_publication_bridge",
+    "complete_binding_finalize_publication_from_binding",
+    "complete_pure_transform_publication_bridge",
+    "complete_pure_transform_publication_from_binding",
+    "complete_canonical_representation_publish_attempt",
+    "complete_plan_repo_owned_representation_publish_attempt",
+    "complete_representation_publish_attempt",
+    "complete_repo_owned_representation_publish_attempt",
+    "complete_structural_representation_publish_attempt",
+    "compute_pure_transform_representation_contract_hash",
+    "build_serving_manifest_ref",
+    "coerce_serving_runtime_policy",
+    "compute_serving_tensor_schema_hash",
+    "count_canonical_serving_tensors",
+    "prepare_binding_finalize_serving_registration",
+    "prepare_serving_registration",
+    "prepare_pure_transform_serving_registration",
+    "parse_serving_manifest_ref",
     "TargetTensors",
     "PersistenceStatusResult",
     "PersistenceShardStatus",
@@ -2028,6 +4393,9 @@ __all__ = [
     "artifact_async",
     "create_binding",
     "from_disk",
+    "realize_into_binding",
+    "resolve_public_disk_source",
+    "list_artifact_layouts",
     "store",
     "shutdown_process_store",
     "BatchContext",
@@ -2037,7 +4405,14 @@ __all__ = [
     "put_async",
     "query_persistence_status",
     "persistence_operation",
+    "register_binding_finalize_publication_bridge",
+    "register_pure_transform_publication_bridge",
+    "start_canonical_representation_publish_attempt",
     "start_assembly_attempt",
+    "start_plan_repo_owned_representation_publish_attempt",
+    "start_representation_publish_attempt",
+    "start_repo_owned_representation_publish_attempt",
+    "start_structural_representation_publish_attempt",
     "register_view",
     "register_piece",
     "register_region",

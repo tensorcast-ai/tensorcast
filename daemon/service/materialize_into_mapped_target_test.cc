@@ -351,7 +351,7 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   req.mutable_selection()->set_artifact_id("artifact_mapped");
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
-  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);

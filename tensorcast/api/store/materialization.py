@@ -21,7 +21,12 @@ from tensorcast._c_ext import (
 )
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api import _region_cache as region_cache
-from tensorcast.api._config import GetArtifactOptions, RegionBackedMode
+from tensorcast.api._config import (
+    GetArtifactOptions,
+    RegionBackedMode,
+    RetrievalPolicy,
+    RetrievalPreference,
+)
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import (
     MaterializationPayload,
@@ -49,7 +54,6 @@ from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
     CanonicalIndexEntry,
-    FallbackOptions,
     RetryPolicy,
     SpanAttributeValue,
 )
@@ -113,6 +117,26 @@ def _build_source_policy(
     policy.allow_p2p = bool(allow_p2p)
     policy.allow_disk = bool(allow_disk)
     return policy
+
+
+def _resolve_source_policy_from_options(
+    options: GetArtifactOptions | None,
+) -> store_daemon_pb2.SourcePolicy:
+    retrieval = (
+        options.source
+        if options is not None and options.source is not None
+        else RetrievalPolicy()
+    )
+    preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+    if retrieval.preference is RetrievalPreference.PREFER_P2P:
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
+    elif retrieval.preference is RetrievalPreference.PREFER_DISK:
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+    return _build_source_policy(
+        preference=preference,
+        allow_p2p=bool(retrieval.allow_p2p),
+        allow_disk=bool(retrieval.allow_disk),
+    )
 
 
 def _selection_debug_fields(
@@ -264,38 +288,24 @@ def _build_region_layout_selection(
     )
 
 
-class FallbackResolver:
-    """Disk/P2P fallback utilities shared by materialization flows."""
-
-    def __init__(self, runtime: StoreRuntimeContext) -> None:
-        self._runtime = runtime
-
-    def ensure_supported(self, fallback: FallbackOptions | None) -> None:
-        if fallback and fallback.prefer not in {"auto", "local", "p2p", "disk"}:
-            raise ArtifactError(
-                f"Unknown fallback preference '{fallback.prefer}'",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
-
-    def record_event(
-        self,
-        *,
-        mode: str,
-        artifact_id: str | None,
-        key: str | None,
-        detail: Mapping[str, object],
-    ) -> None:
-        logger.info(
-            "store.materialize.source",
-            extra={
-                "tc.store.daemon": self._runtime.daemon_endpoint,
-                "tc.store.mode": mode,
-                "tc.store.artifact_id": artifact_id or "",
-                "tc.store.key": key or "",
-                "tc.store.detail": dict(detail),
-            },
-        )
+def _record_retrieval_event(
+    runtime: StoreRuntimeContext,
+    *,
+    mode: str,
+    artifact_id: str | None,
+    key: str | None,
+    detail: Mapping[str, object],
+) -> None:
+    logger.info(
+        "store.materialize.source",
+        extra={
+            "tc.store.daemon": runtime.daemon_endpoint,
+            "tc.store.mode": mode,
+            "tc.store.artifact_id": artifact_id or "",
+            "tc.store.key": key or "",
+            "tc.store.detail": dict(detail),
+        },
+    )
 
 
 class MaterializationPipeline:
@@ -310,7 +320,6 @@ class MaterializationPipeline:
     ) -> None:
         self._runtime = runtime
         self._views = views
-        self._fallback = FallbackResolver(runtime)
         self._executor = TrackedExecutor(runtime)
         self._materialize_fn = materialize_fn
 
@@ -328,7 +337,6 @@ class MaterializationPipeline:
         artifact_id: str | None = None,
         key: str | None = None,
         device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
         ctx: CallContext | None = None,
@@ -337,7 +345,6 @@ class MaterializationPipeline:
             artifact_id=artifact_id,
             key=key,
             device=device,
-            fallback=fallback,
             method="get",
             cancel_event=None,
             options_override=options,
@@ -363,7 +370,6 @@ class MaterializationPipeline:
         artifact_id: str | None,
         key: str | None,
         device: torch.device | str | None,
-        fallback: FallbackOptions | None,
         tensor_names: Sequence[str] | None,
         view_id: str | None = None,
         canonical_index_hint: bytes | None = None,
@@ -380,7 +386,6 @@ class MaterializationPipeline:
             artifact_id=artifact_id,
             key=key,
             device=device,
-            fallback=fallback,
             cancel_event=None,
             options_override=options,
             canonical_index_hint=canonical_index_hint,
@@ -429,7 +434,6 @@ class MaterializationPipeline:
             artifact_id=resolved.artifact_id,
             key=None,
             device=device,
-            fallback=None,
             cancel_event=None,
             options_override=options,
             view=resolved.view_spec,
@@ -447,7 +451,6 @@ class MaterializationPipeline:
         artifact_id: str | None = None,
         key: str | None = None,
         device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
     ) -> ArtifactFuture[dict[str, torch.Tensor]]:
@@ -463,7 +466,6 @@ class MaterializationPipeline:
                     artifact_id=artifact_id,
                     key=key,
                     device=device,
-                    fallback=fallback,
                     method="get",
                     cancel_event=cancel_event,
                     options_override=options,
@@ -521,7 +523,6 @@ class MaterializationPipeline:
         artifact_id: str | None = None,
         key: str | None = None,
         device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
         view_spec: common_pb2.ViewSpec | None = None,
@@ -530,17 +531,14 @@ class MaterializationPipeline:
         replica_uuid: str | None = None,
         ctx: CallContext | None = None,
     ) -> None:
-        options = self._apply_client_defaults(
-            self._build_get_options(fallback, options)
-        )
+        options = self._apply_client_defaults(self._build_get_options(options))
         start_time = time.monotonic()
         try:
             if self._maybe_region_backed_into(
                 target=target,
                 artifact_id=artifact_id,
                 key=key,
-                device_id=self._resolve_device_selector(device, fallback),
-                fallback=fallback,
+                device_id=self._resolve_device_selector(device),
                 options=options,
                 tensor_names=tensor_names,
                 view=view_spec,
@@ -574,7 +572,6 @@ class MaterializationPipeline:
             artifact_id=artifact_id,
             key=key,
             device=device,
-            fallback=fallback,
             method="get_into",
             cancel_event=None,
             options_override=options,
@@ -608,7 +605,6 @@ class MaterializationPipeline:
         artifact_id: str | None = None,
         key: str | None = None,
         device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
         view_spec: common_pb2.ViewSpec | None = None,
@@ -617,9 +613,7 @@ class MaterializationPipeline:
         replica_uuid: str | None = None,
         ctx: CallContext | None = None,
     ) -> ArtifactFuture[None]:
-        options = self._apply_client_defaults(
-            self._build_get_options(fallback, options)
-        )
+        options = self._apply_client_defaults(self._build_get_options(options))
         cancel_event = threading.Event()
         mat_lock = threading.Lock()
         mat_ref: dict[str, MaterializationPayload | None] = {"value": None}
@@ -640,8 +634,7 @@ class MaterializationPipeline:
                             target=target,
                             artifact_id=artifact_id,
                             key=key,
-                            device_id=self._resolve_device_selector(device, fallback),
-                            fallback=fallback,
+                            device_id=self._resolve_device_selector(device),
                             options=options,
                             tensor_names=tensor_names,
                             view=view_spec,
@@ -676,7 +669,6 @@ class MaterializationPipeline:
                     artifact_id=artifact_id,
                     key=key,
                     device=device,
-                    fallback=fallback,
                     method="get_into",
                     cancel_event=cancel_event,
                     options_override=options,
@@ -786,7 +778,6 @@ class MaterializationPipeline:
             artifact_id=resolved.artifact_id,
             key=None,
             device=device,
-            fallback=None,
             cancel_event=None,
             options_override=options,
             view=resolved.view_spec,
@@ -815,7 +806,6 @@ class MaterializationPipeline:
     def _resolve_identifiers(
         artifact_id: str | None,
         key: str | None,
-        fallback: FallbackOptions | None,
     ) -> tuple[str | None, str | None]:
         if artifact_id and key:
             raise ArtifactError(
@@ -834,7 +824,6 @@ class MaterializationPipeline:
     def _resolve_device_selector(
         self,
         selector: torch.device | str | None,
-        fallback: FallbackOptions | None,
         *,
         allow_cpu: bool = False,
     ) -> int:
@@ -973,10 +962,9 @@ class MaterializationPipeline:
 
     def _build_get_options(
         self,
-        fallback: FallbackOptions | None,
         options_override: GetArtifactOptions | None,
     ) -> GetArtifactOptions:
-        return options_override or GetArtifactOptions()
+        return options_override or self._runtime.opts.get or GetArtifactOptions()
 
     def _apply_client_defaults(self, options: GetArtifactOptions) -> GetArtifactOptions:
         from tensorcast.api._runtime import apply_client_load_defaults_if_present
@@ -1617,7 +1605,6 @@ class MaterializationPipeline:
         target: dict[str, torch.Tensor],
         artifact_id: str,
         device_id: int,
-        fallback: FallbackOptions | None,
         options: GetArtifactOptions,
         tensor_names: Sequence[str] | None,
         view: common_pb2.ViewSpec | None,
@@ -1650,29 +1637,7 @@ class MaterializationPipeline:
             )
             self._runtime.cache_artifact_index(cache_entry)
 
-        effective_prefer = fallback.prefer if fallback is not None else "auto"
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        if fallback is not None:
-            if fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-
-        allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if fallback is None else bool(fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+        source_policy = _resolve_source_policy_from_options(options)
 
         client = self._runtime.ensure_client()
         started = False
@@ -1717,7 +1682,6 @@ class MaterializationPipeline:
                     selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(device_id),
-                    preference=preference,
                     source_policy=source_policy,
                     placement=placement,
                 )
@@ -1772,7 +1736,6 @@ class MaterializationPipeline:
         artifact_id: str | None,
         key: str | None,
         device_id: int,
-        fallback: FallbackOptions | None,
         options: GetArtifactOptions,
         tensor_names: Sequence[str] | None,
         view: common_pb2.ViewSpec | None,
@@ -1811,7 +1774,6 @@ class MaterializationPipeline:
                 target=target,
                 artifact_id=artifact_id,
                 device_id=device_id,
-                fallback=fallback,
                 options=options,
                 tensor_names=tensor_names,
                 view=view,
@@ -1841,7 +1803,6 @@ class MaterializationPipeline:
         key: str | None,
         device_id: int,
         options: GetArtifactOptions,
-        fallback: FallbackOptions | None,
         cancel_event: threading.Event | None = None,
         ctx: CallContext | None,
         timeout_s: float | None,
@@ -1861,7 +1822,6 @@ class MaterializationPipeline:
             key=key,
             device_id=device_id,
             options=options,
-            fallback=fallback,
             cancel_event=cancel_event,
             ctx=ctx,
             timeout_s=timeout_s,
@@ -1884,7 +1844,6 @@ class MaterializationPipeline:
         key: str | None,
         device_id: int,
         options: GetArtifactOptions,
-        fallback: FallbackOptions | None,
         cancel_event: threading.Event | None = None,
         ctx: CallContext | None,
         timeout_s: float | None,
@@ -1904,28 +1863,12 @@ class MaterializationPipeline:
         canonical_hint: bytes | None = canonical_index_hint
         generation_hint: int | None = None
         cached_entry: ArtifactCacheEntry | None = None
-        fallback_opts = fallback
-        verify_checksums = (
-            bool(fallback_opts.verify_checksums) if fallback_opts else True
-        )
-        effective_prefer = fallback_opts.prefer if fallback_opts else "auto"
-        if (
-            fallback_opts
-            and fallback_opts.prefer_disk is not None
-            and effective_prefer == "auto"
-            and fallback_opts.prefer_disk
-        ):
-            effective_prefer = "disk"
-        allow_p2p = True if fallback_opts is None else bool(fallback_opts.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        requested_disk = effective_prefer == "disk"
-
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        if effective_prefer == "p2p":
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-        elif effective_prefer == "disk":
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+        verify_checksums = bool(options.verify_checksums)
+        retrieval_policy = options.source or RetrievalPolicy()
+        allow_p2p = bool(retrieval_policy.allow_p2p)
+        allow_disk = bool(retrieval_policy.allow_disk)
+        requested_disk = retrieval_policy.preference is RetrievalPreference.PREFER_DISK
+        source_policy = _resolve_source_policy_from_options(options)
         if resolved_artifact_id is None and key:
             with contextlib.suppress(Exception):
                 resolved_mapping = self._runtime.resolve_key_mapping_cached(key=key)
@@ -1938,15 +1881,6 @@ class MaterializationPipeline:
             if cached_entry is not None:
                 canonical_hint = cached_entry.canonical_index_bytes
                 generation_hint = cached_entry.generation
-
-        allow_disk = True if fallback_opts is None else bool(fallback_opts.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
 
         request_artifact_id = resolved_artifact_id or artifact_id
         view_subset_hash = (
@@ -1964,7 +1898,6 @@ class MaterializationPipeline:
             view_id=view_id,
             placement=placement,
             canonical_index_hint=canonical_hint,
-            preference=preference,
             source_policy=source_policy,
             tensor_names=tensor_names,
             verify_checksums=verify_checksums,
@@ -1976,26 +1909,26 @@ class MaterializationPipeline:
             timeout_s=timeout_s,
             lease_mode=lease_mode,
         )
-        if fallback_opts:
-            disallowed_sources: set[store_daemon_pb2.MaterializationSource] = set()
-            if not allow_p2p:
-                disallowed_sources.add(
-                    store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
-                )
-            if not allow_disk:
-                disallowed_sources.add(
-                    store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
-                )
-            if disallowed_sources and result.source in disallowed_sources:
-                source_label = _source_label(result.source) or "non-disk"
-                self._release_materialized(result, client)
-                raise ArtifactError(
-                    f"Materialization source {source_label} not allowed by fallback policy",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=False,
-                )
+        disallowed_sources: set[store_daemon_pb2.MaterializationSource] = set()
+        if not allow_p2p:
+            disallowed_sources.add(
+                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
+            )
+        if not allow_disk:
+            disallowed_sources.add(
+                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
+            )
+        if disallowed_sources and result.source in disallowed_sources:
+            source_label = _source_label(result.source) or "non-disk"
+            self._release_materialized(result, client)
+            raise ArtifactError(
+                f"Materialization source {source_label} not allowed by retrieval policy",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         source_label = _source_label(result.source) or ""
-        self._fallback.record_event(
+        _record_retrieval_event(
+            self._runtime,
             mode="disk" if requested_disk else "p2p",
             artifact_id=result.artifact_id or request_artifact_id,
             key=key,
@@ -2020,7 +1953,7 @@ class MaterializationPipeline:
                     "tc.store.disk_requested": bool(requested_disk),
                     "tc.store.allow_p2p": bool(allow_p2p),
                     "tc.store.allow_disk": bool(allow_disk),
-                    "tc.store.preference": effective_prefer,
+                    "tc.store.preference": str(retrieval_policy.preference.value),
                     "tc.store.source": source_label,
                 },
             )
@@ -2127,7 +2060,6 @@ class MaterializationPipeline:
         artifact_id: str | None,
         key: str | None,
         device: torch.device | str | None,
-        fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         options_override: GetArtifactOptions | None,
         view: common_pb2.ViewSpec | None = None,
@@ -2142,14 +2074,12 @@ class MaterializationPipeline:
         ctx: CallContext | None = None,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
     ) -> tuple[MaterializationPayload, int]:
-        wait_for_shared_disk_ms = (
-            int(options_override.wait_for_shared_disk_ms)
-            if options_override is not None
-            else 0
-        )
-        options_override_no_wait = options_override
-        if wait_for_shared_disk_ms > 0 and options_override is not None:
-            options_override_no_wait = options_override.model_copy(
+        options_snapshot = self._build_get_options(options_override)
+        retrieval_policy = options_snapshot.source or RetrievalPolicy()
+        wait_for_shared_disk_ms = int(options_snapshot.wait_for_shared_disk_ms)
+        options_override_no_wait = options_snapshot
+        if wait_for_shared_disk_ms > 0:
+            options_override_no_wait = options_snapshot.model_copy(
                 update={"wait_for_shared_disk_ms": 0}
             )
         wait_attempted = False
@@ -2218,8 +2148,9 @@ class MaterializationPipeline:
             "tc.store.method": method,
             "tc.store.lookup.by_key": bool(key),
             "tc.store.lookup.by_id": bool(artifact_id),
-            "tc.store.fallback.prefer": (fallback.prefer if fallback else "auto"),
-            "tc.store.fallback.allow_p2p": bool(fallback is None or fallback.allow_p2p),
+            "tc.store.preference": str(retrieval_policy.preference.value),
+            "tc.store.allow_p2p": bool(retrieval_policy.allow_p2p),
+            "tc.store.allow_disk": bool(retrieval_policy.allow_disk),
         }
         source_label: str | None = None
         selection_label: str | None = None
@@ -2282,7 +2213,6 @@ class MaterializationPipeline:
                         artifact_id=artifact_id,
                         key=key,
                         device=device,
-                        fallback=fallback,
                         cancel_event=cancel_event,
                         options_override=options_override_no_wait,
                         span=span,
@@ -2324,7 +2254,7 @@ class MaterializationPipeline:
                     span.set_attribute("tc.device.id", int(device_id))
                     span.set_attribute("tc.artifact.id", materialized.artifact_id)
                     span.set_attribute(
-                        "tc.store.fallback.used_disk", bool(materialized.disk_path)
+                        "tc.store.used_disk", bool(materialized.disk_path)
                     )
                     span.set_attribute("tc.store.source", source_label or "")
                     span.set_status(Status(StatusCode.OK))
@@ -2383,7 +2313,6 @@ class MaterializationPipeline:
                                     artifact_id=artifact_id,
                                     key=key,
                                     device=device,
-                                    fallback=fallback,
                                     cancel_event=cancel_event,
                                     options_override=options_override,
                                     span=span,
@@ -2443,7 +2372,7 @@ class MaterializationPipeline:
                                     "tc.artifact.id", materialized.artifact_id
                                 )
                                 span.set_attribute(
-                                    "tc.store.fallback.used_disk",
+                                    "tc.store.used_disk",
                                     bool(materialized.disk_path),
                                 )
                                 span.set_attribute(
@@ -2515,7 +2444,6 @@ class MaterializationPipeline:
         artifact_id: str | None,
         key: str | None,
         device: torch.device | str | None,
-        fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         options_override: GetArtifactOptions | None,
         ctx: CallContext | None,
@@ -2532,22 +2460,15 @@ class MaterializationPipeline:
         replica_uuid: str | None = None,
         allow_cpu: bool = False,
     ) -> tuple[MaterializationPayload, int]:
-        resolved_fallback = fallback or self._runtime.opts.fallback
-        artifact_id, key = self._resolve_identifiers(
-            artifact_id, key, resolved_fallback
-        )
-        self._fallback.ensure_supported(resolved_fallback)
-        device_id = self._resolve_device_selector(
-            device, resolved_fallback, allow_cpu=allow_cpu
-        )
-        options = self._build_get_options(resolved_fallback, options_override)
+        artifact_id, key = self._resolve_identifiers(artifact_id, key)
+        options = self._build_get_options(options_override)
+        device_id = self._resolve_device_selector(device, allow_cpu=allow_cpu)
         try:
             materialized = self._materialize(
                 artifact_id=artifact_id,
                 key=key,
                 device_id=device_id,
                 options=options,
-                fallback=resolved_fallback,
                 cancel_event=cancel_event,
                 span=span,
                 view=view,
@@ -2601,4 +2522,4 @@ class MaterializationPipeline:
             )
 
 
-__all__ = ["MaterializationPipeline", "FallbackResolver"]
+__all__ = ["MaterializationPipeline"]

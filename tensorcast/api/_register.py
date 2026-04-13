@@ -1745,6 +1745,10 @@ def _register_artifact_core(
                         with contextlib.suppress(Exception):
                             handle.abort(timeout_s=5.0)
                         raise
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            handle.abort(timeout_s=5.0)
+                        raise
             elif view.placement != store_daemon_pb2.TRANSFORM_PLACEMENT_CLIENT:
                 raise TensorCastError(
                     "Unknown transform placement for view registration"
@@ -1847,6 +1851,10 @@ def _register_artifact_core(
                         local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:
+                with contextlib.suppress(Exception):
+                    handle.abort(timeout_s=5.0)
+                raise
+            except Exception:
                 with contextlib.suppress(Exception):
                     handle.abort(timeout_s=5.0)
                 raise

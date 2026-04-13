@@ -23,9 +23,7 @@ struct CollectiveDiskLoadRequest {
   loading::ReplicaKey replica_key;
   loading::CollectiveLoadGroupHint group;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  std::string source_index_json;
-  std::string view_index_json;
-  std::optional<loading::VariantIdentity> variant_identity;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
   StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   void* gpu_ptr{nullptr};
   int device_id{-1};
@@ -48,8 +46,8 @@ struct CollectiveMappedTargetLoadRequest {
   std::string artifact_id;
   loading::CollectiveLoadGroupHint group;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  loader::ByteRangeMap map;
-  runtime::ingestion::strategy::MappedCopyContract mapped_copy_contract;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  loader::ByteRangeMap collective_lane_map;
   loading::IntoTargetLayout target_layout;
   int device_id{-1};
 };
@@ -62,9 +60,7 @@ struct CollectiveMappedTargetLoadResult {
 struct LocalBatchedDiskLoadRequest {
   loading::ReplicaKey replica_key;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  std::string source_index_json;
-  std::string view_index_json;
-  std::optional<loading::VariantIdentity> variant_identity;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
   StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   void* gpu_ptr{nullptr};
   int device_id{-1};

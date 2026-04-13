@@ -2,13 +2,19 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/contracts/representation_contract.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 
 namespace tensorcast::store::runtime::ingestion::strategy {
 
@@ -21,72 +27,6 @@ enum class SourceByteSpace : std::uint8_t {
   kView = 1,
 };
 
-enum class TensorJobDistribution : std::uint8_t {
-  kUnknown = 0,
-  kReplicated = 1,
-  kDim0Partitioned = 2,
-  kDim1Partitioned = 3,
-};
-
-struct TensorJobCandidate {
-  std::string src_name;
-  std::string dst_name;
-  TensorJobDistribution distribution{TensorJobDistribution::kUnknown};
-  std::vector<int64_t> src_shape;
-  std::vector<int64_t> src_stride;
-  std::vector<int64_t> dst_shape;
-  std::vector<int64_t> dst_stride;
-  std::string dtype;
-  uint64_t src_logical_offset{0};
-  uint64_t src_storage_offset{0};
-  uint64_t src_size_bytes{0};
-  uint64_t dst_base_offset{0};
-  uint64_t dst_size_bytes{0};
-  uint64_t element_size{0};
-  int32_t dim{-1};
-  int64_t src_start{0};
-  int64_t src_end{0};
-  int64_t dst_start{0};
-  int64_t dst_end{0};
-};
-
-struct ConcatSourceFragment {
-  std::string src_name;
-  std::vector<int64_t> src_shape;
-  std::vector<int64_t> src_stride;
-  std::string dtype;
-  uint64_t src_logical_offset{0};
-  uint64_t src_storage_offset{0};
-  uint64_t src_size_bytes{0};
-  uint64_t element_size{0};
-  int32_t dim{0};
-  int64_t src_start{0};
-  int64_t src_end{0};
-  uint64_t prefix_count{0};
-  uint64_t dst_block_offset_bytes{0};
-  uint64_t dst_block_stride_bytes{0};
-  uint64_t dst_block_bytes{0};
-};
-
-struct ConcatJobCandidate {
-  std::string dst_name;
-  std::vector<int64_t> dst_shape;
-  std::vector<int64_t> dst_stride;
-  std::string dtype;
-  uint64_t dst_base_offset{0};
-  uint64_t dst_size_bytes{0};
-  uint64_t element_size{0};
-  uint64_t prefix_count{0};
-  uint64_t dst_block_stride_bytes{0};
-  std::vector<ConcatSourceFragment> sources;
-};
-
-struct MappedCopyContract {
-  loader::ByteRangeMap fallback_map;
-  std::vector<TensorJobCandidate> tensor_job_candidates;
-  std::vector<ConcatJobCandidate> concat_job_candidates;
-};
-
 struct ResolvedSourceBinding {
   loading::MaterializationSource source{loading::MaterializationSource::kDisk};
   SourceByteSpace source_byte_space{SourceByteSpace::kCanonical};
@@ -95,13 +35,104 @@ struct ResolvedSourceBinding {
   bool collective_eligible{false};
 };
 
+struct SourceBoundExecutionPlanSummary {
+  std::string execution_plan_kind;
+  uint64_t planned_collective_candidate_bytes{0};
+  uint64_t planned_collective_admitted_bytes{0};
+  uint64_t planned_local_typed_bytes{0};
+  uint64_t planned_non_admitted_typed_bytes{0};
+  uint64_t planned_generic_residual_bytes{0};
+  uint64_t compatibility_lowered_bytes{0};
+  absl::flat_hash_map<std::string, uint64_t> planner_reject_reason_buckets;
+  std::string planner_version;
+  std::string plan_hash;
+  uint64_t estimated_collective_peak_temporary_bytes{0};
+  uint64_t estimated_collective_batch_bytes{0};
+  uint64_t estimated_collective_dedup_saving_bytes{0};
+  bool collective_lane_eligible{false};
+  bool strict_pure_collective_eligible{false};
+};
+
 struct ResolvedMaterializationPlan {
   std::string artifact_id;
   uint64_t generation{0};
   std::optional<loading::VariantIdentity> variant;
   std::string canonical_index_json;
   loading::IntoTargetLayout target_layout;
-  std::optional<MappedCopyContract> mapped_copy_contract;
+  std::optional<materialization::contracts::RepresentationTransformContract> representation_transform_contract;
+  std::optional<materialization::contracts::RepresentationWorkPlan> representation_work_plan;
+  std::optional<loader::ByteRangeMap> executor_private_generic_fallback_map;
+  std::optional<loader::ByteRangeMap> collective_compatibility_map;
+  std::optional<SourceBoundExecutionPlanSummary> source_bound_plan_summary;
+};
+
+enum class ExecutionStrategyExecutor : std::uint8_t {
+  kGenericByteRange = 0,
+  kTensorBatchedLocal = 1,
+  kOwnerFileCollective = 2,
+};
+
+inline std::string_view execution_strategy_executor_name(ExecutionStrategyExecutor executor) {
+  switch (executor) {
+    case ExecutionStrategyExecutor::kTensorBatchedLocal:
+      return "TensorBatchedLocalExecutor";
+    case ExecutionStrategyExecutor::kOwnerFileCollective:
+      return "OwnerFileCollectiveExecutor";
+    case ExecutionStrategyExecutor::kGenericByteRange:
+    default:
+      return "GenericByteRangeExecutor";
+  }
+}
+
+struct ExecutionStrategyCostEstimate {
+  uint64_t requested_source_bytes{0};
+  uint64_t unique_source_bytes{0};
+  uint64_t estimated_peak_temporary_bytes{0};
+  uint64_t estimated_batch_bytes{0};
+  double estimated_owner_skew_ratio{1.0};
+  uint64_t estimated_dedup_saving_bytes{0};
+};
+
+struct ExecutionStrategyCandidate {
+  ExecutionStrategyExecutor executor{ExecutionStrategyExecutor::kGenericByteRange};
+  bool eligible{false};
+  std::string reason;
+  ExecutionStrategyCostEstimate estimate;
+};
+
+struct ExecutionEnvironmentFacts {
+  loading::ExecutionTopologyContext execution_topology;
+  loading::MaterializationSource source{loading::MaterializationSource::kUnspecified};
+  bool target_is_gpu{false};
+  bool source_layout_available{false};
+  bool coordinator_available{false};
+  bool has_complete_metadata{false};
+  bool requires_server_transform{false};
+  bool allow_mixed_execution{false};
+  uint64_t requested_bytes{0};
+  uint64_t committed_bytes{0};
+  uint64_t residual_bytes{0};
+
+  uint64_t owner_file_collective_peak_bytes_budget{0};
+  uint64_t owner_file_collective_batch_bytes{0};
+  uint64_t owner_file_collective_dim1_staging_bytes{0};
+  uint32_t owner_file_collective_max_inflight_batches{0};
+  bool owner_file_collective_shared_fs_only{true};
+  double owner_file_collective_max_owner_skew_ratio{0.0};
+  uint64_t owner_file_collective_min_dedup_saving_bytes{0};
+  std::chrono::milliseconds owner_file_collective_group_assemble_timeout{0};
+  bool owner_file_collective_allow_mixed_residual{false};
+  uint32_t owner_file_collective_planner_cache_entries{0};
+};
+
+struct ExecutionStrategyPlan {
+  ExecutionStrategyExecutor executor{ExecutionStrategyExecutor::kGenericByteRange};
+  std::string selection_reason;
+  ExecutionEnvironmentFacts environment;
+  std::vector<ExecutionStrategyCandidate> candidates;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  std::optional<materialization::contracts::RepresentationWorkPlan> representation_work_plan;
+  std::optional<loading::CollectiveLoadGroupHint> collective_load_group;
 };
 
 struct ExecutionCommitReport {
@@ -109,10 +140,15 @@ struct ExecutionCommitReport {
   uint64_t requested_bytes{0};
   uint64_t committed_bytes{0};
   uint64_t fallback_bytes{0};
+  uint64_t residual_bytes{0};
+  uint64_t actual_collective_committed_bytes{0};
+  uint64_t actual_local_typed_bytes{0};
+  uint64_t actual_generic_backend_bytes{0};
   bool collective_handled{false};
   bool direct_write_supported{false};
   bool source_ordered{false};
   std::string dominant_executor;
+  std::string selection_reason;
 };
 
 } // namespace tensorcast::store::runtime::ingestion::strategy

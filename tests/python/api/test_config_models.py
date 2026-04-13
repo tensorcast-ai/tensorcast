@@ -8,6 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from tensorcast.api._config import (
+    CollectivePolicyMode,
+    ExecutionTopologyContext,
     GetArtifactOptions,
     OverflowPolicy,
     PlanType,
@@ -15,12 +17,15 @@ from tensorcast.api._config import (
     PolicyTier,
     RegisterArtifactOptions,
     RetentionPolicy,
+    RetrievalPolicy,
+    RetrievalPreset,
     StorePolicy,
     StorePolicyProfile,
     TierSpec,
 )
 from tensorcast.api._errors import InvalidPlan
-from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
+from tensorcast.api.context import CollectiveLoadGroup
+from tensorcast.api.store.types import StoreOptions
 
 
 def test_register_options_coerce_plan_string() -> None:
@@ -215,22 +220,47 @@ def test_get_options_reject_removed_prefer_field() -> None:
 
 def test_get_options_validate_wait_for_shared_disk_ms() -> None:
     assert GetArtifactOptions().wait_for_shared_disk_ms == 0
-    assert GetArtifactOptions(wait_for_shared_disk_ms=123).wait_for_shared_disk_ms == 123
+    assert (
+        GetArtifactOptions(wait_for_shared_disk_ms=123).wait_for_shared_disk_ms == 123
+    )
     assert GetArtifactOptions(wait_for_shared_disk_ms=None).wait_for_shared_disk_ms == 0
 
     with pytest.raises(ValidationError):
         GetArtifactOptions(wait_for_shared_disk_ms=-1)
 
 
-def test_store_options_parse_fallback_string() -> None:
-    opts = StoreOptions(fallback="disk")
-    assert isinstance(opts.fallback, FallbackOptions)
-    assert opts.fallback.prefer == "disk"
-    with pytest.raises(ArtifactError):
-        StoreOptions(fallback="disk:/tmp/cache")
+def test_get_options_parse_source_preset() -> None:
+    opts = GetArtifactOptions(source="disk_first")
+    assert opts.source is not None
+    assert opts.source.preference.value == "prefer_disk"
+    assert opts.source.allow_disk is True
 
 
-def test_fallback_parse_accepts_existing_instance() -> None:
-    instance = FallbackOptions(prefer="local")
-    parsed = FallbackOptions.parse(instance)
-    assert parsed is instance
+def test_get_options_parse_structured_source_and_topology() -> None:
+    opts = GetArtifactOptions(
+        source=RetrievalPolicy(preference="prefer_p2p", allow_disk=False),
+        execution_topology=ExecutionTopologyContext(
+            collective_group=CollectiveLoadGroup(
+                group_id="g",
+                world_size=2,
+                rank=1,
+            ),
+            collective_policy="allow_not_eligible_fallback",
+        ),
+    )
+    assert opts.source is not None
+    assert opts.source.preference.value == "prefer_p2p"
+    assert opts.execution_topology is not None
+    assert opts.execution_topology.collective_group is not None
+    assert opts.execution_topology.collective_group.group_id == "g"
+    assert (
+        opts.execution_topology.collective_policy
+        is CollectivePolicyMode.ALLOW_NOT_ELIGIBLE_FALLBACK
+    )
+
+
+def test_store_options_accept_execution_scoped_defaults() -> None:
+    opts = StoreOptions(get=GetArtifactOptions(source=RetrievalPreset.DISK_ONLY))
+    assert opts.get is not None
+    assert opts.get.source is not None
+    assert opts.get.source.allow_p2p is False

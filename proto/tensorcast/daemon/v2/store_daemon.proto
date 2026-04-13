@@ -6,6 +6,7 @@ import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
 import "tensorcast/operation/v1/operation.proto";
 import "tensorcast/plan/v1/plan.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 service StoreDaemonService {
   // First dependency-ready ingress slice:
@@ -22,6 +23,7 @@ service StoreDaemonService {
   rpc CommitBindingArtifact(CommitBindingArtifactRequest) returns (CommitBindingArtifactResponse) {}
   rpc BeginBindingUpdate(BeginBindingUpdateRequest) returns (BeginBindingUpdateResponse) {}
   rpc SealBinding(SealBindingRequest) returns (SealBindingResponse) {}
+  rpc PromoteBindingCurrentValue(PromoteBindingCurrentValueRequest) returns (PromoteBindingCurrentValueResponse) {}
   rpc RefillOwnedBinding(RefillOwnedBindingRequest) returns (RefillOwnedBindingResponse) {}
   rpc CloseOwnedBinding(CloseOwnedBindingRequest) returns (CloseOwnedBindingResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
@@ -93,6 +95,7 @@ service StoreDaemonService {
   // ========== Key mapping and publish ==========
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
+  rpc ResolvePublicDiskSource(ResolvePublicDiskSourceRequest) returns (ResolvePublicDiskSourceResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
@@ -109,6 +112,8 @@ service StoreDaemonService {
   rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+  // List layout ids currently attached to an artifact.
+  rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
   // Create a fresh assembly workspace bound to a layout contract.
   rpc StartAssemblyAttempt(StartAssemblyAttemptRequest) returns (StartAssemblyAttemptResponse) {}
   // Explicitly transition an assembly attempt from open to sealing.
@@ -183,17 +188,23 @@ message GetServerConfigResponse {
   bool cpu_shared_memory_enabled = 7;
   // Single source of truth for daemon startup visibility across CLI, SDK, and tests.
   DaemonStartupPhase startup_phase = 8;
+  // Bitset of SourceBoundCapabilityFlag values exposed through GetServerConfig
+  // so downstream integrations can gate on stable source-bound contract slices.
+  uint64 source_bound_capability_flags = 9;
+  // Source-bound contract schema/version exposed independently from capability
+  // readiness bits so clients can reason about additive evolution.
+  uint32 source_bound_contract_version = 10;
   // 0 disables batch-native payload transport; 1 enables grpc_chunk_ref v1;
   // 2 enables communicator_source v2 with grpc_chunk_ref fallback.
-  uint32 batch_transport_protocol_version = 9;
+  uint32 batch_transport_protocol_version = 11;
   // True when grpc_chunk_ref is served for batch-native payload transport.
-  bool batch_payload_grpc_chunk_ref_enabled = 10;
+  bool batch_payload_grpc_chunk_ref_enabled = 12;
   // Sender-side slab packing ceiling for one batch transport object.
-  uint64 max_batch_payload_bytes = 11;
+  uint64 max_batch_payload_bytes = 13;
   // True when communicator_source is served for batch-native payload transport.
-  bool batch_payload_communicator_source_enabled = 12;
+  bool batch_payload_communicator_source_enabled = 14;
   // True when host-memory export is enabled for communicator_source packs.
-  bool batch_payload_host_memory_export_enabled = 13;
+  bool batch_payload_host_memory_export_enabled = 15;
 }
 
 message RegisterRequest {
@@ -238,6 +249,13 @@ message SourcePolicy {
   SourcePreference preference = 1;
   optional bool allow_p2p = 2;
   optional bool allow_disk = 3;
+}
+
+message ServingArtifactRuntimePolicy {
+  bool require_manifest = 1;
+  string serving_manifest_ref = 2;
+  string expected_representation_contract_hash = 3;
+  string expected_serving_build_digest = 4;
 }
 
 // Actual source used to serve a materialization request.
@@ -491,8 +509,8 @@ message ReplicaOperationStatus {
 
 message MaterializeReplicaRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
-  reserved 2;
-  reserved "disk_fallback";
+  reserved 2, 9;
+  reserved "disk_fallback", "preference";
 
   string replica_uuid = 3;
   string device_uuid = 4;
@@ -501,7 +519,6 @@ message MaterializeReplicaRequest {
   int32 pid = 7; // Process ID for reference tracking
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
 
-  SourcePreference preference = 9;
   SourcePolicy source_policy = 14;
   LeaseMode lease_mode = 15;
 
@@ -520,12 +537,95 @@ message MaterializeReplicaRequest {
   optional bool need_view_data_hash = 18;
   // Explicit collective group hint for same-host coordinated disk->GPU loads.
   optional CollectiveLoadGroup collective_load_group = 19;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 20;
 }
 
 message CollectiveLoadGroup {
   string group_id = 1;
   uint32 world_size = 2;
   uint32 rank = 3;
+}
+
+enum SourceLocality {
+  SOURCE_LOCALITY_UNSPECIFIED = 0;
+  SOURCE_LOCALITY_AUTO = 1;
+  SOURCE_LOCALITY_HOST_LOCAL = 2;
+  SOURCE_LOCALITY_SHARED_SOURCE = 3;
+}
+
+message SourceExecutionTopology {
+  CollectiveLoadGroup collective_load_group = 1;
+  SourceLocality source_locality = 2;
+  optional string source_sharing_domain = 3;
+}
+
+enum CollectivePolicy {
+  COLLECTIVE_POLICY_UNSPECIFIED = 0;
+  COLLECTIVE_POLICY_REQUIRE_COLLECTIVE = 1;
+  COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK = 2;
+  COLLECTIVE_POLICY_DISABLE_COLLECTIVE = 3;
+}
+
+enum CollectiveFailureClass {
+  COLLECTIVE_FAILURE_CLASS_UNSPECIFIED = 0;
+  COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE = 1;
+  COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED = 2;
+}
+
+enum HashLocation {
+  HASH_LOCATION_UNSPECIFIED = 0;
+  HASH_LOCATION_NONE = 1;
+  HASH_LOCATION_SEAL = 2;
+  HASH_LOCATION_BINDING_CLOSEOUT = 3;
+}
+
+enum IdentityMintStrategy {
+  IDENTITY_MINT_STRATEGY_UNSPECIFIED = 0;
+  IDENTITY_MINT_STRATEGY_NOT_APPLICABLE = 1;
+  IDENTITY_MINT_STRATEGY_SEAL_MINT = 2;
+  IDENTITY_MINT_STRATEGY_SEAL_REUSE = 3;
+  IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT = 4;
+}
+
+message ExecutionDiagnostics {
+  bool collective_requested = 1;
+  bool collective_acknowledged = 2;
+  bool collective_used = 3;
+  CollectivePolicy collective_policy = 4;
+  CollectiveFailureClass collective_failure_class = 5;
+  string dominant_executor = 6;
+  bool direct_write_supported = 7;
+  uint64 fallback_bytes = 8;
+  uint64 residual_bytes = 9;
+  uint32 hash_rounds = 10;
+  HashLocation hash_location = 11;
+  IdentityMintStrategy identity_mint_strategy = 12;
+  uint64 actual_collective_committed_bytes = 13;
+  uint64 actual_local_typed_bytes = 14;
+  uint64 actual_generic_backend_bytes = 15;
+}
+
+message SourceBoundPlanDiagnostics {
+  string execution_plan_kind = 1;
+  uint64 planned_collective_candidate_bytes = 2;
+  uint64 planned_collective_admitted_bytes = 3;
+  uint64 planned_local_typed_bytes = 4;
+  uint64 planned_non_admitted_typed_bytes = 5;
+  uint64 planned_generic_residual_bytes = 6;
+  uint64 compatibility_lowered_bytes = 7;
+  map<string, uint64> planner_reject_reason_buckets = 8;
+  string planner_version = 9;
+  string plan_hash = 10;
+  uint64 estimated_collective_peak_temporary_bytes = 11;
+  uint64 estimated_collective_batch_bytes = 12;
+  uint64 estimated_collective_dedup_saving_bytes = 13;
+}
+
+enum SourceBoundCapabilityFlag {
+  SOURCE_BOUND_CAPABILITY_FLAG_UNSPECIFIED = 0;
+  SOURCE_BOUND_CAPABILITY_FLAG_FIRST_CLASS_COLLECTIVE_INGRESS = 1;
+  SOURCE_BOUND_CAPABILITY_FLAG_TYPED_EXECUTION_DIAGNOSTICS = 2;
+  SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT = 4;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
@@ -573,6 +673,41 @@ message CopyPlan {
   repeated CopyPlanEntry entries = 2;
 }
 
+message PublicDiskSourceHandle {
+  string path = 1;
+  bytes canonical_index_bytes = 2;
+  string artifact_id = 3;
+  uint64 generation = 4;
+  bool verify_checksums = 5;
+}
+
+message BindingRealizationRange {
+  int32 dim = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+enum BindingRealizationOpKind {
+  BINDING_REALIZATION_OP_KIND_UNSPECIFIED = 0;
+  BINDING_REALIZATION_OP_KIND_COPY = 1;
+  BINDING_REALIZATION_OP_KIND_CONST_FILL = 2;
+  BINDING_REALIZATION_OP_KIND_SCALAR_FILL = 3;
+}
+
+message BindingRealizationEntry {
+  BindingRealizationOpKind op_kind = 1;
+  string source_name = 2;
+  repeated BindingRealizationRange source_ranges = 3;
+  string dst_name = 4;
+  repeated BindingRealizationRange dst_ranges = 5;
+  bytes fill_value = 6;
+}
+
+message BindingRealizationPlan {
+  uint32 version = 1;
+  repeated BindingRealizationEntry entries = 2;
+}
+
 message MappedTensorSpec {
   string name = 1;
   repeated int64 shape = 2;
@@ -584,14 +719,13 @@ message MappedTensorSpec {
 
 message MaterializeIntoMappedTargetRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
-  reserved 3;
-  reserved "disk_fallback";
+  reserved 3, 7;
+  reserved "disk_fallback", "preference";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
   string device_uuid = 6;
 
-  SourcePreference preference = 7;
   SourcePolicy source_policy = 12;
 
   CopyPlan copy_plan = 8;
@@ -602,18 +736,18 @@ message MaterializeIntoMappedTargetRequest {
   reserved "key", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 13;
 }
 
 message MaterializeIntoTargetRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
-  reserved 3;
-  reserved "disk_fallback";
+  reserved 3, 7;
+  reserved "disk_fallback", "preference";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
   string device_uuid = 6;
 
-  SourcePreference preference = 7;
   SourcePolicy source_policy = 12;
 
   optional string operation_id = 10;
@@ -621,6 +755,7 @@ message MaterializeIntoTargetRequest {
   reserved "key", "tensor_names", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 13;
 }
 
 message MaterializeIntoTargetResponse {
@@ -1155,13 +1290,15 @@ message CreateOwnedBindingRequest {
   bytes target_index_bytes = 3;
   int32 pid = 4;
   string device_uuid = 5;
-  SourcePreference preference = 6;
+  reserved 6;
+  reserved "preference";
   SourcePolicy source_policy = 7;
   optional string operation_id = 8;
   TransformPlacement placement = 9;
   CopyPlan copy_plan = 10;
   repeated MappedTensorSpec dst_tensors = 11;
   string binding_layout_id = 12;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 13;
 }
 
 message CreateOwnedBindingResponse {
@@ -1208,13 +1345,33 @@ message SealBindingResponse {
   BindingValue current_value = 2;
 }
 
+message PromoteBindingCurrentValueRequest {
+  string binding_id = 1;
+  string binding_value_id = 2;
+}
+
+message PromoteBindingCurrentValueResponse {
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 1;
+  BindingState state = 2;
+  BindingValue current_value = 3;
+  bool existed = 4;
+  ExecutionDiagnostics execution_diagnostics = 5;
+}
+
 message RefillOwnedBindingRequest {
   string binding_id = 1;
   string artifact_id = 2;
-  SourcePreference preference = 3;
+  reserved 3;
+  reserved "preference";
   SourcePolicy source_policy = 4;
   optional string operation_id = 5;
   TransformPlacement placement = 6;
+  ServingArtifactRuntimePolicy serving_artifact_policy = 7;
+  tensorcast.common.v1.ArtifactSelection source_selection = 8;
+  BindingRealizationPlan realization_plan = 9;
+  PublicDiskSourceHandle public_disk_source = 10;
+  SourceExecutionTopology execution_topology = 11;
+  CollectivePolicy collective_policy = 12;
 }
 
 message RefillOwnedBindingResponse {
@@ -1224,6 +1381,8 @@ message RefillOwnedBindingResponse {
   tensorcast.common.v1.ArtifactSelection resolved_selection = 4;
   BindingState state = 5;
   BindingValue current_value = 6;
+  ExecutionDiagnostics execution_diagnostics = 7;
+  SourceBoundPlanDiagnostics source_bound_plan_diagnostics = 8;
 }
 
 message CloseOwnedBindingRequest {
@@ -1862,6 +2021,15 @@ message ImportArtifactFromPathResponse {
   ImportArtifactState import_state = 4;
 }
 
+message ResolvePublicDiskSourceRequest {
+  string path = 1;
+  bool verify_checksums = 2;
+}
+
+message ResolvePublicDiskSourceResponse {
+  PublicDiskSourceHandle source = 1;
+}
+
 enum ImportArtifactPhase {
   IMPORT_ARTIFACT_PHASE_UNSPECIFIED = 0;
   IMPORT_ARTIFACT_PHASE_PREPARE = 1;
@@ -2045,6 +2213,13 @@ message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
 }
 
+message ListArtifactLayoutsRequest {
+  string artifact_id = 1;
+}
+message ListArtifactLayoutsResponse {
+  repeated string layout_ids = 1;
+}
+
 message AssemblyAttemptRef {
   string attempt_id = 1;
   string workspace_assembly_id = 2;
@@ -2059,6 +2234,7 @@ message StartAssemblyAttemptRequest {
   AssemblyRequirementSetRef requirements = 2;
   AssemblyReadinessPolicy readiness_policy = 3;
   AssemblyCloseoutContract closeout_contract = 4;
+  tensorcast.publication.v1.RepresentationPublishSpec representation_publish_spec = 5;
 }
 
 message StartAssemblyAttemptResponse {
@@ -2104,6 +2280,15 @@ message SealAssemblyResponse {
   bool already_sealed = 3;
 }
 
+message RepresentationPublishContract {
+  string serving_artifact_id = 1;
+  string serving_manifest_ref = 2;
+  string representation_contract_hash = 3;
+  string serving_build_digest = 4;
+  string serving_build_digest_version = 5;
+  tensorcast.publication.v1.ServingPublicationSubject subject = 6;
+}
+
 message SealAssemblyResult {
   tensorcast.common.v1.ArtifactDescriptor artifact = 1;
   string representation_contract_hash = 2;
@@ -2111,6 +2296,8 @@ message SealAssemblyResult {
   string source_version_key = 4;
   string serving_version_key = 5;
   string serving_manifest_ref = 6;
+  string serving_build_digest = 7;
+  ExecutionDiagnostics serving_execution_diagnostics = 8;
 }
 
 message StartSealAssemblyRequest {
@@ -2179,6 +2366,7 @@ message AssemblyCloseoutContract {
   string serving_version_key = 4;
   string serving_artifact_id = 5;
   string serving_manifest_ref = 6;
+  RepresentationPublishContract representation_publish_contract = 7;
 }
 
 message AssemblyAttemptIntent {

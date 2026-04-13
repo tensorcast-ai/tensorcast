@@ -18,8 +18,14 @@ from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.retry import build_retry_policies
-from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
+from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import (
+    BuilderMode,
+    ServingArtifactManifest,
+    ServingRuntimePolicy,
+    build_serving_manifest_ref,
+)
 
 
 def _build_payload(
@@ -65,10 +71,12 @@ class _ClientStub:
         *,
         disk_generation: int | None = None,
         disk_artifact_id: str | None = None,
+        startup_in_progress_failures: int = 0,
     ) -> None:
         self.canonical_index_bytes = canonical_index_bytes
         self.disk_generation = disk_generation
         self.disk_artifact_id = disk_artifact_id
+        self.startup_in_progress_failures = startup_in_progress_failures
         self.unloaded: list[tuple[str, str]] = []
         self.get_index_calls = 0
         self.resolve_calls: list[tuple[str, bool]] = []
@@ -93,6 +101,12 @@ class _ClientStub:
     def import_artifact_from_path_stream_v2(
         self, *, path: str, verify_checksums: bool = True
     ):
+        if self.startup_in_progress_failures > 0:
+            self.startup_in_progress_failures -= 1
+            raise RuntimeError(
+                "Local StoreDaemon (daemon) is not available. Msg: "
+                "daemon startup still in progress: prewarming"
+            )
         resp = self.import_artifact_from_path_v2(
             path=path,
             verify_checksums=verify_checksums,
@@ -124,7 +138,7 @@ class _RuntimeStub:
         self._artifact_cache = ArtifactCache(
             daemon_endpoint="daemon", ttl_seconds=10, max_entries=8
         )
-        self._key_cache: dict[str, str | None] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
         self._client = client
 
     def ensure_client(self) -> _ClientStub:
@@ -144,12 +158,18 @@ class _RuntimeStub:
     def resolve_key_mapping_cached(
         self, *, key: str
     ) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key), None
+        return self._key_cache.get(key, (None, None))
 
     def cache_key_mapping(
-        self, key: str, *, artifact_id: str | None, ttl_override=None
+        self,
+        key: str,
+        *,
+        artifact_id: str | None,
+        disk_path: str | None = None,
+        ttl_override=None,
     ) -> None:
-        self._key_cache[key] = artifact_id
+        del ttl_override
+        self._key_cache[key] = (artifact_id, disk_path)
 
 
 class _PipelineStub:
@@ -186,7 +206,6 @@ class _PipelineStub:
         artifact_id: str | None,
         key: str | None,
         device,
-        fallback,
         options=None,
         tensor_names: Sequence[str] | None = None,
         view_spec=None,
@@ -273,7 +292,7 @@ def test_subset_derives_view_metadata_eagerly():
     )
     assert derived._view_metadata.view_index_bytes
     assert derived._view_metadata.view_data_hash is None
-    assert derived._view_metadata.view_id == ""
+    assert derived._view_metadata.view_id
 
 
 def test_selection_reuses_eager_view_metadata():
@@ -338,6 +357,55 @@ def test_tensor_dict_with_diagnostics_reports_source_and_bytes():
     assert diagnostics.materialize_sec >= 0.0
     assert diagnostics.tensor_bind_sec >= 0.0
     assert diagnostics.total_sec >= diagnostics.materialize_sec
+
+
+def test_bind_coerces_serving_manifest_into_runtime_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_bind_owned(self, **kwargs):
+        del self
+        captured.update(kwargs)
+        return "binding"
+
+    monkeypatch.setattr(Artifact, "_bind_owned", _fake_bind_owned)
+
+    manifest = ServingArtifactManifest(
+        framework_name="torch",
+        adapter_version="adapter-v1",
+        serving_abi_version="abi-v1",
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+        tensor_schema_hash="bafktensorschema",
+        canonical_tensor_count=1,
+        serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        build_pipeline_version="pipeline-v1",
+    )
+
+    result = artifact.bind(
+        device="cuda:0",
+        serving_runtime_policy=manifest,
+    )
+
+    assert result == "binding"
+    assert captured["device"] == torch.device("cuda:0")
+    assert captured["serving_runtime_policy"] == ServingRuntimePolicy(
+        require_manifest=True,
+        serving_manifest_ref="tensor:__alt_manifest__.json",
+        expected_representation_contract_hash="bafkrepresentation",
+        expected_serving_build_digest="bafkbuilddigest",
+    )
 
 
 def test_tensor_into_materializes_subset_only():
@@ -453,7 +521,7 @@ def test_to_dict_round_trip_preserves_metadata():
     assert runtime._client.get_index_calls == 0
 
 
-def test_with_fallback_handles_multiple_identifiers():
+def test_subset_clone_handles_multiple_identifiers():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
     runtime.cache_key_mapping("mapped", artifact_id="aid")
@@ -462,7 +530,7 @@ def test_with_fallback_handles_multiple_identifiers():
     artifact = Artifact(store_ref=_store_ref(store), key="mapped")
 
     assert artifact.artifact_id == "aid"
-    clone = artifact.with_fallback(FallbackOptions(prefer="disk", allow_p2p=False))
+    clone = artifact.subset(["foo"])
 
     assert clone.artifact_id == "aid"
     assert clone.key == "mapped"
@@ -543,6 +611,27 @@ def test_from_disk_progress_mode_uses_stream_resolution():
     artifact = store.from_disk("/tmp/artifact", show_progress=True)
 
     assert artifact.artifact_id == "mi2:idx:data"
+    assert client.resolve_calls == [("/tmp/artifact", True)]
+
+
+def test_from_disk_retries_daemon_startup_in_progress(monkeypatch):
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=7,
+        disk_artifact_id="mi2:idx:data",
+        startup_in_progress_failures=2,
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    artifact = store.from_disk("/tmp/artifact")
+
+    assert artifact.artifact_id == "mi2:idx:data"
+    assert len(sleeps) == 2
     assert client.resolve_calls == [("/tmp/artifact", True)]
 
 

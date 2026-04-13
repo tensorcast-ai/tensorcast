@@ -485,6 +485,38 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   if (ms->diagnostics_verbosity() == tcfg::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_UNSPECIFIED) {
     ms->set_diagnostics_verbosity(tcfg::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_BASIC);
   }
+  if (ms->owner_file_collective_peak_bytes_budget() == 0) {
+    ms->set_owner_file_collective_peak_bytes_budget(8ULL * 1024ULL * 1024ULL * 1024ULL);
+  }
+  if (ms->owner_file_collective_batch_bytes() == 0) {
+    ms->set_owner_file_collective_batch_bytes(512ULL * 1024ULL * 1024ULL);
+  }
+  if (ms->owner_file_collective_dim1_staging_bytes() == 0) {
+    ms->set_owner_file_collective_dim1_staging_bytes(256ULL * 1024ULL * 1024ULL);
+  }
+  if (ms->owner_file_collective_max_inflight_batches() == 0) {
+    ms->set_owner_file_collective_max_inflight_batches(1);
+  }
+  if (!ms->has_owner_file_collective_shared_fs_only()) {
+    ms->set_owner_file_collective_shared_fs_only(true);
+  }
+  if (ms->owner_file_collective_max_owner_skew_ratio() <= 0.0) {
+    ms->set_owner_file_collective_max_owner_skew_ratio(1.5);
+  }
+  if (ms->owner_file_collective_min_dedup_saving_bytes() == 0) {
+    ms->set_owner_file_collective_min_dedup_saving_bytes(64ULL * 1024ULL * 1024ULL);
+  }
+  if (!ms->has_owner_file_collective_group_assemble_timeout()) {
+    auto* d = ms->mutable_owner_file_collective_group_assemble_timeout();
+    d->set_seconds(2);
+    d->set_nanos(0);
+  }
+  if (!ms->has_owner_file_collective_allow_mixed_residual()) {
+    ms->set_owner_file_collective_allow_mixed_residual(false);
+  }
+  if (ms->owner_file_collective_planner_cache_entries() == 0) {
+    ms->set_owner_file_collective_planner_cache_entries(256);
+  }
 
   if (cfg->has_pinned_memory()) {
     auto* pm = cfg->mutable_pinned_memory();

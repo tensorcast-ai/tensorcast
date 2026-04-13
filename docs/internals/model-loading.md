@@ -25,15 +25,24 @@ resolution and executor choice.
   - `ArtifactSelection`
   - resolved `view_id` / `ViewPlan`
   - target layout
-  - mapped copy contract
+  - `RepresentationTransformContract`
 - the common runtime then lowers that semantic plan plus source facts into
   executor strategy inside `MaterializationFacade`
 - internal contracts for this seam live in
   `core/store/runtime/ingestion/materialization_strategy_types.h`:
   - `ResolvedMaterializationPlan`
-  - `MappedCopyContract`
+  - `RepresentationTransformContract`
+  - `RepresentationWorkPlan`
   - `ResolvedSourceBinding`
   - `ExecutionCommitReport`
+
+Current rule:
+
+- residual generic byte-range work must be explicit in `RepresentationWorkPlan`,
+- executors do not rediscover semantic truth from source/view metadata during
+  execution,
+- executors must not implicitly reconstruct fallback work after a partial fast
+  path attempt.
 
 ## System Components
 
@@ -149,10 +158,66 @@ region-backed data plane:
 - `Artifact.subset(...).view(...).bind(...)` captures a rank-local source
   selection once; later `binding.swap("model:v2")` reuses that same selection
   against the new full artifact version.
-- `bind_into(..., mapping=copy_plan)` captures a copy plan for mapped binding;
-  later `binding.swap(...)` reuses the same plan without Python copy loops.
+- `bind_into(..., mapping=copy_plan)` captures mapped binding intent once; the
+  daemon lowers it into the shared `RepresentationTransformContract` family,
+  and later `binding.swap(...)` reuses that same lowered semantic shape without
+  Python copy loops.
 - `binding.publish_replica()` or `binding.swap(..., publish=True)` publishes the
   current bound layout once the local overwrite succeeds.
+
+This publish path is the ordinary artifact-backed replica path from `0084`. It
+is not the serving-artifact publication or `representation_publish` closeout
+path used by source-to-serving builder work.
+
+## Serving-Artifact Runtime Preflight
+
+When runtime consumes a serving artifact, TensorCast now performs a serving
+artifact preflight before accepting it into the steady-state loading path.
+
+Phase-1 rules:
+
+- the phase-1 manifest carrier is
+  `tensor:__tensorcast_meta__.manifest_json`
+- artifacts without that reserved manifest tensor continue to load as ordinary
+  non-serving artifacts
+- strict serving runtime is now explicit rather than inferred from every
+  generic materialization request:
+  `PublishedModelVersion.require_serving_runtime_policy()`,
+  `RepresentationPublishContract.to_runtime_policy()`, and
+  `ServingArtifactManifest.to_runtime_policy()` produce a
+  `ServingRuntimePolicy` that callers can pass into
+  `artifact.bind(...)`, `artifact.bind_into(...)`, and `binding.swap(...)`
+- artifacts with that reserved manifest tensor must pass:
+  - manifest JSON parseability
+  - `schema_version == 1`
+  - `artifact_kind == "serving"`
+  - non-empty `framework_name`, `adapter_version`,
+    `serving_abi_version`, `representation_contract_hash`,
+    `serving_build_digest`, `tensor_schema_hash`, `builder_mode`, and
+    `build_pipeline_version`
+  - `serving_manifest_ref` agreement between the manifest and the runtime
+    policy when strict serving runtime is requested
+  - canonical tensor count equality between manifest and canonical index
+  - tensor schema hash equality between manifest and the canonical index with
+    the reserved manifest tensor excluded
+
+Current daemon coverage:
+
+- `MaterializeReplica`
+- `MaterializeIntoTarget`
+- source-bound owned-binding create/refill paths
+
+This keeps serving-artifact publication-time validation and runtime acceptance
+validation on the same contract, so runtime no longer silently accepts a
+manifest-bearing serving artifact whose self-description is inconsistent with
+its canonical tensor layout.
+
+Important distinction:
+
+- generic artifact load remains fail-open for ordinary non-serving artifacts
+- strict serving runtime is opt-in through `ServingRuntimePolicy`
+- this lets serving startup and reload fail closed without turning the whole
+  artifact runtime into a serving-only surface
 
 ### Lease-In-Place Fast Path & Use Leases
 
@@ -219,8 +284,8 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
   `artifact.tensor_dict_into(...)` or the convenience `artifact.tensor_into(name, target, ...)`.
   The Store validates shapes/strides/device before mutating buffers, zero-fills PAD segments to keep
   tensors consistent on failure, and unloads daemon-backed replicas immediately after copy/validation.
-- `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
-  policy flags across call sites.
+- `StoreOptions.get` and per-call `GetArtifactOptions` carry execution-scoped retrieval
+  policy (`source`) and topology hints without sprinkling ad-hoc flags across call sites.
 - Low-level lease feeding and commit orchestration are handled internally by the Store,
   so most integrations rely entirely on the functional facade and its cancellation hooks.
 

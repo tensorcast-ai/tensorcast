@@ -249,6 +249,53 @@ TEST_CASE("ExecutePlan forwards routed instance plans to node agent", "[daemon][
   REQUIRE(node_agent.service->last_request.plan().steps(0).target().target_id() == "inst-1");
 }
 
+TEST_CASE("ExecutePlan preserves transform publication spec when routing to node agent", "[daemon][ingress][plan]") {
+  auto node_agent = start_node_agent_server();
+  auto directory_client = std::make_shared<DirectoryClient>();
+  directory_client->connected = true;
+  directory_client->instances = {
+      tensorcast::store::components::ActiveInstanceInfo{
+          .instance_id = "inst-1",
+          .daemon_id = "daemon-agent",
+          .execution_endpoint = "127.0.0.1:" + std::to_string(node_agent.port),
+          .execution_host_kind = "node_agent_grpc",
+      },
+  };
+
+  auto harness = make_harness(directory_client);
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::ExecutePlanRequest request;
+  request.set_execution_class(tensorcast::daemon::v2::PLAN_EXECUTION_CLASS_TERMINAL_ONLY);
+  request.mutable_plan()->mutable_context()->set_request_id("req-instance-transform-publication");
+  auto* step = request.mutable_plan()->add_steps();
+  step->set_step_id("instance");
+  step->mutable_target()->set_target_type(tensorcast::plan::v1::TARGET_TYPE_INSTANCE);
+  step->mutable_target()->set_target_id("inst-1");
+  auto* action = step->mutable_action()->mutable_transform_register();
+  action->mutable_selection()->CopyFrom(make_selection());
+  action->mutable_spec()->set_name("identity.v1");
+  action->mutable_spec()->mutable_publication_spec()->mutable_build_intent()->set_builder_mode(
+      tensorcast::publication::v1::BUILDER_MODE_PURE_TRANSFORM);
+  action->mutable_spec()->mutable_publication_spec()->mutable_build_intent()->set_framework_name("torch");
+  action->mutable_spec()->mutable_publication_spec()->mutable_build_intent()->set_adapter_version("adapter-v1");
+  action->mutable_spec()->mutable_publication_spec()->mutable_build_intent()->set_serving_abi_version("abi-v1");
+  action->mutable_spec()->mutable_publication_spec()->mutable_build_intent()->set_build_pipeline_version("pipeline-v1");
+  action->mutable_spec()->mutable_publication_spec()->set_serving_version_key("models/demo/serving/v1");
+  action->set_out_key("models/demo/serving/v1");
+
+  tensorcast::daemon::v2::ExecutePlanResponse response;
+  grpc::ServerContext ctx;
+  const auto status = svc.ExecutePlan(&ctx, &request, &response);
+  REQUIRE(status.ok());
+  REQUIRE(response.ok());
+  REQUIRE(node_agent.service->last_request.plan().steps_size() == 1);
+  const auto& forwarded = node_agent.service->last_request.plan().steps(0).action().transform_register().spec();
+  REQUIRE(forwarded.has_publication_spec());
+  REQUIRE(forwarded.publication_spec().build_intent().framework_name() == "torch");
+  REQUIRE(forwarded.publication_spec().serving_version_key() == "models/demo/serving/v1");
+}
+
 TEST_CASE("ExecutePlan prefetch_set fails closed on mismatched set digest", "[daemon][ingress][plan]") {
   auto harness = make_harness();
   auto& svc = harness->service();

@@ -39,11 +39,22 @@ class LayoutSpecRpcHandler:
         self._sha256_digest_to_multibase = sha256_digest_to_multibase
         self._logger = logger
 
-    def _tensor_names_for_index_multihash(self, *, index_multihash: str) -> set[str]:
+    def _tensor_names_for_index_multihash(
+        self,
+        *,
+        index_multihash: str,
+        canonical_index_data: bytes | None = None,
+    ) -> set[str]:
         index_key = self._multibase_sha256_to_hex(index_multihash)
         if not index_key:
             raise ValidationError("invalid index_multihash")
-        data = self._artifact_indices.get(index_key)
+        data = canonical_index_data
+        if data is not None and hashlib.sha256(data).hexdigest() != index_key:
+            raise ValidationError(
+                "canonical_index_data digest does not match layout.index_multihash"
+            )
+        if data is None:
+            data = self._artifact_indices.get(index_key)
         if data is None:
             raise ValidationError("canonical index bytes missing for index_multihash")
         try:
@@ -104,8 +115,14 @@ class LayoutSpecRpcHandler:
                 return global_store_pb2.PutLayoutSpecResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
+            canonical_index_data = (
+                bytes(request.canonical_index_data)
+                if request.canonical_index_data
+                else None
+            )
             tensor_names = self._tensor_names_for_index_multihash(
-                index_multihash=request.layout.index_multihash
+                index_multihash=request.layout.index_multihash,
+                canonical_index_data=canonical_index_data,
             )
             canonical = self._canonicalize_layout_spec(
                 layout=request.layout,
@@ -118,6 +135,13 @@ class LayoutSpecRpcHandler:
                 raise ValidationError("failed to compute layout_id")
 
             with self._layout_spec_repository.transaction() as cursor:
+                if canonical_index_data is not None:
+                    self._artifact_indices.upsert_index(
+                        index_data=canonical_index_data,
+                        encoding="json",
+                        schema_version="v3",
+                        cursor=cursor,
+                    )
                 self._layout_spec_repository.put(
                     layout_id=layout_id,
                     index_multihash=canonical.index_multihash,

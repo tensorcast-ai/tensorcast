@@ -65,6 +65,8 @@ class StoreRuntimeContext:
 
     _AT_FORK_REGISTRY: "weakref.WeakSet[StoreRuntimeContext]" = weakref.WeakSet()
     _DEFAULT_LEASE_TTL_MS = 600_000
+    _SERVER_CONFIG_READY_TIMEOUT_S = 30.0
+    _SERVER_CONFIG_RETRY_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -376,10 +378,49 @@ class StoreRuntimeContext:
             },
         )
 
+    def _load_server_config_with_retry(self, client: DaemonCtl) -> ServerConfig:
+        deadline = time.monotonic() + self._SERVER_CONFIG_READY_TIMEOUT_S
+        attempt = 0
+        last_exc: Exception | None = None
+        while True:
+            try:
+                config = client.get_server_config()
+                local_handle_socket_path = str(
+                    getattr(config, "local_handle_socket_path", "") or ""
+                )
+                cpu_shared_memory_enabled = bool(
+                    getattr(config, "cpu_shared_memory_enabled", True)
+                )
+                if cpu_shared_memory_enabled and not local_handle_socket_path:
+                    raise RuntimeError(
+                        "GetServerConfig succeeded before local_handle_socket_path "
+                        "was ready"
+                    )
+                return config
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                logger.info(
+                    "store.capabilities_fetch_retry",
+                    extra={
+                        "tc.store.daemon": self._daemon_endpoint,
+                        "tc.store.session_id": self._session_id,
+                        "attempt": attempt,
+                        "remaining_s": round(remaining, 3),
+                    },
+                    exc_info=exc,
+                )
+                time.sleep(min(self._SERVER_CONFIG_RETRY_INTERVAL_S, remaining))
+                attempt += 1
+        assert last_exc is not None
+        raise last_exc
+
     def _initialize_session_metadata(self, client: DaemonCtl) -> None:
         capabilities = self._default_capabilities()
         try:
-            config = client.get_server_config()
+            config = self._load_server_config_with_retry(client)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "store.capabilities_fetch_failed",

@@ -3,8 +3,12 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <random>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
@@ -22,6 +26,8 @@
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
+#include "core/store/materialization/runtime/pipeline/ingestion_context.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
@@ -55,6 +61,8 @@ using tensorcast::store::runtime::ingestion::ArtifactLoweringPlan;
 using tensorcast::store::runtime::ingestion::MaterializationFacade;
 using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
+namespace pipeline_runtime = tensorcast::store::materialization::runtime::pipeline;
+namespace view_contracts = tensorcast::store::materialization::view;
 
 namespace loading = tensorcast::store::loading;
 
@@ -166,6 +174,106 @@ std::string sha256_hex(std::string_view payload) {
       absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
   absl::AsciiStrToLower(&hex);
   return hex;
+}
+
+std::filesystem::path make_temp_dir(const std::string& prefix) {
+  auto base = std::filesystem::temp_directory_path();
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  std::uniform_int_distribution<uint64_t> dist;
+  auto dir = base / (prefix + "-" + std::to_string(dist(gen)));
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+
+void write_u64_le(std::ofstream& out, uint64_t value) {
+  unsigned char buf[8];
+  for (int i = 0; i < 8; ++i) {
+    buf[i] = static_cast<unsigned char>((value >> (8 * i)) & 0xFF);
+  }
+  out.write(reinterpret_cast<const char*>(buf), 8);
+}
+
+void create_safetensors_file(
+    const std::filesystem::path& path,
+    const std::string& header_json,
+    const std::vector<unsigned char>& payload) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  REQUIRE(out.is_open());
+  write_u64_le(out, static_cast<uint64_t>(header_json.size()));
+  out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
+  if (!payload.empty()) {
+    out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+  }
+}
+
+pipeline_runtime::IngestionContext make_strategy_context(
+    FacadeHarness& harness,
+    const std::filesystem::path& artifact_path,
+    loading::SourceLocalityHint source_locality,
+    std::optional<std::string> source_sharing_domain) {
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  auto disk_context_or = tensorcast::store::loader::get_disk_artifact_context(artifact_path);
+  if (!disk_context_or.ok()) {
+    throw std::runtime_error(disk_context_or.status().ToString());
+  }
+  auto index_info_or = (*disk_context_or)->get_index_info(/*target_device_id=*/0);
+  if (!index_info_or.ok()) {
+    throw std::runtime_error(index_info_or.status().ToString());
+  }
+
+  pipeline_runtime::IngestionContext ctx{
+      .source_type = pipeline_runtime::SourceType::kDisk,
+      .request_id = "strategy-request",
+      .publish_context_id = "strategy-publish",
+      .materialize_mode = loading::MaterializeMode::LOAD_ONLY,
+      .artifact_identifier = "cgid:strategy-artifact",
+      .target =
+          loading::ReplicaTarget{
+              .location = {.type = MemoryLocation::GPU, .device_id = 0},
+          },
+      .hints =
+          loading::MaterializeHints{
+              .collective_load_group =
+                  loading::CollectiveLoadGroupHint{.group_id = "strategy", .world_size = 2, .rank = 0},
+              .source_locality = source_locality,
+              .source_sharing_domain = std::move(source_sharing_domain),
+              .artifact_id = "cgid:strategy-artifact",
+              .variant = std::optional<view_contracts::VariantIdentity>(view_contracts::VariantIdentity{
+                  .canonical_artifact_id = "cgid:strategy-artifact",
+              }),
+          },
+      .target_device = {.type = DeviceType::GPU, .ordinal = 0, .uuid = ""},
+      .target_location = MemoryLocation::GPU,
+      .target_device_id = 0,
+      .target_is_gpu = true,
+      .storage_path = artifact_path,
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .tx_slice_bytes = harness.runtime_context().tx_slice_bytes(),
+      .num_threads = harness.options().num_thread,
+      .pinned_memory_timeout = harness.options().pinned_memory_timeout,
+      .options = &harness.options(),
+      .replica_runtime = &harness.replica_runtime(),
+      .runtime_context = &harness.runtime_context(),
+      .ordinary_disk_strategy_planner = {},
+      .disk =
+          pipeline_runtime::DiskSourceMetadata{
+              .source = loading::DiskSource{.path = artifact_path, .expected_size = 64},
+              .artifact_path = artifact_path,
+              .descriptor_present = false,
+              .is_safetensors = true,
+              .source_index_json = index_info_or->canonical_index_json,
+              .source_total_size_bytes = 64,
+          },
+      .verification =
+          pipeline_runtime::VerificationState{
+              .canonical_index_json = index_info_or->canonical_index_json,
+              .logical_total_size = 64,
+          },
+      .start_time = std::chrono::steady_clock::now(),
+      .publish_to_global_store = false,
+  };
+  return ctx;
 }
 
 } // namespace
@@ -542,6 +650,81 @@ TEST_CASE("MaterializationFacade materialize_replica reuses disk ingestion path"
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
+TEST_CASE(
+    "MaterializationFacade strategy plan requires explicit shared-source proof for owner-file collective",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_unproven");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 7));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(harness, artifact_root, loading::SourceLocalityHint::kAuto, std::nullopt);
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  REQUIRE(plan_or->selection_reason == "auto_prefers_local_batched");
+  REQUIRE(plan_or->candidates.size() == 3);
+  REQUIRE(plan_or->candidates[2].eligible == false);
+  REQUIRE(plan_or->candidates[2].reason == "shared_source_unproven");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade AUTO prefers owner-file collective for explicit shared source",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_shared");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 11));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(
+      harness, artifact_root, loading::SourceLocalityHint::kSharedSource, std::string("shared-fs:test"));
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
+  REQUIRE(plan_or->selection_reason == "auto_prefers_owner_file_collective_shared_source");
+  REQUIRE(plan_or->candidates.size() == 3);
+  REQUIRE(plan_or->candidates[2].eligible == true);
+  REQUIRE(plan_or->candidates[2].reason == "eligible");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
 TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stale", "[materialization_facade]") {
   SKIP_IF_NO_CUDA();
 
@@ -574,14 +757,14 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
   disk_handle.replica_key.artifact_id = hints.artifact_id;
   disk_handle.replica_key.device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   harness.fake_pipeline->set_next_disk_result(std::move(disk_handle));
-  harness.fake_pipeline->set_next_p2p_result(absl::FailedPreconditionError("p2p should be skipped"));
+  harness.fake_pipeline->set_next_p2p_result(absl::FailedPreconditionError("stale p2p route"));
 
   DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
   auto handle_or =
       harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints, disk_source);
   REQUIRE(handle_or.ok());
   REQUIRE(harness.fake_pipeline->disk_invocations().size() == 1);
-  REQUIRE(harness.fake_pipeline->p2p_invocations().empty());
+  REQUIRE_FALSE(harness.fake_pipeline->p2p_invocations().empty());
   REQUIRE(gs_client->replica_requests.size() >= 1);
   REQUIRE(gs_client->replica_request_wait_timeouts_ms.size() == gs_client->replica_requests.size());
   for (uint32_t timeout_ms : gs_client->replica_request_wait_timeouts_ms) {
@@ -939,8 +1122,18 @@ TEST_CASE("MaterializationFacade mapped target respects typed local canonical ov
   resolved_plan.generation = 1;
   resolved_plan.canonical_index_json = kCanonicalIndexJson;
   resolved_plan.target_layout = target_layout;
-  resolved_plan.mapped_copy_contract =
-      tensorcast::store::runtime::ingestion::strategy::MappedCopyContract{.fallback_map = mapping};
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan =
+      tensorcast::store::materialization::contracts::RepresentationWorkPlan{.residual_fallback_map = mapping};
 
   DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
   auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
@@ -974,18 +1167,29 @@ TEST_CASE(
   resolved_plan.generation = 7;
   resolved_plan.canonical_index_json = R"({"tensor":[0,16,[16],[1],"torch.uint8",0]})";
   resolved_plan.target_layout = target_layout;
-  resolved_plan.mapped_copy_contract = tensorcast::store::runtime::ingestion::strategy::MappedCopyContract{
-      .fallback_map = tensorcast::store::loader::ByteRangeMap{
-          .total_bytes = 16,
-          .num_sources = 1,
-          .segments = {tensorcast::store::loader::ByteRangeSegment{
-              .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
-              .dst_offset = 0,
-              .length = 16,
-              .src_offset = 0,
-              .source_index = 0,
-          }},
-      }};
+  const auto mapping = tensorcast::store::loader::ByteRangeMap{
+      .total_bytes = 16,
+      .num_sources = 1,
+      .segments = {tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 16,
+          .src_offset = 0,
+          .source_index = 0,
+      }},
+  };
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan =
+      tensorcast::store::materialization::contracts::RepresentationWorkPlan{.residual_fallback_map = mapping};
 
   loading::MaterializeHints hints;
   hints.artifact_id = "cgid:artifact_drifted";
@@ -1002,6 +1206,495 @@ TEST_CASE(
   REQUIRE_FALSE(result_or.ok());
   CHECK(absl::IsInvalidArgument(result_or.status()));
   CHECK(result_or.status().message().find("hints.artifact_id does not match resolved_plan") != std::string::npos);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade executes mapped const fill without source bytes", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kTotalSize = 16;
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_const_fill";
+  std::filesystem::create_directories(temp_root);
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kTotalSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kTotalSize});
+  target_layout.total_size = kTotalSize;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_const_fill";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,16,[8],[1],"torch.uint16",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{
+      .items =
+          {
+              tensorcast::store::materialization::contracts::RepresentationWorkItem{
+                  .kind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill,
+                  .dst_name = "tensor",
+                  .dst_spec =
+                      tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+                          .name = "tensor",
+                          .shape = {8},
+                          .stride = {1},
+                          .dtype = "torch.uint16",
+                          .logical_offset = 0,
+                          .logical_length = 16,
+                          .storage_offset = 0,
+                          .element_size = 2,
+                      },
+                  .fill_rule =
+                      tensorcast::store::materialization::contracts::FillRule{
+                          .constant_value = {0x34, 0x12},
+                      },
+                  .committed_bytes = 16,
+              },
+          },
+  };
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:artifact_const_fill";
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+
+  std::array<uint8_t, kTotalSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kTotalSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (size_t index = 0; index < host_out.size(); index += 2) {
+    CHECK(host_out[index] == 0x34);
+    CHECK(host_out[index + 1] == 0x12);
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade executes mixed mapped source bytes and const fill without byte-range gaps",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kSourceSize = 8;
+  constexpr uint64_t kTargetSize = 12;
+  const std::string artifact_id = "cgid:artifact_mixed_copy_const_fill";
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mixed_copy_const_fill";
+  std::filesystem::create_directories(temp_root);
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  loading::InlineBufferSource source{.data = nullptr, .size_bytes = kSourceSize};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = source,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool = harness.runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.runtime_context().async_runtime()},
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .expected_artifact_size = kSourceSize,
+      .materialization_strategy = harness.options().materialization_strategy,
+  };
+  auto canonical_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(canonical_or.ok());
+  auto canonical_replica = std::shared_ptr<tensorcast::store::replica::Replica>(std::move(canonical_or.value()));
+  CHECK_OK(canonical_replica->get_memory_manager().allocate_memory(MemoryLocation::CPU));
+  auto cpu_ptrs = canonical_replica->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  for (uint8_t i = 0; i < kSourceSize; ++i) {
+    cpu_ptr[i] = static_cast<uint8_t>(0x10 + i);
+  }
+  CHECK_OK(canonical_replica->mark_loaded(MemoryLocation::CPU));
+  canonical_replica->set_ready_signal(MemoryLocation::CPU, absl::OkStatus());
+  loading::ReplicaKey canonical_key{
+      .artifact_id = artifact_id,
+      .view_id = std::nullopt,
+      .device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  CHECK_OK(harness.replica_runtime().registry().emplace(canonical_key, gsl::not_null{canonical_replica}));
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kTargetSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  std::array<uint8_t, kTargetSize> initial{};
+  initial.fill(0xAA);
+  auto init_status = tensorcast::cuda::memcpy(gpu_buffer, initial.data(), kTargetSize, cudaMemcpyHostToDevice);
+  REQUIRE(init_status.ok());
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kTargetSize});
+  target_layout.total_size = kTargetSize;
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = kTargetSize;
+  mapping.num_sources = 1;
+  mapping.segments.push_back(
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = kSourceSize,
+          .src_offset = 0,
+          .source_index = 0,
+      });
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = artifact_id;
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"prefix":[0,8,[8],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{
+      .items =
+          {
+              tensorcast::store::materialization::contracts::RepresentationWorkItem{
+                  .kind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill,
+                  .dst_name = "manifest",
+                  .dst_spec =
+                      tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+                          .name = "manifest",
+                          .shape = {4},
+                          .stride = {1},
+                          .dtype = "torch.uint8",
+                          .logical_offset = 8,
+                          .logical_length = 4,
+                          .storage_offset = 0,
+                          .element_size = 1,
+                      },
+                  .fill_rule =
+                      tensorcast::store::materialization::contracts::FillRule{
+                          .constant_value = {0x01},
+                      },
+                  .committed_bytes = 4,
+              },
+          },
+      .residual_fallback_map = mapping,
+  };
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kLocalReplica);
+
+  std::array<uint8_t, kTargetSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kTargetSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (uint8_t i = 0; i < kSourceSize; ++i) {
+    CHECK(host_out[i] == static_cast<uint8_t>(0x10 + i));
+  }
+  for (size_t index = kSourceSize; index < host_out.size(); ++index) {
+    CHECK(host_out[index] == 0x01);
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade executes mapped partial const fill without touching uncovered bytes",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kTotalSize = 16;
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_partial_const_fill";
+  std::filesystem::create_directories(temp_root);
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kTotalSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  std::array<uint8_t, kTotalSize> initial{};
+  initial.fill(0xAA);
+  auto init_status = tensorcast::cuda::memcpy(gpu_buffer, initial.data(), kTotalSize, cudaMemcpyHostToDevice);
+  REQUIRE(init_status.ok());
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kTotalSize});
+  target_layout.total_size = kTotalSize;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:artifact_partial_const_fill";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"tensor":[0,16,[8],[1],"torch.uint16",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan =
+      tensorcast::store::materialization::contracts::RepresentationWorkPlan{
+          .items =
+              {
+                  tensorcast::store::materialization::contracts::RepresentationWorkItem{
+                      .kind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill,
+                      .dst_name = "tensor",
+                      .dst_spec =
+                          tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+                              .name = "tensor",
+                              .shape = {8},
+                              .stride = {1},
+                              .dtype = "torch.uint16",
+                              .logical_offset = 0,
+                              .logical_length = 16,
+                              .storage_offset = 0,
+                              .element_size = 2,
+                          },
+                      .fill_rule =
+                          tensorcast::store::materialization::contracts::FillRule{
+                              .constant_value = {0x34, 0x12},
+                              .destination_range =
+                                  tensorcast::store::materialization::contracts::TensorCoordinateSpec{
+                                      .axes =
+                                          {
+                                              tensorcast::store::materialization::contracts::TensorAxisRange{
+                                                  .dim = 0,
+                                                  .start = 2,
+                                                  .end = 6,
+                                              },
+                                          },
+                                  },
+                          },
+                      .committed_bytes = 8,
+                  },
+              },
+      };
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:artifact_partial_const_fill";
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+
+  std::array<uint8_t, kTotalSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kTotalSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (size_t index = 0; index < host_out.size(); index += 2) {
+    const size_t element = index / 2;
+    if (element >= 2 && element < 6) {
+      CHECK(host_out[index] == 0x34);
+      CHECK(host_out[index + 1] == 0x12);
+    } else {
+      CHECK(host_out[index] == 0xAA);
+      CHECK(host_out[index + 1] == 0xAA);
+    }
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade executes mapped scalar broadcast fill from local source", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kSourceSize = 4;
+  constexpr uint64_t kTargetSize = 8;
+  const std::string artifact_id = "cgid:artifact_scalar_fill";
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_scalar_fill";
+  std::filesystem::create_directories(temp_root);
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  loading::InlineBufferSource source{.data = nullptr, .size_bytes = kSourceSize};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = source,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool = harness.runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.runtime_context().async_runtime()},
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .expected_artifact_size = kSourceSize,
+      .materialization_strategy = harness.options().materialization_strategy,
+  };
+  auto canonical_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(canonical_or.ok());
+  auto canonical_replica = std::shared_ptr<tensorcast::store::replica::Replica>(std::move(canonical_or.value()));
+  CHECK_OK(canonical_replica->get_memory_manager().allocate_memory(MemoryLocation::CPU));
+  auto cpu_ptrs = canonical_replica->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  cpu_ptr[0] = 10;
+  cpu_ptr[1] = 20;
+  cpu_ptr[2] = 30;
+  cpu_ptr[3] = 40;
+  CHECK_OK(canonical_replica->mark_loaded(MemoryLocation::CPU));
+  canonical_replica->set_ready_signal(MemoryLocation::CPU, absl::OkStatus());
+  loading::ReplicaKey canonical_key{
+      .artifact_id = artifact_id,
+      .view_id = std::nullopt,
+      .device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  CHECK_OK(harness.replica_runtime().registry().emplace(canonical_key, gsl::not_null{canonical_replica}));
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kTargetSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kTargetSize});
+  target_layout.total_size = kTargetSize;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = artifact_id;
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = R"({"scalar_src":[0,4,[4],[1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan =
+      tensorcast::store::materialization::contracts::RepresentationWorkPlan{
+          .items =
+              {
+                  tensorcast::store::materialization::contracts::RepresentationWorkItem{
+                      .kind =
+                          tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kScalarBroadcastFill,
+                      .dst_name = "filled",
+                      .dst_spec =
+                          tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+                              .name = "filled",
+                              .shape = {8},
+                              .stride = {1},
+                              .dtype = "torch.uint8",
+                              .logical_offset = 0,
+                              .logical_length = 8,
+                              .storage_offset = 0,
+                              .element_size = 1,
+                          },
+                      .sources =
+                          {
+                              tensorcast::store::materialization::contracts::RepresentationWorkSourceFragment{
+                                  .fragment =
+                                      tensorcast::store::materialization::contracts::SourceFragment{
+                                          .source_spec =
+                                              tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+                                                  .name = "scalar_src",
+                                                  .shape = {4},
+                                                  .stride = {1},
+                                                  .dtype = "torch.uint8",
+                                                  .logical_offset = 0,
+                                                  .logical_length = 4,
+                                                  .storage_offset = 0,
+                                                  .element_size = 1,
+                                              },
+                                          .source_range =
+                                              tensorcast::store::materialization::contracts::TensorCoordinateSpec{
+                                                  .axes =
+                                                      {
+                                                          tensorcast::store::materialization::contracts::TensorAxisRange{
+                                                              .dim = 0,
+                                                              .start = 2,
+                                                              .end = 3,
+                                                          },
+                                                      },
+                                              },
+                                          .destination_range = {},
+                                      },
+                              },
+                          },
+                      .committed_bytes = 8,
+                  },
+              },
+      };
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(target_device, resolved_plan, hints, std::nullopt);
+  REQUIRE(result_or.ok());
+
+  std::array<uint8_t, kTargetSize> host_out{};
+  auto copy_status = tensorcast::cuda::memcpy(host_out.data(), gpu_buffer, kTargetSize, cudaMemcpyDeviceToHost);
+  REQUIRE(copy_status.ok());
+  for (uint8_t value : host_out) {
+    CHECK(value == 30);
+  }
 
   harness.shutdown();
   std::error_code cleanup_ec;

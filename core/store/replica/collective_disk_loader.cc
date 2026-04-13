@@ -69,9 +69,17 @@ constexpr size_t kWholeSourceFreeMemoryReserveBytes = 512ULL * 1024ULL * 1024ULL
 constexpr size_t kMaxMappedPeerPairsPerNcclGroup = 8192;
 
 using StrategyConfig = StoreEngineOptions::MaterializationStrategyConfig;
-using TensorJobCandidate = runtime::ingestion::strategy::TensorJobCandidate;
-using ConcatJobCandidate = runtime::ingestion::strategy::ConcatJobCandidate;
-using TensorJobDistribution = runtime::ingestion::strategy::TensorJobDistribution;
+using RepresentationWorkItem = materialization::contracts::RepresentationWorkItem;
+using RepresentationWorkItemKind = materialization::contracts::RepresentationWorkItemKind;
+using RepresentationWorkPlan = materialization::contracts::RepresentationWorkPlan;
+using RepresentationWorkSourceFragment = materialization::contracts::RepresentationWorkSourceFragment;
+using RepresentationTensorBinding = materialization::contracts::RepresentationTensorBinding;
+using RepresentationTensorSpec = materialization::contracts::RepresentationTensorSpec;
+using RepresentationTransformContract = materialization::contracts::RepresentationTransformContract;
+using SourceFragment = materialization::contracts::SourceFragment;
+using TensorAxisRange = materialization::contracts::TensorAxisRange;
+using TensorCoordinateSpec = materialization::contracts::TensorCoordinateSpec;
+using WorkPartitionKind = materialization::contracts::WorkPartitionKind;
 
 bool enable_mapped_tensor_job_fast_path(const StrategyConfig& strategy) {
   return strategy.enable_tensor_aware_mapped_executor && strategy.allow_mixed_execution;
@@ -119,6 +127,12 @@ bool sync_after_single_range_concat_job(const StrategyConfig& strategy) {
 
 bool use_dedicated_single_range_concat_stream(const StrategyConfig& strategy) {
   return strategy.use_dedicated_single_range_concat_stream;
+}
+
+std::chrono::milliseconds collective_group_assemble_timeout(const StrategyConfig& strategy) {
+  return strategy.owner_file_collective_group_assemble_timeout.count() > 0
+      ? strategy.owner_file_collective_group_assemble_timeout
+      : kGroupAssembleTimeout;
 }
 
 LocalBatchedDiskLoadResult local_batched_fallback(
@@ -321,9 +335,7 @@ struct ParsedParticipant {
   void* gpu_ptr{nullptr};
   std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  std::string source_index_json;
-  std::string view_index_json;
-  std::optional<loading::VariantIdentity> variant_identity;
+  RepresentationWorkPlan representation_work_plan;
 };
 
 struct GroupState {
@@ -376,11 +388,10 @@ struct ParsedMappedParticipant {
   int rank{-1};
   int device_id{-1};
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  loader::ByteRangeMap map;
+  RepresentationWorkPlan work_plan;
+  loader::ByteRangeMap collective_lane_map;
   loading::IntoTargetLayout target_layout;
   std::vector<TargetStorageSpan> storage_spans;
-  std::vector<TensorJobCandidate> tensor_jobs;
-  std::vector<ConcatJobCandidate> concat_jobs;
 };
 
 struct MappedTensorJobRuntime {
@@ -438,6 +449,51 @@ struct Dim1PackWorkspace {
   cudaStream_t pack_stream{nullptr};
 };
 
+struct OwnerRankWorkspace {
+  std::unique_ptr<common::memory::GpuDeviceMemory> stage_buffer;
+  size_t stage_capacity_bytes{0};
+  cudaStream_t h2d_stream{nullptr};
+  cudaEvent_t ready_event{nullptr};
+  int device_id{-1};
+  Dim1PackWorkspace dim1_pack_workspace;
+
+  ~OwnerRankWorkspace() {
+    if (ready_event != nullptr && device_id >= 0) {
+      const absl::Status set_st = tensorcast::cuda::set_device(device_id);
+      if (!set_st.ok()) {
+        LOG(WARNING) << "failed to set device before destroying owner ready event: " << set_st;
+      } else {
+        const absl::Status destroy_st = tensorcast::cuda::event_destroy(ready_event);
+        if (!destroy_st.ok()) {
+          LOG(WARNING) << "failed to destroy owner ready event: " << destroy_st;
+        }
+      }
+    }
+    if (h2d_stream != nullptr && device_id >= 0) {
+      const absl::Status set_st = tensorcast::cuda::set_device(device_id);
+      if (!set_st.ok()) {
+        LOG(WARNING) << "failed to set device before destroying owner H2D stream: " << set_st;
+      } else {
+        const absl::Status destroy_st = tensorcast::cuda::stream_destroy(h2d_stream);
+        if (!destroy_st.ok()) {
+          LOG(WARNING) << "failed to destroy owner H2D stream: " << destroy_st;
+        }
+      }
+    }
+    if (dim1_pack_workspace.pack_stream != nullptr && device_id >= 0) {
+      const absl::Status set_st = tensorcast::cuda::set_device(device_id);
+      if (!set_st.ok()) {
+        LOG(WARNING) << "failed to set device before destroying owner dim1 pack stream: " << set_st;
+      } else {
+        const absl::Status destroy_st = tensorcast::cuda::stream_destroy(dim1_pack_workspace.pack_stream);
+        if (!destroy_st.ok()) {
+          LOG(WARNING) << "failed to destroy owner dim1 pack stream: " << destroy_st;
+        }
+      }
+    }
+  }
+};
+
 struct RemoteStageWorkspace {
   std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> buffers;
   std::vector<cudaEvent_t> done_events;
@@ -484,11 +540,41 @@ struct FileSegment {
   int owner_rank{0};
 };
 
-struct OwnedFileRankState {
-  std::unique_ptr<common::memory::GpuDeviceMemory> owned_payload;
-  uint64_t owned_total_bytes{0};
-  std::vector<uint64_t> owned_file_base;
-  std::vector<bool> owned_file;
+enum class OwnerBatchOpKind : uint8_t {
+  kReplicated = 0,
+  kDim0 = 1,
+  kDim1 = 2,
+};
+
+struct OwnerPlannedJob {
+  size_t job_index{0};
+  size_t file_index{0};
+  int owner_rank{0};
+  OwnerBatchOpKind op_kind{OwnerBatchOpKind::kReplicated};
+  uint64_t source_begin{0};
+  uint64_t source_end{0};
+  uint64_t source_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+};
+
+struct OwnerBatchPlan {
+  int owner_rank{0};
+  uint64_t batch_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  uint64_t first_source_offset{0};
+  std::vector<size_t> planned_job_indices;
+};
+
+struct OwnerCollectivePlan {
+  std::vector<OwnerPlannedJob> planned_jobs;
+  std::vector<OwnerBatchPlan> batches;
+  std::vector<uint64_t> owner_bytes_by_rank;
+  uint64_t unique_source_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  double owner_skew_ratio{1.0};
+  bool used_segment_split{false};
 };
 
 struct SegmentCopy {
@@ -662,82 +748,130 @@ absl::StatusOr<RankTensorSlice> build_rank_tensor_slice(
   return slice;
 }
 
+TensorJob::Distribution to_tensor_job_distribution(WorkPartitionKind distribution);
+
 absl::StatusOr<std::vector<TensorJob>> build_tensor_jobs(const std::vector<ParsedParticipant>& participants) {
   if (participants.empty()) {
     return std::vector<TensorJob>{};
   }
-  std::vector<absl::flat_hash_map<std::string, TensorMeta>> source_by_rank;
-  std::vector<absl::flat_hash_map<std::string, TensorMeta>> view_by_rank;
-  source_by_rank.reserve(participants.size());
-  view_by_rank.reserve(participants.size());
+
+  std::vector<RepresentationWorkPlan> work_plans;
+  work_plans.reserve(participants.size());
   for (const auto& participant : participants) {
-    auto source_or = parse_index_json(participant.source_index_json);
-    if (!source_or.ok()) {
-      return source_or.status();
-    }
-    auto view_or = parse_index_json(participant.view_index_json);
-    if (!view_or.ok()) {
-      return view_or.status();
-    }
-    source_by_rank.push_back(std::move(*source_or));
-    view_by_rank.push_back(std::move(*view_or));
+    work_plans.push_back(participant.representation_work_plan);
   }
 
-  std::vector<std::string> names;
-  names.reserve(view_by_rank.front().size());
-  for (const auto& [name, _] : view_by_rank.front()) {
-    names.push_back(name);
+  std::vector<const RepresentationWorkItem*> ordered_items;
+  ordered_items.reserve(work_plans.front().items.size());
+  for (const auto& item : work_plans.front().items) {
+    if (item.kind != RepresentationWorkItemKind::kTensorCopy || item.sources.size() != 1) {
+      continue;
+    }
+    ordered_items.push_back(&item);
   }
-  std::sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) {
-    return source_by_rank.front().at(a).offset < source_by_rank.front().at(b).offset;
-  });
+  std::sort(
+      ordered_items.begin(),
+      ordered_items.end(),
+      [](const RepresentationWorkItem* lhs, const RepresentationWorkItem* rhs) {
+        const uint64_t lhs_offset = lhs->sources.front().fragment.source_spec.logical_offset;
+        const uint64_t rhs_offset = rhs->sources.front().fragment.source_spec.logical_offset;
+        if (lhs_offset != rhs_offset) {
+          return lhs_offset < rhs_offset;
+        }
+        return lhs->dst_name < rhs->dst_name;
+      });
+
+  std::vector<absl::flat_hash_map<std::string, const RepresentationWorkItem*>> jobs_by_rank;
+  jobs_by_rank.reserve(work_plans.size());
+  for (const auto& work_plan : work_plans) {
+    absl::flat_hash_map<std::string, const RepresentationWorkItem*> by_name;
+    by_name.reserve(work_plan.items.size());
+    for (const auto& item : work_plan.items) {
+      if (item.kind == RepresentationWorkItemKind::kTensorCopy) {
+        by_name.emplace(item.dst_name, &item);
+      }
+    }
+    jobs_by_rank.push_back(std::move(by_name));
+  }
 
   std::vector<TensorJob> jobs;
-  jobs.reserve(names.size());
-  for (const auto& name : names) {
+  jobs.reserve(ordered_items.size());
+  for (const auto* first : ordered_items) {
+    if (first == nullptr || first->sources.size() != 1) {
+      continue;
+    }
     TensorJob job;
-    job.name = name;
-    job.source = source_by_rank.front().at(name);
+    job.name = first->dst_name;
+    const auto& first_source = first->sources.front().fragment.source_spec;
+    job.source = TensorMeta{
+        .offset = first_source.logical_offset,
+        .size_bytes = first_source.logical_length,
+        .shape = first_source.shape,
+        .stride = first_source.stride,
+        .dtype = first_source.dtype,
+        .storage_offset = first_source.storage_offset,
+        .elem_size = first_source.element_size,
+    };
+    job.distribution = to_tensor_job_distribution(first->partition_kind);
     job.slices.resize(participants.size());
 
     bool any_dim0 = false;
     bool any_dim1 = false;
     bool any_full = false;
     for (size_t idx = 0; idx < participants.size(); ++idx) {
-      const auto source_it = source_by_rank[idx].find(name);
-      const auto view_it = view_by_rank[idx].find(name);
-      if (source_it == source_by_rank[idx].end() || view_it == view_by_rank[idx].end()) {
-        return absl::FailedPreconditionError(absl::StrCat("collective disk load requires the same tensor set: ", name));
+      auto it = jobs_by_rank[idx].find(first->dst_name);
+      if (it == jobs_by_rank[idx].end() || it->second == nullptr || it->second->sources.size() != 1) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("collective disk load requires the same tensor work set: ", first->dst_name));
       }
-      std::optional<materialization::view::TensorViewOps> tensor_ops;
-      if (participants[idx].variant_identity.has_value() && participants[idx].variant_identity->view_spec.has_value()) {
-        const auto& tensors = participants[idx].variant_identity->view_spec->tensors;
-        if (auto spec_it = tensors.find(name); spec_it != tensors.end()) {
-          tensor_ops = spec_it->second;
-        }
+      const auto& item = *it->second;
+      if (item.partition_kind != first->partition_kind) {
+        return absl::UnimplementedError(
+            absl::StrCat("mixed tensor work partitions are unsupported: ", first->dst_name));
       }
-      auto slice_or = build_rank_tensor_slice(source_it->second, view_it->second, tensor_ops);
-      if (!slice_or.ok()) {
-        return slice_or.status();
+      const auto& item_source = item.sources.front().fragment.source_spec;
+      if (item_source != first_source) {
+        return absl::UnimplementedError(absl::StrCat("mixed tensor work sources are unsupported: ", first->dst_name));
       }
-      job.slices[idx] = *slice_or;
-      any_full = any_full || slice_or->kind == RankTensorSlice::Kind::kFull;
-      any_dim0 = any_dim0 || slice_or->kind == RankTensorSlice::Kind::kDim0;
-      any_dim1 = any_dim1 || slice_or->kind == RankTensorSlice::Kind::kDim1;
+      RankTensorSlice slice;
+      slice.dst_offset = item.dst_spec.logical_offset;
+      slice.dst_size_bytes = item.dst_spec.logical_length;
+      const auto& fragment = item.sources.front().fragment;
+      const auto& source_axes = fragment.source_range.axes;
+      switch (item.partition_kind) {
+        case WorkPartitionKind::kReplicated:
+          slice.kind = RankTensorSlice::Kind::kFull;
+          break;
+        case WorkPartitionKind::kDim0Partitioned:
+          if (source_axes.size() != 1) {
+            return absl::InvalidArgumentError("dim0 work item missing source axis");
+          }
+          slice.kind = RankTensorSlice::Kind::kDim0;
+          slice.start = source_axes.front().start;
+          slice.length = static_cast<uint64_t>(source_axes.front().end - source_axes.front().start);
+          break;
+        case WorkPartitionKind::kDim1Partitioned:
+          if (source_axes.size() != 1) {
+            return absl::InvalidArgumentError("dim1 work item missing source axis");
+          }
+          slice.kind = RankTensorSlice::Kind::kDim1;
+          slice.start = source_axes.front().start;
+          slice.length = static_cast<uint64_t>(source_axes.front().end - source_axes.front().start);
+          break;
+        case WorkPartitionKind::kUnknown:
+          return absl::UnimplementedError(absl::StrCat("unknown tensor work partition for ", first->dst_name));
+      }
+      job.slices[idx] = slice;
+      any_full = any_full || slice.kind == RankTensorSlice::Kind::kFull;
+      any_dim0 = any_dim0 || slice.kind == RankTensorSlice::Kind::kDim0;
+      any_dim1 = any_dim1 || slice.kind == RankTensorSlice::Kind::kDim1;
     }
 
     if (any_dim0 && (any_dim1 || any_full)) {
-      return absl::UnimplementedError(absl::StrCat("mixed slice kinds for tensor are unsupported: ", name));
+      return absl::UnimplementedError(absl::StrCat("mixed slice kinds for tensor are unsupported: ", first->dst_name));
     }
     if (any_dim1 && any_full) {
-      return absl::UnimplementedError(absl::StrCat("mixed dim1/full slices are unsupported: ", name));
-    }
-    if (any_dim1) {
-      job.distribution = TensorJob::Distribution::kDim1Partitioned;
-    } else if (any_dim0) {
-      job.distribution = TensorJob::Distribution::kDim0Partitioned;
-    } else {
-      job.distribution = TensorJob::Distribution::kReplicated;
+      return absl::UnimplementedError(absl::StrCat("mixed dim1/full slices are unsupported: ", first->dst_name));
     }
     jobs.push_back(std::move(job));
   }
@@ -835,6 +969,319 @@ absl::StatusOr<size_t> find_file_index_for_offset(const std::vector<FileSegment>
     }
   }
   return absl::OutOfRangeError("offset not mapped to a safetensors file");
+}
+
+uint64_t effective_owner_batch_bytes(const StrategyConfig& strategy_config, uint64_t fallback_bytes) {
+  const uint64_t configured_bytes = strategy_config.owner_file_collective_batch_bytes > 0
+      ? strategy_config.owner_file_collective_batch_bytes
+      : fallback_bytes;
+  return std::max<uint64_t>(1, configured_bytes);
+}
+
+uint64_t effective_owner_dim1_staging_bytes(const StrategyConfig& strategy_config, uint64_t fallback_bytes) {
+  const uint64_t configured_bytes = strategy_config.owner_file_collective_dim1_staging_bytes > 0
+      ? strategy_config.owner_file_collective_dim1_staging_bytes
+      : fallback_bytes;
+  return std::max<uint64_t>(1, configured_bytes);
+}
+
+absl::StatusOr<std::pair<uint64_t, uint64_t>> owner_job_source_interval(const TensorJob& job) {
+  uint64_t source_begin = 0;
+  TC_ASSIGN_OR_RETURN(source_begin, source_base_offset_bytes(job.source));
+  if (source_begin > std::numeric_limits<uint64_t>::max() - job.source.size_bytes) {
+    return absl::OutOfRangeError("owner collective source interval overflows");
+  }
+  return std::pair<uint64_t, uint64_t>{source_begin, source_begin + job.source.size_bytes};
+}
+
+uint64_t owner_job_peer_transfer_bytes(const TensorJob& job, int owner_rank) {
+  uint64_t peer_transfer_bytes = 0;
+  for (size_t rank = 0; rank < job.slices.size(); ++rank) {
+    if (static_cast<int>(rank) == owner_rank) {
+      continue;
+    }
+    peer_transfer_bytes += job.slices[rank].dst_size_bytes;
+  }
+  return peer_transfer_bytes;
+}
+
+OwnerBatchOpKind owner_batch_op_kind_for_job(const TensorJob& job) {
+  switch (job.distribution) {
+    case TensorJob::Distribution::kDim0Partitioned:
+      return OwnerBatchOpKind::kDim0;
+    case TensorJob::Distribution::kDim1Partitioned:
+      return OwnerBatchOpKind::kDim1;
+    case TensorJob::Distribution::kReplicated:
+    default:
+      return OwnerBatchOpKind::kReplicated;
+  }
+}
+
+uint64_t estimate_owner_job_peak_temporary_bytes(
+    const TensorJob& job,
+    uint64_t direct_batch_bytes,
+    uint64_t dim1_staging_bytes) {
+  switch (job.distribution) {
+    case TensorJob::Distribution::kDim1Partitioned:
+      return std::min<uint64_t>(job.source.size_bytes, dim1_staging_bytes);
+    case TensorJob::Distribution::kDim0Partitioned:
+    case TensorJob::Distribution::kReplicated:
+    default:
+      return std::min<uint64_t>(job.source.size_bytes, direct_batch_bytes);
+  }
+}
+
+double compute_owner_skew_ratio(const std::vector<uint64_t>& owner_bytes_by_rank) {
+  if (owner_bytes_by_rank.empty()) {
+    return 1.0;
+  }
+  uint64_t total_bytes = 0;
+  uint64_t max_bytes = 0;
+  for (uint64_t bytes : owner_bytes_by_rank) {
+    total_bytes += bytes;
+    max_bytes = std::max(max_bytes, bytes);
+  }
+  if (total_bytes == 0) {
+    return 1.0;
+  }
+  const double average_bytes =
+      static_cast<double>(total_bytes) / static_cast<double>(std::max<size_t>(1, owner_bytes_by_rank.size()));
+  if (average_bytes <= 0.0) {
+    return 1.0;
+  }
+  return static_cast<double>(max_bytes) / average_bytes;
+}
+
+absl::StatusOr<OwnerCollectivePlan> build_owner_file_collective_plan(
+    const std::vector<TensorJob>& jobs,
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    int world_size,
+    const StrategyConfig& strategy_config,
+    uint64_t stage_chunk_bytes) {
+  if (jobs.empty()) {
+    return OwnerCollectivePlan{};
+  }
+  if (segments.empty()) {
+    return absl::InvalidArgumentError("owner collective planning requires safetensors segments");
+  }
+  if (world_size <= 1) {
+    return absl::InvalidArgumentError("owner collective planning requires world_size > 1");
+  }
+
+  std::vector<FileSegment> file_segments;
+  TC_ASSIGN_OR_RETURN(file_segments, compute_file_segments(segments, world_size));
+  OwnerCollectivePlan plan;
+  plan.owner_bytes_by_rank.resize(static_cast<size_t>(world_size), 0);
+  plan.planned_jobs.resize(jobs.size());
+
+  std::vector<std::vector<size_t>> jobs_by_file(file_segments.size());
+  std::vector<uint64_t> source_bytes_by_file(file_segments.size(), 0);
+
+  const uint64_t batch_bytes = effective_owner_batch_bytes(strategy_config, stage_chunk_bytes);
+  const uint64_t dim1_staging_bytes = effective_owner_dim1_staging_bytes(strategy_config, batch_bytes);
+  for (size_t job_idx = 0; job_idx < jobs.size(); ++job_idx) {
+    const auto& job = jobs[job_idx];
+    std::pair<uint64_t, uint64_t> source_interval;
+    TC_ASSIGN_OR_RETURN(source_interval, owner_job_source_interval(job));
+    size_t file_idx = 0;
+    TC_ASSIGN_OR_RETURN(file_idx, find_file_index_for_offset(file_segments, source_interval.first));
+    const auto& file_segment = file_segments[file_idx];
+    if (source_interval.second > file_segment.base_offset + file_segment.data_size) {
+      return absl::UnimplementedError(
+          absl::StrCat("owner collective does not support multi-file tensor source spans: ", job.name));
+    }
+
+    auto& planned_job = plan.planned_jobs[job_idx];
+    planned_job.job_index = job_idx;
+    planned_job.file_index = file_idx;
+    planned_job.op_kind = owner_batch_op_kind_for_job(job);
+    planned_job.source_begin = source_interval.first;
+    planned_job.source_end = source_interval.second;
+    planned_job.source_bytes = source_interval.second - source_interval.first;
+    planned_job.peer_transfer_bytes = 0;
+    planned_job.peak_temporary_bytes = estimate_owner_job_peak_temporary_bytes(job, batch_bytes, dim1_staging_bytes);
+
+    jobs_by_file[file_idx].push_back(job_idx);
+    source_bytes_by_file[file_idx] += planned_job.source_bytes;
+    plan.unique_source_bytes += planned_job.source_bytes;
+  }
+
+  std::vector<size_t> file_order;
+  file_order.reserve(file_segments.size());
+  for (size_t file_idx = 0; file_idx < file_segments.size(); ++file_idx) {
+    if (source_bytes_by_file[file_idx] == 0) {
+      continue;
+    }
+    file_order.push_back(file_idx);
+  }
+  std::sort(file_order.begin(), file_order.end(), [&](size_t lhs, size_t rhs) {
+    if (source_bytes_by_file[lhs] != source_bytes_by_file[rhs]) {
+      return source_bytes_by_file[lhs] > source_bytes_by_file[rhs];
+    }
+    return file_segments[lhs].base_offset < file_segments[rhs].base_offset;
+  });
+
+  auto assign_jobs_greedily = [&](const std::vector<size_t>& job_order) {
+    std::fill(plan.owner_bytes_by_rank.begin(), plan.owner_bytes_by_rank.end(), 0);
+    for (size_t planned_idx = 0; planned_idx < plan.planned_jobs.size(); ++planned_idx) {
+      plan.planned_jobs[planned_idx].owner_rank = 0;
+    }
+    for (size_t job_idx : job_order) {
+      size_t chosen_rank = 0;
+      uint64_t chosen_bytes = plan.owner_bytes_by_rank[0];
+      for (size_t rank = 1; rank < plan.owner_bytes_by_rank.size(); ++rank) {
+        if (plan.owner_bytes_by_rank[rank] < chosen_bytes) {
+          chosen_rank = rank;
+          chosen_bytes = plan.owner_bytes_by_rank[rank];
+        }
+      }
+      plan.planned_jobs[job_idx].owner_rank = static_cast<int>(chosen_rank);
+      plan.owner_bytes_by_rank[chosen_rank] += plan.planned_jobs[job_idx].source_bytes;
+    }
+  };
+
+  {
+    std::fill(plan.owner_bytes_by_rank.begin(), plan.owner_bytes_by_rank.end(), 0);
+    for (size_t file_idx : file_order) {
+      size_t chosen_rank = 0;
+      uint64_t chosen_bytes = plan.owner_bytes_by_rank[0];
+      for (size_t rank = 1; rank < plan.owner_bytes_by_rank.size(); ++rank) {
+        if (plan.owner_bytes_by_rank[rank] < chosen_bytes) {
+          chosen_rank = rank;
+          chosen_bytes = plan.owner_bytes_by_rank[rank];
+        }
+      }
+      for (size_t job_idx : jobs_by_file[file_idx]) {
+        plan.planned_jobs[job_idx].owner_rank = static_cast<int>(chosen_rank);
+      }
+      plan.owner_bytes_by_rank[chosen_rank] += source_bytes_by_file[file_idx];
+    }
+  }
+
+  plan.owner_skew_ratio = compute_owner_skew_ratio(plan.owner_bytes_by_rank);
+  const bool skew_exceeds_threshold = strategy_config.owner_file_collective_max_owner_skew_ratio > 0.0 &&
+      plan.owner_skew_ratio > strategy_config.owner_file_collective_max_owner_skew_ratio;
+  if (skew_exceeds_threshold) {
+    std::vector<size_t> job_order;
+    job_order.reserve(plan.planned_jobs.size());
+    for (size_t job_idx = 0; job_idx < plan.planned_jobs.size(); ++job_idx) {
+      job_order.push_back(job_idx);
+    }
+    std::sort(job_order.begin(), job_order.end(), [&](size_t lhs, size_t rhs) {
+      const auto& lhs_job = plan.planned_jobs[lhs];
+      const auto& rhs_job = plan.planned_jobs[rhs];
+      if (lhs_job.source_bytes != rhs_job.source_bytes) {
+        return lhs_job.source_bytes > rhs_job.source_bytes;
+      }
+      if (lhs_job.file_index != rhs_job.file_index) {
+        return lhs_job.file_index < rhs_job.file_index;
+      }
+      return lhs_job.source_begin < rhs_job.source_begin;
+    });
+    assign_jobs_greedily(job_order);
+    plan.owner_skew_ratio = compute_owner_skew_ratio(plan.owner_bytes_by_rank);
+    plan.used_segment_split = true;
+  }
+
+  for (auto& planned_job : plan.planned_jobs) {
+    planned_job.peer_transfer_bytes =
+        owner_job_peer_transfer_bytes(jobs[planned_job.job_index], planned_job.owner_rank);
+    plan.peer_transfer_bytes += planned_job.peer_transfer_bytes;
+  }
+
+  std::vector<std::vector<size_t>> jobs_by_owner(plan.owner_bytes_by_rank.size());
+  for (size_t planned_idx = 0; planned_idx < plan.planned_jobs.size(); ++planned_idx) {
+    jobs_by_owner[static_cast<size_t>(plan.planned_jobs[planned_idx].owner_rank)].push_back(planned_idx);
+  }
+
+  for (size_t rank = 0; rank < jobs_by_owner.size(); ++rank) {
+    auto& owner_jobs = jobs_by_owner[rank];
+    if (owner_jobs.empty()) {
+      continue;
+    }
+    std::sort(owner_jobs.begin(), owner_jobs.end(), [&](size_t lhs, size_t rhs) {
+      const auto& lhs_job = plan.planned_jobs[lhs];
+      const auto& rhs_job = plan.planned_jobs[rhs];
+      if (lhs_job.file_index != rhs_job.file_index) {
+        return lhs_job.file_index < rhs_job.file_index;
+      }
+      return lhs_job.source_begin < rhs_job.source_begin;
+    });
+
+    OwnerBatchPlan current_batch;
+    current_batch.owner_rank = static_cast<int>(rank);
+    current_batch.first_source_offset = std::numeric_limits<uint64_t>::max();
+    for (size_t planned_idx : owner_jobs) {
+      const auto& planned_job = plan.planned_jobs[planned_idx];
+      if (!current_batch.planned_job_indices.empty() &&
+          current_batch.batch_bytes + planned_job.source_bytes > batch_bytes) {
+        plan.batches.push_back(std::move(current_batch));
+        current_batch = OwnerBatchPlan{
+            .owner_rank = static_cast<int>(rank),
+            .first_source_offset = std::numeric_limits<uint64_t>::max(),
+        };
+      }
+      current_batch.batch_bytes += planned_job.source_bytes;
+      current_batch.peer_transfer_bytes += planned_job.peer_transfer_bytes;
+      current_batch.peak_temporary_bytes =
+          std::max(current_batch.peak_temporary_bytes, planned_job.peak_temporary_bytes);
+      current_batch.first_source_offset = std::min(current_batch.first_source_offset, planned_job.source_begin);
+      current_batch.planned_job_indices.push_back(planned_idx);
+    }
+    if (!current_batch.planned_job_indices.empty()) {
+      plan.batches.push_back(std::move(current_batch));
+    }
+  }
+
+  std::sort(plan.batches.begin(), plan.batches.end(), [](const OwnerBatchPlan& lhs, const OwnerBatchPlan& rhs) {
+    if (lhs.first_source_offset != rhs.first_source_offset) {
+      return lhs.first_source_offset < rhs.first_source_offset;
+    }
+    return lhs.owner_rank < rhs.owner_rank;
+  });
+  return plan;
+}
+
+absl::Status ensure_owner_rank_workspace(OwnerRankWorkspace* workspace, int device_id, size_t stage_bytes) {
+  if (workspace == nullptr) {
+    return absl::InvalidArgumentError("owner rank workspace is required");
+  }
+  if (workspace->device_id != device_id) {
+    workspace->stage_buffer.reset();
+    workspace->stage_capacity_bytes = 0;
+    workspace->dim1_pack_workspace.pack_buffers.clear();
+    workspace->dim1_pack_workspace.capacity_bytes = 0;
+    if (workspace->ready_event != nullptr && workspace->device_id >= 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(workspace->device_id));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_destroy(workspace->ready_event));
+      workspace->ready_event = nullptr;
+    }
+    if (workspace->h2d_stream != nullptr && workspace->device_id >= 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(workspace->device_id));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(workspace->h2d_stream));
+      workspace->h2d_stream = nullptr;
+    }
+    if (workspace->dim1_pack_workspace.pack_stream != nullptr && workspace->device_id >= 0) {
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(workspace->device_id));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_destroy(workspace->dim1_pack_workspace.pack_stream));
+      workspace->dim1_pack_workspace.pack_stream = nullptr;
+    }
+    workspace->device_id = device_id;
+  }
+
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_id));
+  if (workspace->stage_buffer == nullptr || workspace->stage_capacity_bytes < stage_bytes) {
+    workspace->stage_buffer = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(workspace->stage_buffer->allocate(stage_bytes, device_id));
+    workspace->stage_capacity_bytes = stage_bytes;
+  }
+  if (workspace->h2d_stream == nullptr) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&workspace->h2d_stream, cudaStreamNonBlocking));
+  }
+  if (workspace->ready_event == nullptr) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_create_with_flags(&workspace->ready_event, cudaEventDisableTiming));
+  }
+  return absl::OkStatus();
 }
 
 std::vector<loader::Range> split_even_ranges(uint64_t base, uint64_t total_bytes, int parts) {
@@ -1280,15 +1727,15 @@ absl::StatusOr<std::vector<TargetStorageSpan>> build_target_storage_spans(
   return spans;
 }
 
-TensorJob::Distribution to_tensor_job_distribution(TensorJobDistribution distribution) {
+TensorJob::Distribution to_tensor_job_distribution(WorkPartitionKind distribution) {
   switch (distribution) {
-    case TensorJobDistribution::kReplicated:
+    case WorkPartitionKind::kReplicated:
       return TensorJob::Distribution::kReplicated;
-    case TensorJobDistribution::kDim0Partitioned:
+    case WorkPartitionKind::kDim0Partitioned:
       return TensorJob::Distribution::kDim0Partitioned;
-    case TensorJobDistribution::kDim1Partitioned:
+    case WorkPartitionKind::kDim1Partitioned:
       return TensorJob::Distribution::kDim1Partitioned;
-    case TensorJobDistribution::kUnknown:
+    case WorkPartitionKind::kUnknown:
       return TensorJob::Distribution::kReplicated;
   }
   return TensorJob::Distribution::kReplicated;
@@ -1311,57 +1758,15 @@ void merge_byte_ranges(std::vector<ByteRange>* ranges) {
   ranges->resize(out + 1);
 }
 
-bool range_fully_covered(absl::Span<const ByteRange> handled_ranges, uint64_t begin, uint64_t end) {
-  for (const auto& range : handled_ranges) {
-    if (begin >= range.begin && end <= range.end) {
-      return true;
-    }
-    if (range.begin > begin) {
-      break;
-    }
+std::optional<TensorAxisRange> single_axis_range(const TensorCoordinateSpec& spec) {
+  if (spec.selects_scalar || spec.axes.size() != 1) {
+    return std::nullopt;
   }
-  return false;
+  return spec.axes.front();
 }
 
-std::vector<ByteRange> subtract_byte_ranges(absl::Span<const ByteRange> excluded_ranges, uint64_t begin, uint64_t end) {
-  std::vector<ByteRange> remaining;
-  if (begin >= end) {
-    return remaining;
-  }
-  if (excluded_ranges.empty()) {
-    remaining.push_back(ByteRange{.begin = begin, .end = end});
-    return remaining;
-  }
-
-  uint64_t cursor = begin;
-  for (const auto& range : excluded_ranges) {
-    if (range.end <= cursor) {
-      continue;
-    }
-    if (range.begin >= end) {
-      break;
-    }
-    if (cursor < range.begin) {
-      remaining.push_back(ByteRange{.begin = cursor, .end = std::min<uint64_t>(end, range.begin)});
-    }
-    if (range.end >= end) {
-      cursor = end;
-      break;
-    }
-    cursor = std::max<uint64_t>(cursor, range.end);
-  }
-  if (cursor < end) {
-    remaining.push_back(ByteRange{.begin = cursor, .end = end});
-  }
-  return remaining;
-}
-
-bool mapped_tensor_job_sources_match(const TensorJobCandidate& lhs, const TensorJobCandidate& rhs) {
-  return lhs.src_name == rhs.src_name && lhs.distribution == rhs.distribution && lhs.src_shape == rhs.src_shape &&
-      lhs.src_stride == rhs.src_stride && lhs.dst_shape == rhs.dst_shape && lhs.dst_stride == rhs.dst_stride &&
-      lhs.dtype == rhs.dtype && lhs.src_logical_offset == rhs.src_logical_offset &&
-      lhs.src_storage_offset == rhs.src_storage_offset && lhs.src_size_bytes == rhs.src_size_bytes &&
-      lhs.element_size == rhs.element_size && lhs.dim == rhs.dim;
+bool mapped_tensor_job_sources_match(const RepresentationWorkItem& lhs, const RepresentationWorkItem& rhs) {
+  return lhs.partition_kind == rhs.partition_kind && lhs.dst_spec == rhs.dst_spec && lhs.sources == rhs.sources;
 }
 
 absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
@@ -1370,64 +1775,84 @@ absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
   if (participants.empty()) {
     return result;
   }
-  std::vector<absl::flat_hash_map<std::string, const TensorJobCandidate*>> jobs_by_rank;
+  std::vector<absl::flat_hash_map<std::string, const RepresentationWorkItem*>> jobs_by_rank;
   jobs_by_rank.reserve(participants.size());
   for (const auto& participant : participants) {
-    absl::flat_hash_map<std::string, const TensorJobCandidate*> by_name;
-    by_name.reserve(participant.tensor_jobs.size());
-    for (const auto& hint : participant.tensor_jobs) {
-      by_name.emplace(hint.dst_name, &hint);
+    absl::flat_hash_map<std::string, const RepresentationWorkItem*> by_name;
+    by_name.reserve(participant.work_plan.items.size());
+    for (const auto& item : participant.work_plan.items) {
+      if (item.kind != RepresentationWorkItemKind::kTensorCopy) {
+        continue;
+      }
+      by_name.emplace(item.dst_name, &item);
     }
     jobs_by_rank.push_back(std::move(by_name));
   }
 
-  std::vector<const TensorJobCandidate*> ordered_hints;
-  ordered_hints.reserve(participants.front().tensor_jobs.size());
-  for (const auto& hint : participants.front().tensor_jobs) {
-    ordered_hints.push_back(&hint);
+  std::vector<const RepresentationWorkItem*> ordered_hints;
+  ordered_hints.reserve(participants.front().work_plan.items.size());
+  for (const auto& item : participants.front().work_plan.items) {
+    if (item.kind != RepresentationWorkItemKind::kTensorCopy) {
+      continue;
+    }
+    ordered_hints.push_back(&item);
   }
   std::sort(ordered_hints.begin(), ordered_hints.end(), [](const auto* a, const auto* b) {
-    if (a->src_logical_offset != b->src_logical_offset) {
-      return a->src_logical_offset < b->src_logical_offset;
+    const uint64_t lhs_offset = (!a->sources.empty()) ? a->sources.front().fragment.source_spec.logical_offset
+                                                      : std::numeric_limits<uint64_t>::max();
+    const uint64_t rhs_offset = (!b->sources.empty()) ? b->sources.front().fragment.source_spec.logical_offset
+                                                      : std::numeric_limits<uint64_t>::max();
+    if (lhs_offset != rhs_offset) {
+      return lhs_offset < rhs_offset;
     }
     if (a->dst_name != b->dst_name) {
       return a->dst_name < b->dst_name;
     }
-    return a->src_name < b->src_name;
+    const std::string& lhs_name = (!a->sources.empty()) ? a->sources.front().fragment.source_spec.name : a->dst_name;
+    const std::string& rhs_name = (!b->sources.empty()) ? b->sources.front().fragment.source_spec.name : b->dst_name;
+    return lhs_name < rhs_name;
   });
 
   result.handled_dst_ranges_by_rank.resize(participants.size());
   for (const auto* first : ordered_hints) {
-    if (first == nullptr || first->dst_name.empty() || first->src_name.empty()) {
+    if (first == nullptr || first->dst_name.empty() || first->sources.size() != 1) {
       continue;
     }
-    if (first->distribution == TensorJobDistribution::kUnknown || first->dst_start != 0 || first->dst_size_bytes == 0 ||
-        first->element_size == 0) {
+    const auto& first_source = first->sources.front();
+    const auto first_src_axis = single_axis_range(first_source.fragment.source_range);
+    const auto first_dst_axis = single_axis_range(first_source.fragment.destination_range);
+    if (first->partition_kind == WorkPartitionKind::kUnknown || first->dst_spec.logical_length == 0 ||
+        first_source.fragment.source_spec.element_size == 0) {
       continue;
     }
-    if (first->distribution == TensorJobDistribution::kReplicated) {
+    if (first->partition_kind == WorkPartitionKind::kReplicated) {
       continue;
     }
-    if (!is_row_major_contiguous(first->src_shape, first->src_stride)) {
+    if (!is_row_major_contiguous(first_source.fragment.source_spec.shape, first_source.fragment.source_spec.stride)) {
       continue;
     }
-    if (first->distribution == TensorJobDistribution::kDim1Partitioned &&
-        (!is_row_major_contiguous(first->src_shape, first->src_stride) || first->src_shape.size() != 2)) {
+    if ((first->partition_kind == WorkPartitionKind::kDim0Partitioned ||
+         first->partition_kind == WorkPartitionKind::kDim1Partitioned) &&
+        (!first_src_axis.has_value() || !first_dst_axis.has_value() || first_dst_axis->start != 0)) {
+      continue;
+    }
+    if (first->partition_kind == WorkPartitionKind::kDim1Partitioned &&
+        (first_source.fragment.source_spec.shape.size() != 2 || first->dst_spec.shape.size() != 2)) {
       continue;
     }
 
     MappedTensorJobRuntime runtime_job;
     runtime_job.job.name = first->dst_name;
     runtime_job.job.source = TensorMeta{
-        .offset = first->src_logical_offset,
-        .size_bytes = first->src_size_bytes,
-        .shape = first->src_shape,
-        .stride = first->src_stride,
-        .dtype = first->dtype,
-        .storage_offset = first->src_storage_offset,
-        .elem_size = first->element_size,
+        .offset = first_source.fragment.source_spec.logical_offset,
+        .size_bytes = first_source.fragment.source_spec.logical_length,
+        .shape = first_source.fragment.source_spec.shape,
+        .stride = first_source.fragment.source_spec.stride,
+        .dtype = first_source.fragment.source_spec.dtype,
+        .storage_offset = first_source.fragment.source_spec.storage_offset,
+        .elem_size = first_source.fragment.source_spec.element_size,
     };
-    runtime_job.job.distribution = to_tensor_job_distribution(first->distribution);
+    runtime_job.job.distribution = to_tensor_job_distribution(first->partition_kind);
     runtime_job.job.slices.resize(participants.size());
     runtime_job.destinations.resize(participants.size());
 
@@ -1439,16 +1864,19 @@ absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
         break;
       }
       const auto& hint = *it->second;
-      if (!mapped_tensor_job_sources_match(*first, hint) || hint.dst_size_bytes == 0) {
+      if (!mapped_tensor_job_sources_match(*first, hint) || hint.sources.size() != 1 ||
+          hint.dst_spec.logical_length == 0) {
         compatible = false;
         break;
       }
+      const auto& hint_source = hint.sources.front();
+      const auto hint_src_axis = single_axis_range(hint_source.fragment.source_range);
       std::uint8_t* dst_base_ptr = nullptr;
       for (const auto& span : participants[rank].storage_spans) {
         const uint64_t span_end = span.base_offset + span.length;
-        const uint64_t tensor_end = hint.dst_base_offset + hint.dst_size_bytes;
-        if (hint.dst_base_offset >= span.base_offset && tensor_end <= span_end) {
-          dst_base_ptr = span.base_ptr.get() + (hint.dst_base_offset - span.base_offset);
+        const uint64_t tensor_end = hint.dst_spec.logical_offset + hint.dst_spec.logical_length;
+        if (hint.dst_spec.logical_offset >= span.base_offset && tensor_end <= span_end) {
+          dst_base_ptr = span.base_ptr.get() + (hint.dst_spec.logical_offset - span.base_offset);
           break;
         }
       }
@@ -1458,32 +1886,32 @@ absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
       }
       RankTensorSlice slice;
       slice.dst_offset = 0;
-      slice.dst_size_bytes = hint.dst_size_bytes;
-      switch (hint.distribution) {
-        case TensorJobDistribution::kReplicated:
+      slice.dst_size_bytes = hint.dst_spec.logical_length;
+      switch (hint.partition_kind) {
+        case WorkPartitionKind::kReplicated:
           slice.kind = RankTensorSlice::Kind::kFull;
           slice.start = 0;
           slice.length = 0;
           break;
-        case TensorJobDistribution::kDim0Partitioned:
-          if (hint.src_end <= hint.src_start) {
+        case WorkPartitionKind::kDim0Partitioned:
+          if (!hint_src_axis.has_value() || hint_src_axis->end <= hint_src_axis->start) {
             compatible = false;
             break;
           }
           slice.kind = RankTensorSlice::Kind::kDim0;
-          slice.start = hint.src_start;
-          slice.length = static_cast<uint64_t>(hint.src_end - hint.src_start);
+          slice.start = hint_src_axis->start;
+          slice.length = static_cast<uint64_t>(hint_src_axis->end - hint_src_axis->start);
           break;
-        case TensorJobDistribution::kDim1Partitioned:
-          if (hint.src_end <= hint.src_start) {
+        case WorkPartitionKind::kDim1Partitioned:
+          if (!hint_src_axis.has_value() || hint_src_axis->end <= hint_src_axis->start) {
             compatible = false;
             break;
           }
           slice.kind = RankTensorSlice::Kind::kDim1;
-          slice.start = hint.src_start;
-          slice.length = static_cast<uint64_t>(hint.src_end - hint.src_start);
+          slice.start = hint_src_axis->start;
+          slice.length = static_cast<uint64_t>(hint_src_axis->end - hint_src_axis->start);
           break;
-        case TensorJobDistribution::kUnknown:
+        case WorkPartitionKind::kUnknown:
           compatible = false;
           break;
       }
@@ -1503,11 +1931,10 @@ absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
     result.handled_root_dst_bytes += runtime_job.job.slices.front().dst_size_bytes;
     for (size_t rank = 0; rank < participants.size(); ++rank) {
       const auto& hint = *jobs_by_rank[rank].at(first->dst_name);
-      const auto& slice = runtime_job.job.slices[rank];
       result.handled_dst_ranges_by_rank[rank].push_back(
           ByteRange{
-              .begin = hint.dst_base_offset,
-              .end = hint.dst_base_offset + slice.dst_size_bytes,
+              .begin = hint.dst_spec.logical_offset,
+              .end = hint.dst_spec.logical_offset + hint.dst_spec.logical_length,
           });
     }
     result.jobs.push_back(std::move(runtime_job));
@@ -1581,66 +2008,81 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
     const StrategyConfig& strategy) {
   MappedConcatJobBuildResult result;
   result.handled_dst_ranges_by_rank.resize(participants.size());
-  if (participants.empty() || participants.front().concat_jobs.empty()) {
+  if (participants.empty()) {
     return result;
   }
 
-  std::vector<absl::flat_hash_map<std::string, const ConcatJobCandidate*>> jobs_by_rank;
+  std::vector<absl::flat_hash_map<std::string, const RepresentationWorkItem*>> jobs_by_rank;
   jobs_by_rank.reserve(participants.size());
   for (const auto& participant : participants) {
-    absl::flat_hash_map<std::string, const ConcatJobCandidate*> by_name;
-    by_name.reserve(participant.concat_jobs.size());
-    for (const auto& hint : participant.concat_jobs) {
-      by_name.emplace(hint.dst_name, &hint);
+    absl::flat_hash_map<std::string, const RepresentationWorkItem*> by_name;
+    by_name.reserve(participant.work_plan.items.size());
+    for (const auto& item : participant.work_plan.items) {
+      if (item.kind != RepresentationWorkItemKind::kConcatAssemble) {
+        continue;
+      }
+      by_name.emplace(item.dst_name, &item);
     }
     jobs_by_rank.push_back(std::move(by_name));
   }
 
-  for (const auto& hint : participants.front().concat_jobs) {
-    if (hint.sources.empty() || hint.prefix_count == 0 || hint.dst_size_bytes == 0) {
+  std::vector<const RepresentationWorkItem*> concat_items;
+  concat_items.reserve(participants.front().work_plan.items.size());
+  for (const auto& item : participants.front().work_plan.items) {
+    if (item.kind == RepresentationWorkItemKind::kConcatAssemble) {
+      concat_items.push_back(&item);
+    }
+  }
+
+  for (const auto* hint : concat_items) {
+    if (hint == nullptr || hint->sources.empty() || hint->dst_spec.logical_length == 0) {
       LOG(INFO) << "mapped_concat_job_skip"
-                << " dst_name=" << hint.dst_name << " reason=empty_hint";
+                << " dst_name=" << (hint != nullptr ? hint->dst_name : std::string("<null>")) << " reason=empty_hint";
       continue;
     }
-    if (hint.prefix_count > 1 && !enable_mapped_multirange_concat_jobs(strategy)) {
+    const uint64_t prefix_count = hint->sources.front().prefix_count;
+    if (prefix_count == 0) {
       continue;
     }
-    if (hint.prefix_count == 1 && !enable_mapped_single_range_concat_jobs(strategy)) {
+    if (prefix_count > 1 && !enable_mapped_multirange_concat_jobs(strategy)) {
+      continue;
+    }
+    if (prefix_count == 1 && !enable_mapped_single_range_concat_jobs(strategy)) {
       continue;
     }
     MappedConcatJobRuntime job;
-    job.name = hint.dst_name;
-    job.dst_base_offset = hint.dst_base_offset;
-    job.dst_size_bytes = hint.dst_size_bytes;
-    job.prefix_count = hint.prefix_count;
+    job.name = hint->dst_name;
+    job.dst_base_offset = hint->dst_spec.logical_offset;
+    job.dst_size_bytes = hint->dst_spec.logical_length;
+    job.prefix_count = prefix_count;
     job.destinations.resize(participants.size());
-    job.fragments.reserve(hint.sources.size());
+    job.fragments.reserve(hint->sources.size());
 
     bool compatible = true;
-    std::vector<const ConcatJobCandidate*> rank_hints(participants.size(), nullptr);
+    std::vector<const RepresentationWorkItem*> rank_hints(participants.size(), nullptr);
     for (size_t rank = 0; rank < participants.size(); ++rank) {
-      auto it = jobs_by_rank[rank].find(hint.dst_name);
+      auto it = jobs_by_rank[rank].find(hint->dst_name);
       if (it == jobs_by_rank[rank].end() || it->second == nullptr) {
         if (verbose_mapped_concat_diagnostics(strategy)) {
           LOG(INFO) << "mapped_concat_job_skip"
-                    << " dst_name=" << hint.dst_name << " reason=missing_rank_hint"
+                    << " dst_name=" << hint->dst_name << " reason=missing_rank_hint"
                     << " rank=" << rank;
         }
         compatible = false;
         break;
       }
       rank_hints[rank] = it->second;
-      if (it->second->sources.size() != hint.sources.size() || it->second->dst_size_bytes != hint.dst_size_bytes ||
-          it->second->prefix_count != hint.prefix_count) {
+      const uint64_t rank_prefix_count = it->second->sources.empty() ? 0 : it->second->sources.front().prefix_count;
+      if (it->second->sources.size() != hint->sources.size() ||
+          it->second->dst_spec.logical_length != hint->dst_spec.logical_length || rank_prefix_count != prefix_count) {
         if (verbose_mapped_concat_diagnostics(strategy)) {
           LOG(INFO) << "mapped_concat_job_skip"
-                    << " dst_name=" << hint.dst_name << " reason=rank_hint_shape_mismatch"
-                    << " rank=" << rank << " expected_sources=" << hint.sources.size()
+                    << " dst_name=" << hint->dst_name << " reason=rank_hint_shape_mismatch"
+                    << " rank=" << rank << " expected_sources=" << hint->sources.size()
                     << " actual_sources=" << it->second->sources.size()
-                    << " expected_dst_size_bytes=" << hint.dst_size_bytes
-                    << " actual_dst_size_bytes=" << it->second->dst_size_bytes
-                    << " expected_prefix_count=" << hint.prefix_count
-                    << " actual_prefix_count=" << it->second->prefix_count;
+                    << " expected_dst_size_bytes=" << hint->dst_spec.logical_length
+                    << " actual_dst_size_bytes=" << it->second->dst_spec.logical_length
+                    << " expected_prefix_count=" << prefix_count << " actual_prefix_count=" << rank_prefix_count;
         }
         compatible = false;
         break;
@@ -1652,17 +2094,19 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
       continue;
     }
 
-    for (size_t source_idx = 0; source_idx < hint.sources.size(); ++source_idx) {
-      const auto& source = hint.sources[source_idx];
-      if (source.prefix_count == 0 || source.dst_block_bytes == 0 || source.src_end <= source.src_start) {
+    for (size_t source_idx = 0; source_idx < hint->sources.size(); ++source_idx) {
+      const auto& source = hint->sources[source_idx];
+      const auto src_axis = single_axis_range(source.fragment.source_range);
+      if (!src_axis.has_value() || src_axis->dim != 0 || source.prefix_count == 0 || source.dst_block_bytes == 0 ||
+          src_axis->end <= src_axis->start) {
         LOG(INFO) << "mapped_concat_job_skip"
-                  << " dst_name=" << hint.dst_name << " reason=invalid_source_fragment"
-                  << " src_name=" << source.src_name;
+                  << " dst_name=" << hint->dst_name << " reason=invalid_source_fragment"
+                  << " src_name=" << source.fragment.source_spec.name;
         compatible = false;
         break;
       }
-      auto src_block_bytes_or =
-          contiguous_dim0_slice_bytes(source.src_shape, source.element_size, source.src_start, source.src_end);
+      auto src_block_bytes_or = contiguous_dim0_slice_bytes(
+          source.fragment.source_spec.shape, source.fragment.source_spec.element_size, src_axis->start, src_axis->end);
       if (!src_block_bytes_or.ok()) {
         return src_block_bytes_or.status();
       }
@@ -1672,20 +2116,25 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
       std::vector<int64_t> src_ends_by_rank(participants.size(), 0);
       for (size_t rank = 0; rank < participants.size(); ++rank) {
         const auto& rank_source = rank_hints[rank]->sources[source_idx];
-        if (rank_source.src_name != source.src_name || rank_source.src_shape != source.src_shape ||
-            rank_source.src_stride != source.src_stride || rank_source.dtype != source.dtype ||
-            rank_source.element_size != source.element_size ||
+        const auto rank_src_axis = single_axis_range(rank_source.fragment.source_range);
+        if (!rank_src_axis.has_value() || rank_src_axis->dim != 0 ||
+            rank_source.fragment.source_spec.name != source.fragment.source_spec.name ||
+            rank_source.fragment.source_spec.shape != source.fragment.source_spec.shape ||
+            rank_source.fragment.source_spec.stride != source.fragment.source_spec.stride ||
+            rank_source.fragment.source_spec.dtype != source.fragment.source_spec.dtype ||
+            rank_source.fragment.source_spec.element_size != source.fragment.source_spec.element_size ||
             rank_source.dst_block_offset_bytes != source.dst_block_offset_bytes ||
             rank_source.dst_block_stride_bytes != source.dst_block_stride_bytes ||
             rank_source.dst_block_bytes != source.dst_block_bytes || rank_source.prefix_count != source.prefix_count ||
-            rank_source.src_end <= rank_source.src_start) {
+            rank_src_axis->end <= rank_src_axis->start) {
           if (verbose_mapped_concat_diagnostics(strategy)) {
             LOG(INFO) << "mapped_concat_job_skip"
-                      << " dst_name=" << hint.dst_name << " reason=rank_source_mismatch"
-                      << " rank=" << rank << " src_idx=" << source_idx << " src_name=" << source.src_name
-                      << " rank_src_name=" << rank_source.src_name << " src_start=" << source.src_start
-                      << " src_end=" << source.src_end << " rank_src_start=" << rank_source.src_start
-                      << " rank_src_end=" << rank_source.src_end
+                      << " dst_name=" << hint->dst_name << " reason=rank_source_mismatch"
+                      << " rank=" << rank << " src_idx=" << source_idx
+                      << " src_name=" << source.fragment.source_spec.name
+                      << " rank_src_name=" << rank_source.fragment.source_spec.name << " src_start=" << src_axis->start
+                      << " src_end=" << src_axis->end << " rank_src_start=" << rank_src_axis->start
+                      << " rank_src_end=" << rank_src_axis->end
                       << " dst_block_offset_bytes=" << source.dst_block_offset_bytes
                       << " rank_dst_block_offset_bytes=" << rank_source.dst_block_offset_bytes
                       << " dst_block_stride_bytes=" << source.dst_block_stride_bytes
@@ -1697,15 +2146,14 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
           compatible = false;
           break;
         }
-        const int64_t src_block_rows = rank_source.src_end - rank_source.src_start;
+        const int64_t src_block_rows = rank_src_axis->end - rank_src_axis->start;
         if (src_block_rows <= 0) {
           compatible = false;
           break;
         }
-        src_starts_by_rank[rank] = rank_source.src_start;
-        src_ends_by_rank[rank] =
-            rank_source.src_start + static_cast<int64_t>(rank_source.prefix_count) * src_block_rows;
-        const uint64_t logical_begin = hint.dst_base_offset + rank_source.dst_block_offset_bytes;
+        src_starts_by_rank[rank] = rank_src_axis->start;
+        src_ends_by_rank[rank] = rank_src_axis->start + static_cast<int64_t>(rank_source.prefix_count) * src_block_rows;
+        const uint64_t logical_begin = hint->dst_spec.logical_offset + rank_source.dst_block_offset_bytes;
         const uint64_t logical_span =
             source.dst_block_bytes + (source.prefix_count - 1) * source.dst_block_stride_bytes;
         auto* dst_base_ptr = find_tensor_base_ptr(participants[rank], logical_begin, logical_span);
@@ -1721,8 +2169,9 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
             source.prefix_count);
         if (!pieces_or.ok()) {
           LOG(INFO) << "mapped_concat_job_skip"
-                    << " dst_name=" << hint.dst_name << " reason=fragment_target_not_single_storage"
-                    << " rank=" << rank << " src_name=" << source.src_name << " status=" << pieces_or.status();
+                    << " dst_name=" << hint->dst_name << " reason=fragment_target_not_single_storage"
+                    << " rank=" << rank << " src_name=" << source.fragment.source_spec.name
+                    << " status=" << pieces_or.status();
           compatible = false;
           break;
         }
@@ -1735,16 +2184,16 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
           MappedConcatFragmentRuntime{
               .source =
                   TensorMeta{
-                      .offset = source.src_logical_offset,
-                      .size_bytes = source.src_size_bytes,
-                      .shape = source.src_shape,
-                      .stride = source.src_stride,
-                      .dtype = source.dtype,
-                      .storage_offset = source.src_storage_offset,
-                      .elem_size = source.element_size,
+                      .offset = source.fragment.source_spec.logical_offset,
+                      .size_bytes = source.fragment.source_spec.logical_length,
+                      .shape = source.fragment.source_spec.shape,
+                      .stride = source.fragment.source_spec.stride,
+                      .dtype = source.fragment.source_spec.dtype,
+                      .storage_offset = source.fragment.source_spec.storage_offset,
+                      .elem_size = source.fragment.source_spec.element_size,
                   },
-              .src_start = source.src_start,
-              .src_end = source.src_end,
+              .src_start = src_axis->start,
+              .src_end = src_axis->end,
               .src_starts_by_rank = std::move(src_starts_by_rank),
               .src_ends_by_rank = std::move(src_ends_by_rank),
               .prefix_count = source.prefix_count,
@@ -1762,14 +2211,17 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
     }
     for (size_t rank = 0; rank < participants.size(); ++rank) {
       result.handled_dst_ranges_by_rank[rank].push_back(
-          ByteRange{.begin = hint.dst_base_offset, .end = hint.dst_base_offset + hint.dst_size_bytes});
+          ByteRange{
+              .begin = hint->dst_spec.logical_offset,
+              .end = hint->dst_spec.logical_offset + hint->dst_spec.logical_length,
+          });
     }
-    result.handled_root_dst_bytes += hint.dst_size_bytes;
+    result.handled_root_dst_bytes += hint->dst_spec.logical_length;
     result.jobs.push_back(std::move(job));
   }
 
   LOG(INFO) << "mapped_concat_job_summary"
-            << " requested=" << participants.front().concat_jobs.size() << " accepted=" << result.jobs.size()
+            << " requested=" << concat_items.size() << " accepted=" << result.jobs.size()
             << " handled_source_bytes=" << result.handled_source_bytes
             << " handled_root_dst_bytes=" << result.handled_root_dst_bytes;
 
@@ -1780,58 +2232,20 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
 }
 
 absl::StatusOr<std::vector<MappedSegmentRef>> build_mapped_segment_refs(
-    const std::vector<ParsedMappedParticipant>& participants,
-    const std::vector<std::vector<ByteRange>>* excluded_dst_ranges_by_rank = nullptr) {
+    const std::vector<ParsedMappedParticipant>& participants) {
   std::vector<MappedSegmentRef> segments;
   for (const auto& participant : participants) {
-    if (participant.map.num_sources != 1) {
+    if (participant.collective_lane_map.num_sources != 1) {
       return absl::InvalidArgumentError("mapped collective load requires mapping.num_sources == 1");
     }
-    absl::Span<const ByteRange> excluded_ranges;
-    if (excluded_dst_ranges_by_rank != nullptr && participant.rank >= 0 &&
-        static_cast<size_t>(participant.rank) < excluded_dst_ranges_by_rank->size()) {
-      excluded_ranges = absl::MakeSpan((*excluded_dst_ranges_by_rank)[static_cast<size_t>(participant.rank)]);
-    }
-    for (const auto& segment : participant.map.segments) {
+    for (const auto& segment : participant.collective_lane_map.segments) {
       if (segment.kind != loader::ByteRangeSegment::Kind::kData) {
-        return absl::UnimplementedError("mapped collective load does not support pad segments");
+        return absl::InvalidArgumentError("mapped collective load requires data-only collective lane map");
       }
       if (segment.source_index != 0) {
         return absl::InvalidArgumentError("mapped collective load requires source_index == 0");
       }
       if (segment.length == 0) {
-        continue;
-      }
-      const uint64_t dst_end = segment.dst_offset + segment.length;
-      if (!excluded_ranges.empty()) {
-        if (range_fully_covered(excluded_ranges, segment.dst_offset, dst_end)) {
-          continue;
-        }
-        const auto remaining_ranges = subtract_byte_ranges(excluded_ranges, segment.dst_offset, dst_end);
-        if (remaining_ranges.empty()) {
-          continue;
-        }
-        if (remaining_ranges.size() > 1 || remaining_ranges.front().begin != segment.dst_offset ||
-            remaining_ranges.front().end != dst_end) {
-          LOG(INFO) << "mapped_collective_segment_subtract"
-                    << " rank=" << participant.rank << " original_dst_begin=" << segment.dst_offset
-                    << " original_dst_end=" << dst_end << " original_len=" << segment.length
-                    << " remaining_parts=" << remaining_ranges.size();
-        }
-        for (const auto& keep : remaining_ranges) {
-          const uint64_t keep_len = keep.end - keep.begin;
-          if (keep_len == 0) {
-            continue;
-          }
-          const uint64_t src_delta = keep.begin - segment.dst_offset;
-          segments.push_back(
-              MappedSegmentRef{
-                  .rank = participant.rank,
-                  .src_offset = segment.src_offset + src_delta,
-                  .dst_offset = keep.begin,
-                  .length = keep_len,
-              });
-        }
         continue;
       }
       segments.push_back(
@@ -2003,6 +2417,8 @@ absl::StatusOr<std::optional<std::unique_ptr<common::memory::GpuDeviceMemory>>> 
 
   if (disable_collective_whole_source_preload()) {
     LOG(INFO) << "collective_whole_source skipped"
+              << " prototype=1"
+              << " cleanup_target=0109"
               << " reason=disabled"
               << " source_bytes=" << source_bytes;
     return std::optional<std::unique_ptr<common::memory::GpuDeviceMemory>>{};
@@ -2013,6 +2429,8 @@ absl::StatusOr<std::optional<std::unique_ptr<common::memory::GpuDeviceMemory>>> 
   TC_RETURN_IF_ERROR(tensorcast::cuda::get_memory_info(&free_bytes, &total_bytes, root_device_id));
   if (source_bytes + kWholeSourceFreeMemoryReserveBytes > free_bytes) {
     LOG(INFO) << "collective_whole_source skipped"
+              << " prototype=1"
+              << " cleanup_target=0109"
               << " reason=insufficient_free_memory"
               << " source_bytes=" << source_bytes << " free_bytes=" << free_bytes << " total_bytes=" << total_bytes
               << " reserve_bytes=" << kWholeSourceFreeMemoryReserveBytes;
@@ -2724,8 +3142,8 @@ LocalBatchedDiskLoadResult try_local_batched_disk_load_impl(
   if (!enable_local_batched_disk_load(request.strategy_config)) {
     return {.handled = false, .status = absl::OkStatus()};
   }
-  if (request.disk_context == nullptr || request.source_index_json.empty() || request.view_index_json.empty() ||
-      !request.variant_identity.has_value() || request.gpu_ptr == nullptr || request.device_id < 0) {
+  if (request.disk_context == nullptr || request.representation_work_plan.items.empty() || request.gpu_ptr == nullptr ||
+      request.device_id < 0) {
     return local_batched_fallback(request.replica_key.artifact_id, "missing_prerequisites");
   }
 
@@ -2736,9 +3154,7 @@ LocalBatchedDiskLoadResult try_local_batched_disk_load_impl(
       .gpu_ptr = request.gpu_ptr,
       .gpu_allocation = request.gpu_allocation,
       .disk_context = request.disk_context,
-      .source_index_json = request.source_index_json,
-      .view_index_json = request.view_index_json,
-      .variant_identity = request.variant_identity,
+      .representation_work_plan = request.representation_work_plan,
   };
   auto jobs_or = build_tensor_jobs(std::vector<ParsedParticipant>{participant});
   if (!jobs_or.ok()) {
@@ -3536,126 +3952,39 @@ absl::Status execute_group_collective(
     return jobs_or.status();
   }
   const auto jobs_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - jobs_start).count();
-  std::vector<FileSegment> owner_file_segments;
-  std::vector<OwnedFileRankState> owner_states;
-  double owner_preload_sec = 0.0;
+  const bool owner_file_enabled = enable_collective_owner_file_strategy(strategy_config);
+  std::optional<OwnerCollectivePlan> owner_collective_plan;
+  double owner_plan_sec = 0.0;
+  size_t owner_batch_count = 0;
   size_t owner_replicated_jobs = 0;
   size_t owner_dim0_jobs = 0;
+  size_t owner_dim1_jobs = 0;
   double owner_exec_sec = 0.0;
   uint64_t owner_peer_transfer_bytes = 0;
-  const bool owner_file_enabled = enable_collective_owner_file_strategy(strategy_config);
   if (owner_file_enabled) {
-    auto file_segments_or =
-        compute_file_segments(participants.front().disk_context->safetensors_segments(), clique->world_size());
-    if (!file_segments_or.ok()) {
-      return file_segments_or.status();
+    const auto owner_plan_start = std::chrono::steady_clock::now();
+    auto owner_plan_or = build_owner_file_collective_plan(
+        *jobs_or,
+        participants.front().disk_context->safetensors_segments(),
+        clique->world_size(),
+        strategy_config,
+        chunk_bytes);
+    owner_plan_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_plan_start).count();
+    if (owner_plan_or.ok()) {
+      owner_collective_plan = std::move(*owner_plan_or);
+      owner_batch_count = owner_collective_plan->batches.size();
+      LOG(INFO) << "collective_owner_file_batched plan"
+                << " artifact_id=" << participants.front().replica_key.artifact_id
+                << " batches=" << owner_collective_plan->batches.size()
+                << " unique_source_bytes=" << owner_collective_plan->unique_source_bytes
+                << " peer_transfer_bytes=" << owner_collective_plan->peer_transfer_bytes
+                << " owner_skew_ratio=" << owner_collective_plan->owner_skew_ratio
+                << " segment_split=" << (owner_collective_plan->used_segment_split ? 1 : 0);
+    } else {
+      LOG(WARNING) << "collective_owner_file_batched fallback"
+                   << " artifact_id=" << participants.front().replica_key.artifact_id
+                   << " status=" << owner_plan_or.status();
     }
-    owner_file_segments = std::move(*file_segments_or);
-    owner_states.resize(participants.size());
-    for (size_t rank = 0; rank < participants.size(); ++rank) {
-      auto& state = owner_states[rank];
-      state.owned_file_base.assign(owner_file_segments.size(), 0);
-      state.owned_file.assign(owner_file_segments.size(), false);
-      for (size_t file_idx = 0; file_idx < owner_file_segments.size(); ++file_idx) {
-        if (owner_file_segments[file_idx].owner_rank != static_cast<int>(rank)) {
-          continue;
-        }
-        state.owned_file[file_idx] = true;
-        state.owned_file_base[file_idx] = state.owned_total_bytes;
-        state.owned_total_bytes += owner_file_segments[file_idx].data_size;
-      }
-    }
-    const auto preload_start = std::chrono::steady_clock::now();
-    std::vector<absl::Status> preload_status(participants.size(), absl::OkStatus());
-    std::vector<std::thread> preload_threads;
-    preload_threads.reserve(participants.size());
-    for (size_t rank = 0; rank < participants.size(); ++rank) {
-      if (owner_states[rank].owned_total_bytes == 0) {
-        continue;
-      }
-      preload_threads.emplace_back([&, rank]() {
-        auto& state = owner_states[rank];
-        const int device_id = participants[rank].device_id;
-        auto payload = std::make_unique<common::memory::GpuDeviceMemory>();
-        absl::Status status = tensorcast::cuda::set_device(device_id);
-        if (!status.ok()) {
-          preload_status[rank] = status;
-          return;
-        }
-        status = payload->allocate(static_cast<size_t>(state.owned_total_bytes), device_id);
-        if (!status.ok()) {
-          preload_status[rank] = status;
-          return;
-        }
-
-        loader::MultiSafetensorsSource backing_source(participants.front().disk_context->safetensors_segments());
-        std::vector<RemappedSource::Segment> remap;
-        remap.reserve(owner_file_segments.size());
-        for (size_t file_idx = 0; file_idx < owner_file_segments.size(); ++file_idx) {
-          if (!state.owned_file[file_idx]) {
-            continue;
-          }
-          remap.push_back(
-              RemappedSource::Segment{
-                  .dst_offset = state.owned_file_base[file_idx],
-                  .src_offset = owner_file_segments[file_idx].base_offset,
-                  .end_offset = state.owned_file_base[file_idx] + owner_file_segments[file_idx].data_size,
-              });
-        }
-        RemappedSource remapped_source(gsl::not_null<loader::SeekableSource*>{&backing_source}, std::move(remap));
-        loader::GpuMemorySink sink(
-            loader::GpuMemorySink::Options{
-                .gpu_base_ptr = gsl::not_null<void*>{payload->get()},
-                .total_size = state.owned_total_bytes,
-                .chunk_size = chunk_bytes,
-                .device_id = device_id,
-                .allocation = nullptr,
-                .gpu_sched_enabled = false,
-                .gpu_sched_limit_bytes = loader::DEFAULT_GPU_SCHED_LIMIT_BYTES,
-                .gpu_sched_limit_copies = loader::DEFAULT_GPU_SCHED_LIMIT_COPIES,
-            });
-        auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-            /*num_chunks=*/2, chunk_bytes, pinned_pool);
-        status = session_spb->initialize(
-            pinned_timeout,
-            absl::StrCat(
-                "collective_owner_file_preload artifact_id=",
-                participants.front().replica_key.artifact_id,
-                " rank=",
-                rank));
-        if (!status.ok()) {
-          preload_status[rank] = status;
-          return;
-        }
-        loader::StreamingBufferAdapter adapter(session_spb);
-        const auto ranges = split_even_ranges(/*base=*/0, state.owned_total_bytes, /*parts=*/2);
-        status = loader::pump_ranges(
-            remapped_source,
-            sink,
-            adapter,
-            ranges,
-            /*concurrency=*/2,
-            whole_source_load_runtime().blocking_executor());
-        if (status.ok()) {
-          status = sink.close();
-        }
-        if (status.ok()) {
-          state.owned_payload = std::move(payload);
-        }
-        preload_status[rank] = status;
-      });
-    }
-    for (auto& thread : preload_threads) {
-      if (thread.joinable()) {
-        thread.join();
-      }
-    }
-    for (const auto& status : preload_status) {
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    owner_preload_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - preload_start).count();
   }
   const auto whole_source_start = std::chrono::steady_clock::now();
   std::unique_ptr<common::memory::GpuDeviceMemory> root_source;
@@ -3663,18 +3992,28 @@ absl::Status execute_group_collective(
   if (participants.front().disk_context->safetensors_segments().empty()) {
     return absl::FailedPreconditionError("collective disk load requires non-empty safetensors segments");
   }
-  auto root_source_or = maybe_load_whole_source_to_root_buffer(
-      participants,
-      participants.front().disk_context->safetensors_segments(),
-      pinned_pool,
-      pinned_timeout,
-      chunk_bytes);
-  if (!root_source_or.ok()) {
-    return root_source_or.status();
-  }
-  if (root_source_or->has_value()) {
-    root_source = std::move(**root_source_or);
-    whole_source_enabled = true;
+  if (!owner_file_enabled) {
+    auto root_source_or = maybe_load_whole_source_to_root_buffer(
+        participants,
+        participants.front().disk_context->safetensors_segments(),
+        pinned_pool,
+        pinned_timeout,
+        chunk_bytes);
+    if (!root_source_or.ok()) {
+      return root_source_or.status();
+    }
+    if (root_source_or->has_value()) {
+      root_source = std::move(**root_source_or);
+      whole_source_enabled = true;
+      LOG(INFO) << "collective_whole_source prototype"
+                << " artifact_id=" << participants.front().replica_key.artifact_id << " prototype=1"
+                << " cleanup_target=0109"
+                << " source_bytes=" << root_source->size();
+    }
+  } else {
+    LOG(INFO) << "collective_whole_source skipped"
+              << " artifact_id=" << participants.front().replica_key.artifact_id
+              << " reason=owner_file_batched_enabled";
   }
   const auto whole_source_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - whole_source_start).count();
@@ -3708,111 +4047,78 @@ absl::Status execute_group_collective(
   double replicated_sec = 0.0;
   double dim0_sec = 0.0;
   double dim1_sec = 0.0;
-  for (const auto& job : *jobs_or) {
-    bool handled_by_owner_file = false;
-    if (owner_file_enabled &&
-        (job.distribution == TensorJob::Distribution::kReplicated ||
-         job.distribution == TensorJob::Distribution::kDim0Partitioned)) {
-      size_t file_idx = 0;
-      auto file_idx_or = find_file_index_for_offset(owner_file_segments, job.source.offset);
-      if (file_idx_or.ok()) {
-        file_idx = *file_idx_or;
-        const auto& file_segment = owner_file_segments[file_idx];
-        if (job.source.offset + job.source.size_bytes <= file_segment.base_offset + file_segment.data_size) {
-          const int owner_rank = file_segment.owner_rank;
-          auto& owner_state = owner_states[static_cast<size_t>(owner_rank)];
-          if (owner_state.owned_payload != nullptr && owner_state.owned_file[file_idx]) {
-            const uint64_t tensor_file_off = job.source.offset - file_segment.base_offset;
-            const auto* tensor_ptr = static_cast<const std::uint8_t*>(owner_state.owned_payload->get()) +
-                owner_state.owned_file_base[file_idx] + tensor_file_off;
-            const auto owner_start = std::chrono::steady_clock::now();
-            if (job.distribution == TensorJob::Distribution::kReplicated) {
-              const auto& owner_slice = job.slices[static_cast<size_t>(owner_rank)];
-              if (owner_slice.dst_size_bytes > 0) {
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::set_device(participants[static_cast<size_t>(owner_rank)].device_id));
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[static_cast<size_t>(owner_rank)].gpu_ptr) +
-                    owner_slice.dst_offset;
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::memcpy_async(
-                        dst_ptr,
-                        tensor_ptr,
-                        static_cast<size_t>(owner_slice.dst_size_bytes),
-                        cudaMemcpyDeviceToDevice,
-                        clique->stream(owner_rank)));
-              }
-              TC_RETURN_IF_ERROR(clique->group_start());
-              for (size_t peer = 0; peer < participants.size(); ++peer) {
-                if (static_cast<int>(peer) == owner_rank) {
-                  continue;
-                }
-                const auto& peer_slice = job.slices[peer];
-                if (peer_slice.dst_size_bytes == 0) {
-                  continue;
-                }
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[peer].gpu_ptr) + peer_slice.dst_offset;
-                TC_RETURN_IF_ERROR(clique->send_u8(
-                    owner_rank, tensor_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), static_cast<int>(peer)));
-                TC_RETURN_IF_ERROR(clique->recv_u8(
-                    static_cast<int>(peer), dst_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), owner_rank));
-                owner_peer_transfer_bytes += peer_slice.dst_size_bytes;
-              }
-              TC_RETURN_IF_ERROR(clique->group_end());
-              TC_RETURN_IF_ERROR(clique->synchronize_all());
-              owner_replicated_jobs += 1;
-              owner_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_start).count();
-              handled_by_owner_file = true;
-            } else if (job.distribution == TensorJob::Distribution::kDim0Partitioned) {
-              uint64_t per_row_bytes = job.source.elem_size;
-              for (size_t dim = 1; dim < job.source.shape.size(); ++dim) {
-                per_row_bytes *= static_cast<uint64_t>(job.source.shape[dim]);
-              }
-              const auto& owner_slice = job.slices[static_cast<size_t>(owner_rank)];
-              if (owner_slice.dst_size_bytes > 0) {
-                const uint64_t owner_src_off = static_cast<uint64_t>(owner_slice.start) * per_row_bytes;
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[static_cast<size_t>(owner_rank)].gpu_ptr) +
-                    owner_slice.dst_offset;
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::set_device(participants[static_cast<size_t>(owner_rank)].device_id));
-                TC_RETURN_IF_ERROR(
-                    tensorcast::cuda::memcpy_async(
-                        dst_ptr,
-                        tensor_ptr + owner_src_off,
-                        static_cast<size_t>(owner_slice.dst_size_bytes),
-                        cudaMemcpyDeviceToDevice,
-                        clique->stream(owner_rank)));
-              }
-              TC_RETURN_IF_ERROR(clique->group_start());
-              for (size_t peer = 0; peer < participants.size(); ++peer) {
-                if (static_cast<int>(peer) == owner_rank) {
-                  continue;
-                }
-                const auto& peer_slice = job.slices[peer];
-                if (peer_slice.dst_size_bytes == 0) {
-                  continue;
-                }
-                const uint64_t peer_src_off = static_cast<uint64_t>(peer_slice.start) * per_row_bytes;
-                const auto* src_ptr = tensor_ptr + peer_src_off;
-                auto* dst_ptr = static_cast<std::uint8_t*>(participants[peer].gpu_ptr) + peer_slice.dst_offset;
-                TC_RETURN_IF_ERROR(clique->send_u8(
-                    owner_rank, src_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), static_cast<int>(peer)));
-                TC_RETURN_IF_ERROR(clique->recv_u8(
-                    static_cast<int>(peer), dst_ptr, static_cast<size_t>(peer_slice.dst_size_bytes), owner_rank));
-                owner_peer_transfer_bytes += peer_slice.dst_size_bytes;
-              }
-              TC_RETURN_IF_ERROR(clique->group_end());
-              TC_RETURN_IF_ERROR(clique->synchronize_all());
-              owner_dim0_jobs += 1;
-              owner_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_start).count();
-              handled_by_owner_file = true;
-            }
-          }
+  std::vector<bool> handled_by_owner_file(jobs_or->size(), false);
+  if (owner_collective_plan.has_value()) {
+    const uint64_t owner_direct_chunk_bytes =
+        std::min<uint64_t>(chunk_bytes, effective_owner_batch_bytes(strategy_config, chunk_bytes));
+    const uint64_t owner_dim1_chunk_bytes = std::min<uint64_t>(
+        owner_direct_chunk_bytes, effective_owner_dim1_staging_bytes(strategy_config, owner_direct_chunk_bytes));
+    const size_t owner_stage_bytes = static_cast<size_t>(std::max(owner_direct_chunk_bytes, owner_dim1_chunk_bytes));
+    std::vector<OwnerRankWorkspace> owner_workspaces(participants.size());
+    for (const auto& batch : owner_collective_plan->batches) {
+      auto& workspace = owner_workspaces[static_cast<size_t>(batch.owner_rank)];
+      TC_RETURN_IF_ERROR(ensure_owner_rank_workspace(
+          &workspace, participants[static_cast<size_t>(batch.owner_rank)].device_id, owner_stage_bytes));
+      for (size_t planned_idx : batch.planned_job_indices) {
+        const auto& planned_job = owner_collective_plan->planned_jobs[planned_idx];
+        const auto& job = (*jobs_or)[planned_job.job_index];
+        const auto owner_start = std::chrono::steady_clock::now();
+        switch (job.distribution) {
+          case TensorJob::Distribution::kReplicated:
+            TC_RETURN_IF_ERROR(execute_replicated_tensor(
+                job,
+                participants,
+                source,
+                *clique,
+                host_buffer,
+                static_cast<size_t>(owner_direct_chunk_bytes),
+                workspace.stage_buffer->get(),
+                workspace.h2d_stream,
+                workspace.ready_event,
+                batch.owner_rank));
+            owner_replicated_jobs += 1;
+            break;
+          case TensorJob::Distribution::kDim0Partitioned:
+            TC_RETURN_IF_ERROR(execute_dim0_tensor(
+                job,
+                participants,
+                source,
+                *clique,
+                host_buffer,
+                static_cast<size_t>(owner_direct_chunk_bytes),
+                workspace.stage_buffer->get(),
+                workspace.h2d_stream,
+                workspace.ready_event,
+                batch.owner_rank));
+            owner_dim0_jobs += 1;
+            break;
+          case TensorJob::Distribution::kDim1Partitioned:
+            TC_RETURN_IF_ERROR(execute_dim1_tensor(
+                job,
+                participants,
+                source,
+                *clique,
+                host_buffer,
+                static_cast<size_t>(owner_dim1_chunk_bytes),
+                workspace.stage_buffer->get(),
+                workspace.h2d_stream,
+                workspace.ready_event,
+                batch.owner_rank,
+                &workspace.dim1_pack_workspace));
+            owner_dim1_jobs += 1;
+            break;
         }
+        owner_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - owner_start).count();
+        owner_peer_transfer_bytes += planned_job.peer_transfer_bytes;
+        handled_by_owner_file[planned_job.job_index] = true;
       }
     }
-    if (handled_by_owner_file) {
+  }
+  for (size_t job_idx = 0; job_idx < jobs_or->size(); ++job_idx) {
+    if (handled_by_owner_file[job_idx]) {
       continue;
     }
+    const auto& job = (*jobs_or)[job_idx];
     const auto job_start = std::chrono::steady_clock::now();
     switch (job.distribution) {
       case TensorJob::Distribution::kReplicated:
@@ -3895,10 +4201,16 @@ absl::Status execute_group_collective(
   LOG(INFO) << "collective_disk_load timings: clique_init=" << clique_sec << "s"
             << " clique_cache_hit=" << (clique_cache_hit ? 1 : 0) << " pinned_alloc=" << pinned_alloc_sec << "s"
             << " root_alloc=" << root_alloc_sec << "s"
-            << " owner_file_enabled=" << (owner_file_enabled ? 1 : 0) << " owner_preload=" << owner_preload_sec << "s"
-            << " owner_replicated_jobs=" << owner_replicated_jobs << " owner_dim0_jobs=" << owner_dim0_jobs
+            << " owner_file_enabled=" << (owner_file_enabled ? 1 : 0) << " owner_plan=" << owner_plan_sec << "s"
+            << " owner_batches=" << owner_batch_count << " owner_replicated_jobs=" << owner_replicated_jobs
+            << " owner_dim0_jobs=" << owner_dim0_jobs << " owner_dim1_jobs=" << owner_dim1_jobs
             << " owner_exec=" << owner_exec_sec << "s"
-            << " owner_peer_transfer_bytes=" << owner_peer_transfer_bytes
+            << " owner_peer_transfer_bytes=" << owner_peer_transfer_bytes << " owner_unique_source_bytes="
+            << (owner_collective_plan.has_value() ? owner_collective_plan->unique_source_bytes : 0)
+            << " owner_skew_ratio="
+            << (owner_collective_plan.has_value() ? owner_collective_plan->owner_skew_ratio : 1.0)
+            << " owner_segment_split="
+            << (owner_collective_plan.has_value() && owner_collective_plan->used_segment_split ? 1 : 0)
             << " whole_source=" << (whole_source_enabled ? 1 : 0) << " whole_source_load=" << whole_source_sec << "s"
             << " whole_source_bytes=" << (root_source != nullptr ? root_source->size() : 0)
             << " build_jobs=" << jobs_sec << "s"
@@ -4092,35 +4404,7 @@ absl::Status execute_group_collective_mapped(
   }
 
   const auto segments_start = std::chrono::steady_clock::now();
-  std::optional<std::vector<std::vector<ByteRange>>> excluded_ranges;
-  if (!tensor_job_build.jobs.empty() || !concat_job_build.jobs.empty()) {
-    excluded_ranges.emplace(participants.size());
-    if (enable_mapped_dim0_tensor_jobs(options.strategy_config) ||
-        enable_mapped_dim1_tensor_jobs(options.strategy_config)) {
-      for (size_t rank = 0; rank < tensor_job_build.handled_dst_ranges_by_rank.size(); ++rank) {
-        auto& dst = (*excluded_ranges)[rank];
-        const auto& src = tensor_job_build.handled_dst_ranges_by_rank[rank];
-        dst.insert(dst.end(), src.begin(), src.end());
-        merge_byte_ranges(&dst);
-      }
-    }
-    if (excluded_ranges->empty()) {
-      excluded_ranges->resize(participants.size());
-    }
-    if (excluded_ranges->size() < participants.size()) {
-      excluded_ranges->resize(participants.size());
-    }
-    if (enable_mapped_concat_jobs(options.strategy_config)) {
-      for (size_t rank = 0; rank < concat_job_build.handled_dst_ranges_by_rank.size(); ++rank) {
-        auto& dst = (*excluded_ranges)[rank];
-        const auto& src = concat_job_build.handled_dst_ranges_by_rank[rank];
-        dst.insert(dst.end(), src.begin(), src.end());
-        merge_byte_ranges(&dst);
-      }
-    }
-  }
-  auto segment_refs_or =
-      build_mapped_segment_refs(participants, excluded_ranges.has_value() ? &*excluded_ranges : nullptr);
+  auto segment_refs_or = build_mapped_segment_refs(participants);
   if (!segment_refs_or.ok()) {
     return segment_refs_or.status();
   }
@@ -4398,9 +4682,7 @@ CollectiveDiskLoadResult wait_for_group_and_maybe_execute(
       .gpu_ptr = request.gpu_ptr,
       .gpu_allocation = request.gpu_allocation,
       .disk_context = request.disk_context,
-      .source_index_json = request.source_index_json,
-      .view_index_json = request.view_index_json,
-      .variant_identity = request.variant_identity,
+      .representation_work_plan = request.representation_work_plan,
   };
   std::shared_ptr<GroupState> state;
   {
@@ -4434,7 +4716,8 @@ CollectiveDiskLoadResult wait_for_group_and_maybe_execute(
       LOG(INFO) << "collective_disk_load launching group_id=" << request.group.group_id
                 << " world_size=" << state->world_size;
     } else {
-      const absl::Time deadline = absl::Now() + absl::Milliseconds(kGroupAssembleTimeout.count());
+      const absl::Time deadline =
+          absl::Now() + absl::Milliseconds(collective_group_assemble_timeout(request.strategy_config).count());
       while (!state->launching && !state->complete && absl::Now() < deadline) {
         state->cv.WaitWithDeadline(&state->mu, deadline);
       }
@@ -4516,11 +4799,10 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
       .rank = static_cast<int>(request.group.rank),
       .device_id = request.device_id,
       .disk_context = request.disk_context,
-      .map = request.map,
+      .work_plan = request.representation_work_plan,
+      .collective_lane_map = request.collective_lane_map,
       .target_layout = request.target_layout,
       .storage_spans = std::move(*storage_spans_or),
-      .tensor_jobs = request.mapped_copy_contract.tensor_job_candidates,
-      .concat_jobs = request.mapped_copy_contract.concat_job_candidates,
   };
   std::shared_ptr<MappedGroupState> state;
   {
@@ -4554,7 +4836,8 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
       LOG(INFO) << "collective_mapped_target launching group_id=" << request.group.group_id
                 << " world_size=" << state->world_size;
     } else {
-      const absl::Time deadline = absl::Now() + absl::Milliseconds(kGroupAssembleTimeout.count());
+      const absl::Time deadline =
+          absl::Now() + absl::Milliseconds(collective_group_assemble_timeout(options.strategy_config).count());
       while (!state->launching && !state->complete && absl::Now() < deadline) {
         state->cv.WaitWithDeadline(&state->mu, deadline);
       }
@@ -4637,27 +4920,18 @@ CollectiveDiskLoadResult try_collective_disk_load(
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout) {
   if (request.group.world_size <= 1 || request.gpu_ptr == nullptr || request.device_id < 0 ||
-      request.disk_context == nullptr || request.source_index_json.empty() || request.view_index_json.empty() ||
+      request.disk_context == nullptr || request.representation_work_plan.items.empty() ||
       request.gpu_allocation == nullptr) {
     LOG(INFO) << "collective_disk_load skipped group_id=" << request.group.group_id << " reason=request_incomplete"
               << " world_size=" << request.group.world_size << " gpu_ptr=" << (request.gpu_ptr != nullptr)
               << " device_id=" << request.device_id << " disk_context=" << (request.disk_context != nullptr)
-              << " source_index=" << (!request.source_index_json.empty())
-              << " view_index=" << (!request.view_index_json.empty())
+              << " work_items=" << request.representation_work_plan.items.size()
               << " gpu_allocation=" << (request.gpu_allocation != nullptr);
     return {.handled = false, .status = absl::OkStatus()};
   }
   if (!request.disk_context->is_safetensors()) {
     LOG(INFO) << "collective_disk_load skipped group_id=" << request.group.group_id << " reason=non_safetensors_source";
     return {.handled = false, .status = absl::OkStatus()};
-  }
-  if (request.variant_identity.has_value() && request.variant_identity->view_spec.has_value()) {
-    for (const auto& [_, ops] : request.variant_identity->view_spec->tensors) {
-      if (ops.ops.size() > 1) {
-        LOG(INFO) << "collective_disk_load skipped group_id=" << request.group.group_id << " reason=multi_op_view_spec";
-        return {.handled = false, .status = absl::OkStatus()};
-      }
-    }
   }
   return wait_for_group_and_maybe_execute(request, pinned_pool, pinned_timeout);
 }
@@ -4668,11 +4942,14 @@ CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
     std::chrono::milliseconds pinned_timeout,
     const CollectiveMappedTargetLoadOptions& options) {
   if (request.group.world_size <= 1 || request.device_id < 0 || request.disk_context == nullptr ||
-      request.target_layout.storages.empty() || request.map.total_bytes == 0 || request.artifact_id.empty()) {
+      request.target_layout.storages.empty() ||
+      (request.representation_work_plan.items.empty() && request.collective_lane_map.total_bytes == 0) ||
+      request.artifact_id.empty()) {
     LOG(INFO) << "collective_mapped_target skipped group_id=" << request.group.group_id << " reason=request_incomplete"
               << " world_size=" << request.group.world_size << " device_id=" << request.device_id
               << " disk_context=" << (request.disk_context != nullptr)
-              << " storages=" << request.target_layout.storages.size() << " map_bytes=" << request.map.total_bytes
+              << " storages=" << request.target_layout.storages.size()
+              << " map_bytes=" << request.collective_lane_map.total_bytes
               << " artifact_id=" << (!request.artifact_id.empty());
     return {.handled = false, .status = absl::OkStatus()};
   }

@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "core/store/store_engine.h"
@@ -76,14 +78,18 @@ std::string register_stable_artifact(
   reg.device_id = 0;
   reg.total_size_bytes = total_size_bytes;
   reg.plan = tensorcast::store::runtime::metadata::RegistrationPlan::kStableDram;
-  reg.stable_dram.stage_on_gpu = true;
-  reg.stable_dram.release_gpu_on_commit = true;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
   reg.tensor_index_data = std::string("{}");
   reg.schema_version = "v3";
   reg.encoding = "json";
 
   auto begin_or = engine.begin_register_artifact(reg);
   REQUIRE(begin_or.ok());
+  std::vector<std::byte> payload(static_cast<size_t>(total_size_bytes), std::byte{0});
+  auto ingest_status =
+      engine.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
   auto commit_or = engine.commit_registered_artifact(begin_or->registration_id);
   REQUIRE(commit_or.ok());
   return commit_or->artifact_id;
@@ -844,14 +850,18 @@ TEST_CASE("PersistenceManager starts from stable DRAM replica without LIP", "[da
   reg.device_id = 0;
   reg.total_size_bytes = 64ull << 10;
   reg.plan = tensorcast::store::runtime::metadata::RegistrationPlan::kStableDram;
-  reg.stable_dram.stage_on_gpu = true;
-  reg.stable_dram.release_gpu_on_commit = true;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
   reg.tensor_index_data = std::string("{}");
   reg.schema_version = "v3";
   reg.encoding = "json";
 
   auto begin_or = engine.begin_register_artifact(reg);
   REQUIRE(begin_or.ok());
+  std::vector<std::byte> payload(static_cast<size_t>(reg.total_size_bytes), std::byte{0});
+  auto ingest_status =
+      engine.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
   auto commit_or = engine.commit_registered_artifact(begin_or->registration_id);
   REQUIRE(commit_or.ok());
 
@@ -874,14 +884,18 @@ TEST_CASE(
   reg.device_id = 0;
   reg.total_size_bytes = stable_size_bytes;
   reg.plan = tensorcast::store::runtime::metadata::RegistrationPlan::kStableDram;
-  reg.stable_dram.stage_on_gpu = true;
-  reg.stable_dram.release_gpu_on_commit = true;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
   reg.tensor_index_data = std::string("{}");
   reg.schema_version = "v3";
   reg.encoding = "json";
 
   auto begin_or = engine->begin_register_artifact(reg);
   REQUIRE(begin_or.ok());
+  std::vector<std::byte> payload(static_cast<size_t>(reg.total_size_bytes), std::byte{0});
+  auto ingest_status =
+      engine->ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
   auto commit_or = engine->commit_registered_artifact(begin_or->registration_id);
   REQUIRE(commit_or.ok());
 

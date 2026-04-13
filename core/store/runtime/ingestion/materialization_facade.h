@@ -78,8 +78,20 @@ class MaterializationFacade : public materialization::control::MaterializationBa
   using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
 
   struct SealAssemblyCutInput {
+    struct BoundCanonicalSpan {
+      int device_id{-1};
+      uint64_t base_ptr{0};
+      uint64_t mapping_base_offset{0};
+      uint64_t storage_offset{0};
+      uint64_t logical_offset{0};
+      uint64_t logical_length{0};
+    };
+
     std::vector<components::ViewInfo> structural_views;
     bool canonical_full{false};
+    std::string canonical_artifact_id;
+    std::string canonical_index_json;
+    std::vector<BoundCanonicalSpan> bound_canonical_spans;
   };
 
   struct Config {
@@ -198,6 +210,11 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       bool publish_canonical,
       SealProgressCallback progress_cb = {});
 
+  absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan_for_testing(
+      const materialization::runtime::pipeline::IngestionContext& ctx) const {
+    return build_ordinary_disk_execution_strategy_plan(ctx);
+  }
+
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
 
@@ -227,6 +244,9 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
+
+  absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan(
+      const materialization::runtime::pipeline::IngestionContext& ctx) const;
 
   std::string make_request_id(std::string_view prefix);
   [[nodiscard]] IngestionStartedEvent make_started_event(

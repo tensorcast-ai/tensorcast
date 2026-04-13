@@ -41,6 +41,58 @@ Repository rule:
   workflow semantics in the framework layer.
 - Worker steps: `prefetch`, `pin_device_residency`, `unpin_device_residency`.
 - Instance steps: `transform_into`, `transform_register` (executed via Node Agent).
+- For `PURE_TRANSFORM` serving publication on top of `transform_register`,
+  prefer the repo-owned helpers
+  `build_pure_transform_publication_spec(...)` or
+  `build_pure_transform_transform_spec(...)`. These helpers now attach a typed
+  `TransformSpec.publication_spec` carrier instead of relying on internal
+  `tc_serving_*` transform args. The legacy string-arg path is still accepted
+  as a compatibility fallback, but the default identity `transform_register`
+  path now consumes the typed publication spec first and prepares the reserved
+  serving-manifest tensor before registration.
+- If you are building the plan directly, `InstanceStepBuilder.transform_register_pure_transform(...)`
+  wraps that helper path and lowers to the same canonical `transform_register`
+  IR while preserving typed publish intent (`layout_id`, `requirements`,
+  `readiness_policy`, version keys, manifest ref, and contract family) on the
+  plan wire.
+- After execution, the returned `RepresentationPublishSpec`
+  (`PureTransformPublicationBundle` compatibility alias) can now be
+  passed directly to `Store.start_representation_publish_attempt(...)` or
+  `Store.complete_representation_publish_attempt(...)` to run the typed
+  `representation_publish` closeout path. If that spec points back to a
+  source artifact with exactly one attached layout, the Store helper can infer
+  `layout_id`; otherwise the same typed carrier can already bring explicit
+  attempt inputs through the plan / node-agent path.
+- `PlanResult.require_representation_publish_spec(...)` now provides the typed
+  extraction path for that spec, and
+  `PlanResult.require_pure_transform_publication(...)` remains as a compatibility
+  alias. Likewise,
+  `Store.start_plan_repo_owned_representation_publish_attempt(...)` /
+  `Store.complete_plan_repo_owned_representation_publish_attempt(...)` can
+  bridge the `transform_register_pure_transform(...)` result into the same
+  repo-owned publish helpers without manually unpacking `artifact_result`.
+- For the current single-rank canonical publish shape, the same bundle can go
+  through `Store.start_canonical_representation_publish_attempt(...)` or
+  `Store.complete_canonical_representation_publish_attempt(...)` to pin
+  `AssemblyRequirementSetRef.canonical_full()`.
+- For structural publish shapes, pair the bundle with
+  `build_representation_publish_requirements(...)` or the structural Store
+  helpers so `pp`/`ep` requirements come from explicit family choice plus
+  deterministic structural-view lineage instead of layout hints.
+- When the transform-side bundle already carries `contract_family`, the same
+  result can go straight into
+  `Store.start_repo_owned_representation_publish_attempt(...)` or
+  `Store.complete_repo_owned_representation_publish_attempt(...)`.
+- If the builder is not running through `transform_register`, the same serving
+  publication semantics are also available through
+  `Store.register_pure_transform_publication_bridge(...)` and
+  `Store.complete_pure_transform_publication_bridge(...)` on top of already-built
+  in-memory tensors. For the current canonical single-source path, that
+  one-shot helper can also contribute the source artifact before sealing when
+  `source_contribution_device=...` is provided. Structural `pp` / `ep` publish
+  can supply `source_contribution_artifacts=(view_a, view_b, ...)` so the same
+  helper derives structural view ids and submits multiple source contributions
+  before sealing.
 - Instance artifact steps: `manifest`, `publish`, `hydrate`, `evict_local`.
 - `tensorcast.connect(daemon_address=...)` installs a runtime front door bound
   to one daemon endpoint; with an active runtime, `Plan.run()` submits the same

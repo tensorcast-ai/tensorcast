@@ -95,6 +95,17 @@ Status StoreDaemonServiceImpl::SealBinding(
   return materialization_controller_->seal_binding(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::PromoteBindingCurrentValue(
+    grpc::ServerContext* ctx,
+    const v2::PromoteBindingCurrentValueRequest* req,
+    v2::PromoteBindingCurrentValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"PromoteBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->promote_binding_current_value(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::SubmitBindingContribution(
     grpc::ServerContext* ctx,
     const v2::SubmitBindingContributionRequest* req,
@@ -173,6 +184,17 @@ Status StoreDaemonServiceImpl::ImportArtifactFromPath(
   }
   RpcContext rctx{"ImportArtifactFromPath", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->import_artifact_from_path(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ResolvePublicDiskSource(
+    grpc::ServerContext* ctx,
+    const v2::ResolvePublicDiskSourceRequest* req,
+    v2::ResolvePublicDiskSourceResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"ResolvePublicDiskSource", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->resolve_public_disk_source(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ImportArtifactFromPathStream(
@@ -327,6 +349,17 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
   }
   RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ListArtifactLayouts(
+    grpc::ServerContext* ctx,
+    const v2::ListArtifactLayoutsRequest* req,
+    v2::ListArtifactLayoutsResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"ListArtifactLayouts", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->list_artifact_layouts(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::BatchExists(

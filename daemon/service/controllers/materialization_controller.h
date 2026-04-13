@@ -112,6 +112,11 @@ class MaterializationController {
 
   grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
 
+  grpc::Status promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::PromoteBindingCurrentValueRequest& req,
+      v2::PromoteBindingCurrentValueResponse& resp);
+
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
       const v2::RefillOwnedBindingRequest& req,
@@ -153,6 +158,11 @@ class MaterializationController {
       const v2::ImportArtifactFromPathRequest& req,
       v2::ImportArtifactFromPathResponse& resp);
 
+  grpc::Status resolve_public_disk_source(
+      RpcContext& rctx,
+      const v2::ResolvePublicDiskSourceRequest& req,
+      v2::ResolvePublicDiskSourceResponse& resp);
+
   grpc::Status import_artifact_from_path_stream(
       RpcContext& rctx,
       const v2::ImportArtifactFromPathRequest& req,
@@ -162,6 +172,11 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::GetArtifactIndexByIdRequest& req,
       v2::GetArtifactIndexByIdResponse& resp);
+
+  grpc::Status list_artifact_layouts(
+      RpcContext& rctx,
+      const v2::ListArtifactLayoutsRequest& req,
+      v2::ListArtifactLayoutsResponse& resp);
 
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 

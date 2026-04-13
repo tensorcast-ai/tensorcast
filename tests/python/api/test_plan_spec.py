@@ -5,7 +5,9 @@ from __future__ import annotations
 import weakref
 
 import pytest
+import torch
 
+from tensorcast.api._config import PlanType
 from tensorcast.api.context import CallContext, GovernanceContext
 from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan import (
@@ -15,11 +17,20 @@ from tensorcast.api.plan import (
     Instance,
     Plan,
     PlanResult,
+    PlanStepRef,
     Worker,
 )
 from tensorcast.api.plan.artifact_set import resolve_artifact_set_ref
+from tensorcast.api.store import (
+    BuilderMode,
+    PureTransformPublicationBundle,
+    ServingBuildIntent,
+    build_pure_transform_publication_bundle_from_registered_artifact,
+)
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.types import ReplicaInfo
 from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
     EngineOwnedManifest,
@@ -32,6 +43,7 @@ from tensorcast.engine_adapter.artifact_api import (
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import build_serving_manifest_ref
 
 
 def _canonical_index_bytes() -> bytes:
@@ -157,7 +169,6 @@ def test_plan_publish_serializes_canonical_action() -> None:
     assert first_step.action.publish.engine_request_id == "rid-123"
     assert int(first_step.action.publish.ttl_ms) == 60_000
 
-
 def test_plan_hydrate_serializes_publish_manifest() -> None:
     ctx = CallContext(request_id="req-hydrate", idempotency_key="idem-hydrate")
     plan = Plan(ctx)
@@ -200,6 +211,61 @@ def test_plan_hydrate_rejects_ambiguous_request_source() -> None:
         ArtifactError, match="exactly one of engine_request_id or publish_manifest"
     ):
         plan.on_instance(inst).hydrate()
+
+
+def test_plan_transform_register_pure_transform_builds_repo_owned_spec() -> None:
+    store = _StoreStub()
+    canonical_bytes = _canonical_index_bytes()
+    artifact = Artifact(
+        store_ref=weakref.ref(store),
+        artifact_id="mi2:test",
+        canonical_index_bytes=canonical_bytes,
+        canonical_index=canonical_index_from_bytes(canonical_bytes),
+    )
+    ctx = CallContext(request_id="req-pure-transform")
+    plan = Plan(ctx)
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+
+    step_ref = plan.on_instance(inst).transform_register_pure_transform(
+        artifact,
+        build_intent=ServingBuildIntent(
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v7",
+            serving_abi_version="abi-v7",
+            build_pipeline_version="pipeline-v7",
+            source_artifact_ref="mi2:test",
+        ),
+        out_key="models/demo/serving/v7",
+        source_version_key="models/demo/source/v7",
+        serving_version_key="models/demo/serving/v7",
+        transform_args={"quant": 4},
+        layout_hash="layout-v7",
+    )
+
+    spec = plan.to_spec()
+
+    assert len(spec.steps) == 1
+    step = spec.steps[0]
+    assert step.step_id == step_ref.step_id
+    assert step.action.WhichOneof("kind") == "transform_register"
+    assert step.action.transform_register.out_key == "models/demo/serving/v7"
+    assert step.action.transform_register.spec.name == "identity.v1"
+    assert step.action.transform_register.spec.layout_hash == "layout-v7"
+    assert step.action.transform_register.spec.HasField("publication_spec")
+    args = {
+        str(item.key): (
+            int(item.int_value)
+            if item.WhichOneof("value") == "int_value"
+            else str(item.string_value)
+        )
+        for item in step.action.transform_register.spec.args
+    }
+    assert args["quant"] == 4
+    publication_spec = step.action.transform_register.spec.publication_spec
+    assert publication_spec.build_intent.framework_name == "torch"
+    assert publication_spec.source_version_key == "models/demo/source/v7"
+    assert publication_spec.serving_version_key == "models/demo/serving/v7"
 
 
 def test_prefetch_many_lowers_to_inline_artifact_set_ref() -> None:
@@ -593,3 +659,87 @@ def test_plan_result_decodes_node_agent_artifact_set_results() -> None:
     assert decoded.outcomes[0].status is not None
     assert decoded.outcomes[0].status.state == "success"
     assert result.steps["s-set"].value == decoded
+
+
+def test_plan_result_decodes_pure_transform_publication_result() -> None:
+    canonical_index = canonical_index_from_bytes(_canonical_index_bytes())
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:serving",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:serving",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=4,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    bundle = build_pure_transform_publication_bundle_from_registered_artifact(
+        build_intent=ServingBuildIntent(
+            representation_contract_hash="bafkrepresentation",
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v1",
+            serving_abi_version="abi-v1",
+            build_pipeline_version="pipeline-v1",
+            source_artifact_ref="mi2:test:source",
+        ),
+        serving_artifact=registered_artifact,
+        source_version_key="models/demo/source/v1",
+        serving_version_key="models/demo/serving/v1",
+    ).model_copy(update={"contract_family": "canonical_full"})
+
+    response = node_agent_pb2.ExecutePlanResponse(
+        request_id="req-node-agent-pure-transform",
+        ok=True,
+    )
+    step = response.steps.add(
+        step_id="s-pure",
+        target_id="inst-a",
+        action="transform_register",
+    )
+    step.status.state = node_agent_pb2.OPERATION_STATE_SUCCESS
+    step.status.message = "transform_register completed"
+    step.artifact_result.representation_publish.CopyFrom(bundle.to_proto())
+
+    result = PlanResult.from_node_agent_response(response)
+
+    decoded = result.steps["s-pure"].artifact_result
+    assert isinstance(decoded, PureTransformPublicationBundle)
+    assert decoded.source_artifact_ref == "mi2:test:source"
+    assert decoded.contract_family == "canonical_full"
+    assert decoded.structural_view_ids == ()
+    assert decoded.serving_artifact_id == "mi2:test:serving"
+    assert decoded.serving_manifest_ref == build_serving_manifest_ref()
+    assert (
+        decoded.representation_publish_contract.representation_contract_hash
+        == "bafkrepresentation"
+    )
+    assert decoded.closeout_contract.kind == "representation_publish"
+
+    required = result.require_pure_transform_publication(PlanStepRef("s-pure"))
+    assert required == decoded
+
+
+def test_plan_result_require_pure_transform_publication_rejects_non_bundle() -> None:
+    response = node_agent_pb2.ExecutePlanResponse(
+        request_id="req-node-agent-manifest-only",
+        ok=True,
+    )
+    step = response.steps.add(
+        step_id="s-manifest",
+        target_id="inst-a",
+        action="manifest",
+    )
+    step.status.state = node_agent_pb2.OPERATION_STATE_SUCCESS
+    step.status.message = "manifest completed"
+    step.artifact_result.manifest.engine_request_id = "rid-123"
+    step.artifact_result.manifest.layout_id = "layout-v1"
+
+    result = PlanResult.from_node_agent_response(response)
+
+    with pytest.raises(ArtifactError) as exc_info:
+        result.require_pure_transform_publication(PlanStepRef("s-manifest"))
+
+    assert "does not carry a RepresentationPublishSpec" in str(exc_info.value)

@@ -257,7 +257,6 @@ def materialize_artifact_v2(
     view_id: str | None = None,
     placement: store_daemon_pb2.TransformPlacement | None = None,
     canonical_index_hint: bytes | None = None,
-    preference: store_daemon_pb2.SourcePreference | None = None,
     source_policy: store_daemon_pb2.SourcePolicy | None = None,
     tensor_names: Sequence[str] | None = None,
     verify_checksums: bool = True,
@@ -335,17 +334,6 @@ def materialize_artifact_v2(
         ):
             effective_timeout_s = max(0.001, float(ctx.deadline_ms) / 1000.0)
 
-        if preference is not None:
-            preference_value = preference
-        elif source_policy is not None:
-            preference_value = (
-                source_policy.preference
-                if source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-            )
-        else:
-            preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         export_policy = _export_policy_to_proto(opts.export_policy)
         resolved_artifact_id = artifact_id
         if resolved_artifact_id is None:
@@ -397,7 +385,6 @@ def materialize_artifact_v2(
             wait_for_shared_disk_ms=opts.wait_for_shared_disk_ms,
             placement=placement,
             return_response=True,
-            preference=preference_value,
             source_policy=source_policy,
             export_policy=export_policy,
             need_view_data_hash=bool(opts.need_view_data_hash),

@@ -431,7 +431,7 @@ absl::Status GpuMemorySink::close() {
   // For synchronous write_at callers, we already waited for completion.
   if (!overall_status_.ok())
     return overall_status_;
-  if (options_.total_size > 0 && total_bytes_written_ != options_.total_size) {
+  if (options_.require_complete_on_close && options_.total_size > 0 && total_bytes_written_ != options_.total_size) {
     LOG(ERROR) << "GPU memory sink closed with incomplete transfer. "
                << "Expected " << options_.total_size << " bytes, "
                << "but only " << total_bytes_written_ << " bytes were written.";

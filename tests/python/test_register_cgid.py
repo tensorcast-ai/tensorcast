@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ class _FakeDaemonCtl:
     def __init__(self) -> None:
         self.client_ids: list[str | None] = []
         self.begin_total_sizes: list[int] = []
+        self.abort_calls: list[str] = []
 
     def begin_register_artifact(
         self,
@@ -64,6 +65,7 @@ class _FakeDaemonCtl:
         return CommitResult(descriptor=descriptor, existed=False)
 
     def abort_registered_artifact(self, registration_id: str, *, timeout_s: float = 15.0) -> bool:
+        self.abort_calls.append(registration_id)
         return True
 
 
@@ -121,3 +123,32 @@ def test_register_artifact_rejects_non_cgid(monkeypatch: pytest.MonkeyPatch) -> 
         )
 
     assert "cgid" in str(exc_info.value)
+
+
+def test_register_artifact_aborts_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_coalesced_upload(monkeypatch)
+    client = _FakeDaemonCtl()
+    tensors = {"a": torch.zeros((4, 4), dtype=torch.float32)}
+    options = RegisterArtifactOptions(plan=PlanType.VRAM_COALESCED, lease_in_place=False)
+
+    def _fail_commit(registration_id: str, *, timeout_s: float = 30.0):
+        del timeout_s
+        raise TensorCastError(f"commit failed for {registration_id}")
+
+    client.commit_registered_artifact = _fail_commit  # type: ignore[method-assign]
+
+    with pytest.raises(TensorCastError, match="commit failed"):
+        _register_artifact_core(
+            artifact=tensors,
+            options=options,
+            device_id=0,
+            ttl_ms=None,
+            force_lease_in_place=False,
+            prevalidate_disk=False,
+            client=client,
+            daemon_address="fake-daemon",
+        )
+
+    assert client.abort_calls == ["reg-1"]

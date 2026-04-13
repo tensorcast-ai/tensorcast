@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, TensorCast Team.
+#  Copyright (c) 2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -359,7 +359,9 @@ def _build_markdown(
     pairs: list[PairProbeResult],
 ) -> str:
     lines: list[str] = []
-    lines.append(f"# Iperf3 Probe Summary ({datetime.now(tz=timezone.utc).isoformat()})")
+    lines.append(
+        f"# Iperf3 Probe Summary ({datetime.now(tz=timezone.utc).isoformat()})"
+    )
     lines.append("")
     lines.append(
         "- single_link_ref_gibps="
@@ -421,11 +423,7 @@ def _compute_summary(pairs: list[PairProbeResult]) -> dict[str, Any]:
             pair_floor_vals.append(min(values))
 
     pair_floor_p50 = _safe_float(_summarize_series(pair_floor_vals).get("p50"))
-    bidirectional_floor = (
-        float(min(pair_floor_vals))
-        if pair_floor_vals
-        else None
-    )
+    bidirectional_floor = float(min(pair_floor_vals)) if pair_floor_vals else None
     return {
         "seed_to_getter_gibps": _summarize_series(seed_to_getter_vals),
         "getter_to_seed_gibps": _summarize_series(getter_to_seed_vals),
@@ -545,8 +543,7 @@ def main() -> None:
         port_getter_to_seed = int(args.port_base + idx * 2 + 1)
 
         print(
-            f"[iperf-probe] pair={getter_name} seed->getter "
-            f"port={port_seed_to_getter}"
+            f"[iperf-probe] pair={getter_name} seed->getter port={port_seed_to_getter}"
         )
         seed_to_getter = _probe_direction(
             direction="seed_to_getter",
@@ -562,8 +559,7 @@ def main() -> None:
         )
 
         print(
-            f"[iperf-probe] pair={getter_name} getter->seed "
-            f"port={port_getter_to_seed}"
+            f"[iperf-probe] pair={getter_name} getter->seed port={port_getter_to_seed}"
         )
         getter_to_seed = _probe_direction(
             direction="getter_to_seed",

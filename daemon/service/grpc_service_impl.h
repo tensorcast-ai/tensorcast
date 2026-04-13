@@ -110,6 +110,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   grpc::Status SealBinding(grpc::ServerContext* ctx, const v2::SealBindingRequest* req, v2::SealBindingResponse* resp)
       override;
 
+  grpc::Status PromoteBindingCurrentValue(
+      grpc::ServerContext* ctx,
+      const v2::PromoteBindingCurrentValueRequest* req,
+      v2::PromoteBindingCurrentValueResponse* resp) override;
+
   grpc::Status StartAssemblyAttempt(
       grpc::ServerContext* ctx,
       const v2::StartAssemblyAttemptRequest* req,
@@ -254,6 +259,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::ImportArtifactFromPathRequest* req,
       v2::ImportArtifactFromPathResponse* resp) override;
 
+  grpc::Status ResolvePublicDiskSource(
+      grpc::ServerContext* ctx,
+      const v2::ResolvePublicDiskSourceRequest* req,
+      v2::ResolvePublicDiskSourceResponse* resp) override;
+
   grpc::Status ImportArtifactFromPathStream(
       grpc::ServerContext* ctx,
       const v2::ImportArtifactFromPathRequest* req,
@@ -322,6 +332,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::GetArtifactIndexByIdRequest* req,
       v2::GetArtifactIndexByIdResponse* resp) override;
+
+  grpc::Status ListArtifactLayouts(
+      grpc::ServerContext* ctx,
+      const v2::ListArtifactLayoutsRequest* req,
+      v2::ListArtifactLayoutsResponse* resp) override;
 
   grpc::Status SealAssembly(
       grpc::ServerContext* ctx,

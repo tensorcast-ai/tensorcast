@@ -13,7 +13,7 @@ import uuid
 import weakref
 from dataclasses import dataclass, field
 from datetime import timezone
-from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict
 
 import torch
 
@@ -50,7 +50,7 @@ from tensorcast.api.store.mapped_binding import (
 )
 from tensorcast.api.store.materialization import (
     MaterializationPipeline,
-    _build_source_policy,
+    _resolve_source_policy_from_options,
 )
 from tensorcast.api.store.owned_binding_layout import (
     BindingLayout,
@@ -71,8 +71,6 @@ from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
     CanonicalIndexEntry,
-    FallbackOptions,
-    FallbackPreference,
 )
 from tensorcast.api.store.view_composer import (
     ViewBuilder,
@@ -88,8 +86,17 @@ from tensorcast.common.selection_contract import (
 from tensorcast.common.selection_identity import (
     compute_view_subset_hash,
 )
+from tensorcast.profile_utils import (
+    emit_tensorcast_profile_event,
+    tensorcast_profile_stage,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import (
+    ServingRuntimePolicy,
+    ServingRuntimePolicyInput,
+    coerce_serving_runtime_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +366,7 @@ def _bind_region_registration_error(
             f"requested_regions={requested_regions}, "
             f"registered_before_failure={registered_regions}, "
             f"cause={detail}. Increase the daemon max_vram_regions limit "
-            "for source-bind workloads.",
+            "for large bind_into workloads.",
             status_code="RESOURCE_EXHAUSTED",
             retryable=False,
         )
@@ -628,59 +635,11 @@ class PlacementPin:
         )
 
 
-class ArtifactSerializedFallback(TypedDict):
-    prefer: FallbackPreference
-    prefer_disk: bool | None
-    allow_p2p: bool
-    allow_disk: bool
-    verify_checksums: bool
-    replica_uuid: str | None
-
-
 class ArtifactSerialized(TypedDict):
     artifact_id: str | None
     key: str | None
-    fallback: ArtifactSerializedFallback | None
     canonical_index: str | None
     generation: int | None
-
-
-def _fallback_to_dict(
-    fallback: FallbackOptions | None,
-) -> ArtifactSerializedFallback | None:
-    if fallback is None:
-        return None
-    return {
-        "prefer": fallback.prefer,
-        "prefer_disk": (
-            bool(fallback.prefer_disk) if fallback.prefer_disk is not None else None
-        ),
-        "allow_p2p": bool(fallback.allow_p2p),
-        "allow_disk": bool(fallback.allow_disk),
-        "verify_checksums": bool(fallback.verify_checksums),
-        "replica_uuid": fallback.replica_uuid,
-    }
-
-
-def _fallback_from_dict(
-    data: ArtifactSerializedFallback | Mapping[str, object] | None,
-) -> FallbackOptions | None:
-    if data is None:
-        return None
-    prefer_value = data.get("prefer")
-    prefer = prefer_value if isinstance(prefer_value, str) else "auto"
-    prefer_disk_raw = data.get("prefer_disk")
-    prefer_disk = prefer_disk_raw if isinstance(prefer_disk_raw, bool) else None
-    replica_uuid_value = data.get("replica_uuid")
-    replica_uuid = replica_uuid_value if isinstance(replica_uuid_value, str) else None
-    return FallbackOptions(
-        prefer=prefer,  # pyright: ignore[reportArgumentType]
-        prefer_disk=prefer_disk,
-        allow_p2p=bool(data.get("allow_p2p", True)),
-        allow_disk=bool(data.get("allow_disk", True)),
-        verify_checksums=bool(data.get("verify_checksums", True)),
-        replica_uuid=replica_uuid,
-    )
 
 
 def _meta_from_entry(entry: CanonicalIndexEntry) -> TensorMeta:
@@ -709,7 +668,6 @@ class Artifact:
         store_ref: weakref.ReferenceType["Store"],
         artifact_id: str | None = None,
         key: str | None = None,
-        fallback: FallbackOptions | str | None = None,
         canonical_index_bytes: bytes | None = None,
         canonical_index: CanonicalIndex | None = None,
         generation: int | None = None,
@@ -724,7 +682,6 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        self._fallback = FallbackOptions.parse(fallback)
         self._artifact_id = artifact_id
         self._key_hint = key
         self._canonical_index_bytes = canonical_index_bytes
@@ -830,13 +787,12 @@ class Artifact:
         view_data_hash = selection_inputs.view_data_hash
         view_index_hint = selection_inputs.view_index_hint
         view_id_hint = selection_inputs.view_id_hint
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        replica_uuid = options.replica_uuid if options is not None else None
         materialize_start = time.perf_counter()
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
             device=device,
-            fallback=self._fallback,
             tensor_names=requested_names,
             view_id=view_id_hint,
             canonical_index_hint=self._canonical_index_bytes,
@@ -919,6 +875,31 @@ class Artifact:
                     "tc.store.total_sec": diagnostics.total_sec,
                 },
             )
+            emit_tensorcast_profile_event(
+                "tensorcast",
+                "artifact.tensor_dict_with_diagnostics",
+                logger=logger,
+                payload={
+                    "artifact_id": artifact_id,
+                    "source": diagnostics.source,
+                    "source_code": diagnostics.source_code,
+                    "ticket_status": diagnostics.ticket_status,
+                    "disk_path": diagnostics.disk_path,
+                    "tensor_count": diagnostics.tensor_count,
+                    "total_bytes": diagnostics.total_bytes,
+                    "generation": diagnostics.generation,
+                    "materialize_sec": diagnostics.materialize_sec,
+                    "tensor_bind_sec": diagnostics.tensor_bind_sec,
+                    "total_sec": diagnostics.total_sec,
+                    "retry_attempts": diagnostics.retry_attempts,
+                    "retry_reason_buckets": diagnostics.retry_reason_buckets,
+                    "budget_deadline_sec": diagnostics.budget_deadline_sec,
+                    "budget_elapsed_sec": diagnostics.budget_elapsed_sec,
+                    "budget_remaining_sec": diagnostics.budget_remaining_sec,
+                    "budget_exit_reason": diagnostics.budget_exit_reason,
+                    "breakdown": diagnostics.breakdown,
+                },
+            )
             return TensorDictMaterializationResult(
                 tensors=output,
                 diagnostics=diagnostics,
@@ -966,13 +947,12 @@ class Artifact:
         view_index_hint = (
             view_metadata.view_index_bytes or None if view_metadata else None
         )
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        replica_uuid = options.replica_uuid if options is not None else None
         pipeline.get_into(
             target,
             artifact_id=artifact_id,
             key=None,
             device=device,
-            fallback=self._fallback,
             options=options,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
@@ -1008,14 +988,13 @@ class Artifact:
         )
         if view_spec_proto is not None:
             view_index_hint = None
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        replica_uuid = options.replica_uuid if options is not None else None
         resolved_device = device if device is not None else target_tensor.device
         pipeline.get_into(
             {requested_names[0]: target_tensor},
             artifact_id=artifact_id,
             key=None,
             device=resolved_device,
-            fallback=self._fallback,
             options=options,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
@@ -1059,8 +1038,10 @@ class Artifact:
         *,
         mapping: CopyPlan | None = None,
         packing: str = "byte_space",
+        options: GetArtifactOptions | None = None,
         capacity_bytes: int | None = None,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Allocate daemon-owned target tensors, fill from this artifact, and return a Binding."""
@@ -1113,7 +1094,11 @@ class Artifact:
             device=device_obj,
             mapping=mapping,
             packing=packing,
+            options=options,
             publish=publish,
+            serving_runtime_policy=coerce_serving_runtime_policy(
+                serving_runtime_policy
+            ),
             ctx=ctx,
         )
 
@@ -1123,7 +1108,9 @@ class Artifact:
         *,
         mapping: CopyPlan | None = None,
         packing: str = "byte_space",
+        options: GetArtifactOptions | None = None,
         publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Adopt user-owned CUDA tensors, fill once, and return a Binding."""
@@ -1132,7 +1119,11 @@ class Artifact:
                 target_tensors=target_tensors,
                 mapping=mapping,
                 packing=packing,
+                options=options,
                 publish=publish,
+                serving_runtime_policy=coerce_serving_runtime_policy(
+                    serving_runtime_policy
+                ),
                 ctx=ctx,
             )
         store, runtime, pipeline = self._require_components()
@@ -1249,31 +1240,7 @@ class Artifact:
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
 
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = (
-            self._fallback.prefer if self._fallback is not None else "auto"
-        )
-        if self._fallback is not None:
-            if self._fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif self._fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-
-        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+        source_policy = _resolve_source_policy_from_options(options)
 
         client = runtime.ensure_client()
         operation_id = _build_transport_operation_id(
@@ -1306,8 +1273,10 @@ class Artifact:
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
-                        preference=preference,
                         source_policy=source_policy,
+                        serving_runtime_policy=coerce_serving_runtime_policy(
+                            serving_runtime_policy
+                        ),
                         operation_id=operation_id,
                         timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
@@ -1402,7 +1371,6 @@ class Artifact:
             view_id=region_layout.view_id,
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
-            fallback=self._fallback,
             current_value_metadata=current_value_metadata,
             target_publication_token=getattr(
                 response, "target_publication_token", None
@@ -1416,7 +1384,9 @@ class Artifact:
         target_tensors: Mapping[str, torch.Tensor],
         mapping: CopyPlan,
         packing: str,
+        options: GetArtifactOptions | None,
         publish: bool,
+        serving_runtime_policy: ServingRuntimePolicy | None,
         ctx: CallContext | None,
     ) -> Binding:
         store, runtime, pipeline = self._require_components()
@@ -1538,31 +1508,7 @@ class Artifact:
         ):
             selection_index_bytes = bytes(self._view_metadata.view_index_bytes)
 
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = (
-            self._fallback.prefer if self._fallback is not None else "auto"
-        )
-        if self._fallback is not None:
-            if self._fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif self._fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-
-        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+        source_policy = _resolve_source_policy_from_options(options)
 
         client = runtime.ensure_client()
         operation_id = _build_transport_operation_id(
@@ -1603,8 +1549,8 @@ class Artifact:
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
-                        preference=preference,
                         source_policy=source_policy,
+                        serving_runtime_policy=serving_runtime_policy,
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
                         operation_id=operation_id,
@@ -1714,7 +1660,6 @@ class Artifact:
             view_id=region_layout.view_id,
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
-            fallback=self._fallback,
             current_value_metadata=current_value_metadata,
             target_publication_token=getattr(
                 response, "target_publication_token", None
@@ -1745,7 +1690,9 @@ class Artifact:
         device: torch.device,
         mapping: CopyPlan | None,
         packing: str,
+        options: GetArtifactOptions | None,
         publish: bool,
+        serving_runtime_policy: ServingRuntimePolicy | None,
         ctx: CallContext | None,
     ) -> Binding:
         store, runtime, _ = self._require_components()
@@ -1772,136 +1719,146 @@ class Artifact:
             else None
         )
 
-        source_selection = self._build_owner_source_selection(
-            packing=mode if mapping is None else "byte_space",
-            view_spec_proto=view_spec_proto,
-            canonical_index_bytes=canonical_index_bytes,
-        )
-        index_kind = (
-            store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
-            if source_selection.view_id or source_selection.tensor_names
-            else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
-        )
-        view_id = str(source_selection.view_id or "")
-        logical_layout_hash = bytes(source_selection.logical_layout_hash)
-
-        copy_plan_proto: store_daemon_pb2.CopyPlan | None = None
-        dst_specs: tuple[store_daemon_pb2.MappedTensorSpec, ...] = ()
-        if mapping is None:
-            owner_layout = build_owned_layout(
-                entries=self._effective_index().entries,
-                device_id=device_id,
-                index_kind=index_kind,
-                logical_layout_hash=logical_layout_hash,
-                view_id=view_id or None,
-                ordered_names=tuple(source_selection.tensor_names)
-                if source_selection.tensor_names
-                else None,
-            )
-        else:
-            if mode != "byte_space":
-                raise ArtifactError(
-                    "mapped binding requires packing='byte_space'",
-                    status_code="INVALID_ARGUMENT",
-                    retryable=False,
-                )
-            normalized_plan = normalize_copy_plan(mapping)
-            inferred_entries = infer_mapped_target_entries(
-                plan=normalized_plan,
-                canonical_index=canonical_index,
-                view_narrows=view_narrow_ranges(self._view_spec),
-            )
-            target_spec_payloads = [
-                {
-                    "name": entry.name,
-                    "dtype": str(entry.dtype),
-                    "shape": tuple(int(v) for v in entry.shape),
-                    "stride": tuple(int(v) for v in entry.stride),
-                    "logical_length": int(entry.size_bytes),
-                }
-                for entry in inferred_entries
-            ]
-            mapped_view_id = compute_mapped_view_id_from_specs(
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "artifact.bind_owned.prepare",
+            logger=logger,
+            extra={
+                "artifact_id": self._artifact_id,
+                "device": str(device),
+                "mapping_provided": mapping is not None,
+                "packing": mode,
+            },
+        ) as profile:
+            source_selection = self._build_owner_source_selection(
+                packing=mode if mapping is None else "byte_space",
+                view_spec_proto=view_spec_proto,
                 canonical_index_bytes=canonical_index_bytes,
-                source_view_id=self._mapped_source_view_id(runtime),
-                plan=normalized_plan,
-                target_specs=target_spec_payloads,
             )
-            dst_specs = tuple(
-                build_mapped_tensor_spec(
-                    name=entry.name,
-                    shape=entry.shape,
-                    stride=entry.stride,
-                    dtype=str(entry.dtype),
-                    logical_length=int(entry.size_bytes),
-                )
-                for entry in inferred_entries
+            index_kind = (
+                store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
+                if source_selection.view_id or source_selection.tensor_names
+                else store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
             )
-            owner_layout = build_owned_layout(
-                entries=inferred_entries,
-                device_id=device_id,
-                index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW,
-                logical_layout_hash=None,
-                view_id=mapped_view_id,
-                dst_specs=dst_specs,
-                separate_storages=True,
-            )
-            copy_plan_proto = store_daemon_pb2.CopyPlan(version=1)
-            for entry in normalized_plan:
-                entry_proto = copy_plan_proto.entries.add()
-                entry_proto.ckpt_name = str(entry.ckpt_name)
-                entry_proto.dst_name = str(entry.dst_name)
-                if entry.ckpt_range is not None:
-                    entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
-                    entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
-                    entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
-                if entry.dst_range is not None:
-                    entry_proto.dst_range.dim = int(entry.dst_range.dim)
-                    entry_proto.dst_range.start = int(entry.dst_range.start)
-                    entry_proto.dst_range.end = int(entry.dst_range.end)
+            view_id = str(source_selection.view_id or "")
+            logical_layout_hash = bytes(source_selection.logical_layout_hash)
 
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = (
-            self._fallback.prefer if self._fallback is not None else "auto"
-        )
-        if self._fallback is not None:
-            if self._fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
+            copy_plan_proto: store_daemon_pb2.CopyPlan | None = None
+            dst_specs: tuple[store_daemon_pb2.MappedTensorSpec, ...] = ()
+            target_tensor_count = 0
+            if mapping is None:
+                target_tensor_count = len(self._effective_index().entries)
+                owner_layout = build_owned_layout(
+                    entries=self._effective_index().entries,
+                    device_id=device_id,
+                    index_kind=index_kind,
+                    logical_layout_hash=logical_layout_hash,
+                    view_id=view_id or None,
+                    ordered_names=tuple(source_selection.tensor_names)
+                    if source_selection.tensor_names
+                    else None,
                 )
-            elif self._fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+            else:
+                if mode != "byte_space":
+                    raise ArtifactError(
+                        "mapped binding requires packing='byte_space'",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+                normalized_plan = normalize_copy_plan(mapping)
+                inferred_entries = infer_mapped_target_entries(
+                    plan=normalized_plan,
+                    canonical_index=canonical_index,
+                    view_narrows=view_narrow_ranges(self._view_spec),
                 )
-        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
+                target_tensor_count = len(inferred_entries)
+                target_spec_payloads = [
+                    {
+                        "name": entry.name,
+                        "dtype": str(entry.dtype),
+                        "shape": tuple(int(v) for v in entry.shape),
+                        "stride": tuple(int(v) for v in entry.stride),
+                        "logical_length": int(entry.size_bytes),
+                    }
+                    for entry in inferred_entries
+                ]
+                mapped_view_id = compute_mapped_view_id_from_specs(
+                    canonical_index_bytes=canonical_index_bytes,
+                    source_view_id=self._mapped_source_view_id(runtime),
+                    plan=normalized_plan,
+                    target_specs=target_spec_payloads,
+                )
+                dst_specs = tuple(
+                    build_mapped_tensor_spec(
+                        name=entry.name,
+                        shape=entry.shape,
+                        stride=entry.stride,
+                        dtype=str(entry.dtype),
+                        logical_length=int(entry.size_bytes),
+                    )
+                    for entry in inferred_entries
+                )
+                owner_layout = build_owned_layout(
+                    entries=inferred_entries,
+                    device_id=device_id,
+                    index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW,
+                    logical_layout_hash=None,
+                    view_id=mapped_view_id,
+                    dst_specs=dst_specs,
+                    separate_storages=True,
+                )
+                copy_plan_proto = store_daemon_pb2.CopyPlan(version=1)
+                for entry in normalized_plan:
+                    entry_proto = copy_plan_proto.entries.add()
+                    entry_proto.ckpt_name = str(entry.ckpt_name)
+                    entry_proto.dst_name = str(entry.dst_name)
+                    if entry.ckpt_range is not None:
+                        entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
+                        entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
+                        entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
+                    if entry.dst_range is not None:
+                        entry_proto.dst_range.dim = int(entry.dst_range.dim)
+                        entry_proto.dst_range.start = int(entry.dst_range.start)
+                        entry_proto.dst_range.end = int(entry.dst_range.end)
+            if profile is not None:
+                profile["source_tensor_count"] = len(source_selection.tensor_names)
+                profile["binding_layout_id"] = owner_layout.binding_layout_id
+                profile["target_index_bytes_len"] = len(owner_layout.target_index_bytes)
+                profile["target_tensor_count"] = target_tensor_count
+
+        source_policy = _resolve_source_policy_from_options(options)
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
-            response = runtime.ensure_client().create_owned_binding(
-                source_selection=source_selection,
-                target_layout=owner_layout.target_layout,
-                target_index_bytes=owner_layout.target_index_bytes,
-                device_uuid=device_uuid_for(device_id),
-                binding_layout_id=owner_layout.binding_layout_id,
-                preference=preference,
-                source_policy=source_policy,
-                copy_plan=copy_plan_proto,
-                dst_specs=dst_specs,
-                operation_id=_build_transport_operation_id(
-                    base_operation_id=uuid.uuid4().hex,
-                    ctx=ctx,
-                ),
-                timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "artifact.bind_owned.create_owned_binding_rpc",
+                logger=logger,
+                extra={
+                    "artifact_id": self._artifact_id,
+                    "device": str(device),
+                    "binding_layout_id": owner_layout.binding_layout_id,
+                    "target_tensor_count": target_tensor_count,
+                    "target_index_bytes_len": len(owner_layout.target_index_bytes),
+                },
+            ) as profile:
+                response = runtime.ensure_client().create_owned_binding(
+                    source_selection=source_selection,
+                    target_layout=owner_layout.target_layout,
+                    target_index_bytes=owner_layout.target_index_bytes,
+                    device_uuid=device_uuid_for(device_id),
+                    binding_layout_id=owner_layout.binding_layout_id,
+                    source_policy=source_policy,
+                    serving_runtime_policy=serving_runtime_policy,
+                    copy_plan=copy_plan_proto,
+                    dst_specs=dst_specs,
+                    operation_id=_build_transport_operation_id(
+                        base_operation_id=uuid.uuid4().hex,
+                        ctx=ctx,
+                    ),
+                    timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
+                )
+                if profile is not None:
+                    profile["binding_id"] = getattr(response, "binding_id", None)
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             if any(
@@ -1926,11 +1883,27 @@ class Artifact:
             ) from exc
 
         try:
-            tensors = restore_owned_binding_tensors(
-                response=response,
-                runtime=runtime,
-                device_id=device_id,
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "artifact.bind_owned.restore_binding_tensors",
+                logger=logger,
+                extra={
+                    "artifact_id": self._artifact_id,
+                    "device": str(device),
+                    "binding_id": str(response.binding_id),
+                },
+            ) as profile:
+                tensors = restore_owned_binding_tensors(
+                    response=response,
+                    runtime=runtime,
+                    device_id=device_id,
+                )
+                if profile is not None:
+                    profile["restored_tensor_count"] = len(tensors)
+                    profile["restored_tensor_bytes"] = sum(
+                        int(tensor.numel() * tensor.element_size())
+                        for tensor in tensors.values()
+                    )
         except Exception:
             with contextlib.suppress(Exception):
                 runtime.ensure_client().close_owned_binding(
@@ -1939,12 +1912,27 @@ class Artifact:
             raise
 
         try:
-            current_value_metadata = parse_binding_value_or_raise(
-                response.current_value if hasattr(response, "current_value") else None,
-                rpc_name="CreateOwnedBinding",
-                expected_binding_id=str(response.binding_id),
-                expected_binding_layout_id=owner_layout.binding_layout_id,
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "artifact.bind_owned.parse_current_value",
+                logger=logger,
+                extra={
+                    "artifact_id": self._artifact_id,
+                    "binding_id": str(response.binding_id),
+                },
+            ) as profile:
+                current_value_metadata = parse_binding_value_or_raise(
+                    response.current_value
+                    if hasattr(response, "current_value")
+                    else None,
+                    rpc_name="CreateOwnedBinding",
+                    expected_binding_id=str(response.binding_id),
+                    expected_binding_layout_id=owner_layout.binding_layout_id,
+                )
+                if profile is not None and current_value_metadata is not None:
+                    profile["sealed_artifact_id"] = getattr(
+                        current_value_metadata, "artifact_id", None
+                    )
         except ArtifactError:
             with contextlib.suppress(Exception):
                 runtime.ensure_client().close_owned_binding(
@@ -1961,7 +1949,6 @@ class Artifact:
             current_value_metadata=current_value_metadata,
             device=device,
             device_id=device_id,
-            fallback=self._fallback,
             target_publication_token=getattr(
                 response, "target_publication_token", None
             ),
@@ -2153,12 +2140,6 @@ class Artifact:
                 uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
             )
 
-        replica_uuid = deterministic_replica_uuid or (
-            self._fallback.replica_uuid if self._fallback else None
-        )
-        if not replica_uuid:
-            replica_uuid = uuid.uuid4().hex
-
         opts = options or GetArtifactOptions()
         opts = opts.model_copy(
             update={
@@ -2166,12 +2147,14 @@ class Artifact:
                 "enable_verification": False,
             }
         )
+        replica_uuid = deterministic_replica_uuid or opts.replica_uuid
+        if not replica_uuid:
+            replica_uuid = uuid.uuid4().hex
 
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
             device=device_obj,
-            fallback=self._fallback,
             tensor_names=requested_names,
             view_id=view_id_hint,
             canonical_index_hint=self._canonical_index_bytes,
@@ -2314,24 +2297,6 @@ class Artifact:
             ctx=ctx,
         )
 
-    def with_fallback(self, fallback: FallbackOptions | str) -> Artifact:
-        parsed = FallbackOptions.parse(fallback)
-        clone = Artifact(
-            store_ref=self._store_ref,
-            artifact_id=self._artifact_id,
-            key=self._key_hint,
-            fallback=parsed,
-            canonical_index_bytes=self._canonical_index_bytes,
-            canonical_index=self._canonical_index,
-            generation=self._generation,
-            view_spec=self._view_spec,
-            view_metadata=self._view_metadata,
-            view_depth=self._view_depth,
-        )
-        clone._released = self._released
-        clone._tensor_metas = dict(self._tensor_metas or {})
-        return clone
-
     def exists(self) -> bool:
         """Check existence lazily, surfacing ArtifactError on failures."""
         if self._canonical_index is not None:
@@ -2403,7 +2368,6 @@ class Artifact:
         return {
             "artifact_id": self._artifact_id,
             "key": self._key_hint,
-            "fallback": _fallback_to_dict(self._fallback),
             "canonical_index": encoded_index,
             "generation": self._generation,
         }
@@ -2412,7 +2376,6 @@ class Artifact:
     def from_dict(cls, data: Mapping[str, object], store: "Store") -> Artifact:
         artifact_id = data.get("artifact_id")
         key_hint = data.get("key")
-        fallback_dict = data.get("fallback")
         canonical_blob = data.get("canonical_index")
         generation = data.get("generation")
         canonical_index_bytes: bytes | None = None
@@ -2429,9 +2392,6 @@ class Artifact:
                     status_code="DATA_LOSS",
                     retryable=False,
                 ) from exc
-        fallback = None
-        if isinstance(fallback_dict, Mapping):
-            fallback = _fallback_from_dict(cast(Mapping[str, object], fallback_dict))
         generation_value = (
             int(generation) if isinstance(generation, (int, float)) else None
         )
@@ -2439,7 +2399,6 @@ class Artifact:
             store_ref=weakref.ref(store),
             artifact_id=str(artifact_id) if artifact_id else None,
             key=str(key_hint) if key_hint else None,
-            fallback=fallback,
             canonical_index_bytes=canonical_index_bytes,
             canonical_index=canonical_index,
             generation=generation_value,
@@ -2678,8 +2637,9 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                resolved = runtime.resolve_key_mapping_cached(key=self._key_hint)
-                artifact_id = resolved[0] if isinstance(resolved, tuple) else resolved
+                artifact_id, _disk_path = runtime.resolve_key_mapping_cached(
+                    key=self._key_hint
+                )
                 if not artifact_id:
                     raise ArtifactError(
                         f"Artifact key '{self._key_hint}' is not mapped",
@@ -2989,7 +2949,6 @@ class Artifact:
                 store_ref=self._store_ref,
                 artifact_id=self._artifact_id,
                 key=self._key_hint,
-                fallback=self._fallback,
                 canonical_index_bytes=self._canonical_index_bytes,
                 canonical_index=self._canonical_index,
                 generation=self._generation,
@@ -3018,7 +2977,6 @@ class Artifact:
             store_ref=self._store_ref,
             artifact_id=self._artifact_id,
             key=self._key_hint,
-            fallback=self._fallback,
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
             generation=self._generation,

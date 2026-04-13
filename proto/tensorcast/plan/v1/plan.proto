@@ -3,6 +3,7 @@ syntax = "proto3";
 package tensorcast.plan.v1;
 
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 message CallContext {
   string request_id = 1;
@@ -174,6 +175,7 @@ message TransformSpec {
   string name = 1;
   repeated TransformArg args = 2;
   string layout_hash = 3;
+  tensorcast.publication.v1.PureTransformPublicationSpec publication_spec = 4;
 }
 
 message TargetSpec {

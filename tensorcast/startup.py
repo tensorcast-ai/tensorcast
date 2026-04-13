@@ -16,6 +16,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import hashlib
+import importlib
 import json
 import os
 import signal
@@ -27,7 +28,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-import tensorcast.runtime as runtime_service
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
 from tensorcast.cli_utils.config import discover_daemon_config
 from tensorcast.cli_utils.health import ping_daemon, wait_for_daemon
@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.daemon_runtime_config import load_daemon_config
 from tensorcast.logger import init_logger, setup_logging
+
+runtime = importlib.import_module("tensorcast.runtime")
 
 _current_ctx: Context | None = None
 _atexit_registered = False
@@ -141,7 +143,7 @@ class Context:
         if self.is_owner and self.session_id:
             # Stop daemon session we launched.
             try:
-                runtime_service.stop(session_id=self.session_id)
+                runtime.stop(session_id=self.session_id)
             finally:
                 _clear_auto_state_if_matches(self.session_id, self.address)
         self._closed = True
@@ -190,7 +192,7 @@ class Context:
 
 
 def _current_session_address() -> str | None:
-    session = runtime_service.status()
+    session = runtime.status()
     if session and session.daemon_address:
         return session.daemon_address
     from tensorcast.cli_utils.service_manager import get_session_address
@@ -513,7 +515,7 @@ def _start_context(
     logger,
 ) -> Context:
     global _current_ctx
-    session_obj = runtime_service.start(
+    session_obj = runtime.start(
         daemon_config=cfg_path,
         session_id=session_id,
         global_store_mode=global_store_mode,
@@ -615,7 +617,7 @@ def _init_auto_mode(
     )
     timeout_s = _auto_wait_timeout_seconds()
     while True:
-        existing = runtime_service.status()
+        existing = runtime.status()
         existing_address = (
             existing.daemon_address
             if existing
