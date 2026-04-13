@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import logging
 import os
@@ -1091,6 +1092,7 @@ class Store:
             if self._enable_batcher
             else None
         )
+        _LIVE_STORES.add(self)
 
     def set_register_fn(self, register_fn: Callable[..., RegistrationResult]) -> None:
         self._registration.set_register_fn(register_fn)
@@ -3290,6 +3292,8 @@ class Store:
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
+            _LIVE_STORES.discard(self)
+        with contextlib.suppress(Exception):
             if self._batcher is not None:
                 self._batcher.close()
         self._runtime.close()
@@ -3298,6 +3302,7 @@ class Store:
 _PROCESS_STORE_LOCK = threading.RLock()
 _PROCESS_STORE: Store | None = None
 _PROCESS_STORE_OPTS: StoreOptions | None = None
+_LIVE_STORES: "weakref.WeakSet[Store]" = weakref.WeakSet()
 
 
 def _ensure_process_store(
@@ -3371,6 +3376,16 @@ def shutdown_process_store() -> None:
         with contextlib.suppress(Exception):
             current.close()
     shutdown_context()
+
+
+def _shutdown_live_stores() -> None:
+    for current in list(_LIVE_STORES):
+        with contextlib.suppress(Exception):
+            current.close()
+    shutdown_context()
+
+
+atexit.register(_shutdown_live_stores)
 
 
 def _coerce_store() -> Store:

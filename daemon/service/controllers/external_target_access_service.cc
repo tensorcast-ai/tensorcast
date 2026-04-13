@@ -13,6 +13,28 @@ namespace tensorcast::daemon {
 using materialization_target_storage::AcquireTargetStoragesError;
 using materialization_target_storage::TargetStorageLease;
 
+absl::Status validate_host_shared_target_region_classes(
+    IpcRegionRegistry& regions,
+    const v2::TargetLayout& layout,
+    std::string_view rpc_name) {
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_source_case() != v2::StorageEntry::kRegionRef ||
+        storage.region_ref().memory_kind() != v2::REGION_MEMORY_KIND_HOST_SHARED) {
+      continue;
+    }
+    auto desc_or = regions.describe(storage.region_ref().region_id());
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    if (desc_or->host_region_class == IpcRegionRegistry::HostRegionClass::kAllocator) {
+      return absl::InvalidArgumentError(
+          std::format(
+              "{} does not support generic target validation for allocator-backed HOST_SHARED regions", rpc_name));
+    }
+  }
+  return absl::OkStatus();
+}
+
 ExternalTargetAccessService::ExternalTargetAccessService(Dep d) : d_(d) {}
 
 absl::Status ExternalTargetAccessService::ensure_local_region_peer(std::string_view peer, std::string_view rpc_name)
@@ -50,6 +72,10 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
   if (!storage_lease_or.ok()) {
     return storage_lease_or.status();
   }
+  auto host_region_class_status = validate_host_shared_target_region_classes(d_.regions, layout, rpc_name);
+  if (!host_region_class_status.ok()) {
+    return host_region_class_status;
+  }
 
   return ValidatedTargetAccess{
       .device = *device_or,
@@ -83,20 +109,50 @@ absl::StatusOr<store::DeviceKey> ExternalTargetAccessService::resolve_target_sto
     const v2::TargetLayout& layout,
     std::string_view device_uuid,
     std::string_view /*rpc_name*/) const {
+  std::optional<bool> host_shared_layout;
   std::optional<int32_t> vram_device_id;
   for (const auto& storage : layout.storages()) {
+    bool storage_is_host_shared = false;
     switch (storage.storage_source_case()) {
       case v2::StorageEntry::kVramRegionId:
         if (storage.vram_region_id().empty()) {
           return absl::InvalidArgumentError("vram_region_id must not be empty");
         }
+        storage_is_host_shared = false;
         break;
-      case v2::StorageEntry::kCudaIpcHandle:
-        return absl::InvalidArgumentError("target storage must reference a managed vram region");
+      case v2::StorageEntry::kRegionRef:
+        if (storage.region_ref().region_id().empty()) {
+          return absl::InvalidArgumentError("region_ref.region_id must not be empty");
+        }
+        switch (storage.region_ref().memory_kind()) {
+          case v2::REGION_MEMORY_KIND_VRAM:
+            storage_is_host_shared = false;
+            break;
+          case v2::REGION_MEMORY_KIND_HOST_SHARED:
+            storage_is_host_shared = true;
+            break;
+          case v2::REGION_MEMORY_KIND_UNSPECIFIED:
+          default:
+            return absl::InvalidArgumentError("region_ref.memory_kind must be specified");
+        }
         break;
       case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
       default:
         return absl::InvalidArgumentError("target storage must reference a region");
+    }
+    if (!host_shared_layout.has_value()) {
+      host_shared_layout = storage_is_host_shared;
+    } else if (*host_shared_layout != storage_is_host_shared) {
+      return absl::InvalidArgumentError("mixed VRAM and HOST_SHARED target layouts are not supported");
+    }
+    if (storage_is_host_shared) {
+      if (storage.device_id() != -1) {
+        return absl::InvalidArgumentError("HOST_SHARED storage.device_id must be -1");
+      }
+      if (!device_uuid.empty()) {
+        return absl::InvalidArgumentError("device_uuid must be empty for pure HOST_SHARED target layouts");
+      }
+      continue;
     }
     if (storage.device_id() < 0) {
       return absl::InvalidArgumentError("storage.device_id must be >= 0");
@@ -110,8 +166,15 @@ absl::StatusOr<store::DeviceKey> ExternalTargetAccessService::resolve_target_sto
       return absl::InvalidArgumentError("target_layout must use one VRAM device_id");
     }
   }
-  if (!vram_device_id.has_value()) {
+  if (!host_shared_layout.has_value()) {
     return absl::InvalidArgumentError("target_layout must include at least one storage entry");
+  }
+  if (*host_shared_layout) {
+    return store::DeviceKey{
+        .type = DeviceType::CPU,
+        .ordinal = -1,
+        .uuid = "",
+    };
   }
   const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, device_uuid, std::nullopt);
   if (device.type != DeviceType::GPU || device.ordinal < 0) {

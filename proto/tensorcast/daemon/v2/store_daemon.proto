@@ -72,6 +72,8 @@ service StoreDaemonService {
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
   rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
   rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
+  rpc RegisterRegion(RegisterRegionRequest) returns (RegisterRegionResponse) {}
+  rpc UnregisterRegion(UnregisterRegionRequest) returns (UnregisterRegionResponse) {}
   rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
@@ -409,6 +411,36 @@ message TargetTensorOffset {
   string storage_id = 2;
   uint64 storage_offset = 3;
   uint64 logical_length = 4;
+  optional uint64 slot_index = 5;
+  optional uint64 slot_generation = 6;
+}
+
+enum RegionMemoryKind {
+  REGION_MEMORY_KIND_UNSPECIFIED = 0;
+  REGION_MEMORY_KIND_VRAM = 1;
+  REGION_MEMORY_KIND_HOST_SHARED = 2;
+}
+
+enum HostSharedRegionClass {
+  HOST_SHARED_REGION_CLASS_UNSPECIFIED = 0;
+  HOST_SHARED_REGION_CLASS_SCRATCH = 1;
+  HOST_SHARED_REGION_CLASS_ALLOCATOR = 2;
+}
+
+message RegionRef {
+  string region_id = 1;
+  RegionMemoryKind memory_kind = 2;
+  int32 device_id = 3;
+  uint64 size_bytes = 4;
+}
+
+message HostSharedRegionSpec {
+  // Opaque local-only attach metadata. Phase 2.5A keeps the exact transport out
+  // of the public RPC contract so the daemon can evolve from scratch slabs to
+  // allocator-backed host residency without reshaping callers.
+  bytes attach_token = 1;
+  bool daemon_managed = 2;
+  HostSharedRegionClass region_class = 3;
 }
 
 message TargetLayout {
@@ -770,6 +802,8 @@ message BatchItemOutcome {
   string artifact_id = 1;
   BatchItemStatus status = 2;
   string message = 3;
+  optional uint64 slot_index = 4;
+  optional uint64 slot_generation = 5;
 }
 
 enum ByteArtifactVerificationMode {
@@ -1783,8 +1817,10 @@ message StorageEntry {
     // CUDA IPC handle for the allocation base pointer that backs this storage.
     bytes cuda_ipc_handle = 4;
     string vram_region_id = 5;
+    RegionRef region_ref = 7;
   }
-  // Byte offset from the mapped base pointer (allocation base for cuda_ipc_handle, region base for vram_region_id)
+  // Byte offset from the mapped base pointer (allocation base for
+  // cuda_ipc_handle, region base for vram_region_id/region_ref)
   // to the start of this storage window.
   uint64 mapping_base_offset = 6;
 }
@@ -1861,6 +1897,39 @@ message RevokeRegisteredArtifactRequest {
   string reason = 2;
 }
 message RevokeRegisteredArtifactResponse {}
+
+message RegisterRegionRequest {
+  optional string session_id = 1;
+  RegionMemoryKind memory_kind = 2;
+  int32 owner_pid = 3;
+  uint64 size_bytes = 4;
+  uint32 ttl_ms = 5;
+  optional string region_name = 6;
+  // Required for VRAM regions; ignored for HOST_SHARED.
+  int32 device_id = 7;
+  oneof region_source {
+    bytes cuda_ipc_handle = 8;
+    HostSharedRegionSpec host_shared = 9;
+  }
+}
+
+message RegisterRegionResponse {
+  RegionRef region = 1;
+  uint32 ttl_ms = 2;
+  google.protobuf.Timestamp expires_at = 3;
+  HostSharedRegionSpec host_shared = 4;
+}
+
+message UnregisterRegionRequest {
+  optional string session_id = 1;
+  string region_id = 2;
+  int32 owner_pid = 3;
+  optional bool force = 4;
+}
+
+message UnregisterRegionResponse {
+  bool released = 1;
+}
 
 message RegisterVramRegionRequest {
   // Client session identifier (best-effort) used for diagnostics and ownership.

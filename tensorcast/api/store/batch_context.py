@@ -131,7 +131,7 @@ class MaterializationBatcher:
         if self._shutdown.is_set():
             return
         self._shutdown.set()
-        self._dispatch_thread.join(timeout=1.0)
+        self._dispatch_thread.join(timeout=5.0)
 
     @staticmethod
     def _device_key(device: torch.device | str) -> str:

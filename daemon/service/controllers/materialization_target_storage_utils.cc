@@ -29,8 +29,25 @@ absl::StatusOr<ResolvedStorageSource> resolve_storage_source(const v2::StorageEn
           .region_id = storage.vram_region_id(),
           .memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kVram,
       };
-    case v2::StorageEntry::kCudaIpcHandle:
-      return absl::InvalidArgumentError("storage entry must reference a managed vram region");
+    case v2::StorageEntry::kRegionRef:
+      if (storage.region_ref().region_id().empty()) {
+        return absl::InvalidArgumentError("region_ref.region_id must not be empty");
+      }
+      switch (storage.region_ref().memory_kind()) {
+        case v2::REGION_MEMORY_KIND_VRAM:
+          return ResolvedStorageSource{
+              .region_id = storage.region_ref().region_id(),
+              .memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kVram,
+          };
+        case v2::REGION_MEMORY_KIND_HOST_SHARED:
+          return ResolvedStorageSource{
+              .region_id = storage.region_ref().region_id(),
+              .memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kHostShared,
+          };
+        case v2::REGION_MEMORY_KIND_UNSPECIFIED:
+        default:
+          return absl::InvalidArgumentError("region_ref.memory_kind must be specified");
+      }
     case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
     default:
       return absl::InvalidArgumentError("storage entry must reference a region");

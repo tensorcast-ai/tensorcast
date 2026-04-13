@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import contextlib
 import logging
@@ -64,6 +65,7 @@ class StoreRuntimeContext:
     """Process-wide runtime and lifecycle manager for Store operations."""
 
     _AT_FORK_REGISTRY: "weakref.WeakSet[StoreRuntimeContext]" = weakref.WeakSet()
+    _LIVE_CONTEXTS: "weakref.WeakSet[StoreRuntimeContext]" = weakref.WeakSet()
     _DEFAULT_LEASE_TTL_MS = 600_000
     _SERVER_CONFIG_READY_TIMEOUT_S = 30.0
     _SERVER_CONFIG_RETRY_INTERVAL_S = 1.0
@@ -119,6 +121,7 @@ class StoreRuntimeContext:
         self._closed = False
 
         self._init_session_record()
+        StoreRuntimeContext._LIVE_CONTEXTS.add(self)
         self._install_at_fork()
         self._client = self._create_client()
         self._initialize_session_metadata(self._client)
@@ -522,6 +525,8 @@ class StoreRuntimeContext:
         if self._closed:
             return
         self._closed = True
+        with contextlib.suppress(Exception):
+            StoreRuntimeContext._LIVE_CONTEXTS.discard(self)
         with self._client_lock:
             if self._client is not None:
                 with contextlib.suppress(Exception):
@@ -532,7 +537,7 @@ class StoreRuntimeContext:
         with contextlib.suppress(Exception):
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_loop_thread") and self._loop_thread.is_alive():
-            self._loop_thread.join(timeout=1.0)
+            self._loop_thread.join(timeout=5.0)
         with contextlib.suppress(Exception):
             self._loop.close()
         with self._key_cache_lock:
@@ -737,6 +742,15 @@ def shutdown_context() -> None:
     if current is not None:
         with contextlib.suppress(Exception):
             current.close()
+
+
+def _shutdown_all_contexts() -> None:
+    for context in list(StoreRuntimeContext._LIVE_CONTEXTS):
+        with contextlib.suppress(Exception):
+            context.close()
+
+
+atexit.register(_shutdown_all_contexts)
 
 
 __all__ = ["StoreRuntimeContext", "get_context", "shutdown_context"]
