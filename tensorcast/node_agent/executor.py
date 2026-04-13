@@ -315,7 +315,15 @@ class NodeAgentExecutor:
 
     def _store_for_daemon(self) -> Store:
         if self._store is None:
-            self._store = Store(self._daemon_address)
+            from tensorcast.api.store.runtime import StoreRuntimeContext
+
+            self._store = Store(
+                self._daemon_address,
+                runtime=StoreRuntimeContext(
+                    self._daemon_address,
+                    client_factory=lambda _addr: self._client,
+                ),
+            )
         return self._store
 
     def execute_plan(

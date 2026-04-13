@@ -809,7 +809,7 @@ def test_binding_realize_from_tracks_source_bound_plan_diagnostics(
     layout = artifact.bind(device="cuda:0", packing="byte_space").layout
     binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
     client.refill_source_bound_plan_diagnostics = (
-        store_daemon_pb2.SourceBoundPlanDiagnostics(
+        types.SimpleNamespace(
             execution_plan_kind="collective_first_mixed",
             planned_collective_candidate_bytes=128,
             planned_collective_admitted_bytes=128,
