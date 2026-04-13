@@ -75,6 +75,7 @@ from tensorcast.api.store.mapped_binding import (
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.owned_binding_layout import (
     BindingLayout,
+    build_owned_layout,
 )
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
@@ -4355,6 +4356,7 @@ __all__ = [
     "BindingRealizationPlan",
     "binding_realization_plan_to_proto",
     "normalize_binding_realization_plan",
+    "build_owned_layout",
     "build_binding_finalize_admission_facts",
     "build_binding_finalize_publication_bundle",
     "build_binding_finalize_publication_bundle_from_registered_artifact",
