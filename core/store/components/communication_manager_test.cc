@@ -37,7 +37,9 @@ tensorcast::store::P2PSource make_cpu_source(uint16_t port) {
 
 } // namespace
 
-TEST_CASE("CommunicationManager bootstraps routed topology from communicator config", "[store][communication][routing]") {
+TEST_CASE(
+    "CommunicationManager bootstraps routed topology from communicator config",
+    "[store][communication][routing]") {
   tensorcast::communicator::v1::CommunicatorConfig config = make_simple_numa_config();
   CommunicationManager manager;
   REQUIRE(manager.initialize_with_config("127.0.0.1", /*listen_port=*/0, config).ok());
@@ -77,7 +79,9 @@ TEST_CASE("CommunicationManager accumulates bindings before topology bootstrap",
   CHECK(channel_or.value()->hops().front()->remote_binding().port == 4020);
 }
 
-TEST_CASE("CommunicationManager upserts live routing bindings without replacing context", "[store][communication][routing]") {
+TEST_CASE(
+    "CommunicationManager upserts live routing bindings without replacing context",
+    "[store][communication][routing]") {
   CommunicationManager manager;
   REQUIRE(manager.initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config()).ok());
   REQUIRE(manager.bootstrap_routing_context().ok());
@@ -102,21 +106,28 @@ TEST_CASE("CommunicationManager upserts live routing bindings without replacing 
   CHECK(updated_channel_or.value()->hops().front()->remote_binding().port == 4040);
 }
 
-TEST_CASE("CommunicationManager clears routing context when topology bootstrap is disabled", "[store][communication][routing]") {
+TEST_CASE(
+    "CommunicationManager clears routing context when topology bootstrap is disabled",
+    "[store][communication][routing]") {
   CommunicationManager manager;
-  REQUIRE(manager.initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config(/*enable=*/false)).ok());
-  manager.set_routing_context(std::make_shared<tensorcast::communicator::routing::RoutingContext>(
-      tensorcast::communicator::routing::RoutingContext::Options{}, manager.get_shared_engine()));
+  REQUIRE(
+      manager.initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config(/*enable=*/false)).ok());
+  manager.set_routing_context(
+      std::make_shared<tensorcast::communicator::routing::RoutingContext>(
+          tensorcast::communicator::routing::RoutingContext::Options{}, manager.get_shared_engine()));
   REQUIRE(manager.routing_context() != nullptr);
 
   REQUIRE(manager.bootstrap_routing_context().ok());
   CHECK(manager.routing_context() == nullptr);
 }
 
-TEST_CASE("CommunicationManager normalizes low tcp_conn_count for staging pool sizing", "[store][communication][routing]") {
+TEST_CASE(
+    "CommunicationManager normalizes low tcp_conn_count for staging pool sizing",
+    "[store][communication][routing]") {
   CommunicationManager manager;
-  REQUIRE(
-      manager.initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config(/*enable=*/true, /*tcp_conn_count=*/1))
-          .ok());
+  REQUIRE(manager
+              .initialize_with_config(
+                  "127.0.0.1", /*listen_port=*/0, make_simple_numa_config(/*enable=*/true, /*tcp_conn_count=*/1))
+              .ok());
   CHECK(manager.is_enabled());
 }

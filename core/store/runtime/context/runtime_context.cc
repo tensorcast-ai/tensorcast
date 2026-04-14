@@ -35,8 +35,8 @@ std::vector<tensorcast::store::P2PSource> build_local_routing_sources(
   sources.reserve(1 + static_cast<size_t>(std::max(0, device_manager.get_num_gpus())));
 
   tensorcast::store::P2PSource cpu_source;
-  cpu_source.local_endpoint_id =
-      tensorcast::store::components::derive_endpoint_id(identity.node_id, tensorcast::common::memory::MemoryLocation::CPU, 0);
+  cpu_source.local_endpoint_id = tensorcast::store::components::derive_endpoint_id(
+      identity.node_id, tensorcast::common::memory::MemoryLocation::CPU, 0);
   cpu_source.location = {
       .type = tensorcast::common::memory::MemoryLocation::CPU,
       .device_id = 0,
@@ -45,8 +45,8 @@ std::vector<tensorcast::store::P2PSource> build_local_routing_sources(
 
   for (int gpu_id = 0; gpu_id < device_manager.get_num_gpus(); ++gpu_id) {
     tensorcast::store::P2PSource gpu_source;
-    gpu_source.local_endpoint_id =
-        tensorcast::store::components::derive_endpoint_id(identity.node_id, tensorcast::common::memory::MemoryLocation::GPU, gpu_id);
+    gpu_source.local_endpoint_id = tensorcast::store::components::derive_endpoint_id(
+        identity.node_id, tensorcast::common::memory::MemoryLocation::GPU, gpu_id);
     gpu_source.location = {
         .type = tensorcast::common::memory::MemoryLocation::GPU,
         .device_id = gpu_id,
@@ -437,9 +437,7 @@ absl::Status RuntimeContext::refresh_routing_context() {
   }
 
   LOG(INFO) << "RuntimeContext: bootstrapped routing context"
-            << " node_id=" << worker_identity_.node_id
-            << " p2p_port=" << worker_identity_.p2p_port
-            << " mode="
+            << " node_id=" << worker_identity_.node_id << " p2p_port=" << worker_identity_.p2p_port << " mode="
             << (options_.materialization_strategy.topology_guided_execution_enabled() ? "prefer_guided"
                                                                                       : "observe_only");
   return absl::OkStatus();

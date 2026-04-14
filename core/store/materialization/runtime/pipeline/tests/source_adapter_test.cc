@@ -34,8 +34,7 @@ StoreEngineOptions make_context_options() {
 StoreEngineOptions::MaterializationStrategyConfig make_observe_only_strategy() {
   StoreEngineOptions::MaterializationStrategyConfig strategy;
   strategy.enable_topology_guided_transfer = true;
-  strategy.topology_guided_mode =
-      StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kObserveOnly;
+  strategy.topology_guided_mode = StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kObserveOnly;
   return strategy;
 }
 

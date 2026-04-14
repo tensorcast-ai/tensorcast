@@ -103,9 +103,9 @@ communicator::routing::EndpointBinding CommunicationManager::make_endpoint_bindi
 bool CommunicationManager::endpoint_binding_equals(
     const communicator::routing::EndpointBinding& lhs,
     const communicator::routing::EndpointBinding& rhs) {
-  return lhs.endpoint_id == rhs.endpoint_id && lhs.node_id == rhs.node_id && lhs.ip == rhs.ip &&
-      lhs.port == rhs.port && lhs.dev_type == rhs.dev_type && lhs.dev_id == rhs.dev_id &&
-      lhs.pci_bdf == rhs.pci_bdf && lhs.rail_id == rhs.rail_id && lhs.gpu_uuid == rhs.gpu_uuid;
+  return lhs.endpoint_id == rhs.endpoint_id && lhs.node_id == rhs.node_id && lhs.ip == rhs.ip && lhs.port == rhs.port &&
+      lhs.dev_type == rhs.dev_type && lhs.dev_id == rhs.dev_id && lhs.pci_bdf == rhs.pci_bdf &&
+      lhs.rail_id == rhs.rail_id && lhs.gpu_uuid == rhs.gpu_uuid;
 }
 
 //-------------------------------------------------------------------------
@@ -318,8 +318,8 @@ absl::Status CommunicationManager::bootstrap_routing_context() {
   const auto& obs = topology_or->observability;
   LOG(INFO) << "CommunicationManager: bootstrapped routing context"
             << " discovery_enabled=" << obs.discovery_enabled << " nic_endpoints=" << obs.nic_endpoint_count
-            << " rail_switch_endpoints=" << obs.rail_switch_endpoint_count << " lldp_records="
-            << obs.lldp_record_count << " nvlink_edges=" << obs.nvlink_edge_count;
+            << " rail_switch_endpoints=" << obs.rail_switch_endpoint_count << " lldp_records=" << obs.lldp_record_count
+            << " nvlink_edges=" << obs.nvlink_edge_count;
   return absl::OkStatus();
 }
 
@@ -341,8 +341,7 @@ void CommunicationManager::remember_p2p_source(const P2PSource& source) {
 
     if (!source.remote_endpoint_id.empty() && !source.ip.empty() && source.port != 0) {
       if (const auto remote = parse_canonical_endpoint_id(source.remote_endpoint_id); remote.has_value()) {
-        const auto remote_binding =
-            make_endpoint_binding(source.remote_endpoint_id, *remote, source.ip, source.port);
+        const auto remote_binding = make_endpoint_binding(source.remote_endpoint_id, *remote, source.ip, source.port);
         if (upsert_routing_binding_locked(remote_binding)) {
           changed_bindings.push_back(remote_binding);
         }

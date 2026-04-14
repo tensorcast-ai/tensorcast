@@ -83,9 +83,7 @@ TEST_CASE("RuntimeContext keeps topology-guided routing disabled by default", "[
   context.shutdown();
 }
 
-TEST_CASE(
-    "RuntimeContext bootstraps routing context with typed communicator config",
-    "[runtime][context][routing]") {
+TEST_CASE("RuntimeContext bootstraps routing context with typed communicator config", "[runtime][context][routing]") {
   StoreEngineOptions opts = MakeContextOptions();
   opts.communicator_config = make_simple_numa_config();
   opts.materialization_strategy = make_topology_guided_strategy(
@@ -110,17 +108,18 @@ TEST_CASE(
 
   const std::string local_endpoint = "node-built-in/dev/cpu/0";
   const std::string remote_endpoint = "node-remote/dev/cpu/0";
-  comm_manager->remember_p2p_source(tensorcast::store::P2PSource{
-      .local_endpoint_id = "",
-      .remote_endpoint_id = remote_endpoint,
-      .ip = "10.0.0.3",
-      .port = 64010,
-      .location =
-          {
-              .type = tensorcast::common::memory::MemoryLocation::CPU,
-              .device_id = 0,
-          },
-  });
+  comm_manager->remember_p2p_source(
+      tensorcast::store::P2PSource{
+          .local_endpoint_id = "",
+          .remote_endpoint_id = remote_endpoint,
+          .ip = "10.0.0.3",
+          .port = 64010,
+          .location =
+              {
+                  .type = tensorcast::common::memory::MemoryLocation::CPU,
+                  .device_id = 0,
+              },
+      });
 
   auto communicator_or = routing_context->get_communicator(local_endpoint, remote_endpoint);
   REQUIRE(communicator_or.ok());
@@ -155,17 +154,18 @@ TEST_CASE("RuntimeContext bootstraps routing context for product communicator", 
 
   const std::string local_endpoint = "node-local/dev/cpu/0";
   const std::string remote_endpoint = "node-remote/dev/cpu/0";
-  comm_manager->remember_p2p_source(tensorcast::store::P2PSource{
-      .local_endpoint_id = "",
-      .remote_endpoint_id = remote_endpoint,
-      .ip = "10.0.0.2",
-      .port = 64000,
-      .location =
-          {
-              .type = tensorcast::common::memory::MemoryLocation::CPU,
-              .device_id = 0,
-          },
-  });
+  comm_manager->remember_p2p_source(
+      tensorcast::store::P2PSource{
+          .local_endpoint_id = "",
+          .remote_endpoint_id = remote_endpoint,
+          .ip = "10.0.0.2",
+          .port = 64000,
+          .location =
+              {
+                  .type = tensorcast::common::memory::MemoryLocation::CPU,
+                  .device_id = 0,
+              },
+      });
   routing_context = comm_manager->routing_context();
   REQUIRE(routing_context != nullptr);
 
@@ -207,17 +207,18 @@ TEST_CASE(
 
   const std::string local_endpoint = "node-late/dev/cpu/0";
   const std::string remote_endpoint = "node-remote/dev/cpu/0";
-  comm_manager->remember_p2p_source(tensorcast::store::P2PSource{
-      .local_endpoint_id = "",
-      .remote_endpoint_id = remote_endpoint,
-      .ip = "10.0.0.2",
-      .port = 64001,
-      .location =
-          {
-              .type = tensorcast::common::memory::MemoryLocation::CPU,
-              .device_id = 0,
-          },
-  });
+  comm_manager->remember_p2p_source(
+      tensorcast::store::P2PSource{
+          .local_endpoint_id = "",
+          .remote_endpoint_id = remote_endpoint,
+          .ip = "10.0.0.2",
+          .port = 64001,
+          .location =
+              {
+                  .type = tensorcast::common::memory::MemoryLocation::CPU,
+                  .device_id = 0,
+              },
+      });
 
   auto communicator_or = routing_context->get_communicator(local_endpoint, remote_endpoint);
   REQUIRE(communicator_or.ok());
@@ -230,7 +231,9 @@ TEST_CASE(
   context.shutdown();
 }
 
-TEST_CASE("RuntimeContext keeps observe-only topology-guided rollout on baseline execution", "[runtime][context][routing]") {
+TEST_CASE(
+    "RuntimeContext keeps observe-only topology-guided rollout on baseline execution",
+    "[runtime][context][routing]") {
   auto comm_manager = std::make_shared<CommunicationManager>();
   REQUIRE(comm_manager->initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config()).ok());
 

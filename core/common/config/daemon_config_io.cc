@@ -445,8 +445,7 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     defaults->set_enable_local_batched_disk_load(true);
     defaults->set_enable_owner_file_collective(false);
     defaults->set_enable_topology_guided_transfer(false);
-    defaults->set_topology_guided_mode(
-        tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
+    defaults->set_topology_guided_mode(tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
     defaults->set_enable_remote_bootstrap_local_fanout(false);
   }
   auto* ms = e->mutable_materialization_strategy();
