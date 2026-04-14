@@ -220,6 +220,12 @@ tensorcast::communicator::v1::CommunicatorConfig make_tcp_communicator_config(
   configure_tcp_stager_defaults(&cfg, buffers_per_flow);
   // Keep tests small and deterministic.
   cfg.mutable_transport()->set_tcp_conn_count(2);
+  // Keep RDMA test defaults explicit in helper-generated configs so standalone
+  // test binaries do not run with protobuf zero-values (e.g. outstanding_wr=0).
+  auto* rdma = cfg.mutable_rdma();
+  rdma->set_outstanding_wr(64);
+  rdma->set_ack_ttl_ms(30000);
+  rdma->set_qp_count(1);
   return cfg;
 }
 

@@ -175,6 +175,17 @@ message Engine {
     bool use_dedicated_single_range_concat_stream = 14;
     MaterializationStrategyExecutorPreference executor_preference = 15;
     MaterializationStrategyDiagnosticsVerbosity diagnostics_verbosity = 16;
+    optional bool enable_topology_guided_transfer = 17;
+
+    enum TopologyGuidedMode {
+      TOPOLOGY_GUIDED_MODE_UNSPECIFIED = 0;
+      TOPOLOGY_GUIDED_MODE_DISABLED = 1;
+      TOPOLOGY_GUIDED_MODE_OBSERVE_ONLY = 2;
+      TOPOLOGY_GUIDED_MODE_PREFER_GUIDED = 3;
+    }
+
+    TopologyGuidedMode topology_guided_mode = 18;
+    optional bool enable_remote_bootstrap_local_fanout = 19;
   }
   MaterializationStrategy materialization_strategy = 14;
 }

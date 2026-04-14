@@ -306,9 +306,17 @@ Executor rollout and preference are now configured under
 - `allow_mixed_execution`
 - `executor_preference`
 - `diagnostics_verbosity`
+- `enable_topology_guided_transfer`
+- `topology_guided_mode`
+- `enable_remote_bootstrap_local_fanout`
 
 These replace the earlier mapped/local-batched env-gated prototype controls in
 the common runtime hot path.
+
+Current 0109 Phase 1 rollout keeps baseline execution unless
+`enable_topology_guided_transfer=true` and `topology_guided_mode=PREFER_GUIDED`.
+`DISABLED` and `OBSERVE_ONLY` preserve the existing direct/fallback execution
+path until planner diagnostics and grouped fanout execution land.
 
 ## Verification and Integrity
 

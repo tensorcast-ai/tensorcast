@@ -32,6 +32,7 @@ sc_cc_library(
         "//core/common:artifact_verification_lib",
         "//core/common:trace_macros_lib",
         "//core/cuda:cuda_ipc_lib",
+        "//core/store:endpoint_id",
         "//core/store:eviction_service",
         "//core/store:store_engine_options",
         "//core/store/materialization/common:view_hash_utils",

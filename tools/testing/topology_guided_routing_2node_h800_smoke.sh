@@ -10,8 +10,16 @@ worker_cpu_count="${WORKER_CPU_COUNT:-32}"
 worker_memory_mb="${WORKER_MEMORY_MB:-512000}"
 max_wait_duration="${MAX_WAIT_DURATION:-20m}"
 ready_poll_interval_sec="${READY_POLL_INTERVAL_SEC:-5}"
+describe_poll_rounds="${DESCRIBE_POLL_ROUNDS:-2}"
+scheduler_retry_backoff_sec="${SCHEDULER_RETRY_BACKOFF_SEC:-45}"
+quota_grace_sec="${QUOTA_GRACE_SEC:-240}"
+launch_retry_limit="${LAUNCH_RETRY_LIMIT:-3}"
+pair_launch_retry_limit="${PAIR_LAUNCH_RETRY_LIMIT:-2}"
+pair_topology_retry_limit="${PAIR_TOPOLOGY_RETRY_LIMIT:-3}"
+pair_topology_retry_backoff_sec="${PAIR_TOPOLOGY_RETRY_BACKOFF_SEC:-30}"
 repo_path="${REPO_PATH:-$(pwd)}"
 transfer_gpu_count="${TRANSFER_GPU_COUNT:-8}"
+min_common_hca_spare="${MIN_COMMON_HCA_SPARE:-0}"
 transfer_port="${TRANSFER_PORT:-19099}"
 transfer_chunk="${TRANSFER_CHUNK:-1}"
 transfer_count="${TRANSFER_COUNT:-16777216}"
@@ -61,6 +69,38 @@ if (( max_transfer_attempts <= 0 )); then
   echo "MAX_TRANSFER_ATTEMPTS must be > 0." >&2
   exit 2
 fi
+if (( describe_poll_rounds <= 0 )); then
+  echo "DESCRIBE_POLL_ROUNDS must be > 0." >&2
+  exit 2
+fi
+if (( scheduler_retry_backoff_sec <= 0 )); then
+  echo "SCHEDULER_RETRY_BACKOFF_SEC must be > 0." >&2
+  exit 2
+fi
+if (( quota_grace_sec <= 0 )); then
+  echo "QUOTA_GRACE_SEC must be > 0." >&2
+  exit 2
+fi
+if (( launch_retry_limit <= 0 )); then
+  echo "LAUNCH_RETRY_LIMIT must be > 0." >&2
+  exit 2
+fi
+if (( pair_launch_retry_limit <= 0 )); then
+  echo "PAIR_LAUNCH_RETRY_LIMIT must be > 0." >&2
+  exit 2
+fi
+if (( pair_topology_retry_limit <= 0 )); then
+  echo "PAIR_TOPOLOGY_RETRY_LIMIT must be > 0." >&2
+  exit 2
+fi
+if (( pair_topology_retry_backoff_sec <= 0 )); then
+  echo "PAIR_TOPOLOGY_RETRY_BACKOFF_SEC must be > 0." >&2
+  exit 2
+fi
+if (( min_common_hca_spare < 0 )); then
+  echo "MIN_COMMON_HCA_SPARE must be >= 0." >&2
+  exit 2
+fi
 if [[ "${enforce_bandwidth}" != "0" && "${enforce_bandwidth}" != "1" ]]; then
   echo "ENFORCE_BANDWIDTH must be 0 or 1." >&2
   exit 2
@@ -91,6 +131,10 @@ fi
 
 server_worker_pid=""
 client_worker_pid=""
+wait_last_reason=""
+wait_last_detail=""
+launch_last_reason=""
+launch_last_detail=""
 
 duration_to_seconds() {
   local duration="$1"
@@ -160,12 +204,82 @@ print_process_status() {
   brainctl describe "process/${pid}" -n "${namespace}" | sed -n '1,80p'
 }
 
+delete_process_if_exists() {
+  local pid="$1"
+  if [[ -z "${pid}" ]]; then
+    return 0
+  fi
+  brainctl delete process "${pid}" -n "${namespace}" >/dev/null 2>&1 || true
+  brainctl get process "${pid}" -n "${namespace}" 2>&1 | grep -q "NotFound" || true
+}
+
+launch_worker_once() {
+  local role="$1"
+  local pair_attempt="$2"
+  local submit_attempt="$3"
+  local role_upper
+  role_upper="$(printf '%s' "${role}" | tr '[:lower:]' '[:upper:]')"
+  local launch_output
+  local pid
+
+  if ! launch_output="$(brainctl launch -d \
+    --charged-group="${charged_group}" \
+    --gpu "${worker_gpu_count}" \
+    --cpu "${worker_cpu_count}" \
+    --memory "${worker_memory_mb}" \
+    --private-machine group \
+    --positive-tags "${positive_tags}" \
+    "${extra_launch_args[@]}" \
+    --max-wait-duration="${max_wait_duration}" \
+    --comment "${comment_prefix}-${role}-${timestamp}-p${pair_attempt}-s${submit_attempt}" \
+    -- bash -lc "echo ${role_upper}_READY; hostname; nvidia-smi -L | sed -n '1,16p'; sleep 7200" 2>&1)"; then
+    echo "[launch] brainctl launch failed for ${role}: ${launch_output}" >&2
+    return 1
+  fi
+
+  pid="$(printf '%s\n' "${launch_output}" | awk '
+    /^ws-[[:alnum:]-]+$/ { print $1; exit }
+    /^ws-[[:alnum:]-]+[[:space:]]/ { print $1; exit }
+  ')"
+  if [[ -z "${pid}" ]]; then
+    pid="$(printf '%s\n' "${launch_output}" | awk 'NF {last=$1} END {print last}')"
+  fi
+  if [[ -z "${pid}" ]]; then
+    echo "[launch] failed to parse ${role} worker pid from output: ${launch_output}" >&2
+    return 1
+  fi
+  echo "${pid}"
+}
+
+classify_scheduling_event() {
+  local describe_text="$1"
+  if printf '%s\n' "${describe_text}" | grep -qi "insufficient group quota: gpu"; then
+    echo "quota"
+    return 0
+  fi
+  if printf '%s\n' "${describe_text}" | grep -qi "Waiting for resources to be preempted"; then
+    echo "preempt"
+    return 0
+  fi
+  if printf '%s\n' "${describe_text}" | grep -Eqi "FailedScheduling|StartProcessActionFailed"; then
+    echo "scheduler"
+    return 0
+  fi
+  echo "none"
+}
+
 wait_for_process_ready() {
   local pid="$1"
   local max_rounds="${2:-120}"
   local interval_sec="${3:-5}"
   local round=0
   local preempt_noted=0
+  local quota_first_round=0
+  local quota_grace_rounds=$(((quota_grace_sec + interval_sec - 1) / interval_sec))
+  local describe_text=""
+
+  wait_last_reason=""
+  wait_last_detail=""
 
   while (( round < max_rounds )); do
     round=$((round + 1))
@@ -174,28 +288,153 @@ wait_for_process_ready() {
     local ready status
     ready="$(printf '%s\n' "${row}" | awk '{print $4}')"
     status="$(printf '%s\n' "${row}" | awk '{print $5}')"
-    echo "[wait] pid=${pid} round=${round} ready=${ready:-unknown} status=${status:-unknown}"
+    echo "[wait] pid=${pid} round=${round} ready=${ready:-unknown} status=${status:-unknown}" >&2
 
     if [[ "${ready}" == "1/1" && "${status}" == "Running" ]]; then
+      wait_last_reason="running"
       return 0
     fi
 
     if [[ "${status}" == "Failed" || "${status}" == "Error" || "${status}" == "Succeeded" ]]; then
+      wait_last_reason="terminal"
+      wait_last_detail="status=${status}"
       break
     fi
 
-    if (( preempt_noted == 0 )) &&
-      brainctl describe "process/${pid}" -n "${namespace}" | grep -q "Waiting for resources to be preempted"; then
-      echo "[scheduler] process ${pid} is waiting for preemption; sleep 60s before next check"
-      preempt_noted=1
-      sleep 60
-      continue
+    if (( round == 1 || round % describe_poll_rounds == 0 )); then
+      describe_text="$(brainctl describe "process/${pid}" -n "${namespace}" 2>&1 || true)"
+      case "$(classify_scheduling_event "${describe_text}")" in
+        quota)
+          if (( quota_first_round == 0 )); then
+            quota_first_round="${round}"
+            echo "[scheduler] process ${pid} hit GPU quota limit; start grace window ${quota_grace_sec}s" >&2
+          fi
+          if (( round - quota_first_round >= quota_grace_rounds )); then
+            wait_last_reason="quota_timeout"
+            wait_last_detail="quota_grace_exhausted_after=${quota_grace_sec}s"
+            break
+          fi
+          ;;
+        preempt)
+          if (( preempt_noted == 0 )); then
+            echo "[scheduler] process ${pid} is waiting for preemption; continuing to wait" >&2
+            preempt_noted=1
+          fi
+          ;;
+        scheduler)
+          wait_last_reason="scheduler_pending"
+          wait_last_detail="failed scheduling/start action observed while pending"
+          ;;
+        none)
+          ;;
+      esac
     fi
     sleep "${interval_sec}"
   done
 
+  if [[ -z "${wait_last_reason}" ]]; then
+    wait_last_reason="timeout"
+    wait_last_detail="max_rounds=${max_rounds} interval_sec=${interval_sec}"
+  fi
+
   echo "process ${pid} did not become ready in time" >&2
   print_process_status "${pid}" >&2
+  return 1
+}
+
+launch_worker_with_retries() {
+  local role="$1"
+  local pair_attempt="$2"
+  local out_pid_name="${3:-}"
+  if [[ -z "${out_pid_name}" ]]; then
+    echo "launch_worker_with_retries requires output pid variable name." >&2
+    return 2
+  fi
+  local -n out_pid_ref="${out_pid_name}"
+  local submit_attempt=0
+  local pid=""
+  local sleep_time=0
+
+  out_pid_ref=""
+  launch_last_reason=""
+  launch_last_detail=""
+
+  while (( submit_attempt < launch_retry_limit )); do
+    submit_attempt=$((submit_attempt + 1))
+    echo "[launch] ${role} submit ${submit_attempt}/${launch_retry_limit} (pair attempt ${pair_attempt})" >&2
+    if ! pid="$(launch_worker_once "${role}" "${pair_attempt}" "${submit_attempt}")"; then
+      launch_last_reason="launch_submit_failed"
+      launch_last_detail="brainctl launch failed before pid ready"
+      if (( submit_attempt < launch_retry_limit )); then
+        sleep_time=$((scheduler_retry_backoff_sec * submit_attempt))
+        echo "[launch] ${role} submit failed; retry in ${sleep_time}s" >&2
+        sleep "${sleep_time}"
+        continue
+      fi
+      return 1
+    fi
+
+    echo "[launch] ${role} worker pid: ${pid}" >&2
+    print_process_status "${pid}" >&2 || true
+    if wait_for_process_ready "${pid}" "${max_wait_rounds}" "${ready_poll_interval_sec}"; then
+      out_pid_ref="${pid}"
+      return 0
+    fi
+
+    launch_last_reason="${wait_last_reason}"
+    launch_last_detail="${wait_last_detail}"
+    echo "[launch] ${role} worker ${pid} not ready: reason=${launch_last_reason} detail=${launch_last_detail}" >&2
+    delete_process_if_exists "${pid}"
+    pid=""
+
+    if (( submit_attempt < launch_retry_limit )); then
+      sleep_time=$((scheduler_retry_backoff_sec * submit_attempt))
+      echo "[launch] ${role} retry after cleanup; backoff=${sleep_time}s" >&2
+      sleep "${sleep_time}"
+    fi
+  done
+  return 1
+}
+
+launch_worker_pair() {
+  local pair_attempt=0
+  local backoff_sec=0
+
+  while (( pair_attempt < pair_launch_retry_limit )); do
+    pair_attempt=$((pair_attempt + 1))
+    echo "[launch] pair attempt ${pair_attempt}/${pair_launch_retry_limit}" >&2
+
+    server_worker_pid=""
+    client_worker_pid=""
+
+    if ! launch_worker_with_retries "server" "${pair_attempt}" server_worker_pid; then
+      echo "[launch] server worker launch failed: reason=${launch_last_reason} detail=${launch_last_detail}" >&2
+      if (( pair_attempt < pair_launch_retry_limit )); then
+        backoff_sec=$((scheduler_retry_backoff_sec * pair_attempt))
+        echo "[launch] retry full pair in ${backoff_sec}s" >&2
+        sleep "${backoff_sec}"
+        continue
+      fi
+      return 1
+    fi
+
+    if ! launch_worker_with_retries "client" "${pair_attempt}" client_worker_pid; then
+      echo "[launch] client worker launch failed: reason=${launch_last_reason} detail=${launch_last_detail}" >&2
+      delete_process_if_exists "${server_worker_pid}"
+      server_worker_pid=""
+      if (( pair_attempt < pair_launch_retry_limit )); then
+        backoff_sec=$((scheduler_retry_backoff_sec * pair_attempt))
+        echo "[launch] retry full pair in ${backoff_sec}s" >&2
+        sleep "${backoff_sec}"
+        continue
+      fi
+      return 1
+    fi
+
+    echo "[launch] both workers ready: server=${server_worker_pid} client=${client_worker_pid}" >&2
+    return 0
+  done
+
   return 1
 }
 
@@ -384,44 +623,26 @@ brainctl launch \
   --positive-tags "${positive_tags}" \
   --predict-only
 
-echo "[launch] server worker"
-server_worker_pid="$(brainctl launch -d \
-  --charged-group="${charged_group}" \
-  --gpu "${worker_gpu_count}" \
-  --cpu "${worker_cpu_count}" \
-  --memory "${worker_memory_mb}" \
-  --private-machine group \
-  --positive-tags "${positive_tags}" \
-  "${extra_launch_args[@]}" \
-  --max-wait-duration="${max_wait_duration}" \
-  --comment "${comment_prefix}-server-${timestamp}" \
-  -- bash -lc 'echo SERVER_READY; hostname; nvidia-smi -L | sed -n "1,16p"; sleep 7200')"
-echo "server worker pid: ${server_worker_pid}"
-print_process_status "${server_worker_pid}"
+required_common_hcas=$(( transfer_gpu_count + min_common_hca_spare ))
+topology_pair_attempt=0
+declare -a server_hcas=()
+declare -a client_hcas=()
+declare -a server_engine_hcas=()
+declare -a client_engine_hcas=()
+declare -a common_hcas=()
 
-echo "[launch] client worker"
-client_worker_pid="$(brainctl launch -d \
-  --charged-group="${charged_group}" \
-  --gpu "${worker_gpu_count}" \
-  --cpu "${worker_cpu_count}" \
-  --memory "${worker_memory_mb}" \
-  --private-machine group \
-  --positive-tags "${positive_tags}" \
-  "${extra_launch_args[@]}" \
-  --max-wait-duration="${max_wait_duration}" \
-  --comment "${comment_prefix}-client-${timestamp}" \
-  -- bash -lc 'echo CLIENT_READY; hostname; nvidia-smi -L | sed -n "1,16p"; sleep 7200')"
-echo "client worker pid: ${client_worker_pid}"
-print_process_status "${client_worker_pid}"
+while (( topology_pair_attempt < pair_topology_retry_limit )); do
+  topology_pair_attempt=$((topology_pair_attempt + 1))
+  echo "[launch] server+client workers with scheduler-aware retries (topology attempt ${topology_pair_attempt}/${pair_topology_retry_limit})"
+  if ! launch_worker_pair; then
+    echo "failed to launch 2x${worker_gpu_count} workers under scheduler constraints." >&2
+    exit 1
+  fi
 
-for pid in "${server_worker_pid}" "${client_worker_pid}"; do
-  wait_for_process_ready "${pid}" "${max_wait_rounds}" "${ready_poll_interval_sec}"
-done
-
-echo "[remote] validate user + workspace"
-for pid in "${server_worker_pid}" "${client_worker_pid}"; do
-  brainctl exec "process/${pid}" -n "${namespace}" -- bash -lc "getent passwd ${run_as_user} >/dev/null"
-  brain_exec_as_user "${pid}" "
+  echo "[remote] validate user + workspace"
+  for pid in "${server_worker_pid}" "${client_worker_pid}"; do
+    brainctl exec "process/${pid}" -n "${namespace}" -- bash -lc "getent passwd ${run_as_user} >/dev/null"
+    brain_exec_as_user "${pid}" "
 pwd
 test -d \"${repo_path}\"
 if [ ! -x ./bazel-bin/core/communicator/gpu_ce_test_binary ]; then
@@ -430,48 +651,73 @@ if [ ! -x ./bazel-bin/core/communicator/gpu_ce_test_binary ]; then
     --ui_event_filters=warning,error
 fi
 "
+  done
+
+  echo "[remote] RDMA verbs preflight + discover usable RNICs"
+  server_hcas_raw="$(collect_verbs_hcas "${server_worker_pid}" "server")"
+  client_hcas_raw="$(collect_verbs_hcas "${client_worker_pid}" "client")"
+
+  mapfile -t server_hcas < <(printf '%s\n' "${server_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
+  mapfile -t client_hcas < <(printf '%s\n' "${client_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
+  if (( ${#server_hcas[@]} == 0 || ${#client_hcas[@]} == 0 )); then
+    echo "failed to discover verbs-visible RNIC devices on remote workers" >&2
+    echo "server RNICs: ${server_hcas_raw}" >&2
+    echo "client RNICs: ${client_hcas_raw}" >&2
+    emit_rdma_environment_hints
+    exit 1
+  fi
+
+  server_verbs_csv="$(IFS=,; echo "${server_hcas[*]}")"
+  client_verbs_csv="$(IFS=,; echo "${client_hcas[*]}")"
+
+  echo "[remote] RDMA communicator probe (engine-usable RNICs)"
+  server_engine_hcas_raw="$(collect_engine_usable_hcas "${server_worker_pid}" "server" "${server_verbs_csv}")"
+  client_engine_hcas_raw="$(collect_engine_usable_hcas "${client_worker_pid}" "client" "${client_verbs_csv}")"
+  mapfile -t server_engine_hcas < <(printf '%s\n' "${server_engine_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
+  mapfile -t client_engine_hcas < <(printf '%s\n' "${client_engine_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
+  if (( ${#server_engine_hcas[@]} == 0 || ${#client_engine_hcas[@]} == 0 )); then
+    echo "failed to discover communicator-usable RNIC devices on remote workers" >&2
+    echo "server communicator RNICs: ${server_engine_hcas_raw}" >&2
+    echo "client communicator RNICs: ${client_engine_hcas_raw}" >&2
+    exit 1
+  fi
+
+  mapfile -t common_hcas < <(
+    comm -12 \
+      <(printf '%s\n' "${server_engine_hcas[@]}" | LC_ALL=C sort -u) \
+      <(printf '%s\n' "${client_engine_hcas[@]}" | LC_ALL=C sort -u) \
+      | sort -V
+  )
+
+  echo "[remote] server communicator RNICs (${#server_engine_hcas[@]}): ${server_engine_hcas[*]}"
+  echo "[remote] client communicator RNICs (${#client_engine_hcas[@]}): ${client_engine_hcas[*]}"
+  echo "[remote] common communicator RNICs (${#common_hcas[@]}): ${common_hcas[*]}"
+  echo "[remote] spare common RNICs beyond TRANSFER_GPU_COUNT(${transfer_gpu_count}): $(( ${#common_hcas[@]} - transfer_gpu_count ))"
+
+  if (( ${#common_hcas[@]} < transfer_gpu_count )); then
+    echo "need at least ${transfer_gpu_count} common communicator-usable RNICs, got ${#common_hcas[@]}" >&2
+    echo "server communicator RNICs: ${server_engine_hcas[*]}" >&2
+    echo "client communicator RNICs: ${client_engine_hcas[*]}" >&2
+    exit 1
+  fi
+
+  if (( ${#common_hcas[@]} >= required_common_hcas )); then
+    break
+  fi
+
+  echo "[topology] common RNIC count ${#common_hcas[@]} does not satisfy required ${required_common_hcas} (TRANSFER_GPU_COUNT=${transfer_gpu_count} + MIN_COMMON_HCA_SPARE=${min_common_hca_spare})." >&2
+  if (( topology_pair_attempt >= pair_topology_retry_limit )); then
+    echo "[topology] exhausted pair reselection attempts while looking for spare common RNICs." >&2
+    exit 1
+  fi
+
+  echo "[topology] recycle worker pair and retry topology selection after ${pair_topology_retry_backoff_sec}s." >&2
+  delete_process_if_exists "${server_worker_pid}"
+  delete_process_if_exists "${client_worker_pid}"
+  server_worker_pid=""
+  client_worker_pid=""
+  sleep "${pair_topology_retry_backoff_sec}"
 done
-
-echo "[remote] RDMA verbs preflight + discover usable RNICs"
-server_hcas_raw="$(collect_verbs_hcas "${server_worker_pid}" "server")"
-client_hcas_raw="$(collect_verbs_hcas "${client_worker_pid}" "client")"
-
-mapfile -t server_hcas < <(printf '%s\n' "${server_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
-mapfile -t client_hcas < <(printf '%s\n' "${client_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
-if (( ${#server_hcas[@]} == 0 || ${#client_hcas[@]} == 0 )); then
-  echo "failed to discover verbs-visible RNIC devices on remote workers" >&2
-  echo "server RNICs: ${server_hcas_raw}" >&2
-  echo "client RNICs: ${client_hcas_raw}" >&2
-  emit_rdma_environment_hints
-  exit 1
-fi
-
-server_verbs_csv="$(IFS=,; echo "${server_hcas[*]}")"
-client_verbs_csv="$(IFS=,; echo "${client_hcas[*]}")"
-
-echo "[remote] RDMA communicator probe (engine-usable RNICs)"
-server_engine_hcas_raw="$(collect_engine_usable_hcas "${server_worker_pid}" "server" "${server_verbs_csv}")"
-client_engine_hcas_raw="$(collect_engine_usable_hcas "${client_worker_pid}" "client" "${client_verbs_csv}")"
-mapfile -t server_engine_hcas < <(printf '%s\n' "${server_engine_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
-mapfile -t client_engine_hcas < <(printf '%s\n' "${client_engine_hcas_raw}" | awk '/^mlx5/{print}' | sort -Vu)
-if (( ${#server_engine_hcas[@]} == 0 || ${#client_engine_hcas[@]} == 0 )); then
-  echo "failed to discover communicator-usable RNIC devices on remote workers" >&2
-  echo "server communicator RNICs: ${server_engine_hcas_raw}" >&2
-  echo "client communicator RNICs: ${client_engine_hcas_raw}" >&2
-  exit 1
-fi
-
-mapfile -t common_hcas < <(
-  comm -12 \
-    <(printf '%s\n' "${server_engine_hcas[@]}" | sort -V) \
-    <(printf '%s\n' "${client_engine_hcas[@]}" | sort -V)
-)
-if (( ${#common_hcas[@]} < transfer_gpu_count )); then
-  echo "need at least ${transfer_gpu_count} common communicator-usable RNICs, got ${#common_hcas[@]}" >&2
-  echo "server communicator RNICs: ${server_engine_hcas[*]}" >&2
-  echo "client communicator RNICs: ${client_engine_hcas[*]}" >&2
-  exit 1
-fi
 
 declare -A excluded_hcas=()
 declare -a excluded_hca_order=()
@@ -508,6 +754,95 @@ select_hca_subset() {
       exit 1
       ;;
   esac
+}
+
+rotate_selected_hca_with_spare() {
+  local reason="${1:-}"
+  local -A selected_hca_set=()
+  local -a spare_candidates=()
+  local -A bw_by_gpu=()
+  local -A nic_usage=()
+  local -A nic_min_bw=()
+  local dev gpu nic bw usage min_bw
+  local remove_dev=""
+  local remove_usage=-1
+  local remove_min_bw="999999"
+  local add_dev=""
+  local idx
+
+  for dev in "${selected_hcas[@]}"; do
+    selected_hca_set["${dev}"]=1
+  done
+  for dev in "${common_hcas[@]}"; do
+    if [[ -n "${selected_hca_set[${dev}]:-}" ]]; then
+      continue
+    fi
+    spare_candidates+=("${dev}")
+  done
+  if (( ${#spare_candidates[@]} == 0 )); then
+    return 1
+  fi
+
+  while read -r gpu bw; do
+    if [[ ! "${gpu}" =~ ^[0-9]+$ ]]; then
+      continue
+    fi
+    if ! awk -v v="${bw}" 'BEGIN { exit !(v + 0 >= 0) }'; then
+      continue
+    fi
+    bw_by_gpu["${gpu}"]="${bw}"
+  done <<< "${bandwidth_table}"
+
+  while read -r gpu nic; do
+    if [[ ! "${gpu}" =~ ^[0-9]+$ ]]; then
+      continue
+    fi
+    if [[ ! "${nic}" =~ ^mlx5_[0-9]+$ ]]; then
+      continue
+    fi
+    nic_usage["${nic}"]=$(( ${nic_usage["${nic}"]:-0} + 1 ))
+    bw="${bw_by_gpu["${gpu}"]:-0}"
+    if [[ -z "${nic_min_bw["${nic}"]:-}" ]] || \
+      awk -v lhs="${bw}" -v rhs="${nic_min_bw["${nic}"]}" 'BEGIN { exit !(lhs + 0 < rhs + 0) }'; then
+      nic_min_bw["${nic}"]="${bw}"
+    fi
+  done <<< "${gpu_nic_map_raw}"
+
+  for dev in "${selected_hcas[@]}"; do
+    usage="${nic_usage["${dev}"]:-0}"
+    min_bw="${nic_min_bw["${dev}"]:-999999}"
+    if (( usage > remove_usage )); then
+      remove_dev="${dev}"
+      remove_usage="${usage}"
+      remove_min_bw="${min_bw}"
+      continue
+    fi
+    if (( usage == remove_usage )) && \
+      awk -v lhs="${min_bw}" -v rhs="${remove_min_bw}" 'BEGIN { exit !(lhs + 0 < rhs + 0) }'; then
+      remove_dev="${dev}"
+      remove_min_bw="${min_bw}"
+    fi
+  done
+
+  if [[ -z "${remove_dev}" ]]; then
+    return 1
+  fi
+  if (( remove_usage <= 1 )) && [[ "${reason}" != "bandwidth_imbalance" ]]; then
+    return 1
+  fi
+
+  add_dev="${spare_candidates[0]}"
+  for idx in "${!selected_hcas[@]}"; do
+    if [[ "${selected_hcas[${idx}]}" != "${remove_dev}" ]]; then
+      continue
+    fi
+    selected_hcas[${idx}]="${add_dev}"
+    break
+  done
+
+  echo "[retry] rotate selected RNIC via spare: remove=${remove_dev}(usage=${remove_usage},min_gbps=${remove_min_bw}) add=${add_dev}"
+  echo "[retry] preserve existing working lanes; patch only suspected weak lane (no full reset)"
+  return 0
 }
 
 if [[ -n "${ib_hca_override}" ]]; then
@@ -740,29 +1075,116 @@ fi
     | sed -n 's/.*local_dev=\\([^ ]*\\).*/\\1/p' || true
   grep 'RDMA_CONNECT_FAILED:' \"${client_log_path}\" \
     | sed -n 's/.*RDMA_CONNECT_FAILED: local=\\([^ ]*\\) peer=.*/\\1/p' || true
-  failed_keys=\$(grep -E '^(with|no) regmr result: key=gpu-ce-test-tensor-[0-9]+-0, status=14' \"${client_log_path}\" \
-    | sed -n 's/.*tensor-\\([0-9]\\+\\)-0.*/\\1/p' | sort -u || true)
-  if [ -n \"\${failed_keys}\" ]; then
+  suspect_keys=\$(
+    (
+      grep -E '^(with|no) regmr result: key=gpu-ce-test-tensor-[0-9]+-0, status=14' \"${client_log_path}\" \
+        | sed -n 's/.*tensor-\\([0-9]\\+\\)-0.*/\\1/p' || true
+      grep 'ibv_post_send failed for request=gpu-ce-test-tensor-' \"${client_log_path}\" \
+        | sed -n 's/.*request=gpu-ce-test-tensor-\\([0-9]\\+\\)-0:.*/\\1/p' || true
+      grep -E '^(with|no) regmr result: key=gpu-ce-test-tensor-[0-9]+-0, status=0, .*rdma_read=0' \"${client_log_path}\" \
+        | sed -n 's/.*tensor-\\([0-9]\\+\\)-0.*/\\1/p' || true
+    ) | sort -u
+  )
+  if [ -n \"\${suspect_keys}\" ]; then
     while IFS= read -r key_idx; do
       if [ -z \"\${key_idx}\" ]; then
         continue
       fi
       grep \"read tensor:.*key=gpu-ce-test-tensor-\${key_idx}-0 \" \"${client_log_path}\" \
         | sed -n 's/.*net_dev=\\([^ ,]*\\).*/\\1/p' | head -n 1
-    done <<< \"\${failed_keys}\"
+    done <<< \"\${suspect_keys}\"
   fi
 ) | sort -Vu
 " || true)"
   server_failed_hcas_raw="$(brain_exec_as_user "${server_worker_pid}" "grep 'failed to rdma connect from' \"${server_log_path}\" | sed -n 's/.*net_dev=\\([^ ]*\\).*/\\1/p' | sort -Vu || true")"
   mapfile -t failed_hcas < <(printf '%s\n%s\n' "${client_failed_hcas_raw}" "${server_failed_hcas_raw}" | awk '/^mlx5_[0-9]+$/ {print}' | sort -Vu)
+  imbalance_reason_present=0
+  for reason in "${failure_reasons[@]}"; do
+    if [[ "${reason}" == per-link\ bandwidth\ imbalance:* ]]; then
+      imbalance_reason_present=1
+      break
+    fi
+  done
   if (( ${#failed_hcas[@]} == 0 )); then
+    if (( imbalance_reason_present == 1 )) && rotate_selected_hca_with_spare "bandwidth_imbalance"; then
+      ib_hca_csv="$(IFS=,; echo "${selected_hcas[*]}")"
+      echo "[retry] next attempt RNICs: ${ib_hca_csv}"
+      continue
+    fi
     echo "[retry] no failed RNIC extracted from logs; retry with current RNIC set." >&2
     continue
   fi
 
   max_exclusions=$(( ${#common_hcas[@]} - transfer_gpu_count ))
+  declare -A failed_hca_set=()
+  for dev in "${failed_hcas[@]}"; do
+    observed_failed_hcas["${dev}"]=1
+    failed_hca_set["${dev}"]=1
+  done
   if (( max_exclusions <= 0 )); then
-    echo "[retry] no spare RNIC candidates available for failover." >&2
+    declare -A selected_hca_usage=()
+    for dev in "${selected_hcas[@]}"; do
+      selected_hca_usage["${dev}"]=0
+    done
+    while read -r gpu_idx nic_name; do
+      if [[ -z "${gpu_idx}" || -z "${nic_name}" ]]; then
+        continue
+      fi
+      if [[ -n "${selected_hca_usage[${nic_name}]+x}" ]]; then
+        selected_hca_usage["${nic_name}"]=$(( selected_hca_usage["${nic_name}"] + 1 ))
+      fi
+    done <<< "${gpu_nic_map_raw}"
+
+    slot_swap_applied=0
+    for failed_dev in "${failed_hcas[@]}"; do
+      failed_idx=-1
+      for idx in "${!selected_hcas[@]}"; do
+        if [[ "${selected_hcas[${idx}]}" == "${failed_dev}" ]]; then
+          failed_idx="${idx}"
+          break
+        fi
+      done
+      if (( failed_idx < 0 )); then
+        continue
+      fi
+
+      best_idx=-1
+      best_usage=2147483647
+      for idx in "${!selected_hcas[@]}"; do
+        if (( idx == failed_idx )); then
+          continue
+        fi
+        candidate_dev="${selected_hcas[${idx}]}"
+        if [[ -n "${failed_hca_set[${candidate_dev}]:-}" ]]; then
+          continue
+        fi
+        candidate_usage="${selected_hca_usage[${candidate_dev}]:-0}"
+        if (( candidate_usage < best_usage )); then
+          best_usage="${candidate_usage}"
+          best_idx="${idx}"
+        fi
+      done
+      if (( best_idx < 0 )); then
+        continue
+      fi
+
+      replacement_dev="${selected_hcas[${best_idx}]}"
+      selected_hcas[${best_idx}]="${selected_hcas[${failed_idx}]}"
+      selected_hcas[${failed_idx}]="${replacement_dev}"
+      slot_swap_applied=1
+      echo "[retry] no spare RNIC candidates; remapped slot by usage: ${failed_dev}@idx${failed_idx} <-> ${replacement_dev}@idx${best_idx}(usage=${best_usage})"
+      break
+    done
+
+    if (( slot_swap_applied == 0 )); then
+      echo "[retry] no spare RNIC candidates available for failover or slot remap." >&2
+      continue
+    fi
+    ib_hca_csv="$(IFS=,; echo "${selected_hcas[*]}")"
+    cumulative_failed="$(printf '%s\n' "${!observed_failed_hcas[@]}" | sort -V | paste -sd, -)"
+    echo "[retry] failed RNICs (attempt-local): ${failed_hcas[*]}"
+    echo "[retry] cumulative failed RNICs: ${cumulative_failed:-none}"
+    echo "[retry] next attempt RNICs: ${ib_hca_csv}"
     continue
   fi
 
@@ -771,7 +1193,6 @@ fi
   declare -a replacement_pairs=()
   current_exclusions=${#excluded_hcas[@]}
   for dev in "${failed_hcas[@]}"; do
-    observed_failed_hcas["${dev}"]=1
     if ! printf '%s\n' "${common_hcas[@]}" | grep -qx "${dev}"; then
       continue
     fi

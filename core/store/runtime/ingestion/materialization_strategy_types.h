@@ -104,6 +104,100 @@ struct ResolvedMaterializationPlan {
   std::optional<MappedCopyContract> mapped_copy_contract;
 };
 
+enum class RouteIntentKind : std::uint8_t {
+  kUnknown = 0,
+  kDirectRemotePerTarget = 1,
+  kRemoteBootstrapFanout = 2,
+  kOwnerFileCollective = 3,
+  kResidualFallback = 4,
+};
+
+enum class RouteProtocolFamily : std::uint8_t {
+  kUnknown = 0,
+  kAuto = 1,
+  kNetwork = 2,
+  kNvlink = 3,
+  kPcie = 4,
+};
+
+enum class RouteFallbackPolicy : std::uint8_t {
+  kUnknown = 0,
+  kAllowResidualFallback = 1,
+  kRequireExactCoverage = 2,
+};
+
+struct RouteHealthCostAnnotations {
+  bool healthy{false};
+  double health_score{0.0};
+  double estimated_cost{0.0};
+  bool rail_aligned{false};
+};
+
+struct RouteIntent {
+  std::string src_endpoint_id;
+  std::string dst_endpoint_id;
+  RouteIntentKind kind{RouteIntentKind::kUnknown};
+  RouteProtocolFamily preferred_protocol_family{RouteProtocolFamily::kUnknown};
+  std::optional<std::string> local_ingress_anchor_id;
+  RouteHealthCostAnnotations annotations;
+  RouteFallbackPolicy fallback_policy{RouteFallbackPolicy::kUnknown};
+};
+
+enum class TransferLegKind : std::uint8_t {
+  kUnknown = 0,
+  kRemoteIngress = 1,
+  kLocalFanout = 2,
+  kOwnerCollective = 3,
+  kResidualFallback = 4,
+};
+
+struct TopologyRuntimeSnapshot {
+  bool available{false};
+  uint64_t topology_generation{0};
+  std::string local_node_id;
+  // Planner follow-up will populate the selected local endpoint when anchor
+  // selection is wired; Phase 1 keeps the field as scaffolding only.
+  std::string local_endpoint_id;
+};
+
+struct TopologyStrategyInput {
+  TopologyRuntimeSnapshot runtime;
+  ResolvedSourceBinding source_binding;
+  ResolvedMaterializationPlan resolved_plan;
+  std::vector<std::string> target_endpoint_ids;
+};
+
+struct TransferLeg {
+  TransferLegKind kind{TransferLegKind::kUnknown};
+  std::string src_endpoint_id;
+  std::string dst_endpoint_id;
+  uint64_t planned_bytes{0};
+  bool routed_preferred{false};
+  bool exact_coverage{false};
+};
+
+struct TransferGroup {
+  RouteIntent intent;
+  std::string group_id;
+  std::string anchor_endpoint_id;
+  uint64_t planned_bytes{0};
+  std::vector<TransferLeg> legs;
+};
+
+struct TopologyPlanDiagnostics {
+  bool guided{false};
+  std::string degrade_reason;
+  std::vector<std::string> planner_notes;
+};
+
+struct TopologyGuidedPlan {
+  std::vector<TransferGroup> groups;
+  uint64_t routed_bytes{0};
+  uint64_t local_fanout_bytes{0};
+  uint64_t residual_fallback_bytes{0};
+  TopologyPlanDiagnostics diagnostics;
+};
+
 struct ExecutionCommitReport {
   loading::MaterializationSource source{loading::MaterializationSource::kDisk};
   uint64_t requested_bytes{0};

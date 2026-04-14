@@ -241,6 +241,30 @@ absl::Status RoutingContext::set_endpoint_bindings(std::vector<EndpointBinding> 
   }
   bindings_ = std::move(next_bindings);
   bindings_initialized_ = true;
+  connections_.clear();
+  communicators_.clear();
+  link_states_.clear();
+  topology_generation_ += 1;
+  return absl::OkStatus();
+}
+
+absl::Status RoutingContext::upsert_endpoint_bindings(std::vector<EndpointBinding> bindings) {
+  absl::MutexLock lock(&mu_);
+  for (const auto& binding : bindings) {
+    if (binding.endpoint_id.empty()) {
+      return absl::InvalidArgumentError("endpoint binding id must be non-empty");
+    }
+  }
+  for (auto& binding : bindings) {
+    bindings_[binding.endpoint_id] = std::move(binding);
+  }
+  if (!bindings.empty()) {
+    bindings_initialized_ = true;
+    connections_.clear();
+    communicators_.clear();
+    link_states_.clear();
+    topology_generation_ += 1;
+  }
   return absl::OkStatus();
 }
 
@@ -248,7 +272,9 @@ absl::Status RoutingContext::update_endpoint_binding(EndpointBinding binding) {
   if (binding.endpoint_id.empty()) {
     return absl::InvalidArgumentError("endpoint binding id must be non-empty");
   }
-  return absl::FailedPreconditionError("endpoint bindings are immutable; update_endpoint_binding is not supported");
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(std::move(binding));
+  return upsert_endpoint_bindings(std::move(bindings));
 }
 
 absl::StatusOr<std::shared_ptr<RoutingContext::Communicator>> RoutingContext::get_communicator(

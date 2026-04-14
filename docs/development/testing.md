@@ -84,10 +84,14 @@ The script enforces the runtime constraints:
   keeps only accepted devices (`Dev: mlx5_* added` or
   `RDMA candidate accepted: dev=mlx5_*`) as final candidates.
 - It runs transfer verification with bounded retries (`MAX_TRANSFER_ATTEMPTS`,
-  default `3`). On handshake timeout (`[rdma_handshake] transport connect failed`
-  with `local_dev=mlx5_*`), it cumulatively excludes failed RNICs from candidate
-  set, rebuilds an 8-device selection from remaining common HCAs, and retries
-  automatically.
+  default `3`). Failed RNIC extraction now covers multiple control-path
+  signals, including handshake/connect failures, `ibv_post_send failed`
+  request keys, and `rdma_read=0` result keys.
+- When spare common HCAs exist, it cumulatively excludes failed RNICs from the
+  candidate set and rebuilds an 8-device selection for the next attempt.
+- When no spare common HCAs exist (exactly 8 common devices), it performs a
+  slot remap retry: swap the failed RNIC out of its current rail slot with the
+  least-used non-failed RNIC slot observed in the previous attempt, then retry.
 - It asserts 8 successful with-regmr + 8 successful no-regmr reads, full
   read-path coverage for all 8 tensor keys, and affinity spread/handshake
   evidence with a strict minimum of 7 unique NIC/connect pairs (for 8-GPU run)

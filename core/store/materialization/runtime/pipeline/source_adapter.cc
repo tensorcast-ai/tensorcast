@@ -163,7 +163,11 @@ absl::Status P2PSourceAdapter::prepare(const P2PSource& source, IngestionContext
   P2PSource normalized = source;
   normalized.comm_engine =
       gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager->get_shared_engine()};
-  if (!normalized.routing_context) {
+  // Update the live routing bindings first so any fetched context already sees this source.
+  comm_manager->remember_p2p_source(normalized);
+  const bool topology_guided_execution_enabled =
+      ctx.options != nullptr && ctx.options->materialization_strategy.topology_guided_execution_enabled();
+  if (!normalized.routing_context && topology_guided_execution_enabled) {
     normalized.routing_context = comm_manager->routing_context();
   }
   ctx.p2p.source = std::move(normalized);

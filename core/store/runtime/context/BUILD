@@ -27,8 +27,10 @@ sc_cc_library(
         "//core/common:async_copy_manager_lib",
         "//core/common:host_memory_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/communicator:host_topology_builder_lib",
         "//core/store:communication_manager",
         "//core/store:device_manager",
+        "//core/store:endpoint_id",
         "//core/store:global_store_client",
         "//core/store:metrics_collector",
         "//core/store:replica_registry",
@@ -47,10 +49,16 @@ sc_cc_library(
 cc_test(
     name = "runtime_context_test",
     srcs = ["runtime_context_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
     deps = [
         ":runtime_context",
+        "//core/communicator:routing_context_lib",
+        "//core/store:communication_manager",
         "//core/store:memory_tier_budget",
         "//core/store:store_engine_options",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
         "//core/testing:catch_main",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

@@ -1,6 +1,7 @@
 // Copyright (c) 2026, TensorCast Team.
 
 #include "core/common/config/daemon_config_io.h"
+#include "tensorcast/config/v1/daemon_config.pb.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -135,6 +136,9 @@ engine:
     enable_mapped_multirange_concat_jobs: false
     enable_local_batched_disk_load: true
     enable_owner_file_collective: true
+    enable_topology_guided_transfer: true
+    topology_guided_mode: TOPOLOGY_GUIDED_MODE_PREFER_GUIDED
+    enable_remote_bootstrap_local_fanout: true
     executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE
     diagnostics_verbosity: MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE
 pinned_memory:
@@ -176,6 +180,13 @@ pinned_memory:
   REQUIRE(
       strategy.diagnostics_verbosity() ==
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE);
+  REQUIRE(strategy.has_enable_topology_guided_transfer());
+  REQUIRE(strategy.enable_topology_guided_transfer());
+  REQUIRE(
+      strategy.topology_guided_mode() ==
+      tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_PREFER_GUIDED);
+  REQUIRE(strategy.has_enable_remote_bootstrap_local_fanout());
+  REQUIRE(strategy.enable_remote_bootstrap_local_fanout());
 }
 
 TEST_CASE("DaemonConfig missing materialization strategy gets 0108 defaults", "[config]") {
@@ -208,6 +219,13 @@ pinned_memory:
   REQUIRE(
       strategy.executor_preference() ==
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO);
+  REQUIRE(strategy.has_enable_topology_guided_transfer());
+  REQUIRE_FALSE(strategy.enable_topology_guided_transfer());
+  REQUIRE(
+      strategy.topology_guided_mode() ==
+      tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
+  REQUIRE(strategy.has_enable_remote_bootstrap_local_fanout());
+  REQUIRE_FALSE(strategy.enable_remote_bootstrap_local_fanout());
 }
 
 TEST_CASE("DaemonConfig partial materialization strategy preserves 0108 defaults", "[config]") {
@@ -233,6 +251,13 @@ pinned_memory:
   REQUIRE(strategy.enable_local_batched_disk_load());
   REQUIRE(strategy.has_enable_owner_file_collective());
   REQUIRE_FALSE(strategy.enable_owner_file_collective());
+  REQUIRE(strategy.has_enable_topology_guided_transfer());
+  REQUIRE_FALSE(strategy.enable_topology_guided_transfer());
+  REQUIRE(
+      strategy.topology_guided_mode() ==
+      tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
+  REQUIRE(strategy.has_enable_remote_bootstrap_local_fanout());
+  REQUIRE_FALSE(strategy.enable_remote_bootstrap_local_fanout());
   REQUIRE(
       strategy.executor_preference() ==
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL);

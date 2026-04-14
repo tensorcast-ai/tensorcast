@@ -14,6 +14,7 @@
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/memory_tier_config.h"
+#include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::store {
 
@@ -82,6 +83,11 @@ struct StoreEngineOptions {
   // manager instead of creating its own internal instance.
   std::shared_ptr<components::CommunicationManager> comm_manager{nullptr};
 
+  // Optional typed communicator config used when RuntimeContext constructs its
+  // own CommunicationManager. This is the runtime bootstrap path for
+  // topology-guided routing when no preinitialized comm_manager is injected.
+  std::optional<tensorcast::communicator::v1::CommunicatorConfig> communicator_config;
+
   // Optional externally created AsyncRuntime so StoreEngine and daemon can
   // share a single executor runtime with unified shutdown/drain.
   std::shared_ptr<common::AsyncRuntime> async_runtime{nullptr};
@@ -139,6 +145,13 @@ struct StoreEngineOptions {
       kVerbose = 2,
     };
 
+    enum class TopologyGuidedMode : std::uint8_t {
+      kUnspecified = 0,
+      kDisabled = 1,
+      kObserveOnly = 2,
+      kPreferGuided = 3,
+    };
+
     bool enable_tensor_aware_mapped_executor{true};
     bool enable_local_batched_disk_load{false};
     bool enable_owner_file_collective{false};
@@ -155,6 +168,18 @@ struct StoreEngineOptions {
     bool use_dedicated_single_range_concat_stream{false};
     ExecutorPreference executor_preference{ExecutorPreference::kAuto};
     DiagnosticsVerbosity diagnostics_verbosity{DiagnosticsVerbosity::kBasic};
+    bool enable_topology_guided_transfer{false};
+    TopologyGuidedMode topology_guided_mode{TopologyGuidedMode::kDisabled};
+    bool enable_remote_bootstrap_local_fanout{false};
+
+    [[nodiscard]] bool topology_guided_observation_enabled() const {
+      return enable_topology_guided_transfer && topology_guided_mode != TopologyGuidedMode::kUnspecified &&
+          topology_guided_mode != TopologyGuidedMode::kDisabled;
+    }
+
+    [[nodiscard]] bool topology_guided_execution_enabled() const {
+      return enable_topology_guided_transfer && topology_guided_mode == TopologyGuidedMode::kPreferGuided;
+    }
   };
 
   MaterializationStrategyConfig materialization_strategy{};

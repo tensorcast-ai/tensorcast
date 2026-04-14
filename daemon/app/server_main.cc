@@ -884,6 +884,10 @@ int main(int argc, char** argv) {
         ms.has_enable_mapped_multirange_concat_jobs() ? ms.enable_mapped_multirange_concat_jobs() : true;
     strategy.sync_after_single_range_concat_job = ms.sync_after_single_range_concat_job();
     strategy.use_dedicated_single_range_concat_stream = ms.use_dedicated_single_range_concat_stream();
+    strategy.enable_topology_guided_transfer =
+        ms.has_enable_topology_guided_transfer() ? ms.enable_topology_guided_transfer() : false;
+    strategy.enable_remote_bootstrap_local_fanout =
+        ms.has_enable_remote_bootstrap_local_fanout() ? ms.enable_remote_bootstrap_local_fanout() : false;
     switch (ms.executor_preference()) {
       case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_GENERIC_BYTE_RANGE:
         strategy.executor_preference =
@@ -918,6 +922,25 @@ int main(int argc, char** argv) {
       default:
         strategy.diagnostics_verbosity =
             store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kBasic;
+        break;
+    }
+    switch (ms.topology_guided_mode()) {
+      case tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_OBSERVE_ONLY:
+        strategy.topology_guided_mode =
+            store::StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kObserveOnly;
+        break;
+      case tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_PREFER_GUIDED:
+        strategy.topology_guided_mode =
+            store::StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kPreferGuided;
+        break;
+      case tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED:
+        strategy.topology_guided_mode =
+            store::StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kDisabled;
+        break;
+      case tensorcast::config::v1::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_UNSPECIFIED:
+      default:
+        strategy.topology_guided_mode =
+            store::StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kDisabled;
         break;
     }
   }
@@ -1006,6 +1029,7 @@ int main(int argc, char** argv) {
   opts.p2p_port = p2p_port;
   opts.p2p_listen_host = p2p_host;
   opts.enable_rdma = cfg.communicator().enable_rdma();
+  opts.communicator_config = cfg.communicator();
 
   if (cfg.high_availability().enabled() && p2p_port == 0) {
     LOG(ERROR) << "Global Store high availability requires server.p2p_listen.port to be non-zero;"

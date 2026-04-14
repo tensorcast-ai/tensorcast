@@ -98,6 +98,7 @@ sc_header_only_library(
         "//core/common:const_granularity_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:pinned_memory_authority_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )
 
@@ -167,10 +168,27 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":communication_types",
+        "//core/communicator:constants_lib",
         "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
+        "//core/communicator:host_topology_builder_lib",
         "//core/communicator:routing_context_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+cc_test(
+    name = "communication_manager_test",
+    srcs = ["components/communication_manager_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
+    deps = [
+        ":communication_manager",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

@@ -24,4 +24,13 @@ std::string derive_endpoint_id(const WorkerIdentity& local_identity, const Devic
   return derive_endpoint_id(local_identity.node_id, memory_type, device_id);
 }
 
+std::string extract_node_id_from_endpoint_id(std::string_view endpoint_id) {
+  constexpr std::string_view kDeviceMarker = "/dev/";
+  const size_t sep = endpoint_id.find(kDeviceMarker);
+  if (sep == std::string_view::npos || sep == 0) {
+    return {};
+  }
+  return std::string(endpoint_id.substr(0, sep));
+}
+
 } // namespace tensorcast::store::components

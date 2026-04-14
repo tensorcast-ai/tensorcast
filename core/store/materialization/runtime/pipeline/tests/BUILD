@@ -42,6 +42,24 @@ cc_test(
 )
 
 cc_test(
+    name = "source_adapter_test",
+    srcs = ["source_adapter_test.cc"],
+    env = {
+        "TENSORCAST_CUDA_BACKEND": "fake",
+    },
+    deps = [
+        "//core/communicator:routing_context_lib",
+        "//core/store:communication_manager",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
+        "//core/store/runtime/context:runtime_context",
+        "//core/testing:catch_main",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "verification_stage_policy_test",
     srcs = ["verification_stage_policy_test.cc"],
     deps = [

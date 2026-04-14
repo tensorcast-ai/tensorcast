@@ -2749,6 +2749,16 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
   if (total_size != source.total_payload_bytes()) {
     return absl::FailedPreconditionError("communicator_source buffer_sizes do not match total_payload_bytes");
   }
+  store::P2PSource route_source;
+  route_source.ip = producer_host;
+  route_source.port = producer_port;
+  route_source.local_endpoint_id = local_endpoint_id;
+  route_source.remote_endpoint_id = remote_endpoint_id;
+  route_source.location = store::Location{
+      .type = common::memory::MemoryLocation::CPU,
+      .device_id = 0,
+  };
+  options_.comm_manager->remember_p2p_source(route_source);
   store::loader::RemoteKeySource::Options source_opts{
       .comm_engine =
           gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
@@ -2759,7 +2769,8 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
       .port = producer_port,
       .local_endpoint_id = std::move(local_endpoint_id),
       .remote_endpoint_id = std::move(remote_endpoint_id),
-      .routing_context = options_.comm_manager->routing_context(),
+      .routing_context =
+          options_.topology_guided_execution_enabled ? options_.comm_manager->routing_context() : nullptr,
       .total_size = source.total_payload_bytes(),
       .request_budget = std::chrono::milliseconds(absl::ToInt64Milliseconds(options_.fetch_deadline)),
       .artifact_id = metadata_or->transport_id,

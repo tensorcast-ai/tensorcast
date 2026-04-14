@@ -66,6 +66,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   absl::Status set_topology(topology::Topology topology);
 
   absl::Status set_endpoint_bindings(std::vector<EndpointBinding> bindings);
+  absl::Status upsert_endpoint_bindings(std::vector<EndpointBinding> bindings);
   absl::Status update_endpoint_binding(EndpointBinding binding);
 
   absl::StatusOr<std::shared_ptr<Communicator>> get_communicator(

@@ -432,13 +432,17 @@ absl::Status load_assembled_ranges_into_replica(
 
 void fill_runtime_p2p_bindings(
     const std::shared_ptr<components::CommunicationManager>& comm_manager,
+    bool topology_guided_execution_enabled,
     P2PSource* source) {
   if (source == nullptr || !comm_manager || !comm_manager->is_enabled()) {
     return;
   }
+  comm_manager->remember_p2p_source(*source);
   source->comm_engine =
       gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager->get_shared_engine()};
-  source->routing_context = comm_manager->routing_context();
+  if (source->routing_context == nullptr && topology_guided_execution_enabled) {
+    source->routing_context = comm_manager->routing_context();
+  }
 }
 
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
@@ -1205,6 +1209,7 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_piece_source(
 
 absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_remote_piece_source(
     components::CommunicationManager& comm_manager,
+    bool topology_guided_execution_enabled,
     const components::RemoteReplicaInfo& remote,
     std::string_view view_id,
     std::string_view local_endpoint_id,
@@ -1221,6 +1226,16 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_remote_piece_source
   for (uint64_t size : remote.buffer_sizes) {
     buffer_sizes.push_back(static_cast<size_t>(size));
   }
+  P2PSource route_source;
+  route_source.ip = remote.node_address;
+  route_source.port = static_cast<uint16_t>(remote.node_port);
+  route_source.local_endpoint_id = std::string(local_endpoint_id);
+  route_source.remote_endpoint_id = remote.endpoint_id;
+  route_source.location = Location{
+      .type = remote.memory_type,
+      .device_id = static_cast<int>(remote.device_id),
+  };
+  comm_manager.remember_p2p_source(route_source);
   loader::RemoteKeySource::Options opts{
       .comm_engine =
           gsl::not_null<std::shared_ptr<tensorcast::communicator::engine::Communicator>>{
@@ -1231,7 +1246,7 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_remote_piece_source
       .port = static_cast<uint16_t>(remote.node_port),
       .local_endpoint_id = std::string(local_endpoint_id),
       .remote_endpoint_id = remote.endpoint_id,
-      .routing_context = comm_manager.routing_context(),
+      .routing_context = topology_guided_execution_enabled ? comm_manager.routing_context() : nullptr,
       .total_size = remote.memory_size,
       .request_budget = request_budget,
       .artifact_id = std::string(artifact_id_for_diagnostics),
@@ -1247,6 +1262,7 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> resolve_assembly_piece_s
     const DeviceKey& target_device,
     std::string_view local_endpoint_id,
     const std::shared_ptr<components::CommunicationManager>& comm_manager,
+    bool topology_guided_execution_enabled,
     std::chrono::milliseconds request_budget,
     std::string_view artifact_id_for_diagnostics) {
   const auto& remote = source.session.remote_replica;
@@ -1274,13 +1290,25 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> resolve_assembly_piece_s
       return local_or.status();
     }
     return make_remote_piece_source(
-        *comm_manager, remote, source.view_id, local_endpoint_id, request_budget, artifact_id_for_diagnostics);
+        *comm_manager,
+        topology_guided_execution_enabled,
+        remote,
+        source.view_id,
+        local_endpoint_id,
+        request_budget,
+        artifact_id_for_diagnostics);
   }
   if (!comm_enabled) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
   return make_remote_piece_source(
-      *comm_manager, remote, source.view_id, local_endpoint_id, request_budget, artifact_id_for_diagnostics);
+      *comm_manager,
+      topology_guided_execution_enabled,
+      remote,
+      source.view_id,
+      local_endpoint_id,
+      request_budget,
+      artifact_id_for_diagnostics);
 }
 
 absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_canonical_source(
@@ -2154,7 +2182,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
-        fill_runtime_p2p_bindings(comm_manager, &p2p_src);
+        fill_runtime_p2p_bindings(
+            comm_manager, config_.options->materialization_strategy.topology_guided_execution_enabled(), &p2p_src);
         p2p_src.request_budget = hints.request_budget;
         p2p_src.artifact_id = hints.artifact_id;
         if (has_disk_source && allow_disk && !prefer_p2p) {
@@ -2778,7 +2807,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
-        fill_runtime_p2p_bindings(comm_manager, &p2p_src);
+        fill_runtime_p2p_bindings(
+            comm_manager, config_.options->materialization_strategy.topology_guided_execution_enabled(), &p2p_src);
         p2p_src.request_budget = request_hints.request_budget;
         p2p_src.artifact_id = request_hints.artifact_id;
         if (has_disk_source && allow_disk && !prefer_p2p) {
@@ -3243,6 +3273,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
         target_device,
         local_endpoint_id,
         comm_manager,
+        config_.options->materialization_strategy.topology_guided_execution_enabled(),
         std::chrono::milliseconds(0),
         assembly_id);
     if (!source_or.ok()) {
@@ -3565,6 +3596,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
         request.target_device(),
         local_endpoint_id,
         comm_manager,
+        config_.options->materialization_strategy.topology_guided_execution_enabled(),
         request.hints().request_budget,
         request.canonical_artifact_id());
     if (!source_or.ok()) {
@@ -3906,6 +3938,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
         target_device,
         local_endpoint_id,
         comm_manager,
+        config_.options->materialization_strategy.topology_guided_execution_enabled(),
         std::chrono::milliseconds(0),
         assembly_id);
     if (!source_or.ok()) {
@@ -4313,6 +4346,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
           target_device,
           local_endpoint_id,
           comm_manager,
+          config_.options->materialization_strategy.topology_guided_execution_enabled(),
           std::chrono::milliseconds(0),
           assembly_id);
       if (!source_or.ok()) {
@@ -4776,7 +4810,10 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_p2p(
 }
 
 void MaterializationFacade::prepare_p2p_source(P2PSource* source) const {
-  fill_runtime_p2p_bindings(config_.runtime_context->communication_manager(), source);
+  fill_runtime_p2p_bindings(
+      config_.runtime_context->communication_manager(),
+      config_.options->materialization_strategy.topology_guided_execution_enabled(),
+      source);
 }
 
 absl::Status MaterializationFacade::register_replica_with_global_store(

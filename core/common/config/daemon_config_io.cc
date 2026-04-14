@@ -444,6 +444,10 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     auto* defaults = e->mutable_materialization_strategy();
     defaults->set_enable_local_batched_disk_load(true);
     defaults->set_enable_owner_file_collective(false);
+    defaults->set_enable_topology_guided_transfer(false);
+    defaults->set_topology_guided_mode(
+        tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
+    defaults->set_enable_remote_bootstrap_local_fanout(false);
   }
   auto* ms = e->mutable_materialization_strategy();
   if (!ms->has_enable_local_batched_disk_load()) {
@@ -479,11 +483,29 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   if (!ms->has_enable_mapped_multirange_concat_jobs()) {
     ms->set_enable_mapped_multirange_concat_jobs(true);
   }
+  if (!ms->has_enable_topology_guided_transfer()) {
+    ms->set_enable_topology_guided_transfer(false);
+  }
+  if (ms->topology_guided_mode() == tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_UNSPECIFIED) {
+    ms->set_topology_guided_mode(tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
+  }
+  if (!ms->has_enable_remote_bootstrap_local_fanout()) {
+    ms->set_enable_remote_bootstrap_local_fanout(false);
+  }
   if (ms->executor_preference() == tcfg::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_UNSPECIFIED) {
     ms->set_executor_preference(tcfg::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO);
   }
   if (ms->diagnostics_verbosity() == tcfg::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_UNSPECIFIED) {
     ms->set_diagnostics_verbosity(tcfg::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_BASIC);
+  }
+  if (!ms->has_enable_topology_guided_transfer()) {
+    ms->set_enable_topology_guided_transfer(false);
+  }
+  if (ms->topology_guided_mode() == tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_UNSPECIFIED) {
+    ms->set_topology_guided_mode(tcfg::Engine::MaterializationStrategy::TOPOLOGY_GUIDED_MODE_DISABLED);
+  }
+  if (!ms->has_enable_remote_bootstrap_local_fanout()) {
+    ms->set_enable_remote_bootstrap_local_fanout(false);
   }
 
   if (cfg->has_pinned_memory()) {

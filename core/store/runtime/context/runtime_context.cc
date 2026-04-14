@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -15,9 +16,49 @@
 #include "absl/time/time.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/memory/host_memory.h"
+#include "core/store/components/endpoint_id.h"
 
 namespace {
 constexpr char kDefaultP2PHost[] = "0.0.0.0";
+
+using tensorcast::store::components::DeviceManager;
+using tensorcast::store::components::WorkerIdentity;
+
+bool has_bootstrapable_routing_identity(const WorkerIdentity& identity) {
+  return !identity.node_id.empty() && !identity.node_address.empty() && identity.p2p_port != 0;
+}
+
+std::vector<tensorcast::store::P2PSource> build_local_routing_sources(
+    const WorkerIdentity& identity,
+    const DeviceManager& device_manager) {
+  std::vector<tensorcast::store::P2PSource> sources;
+  sources.reserve(1 + static_cast<size_t>(std::max(0, device_manager.get_num_gpus())));
+
+  tensorcast::store::P2PSource cpu_source;
+  cpu_source.local_endpoint_id =
+      tensorcast::store::components::derive_endpoint_id(identity.node_id, tensorcast::common::memory::MemoryLocation::CPU, 0);
+  cpu_source.location = {
+      .type = tensorcast::common::memory::MemoryLocation::CPU,
+      .device_id = 0,
+  };
+  sources.push_back(std::move(cpu_source));
+
+  for (int gpu_id = 0; gpu_id < device_manager.get_num_gpus(); ++gpu_id) {
+    tensorcast::store::P2PSource gpu_source;
+    gpu_source.local_endpoint_id =
+        tensorcast::store::components::derive_endpoint_id(identity.node_id, tensorcast::common::memory::MemoryLocation::GPU, gpu_id);
+    gpu_source.location = {
+        .type = tensorcast::common::memory::MemoryLocation::GPU,
+        .device_id = gpu_id,
+    };
+    auto gpu_info_or = device_manager.get_gpu_info(gpu_id);
+    if (gpu_info_or.ok() && *gpu_info_or != nullptr) {
+      gpu_source.location.device_uuid = (*gpu_info_or)->uuid;
+    }
+    sources.push_back(std::move(gpu_source));
+  }
+  return sources;
+}
 } // namespace
 
 namespace tensorcast::store::runtime {
@@ -87,6 +128,10 @@ absl::Status RuntimeContext::start() {
   auto device_status = initialize_device_manager();
   if (!device_status.ok()) {
     return device_status;
+  }
+  auto routing_status = refresh_routing_context();
+  if (!routing_status.ok()) {
+    return routing_status;
   }
   auto gs_status = initialize_global_store_client();
   if (!gs_status.ok()) {
@@ -193,6 +238,13 @@ void RuntimeContext::set_global_store_client_for_testing(std::shared_ptr<compone
 
 void RuntimeContext::set_worker_identity(components::WorkerIdentity identity) {
   worker_identity_ = std::move(identity);
+  if (started_) {
+    absl::Status routing_status = refresh_routing_context();
+    if (!routing_status.ok()) {
+      LOG(WARNING) << "RuntimeContext: failed to refresh routing context after worker identity update: "
+                   << routing_status;
+    }
+  }
   if (global_store_client_) {
     global_store_client_->update_local_endpoint(
         worker_identity_.node_id, worker_identity_.node_address, worker_identity_.grpc_port, worker_identity_.p2p_port);
@@ -304,9 +356,17 @@ absl::Status RuntimeContext::initialize_communication_manager() {
   const std::string listen_host =
       options_.p2p_listen_host.empty() ? std::string{kDefaultP2PHost} : options_.p2p_listen_host;
   const uint16_t requested_port = options_.p2p_port;
-  const bool enable_rdma = options_.enable_rdma;
+  const bool has_typed_communicator_config = options_.communicator_config.has_value();
 
-  absl::Status status = comm_manager_->initialize(listen_host, requested_port, enable_rdma);
+  if (!has_typed_communicator_config && options_.materialization_strategy.topology_guided_observation_enabled()) {
+    LOG(WARNING) << "RuntimeContext: topology-guided routing requested without communicator_config; "
+                    "runtime bootstrap will continue with direct fallback unless an external "
+                    "CommunicationManager is injected";
+  }
+
+  absl::Status status = has_typed_communicator_config
+      ? comm_manager_->initialize_with_config(listen_host, requested_port, *options_.communicator_config)
+      : comm_manager_->initialize(listen_host, requested_port, options_.enable_rdma);
   if (!status.ok()) {
     return status;
   }
@@ -315,9 +375,12 @@ absl::Status RuntimeContext::initialize_communication_manager() {
   if (active_port != 0) {
     options_.p2p_port = active_port;
   }
+  const bool rdma_enabled = comm_manager_->communicator_config().enable_rdma();
+  options_.enable_rdma = rdma_enabled;
 
   LOG(INFO) << "RuntimeContext: communication manager listening on " << listen_host << ":" << active_port
-            << (enable_rdma ? " (RDMA enabled)" : " (RDMA disabled)");
+            << (rdma_enabled ? " (RDMA enabled)" : " (RDMA disabled)")
+            << (has_typed_communicator_config ? " [typed config]" : " [minimal config]");
 
   return absl::OkStatus();
 }
@@ -344,6 +407,41 @@ absl::Status RuntimeContext::initialize_global_store_client() {
   client->update_local_endpoint(
       worker_identity_.node_id, worker_identity_.node_address, worker_identity_.grpc_port, worker_identity_.p2p_port);
   global_store_client_ = std::move(client);
+  return absl::OkStatus();
+}
+
+absl::Status RuntimeContext::refresh_routing_context() {
+  if (!comm_manager_ || !comm_manager_->is_enabled()) {
+    return absl::OkStatus();
+  }
+
+  if (!options_.materialization_strategy.topology_guided_observation_enabled()) {
+    return absl::OkStatus();
+  }
+
+  if (!has_bootstrapable_routing_identity(worker_identity_)) {
+    return absl::OkStatus();
+  }
+
+  absl::Status bootstrap_status = comm_manager_->bootstrap_routing_context();
+  if (!bootstrap_status.ok()) {
+    LOG(WARNING) << "RuntimeContext: failed to bootstrap topology routing context, continuing with direct fallback: "
+                 << bootstrap_status;
+    return absl::OkStatus();
+  }
+
+  std::vector<tensorcast::store::P2PSource> local_sources =
+      build_local_routing_sources(worker_identity_, *device_manager_);
+  for (const auto& source : local_sources) {
+    comm_manager_->remember_p2p_source(source);
+  }
+
+  LOG(INFO) << "RuntimeContext: bootstrapped routing context"
+            << " node_id=" << worker_identity_.node_id
+            << " p2p_port=" << worker_identity_.p2p_port
+            << " mode="
+            << (options_.materialization_strategy.topology_guided_execution_enabled() ? "prefer_guided"
+                                                                                      : "observe_only");
   return absl::OkStatus();
 }
 

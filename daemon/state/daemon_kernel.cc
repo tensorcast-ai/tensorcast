@@ -193,6 +193,8 @@ DaemonKernel::DaemonKernel(
           .minimum_batch_transport_ttl = options_.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl,
           .transport_release_guard = options_.byte_artifact_routing.payload_transport.transport_release_guard,
           .comm_manager = engine_->get_shared_comm_manager(),
+          .topology_guided_execution_enabled =
+              engine_->options().materialization_strategy.topology_guided_execution_enabled(),
           .inter_daemon_channel_credentials = inter_daemon_channel_credentials_,
           .inter_daemon_grpc_security = options_.inter_daemon_grpc_security,
       });

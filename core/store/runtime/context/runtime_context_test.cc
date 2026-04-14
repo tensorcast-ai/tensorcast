@@ -10,13 +10,17 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "catch2/catch_test_macros.hpp"
+#include "core/communicator/routing/routing_context.h"
+#include "core/store/components/communication_manager.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/store_engine_options.h"
+#include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 using tensorcast::store::MemoryTierBudget;
 using tensorcast::store::MemoryTierConfig;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::components::CommunicationManager;
 using tensorcast::store::runtime::RegistrationEvent;
 using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::RuntimeEvent;
@@ -35,7 +39,218 @@ StoreEngineOptions MakeContextOptions() {
   return opts;
 }
 
+StoreEngineOptions::MaterializationStrategyConfig make_topology_guided_strategy(
+    StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode mode) {
+  StoreEngineOptions::MaterializationStrategyConfig strategy;
+  strategy.enable_topology_guided_transfer = true;
+  strategy.topology_guided_mode = mode;
+  return strategy;
+}
+
+tensorcast::communicator::v1::CommunicatorConfig make_simple_numa_config() {
+  tensorcast::communicator::v1::CommunicatorConfig comm_cfg;
+  comm_cfg.set_enable_rdma(false);
+  comm_cfg.mutable_stager()->set_buffers_per_flow(2);
+  comm_cfg.mutable_transport()->set_tcp_conn_count(1);
+  auto* simple_numa = comm_cfg.mutable_simple_numa();
+  simple_numa->set_enable(true);
+  auto* node = simple_numa->add_nodes();
+  node->set_id(0);
+  node->add_nics("mlx5_0");
+  node->add_gpus(0);
+  return comm_cfg;
+}
+
 } // namespace
+
+TEST_CASE("RuntimeContext keeps topology-guided routing disabled by default", "[runtime][context][routing]") {
+  auto comm_manager = std::make_shared<CommunicationManager>();
+  REQUIRE(comm_manager->initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config()).ok());
+
+  StoreEngineOptions opts = MakeContextOptions();
+  opts.comm_manager = comm_manager;
+  RuntimeContext context(opts);
+  context.set_worker_identity(
+      {.worker_id = "worker-disabled",
+       .node_id = "node-disabled",
+       .node_address = "127.0.0.1",
+       .grpc_port = 50051,
+       .p2p_port = comm_manager->listen_port()});
+
+  REQUIRE(context.start().ok());
+  CHECK(comm_manager->routing_context() == nullptr);
+
+  context.shutdown();
+}
+
+TEST_CASE(
+    "RuntimeContext bootstraps routing context with typed communicator config",
+    "[runtime][context][routing]") {
+  StoreEngineOptions opts = MakeContextOptions();
+  opts.communicator_config = make_simple_numa_config();
+  opts.materialization_strategy = make_topology_guided_strategy(
+      StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kPreferGuided);
+  RuntimeContext context(opts);
+
+  REQUIRE(context.start().ok());
+  auto comm_manager = context.communication_manager();
+  REQUIRE(comm_manager != nullptr);
+  REQUIRE(comm_manager->is_enabled());
+  CHECK(comm_manager->routing_context() == nullptr);
+
+  context.set_worker_identity(
+      {.worker_id = "worker-built-in",
+       .node_id = "node-built-in",
+       .node_address = "127.0.0.1",
+       .grpc_port = 50051,
+       .p2p_port = comm_manager->listen_port()});
+
+  auto routing_context = comm_manager->routing_context();
+  REQUIRE(routing_context != nullptr);
+
+  const std::string local_endpoint = "node-built-in/dev/cpu/0";
+  const std::string remote_endpoint = "node-remote/dev/cpu/0";
+  comm_manager->remember_p2p_source(tensorcast::store::P2PSource{
+      .local_endpoint_id = "",
+      .remote_endpoint_id = remote_endpoint,
+      .ip = "10.0.0.3",
+      .port = 64010,
+      .location =
+          {
+              .type = tensorcast::common::memory::MemoryLocation::CPU,
+              .device_id = 0,
+          },
+  });
+
+  auto communicator_or = routing_context->get_communicator(local_endpoint, remote_endpoint);
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  CHECK(channel_or.value()->src_endpoint_id() == local_endpoint);
+  CHECK(channel_or.value()->dst_endpoint_id() == remote_endpoint);
+  CHECK(channel_or.value()->hop_count() == 1);
+
+  context.shutdown();
+}
+
+TEST_CASE("RuntimeContext bootstraps routing context for product communicator", "[runtime][context][routing]") {
+  auto comm_manager = std::make_shared<CommunicationManager>();
+  REQUIRE(comm_manager->initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config()).ok());
+
+  StoreEngineOptions opts = MakeContextOptions();
+  opts.comm_manager = comm_manager;
+  opts.materialization_strategy = make_topology_guided_strategy(
+      StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kPreferGuided);
+  RuntimeContext context(opts);
+  context.set_worker_identity(
+      {.worker_id = "worker-local",
+       .node_id = "node-local",
+       .node_address = "127.0.0.1",
+       .grpc_port = 50051,
+       .p2p_port = comm_manager->listen_port()});
+
+  REQUIRE(context.start().ok());
+  auto routing_context = comm_manager->routing_context();
+  REQUIRE(routing_context != nullptr);
+
+  const std::string local_endpoint = "node-local/dev/cpu/0";
+  const std::string remote_endpoint = "node-remote/dev/cpu/0";
+  comm_manager->remember_p2p_source(tensorcast::store::P2PSource{
+      .local_endpoint_id = "",
+      .remote_endpoint_id = remote_endpoint,
+      .ip = "10.0.0.2",
+      .port = 64000,
+      .location =
+          {
+              .type = tensorcast::common::memory::MemoryLocation::CPU,
+              .device_id = 0,
+          },
+  });
+  routing_context = comm_manager->routing_context();
+  REQUIRE(routing_context != nullptr);
+
+  auto communicator_or = routing_context->get_communicator(local_endpoint, remote_endpoint);
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  CHECK(channel_or.value()->src_endpoint_id() == local_endpoint);
+  CHECK(channel_or.value()->dst_endpoint_id() == remote_endpoint);
+  CHECK(channel_or.value()->hop_count() == 1);
+
+  context.shutdown();
+}
+
+TEST_CASE(
+    "RuntimeContext refreshes routing context when worker identity is set after start",
+    "[runtime][context][routing]") {
+  auto comm_manager = std::make_shared<CommunicationManager>();
+  REQUIRE(comm_manager->initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config()).ok());
+
+  StoreEngineOptions opts = MakeContextOptions();
+  opts.comm_manager = comm_manager;
+  opts.materialization_strategy = make_topology_guided_strategy(
+      StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kPreferGuided);
+  RuntimeContext context(opts);
+
+  REQUIRE(context.start().ok());
+  CHECK(comm_manager->routing_context() == nullptr);
+
+  context.set_worker_identity(
+      {.worker_id = "worker-late",
+       .node_id = "node-late",
+       .node_address = "127.0.0.1",
+       .grpc_port = 50051,
+       .p2p_port = comm_manager->listen_port()});
+
+  auto routing_context = comm_manager->routing_context();
+  REQUIRE(routing_context != nullptr);
+
+  const std::string local_endpoint = "node-late/dev/cpu/0";
+  const std::string remote_endpoint = "node-remote/dev/cpu/0";
+  comm_manager->remember_p2p_source(tensorcast::store::P2PSource{
+      .local_endpoint_id = "",
+      .remote_endpoint_id = remote_endpoint,
+      .ip = "10.0.0.2",
+      .port = 64001,
+      .location =
+          {
+              .type = tensorcast::common::memory::MemoryLocation::CPU,
+              .device_id = 0,
+          },
+  });
+
+  auto communicator_or = routing_context->get_communicator(local_endpoint, remote_endpoint);
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  CHECK(channel_or.value()->src_endpoint_id() == local_endpoint);
+  CHECK(channel_or.value()->dst_endpoint_id() == remote_endpoint);
+  CHECK(channel_or.value()->hop_count() == 1);
+
+  context.shutdown();
+}
+
+TEST_CASE("RuntimeContext keeps observe-only topology-guided rollout on baseline execution", "[runtime][context][routing]") {
+  auto comm_manager = std::make_shared<CommunicationManager>();
+  REQUIRE(comm_manager->initialize_with_config("127.0.0.1", /*listen_port=*/0, make_simple_numa_config()).ok());
+
+  StoreEngineOptions opts = MakeContextOptions();
+  opts.comm_manager = comm_manager;
+  opts.materialization_strategy = make_topology_guided_strategy(
+      StoreEngineOptions::MaterializationStrategyConfig::TopologyGuidedMode::kObserveOnly);
+  RuntimeContext context(opts);
+  context.set_worker_identity(
+      {.worker_id = "worker-observe",
+       .node_id = "node-observe",
+       .node_address = "127.0.0.1",
+       .grpc_port = 50051,
+       .p2p_port = comm_manager->listen_port()});
+
+  REQUIRE(context.start().ok());
+  CHECK(comm_manager->routing_context() != nullptr);
+
+  context.shutdown();
+}
 
 TEST_CASE("MemoryTierBudget fails fast on invalid capacities", "[runtime][memory_tier][budget]") {
   MemoryTierConfig cfg;

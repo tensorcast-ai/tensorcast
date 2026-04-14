@@ -107,6 +107,7 @@ class RuntimeContext {
   absl::Status initialize_device_manager();
   absl::Status initialize_communication_manager();
   absl::Status initialize_global_store_client();
+  absl::Status refresh_routing_context();
 
   StoreEngineOptions options_;
   size_t artifact_chunk_bytes_{0};

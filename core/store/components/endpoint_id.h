@@ -16,4 +16,8 @@ std::string derive_endpoint_id(std::string_view node_id, common::memory::MemoryL
 
 std::string derive_endpoint_id(const WorkerIdentity& local_identity, const DeviceKey& device);
 
+// Returns the "<node_id>" prefix from a canonical endpoint id. Returns an
+// empty string when the id does not match the canonical store endpoint format.
+std::string extract_node_id_from_endpoint_id(std::string_view endpoint_id);
+
 } // namespace tensorcast::store::components

@@ -489,7 +489,7 @@ TEST_CASE("RoutingContext caches communicators and builds direct channels", "[co
   CHECK(channel_or.value()->hops().front()->link()->id == "nic0_to_nic1");
 }
 
-TEST_CASE("RoutingContext rejects topology and binding mutation", "[communicator][routing]") {
+TEST_CASE("RoutingContext rejects topology reset and supports binding upsert", "[communicator][routing]") {
   auto context = std::make_shared<RoutingContext>(RoutingContext::Options{}, /*engine=*/nullptr);
   REQUIRE(context->set_topology(build_minimal_topology()).ok());
   auto second_topology = context->set_topology(build_minimal_topology());
@@ -506,9 +506,19 @@ TEST_CASE("RoutingContext rejects topology and binding mutation", "[communicator
   auto bindings_status = context->set_endpoint_bindings(std::move(second_bindings));
   CHECK(bindings_status.code() == absl::StatusCode::kFailedPrecondition);
 
-  EndpointBinding update_binding{"nic0", "node0", "127.0.0.1", 3000};
+  EndpointBinding update_binding{"nic1", "node0", "127.0.0.1", 3000};
   auto update_status = context->update_endpoint_binding(std::move(update_binding));
-  CHECK(update_status.code() == absl::StatusCode::kFailedPrecondition);
+  REQUIRE(update_status.ok());
+
+  auto invalid_update = context->upsert_endpoint_bindings({EndpointBinding{}});
+  CHECK(invalid_update.code() == absl::StatusCode::kInvalidArgument);
+
+  auto communicator_or = context->get_communicator("nic0", "nic1");
+  REQUIRE(communicator_or.ok());
+  auto channel_or = communicator_or.value()->primary_channel();
+  REQUIRE(channel_or.ok());
+  REQUIRE(channel_or.value()->hops().size() == 1);
+  CHECK(channel_or.value()->hops().front()->remote_binding().port == 3000);
 }
 
 TEST_CASE(

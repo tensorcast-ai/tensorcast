@@ -114,8 +114,8 @@ Modules exist:
 
 Current code constraints:
 - `RoutingContext::set_topology(...)` is one-shot immutable.
-- `RoutingContext::set_endpoint_bindings(...)` is one-shot immutable.
-- `RoutingContext::update_endpoint_binding(...)` returns `FAILED_PRECONDITION`.
+- `RoutingContext::set_endpoint_bindings(...)` is one-shot initialization.
+- `RoutingContext::upsert_endpoint_bindings(...)` and `RoutingContext::update_endpoint_binding(...)` refresh bindings in place and invalidate cached channels by bumping the generation counter.
 - `RouteChannel` supports direct 1-hop only; multi-hop read returns `UNIMPLEMENTED`.
 - When a direct topology link is missing for cross-node traffic, `RoutingContext` now attempts a rail-matched NIC fallback:
   - infer source/destination device pool hints (`gpu<id>` / `cpu<id>`) from endpoint ids or binding metadata,
