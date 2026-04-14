@@ -245,7 +245,7 @@ def test_get_options_parse_structured_source_and_topology() -> None:
                 world_size=2,
                 rank=1,
             ),
-            collective_policy="allow_not_eligible_fallback",
+            collective_policy="collective_first",
         ),
     )
     assert opts.source is not None
@@ -255,7 +255,7 @@ def test_get_options_parse_structured_source_and_topology() -> None:
     assert opts.execution_topology.collective_group.group_id == "g"
     assert (
         opts.execution_topology.collective_policy
-        is CollectivePolicyMode.ALLOW_NOT_ELIGIBLE_FALLBACK
+        is CollectivePolicyMode.COLLECTIVE_FIRST
     )
 
 

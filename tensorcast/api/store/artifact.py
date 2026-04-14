@@ -1828,6 +1828,10 @@ class Artifact:
 
         source_policy = _resolve_source_policy_from_options(options)
         rpc_timeout_s = _ctx_timeout_s(ctx)
+        operation_id = _build_transport_operation_id(
+            base_operation_id=uuid.uuid4().hex,
+            ctx=ctx,
+        )
         try:
             with tensorcast_profile_stage(
                 "tensorcast",
@@ -1851,10 +1855,7 @@ class Artifact:
                     serving_runtime_policy=serving_runtime_policy,
                     copy_plan=copy_plan_proto,
                     dst_specs=dst_specs,
-                    operation_id=_build_transport_operation_id(
-                        base_operation_id=uuid.uuid4().hex,
-                        ctx=ctx,
-                    ),
+                    operation_id=operation_id,
                     timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )
                 if profile is not None:
@@ -1952,6 +1953,7 @@ class Artifact:
             target_publication_token=getattr(
                 response, "target_publication_token", None
             ),
+            target_publication_operation_id=operation_id,
         )
         if slot.current_value_metadata is None:
             with contextlib.suppress(Exception):

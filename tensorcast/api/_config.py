@@ -722,7 +722,7 @@ class SourceLocalityHint(str, Enum):
 
 class CollectivePolicyMode(str, Enum):
     REQUIRE_COLLECTIVE = "require_collective"
-    ALLOW_NOT_ELIGIBLE_FALLBACK = "allow_not_eligible_fallback"
+    COLLECTIVE_FIRST = "collective_first"
     DISABLE_COLLECTIVE = "disable_collective"
 
     @staticmethod
@@ -734,14 +734,14 @@ class CollectivePolicyMode(str, Enum):
         )
         if normalized == "require_collective":
             return CollectivePolicyMode.REQUIRE_COLLECTIVE
-        if normalized == "allow_not_eligible_fallback":
-            return CollectivePolicyMode.ALLOW_NOT_ELIGIBLE_FALLBACK
+        if normalized == "collective_first":
+            return CollectivePolicyMode.COLLECTIVE_FIRST
         if normalized == "disable_collective":
             return CollectivePolicyMode.DISABLE_COLLECTIVE
         raise ValueError(
             "Unknown collective_policy "
             f"'{value}'; expected require_collective, "
-            "allow_not_eligible_fallback, or disable_collective."
+            "collective_first, or disable_collective."
         )
 
 

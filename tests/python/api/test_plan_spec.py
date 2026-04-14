@@ -23,7 +23,7 @@ from tensorcast.api.plan import (
 from tensorcast.api.plan.artifact_set import resolve_artifact_set_ref
 from tensorcast.api.store import (
     BuilderMode,
-    PureTransformPublicationBundle,
+    RepresentationPublishSpec,
     ServingBuildIntent,
     build_pure_transform_publication_bundle_from_registered_artifact,
 )
@@ -706,7 +706,7 @@ def test_plan_result_decodes_pure_transform_publication_result() -> None:
     result = PlanResult.from_node_agent_response(response)
 
     decoded = result.steps["s-pure"].artifact_result
-    assert isinstance(decoded, PureTransformPublicationBundle)
+    assert isinstance(decoded, RepresentationPublishSpec)
     assert decoded.source_artifact_ref == "mi2:test:source"
     assert decoded.contract_family == "canonical_full"
     assert decoded.structural_view_ids == ()
@@ -718,11 +718,11 @@ def test_plan_result_decodes_pure_transform_publication_result() -> None:
     )
     assert decoded.closeout_contract.kind == "representation_publish"
 
-    required = result.require_pure_transform_publication(PlanStepRef("s-pure"))
+    required = result.require_representation_publish_spec(PlanStepRef("s-pure"))
     assert required == decoded
 
 
-def test_plan_result_require_pure_transform_publication_rejects_non_bundle() -> None:
+def test_plan_result_require_representation_publish_spec_rejects_non_bundle() -> None:
     response = node_agent_pb2.ExecutePlanResponse(
         request_id="req-node-agent-manifest-only",
         ok=True,
@@ -740,6 +740,6 @@ def test_plan_result_require_pure_transform_publication_rejects_non_bundle() -> 
     result = PlanResult.from_node_agent_response(response)
 
     with pytest.raises(ArtifactError) as exc_info:
-        result.require_pure_transform_publication(PlanStepRef("s-manifest"))
+        result.require_representation_publish_spec(PlanStepRef("s-manifest"))
 
     assert "does not carry a RepresentationPublishSpec" in str(exc_info.value)

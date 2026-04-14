@@ -106,6 +106,32 @@ uint64_t shard_for_artifact(std::string_view artifact_id, uint64_t shard_count) 
   return hash64 % shard_count;
 }
 
+std::string make_valid_byte_artifact_id(
+    std::string_view namespace_name,
+    std::string_view engine,
+    std::string_view model_id,
+    std::string_view model_version,
+    std::string_view layout_id,
+    std::string_view engine_key) {
+  return absl::StrCat(
+      "cgid:byte_artifact~",
+      namespace_name,
+      "~",
+      engine,
+      "~",
+      tensorcast::common::encode_cgid_segment(model_id),
+      "~",
+      tensorcast::common::encode_cgid_segment(model_version),
+      "~",
+      layout_id,
+      "~",
+      tensorcast::common::encode_cgid_segment(engine_key));
+}
+
+std::string make_test_byte_artifact_id(std::string_view engine_key, std::string_view layout_id = "layout_v1") {
+  return make_valid_byte_artifact_id("tenant", "engine", "batch-redirect-model", "v1", layout_id, engine_key);
+}
+
 uint64_t shard_home_hrw_score_for_test(uint64_t shard_id, std::string_view daemon_id) {
   const std::string key = absl::StrCat("byte-artifact-home:", shard_id, ":", daemon_id);
   const auto digest = tensorcast::common::sha256_digest_bytes(
@@ -135,8 +161,7 @@ std::string find_artifact_id_for_expected_home(
     absl::Span<const std::string> daemon_ids,
     uint64_t shard_count = 4096ULL) {
   for (uint64_t index = 0; index < 10000; ++index) {
-    const std::string artifact_id =
-        absl::StrCat("cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.expected", index);
+    const std::string artifact_id = make_test_byte_artifact_id(absl::StrCat("expected-owner:", index));
     const uint64_t shard_id = shard_for_artifact(artifact_id, shard_count);
     if (expected_shard_home_owner_for_test(shard_id, daemon_ids) == expected_owner) {
       return artifact_id;
@@ -639,7 +664,7 @@ TEST_CASE("BatchExists retries on stale shard-home fence redirect (remote home)"
       /*start_server=*/false);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azE";
+  const std::string artifact_id = make_test_byte_artifact_id("stale-redirect:blk-1");
   const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
   gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
 
@@ -784,7 +809,7 @@ TEST_CASE(
       /*start_server=*/false);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bGVhc2UtcmVhY3F1aXJl~layout_v1~b64u.azI";
+  const std::string artifact_id = make_test_byte_artifact_id("lease-reacquire:blk-2");
   const std::string payload = "published-before-reacquire";
   const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
   gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
@@ -880,7 +905,7 @@ TEST_CASE(
       /*start_server=*/false);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.a2VlcGFsaXZlLWlkbGU~layout_v1~b64u.azc";
+  const std::string artifact_id = make_test_byte_artifact_id("keepalive-idle:blk-7");
   const std::string payload = "published-before-idle";
   const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
   gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
@@ -996,7 +1021,7 @@ TEST_CASE(
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, /*capability_flags=*/0);
 
   BatchExistsRequest req;
-  req.add_selections()->set_artifact_id("cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azU");
+  req.add_selections()->set_artifact_id(make_test_byte_artifact_id("ineligible:blk-5"));
   BatchExistsResponse resp;
   grpc::ServerContext ctx;
   const auto st = front.harness->service().BatchExists(&ctx, &req, &resp);
@@ -1051,7 +1076,7 @@ TEST_CASE("BatchExists fails closed on routing epoch mismatch", "[daemon][batch]
       /*start_server=*/false);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azY";
+  const std::string artifact_id = make_test_byte_artifact_id("epoch-mismatch:blk-6");
   const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
   gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
 
@@ -1117,7 +1142,7 @@ TEST_CASE("Batch get/put transport payload_ref over remote home daemon", "[daemo
       static_cast<uint32_t>(std::stoi(front.address.substr(front.address.find(':') + 1))),
       kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azg";
+  const std::string artifact_id = make_test_byte_artifact_id("remote-transport:blk-8");
   const std::string payload = "remote-payload-ref-transport";
   const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
   gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
@@ -1349,7 +1374,7 @@ TEST_CASE(
       /*inline_payload_threshold_bytes=*/8);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.aXNzdWVyLXJvdXRlLXJlbW90ZQ~layout_v1~b64u.azI";
+  const std::string artifact_id = make_test_byte_artifact_id("issuer-route-remote:blk-2");
   const std::string payload = "remote-issuer-route-payload";
 
   auto payload_ref_or = home.harness->kernel().payload_transport_broker().issue_payload_ref(
@@ -1437,7 +1462,7 @@ TEST_CASE(
       /*inline_payload_threshold_bytes=*/8);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGUtcmVmcmVzaA~layout_v1~b64u.azQ";
+  const std::string artifact_id = make_test_byte_artifact_id("route-refresh:blk-4");
   const std::string payload = "refresh-route-payload";
   auto payload_ref_or = home.harness->kernel().payload_transport_broker().issue_payload_ref(
       artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-refresh-route");
@@ -1523,7 +1548,7 @@ TEST_CASE(
       /*inline_payload_threshold_bytes=*/8);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGUtbWlzc2luZw~layout_v1~b64u.azU";
+  const std::string artifact_id = make_test_byte_artifact_id("route-missing:blk-5");
   const std::string payload = "missing-route-payload";
   auto payload_ref_or = home.harness->kernel().payload_transport_broker().issue_payload_ref(
       artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-missing-route");
@@ -1597,7 +1622,7 @@ TEST_CASE(
   REQUIRE(selected_port != 0);
   gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cmVwbHktYWRtaXNzaW9u~layout_v1~b64u.azY";
+  const std::string artifact_id = make_test_byte_artifact_id("reply-admission:blk-6");
   tensorcast::common::v1::PayloadRefScope scope;
   scope.set_payload_id("payload-reply-admission");
   scope.set_artifact_id(artifact_id);
@@ -1686,7 +1711,7 @@ TEST_CASE(
   REQUIRE(selected_port != 0);
   gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cmV0cnktbGF0ZXI~layout_v1~b64u.azY";
+  const std::string artifact_id = make_test_byte_artifact_id("retry-later:blk-6");
   tensorcast::common::v1::PayloadRefScope scope;
   scope.set_payload_id("payload-retry-later");
   scope.set_artifact_id(artifact_id);
@@ -1788,7 +1813,7 @@ TEST_CASE(
   REQUIRE(selected_port != 0);
   gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dGVybWluYWw~layout_v1~b64u.azc";
+  const std::string artifact_id = make_test_byte_artifact_id("terminal:blk-7");
   tensorcast::common::v1::PayloadRefScope scope;
   scope.set_payload_id("payload-terminal");
   scope.set_artifact_id(artifact_id);
@@ -1873,7 +1898,7 @@ TEST_CASE(
   REQUIRE(selected_port != 0);
   gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.ZmFpbC1jbG9zZWQ~layout_v1~b64u.azg";
+  const std::string artifact_id = make_test_byte_artifact_id("fail-closed:blk-8");
   tensorcast::common::v1::PayloadRefScope scope;
   scope.set_payload_id("payload-fail-closed");
   scope.set_artifact_id(artifact_id);
@@ -1960,7 +1985,7 @@ TEST_CASE(
   REQUIRE(selected_port != 0);
   gs->upsert_worker(kHomeDaemonId, "127.0.0.1", static_cast<uint32_t>(selected_port), kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Y29udGludWl0eS1pc3N1ZXI~layout_v1~b64u.azM";
+  const std::string artifact_id = make_test_byte_artifact_id("continuity-issuer:blk-3");
   tensorcast::common::v1::PayloadRefScope scope;
   scope.set_payload_id("payload-continuity");
   scope.set_artifact_id(artifact_id);
@@ -2022,7 +2047,7 @@ TEST_CASE(
       /*inline_payload_threshold_bytes=*/8);
   gs->upsert_worker(kFrontDaemonId, "127.0.0.1", /*grpc_port=*/1, kShardHomeEligibleFlag);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azk";
+  const std::string artifact_id = make_test_byte_artifact_id("remote-home-unreachable:blk-9");
   const std::string payload = "failed-forward-cleanup";
   const uint64_t shard_id = shard_for_artifact(artifact_id, /*shard_count=*/4096ULL);
   gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);

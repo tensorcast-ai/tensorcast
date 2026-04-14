@@ -1501,14 +1501,10 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                         << " candidates=" << format_strategy_candidates(execution_strategy_plan->candidates);
             }
             absl::Status exec_status;
-            // Run pump_ranges() producer fanout on the CPU executor instead of
-            // the blocking executor that is already hosting this outer load
-            // task. Otherwise many concurrent load_async_from_source() calls
-            // can occupy the entire blocking pool and starve their own nested
-            // producer tasks, wedging staged CPU-target transfers.
-            auto transfer_fanout_executor = self->async_runtime_->cpu_executor();
             std::string actual_executor = requested_executor;
             std::string runtime_fallback_reason;
+            runtime::ingestion::strategy::CollectiveExecutionMetrics collective_metrics;
+            auto transfer_fanout_executor = self->async_runtime_->cpu_executor();
             if (collective_disk_load.has_value()) {
               auto collective_result = try_collective_disk_load(
                   CollectiveDiskLoadRequest{
@@ -1525,9 +1521,11 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                   self->pinned_memory_timeout_);
               if (collective_result.handled) {
                 exec_status = collective_result.status;
+                collective_metrics = collective_result.metrics;
               } else {
                 actual_executor = "GenericByteRangeExecutor";
-                runtime_fallback_reason = "collective_not_handled";
+                runtime_fallback_reason =
+                    collective_result.skip_reason.empty() ? "collective_not_handled" : collective_result.skip_reason;
                 exec_status = self->transfer_service_->execute(
                     plan,
                     target_location,
@@ -1554,19 +1552,11 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
               if (local_result.handled) {
                 exec_status = local_result.status;
               } else {
-                actual_executor = "GenericByteRangeExecutor";
-                runtime_fallback_reason = "local_batched_not_handled";
-                LOG(WARNING) << "ReplicaLoadController(" << self->replica_key_.artifact_id
-                             << "): LOCAL_BATCHED_DISK_LOAD_FALLBACK handing off to generic transfer path";
-                exec_status = self->transfer_service_->execute(
-                    plan,
-                    target_location,
-                    *source,
-                    concurrency,
-                    transfer_fanout_executor.copy(),
-                    gpu_ptr,
-                    gpu_allocation,
-                    device_id);
+                runtime_fallback_reason =
+                    local_result.skip_reason.empty() ? "local_batched_not_handled" : local_result.skip_reason;
+                exec_status = absl::FailedPreconditionError(
+                    absl::StrCat(
+                        "selected local batched executor was not admitted at runtime: ", runtime_fallback_reason));
               }
             } else {
               exec_status = self->transfer_service_->execute(
@@ -1647,6 +1637,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
               commit_report.residual_bytes = commit_report.fallback_bytes;
             }
             commit_report.collective_handled = actual_executor == "OwnerFileCollectiveExecutor";
+            commit_report.collective_metrics = collective_metrics;
             commit_report.dominant_executor = actual_executor;
             commit_report.selection_reason = execution_strategy_plan.has_value()
                 ? execution_strategy_plan->selection_reason

@@ -424,18 +424,40 @@ std::optional<int32_t> infer_partition_dim(const RepresentationTensorBinding& bi
     return std::nullopt;
   }
   const auto& fragment = binding.sources.front();
-  if (fragment.source_range.axes.empty() && fragment.destination_range.axes.empty()) {
+  const bool source_is_full = fragment.source_range.axes.empty();
+  const bool destination_is_full = fragment.destination_range.axes.empty();
+  if (source_is_full && destination_is_full) {
     return -1;
   }
-  if (fragment.source_range.axes.size() != 1 || fragment.destination_range.axes.size() != 1) {
+  if ((!source_is_full && fragment.source_range.axes.size() != 1) ||
+      (!destination_is_full && fragment.destination_range.axes.size() != 1)) {
     return std::nullopt;
   }
-  const auto& src_axis = fragment.source_range.axes.front();
-  const auto& dst_axis = fragment.destination_range.axes.front();
-  if (src_axis.dim != dst_axis.dim) {
+  const TensorAxisRange* src_axis = source_is_full ? nullptr : &fragment.source_range.axes.front();
+  const TensorAxisRange* dst_axis = destination_is_full ? nullptr : &fragment.destination_range.axes.front();
+  const int32_t dim = src_axis != nullptr ? src_axis->dim : dst_axis->dim;
+  if (src_axis != nullptr && dst_axis != nullptr && src_axis->dim != dst_axis->dim) {
     return std::nullopt;
   }
-  return src_axis.dim;
+  if (dim < 0 || dim >= static_cast<int32_t>(fragment.source_spec.shape.size()) ||
+      dim >= static_cast<int32_t>(binding.dst_spec.shape.size())) {
+    return std::nullopt;
+  }
+  if (fragment.source_spec.shape.size() != binding.dst_spec.shape.size()) {
+    return std::nullopt;
+  }
+  for (size_t axis = 0; axis < fragment.source_spec.shape.size(); ++axis) {
+    const int64_t src_extent = src_axis != nullptr && static_cast<int32_t>(axis) == src_axis->dim
+        ? src_axis->end - src_axis->start
+        : fragment.source_spec.shape[axis];
+    const int64_t dst_extent = dst_axis != nullptr && static_cast<int32_t>(axis) == dst_axis->dim
+        ? dst_axis->end - dst_axis->start
+        : binding.dst_spec.shape[axis];
+    if (src_extent != dst_extent) {
+      return std::nullopt;
+    }
+  }
+  return dim;
 }
 
 } // namespace
@@ -457,6 +479,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
 
   std::vector<tensorcast::store::loader::ByteRangeSegment> mapped_segments;
   mapped_segments.reserve(copy_plan.entries_size());
+  absl::flat_hash_map<std::string, std::vector<tensorcast::store::loader::ByteRangeSegment>> mapped_segments_by_dst;
+  mapped_segments_by_dst.reserve(copy_plan.entries_size());
   absl::flat_hash_map<std::string, std::vector<CandidateEntry>> candidate_entries_by_dst;
   candidate_entries_by_dst.reserve(copy_plan.entries_size());
 
@@ -493,6 +517,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
       dst_range = build_range(entry.dst_range());
     }
 
+    const size_t mapped_segments_begin = mapped_segments.size();
     auto status = validate_and_build_segments(
         entry_index,
         entry,
@@ -508,6 +533,10 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
         result.total_bytes_copied);
     if (!status.ok()) {
       return status;
+    }
+    auto& dst_segments = mapped_segments_by_dst[entry.dst_name()];
+    for (size_t segment_index = mapped_segments_begin; segment_index < mapped_segments.size(); ++segment_index) {
+      dst_segments.push_back(mapped_segments[segment_index]);
     }
 
     candidate_entries_by_dst[entry.dst_name()].push_back(
@@ -560,7 +589,6 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
     }
   }
 
-  result.compatibility_lowered_map.segments = mapped_segments;
   result.generic_fallback_map.segments = std::move(mapped_segments);
   result.transform_contract.source_byte_space = source_byte_space;
   result.transform_contract.target_representation.family = std::string(representation_family);
@@ -639,6 +667,10 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
       if (concat_compatible) {
         result.compatibility_stats.concat_candidates += 1;
         result.compatibility_stats.concat_bytes += binding.dst_spec.logical_length;
+        if (auto it = mapped_segments_by_dst.find(dst_name); it != mapped_segments_by_dst.end()) {
+          result.compatibility_lowered_map.segments.insert(
+              result.compatibility_lowered_map.segments.end(), it->second.begin(), it->second.end());
+        }
       } else {
         result.compatibility_stats.rejected_mixed_src_or_dim += 1;
         result.compatibility_stats.rejected_mixed_src_or_dim_bytes += binding.dst_spec.logical_length;
@@ -652,6 +684,10 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
     } else {
       result.compatibility_stats.compatible_candidates += 1;
       result.compatibility_stats.compatible_bytes += binding.dst_spec.logical_length;
+      if (auto it = mapped_segments_by_dst.find(dst_name); it != mapped_segments_by_dst.end()) {
+        result.compatibility_lowered_map.segments.insert(
+            result.compatibility_lowered_map.segments.end(), it->second.begin(), it->second.end());
+      }
     }
 
     result.transform_contract.tensor_bindings.push_back(std::move(binding));

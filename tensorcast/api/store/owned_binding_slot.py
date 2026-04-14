@@ -42,7 +42,9 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     ExecutionDiagnostics,
     PublicDiskSourceHandle,
+    ServerConfig,
     ServingRuntimePolicy,
+    SourceBoundCapability,
     SourceBoundPlanDiagnostics,
 )
 
@@ -51,6 +53,71 @@ if TYPE_CHECKING:
     from tensorcast.api.store.artifact import Artifact
     from tensorcast.api.store.binding import BindingUpdateEpoch
     from tensorcast.api.store.runtime import StoreRuntimeContext
+
+
+_MIN_SOURCE_BOUND_CONTRACT_VERSION = 4
+_REQUIRED_SOURCE_BOUND_CAPABILITIES = (
+    SourceBoundCapability.FIRST_CLASS_COLLECTIVE_INGRESS,
+    SourceBoundCapability.TYPED_EXECUTION_DIAGNOSTICS,
+    SourceBoundCapability.SINGLE_MINT_BINDING_CLOSEOUT,
+)
+
+
+def _raise_if_published_for_mutation(
+    *,
+    op_name: str,
+    published_lease_id: str | None,
+) -> None:
+    if published_lease_id is None:
+        return
+    raise ArtifactError(
+        f"{op_name}() requires an unpublished binding; call retire() first",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
+
+
+def _resolve_server_config(runtime: "StoreRuntimeContext") -> ServerConfig | None:
+    capabilities = getattr(runtime, "capabilities", None)
+    server_config = getattr(capabilities, "server_config", None)
+    if server_config is not None:
+        return server_config
+    client = runtime.ensure_client()
+    get_server_config = getattr(client, "get_server_config", None)
+    if callable(get_server_config):
+        return get_server_config()
+    return None
+
+
+def _source_bound_capability_names(flags: int) -> list[str]:
+    return [
+        capability.name
+        for capability in SourceBoundCapability
+        if flags & int(capability)
+    ]
+
+
+def _require_execution_only_realize_contract(
+    runtime: "StoreRuntimeContext",
+) -> None:
+    server_config = _resolve_server_config(runtime)
+    version = int(getattr(server_config, "source_bound_contract_version", 0) or 0)
+    flags = int(getattr(server_config, "source_bound_capability_flags", 0) or 0)
+    missing = [
+        capability.name
+        for capability in _REQUIRED_SOURCE_BOUND_CAPABILITIES
+        if not (flags & int(capability))
+    ]
+    if version >= _MIN_SOURCE_BOUND_CONTRACT_VERSION and not missing:
+        return
+    required = [capability.name for capability in _REQUIRED_SOURCE_BOUND_CAPABILITIES]
+    raise ArtifactError(
+        "realize_from() requires source-bound contract v4 with capabilities "
+        f"{required}; daemon reported version={version}, "
+        f"capabilities={_source_bound_capability_names(flags)}",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
 
 
 def restore_owned_binding_tensors(
@@ -237,10 +304,10 @@ def _build_source_execution_contract(
             topology_proto,
             store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
         )
-    if normalized_policy == "allow_not_eligible_fallback":
+    if normalized_policy == "collective_first":
         return (
             topology_proto,
-            store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK,
+            store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST,
         )
     return topology_proto, store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
 
@@ -292,6 +359,7 @@ class OwnedBindingSlot:
         device: torch.device,
         device_id: int,
         target_publication_token: bytes | None,
+        target_publication_operation_id: str | None = None,
     ) -> None:
         if not tensors:
             raise ArtifactError(
@@ -321,6 +389,11 @@ class OwnedBindingSlot:
         self._device_id = int(device_id)
         self._target_publication_token = (
             bytes(target_publication_token) if target_publication_token else None
+        )
+        self._target_publication_operation_id = (
+            str(target_publication_operation_id)
+            if target_publication_operation_id
+            else None
         )
         self._seal_generation_counter = (
             int(current_value_metadata.seal_generation)
@@ -450,6 +523,7 @@ class OwnedBindingSlot:
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
+        operation_id = self._target_publication_operation_id or uuid.uuid4().hex
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
@@ -457,6 +531,7 @@ class OwnedBindingSlot:
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
+                operation_id=operation_id,
                 timeout_s=timeout_s if timeout_s is not None else 60.0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -528,7 +603,7 @@ class OwnedBindingSlot:
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
-        operation_id = uuid.uuid4().hex
+        operation_id = self._target_publication_operation_id or uuid.uuid4().hex
         client = self._runtime.ensure_client()
         try:
             start_resp = client.start_publish_target_replica(
@@ -631,12 +706,10 @@ class OwnedBindingSlot:
         from tensorcast.api.store.binding import BindingUpdateEpoch
 
         self._ensure_open()
-        if self._published_lease_id is not None:
-            self.retire(
-                wait=True,
-                drain_timeout_s=drain_timeout_s,
-                ctx=ctx,
-            )
+        _raise_if_published_for_mutation(
+            op_name="begin_update",
+            published_lease_id=self._published_lease_id,
+        )
         timeout_s = _ctx_timeout_s(ctx)
         response = self._runtime.ensure_client().begin_binding_update(
             binding_id=self._binding_id,
@@ -653,6 +726,7 @@ class OwnedBindingSlot:
         self._current_value_metadata = None
         self._selection = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = False
         return BindingUpdateEpoch(
             binding_id=self._binding_id,
@@ -700,6 +774,7 @@ class OwnedBindingSlot:
         self._current_value_metadata = metadata
         self._selection = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = False
 
     def promote_current_value(
@@ -743,6 +818,7 @@ class OwnedBindingSlot:
         self._contribution_selection = clone_selection(metadata.selection)
         self._contribution_source_artifact_id = metadata.source_artifact_id
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = False
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
@@ -758,8 +834,15 @@ class OwnedBindingSlot:
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
         operation_id: str | None = None,
-    ) -> None:
+    ) -> "BindingUpdateEpoch":
+        from tensorcast.api.store.binding import BindingUpdateEpoch
+
         self._ensure_open()
+        _raise_if_published_for_mutation(
+            op_name="realize_from",
+            published_lease_id=self._published_lease_id,
+        )
+        _require_execution_only_realize_contract(self._runtime)
         public_disk_source = (
             artifact if isinstance(artifact, PublicDiskSourceHandle) else None
         )
@@ -840,31 +923,31 @@ class OwnedBindingSlot:
                 status_code=error.status_code,
                 retryable=False,
             ) from exc
-        metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
-            rpc_name="RefillOwnedBinding",
-            expected_binding_id=self._binding_id,
-            expected_binding_layout_id=self._binding_layout_id,
-        )
-        if metadata is None:
+        update_epoch = str(getattr(response, "update_epoch", "") or "")
+        if not update_epoch:
             self._enter_dirty_state()
             raise ArtifactError(
-                "RefillOwnedBinding returned empty current_value",
+                "RefillOwnedBinding returned empty update_epoch",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
         self._dirty = False
+        self._active_update_epoch = update_epoch
         self._selection = None
         self._contribution_selection = None
         self._contribution_source_artifact_id = None
         self._target_publication_token = None
-        self._seal_generation_counter = int(metadata.seal_generation)
-        self._current_value_metadata = metadata
+        self._target_publication_operation_id = None
+        self._current_value_metadata = None
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
         )
         self._last_source_bound_plan_diagnostics = (
             _source_bound_plan_diagnostics_from_response(response)
+        )
+        return BindingUpdateEpoch(
+            binding_id=self._binding_id,
+            update_epoch=update_epoch,
         )
 
     def swap(
@@ -953,6 +1036,11 @@ class OwnedBindingSlot:
             if getattr(response, "target_publication_token", b"")
             else None
         )
+        self._target_publication_operation_id = (
+            str(operation_id)
+            if operation_id and self._target_publication_token
+            else None
+        )
         metadata = parse_binding_value_or_raise(
             response.current_value if hasattr(response, "current_value") else None,
             rpc_name="RefillOwnedBinding",
@@ -1038,6 +1126,7 @@ class OwnedBindingSlot:
         self._current_value_metadata = None
         self._selection = None
         self._target_publication_token = None
+        self._target_publication_operation_id = None
         self._dirty = True
 
 

@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-03-31
+last_updated: 2026-04-10
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -24,12 +24,16 @@ related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - daemon/service/controllers/owned_binding_service.cc
   - daemon/service/controllers/assembly_operation_service.cc
+  - daemon/service/controllers/assembly_closeout_identity_utils.cc
+  - daemon/service/controllers/assembly_closeout_identity_utils.h
+  - daemon/service/assembly_closeout_identity_utils_test.cc
+  - daemon/service/grpc_service_impl_start_seal_assembly_test.cc
   - daemon/service/controllers/target_materialization_service.cc
+  - tests/python/test_assembly_attempt.py
 links:
   related:
-    - ./0113-step3p5-closure-and-sot-convergence.md
-    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0108-tensor-aware-materialization-strategy-plane.md
+    - ../plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -73,16 +77,18 @@ The main correction is:
 
 Execution-policy note:
 
-- `0112` owns shipped public ingress and same-binding correctness,
-- while active execution-policy rollout and TP startup convergence now track
-  through `0114` plan.
+- `0112` owns shipped public ingress, same-binding correctness, and the audited
+  same-binding serving-path closure,
+- `0108` now owns the shared strategy and explicit lane-planning rules that the
+  source-bound path consumes,
+- and the remaining mounted rollout and delete-gate cleanup now track through
+  `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`.
 
 # Implementation Status
 
-As of `2026-03-28`, the repository has landed the main repo-local contract
-and ingress pieces for `0112`, and the audited Step3p5 mounted 8xH800 path has
-been validated end-to-end through
-`/data/tc/s35-0112/tc-20260328-054200`:
+As of `2026-04-10`, the repository has landed the main repo-local contract and
+ingress pieces for `0112`, and the audited Step3p5 same-binding mounted path is
+closed end-to-end:
 
 - `RepresentationPublishContract` is no longer artifact-id-only; it now carries
   a first-class `ServingPublicationSubject` / `BindingValueRef` union in proto
@@ -104,7 +110,16 @@ been validated end-to-end through
   ingress, `BindingRealizationPlan`, binding-subject publication, and
   fail-closed canonical-full seal without taking runtime fallback.
 - the ready service also serves a real validation completion request, so the
-  current blocker set is no longer correctness but performance.
+  path is no longer blocked on correctness.
+- the audited mounted operator packet now includes collective-dominant
+  realization evidence:
+  - `collective_handled=1`,
+  - `actual_collective_committed_bytes=25550556928`,
+  - `dominant_executor=OwnerFileCollectiveExecutor`,
+  - `publish_hash_rounds=0`,
+  - `publish_hash_location=seal`,
+  - `publish_hash_backend=gpu`,
+  - and `publish_hash_identity_forming=True`.
 
 `0112` is now complete at its shipped scope.
 
@@ -117,26 +132,22 @@ That shipped scope is explicit:
 - and `BindingRealizationPlan` is the public work-item-list contract that the
   repo now ships.
 
-The remaining work after this design closeout is primarily execution-model
-convergence, performance, and delete-gate work, not shipped-correctness blocker
-work.
+The remaining work after this design closeout is no longer shipped-correctness
+blocker work. It is:
+
+- shared strategy-plane follow-up owned by `0108`,
+- owner-file collective executor rollout owned by `0109`,
+- and mounted rollout plus delete-gate cleanup tracked by the `0112-01`
+  companion plan.
 
 In particular:
 
 - `0112` closed the correctness path for binding-native same-binding serving
-  startup,
-- but it did not attempt to make the source-bound realization path
-  `collective-first`,
-- and follow-on architecture work may still tighten how the shared runtime
-  strategy trunk should consume `BindingRealizationPlan` and
-  `RepresentationWorkPlan`.
-
-That remaining work is now tracked only in the `0113` closure design/plan.
-
-- the deleted `0112` companion plan and Step3p5 performance follow-up note are
-  no longer active execution SOT;
-- source-bound collective contract cutover, single-mint closeout, executor
-  convergence, and final legacy deletion now belong to `0113`.
+  startup and now also records the audited Step3p5 same-binding closure result,
+- while the shared runtime strategy trunk that feeds that path is owned by
+  `0108`,
+- and the remaining path-level rollout and delete-gate work is tracked by
+  `0112-01`.
 
 # Closure Summary
 
@@ -216,34 +227,24 @@ legacy `tensor_dict/materialize_subset(...)`.
 What remains after this closure is not "remove one more bridge." What remains
 is optimize the slow but now-correct path.
 
-## 7. Performance follow-up
+## 7. Audited mounted closure and remaining follow-up
 
-The current mounted 8xH800 evidence gives a clear performance picture:
+For the audited Step3p5 same-binding path, the old "generic-dominant mounted
+baseline" is no longer the current state. The closure packet now shows:
 
-- TensorCast cold-start case `/data/tc/s35-0112/tc-20260328-054200` reaches
-  ready in about `402.45s`.
-- Same-worker default baseline
-  `/data/tc/s35-default/default-20260328-055149` reaches ready in about
-  `212.44s`.
-- The TensorCast delta is therefore about `190s`.
+- collective-dominant realization on the audited operator path,
+- same-binding serving readiness through the binding-native publication subject,
+- one surviving identity-forming seal hash on the audited path,
+- and operator-visible typed execution plus hash facts sufficient to treat the
+  audited closure as complete.
 
-That delta is now well localized:
+What remains after that audited closure is not new `0112` architecture work.
+The remaining work is:
 
-- `materialize_mapped_into_target` averages about `142.36s/rank` and still runs
-  on `GenericByteRangeExecutor(source_ordered)` with
-  `direct_write_supported=0` and `collective_handled=0`.
-- binding-subject publication still spends about `37.35s/rank` in
-  `publication.wait_assembly_attempt`.
-- daemon closeout breakdown shows about `15.41s` in
-  `seal_from_cut.compute_data_multihash` and about `21.60s` in
-  `assembly_attempt.finalize_dependency_ready_closeout`.
-
-These are the next `0112`-consistent optimization targets:
-
-- make mapped disk realization enter a faster executor shape,
-- and remove duplicate closeout-time hashing / sealing work that is now
-  provably redundant once the serving subject has already been promoted from
-  the same immutable binding current value.
+- broader mounted evidence hardening and delete-gate cleanup under the
+  `0112-01` companion plan,
+- shared strategy or local-executor follow-up under `0108`,
+- and owner-file collective executor rollout under `0109`.
 
 ## Secondary closure items
 
@@ -277,8 +278,8 @@ However, the current implementation still combines that intended shape with an
 older scratch-style publication flow:
 
 - vLLM and the SDK can still build finalized serving tensors in memory and call
-  `Store.register_binding_finalize_publication_bridge(...)` or
-  `Store.complete_binding_finalize_publication_bridge(...)`, which first registers a
+  `Store.register_binding_finalize_publication(...)` or
+  `Store.complete_binding_finalize_publication(...)`, which first registers a
   new serving artifact from those tensors and only then performs
   `representation_publish`.
 - canonical-full contribution still re-materializes publication tensors into a
@@ -536,7 +537,7 @@ This operation:
 7. returns a durable `RegisteredArtifact` or equivalent descriptor.
 
 This is the key architectural replacement for the current
-`register_binding_finalize_publication_bridge(tensors=...)` path.
+`register_binding_finalize_publication(tensors=...)` path.
 
 Normative rules:
 
@@ -715,6 +716,19 @@ Execution responsibility:
 
 The integration layer only prepares the plan and invokes framework finalize.
 
+Normative execution rule for the preferred same-binding builder path:
+
+- `Binding.realize_from(...)` / `Store.realize_into_binding(...)` are
+  execution-only ingress points;
+- they write source bytes into binding-backed target storage but do not
+  implicitly seal, mint identity, or return a publication-ready current value;
+- audited `BINDING_FINALIZE + SAME_BINDING_FAST_PATH` flows must therefore use
+  the explicit binding update window:
+  `begin_update(...) -> realize_from(...) -> framework finalize -> seal_current(...)`;
+- the public ingress remains one ingress, but its correct long-term semantics
+  are direct target-state semantics rather than compatibility-preserving
+  implicit sealing.
+
 # Disk and Source Resolution
 
 ## Long-term disk model
@@ -808,7 +822,7 @@ The binding-native path should not need:
 ## GPU hash rule
 
 If the promoted binding current value corresponds to the final canonical serving
-byte space, TensorCast should hash those bytes directly on GPU.
+byte space, TensorCast must hash those bytes directly on GPU.
 
 If a future promoted target layout is not identical to canonical logical byte
 order, TensorCast must hash the logical canonical byte stream implied by the
@@ -816,6 +830,45 @@ target layout and canonical index, not the raw storage order.
 
 Raw-storage hashing is only valid when raw storage order and canonical byte
 order are the same contract.
+
+For the audited same-binding `canonical_full` startup path, this rule is
+mandatory rather than opportunistic:
+
+- the single surviving identity-forming full-data hash must execute on GPU;
+- D2H/CPU hashing is not an equivalent success mode for that audited path;
+- if TensorCast cannot prove the GPU-hash preconditions for that path, the
+  operation must fail closed rather than silently downgrading.
+
+## Same-Binding Seal-Reuse Metadata Convergence
+
+The same-binding seal-reuse closeout contract also requires one canonical-index
+byte truth after the surviving seal identity already exists.
+
+Normative rules:
+
+- when same-binding `canonical_full` closeout reuses a sealed binding identity,
+  the canonical-index bytes carried by that reused identity are the single
+  canonical-index truth for closeout metadata;
+- artifact descriptor materialization and GS memory-replica registration must
+  agree with the reused `artifact_id` / `index_multihash`;
+- and if TensorCast cannot prove that agreement, closeout must fail closed
+  rather than publishing mixed metadata.
+
+Implemented on `2026-04-10`:
+
+- same-binding closeout now resolves one registration canonical-index payload
+  from the reused sealed identity when present, rather than falling back to
+  `snapshot.target_index_json`;
+- closeout now rejects:
+  - reused seal identities missing `canonical_index_json`,
+  - canonical-index bytes whose recomputed `index_multihash` would diverge
+    from the published artifact identity,
+  - and any closeout result that mutates the reused
+    `artifact_id` / `index_multihash` / `data_multihash`;
+- repo coverage for this invariant now lives in:
+  - [assembly_closeout_identity_utils_test.cc](/data/workspace/tensorcast-280/daemon/service/assembly_closeout_identity_utils_test.cc)
+  - [grpc_service_impl_start_seal_assembly_test.cc](/data/workspace/tensorcast-280/daemon/service/grpc_service_impl_start_seal_assembly_test.cc)
+  - [test_assembly_attempt.py](/data/workspace/tensorcast-280/tests/python/test_assembly_attempt.py)
 
 # Compatibility and Migration
 
@@ -839,10 +892,10 @@ The current helpers should be classified as follows:
 - `Store.complete_binding_finalize_publication_from_binding(...)`
   - preferred same-binding closeout entry for `BINDING_FINALIZE`
   - subject-first closeout on the sealed binding current value
-- `Store.register_binding_finalize_publication_bridge(tensors=...)`
+- `Store.register_binding_finalize_publication(tensors=...)`
   - explicit bridge path
   - not the long-term same-binding publication architecture
-- `Store.complete_binding_finalize_publication_bridge(tensors=...)`
+- `Store.complete_binding_finalize_publication(tensors=...)`
   - same explicit bridge status
 - `Store.from_disk(...)`
   - remains an import-oriented API

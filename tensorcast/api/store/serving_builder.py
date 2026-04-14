@@ -45,9 +45,6 @@ if TYPE_CHECKING:
         ArtifactDescriptor as StoreArtifactDescriptor,
     )
 
-ServingPublicationBundle = RepresentationPublishSpec
-PureTransformPublicationBundle = ServingPublicationBundle
-
 
 @dataclass(frozen=True, slots=True)
 class PreparedServingRegistration:
@@ -73,10 +70,6 @@ class RegisteredServingPublication:
     registered_artifact: RegisteredArtifact
     prepared_registration: PreparedServingRegistration
     publication: RepresentationPublishSpec
-
-
-PreparedPureTransformServingRegistration = PreparedServingRegistration
-RegisteredPureTransformPublication = RegisteredServingPublication
 
 
 PURE_TRANSFORM_SERVING_ARG_ENABLE = "tc_serving_enable"
@@ -737,7 +730,7 @@ def prepare_pure_transform_serving_registration(
     tensors: Mapping[str, torch.Tensor],
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
-) -> PreparedPureTransformServingRegistration:
+) -> PreparedServingRegistration:
     if build_intent.builder_mode is not BuilderMode.PURE_TRANSFORM:
         raise ArtifactError(
             "prepare_pure_transform_serving_registration requires ServingBuildIntent.builder_mode=PURE_TRANSFORM",
@@ -1404,12 +1397,9 @@ def build_binding_finalize_publication_bundle_from_registered_artifact(
 
 __all__ = [
     "PreparedServingRegistration",
-    "PreparedPureTransformServingRegistration",
     "PureTransformPublicationSpec",
-    "PureTransformPublicationBundle",
+    "RepresentationPublishSpec",
     "RegisteredServingPublication",
-    "RegisteredPureTransformPublication",
-    "ServingPublicationBundle",
     "PURE_TRANSFORM_SERVING_ARG_ABI_VERSION",
     "PURE_TRANSFORM_SERVING_ARG_ADAPTER_VERSION",
     "PURE_TRANSFORM_SERVING_ARG_BUILD_PIPELINE_VERSION",

@@ -26,7 +26,8 @@ from tensorcast.api.plan.artifact_set import (
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
-from tensorcast.api.store.serving_builder import PureTransformPublicationBundle
+from tensorcast.api.store.runtime import StoreRuntimeContext
+from tensorcast.api.store.serving_builder import RepresentationPublishSpec
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.engine_adapter import (
     BatchResult,
@@ -46,7 +47,7 @@ ArtifactActionResult = (
     | PublishResult
     | HydrateResult
     | BatchResult
-    | PureTransformPublicationBundle
+    | RepresentationPublishSpec
 )
 
 
@@ -291,6 +292,7 @@ class NodeAgentExecutor:
         self._agent_id = agent_id or uuid.uuid4().hex
         self._version = version or "unknown"
         self._engine_adapter = engine_adapter
+        self._client_factory = client_factory
         self._client = client_factory(daemon_address)
         self._store: Store | None = None
 
@@ -316,7 +318,13 @@ class NodeAgentExecutor:
 
     def _store_for_daemon(self) -> Store:
         if self._store is None:
-            self._store = Store(self._daemon_address)
+            self._store = Store(
+                self._daemon_address,
+                runtime=StoreRuntimeContext(
+                    self._daemon_address,
+                    client_factory=lambda _addr: self._client,
+                ),
+            )
         return self._store
 
     def execute_plan(
@@ -711,7 +719,7 @@ class NodeAgentExecutor:
             status=_status_success("transform_register completed"),
             artifact_result=(
                 register_result
-                if isinstance(register_result, PureTransformPublicationBundle)
+                if isinstance(register_result, RepresentationPublishSpec)
                 else None
             ),
         )

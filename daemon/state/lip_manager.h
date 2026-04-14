@@ -20,11 +20,17 @@
 #include "core/store/store_engine.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/types.h"
+#include "gsl/pointers"
 
 namespace tensorcast::daemon {
 
 class LipManager {
  public:
+  struct BuildCommitLeaseOptions {
+    std::optional<gsl::not_null<void*>> direct_gpu_hash_ptr;
+    bool require_gpu_identity_hash;
+  };
+
   struct RoutableLeaseResult {
     ArtifactDeviceKey key;
     std::vector<std::string> remote_memory_keys;
@@ -118,7 +124,8 @@ class LipManager {
       absl::Span<const LeaseSegMeta> segments,
       absl::Span<const RegisterStorageMeta> storages,
       absl::Span<const RegisterTensorAliasMeta> aliases,
-      const std::optional<CommitLeaseResult>& identity_override = std::nullopt);
+      const std::optional<CommitLeaseResult>& identity_override = std::nullopt,
+      BuildCommitLeaseOptions options = {});
 
   // Commit a LIP (lease in-place) registration into a persistent lease entry,
   // optionally reusing a pre-minted identity instead of hashing the same bytes
@@ -137,7 +144,8 @@ class LipManager {
       std::vector<LeaseSegMeta>&& segments,
       std::vector<RegisterStorageMeta>&& storages,
       std::vector<RegisterTensorAliasMeta>&& aliases,
-      const std::optional<CommitLeaseResult>& identity_override = std::nullopt);
+      const std::optional<CommitLeaseResult>& identity_override = std::nullopt,
+      BuildCommitLeaseOptions options = {});
 
   // Commit a view-scoped routable LIP lease (used for piece registrations).
   // This registers long-lived communicator keys over the leased view ByteSpace

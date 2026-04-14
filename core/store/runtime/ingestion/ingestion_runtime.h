@@ -64,13 +64,13 @@ class IngestionRuntime {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+      const ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+      const ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(

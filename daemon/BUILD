@@ -168,7 +168,6 @@ sc_cc_library(
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time:time",
         "@abseil-cpp//absl/types:span",
-        "@boringssl//:crypto",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
     ],
@@ -222,14 +221,11 @@ sc_cc_library(
         "//core/common:capability_token_lib",
         "//core/common:memory_location_lib",
         "//core/common:selection_identity_lib",
-        "//core/store:communication_manager",
         "//core/store:device_registry",
-        "//core/store:endpoint_id",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:disk_loader",
         "//core/store/materialization/dataplane:inline_buffer_loader",
-        "//core/store/materialization/dataplane:remote_key_source",
         "//core/store/runtime/ingestion:artifact_lowering_plan",
         "//core/store/runtime/ingestion:artifact_truth",
         "//proto/tensorcast/common/v1:common_cc",
@@ -1195,6 +1191,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:index_reader",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/random:random",
@@ -1205,10 +1202,23 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "assembly_closeout_identity_utils_lib",
+    srcs = ["service/controllers/assembly_closeout_identity_utils.cc"],
+    hdrs = ["service/controllers/assembly_closeout_identity_utils.h"],
+    deps = [
+        ":types_hdr",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
+        "//core/store:global_store_client",
+    ],
+)
+
+sc_cc_library(
     name = "assembly_operation_service_lib",
     srcs = ["service/controllers/assembly_operation_service.cc"],
     hdrs = ["service/controllers/assembly_operation_service.h"],
     deps = [
+        ":assembly_closeout_identity_utils_lib",
         ":assembly_coordination_utils_lib",
         ":binding_registry_lib",
         ":daemon_options_hdr",
@@ -1331,6 +1341,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store:view_utils",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "//proto/tensorcast/operation/v1:operation_cc",
         "@abseil-cpp//absl/random:random",
@@ -1804,6 +1815,8 @@ cc_test(
     srcs = ["service/controllers/materialization_target_plan_utils_test.cc"],
     deps = [
         ":materialization_target_plan_utils_lib",
+        "//core/store:store_engine_options",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "@catch2//:catch2_main",
     ],
 )
@@ -2329,27 +2342,6 @@ cc_test(
 )
 
 cc_test(
-    name = "local_handle_region_attach_test",
-    srcs = ["state/local_handle_region_attach_test.cc"],
-    deps = [
-        ":ipc_region_registry_lib",
-        ":local_handle_server_lib",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
-    name = "byte_artifact_region_layout_host_shared_test",
-    srcs = ["service/byte_artifact_region_layout_host_shared_test.cc"],
-    deps = [
-        ":external_target_access_service_lib",
-        ":ipc_region_registry_lib",
-        "//core/store:device_registry",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
     name = "grpc_service_impl_replica_status_test",
     srcs = ["service/grpc_service_impl_replica_status_test.cc"],
     deps = [
@@ -2411,6 +2403,27 @@ cc_test(
         "//core/store:testing_recording_global_store_client",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "assembly_closeout_identity_utils_test",
+    srcs = ["service/assembly_closeout_identity_utils_test.cc"],
+    deps = [
+        ":assembly_closeout_identity_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:testing_global_store_client_stub",
+        "//core/store:testing_recording_global_store_client",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_policy_utils_test",
+    srcs = ["service/materialization_policy_utils_test.cc"],
+    deps = [
+        ":materialization_policy_utils_lib",
         "@catch2//:catch2_main",
     ],
 )

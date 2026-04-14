@@ -36,6 +36,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/sources/memory_source.h"
+#include "daemon/service/controllers/assembly_closeout_identity_utils.h"
 #include "daemon/service/controllers/assembly_coordination_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
@@ -53,17 +54,30 @@ namespace tensorcast::daemon {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 namespace coordination = assembly_coordination;
+namespace closeout_identity = assembly_closeout_identity;
 namespace pubv1 = tensorcast::publication::v1;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
 namespace serving_manifest = serving_artifact_manifest;
 using materialization_policy::build_execution_diagnostics;
+using materialization_policy::HashExecutionDetails;
 using materialization_policy::spec_includes_transpose;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_post_seal::compute_view_meta_digest;
 using status_utils::to_grpc_status;
 
 namespace {
+std::string_view binding_seal_identity_canonical_index_json(const BindingRegistry::Record& record) {
+  if (record.sealed_commit_result.has_value() && !record.sealed_commit_result->canonical_index_json.empty()) {
+    return record.sealed_commit_result->canonical_index_json;
+  }
+  return record.target_index_json;
+}
+
+std::string_view binding_tensor_canonical_index_json(const BindingRegistry::Record& record) {
+  return record.target_index_json;
+}
+
 class OperationLeaseGuard {
  public:
   OperationLeaseGuard(
@@ -467,7 +481,8 @@ absl::StatusOr<std::vector<store::StoreEngine::SealAssemblyCutInput::BoundCanoni
     return absl::FailedPreconditionError("bound canonical source requires live binding allocation");
   }
 
-  auto index_or = parse_canonical_index(record.target_index_json);
+  const std::string_view canonical_index_json = binding_tensor_canonical_index_json(record);
+  auto index_or = parse_canonical_index(canonical_index_json);
   if (!index_or.ok()) {
     return index_or.status();
   }
@@ -604,9 +619,12 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
       if (!spans_or.ok()) {
         return spans_or.status();
       }
-      input.canonical_index_json = record->target_index_json;
-      if (!record->current_artifact_id.empty()) {
+      if (record->sealed_commit_result.has_value() && !record->sealed_commit_result->artifact_id.empty()) {
+        input.canonical_artifact_id = record->sealed_commit_result->artifact_id;
+      } else if (!record->current_artifact_id.empty()) {
         input.canonical_artifact_id = record->current_artifact_id;
+      } else {
+        input.canonical_index_json = std::string(binding_seal_identity_canonical_index_json(*record));
       }
       input.bound_canonical_spans = std::move(*spans_or);
     }
@@ -806,7 +824,8 @@ absl::StatusOr<std::vector<RegisterTensorAliasMeta>> build_closeout_binding_tens
   if (!offsets_or.ok()) {
     return offsets_or.status();
   }
-  auto index_or = parse_canonical_index(record.target_index_json);
+  const std::string_view canonical_index_json = binding_tensor_canonical_index_json(record);
+  auto index_or = parse_canonical_index(canonical_index_json);
   if (!index_or.ok()) {
     return index_or.status();
   }
@@ -900,7 +919,7 @@ absl::StatusOr<BoundCloseoutSnapshot> capture_bound_closeout_snapshot(
     snapshot.device_id = record->device_id;
     snapshot.owner_pid = record->owner_pid;
     snapshot.target_layout = record->target_layout;
-    snapshot.target_index_json = record->target_index_json;
+    snapshot.target_index_json = std::string(binding_tensor_canonical_index_json(*record));
     snapshot.handle_bytes = record->handle_bytes;
     snapshot.allocation = record->allocation.get();
     snapshot.sealed_commit_result = record->sealed_commit_result;
@@ -977,6 +996,39 @@ void populate_artifact_descriptor_from_commit_lease(
           : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
 }
 
+HashExecutionDetails build_hash_execution_details(
+    const CommitLeaseResult* hash_commit_result,
+    uint32_t hash_rounds,
+    v2::HashLocation hash_location,
+    v2::IdentityMintStrategy identity_mint_strategy) {
+  HashExecutionDetails details;
+  details.hash_rounds = hash_rounds;
+  details.hash_location = hash_location;
+  details.identity_mint_strategy = identity_mint_strategy;
+  if (hash_commit_result == nullptr) {
+    return details;
+  }
+  switch (hash_commit_result->hash_info.backend) {
+    case CommitLeaseHashBackend::kGpu:
+      details.hash_backend = v2::HashBackend::HASH_BACKEND_GPU;
+      break;
+    case CommitLeaseHashBackend::kD2HCpu:
+      details.hash_backend = v2::HashBackend::HASH_BACKEND_D2H_CPU;
+      break;
+    case CommitLeaseHashBackend::kCpu:
+      details.hash_backend = v2::HashBackend::HASH_BACKEND_CPU;
+      break;
+    case CommitLeaseHashBackend::kNone:
+    default:
+      details.hash_backend = v2::HashBackend::HASH_BACKEND_NONE;
+      break;
+  }
+  details.hash_bytes = hash_commit_result->hash_info.bytes;
+  details.hash_wall_time_ms = hash_commit_result->hash_info.wall_time_ms;
+  details.hash_identity_forming = hash_commit_result->hash_info.identity_forming;
+  return details;
+}
+
 absl::StatusOr<RepresentationPublishValidationResult> validate_artifact_subject_closeout(
     store::StoreEngine* engine,
     const v2::RepresentationPublishContract& representation_publish) {
@@ -1024,9 +1076,7 @@ absl::StatusOr<RepresentationPublishValidationResult> validate_artifact_subject_
       /*result=*/nullptr,
       v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
       store::loading::ExecutionTopologyContext{},
-      /*hash_rounds=*/0,
-      v2::HashLocation::HASH_LOCATION_NONE,
-      v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE);
+      HashExecutionDetails{});
   return result;
 }
 
@@ -1203,6 +1253,24 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
   if (!out_or.ok()) {
     return out_or.status();
   }
+  if (snapshot.sealed_commit_result.has_value()) {
+    auto reuse_status =
+        closeout_identity::validate_reused_identity_matches_closeout_result(*snapshot.sealed_commit_result, *out_or);
+    if (!reuse_status.ok()) {
+      return reuse_status;
+    }
+  }
+  auto registration_index_json_or =
+      closeout_identity::resolve_registration_canonical_index_json(snapshot.sealed_commit_result, *out_or);
+  if (!registration_index_json_or.ok()) {
+    return registration_index_json_or.status();
+  }
+  const std::string& registration_index_json = *registration_index_json_or;
+  auto registration_index_status =
+      closeout_identity::validate_registration_canonical_index_matches_commit_result(registration_index_json, *out_or);
+  if (!registration_index_status.ok()) {
+    return registration_index_status;
+  }
 
   auto routable_or = lip_manager->publish_committed_lease_routable(registration_id);
   if (!routable_or.ok()) {
@@ -1227,7 +1295,7 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
       out_or->index_multihash,
       routable_or->remote_memory_keys,
       routable_or->buffer_sizes,
-      snapshot.target_index_json,
+      registration_index_json,
       out_or->encoding,
       out_or->schema_version,
       /*max_concurrency=*/1,
@@ -1277,15 +1345,19 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
   }
 
   populate_artifact_descriptor_from_commit_lease(*out_or, &prevalidated.serving_artifact);
+  const CommitLeaseResult* hash_commit_result =
+      snapshot.sealed_commit_result.has_value() ? &*snapshot.sealed_commit_result : &*out_or;
   prevalidated.serving_execution_diagnostics = build_execution_diagnostics(
       /*result=*/nullptr,
       v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
       store::loading::ExecutionTopologyContext{},
-      /*hash_rounds=*/snapshot.sealed_commit_result.has_value() ? 0U : 1U,
-      snapshot.sealed_commit_result.has_value() ? v2::HashLocation::HASH_LOCATION_SEAL
-                                                : v2::HashLocation::HASH_LOCATION_BINDING_CLOSEOUT,
-      snapshot.sealed_commit_result.has_value() ? v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_REUSE
-                                                : v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT);
+      build_hash_execution_details(
+          hash_commit_result,
+          snapshot.sealed_commit_result.has_value() ? 0U : 1U,
+          snapshot.sealed_commit_result.has_value() ? v2::HashLocation::HASH_LOCATION_SEAL
+                                                    : v2::HashLocation::HASH_LOCATION_BINDING_CLOSEOUT,
+          snapshot.sealed_commit_result.has_value() ? v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_SEAL_REUSE
+                                                    : v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT));
   rollback.release();
   return prevalidated;
 }
@@ -1955,6 +2027,18 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
                   *seal_or,
                   prevalidated_representation_publish,
                   &result_msg);
+            }
+
+            if (final_status.ok()) {
+              // Publish workspace->seal only after closeout has succeeded so failed attempts
+              // cannot be resolved later as if the seal were committed.
+              SC_TRACE_SCOPE("assembly_attempt.publish_workspace_seal_binding");
+              final_status = closeout_identity::publish_workspace_seal_binding_after_success(
+                  client_sp,
+                  workspace_assembly_id,
+                  sealed_artifact_id,
+                  /*binding_subject_closeout=*/prevalidated_representation_publish.has_value(),
+                  /*reused_sealed_identity=*/seal_or->already_sealed);
             }
 
             if (final_status.ok() && !binding_subject_closeout) {

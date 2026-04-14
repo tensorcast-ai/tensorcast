@@ -290,6 +290,47 @@ std::optional<TensorAxisRange> single_axis_range(const TensorCoordinateSpec& spe
   return spec.axes.front();
 }
 
+std::optional<WorkPartitionKind> infer_single_source_partition_kind(
+    const RepresentationTensorSpec& source_spec,
+    const TensorCoordinateSpec& source_range,
+    const RepresentationTensorSpec& dst_spec,
+    const TensorCoordinateSpec& destination_range) {
+  const auto src_axis = single_axis_range(source_range);
+  const auto dst_axis = single_axis_range(destination_range);
+  if (!src_axis.has_value() && !dst_axis.has_value()) {
+    return WorkPartitionKind::kReplicated;
+  }
+  if (source_spec.shape.size() != dst_spec.shape.size()) {
+    return std::nullopt;
+  }
+  const int32_t dim = src_axis.has_value() ? src_axis->dim : dst_axis->dim;
+  if (dim < 0 || dim >= static_cast<int32_t>(source_spec.shape.size()) ||
+      dim >= static_cast<int32_t>(dst_spec.shape.size())) {
+    return std::nullopt;
+  }
+  if (src_axis.has_value() && dst_axis.has_value() && src_axis->dim != dst_axis->dim) {
+    return std::nullopt;
+  }
+  for (size_t axis = 0; axis < source_spec.shape.size(); ++axis) {
+    const int64_t src_extent = src_axis.has_value() && static_cast<int32_t>(axis) == src_axis->dim
+        ? src_axis->end - src_axis->start
+        : source_spec.shape[axis];
+    const int64_t dst_extent = dst_axis.has_value() && static_cast<int32_t>(axis) == dst_axis->dim
+        ? dst_axis->end - dst_axis->start
+        : dst_spec.shape[axis];
+    if (src_extent != dst_extent) {
+      return std::nullopt;
+    }
+  }
+  if (dim == 0) {
+    return WorkPartitionKind::kDim0Partitioned;
+  }
+  if (dim == 1 && source_spec.shape.size() == 2 && dst_spec.shape.size() == 2) {
+    return WorkPartitionKind::kDim1Partitioned;
+  }
+  return std::nullopt;
+}
+
 struct ByteSpan {
   uint64_t offset{0};
   uint64_t length{0};
@@ -1245,18 +1286,13 @@ absl::StatusOr<RepresentationWorkPlan> build_representation_work_plan(const Repr
     }
 
     if (item.kind == RepresentationWorkItemKind::kTensorCopy && item.sources.size() == 1) {
-      const auto src_axis = single_axis_range(item.sources.front().fragment.source_range);
-      const auto dst_axis = single_axis_range(item.sources.front().fragment.destination_range);
-      if (!src_axis.has_value() && !dst_axis.has_value()) {
-        item.partition_kind = WorkPartitionKind::kReplicated;
-      } else if (src_axis.has_value() && dst_axis.has_value() && src_axis->dim == dst_axis->dim) {
-        if (src_axis->dim == 0) {
-          item.partition_kind = WorkPartitionKind::kDim0Partitioned;
-        } else if (
-            src_axis->dim == 1 && item.sources.front().fragment.source_spec.shape.size() == 2 &&
-            item.dst_spec.shape.size() == 2) {
-          item.partition_kind = WorkPartitionKind::kDim1Partitioned;
-        }
+      auto partition_kind = infer_single_source_partition_kind(
+          item.sources.front().fragment.source_spec,
+          item.sources.front().fragment.source_range,
+          item.dst_spec,
+          item.sources.front().fragment.destination_range);
+      if (partition_kind.has_value()) {
+        item.partition_kind = *partition_kind;
       }
     } else if (item.kind == RepresentationWorkItemKind::kScalarBroadcastFill) {
       item.partition_kind = WorkPartitionKind::kUnknown;

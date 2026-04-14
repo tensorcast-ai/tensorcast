@@ -23,6 +23,7 @@
 #include "core/store/materialization/control/materialization_backend.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
+#include "core/store/replica/collective_disk_loader.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/ingestion_event_hub.h"
@@ -57,10 +58,16 @@ struct MaterializationHooks {
       const loading::ReplicaKey& key,
       std::string_view artifact_override,
       std::string_view publish_context_id)>;
+  using CollectiveMappedTargetLoadOverride = std::function<tensorcast::store::replica::CollectiveMappedTargetLoadResult(
+      const tensorcast::store::replica::CollectiveMappedTargetLoadRequest& request,
+      const std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>& pinned_pool,
+      std::chrono::milliseconds pinned_timeout,
+      const tensorcast::store::replica::CollectiveMappedTargetLoadOptions& options)>;
 
   PipelineFactory pipeline_factory;
   ServiceFactory materialization_service_factory;
   RegisterReplicaOverride register_replica_override;
+  CollectiveMappedTargetLoadOverride collective_mapped_target_load_override;
   std::function<void(const IngestionRequestMetadata&)> before_pipeline_start;
   std::function<void(IngestionResultEvent&)> mutate_completion_event;
   std::function<std::optional<absl::StatusOr<loading::ReplicaHandle>>()> override_result;
@@ -128,13 +135,13 @@ class MaterializationFacade : public materialization::control::MaterializationBa
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const strategy::ResolvedMaterializationPlan& resolved_plan,
+      const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const strategy::ResolvedMaterializationPlan& resolved_plan,
+      const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(

@@ -32,6 +32,18 @@ TEST_CASE("Byte artifact cgid rejects wrong segment shape", "[artifact_identity]
   REQUIRE_FALSE(parsed_or.ok());
 }
 
+TEST_CASE("Byte artifact cgid accepts legacy segment shape", "[artifact_identity][byte_artifact]") {
+  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azQ";
+  auto parsed_or = parse_byte_artifact_cgid(artifact_id);
+  REQUIRE(parsed_or.ok());
+  REQUIRE(parsed_or->namespace_name == "tenant");
+  REQUIRE(parsed_or->engine == "engine");
+  REQUIRE(parsed_or->model_id_enc == "b64u.bQ");
+  REQUIRE(parsed_or->model_version_enc.empty());
+  REQUIRE(parsed_or->layout_id == "layout_v1");
+  REQUIRE(parsed_or->engine_key_enc == "b64u.azQ");
+}
+
 TEST_CASE("CGID segment b64u encode/decode roundtrip", "[artifact_identity][byte_artifact]") {
   const std::string raw = "request-0001:blk-42";
   const std::string encoded = encode_cgid_segment(raw);

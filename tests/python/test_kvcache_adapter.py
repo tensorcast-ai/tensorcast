@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tensorcast.api.errors import ArtifactError
-from tensorcast.engine_adapter.kvcache_adapter import (
+from tensorcast.engine_adapter import (
     MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA,
     PUBLISH_MANIFEST_SCHEMA,
     EngineOwnedManifest,

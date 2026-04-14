@@ -265,6 +265,7 @@ std::vector<v2::BatchItemOutcome> ByteArtifactAuthorityService::batch_put_if_abs
         outcomes.push_back(make_outcome(item.artifact_id, v2::BATCH_ITEM_STATUS_OK, "joined"));
         break;
       case ByteArtifactBodyStore::PutOutcome::kConflict:
+        retire_put_item_backing(item);
         outcomes.push_back(make_outcome(
             item.artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "put_if_absent invariant mismatch"));
         break;

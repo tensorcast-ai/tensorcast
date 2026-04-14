@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence, cast
@@ -15,6 +16,7 @@ import pytest
 import torch
 
 import tensorcast.api.store as store_mod
+import tensorcast.api.store.runtime as store_runtime_mod
 from tensorcast import daemon_ctl
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
@@ -1221,3 +1223,58 @@ def test_store_force_recreate_and_option_refresh(
     assert refreshed.opts == mismatch_opts
 
     store_mod.shutdown_process_store()
+
+
+def test_shutdown_live_stores_closes_leaked_store_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    leaked_a = DummyStore()
+    leaked_b = DummyStore()
+    live_stores: weakref.WeakSet[DummyStore] = weakref.WeakSet()
+    live_stores.add(leaked_a)
+    live_stores.add(leaked_b)
+
+    shutdown_calls: list[str] = []
+    monkeypatch.setattr(store_mod, "_LIVE_STORES", live_stores)
+    monkeypatch.setattr(
+        store_mod,
+        "shutdown_context",
+        lambda: shutdown_calls.append("shutdown_context"),
+    )
+
+    store_mod._shutdown_live_stores()
+
+    assert leaked_a.closed is True
+    assert leaked_b.closed is True
+    assert shutdown_calls == ["shutdown_context"]
+
+
+def test_shutdown_all_contexts_closes_leaked_runtime_contexts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    leaked_a = DummyContext()
+    leaked_b = DummyContext()
+    live_contexts: weakref.WeakSet[DummyContext] = weakref.WeakSet()
+    live_contexts.add(leaked_a)
+    live_contexts.add(leaked_b)
+
+    monkeypatch.setattr(store_runtime_mod.StoreRuntimeContext, "_LIVE_CONTEXTS", live_contexts)
+
+    store_runtime_mod._shutdown_all_contexts()
+
+    assert leaked_a.closed is True
+    assert leaked_b.closed is True

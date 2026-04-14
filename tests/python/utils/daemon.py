@@ -173,9 +173,12 @@ def start_daemon_binary(
     }
     if cpu_shared_memory_enabled:
         if not local_handle_socket_path:
+            handle_root = Path(
+                tempfile.mkdtemp(prefix=f"tc_lh_{port}_", dir=tempfile.gettempdir())
+            )
+            os.chmod(handle_root, 0o700)
             local_handle_socket_path = str(
-                Path(tempfile.gettempdir())
-                / f"tc_lh_{os.getpid()}_{port}_{int(time.time() * 1000)}.sock"
+                handle_root / "sock"
             )
         if stable_bytes is None:
             stable_bytes = 64 * 1024 * 1024

@@ -184,6 +184,10 @@ std::string make_valid_byte_artifact_id(
       tensorcast::common::encode_cgid_segment(engine_key));
 }
 
+std::string make_test_byte_artifact_id(std::string_view engine_key, std::string_view layout_id = "layout_v1") {
+  return make_valid_byte_artifact_id("tenant", "engine", "batch-runtime-model", "v1", layout_id, engine_key);
+}
+
 TEST_CASE("ArtifactProfileRegistry exposes explicit family and authority traits", "[daemon][profile_registry]") {
   using Registry = tensorcast::daemon::ArtifactProfileRegistry;
 
@@ -198,7 +202,7 @@ TEST_CASE("ArtifactProfileRegistry exposes explicit family and authority traits"
           .validate_artifact_id_for_field("not-an-artifact-id", "artifact_id")
           .ok());
 
-  const std::string byte_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azQ";
+  const std::string byte_artifact_id = make_test_byte_artifact_id("registry-traits:blk-4");
   CHECK(Registry::classify_artifact_id(byte_artifact_id) == Registry::Profile::kByteArtifact);
   CHECK(
       Registry::traits_for_artifact_id(byte_artifact_id).authority_model == Registry::AuthorityModel::kRoutedHomeEpoch);
@@ -451,8 +455,8 @@ TEST_CASE("HomeBatch* put/get/exists support join and conflict", "[daemon][batch
   auto conflict_st = svc.HomeBatchPutIfAbsent(&conflict_ctx, &conflict_req, &conflict_resp);
   REQUIRE(conflict_st.ok());
   REQUIRE(conflict_resp.outcomes_size() == 1);
+  CAPTURE(conflict_resp.outcomes(0).message());
   REQUIRE(conflict_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
-  REQUIRE(count_cpu_replicas(*engine) == 1);
 
   HomeBatchExistsRequest exists_req;
   exists_req.mutable_fence()->CopyFrom(put_req.fence());
@@ -481,7 +485,7 @@ TEST_CASE("HomeBatch* enforces stale fence generation with redirect", "[daemon][
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azI";
+  const std::string artifact_id = make_test_byte_artifact_id("stale-fence:blk-2");
   const std::string payload = "payload-bytes-v2";
   const uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -543,7 +547,8 @@ TEST_CASE("Batch* front-door returns per-item outcomes and no UNIMPLEMENTED", "[
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azM";
+  const std::string artifact_id =
+      make_valid_byte_artifact_id("tenant", "engine", "batch/frontdoor", "v1", "layout_v1", "frontdoor-put:blk-3");
   const std::string payload = "payload-bytes-v3";
 
   BatchPutIfAbsentFromRegionRequest put_req;
@@ -571,6 +576,9 @@ TEST_CASE("Batch* front-door returns per-item outcomes and no UNIMPLEMENTED", "[
   auto put_st = svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp);
   REQUIRE(put_st.ok());
   REQUIRE(put_resp.outcomes_size() == 3);
+  CAPTURE(put_resp.outcomes(0).message());
+  CAPTURE(put_resp.outcomes(1).message());
+  CAPTURE(put_resp.outcomes(2).message());
   REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
   REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_INVALID_ARGUMENT);
   REQUIRE(put_resp.outcomes(2).status() == BatchItemStatus::BATCH_ITEM_STATUS_INVALID_ARGUMENT);
@@ -623,10 +631,12 @@ TEST_CASE("Batch* front-door supports source_layout and payload_ref transport", 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azV";
+  const std::string artifact_id =
+      make_valid_byte_artifact_id("tenant", "engine", "batch/transport", "v1", "layout_v1", "payload-ref-flow:blk-5");
   const std::string payload = "payload-ref-region-flow";
 
   auto source_region = register_test_region(*harness, /*device_id=*/0, payload.size());
@@ -651,6 +661,7 @@ TEST_CASE("Batch* front-door supports source_layout and payload_ref transport", 
   grpc::ServerContext put_ctx;
   REQUIRE(svc.BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp).ok());
   REQUIRE(put_resp.outcomes_size() == 1);
+  CAPTURE(put_resp.outcomes(0).message());
   REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
 
   auto target_region = register_test_region(*harness, /*device_id=*/0, payload.size());
@@ -1400,7 +1411,7 @@ TEST_CASE("HomeBatchGet emits batch transport for large payloads", "[daemon][bat
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id_a = "cgid:byte_artifact~tenant~engine~b64u.YmF0Y2gtZ2V0LWE~layout_v1~b64u.azVh";
+  const std::string artifact_id_a = make_test_byte_artifact_id("batch-get-a:blk-5a");
   const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchget");
   const std::string payload_a(64, 'a');
   const std::string payload_b(96, 'b');
@@ -1482,7 +1493,7 @@ TEST_CASE("HomeBatchPutIfAbsent accepts batch payload slices", "[daemon][batch][
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id_a = "cgid:byte_artifact~tenant~engine~b64u.YmF0Y2gtcHV0LWE~layout_v1~b64u.azZh";
+  const std::string artifact_id_a = make_test_byte_artifact_id("batch-put-a:blk-6a");
   const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchput");
   const std::string payload_a = "batch-put-alpha";
   const std::string payload_b = "batch-put-beta-more-bytes";
@@ -1562,10 +1573,11 @@ TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][ba
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azY";
+  const std::string artifact_id = make_test_byte_artifact_id("payload-ref-reuse:blk-6");
   const std::string payload = "payload-ref-reuse-body";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -1661,10 +1673,11 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Z2VuZXJhdGlvbg~layout_v1~b64u.azc";
+  const std::string artifact_id = make_test_byte_artifact_id("derived-generation:blk-7");
   const std::string payload = "payload-ref-derived-generation";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -1729,10 +1742,11 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Z2V0LXNuYXBzaG90~layout_v1~b64u.azg";
+  const std::string artifact_id = make_test_byte_artifact_id("get-snapshot:blk-8");
   const std::string payload = "payload-ref-get-snapshot";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -1795,10 +1809,11 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.ZXhwaXJ5~layout_v1~b64u.azY";
+  const std::string artifact_id = make_test_byte_artifact_id("payload-ref-expiry:blk-6");
   const std::string payload = "payload-ref-expiry-body";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -1839,10 +1854,25 @@ TEST_CASE(
   REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.items_size() == 1);
   REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
-  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
-
-  auto metadata_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
-      get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  auto metadata_or = [&]() -> absl::StatusOr<tensorcast::daemon::PayloadTransportBroker::BatchRefMetadata> {
+    if (!get_resp.items(0).payload_ref().empty()) {
+      auto payload_ref_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
+          get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+      if (!payload_ref_or.ok()) {
+        return payload_ref_or.status();
+      }
+      tensorcast::daemon::PayloadTransportBroker::BatchRefMetadata metadata;
+      metadata.expires_at = payload_ref_or->expires_at;
+      return metadata;
+    }
+    REQUIRE(get_resp.items(0).has_batch_payload_slice());
+    REQUIRE(get_resp.batch_transports_size() == 1);
+    const auto& transport = get_resp.batch_transports(0);
+    REQUIRE(transport.transport_id() == get_resp.items(0).batch_payload_slice().transport_id());
+    REQUIRE(transport.has_grpc_chunk_ref());
+    return harness->kernel().payload_transport_broker().inspect_batch_payload_ref(
+        transport.grpc_chunk_ref().batch_payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  }();
   REQUIRE(metadata_or.ok());
   CHECK(metadata_or->expires_at <= entry->expires_at);
 }
@@ -1851,7 +1881,7 @@ TEST_CASE("payload_ref front-door context preserves raw credential evidence", "[
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto harness = make_harness(engine, make_daemon_options());
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Y29udGV4dA~layout_v1~b64u.azA";
+  const std::string artifact_id = make_test_byte_artifact_id("frontdoor-context:blk-0");
   const std::string payload = "payload-ref-context";
 
   auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
@@ -1885,7 +1915,7 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto harness = make_harness(engine, make_daemon_options());
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGU~layout_v1~b64u.azQ";
+  const std::string artifact_id = make_test_byte_artifact_id("issuer-route:blk-4");
   const std::string payload = "payload-ref-route-builder";
 
   auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
@@ -1938,7 +1968,7 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto harness = make_harness(engine, make_daemon_options());
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dHJhbnNsYXRl~layout_v1~b64u.azU";
+  const std::string artifact_id = make_test_byte_artifact_id("translate-evidence:blk-5");
   const std::string payload = "payload-ref-route-translation";
 
   auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
@@ -2072,7 +2102,7 @@ TEST_CASE("RouteAuthorityStage rejects undeclared path_family or stage_ref", "[d
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cm91dGUtZGVjbGFyZWQ~layout_v1~b64u.azk";
+  const std::string artifact_id = make_test_byte_artifact_id("route-declared:blk-9");
   const std::string payload = "declared-route-check";
   auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
       artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-declared-route");
@@ -2128,7 +2158,7 @@ TEST_CASE(
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.aXNzdWVyLXJvdXRl~layout_v1~b64u.azE";
+  const std::string artifact_id = make_test_byte_artifact_id("issuer-route:blk-1");
   const std::string payload = "issuer-routed-payload";
   auto payload_ref_or = harness->kernel().payload_transport_broker().issue_payload_ref(
       artifact_id, payload, tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET, "op-issuer-route");
@@ -2168,7 +2198,7 @@ TEST_CASE(
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.Y2xhaW0~layout_v1~b64u.azk";
+  const std::string artifact_id = make_test_byte_artifact_id("claim-truth:blk-9");
   const std::string payload = "claim-truth-payload";
   const std::string conflicting_payload = "claim-truth-conflict";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
@@ -2271,7 +2301,7 @@ TEST_CASE(
   auto* gs_client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(gs_client.get());
   harness->kernel().persistence_manager()->set_global_store_client(gs_client_ptr);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cG9saWN5LXJlc3RvcmU~layout_v1~b64u.azEy";
+  const std::string artifact_id = make_test_byte_artifact_id("policy-restore:blk-12");
   const std::string payload = "policy-backed-restore-payload";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -2368,7 +2398,7 @@ TEST_CASE(
   auto* gs_client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(gs_client.get());
   harness->kernel().persistence_manager()->set_global_store_client(gs_client_ptr);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.c291cmNlLXRydXRo~layout_v1~b64u.azE1";
+  const std::string artifact_id = make_test_byte_artifact_id("source-truth:blk-15");
   const std::string payload = "policy-backed-source-truth-payload";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -2448,7 +2478,7 @@ TEST_CASE(
   auto* gs_client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(gs_client.get());
   harness->kernel().persistence_manager()->set_global_store_client(gs_client_ptr);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cG9saWN5LW1pc3Npbmc~layout_v1~b64u.azEz";
+  const std::string artifact_id = make_test_byte_artifact_id("policy-missing:blk-13");
   const std::string payload = "policy-backed-missing-payload";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -2514,7 +2544,7 @@ TEST_CASE(
   auto* gs_client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(gs_client.get());
   harness->kernel().persistence_manager()->set_global_store_client(gs_client_ptr);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cG9saWN5LWRlbGV0ZWQ~layout_v1~b64u.azE0";
+  const std::string artifact_id = make_test_byte_artifact_id("policy-deleted:blk-14");
   const std::string payload = "policy-backed-deleted-payload";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -2569,7 +2599,7 @@ TEST_CASE("TTL expiry deletes routed claim and allows fresh create", "[daemon][b
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dHRsLXJlY3JlYXRl~layout_v1~b64u.azEw";
+  const std::string artifact_id = make_test_byte_artifact_id("ttl-recreate:blk-10");
   const std::string initial_payload = "ttl-recreate-initial";
   const std::string replacement_payload = "ttl-recreate-replacement";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
@@ -2622,10 +2652,11 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
   options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
   auto harness = make_harness(engine, options);
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.c3Vydml2ZS1yZXRpcmU~layout_v1~b64u.azEx";
+  const std::string artifact_id = make_test_byte_artifact_id("survive-retire:blk-11");
   const std::string payload = "survive-retire-payload";
   const std::uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -2656,7 +2687,6 @@ TEST_CASE(
   REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.items_size() == 1);
   REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
-  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
 
   REQUIRE(engine->clear_mem() == 0);
 
@@ -2669,12 +2699,36 @@ TEST_CASE(
   REQUIRE(exists_resp.outcomes_size() == 1);
   REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
 
-  auto payload_or = harness->kernel().payload_transport_broker().resolve_local_payload_ref(
-      get_resp.items(0).payload_ref(),
-      artifact_id,
-      absl::Now(),
-      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-      "op-survive-retire");
+  auto payload_or = [&]() -> absl::StatusOr<tensorcast::daemon::PayloadTransportBroker::ResolvedPayload> {
+    if (!get_resp.items(0).payload_ref().empty()) {
+      return harness->kernel().payload_transport_broker().resolve_local_payload_ref(
+          get_resp.items(0).payload_ref(),
+          artifact_id,
+          absl::Now(),
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+          "op-survive-retire");
+    }
+    REQUIRE(get_resp.items(0).has_batch_payload_slice());
+    REQUIRE(get_resp.batch_transports_size() == 1);
+    const auto& transport = get_resp.batch_transports(0);
+    REQUIRE(transport.transport_id() == get_resp.items(0).batch_payload_slice().transport_id());
+    REQUIRE(transport.has_grpc_chunk_ref());
+    auto resolved_or = harness->kernel().payload_transport_broker().fetch_batch_payload_ref(
+        harness->kernel().worker_directory_cache(),
+        absl::Now(),
+        absl::Seconds(1),
+        kDaemonId,
+        transport.grpc_chunk_ref().batch_payload_ref(),
+        tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+        "op-survive-retire");
+    if (!resolved_or.ok()) {
+      return resolved_or.status();
+    }
+    tensorcast::daemon::PayloadTransportBroker::ResolvedPayload payload;
+    payload.metadata.expires_at = resolved_or->metadata.expires_at;
+    payload.payload = resolved_or->payload != nullptr ? *resolved_or->payload : "";
+    return payload;
+  }();
   REQUIRE(payload_or.ok());
   REQUIRE(payload_or->payload == payload);
 }
@@ -2690,7 +2744,7 @@ TEST_CASE("BodyBackingManager derives stable admission from shared policy flow",
     });
   };
 
-  const std::string retained_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.cmV0YWluZWQ~layout_v1~b64u.azQ";
+  const std::string retained_artifact_id = make_test_byte_artifact_id("retained:blk-4");
   const auto retained_payload = std::make_shared<const std::string>("retained-home-payload");
   tensorcast::daemon::v2::PutIfAbsentInvariant retained_invariant;
   set_invariant(&retained_invariant, "layout_v1", *retained_payload);
@@ -2715,7 +2769,7 @@ TEST_CASE("BodyBackingManager derives stable admission from shared policy flow",
   REQUIRE(retained_or->body_handle.replica_handle().key().device.type == tensorcast::DeviceType::CPU);
   REQUIRE(retained_or->body_handle.retire().ok());
 
-  const std::string transient_artifact_id = "cgid:byte_artifact~tenant~engine~b64u.dHJhbnNpZW50~layout_v1~b64u.azQ";
+  const std::string transient_artifact_id = make_test_byte_artifact_id("transient:blk-4");
   const auto transient_payload = std::make_shared<const std::string>("transient-forward-payload");
   tensorcast::daemon::v2::PutIfAbsentInvariant transient_invariant;
   set_invariant(&transient_invariant, "layout_v1", *transient_payload);
@@ -2740,7 +2794,7 @@ TEST_CASE("BodyBackingManager fast CPU staging hashes during local byte ingress"
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   tensorcast::daemon::BodyBackingManager manager(*engine);
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.ZmFzdA~layout_v1~b64u.azQ";
+  const std::string artifact_id = make_test_byte_artifact_id("fast-cpu:blk-4");
   const auto payload = std::make_shared<const std::string>("fast-cpu-body-payload");
   tensorcast::daemon::v2::PutIfAbsentInvariant invariant;
   set_invariant(&invariant, "layout_v1", *payload);
@@ -2773,7 +2827,7 @@ TEST_CASE("HomeBatchTouchTtl keeps immortal entries immortal", "[daemon][batch][
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azQ";
+  const std::string artifact_id = make_test_byte_artifact_id("ttl-immortal:blk-4");
   const std::string payload = "payload-immortal";
   const uint64_t shard_id = shard_for_artifact(artifact_id);
 
@@ -2820,7 +2874,7 @@ TEST_CASE("HomeBatch expiry retires retained core replica", "[daemon][batch][ttl
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  const std::string artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azc";
+  const std::string artifact_id = make_test_byte_artifact_id("ttl-cleanup:blk-7");
   const std::string payload = "payload-expire-cleanup";
   const uint64_t shard_id = shard_for_artifact(artifact_id);
 

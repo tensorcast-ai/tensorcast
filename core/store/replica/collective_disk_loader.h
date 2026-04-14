@@ -3,12 +3,14 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -33,6 +35,8 @@ struct CollectiveDiskLoadRequest {
 struct CollectiveDiskLoadResult {
   bool handled{false};
   absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  std::string skip_reason;
 };
 
 struct CollectiveMappedTargetLoadOptions {
@@ -55,6 +59,8 @@ struct CollectiveMappedTargetLoadRequest {
 struct CollectiveMappedTargetLoadResult {
   bool handled{false};
   absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  std::string skip_reason;
 };
 
 struct LocalBatchedDiskLoadRequest {
@@ -70,7 +76,26 @@ struct LocalBatchedDiskLoadRequest {
 struct LocalBatchedDiskLoadResult {
   bool handled{false};
   absl::Status status{absl::OkStatus()};
+  std::string skip_reason;
 };
+
+struct LocalBatchedPlanSummary {
+  bool eligible{false};
+  std::string reason;
+  uint64_t requested_source_bytes{0};
+  uint64_t unique_source_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+  uint64_t batch_count{0};
+  uint64_t dedup_saving_bytes{0};
+  uint64_t direct_dedup_copy_bytes{0};
+  size_t replicated_jobs{0};
+  size_t dim0_jobs{0};
+  size_t dim1_jobs{0};
+};
+
+absl::StatusOr<LocalBatchedPlanSummary> summarize_local_batched_disk_load(
+    const materialization::contracts::RepresentationWorkPlan& representation_work_plan,
+    const StoreEngineOptions::MaterializationStrategyConfig& strategy_config);
 
 CollectiveDiskLoadResult try_collective_disk_load(
     const CollectiveDiskLoadRequest& request,

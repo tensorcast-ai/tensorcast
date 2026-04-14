@@ -401,7 +401,11 @@ class TransportService:
         pending_request.set_scheduling_group(scheduling_group)
 
         try:
-            with self.replica_repository.transaction() as tx:
+            # Serialize the initial replay reconciliation, queue mutation, and first
+            # dispatch pass under the same gate as complete_transport(). This keeps
+            # the pending queue on a single mutation timeline and avoids malformed
+            # rows under concurrent request storms.
+            with self._dispatch_loop_lock, self.replica_repository.transaction() as tx:
                 self.pending_transport_request_repository.purge_malformed_rows(
                     cursor=tx
                 )
@@ -452,6 +456,39 @@ class TransportService:
                     )
                     if replica is not None:
                         return replica, existing_transport.transport_id
+
+                self.pending_transport_request_repository.expire_enqueued_deadlines(
+                    now_utc=datetime.now(timezone.utc),
+                    cursor=tx,
+                )
+                self._dispatch_pending_requests(tx=tx)
+                (
+                    resolved_replica,
+                    resolved_transport_id,
+                    terminal_pending_state,
+                ) = self._resolve_pending_request_state(
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    cursor=tx,
+                )
+                if resolved_replica is not None and resolved_transport_id is not None:
+                    inc_transport_request(artifact_id, "success")
+                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    return resolved_replica, resolved_transport_id
+                if terminal_pending_state == PendingTransportState.EXPIRED:
+                    inc_transport_dispatch_event("request_terminal_expired")
+                    inc_transport_request(artifact_id, "timeout")
+                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    raise TimeoutError(
+                        "Queued transport request expired before dispatch"
+                    )
+                if terminal_pending_state == PendingTransportState.CANCELLED:
+                    inc_transport_dispatch_event("request_terminal_cancelled")
+                    inc_transport_request(artifact_id, "timeout")
+                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    raise TimeoutError(
+                        "Queued transport request cancelled before dispatch"
+                    )
         except DatabaseError as exc:
             if isinstance(exc.__cause__, ValidationError):
                 raise exc.__cause__ from exc

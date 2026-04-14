@@ -15,6 +15,7 @@ _CGID_MIN_LEN: int = 8
 _CGID_MAX_LEN: int = 200
 BYTE_ARTIFACT_CGID_NAMESPACE: str = "byte_artifact"
 _CGID_SEGMENT_DELIM: str = "~"
+_LEGACY_BYTE_ARTIFACT_SEGMENT_COUNT: int = 6
 _BYTE_ARTIFACT_SEGMENT_COUNT: int = 7
 _B64U_PREFIX: str = "b64u."
 
@@ -101,11 +102,17 @@ def parse_byte_artifact_cgid(artifact_id: str) -> ByteArtifactCgidParts:
     suffix = artifact_id[len(CGID_PREFIX) :]
     segments = suffix.split(_CGID_SEGMENT_DELIM)
     if (
-        len(segments) != _BYTE_ARTIFACT_SEGMENT_COUNT
+        len(segments)
+        not in {
+            _LEGACY_BYTE_ARTIFACT_SEGMENT_COUNT,
+            _BYTE_ARTIFACT_SEGMENT_COUNT,
+        }
         or segments[0] != BYTE_ARTIFACT_CGID_NAMESPACE
     ):
         raise ValueError(
             "byte_artifact cgid must match "
+            "'cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~"
+            "<layout_id>~<engine_key_enc>' or "
             "'cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~"
             "<model_version_enc>~<layout_id>~<engine_key_enc>'"
         )
@@ -116,6 +123,15 @@ def parse_byte_artifact_cgid(artifact_id: str) -> ByteArtifactCgidParts:
         for segment in segments
     ):
         raise ValueError("byte_artifact cgid segments contain forbidden delimiters")
+    if len(segments) == _LEGACY_BYTE_ARTIFACT_SEGMENT_COUNT:
+        return ByteArtifactCgidParts(
+            namespace=segments[1],
+            engine=segments[2],
+            model_id_enc=segments[3],
+            model_version_enc="",
+            layout_id=segments[4],
+            engine_key_enc=segments[5],
+        )
     return ByteArtifactCgidParts(
         namespace=segments[1],
         engine=segments[2],

@@ -182,7 +182,7 @@ def test_get_server_config_parses_source_bound_contract_surface(monkeypatch) -> 
             | int(SourceBoundCapability.TYPED_EXECUTION_DIAGNOSTICS)
             | int(SourceBoundCapability.SINGLE_MINT_BINDING_CLOSEOUT)
         ),
-        source_bound_contract_version=3,
+        source_bound_contract_version=4,
     )
 
     def _fake_unary(method, request, *, timeout, span, retries):
@@ -198,7 +198,7 @@ def test_get_server_config_parses_source_bound_contract_surface(monkeypatch) -> 
 
     config = daemon_ctl.DaemonCtl.get_server_config(ctl)
 
-    assert config.source_bound_contract_version == 3
+    assert config.source_bound_contract_version == 4
     assert config.has_source_bound_capability(
         SourceBoundCapability.FIRST_CLASS_COLLECTIVE_INGRESS
     )

@@ -29,8 +29,7 @@ links:
   related:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0109-batched-owner-file-collective-executor.md
-    - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0112-binding-native-serving-realization-and-publication.md
   predecessors:
     - ./0071-managed-shared-disk-persistence.md
     - ./0078-selection-first-artifact-retrieval.md
@@ -103,10 +102,13 @@ Residual execution tracking:
 
 - the retrieval-policy and execution-topology split defined here is already
   landed and remains authoritative;
-- downstream strategy-plane, owner-file collective, representation-publication,
-  and Step3p5 closeout work is now consolidated under
-  `0113-step3p5-closure-and-sot-convergence`;
-- the deleted `0108`-series execution notes are no longer active SOT.
+- downstream strategy-plane, owner-file collective, and same-binding serving
+  follow-up now track through the surviving owners:
+  - `0108` plus its companion plan,
+  - `0109` plus `0109-01`,
+  - `0112` plus `0112-01`;
+- the deleted `0108`-series execution notes and later closure-only design notes
+  are no longer active SOT.
 
 # Problem Statement
 
@@ -764,8 +766,9 @@ Mitigations:
 - `docs/designs/0084-binding-unified-model-and-contract.md`
 - `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`
 - `docs/designs/0109-batched-owner-file-collective-executor.md`
-- `docs/designs/0113-step3p5-closure-and-sot-convergence.md`
-- `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+- `docs/designs/0112-binding-native-serving-realization-and-publication.md`
+- `docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`
+- `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`
 - `docs/designs/0104-artifact-realization-and-cluster-rollout.md`
 - `docs/architecture/api/api-design.md`
 - `docs/architecture/api/materialization-flow.md`

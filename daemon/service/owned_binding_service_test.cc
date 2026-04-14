@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,6 +22,9 @@
 namespace {
 
 namespace v2 = tensorcast::daemon::v2;
+using ByteRangeMap = tensorcast::store::loader::ByteRangeMap;
+using ByteRangeSegment = tensorcast::store::loader::ByteRangeSegment;
+using SourceBoundLoweringArtifacts = tensorcast::store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts;
 
 std::filesystem::path test_tmpdir() {
   const char* env = std::getenv("TEST_TMPDIR");
@@ -72,6 +76,23 @@ v2::TargetLayout make_target_layout() {
   offset->set_storage_offset(0);
   offset->set_logical_length(4);
   return layout;
+}
+
+ByteRangeMap make_data_map(uint64_t total_bytes) {
+  ByteRangeMap map;
+  map.total_bytes = total_bytes;
+  map.num_sources = total_bytes > 0 ? 1 : 0;
+  if (total_bytes > 0) {
+    map.segments.push_back(
+        ByteRangeSegment{
+            .kind = ByteRangeSegment::Kind::kData,
+            .dst_offset = 0,
+            .length = total_bytes,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return map;
 }
 
 class BindingContributionGuardClient final : public tensorcast::store::testing::GlobalStoreClientStub {
@@ -360,4 +381,150 @@ TEST_CASE(
   REQUIRE(
       status_with_metadata.error_message().find("conflicts with operation_id collective metadata") ==
       std::string::npos);
+}
+
+TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifact state", "[daemon][binding]") {
+  Fixture fix;
+  const auto record = fix.insert_ready_artifact_record();
+
+  const auto plan_summary = tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+      .planned_collective_candidate_bytes = 4,
+      .planned_collective_admitted_bytes = 4,
+      .planned_local_typed_bytes = 0,
+      .planned_non_admitted_typed_bytes = 0,
+      .planned_generic_residual_bytes = 0,
+      .planner_reject_reason_buckets = {{"source_locality_host_local", 4}},
+      .collective_lane_eligible = false,
+      .strict_pure_collective_eligible = false,
+  };
+
+  const auto status = tensorcast::daemon::evaluate_strict_collective_preflight_for_testing(
+      &plan_summary, v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  CHECK(status.error_message().find("pure-collective eligible") != std::string::npos);
+  CHECK(status.error_message().find("planned_local_typed_bytes=0") != std::string::npos);
+  CHECK(status.error_message().find("source_locality_host_local=4") != std::string::npos);
+
+  absl::MutexLock lock(&record->mu);
+  REQUIRE(record->state == v2::BINDING_STATE_READY_ARTIFACT);
+  REQUIRE(record->current_artifact_id == "artifact-old");
+  REQUIRE(record->current_binding_value_id == "value-1");
+}
+
+TEST_CASE("SourceBoundPlanSummary keeps collective lane eligibility separate from pure blockers", "[daemon][binding]") {
+  using WorkItem = tensorcast::store::materialization::contracts::RepresentationWorkItem;
+  using WorkItemKind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind;
+  using WorkPartitionKind = tensorcast::store::materialization::contracts::WorkPartitionKind;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  tensorcast::store::materialization::contracts::RepresentationWorkPlan work_plan;
+
+  WorkItem collective_item;
+  collective_item.kind = WorkItemKind::kTensorCopy;
+  collective_item.partition_kind = WorkPartitionKind::kDim0Partitioned;
+  collective_item.committed_bytes = 8;
+  work_plan.items.push_back(collective_item);
+
+  WorkItem residual_item;
+  residual_item.kind = WorkItemKind::kResidualByteRange;
+  residual_item.committed_bytes = 4;
+  work_plan.items.push_back(residual_item);
+
+  WorkItem fill_item;
+  fill_item.kind = WorkItemKind::kPadFill;
+  fill_item.committed_bytes = 2;
+  work_plan.items.push_back(fill_item);
+
+  resolved_plan.representation_work_plan = work_plan;
+
+  tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  strategy_config.enable_owner_file_collective = true;
+  strategy_config.allow_mixed_execution = true;
+  strategy_config.owner_file_collective_allow_mixed_residual = true;
+
+  tensorcast::store::loading::ExecutionTopologyContext execution_topology;
+  execution_topology.collective_load_group =
+      tensorcast::store::loading::CollectiveLoadGroupHint{.group_id = "group-a", .world_size = 4, .rank = 1};
+  execution_topology.source_locality = tensorcast::store::loading::SourceLocalityHint::kSharedSource;
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(12);
+
+  const auto summary = tensorcast::daemon::summarize_source_bound_plan_for_testing(
+      resolved_plan,
+      lowering_artifacts,
+      strategy_config,
+      execution_topology,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      /*disk_source_available=*/true);
+
+  CHECK(summary.collective_lane_eligible);
+  CHECK_FALSE(summary.strict_pure_collective_eligible);
+  CHECK(summary.execution_plan_kind == "collective_first_mixed");
+  CHECK(summary.planned_collective_candidate_bytes == 8);
+  CHECK(summary.planned_collective_admitted_bytes == 8);
+  CHECK(summary.planned_generic_residual_bytes == 4);
+  CHECK(summary.planned_local_typed_bytes == 2);
+  CHECK(summary.planner_reject_reason_buckets.empty());
+}
+
+TEST_CASE(
+    "SourceBoundPlanSummary keeps admitted collective bytes when typed work falls back to generic",
+    "[daemon][binding]") {
+  using WorkItem = tensorcast::store::materialization::contracts::RepresentationWorkItem;
+  using WorkItemKind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind;
+  using WorkPartitionKind = tensorcast::store::materialization::contracts::WorkPartitionKind;
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  tensorcast::store::materialization::contracts::RepresentationWorkPlan work_plan;
+
+  WorkItem collective_item;
+  collective_item.kind = WorkItemKind::kTensorCopy;
+  collective_item.partition_kind = WorkPartitionKind::kDim0Partitioned;
+  collective_item.committed_bytes = 8;
+  work_plan.items.push_back(collective_item);
+
+  WorkItem concat_item;
+  concat_item.kind = WorkItemKind::kConcatAssemble;
+  concat_item.committed_bytes = 4;
+  work_plan.items.push_back(concat_item);
+
+  resolved_plan.representation_work_plan = work_plan;
+
+  tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  strategy_config.enable_owner_file_collective = true;
+  strategy_config.allow_mixed_execution = true;
+
+  tensorcast::store::loading::ExecutionTopologyContext execution_topology;
+  execution_topology.collective_load_group =
+      tensorcast::store::loading::CollectiveLoadGroupHint{.group_id = "group-a", .world_size = 4, .rank = 1};
+  execution_topology.source_locality = tensorcast::store::loading::SourceLocalityHint::kSharedSource;
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(12);
+
+  const auto summary = tensorcast::daemon::summarize_source_bound_plan_for_testing(
+      resolved_plan,
+      lowering_artifacts,
+      strategy_config,
+      execution_topology,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      /*disk_source_available=*/true);
+
+  CHECK(summary.collective_lane_eligible);
+  CHECK_FALSE(summary.strict_pure_collective_eligible);
+  CHECK(summary.execution_plan_kind == "collective_first_mixed");
+  CHECK(summary.planned_collective_candidate_bytes == 8);
+  CHECK(summary.planned_collective_admitted_bytes == 8);
+  CHECK(summary.planned_non_admitted_typed_bytes == 4);
+  REQUIRE(summary.planner_reject_reason_buckets.contains("concat_not_admitted"));
+  CHECK(summary.planner_reject_reason_buckets.at("concat_not_admitted") == 4);
+  REQUIRE(summary.planner_reject_reason_buckets.contains("typed_work_not_collective_admitted"));
+  CHECK(summary.planner_reject_reason_buckets.at("typed_work_not_collective_admitted") == 4);
+  CHECK_FALSE(summary.planner_reject_reason_buckets.contains("local_typed_work_present"));
+  CHECK_FALSE(summary.planner_reject_reason_buckets.contains("true_generic_residual_present"));
 }

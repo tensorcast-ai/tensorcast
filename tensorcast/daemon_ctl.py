@@ -3835,9 +3835,31 @@ class DaemonCtl:
     ) -> AssemblyAttemptRef:
         if representation_publish_spec is not None:
             req = store_daemon_pb2.StartAssemblyAttemptRequest()
-            req.representation_publish_spec.CopyFrom(
-                representation_publish_spec.to_proto()
+            spec_proto = representation_publish_spec.to_proto()
+            resolved_layout_id = layout_id or getattr(
+                representation_publish_spec, "layout_id", None
             )
+            if resolved_layout_id and not spec_proto.layout_id:
+                spec_proto.layout_id = str(resolved_layout_id)
+            resolved_requirements = requirements or getattr(
+                representation_publish_spec, "requirements", None
+            )
+            if resolved_requirements is not None and not spec_proto.HasField(
+                "requirements"
+            ):
+                spec_proto.requirements.CopyFrom(
+                    resolved_requirements.to_publication_proto()
+                )
+            resolved_readiness_policy = readiness_policy or getattr(
+                representation_publish_spec, "readiness_policy", None
+            )
+            if resolved_readiness_policy is not None and not spec_proto.HasField(
+                "readiness_policy"
+            ):
+                spec_proto.readiness_policy.CopyFrom(
+                    resolved_readiness_policy.to_publication_proto()
+                )
+            req.representation_publish_spec.CopyFrom(spec_proto)
         else:
             if not layout_id:
                 raise ValueError("layout_id is required")

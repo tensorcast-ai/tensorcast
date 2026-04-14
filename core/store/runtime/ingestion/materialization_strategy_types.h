@@ -27,6 +27,36 @@ enum class SourceByteSpace : std::uint8_t {
   kView = 1,
 };
 
+enum class SourceBoundPolicy : std::uint8_t {
+  kRequirePureCollective = 0,
+  kCollectiveFirst = 1,
+  kDisableCollective = 2,
+};
+
+enum class SourceBoundExecutionMode : std::uint8_t {
+  kPureCollective = 0,
+  kCollectiveFirstMixed = 1,
+  kGenericOnly = 2,
+  kLocalTypedOnly = 3,
+  kRejected = 4,
+};
+
+inline std::string_view source_bound_execution_mode_name(SourceBoundExecutionMode mode) {
+  switch (mode) {
+    case SourceBoundExecutionMode::kPureCollective:
+      return "pure_collective";
+    case SourceBoundExecutionMode::kCollectiveFirstMixed:
+      return "collective_first_mixed";
+    case SourceBoundExecutionMode::kLocalTypedOnly:
+      return "local_typed_only";
+    case SourceBoundExecutionMode::kRejected:
+      return "reject";
+    case SourceBoundExecutionMode::kGenericOnly:
+    default:
+      return "generic_only";
+  }
+}
+
 struct ResolvedSourceBinding {
   loading::MaterializationSource source{loading::MaterializationSource::kDisk};
   SourceByteSpace source_byte_space{SourceByteSpace::kCanonical};
@@ -53,6 +83,20 @@ struct SourceBoundExecutionPlanSummary {
   bool strict_pure_collective_eligible{false};
 };
 
+struct SourceBoundLoweringStats {
+  uint64_t total_dst_tensors{0};
+  uint64_t compatible_candidates{0};
+  uint64_t compatible_bytes{0};
+  uint64_t concat_candidates{0};
+  uint64_t concat_bytes{0};
+  uint64_t rejected_mixed_src_or_dim{0};
+  uint64_t rejected_mixed_src_or_dim_bytes{0};
+  uint64_t rejected_non_contiguous{0};
+  uint64_t rejected_non_contiguous_bytes{0};
+  uint64_t rejected_unsupported_distribution{0};
+  uint64_t rejected_unsupported_distribution_bytes{0};
+};
+
 struct ResolvedMaterializationPlan {
   std::string artifact_id;
   uint64_t generation{0};
@@ -61,9 +105,38 @@ struct ResolvedMaterializationPlan {
   loading::IntoTargetLayout target_layout;
   std::optional<materialization::contracts::RepresentationTransformContract> representation_transform_contract;
   std::optional<materialization::contracts::RepresentationWorkPlan> representation_work_plan;
-  std::optional<loader::ByteRangeMap> executor_private_generic_fallback_map;
-  std::optional<loader::ByteRangeMap> collective_compatibility_map;
-  std::optional<SourceBoundExecutionPlanSummary> source_bound_plan_summary;
+};
+
+struct SourceBoundLoweringArtifacts {
+  std::optional<loader::ByteRangeMap> executor_generic_data_map;
+  std::optional<loader::ByteRangeMap> collective_data_map;
+  SourceBoundLoweringStats lowering_stats;
+};
+
+struct SourceBoundLanePlan {
+  SourceBoundExecutionMode mode{SourceBoundExecutionMode::kGenericOnly};
+  loader::ByteRangeMap collective_lane_map;
+  loader::ByteRangeMap generic_backend_map;
+  loader::ByteRangeMap true_residual_map;
+  uint64_t local_typed_bytes{0};
+  uint64_t local_pad_bytes{0};
+  uint64_t local_fill_bytes{0};
+  uint64_t deferred_typed_bytes{0};
+  bool require_collective_success{false};
+  std::string selection_reason;
+  absl::flat_hash_map<std::string, uint64_t> reject_reason_buckets;
+};
+
+struct SourceBoundStrategyPlan {
+  SourceBoundPolicy policy{SourceBoundPolicy::kCollectiveFirst};
+  SourceBoundLanePlan lane_plan;
+  SourceBoundExecutionPlanSummary summary;
+};
+
+struct PreparedSourceBoundExecutionPlan {
+  ResolvedMaterializationPlan resolved_plan;
+  std::optional<SourceBoundLoweringArtifacts> lowering_artifacts;
+  std::optional<SourceBoundStrategyPlan> strategy_plan;
 };
 
 enum class ExecutionStrategyExecutor : std::uint8_t {
@@ -133,6 +206,15 @@ struct ExecutionStrategyPlan {
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
   std::optional<materialization::contracts::RepresentationWorkPlan> representation_work_plan;
   std::optional<loading::CollectiveLoadGroupHint> collective_load_group;
+  std::optional<SourceBoundLanePlan> source_bound_lane_plan;
+};
+
+struct CollectiveExecutionMetrics {
+  uint64_t unique_source_bytes{0};
+  uint64_t peer_transfer_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+  uint64_t batch_count{0};
+  uint64_t dedup_saving_bytes{0};
 };
 
 struct ExecutionCommitReport {
@@ -144,6 +226,8 @@ struct ExecutionCommitReport {
   uint64_t actual_collective_committed_bytes{0};
   uint64_t actual_local_typed_bytes{0};
   uint64_t actual_generic_backend_bytes{0};
+  CollectiveExecutionMetrics collective_metrics;
+  std::string collective_skip_reason;
   bool collective_handled{false};
   bool direct_write_supported{false};
   bool source_ordered{false};

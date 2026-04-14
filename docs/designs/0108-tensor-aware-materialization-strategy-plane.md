@@ -40,9 +40,10 @@ links:
   related:
     - ./0107-retrieval-policy-plane-cleanup.md
     - ./0109-batched-owner-file-collective-executor.md
-    - ./0113-step3p5-closure-and-sot-convergence.md
-    - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ./0112-binding-native-serving-realization-and-publication.md
+    - ../plans/0108-tensor-aware-materialization-strategy-plane.md
+    - ../plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md
+    - ../plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md
   dependencies:
     - ./0004-unified-runtime-config.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -96,6 +97,11 @@ The final model is:
   surface, but no longer acts as the mandatory primary IR for all retrievals.
 - executor-private planning artifacts do not become SDK, proto, or generic
   `MaterializeHints` contract.
+- source-bound mapped and binding requests must also consume the same shared
+  strategy abstraction:
+  - explicit lane allocation is required before execution begins,
+  - runtime must execute the chosen plan exactly,
+  - and implicit widening to a slower generic path is forbidden.
 
 This design is driven by actual loader experiments on the Step3p5 weight set
 and exists to close the remaining host-local gap against `fastsafetensors`
@@ -110,15 +116,26 @@ plane, but execution is now intentionally split:
 - the request-normalization prerequisite remains owned by
   `docs/designs/0107-retrieval-policy-plane-cleanup.md`;
 - the mapped-target, semantic-contract, typed-config extraction, and ordinary
-  replica convergence work that previously lived in the deleted `0108` / `0108-01`
-  companion plans is now folded back into this design's implementation record;
-- all remaining residual execution, delete gates, and Step3p5-oriented closure
-  work now live in
-  `docs/designs/0113-step3p5-closure-and-sot-convergence.md`, while active
-  execution tracking is centralized in
-  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
-- no new execution note should reopen the deleted `0108` companion plans unless
-  `0113` or `0114` is revised first.
+  replica convergence work that previously lived in deleted earlier companion
+  plans is now folded back into this design's implementation record;
+- the former standalone `0115` explicit source-bound planning closure is now
+  folded into this design:
+  - explicit lane plans,
+  - semantic-only `ResolvedMaterializationPlan`,
+  - and the "no implicit fallback" rule are normative `0108` ownership now;
+- the active `0108` execution scope is tracked only in
+  `docs/plans/0108-tensor-aware-materialization-strategy-plane.md`, and it is
+  intentionally limited to host-local local-executor convergence and ordinary
+  shared-runtime cleanup;
+- owner-file collective executor rollout, mixed-residual policy, and
+  executor-specific delete gates now live under
+  `docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`;
+- same-binding serving-path closure, mounted operator evidence, and delete-gate
+  cleanup now live under `0112` plus
+  `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`;
+- no separate long-term design owner remains for `0113`, `0114`, `0115`, or
+  `0117`; their still-relevant normative content must live in the surviving
+  owners named above.
 
 # Implementation Status
 
@@ -160,10 +177,11 @@ Partially implemented in this repository:
 - ordinary replica local-batched and collective executors now consume shared
   work-plan items and common-runtime-selected plan ownership instead of
   recovering semantic truth in executor-local code.
-- the current owner-file collective implementation still lives as a replica-side
-  prototype with eager `owned_payload` preload and optional root whole-source
-  preload, but it is now explicitly non-default prototype scaffolding rather
-  than the owner of ordinary startup routing.
+- the current owner-file collective implementation now uses the bounded batched
+  owner-file steady path without eager `owned_payload` residency or root
+  whole-source preload on the selected route, and ordinary host-local
+  local-batched selection is now driven by a shared planner/executor admission
+  summary rather than a late replica fallback.
 - ordinary non-collective `into_target` still executes through the generic
   byte-range backend after shared lowering.
 - `ExecutionCommitReport` and ordinary strategy-plan diagnostics now apply to
@@ -171,10 +189,32 @@ Partially implemented in this repository:
   owns the follow-on batch-level owner-file executor semantics.
 - public SDK retrieval APIs remain unchanged.
 
-Remaining follow-up work after this implementation is operational validation on
-the Step3p5 benchmark, full vLLM serving matrix described in the companion
-plan, and landing the common-runtime local tensor-aware executor that fully
-reabsorbs the remaining replica-side prototype behavior.
+Remaining `0108`-owned work after this implementation is now intentionally
+narrow:
+
+- land the dedicated shared-runtime local tensor-aware executor for the ordinary
+  host-local `GPU <- DISK` path,
+- retire the remaining ordinary-path prototype ownership once that executor
+  closes parity,
+- keep source-bound mapped and binding execution on the explicit lane-plan
+  strategy trunk already absorbed here,
+- and extend source-bound local execution only if later evidence shows a real
+  remaining gap and only through the same explicit lane-plan model.
+
+This design no longer owns:
+
+- owner-file collective executor rollout or shared-source defaulting,
+- same-binding mounted Step3p5 rollout and delete-gate cleanup,
+- or downstream `internal-vllm` rollout tracking.
+
+Normative source-bound execution rule after the reorganization:
+
+- source-bound mapped and binding requests must enter runtime with an explicit
+  strategy-owned lane plan,
+- runtime must not derive executor behavior from missing optional maps or
+  summary-only fallback,
+- and any future source-bound local tensor-aware executor must extend the shared
+  lane-plan model rather than introducing a second mapped fast path.
 
 Normative sequencing rule:
 
@@ -1049,8 +1089,11 @@ Mitigations:
 - [`docs/designs/0078-selection-first-artifact-retrieval.md`](/data/workspace/tensorcast-280/docs/designs/0078-selection-first-artifact-retrieval.md)
 - [`docs/designs/0084-binding-unified-model-and-contract.md`](/data/workspace/tensorcast-280/docs/designs/0084-binding-unified-model-and-contract.md)
 - [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
-- [`docs/designs/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/designs/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/designs/0109-batched-owner-file-collective-executor.md`](/data/workspace/tensorcast-280/docs/designs/0109-batched-owner-file-collective-executor.md)
+- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
+- [`docs/plans/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/plans/0108-tensor-aware-materialization-strategy-plane.md)
+- [`docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`](/data/workspace/tensorcast-280/docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md)
+- [`docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`](/data/workspace/tensorcast-280/docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md)
 - [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
 - [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
 - [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)

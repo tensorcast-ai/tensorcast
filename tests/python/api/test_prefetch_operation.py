@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 import weakref
 from typing import Any
 
 import tensorcast as tc
 from tensorcast.api._materialize import MaterializationPayload
+from tensorcast.api._device import device_uuid_for
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.common.selection_identity import (
     compute_selection_hash,
@@ -101,12 +103,15 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
         view_id="",
         view_subset_hash=None,
     ).hex()
+    logical_layout_hash = artifact._build_artifact_selection().logical_layout_hash.hex()
+    device_uuid = device_uuid_for(0)
     action_fingerprint = (
-        f"prefetch|daemon={daemon_id}|selection={selection_hash}"
-        f"|device=0|lease=NO_LEASE|v1"
+        f"prefetch|daemon={daemon_id}|artifact=aid|layout={logical_layout_hash}"
+        f"|selection={selection_hash}|device=0|device_uuid={device_uuid}|lease=NO_LEASE|v2"
     )
     ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
-    expected = str(uuid.uuid5(ns, f"{ctx.idempotency_key}|{action_fingerprint}"))
+    idempotency_key_hex = hashlib.sha256(ctx.idempotency_key.encode("utf-8")).hexdigest()
+    expected = str(uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}"))
 
     assert store._materialization.calls
     assert store._materialization.calls[0]["replica_uuid"] == expected

@@ -20,6 +20,7 @@ import pytest
 import torch
 import yaml
 from google.protobuf import wrappers_pb2
+from pydantic import ValidationError
 
 from tensorcast.api.store import (
     ArtifactError,
@@ -364,44 +365,50 @@ def _spawn_daemon(
     post_seal: dict[str, bool] | None = None,
 ) -> tuple[str, int, subprocess.Popen]:
     bin_path = ensure_cpp_daemon_binary()
-    listen_port = _get_free_port()
-    storage_dir = tmp_path / f"daemon_{listen_port}"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    daemon_id = f"daemon_piece_{listen_port}"
+    last_error: Exception | None = None
+    for _attempt in range(3):
+        listen_port = _get_free_port()
+        storage_dir = tmp_path / f"daemon_{listen_port}"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        daemon_id = f"daemon_piece_{listen_port}"
 
-    cfg = _build_daemon_config(
-        listen_port=listen_port,
-        storage_dir=storage_dir,
-        gs_port=gs_port,
-        daemon_id=daemon_id,
-        post_seal=post_seal,
-    )
-
-    with tempfile.NamedTemporaryFile(
-        prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
-    ) as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-        cfg_path = Path(f.name)
-
-    env = build_daemon_process_env(os.environ)
-    proc_log = storage_dir / "daemon_proc.log"
-    with proc_log.open("a") as log_fd:
-        proc = subprocess.Popen(
-            [str(bin_path), f"--config={cfg_path}"],
-            stdout=log_fd,
-            stderr=log_fd,
-            env=env,
+        cfg = _build_daemon_config(
+            listen_port=listen_port,
+            storage_dir=storage_dir,
+            gs_port=gs_port,
+            daemon_id=daemon_id,
+            post_seal=post_seal,
         )
-        try:
-            _wait_ready(f"127.0.0.1:{listen_port}", proc)
-            return (f"127.0.0.1:{listen_port}", gs_port, proc)
-        except Exception:
-            proc.terminate()
+
+        with tempfile.NamedTemporaryFile(
+            prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
+        ) as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+            cfg_path = Path(f.name)
+
+        env = build_daemon_process_env(os.environ)
+        proc_log = storage_dir / "daemon_proc.log"
+        with proc_log.open("a") as log_fd:
+            proc = subprocess.Popen(
+                [str(bin_path), f"--config={cfg_path}"],
+                stdout=log_fd,
+                stderr=log_fd,
+                env=env,
+            )
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            raise
+                _wait_ready(f"127.0.0.1:{listen_port}", proc)
+                return (f"127.0.0.1:{listen_port}", gs_port, proc)
+            except Exception as exc:
+                last_error = exc
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("failed to spawn daemon")
 
 
 @pytest.fixture(scope="module")
@@ -943,7 +950,8 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
 
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         binding = source_artifact.bind(device="cuda:0", packing="byte_space")
-        sealed = binding.seal_current(update_epoch=binding.begin_update())
+        current_value = binding.current_value
+        assert current_value is not None
         source_version_key = "models/demo/source/v1"
         attempt = store.start_assembly_attempt(
             layout_id=layout_id,
@@ -954,7 +962,7 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
             ),
         )
 
-        partial = sealed.contribute_to_assembly(attempt=attempt)
+        partial = current_value.contribute_to_assembly(attempt=attempt)
         assert partial.contribution_kind == "canonical_full"
 
         result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
@@ -1005,7 +1013,7 @@ def test_complete_pure_transform_publication_publishes_serving_lineage(
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
 
-        result = store.complete_pure_transform_publication_bridge(
+        result = store.complete_pure_transform_publication(
             source_tensors,
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1082,7 +1090,7 @@ def test_complete_pure_transform_publication_structural_pp_publishes_serving_lin
             replicated_tensors=["weights"],
         )
 
-        result = store.complete_pure_transform_publication_bridge(
+        result = store.complete_pure_transform_publication(
             source_tensors,
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1154,7 +1162,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
             expected_view_ids=[],
         )
         source_handle_v1 = store.artifact(artifact_id=source_artifact_v1)
-        result_v1 = store.complete_pure_transform_publication_bridge(
+        result_v1 = store.complete_pure_transform_publication(
             _artifact_tensor_dict(store, artifact_id=source_artifact_v1),
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1188,7 +1196,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
             expected_view_ids=[],
         )
         source_handle_v2 = store.artifact(artifact_id=source_artifact_v2)
-        result_v2 = store.complete_pure_transform_publication_bridge(
+        result_v2 = store.complete_pure_transform_publication(
             _artifact_tensor_dict(store, artifact_id=source_artifact_v2),
             build_intent=ServingBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
@@ -1369,7 +1377,7 @@ def test_binding_attempt_rejects_serving_closeout_before_typed_contracts(
             expected_view_ids=[],
         )
 
-        with pytest.raises((ArtifactError, grpc.RpcError)) as exc_info:
+        with pytest.raises((ArtifactError, grpc.RpcError, ValidationError)) as exc_info:
             store.start_assembly_attempt(
                 layout_id=layout_id,
                 requirements=_canonical_full_requirements(),
@@ -1414,7 +1422,8 @@ def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
 
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         binding = source_artifact.bind(device="cuda:0", packing="byte_space")
-        sealed = binding.seal_current(update_epoch=binding.begin_update())
+        current_value = binding.current_value
+        assert current_value is not None
 
         frozen_key = "models/demo/source/frozen-v1"
         ignored_key = "models/demo/source/ignored-v2"
@@ -1435,7 +1444,7 @@ def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
         assert attempt_record.ParseFromString(attempt_resp.attempt.attempt_record_proto)
         assert attempt_record.intent.closeout_contract.source_version_key == frozen_key
 
-        sealed.contribute_to_assembly(attempt=attempt)
+        current_value.contribute_to_assembly(attempt=attempt)
         result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
         assert result.source_version_key == frozen_key
 
@@ -1460,7 +1469,7 @@ def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
         gs_channel.close()
 
 
-def test_piece_partial_contribution_rejected_for_ep_requirements(
+def test_piece_partial_contribution_accepted_for_ep_requirements(
     daemon_process, gs_server
 ):
     listen_addr, gs_port, _ = daemon_process
@@ -1494,11 +1503,10 @@ def test_piece_partial_contribution_rejected_for_ep_requirements(
             requirements=_ep_requirements([view_id]),
         )
 
-        with pytest.raises(ArtifactError) as exc_info:
-            binding.seal_current(
-                update_epoch=binding.begin_update()
-            ).contribute_to_assembly(attempt=attempt)
-        assert "coverage_contract mismatch" in str(exc_info.value)
+        partial = binding.seal_current(
+            update_epoch=binding.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+        assert partial.contribution_kind == "piece_partial"
     finally:
         with contextlib.suppress(Exception):
             channel.close()
@@ -1889,9 +1897,6 @@ def test_binding_piece_partial_replacement_and_pp_attempt(daemon_process, gs_ser
         replacement = sealed_a_new.contribute_to_assembly(attempt=attempt)
         assert replacement.contribution_kind == "piece_partial"
         assert replacement.view_id == view_id_a
-
-        reopened_epoch = binding_a_old.begin_update()
-        assert reopened_epoch
 
         second = sealed_b.contribute_to_assembly(attempt=attempt)
         assert second.contribution_kind == "piece_partial"

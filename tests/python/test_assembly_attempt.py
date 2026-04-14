@@ -16,10 +16,9 @@ from tensorcast.api.store import (
     AssemblyCloseoutContract,
     AssemblyRequirementSetRef,
     PublishedModelVersion,
-    PureTransformPublicationBundle,
-    RegisteredPureTransformPublication,
     RegisteredServingPublication,
     RepresentationPublishContract,
+    RepresentationPublishSpec,
     ServingArtifactManifest,
     ServingBuildIntent,
     Store,
@@ -209,7 +208,7 @@ def _binding_finalize_build_intent() -> ServingBuildIntent:
     )
 
 
-def _representation_publish_bundle() -> PureTransformPublicationBundle:
+def _representation_publish_bundle() -> RepresentationPublishSpec:
     manifest = ServingArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v1",
@@ -237,7 +236,7 @@ def _representation_publish_bundle() -> PureTransformPublicationBundle:
         serving_manifest_ref=contract.serving_manifest_ref,
         representation_publish_contract=contract,
     )
-    return PureTransformPublicationBundle(
+    return RepresentationPublishSpec(
         serving_artifact_id=contract.serving_artifact_id,
         serving_manifest_ref=contract.serving_manifest_ref,
         serving_manifest=manifest,
@@ -248,8 +247,8 @@ def _representation_publish_bundle() -> PureTransformPublicationBundle:
 
 
 def _plan_publication_result(
-    bundle: PureTransformPublicationBundle,
-) -> tuple[PlanResult, PlanStepRef[PureTransformPublicationBundle]]:
+    bundle: RepresentationPublishSpec,
+) -> tuple[PlanResult, PlanStepRef[RepresentationPublishSpec]]:
     step_ref = PlanStepRef("s-pure")
     result = PlanResult(
         ok=True,
@@ -323,7 +322,7 @@ def test_register_pure_transform_publication_registers_manifest_bearing_artifact
 
     store.put = _put  # type: ignore[method-assign]
 
-    result = store.register_pure_transform_publication_bridge(
+    result = store.register_pure_transform_publication(
         tensors,
         build_intent=build_intent,
         contract_family="canonical_full",
@@ -409,7 +408,7 @@ def test_register_binding_finalize_publication_registers_manifest_bearing_artifa
 
     store.put = _put  # type: ignore[method-assign]
 
-    result = store.register_binding_finalize_publication_bridge(
+    result = store.register_binding_finalize_publication(
         tensors,
         build_intent=build_intent,
         admission_facts=admission_facts,
@@ -496,7 +495,7 @@ def test_complete_pure_transform_publication_runs_register_and_closeout() -> Non
 
     store.put = _put  # type: ignore[method-assign]
 
-    result = store.complete_pure_transform_publication_bridge(
+    result = store.complete_pure_transform_publication(
         tensors,
         build_intent=build_intent,
         contract_family="canonical_full",
@@ -580,7 +579,7 @@ def test_complete_binding_finalize_publication_runs_register_and_closeout() -> N
 
     store.put = _put  # type: ignore[method-assign]
 
-    result = store.complete_binding_finalize_publication_bridge(
+    result = store.complete_binding_finalize_publication(
         tensors,
         build_intent=build_intent,
         admission_facts=admission_facts,
@@ -598,7 +597,7 @@ def test_complete_binding_finalize_publication_runs_register_and_closeout() -> N
     assert len(client.wait_calls) == 1
 
 
-def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors_for_contribution() -> (
+def test_complete_pure_transform_publication_canonical_full_routes_source_artifact_contribution() -> (
     None
 ):
     store_ref = _StoreStub()
@@ -621,13 +620,13 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
     def _register(
         tensors: dict[str, torch.Tensor],
         **kwargs: object,
-    ) -> RegisteredPureTransformPublication:
+    ) -> RegisteredServingPublication:
         del tensors
         del kwargs
         bundle = _representation_publish_bundle().model_copy(
             update={"contract_family": "canonical_full"}
         )
-        return RegisteredPureTransformPublication(
+        return RegisteredServingPublication(
             registered_artifact=RegisteredArtifact(
                 artifact_id="mi2:test:serving",
                 replica=ReplicaInfo(
@@ -651,14 +650,9 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
             requirements=AssemblyRequirementSetRef.canonical_full(),
         )
 
-    def _contribute_canonical(**kwargs: object) -> object:
-        captured["canonical_kwargs"] = kwargs
-        return object()
-
     def _contribute_source(**kwargs: object) -> tuple[object, ...]:
-        raise AssertionError(
-            "canonical_full publication should not contribute source artifacts"
-        )
+        captured["source_kwargs"] = kwargs
+        return ()
 
     def _seal_attempt(
         attempt: AssemblyAttemptRef,
@@ -689,14 +683,13 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
             serving_manifest_ref=build_serving_manifest_ref(),
         )
 
-    store.register_pure_transform_publication_bridge = _register  # type: ignore[method-assign]
+    store.register_pure_transform_publication = _register  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
-    store._contribute_canonical_publish_tensors_to_attempt = _contribute_canonical  # type: ignore[method-assign]
-    store._contribute_source_artifacts_to_attempt = _contribute_source  # type: ignore[method-assign]
+    store._contribute_source_current_values_to_attempt_and_keep_bindings = _contribute_source  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
-    result = store.complete_pure_transform_publication_bridge(
+    result = store.complete_pure_transform_publication(
         {"w": torch.ones((1,), dtype=torch.float32)},
         build_intent=_serving_build_intent(),
         source_artifact=source_artifact,
@@ -708,14 +701,11 @@ def test_complete_pure_transform_publication_canonical_full_uses_publish_tensors
 
     assert result.serving_artifact_id == "mi2:test:serving"
     assert captured["start_kwargs"]["source_artifact"] is source_artifact
-    assert captured["canonical_kwargs"]["publication"].registered_artifact.artifact_id == "mi2:test:serving"
-    prepared_tensors = captured["canonical_kwargs"]["publication"].prepared_registration.tensors
-    assert "w" in prepared_tensors
-    assert "__tensorcast_meta__.manifest_json" in prepared_tensors
-    assert captured["canonical_kwargs"]["device"] == "cuda:0"
+    assert captured["source_kwargs"]["source_artifacts"] == (source_artifact,)
+    assert captured["source_kwargs"]["device"] == "cuda:0"
 
 
-def test_complete_binding_finalize_publication_canonical_full_uses_publish_tensors_for_contribution() -> (
+def test_complete_binding_finalize_publication_canonical_full_routes_source_artifact_contribution() -> (
     None
 ):
     store_ref = _StoreStub()
@@ -771,14 +761,9 @@ def test_complete_binding_finalize_publication_canonical_full_uses_publish_tenso
             requirements=AssemblyRequirementSetRef.canonical_full(),
         )
 
-    def _contribute_canonical(**kwargs: object) -> object:
-        captured["canonical_kwargs"] = kwargs
-        return object()
-
     def _contribute_source(**kwargs: object) -> tuple[object, ...]:
-        raise AssertionError(
-            "canonical_full binding_finalize publication should not contribute source artifacts"
-        )
+        captured["source_kwargs"] = kwargs
+        return ()
 
     def _seal_attempt(
         attempt: AssemblyAttemptRef,
@@ -809,14 +794,13 @@ def test_complete_binding_finalize_publication_canonical_full_uses_publish_tenso
             serving_manifest_ref=build_serving_manifest_ref(),
         )
 
-    store.register_binding_finalize_publication_bridge = _register  # type: ignore[method-assign]
+    store.register_binding_finalize_publication = _register  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
-    store._contribute_canonical_publish_tensors_to_attempt = _contribute_canonical  # type: ignore[method-assign]
-    store._contribute_source_artifacts_to_attempt = _contribute_source  # type: ignore[method-assign]
+    store._contribute_source_current_values_to_attempt_and_keep_bindings = _contribute_source  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
-    result = store.complete_binding_finalize_publication_bridge(
+    result = store.complete_binding_finalize_publication(
         {"w": torch.ones((1,), dtype=torch.float32)},
         build_intent=_binding_finalize_build_intent(),
         admission_facts=admission_facts,
@@ -830,14 +814,11 @@ def test_complete_binding_finalize_publication_canonical_full_uses_publish_tenso
 
     assert result.serving_artifact_id == "mi2:test:serving-binding"
     assert captured["start_kwargs"]["source_artifact"] is source_artifact
-    assert captured["canonical_kwargs"]["publication"].registered_artifact.artifact_id == "mi2:test:serving-binding"
-    prepared_tensors = captured["canonical_kwargs"]["publication"].prepared_registration.tensors
-    assert "w" in prepared_tensors
-    assert "__tensorcast_meta__.manifest_json" in prepared_tensors
-    assert captured["canonical_kwargs"]["device"] == "cuda:0"
+    assert captured["source_kwargs"]["source_artifacts"] == (source_artifact,)
+    assert captured["source_kwargs"]["device"] == "cuda:0"
 
 
-def test_complete_binding_finalize_publication_canonical_full_keeps_binding_alive_until_wait() -> (
+def test_complete_binding_finalize_publication_canonical_full_contributes_before_wait() -> (
     None
 ):
     store_ref = _StoreStub()
@@ -860,42 +841,10 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
     )
 
     events: list[str] = []
-    fake_binding: object | None = None
-
-    class _FakeSealed:
-        def contribute_to_assembly(
-            self,
-            *,
-            attempt: AssemblyAttemptRef,
-            ctx: object | None = None,
-        ) -> object:
-            del attempt
-            del ctx
-            events.append("contribute")
-            assert fake_binding is not None
-            assert fake_binding.closed is False
-            return object()
 
     class _FakeBinding:
         def __init__(self) -> None:
             self.closed = False
-
-        def begin_update(self, ctx: object | None = None) -> str:
-            del ctx
-            events.append("begin_update")
-            return "epoch-1"
-
-        def seal_current(
-            self,
-            *,
-            update_epoch: str,
-            ctx: object | None = None,
-        ) -> _FakeSealed:
-            del update_epoch
-            del ctx
-            events.append("seal_current")
-            assert self.closed is False
-            return _FakeSealed()
 
         def close(self) -> None:
             events.append("close")
@@ -934,12 +883,12 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
             requirements=AssemblyRequirementSetRef.canonical_full(),
         )
 
-    def _create_binding(layout: object, **kwargs: object) -> _FakeBinding:
-        del layout
+    live_binding = _FakeBinding()
+
+    def _contribute_source(**kwargs: object) -> tuple[object, ...]:
         del kwargs
-        nonlocal fake_binding
-        fake_binding = _FakeBinding()
-        return fake_binding
+        events.append("contribute_source")
+        return (live_binding,)
 
     def _seal_attempt(
         attempt: AssemblyAttemptRef,
@@ -948,8 +897,6 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
     ) -> object:
         del ctx
         events.append("seal_attempt")
-        assert fake_binding is not None
-        assert fake_binding.closed is False
         return client.seal_assembly_attempt(attempt_id=attempt.attempt_id)
 
     def _wait_attempt(
@@ -962,8 +909,6 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
         del timeout_s
         del ctx
         events.append("wait_attempt")
-        assert fake_binding is not None
-        assert fake_binding.closed is False
         return PublishedModelVersion(
             assembly_id="cgid:assembly-3",
             source_artifact_id="mi2:test:source",
@@ -975,13 +920,13 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
             serving_manifest_ref=build_serving_manifest_ref(),
         )
 
-    store.register_binding_finalize_publication_bridge = _register  # type: ignore[method-assign]
+    store.register_binding_finalize_publication = _register  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
-    store.create_binding = _create_binding  # type: ignore[method-assign]
+    store._contribute_source_current_values_to_attempt_and_keep_bindings = _contribute_source  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
-    result = store.complete_binding_finalize_publication_bridge(
+    result = store.complete_binding_finalize_publication(
         {"w": torch.ones((1,), dtype=torch.float32)},
         build_intent=_binding_finalize_build_intent(),
         admission_facts=admission_facts,
@@ -994,12 +939,8 @@ def test_complete_binding_finalize_publication_canonical_full_keeps_binding_aliv
     )
 
     assert result.serving_artifact_id == "mi2:test:serving-binding"
-    assert fake_binding is not None
-    assert fake_binding.closed is True
     assert events == [
-        "begin_update",
-        "seal_current",
-        "contribute",
+        "contribute_source",
         "seal_attempt",
         "wait_attempt",
         "close",
@@ -1030,13 +971,13 @@ def test_complete_pure_transform_publication_routes_structural_view_contribution
     def _register_publication(
         tensors: dict[str, torch.Tensor],
         **kwargs: object,
-    ) -> RegisteredPureTransformPublication:
+    ) -> RegisteredServingPublication:
         del tensors
         del kwargs
         bundle = _representation_publish_bundle().model_copy(
             update={"contract_family": "pp"}
         )
-        return RegisteredPureTransformPublication(
+        return RegisteredServingPublication(
             registered_artifact=RegisteredArtifact(
                 artifact_id="mi2:test:serving",
                 replica=ReplicaInfo(
@@ -1097,13 +1038,13 @@ def test_complete_pure_transform_publication_routes_structural_view_contribution
             serving_manifest_ref=build_serving_manifest_ref(),
         )
 
-    store.register_pure_transform_publication_bridge = _register_publication  # type: ignore[method-assign]
+    store.register_pure_transform_publication = _register_publication  # type: ignore[method-assign]
     store.start_repo_owned_representation_publish_attempt = _start_repo_owned  # type: ignore[method-assign]
     store._contribute_source_artifacts_to_attempt = _contribute  # type: ignore[method-assign]
     store.seal_assembly_attempt = _seal_attempt  # type: ignore[method-assign]
     store.wait_assembly_attempt = _wait_attempt  # type: ignore[method-assign]
 
-    result = store.complete_pure_transform_publication_bridge(
+    result = store.complete_pure_transform_publication(
         {"w": torch.ones((1,), dtype=torch.float32)},
         build_intent=_serving_build_intent(),
         source_artifact=source_artifact,
@@ -1285,7 +1226,7 @@ def test_start_representation_publish_attempt_provisions_binding_subject_layout_
         representation_contract_hash=manifest.representation_contract_hash,
         serving_build_digest=manifest.serving_build_digest,
     )
-    publication = PureTransformPublicationBundle(
+    publication = RepresentationPublishSpec(
         serving_artifact_id=None,
         serving_manifest_ref=contract.serving_manifest_ref,
         serving_manifest=manifest,
@@ -1710,15 +1651,28 @@ def test_representation_publish_closeout_contract_requires_typed_child() -> None
     assert "representation_publish_contract" in str(exc_info.value)
 
 
-def test_tensor_entry_publication_helpers_use_explicit_bridge_names() -> None:
-    assert not hasattr(Store, "complete_pure_transform_publication")
-    assert not hasattr(Store, "complete_binding_finalize_publication")
-    assert not hasattr(Store, "register_pure_transform_publication")
-    assert not hasattr(Store, "register_binding_finalize_publication")
-    assert not hasattr(store_api, "complete_pure_transform_publication")
-    assert not hasattr(store_api, "complete_binding_finalize_publication")
-    assert not hasattr(store_api, "register_pure_transform_publication")
-    assert not hasattr(store_api, "register_binding_finalize_publication")
+def test_tensor_entry_publication_helpers_use_canonical_publication_names(
+) -> None:
+    assert hasattr(Store, "complete_pure_transform_publication")
+    assert hasattr(Store, "complete_binding_finalize_publication")
+    assert hasattr(Store, "register_pure_transform_publication")
+    assert hasattr(Store, "register_binding_finalize_publication")
+    assert hasattr(store_api, "complete_pure_transform_publication")
+    assert hasattr(store_api, "complete_binding_finalize_publication")
+    assert hasattr(store_api, "register_pure_transform_publication")
+    assert hasattr(store_api, "register_binding_finalize_publication")
+    assert not hasattr(Store, "complete_pure_transform_publication_bridge")
+    assert not hasattr(Store, "complete_binding_finalize_publication_bridge")
+    assert not hasattr(Store, "register_pure_transform_publication_bridge")
+    assert not hasattr(Store, "register_binding_finalize_publication_bridge")
+    assert not hasattr(store_api, "complete_pure_transform_publication_bridge")
+    assert not hasattr(
+        store_api, "complete_binding_finalize_publication_bridge"
+    )
+    assert not hasattr(store_api, "register_pure_transform_publication_bridge")
+    assert not hasattr(
+        store_api, "register_binding_finalize_publication_bridge"
+    )
 
 
 def test_representation_publish_contract_from_proto_requires_subject() -> None:
@@ -1819,3 +1773,26 @@ def test_representation_publish_closeout_contract_accepts_binding_subject_child(
 
     assert not proto.serving_artifact_id
     assert proto.representation_publish_contract.subject.binding_value.binding_id == "binding-1"
+
+
+def test_representation_publish_contract_from_proto_preserves_binding_value_subject() -> (
+    None
+):
+    proto = store_daemon_pb2.RepresentationPublishContract(
+        serving_manifest_ref=build_serving_manifest_ref(),
+        representation_contract_hash="bafkrepresentation",
+        serving_build_digest="bafkbuilddigest",
+    )
+    proto.subject.binding_value.binding_id = "binding-1"
+    proto.subject.binding_value.binding_layout_id = "layout-1"
+    proto.subject.binding_value.binding_value_id = "value-1"
+    proto.subject.binding_value.seal_generation = 2
+
+    contract = RepresentationPublishContract.from_proto(proto)
+
+    assert contract.subject.serving_artifact_id is None
+    assert contract.subject.binding_value_ref is not None
+    assert contract.subject.binding_value_ref.binding_id == "binding-1"
+    assert contract.subject.binding_value_ref.binding_layout_id == "layout-1"
+    assert contract.subject.binding_value_ref.binding_value_id == "value-1"
+    assert contract.subject.binding_value_ref.seal_generation == 2
