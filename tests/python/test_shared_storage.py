@@ -152,7 +152,7 @@ def test_shared_storage_roundtrip(tmp_path):
     # -----------------------
     def assert_shared(names: Sequence[str]):
         """Assert tensors referenced by `names` share storage in `loaded_state_dict`."""
-        ptrs = {loaded_state_dict[n].storage().data_ptr() for n in names}
+        ptrs = {loaded_state_dict[n].untyped_storage().data_ptr() for n in names}
         assert len(ptrs) == 1, (
             f"Tensors {names} are expected to share storage after load but found {len(ptrs)} distinct storages"
         )
@@ -163,16 +163,16 @@ def test_shared_storage_roundtrip(tmp_path):
     assert_shared(["base2", "view2"])
 
     # Groups should not share with each other
-    ptr_group1 = loaded_state_dict["base1"].storage().data_ptr()
-    ptr_group2 = loaded_state_dict["base2"].storage().data_ptr()
+    ptr_group1 = loaded_state_dict["base1"].untyped_storage().data_ptr()
+    ptr_group2 = loaded_state_dict["base2"].untyped_storage().data_ptr()
     assert ptr_group1 != ptr_group2, (
         "Separate storage groups share the same backing storage unexpectedly"
     )
 
     # Independent tensors should each have unique storage
     indep_ptrs = {
-        loaded_state_dict["indep1"].storage().data_ptr(),
-        loaded_state_dict["indep2"].storage().data_ptr(),
+        loaded_state_dict["indep1"].untyped_storage().data_ptr(),
+        loaded_state_dict["indep2"].untyped_storage().data_ptr(),
     }
     assert len(indep_ptrs) == 2
     # And they should not collide with shared groups

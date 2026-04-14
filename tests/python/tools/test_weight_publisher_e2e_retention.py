@@ -241,7 +241,7 @@ def test_publish_one_version_records_bandwidth_fields(
         return next(monotonic_points, 14.0)
 
     monkeypatch.setattr(
-        "tensorcast.tools.weight_publisher_e2e.time.monotonic",
+        "tensorcast.tools.weight_publisher_e2e._monotonic",
         _next_monotonic,
     )
 

@@ -67,6 +67,10 @@ DEFAULT_RECEIVER_MATERIALIZE_OPTIONS = GetArtifactOptions(
 )
 
 
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 def _is_not_found_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return (
@@ -1052,9 +1056,9 @@ class WeightUpdatePublisher:
             publish_device=publish_device,
         )
         publish_payload_bytes = _estimate_tensor_payload_bytes(tensors)
-        publish_start = time.monotonic()
+        publish_start = _monotonic()
         artifact_id = self._publisher.publish(tensors, version=version)
-        publish_latency_s = time.monotonic() - publish_start
+        publish_latency_s = _monotonic() - publish_start
         publish_breakdown_s = self._publisher.last_publish_breakdown_s()
         put_s = float(publish_breakdown_s.get("put_s", 0.0))
         publish_throughput_gib_s = _bytes_throughput_gib_s(
