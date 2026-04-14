@@ -53,13 +53,20 @@ class SourceBoundCapability(IntFlag):
 
 class CollectivePolicy(str, Enum):
     REQUIRE_COLLECTIVE = "require_collective"
-    ALLOW_NOT_ELIGIBLE_FALLBACK = "allow_not_eligible_fallback"
+    COLLECTIVE_FIRST = "collective_first"
     DISABLE_COLLECTIVE = "disable_collective"
 
 
 class CollectiveFailureClass(str, Enum):
     NOT_ELIGIBLE = "not_eligible"
     EXECUTION_FAILED = "execution_failed"
+
+
+class HashBackend(str, Enum):
+    NONE = "none"
+    GPU = "gpu"
+    D2H_CPU = "d2h_cpu"
+    CPU = "cpu"
 
 
 class HashLocation(str, Enum):
@@ -79,8 +86,8 @@ _COLLECTIVE_POLICY_TO_PROTO: dict[CollectivePolicy, int] = {
     CollectivePolicy.REQUIRE_COLLECTIVE: int(
         store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
     ),
-    CollectivePolicy.ALLOW_NOT_ELIGIBLE_FALLBACK: int(
-        store_daemon_pb2.COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK
+    CollectivePolicy.COLLECTIVE_FIRST: int(
+        store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST
     ),
     CollectivePolicy.DISABLE_COLLECTIVE: int(
         store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
@@ -99,6 +106,15 @@ _COLLECTIVE_FAILURE_CLASS_TO_PROTO: dict[CollectiveFailureClass, int] = {
 }
 _COLLECTIVE_FAILURE_CLASS_FROM_PROTO: dict[int, CollectiveFailureClass] = {
     value: key for key, value in _COLLECTIVE_FAILURE_CLASS_TO_PROTO.items()
+}
+_HASH_BACKEND_TO_PROTO: dict[HashBackend, int] = {
+    HashBackend.NONE: int(store_daemon_pb2.HASH_BACKEND_NONE),
+    HashBackend.GPU: int(store_daemon_pb2.HASH_BACKEND_GPU),
+    HashBackend.D2H_CPU: int(store_daemon_pb2.HASH_BACKEND_D2H_CPU),
+    HashBackend.CPU: int(store_daemon_pb2.HASH_BACKEND_CPU),
+}
+_HASH_BACKEND_FROM_PROTO: dict[int, HashBackend] = {
+    value: key for key, value in _HASH_BACKEND_TO_PROTO.items()
 }
 _HASH_LOCATION_TO_PROTO: dict[HashLocation, int] = {
     HashLocation.NONE: int(store_daemon_pb2.HASH_LOCATION_NONE),
@@ -142,7 +158,17 @@ class ExecutionDiagnostics(BaseModel):
     actual_collective_committed_bytes: int = 0
     actual_local_typed_bytes: int = 0
     actual_generic_backend_bytes: int = 0
+    collective_unique_source_bytes: int = 0
+    collective_peer_transfer_bytes: int = 0
+    collective_peak_temporary_bytes: int = 0
+    collective_batch_count: int = 0
+    collective_dedup_saving_bytes: int = 0
+    collective_skip_reason: str | None = None
     hash_rounds: int = 0
+    hash_backend: HashBackend = HashBackend.NONE
+    hash_bytes: int = 0
+    hash_wall_time_ms: int = 0
+    hash_identity_forming: bool = False
     hash_location: HashLocation = HashLocation.NONE
     identity_mint_strategy: IdentityMintStrategy = IdentityMintStrategy.NOT_APPLICABLE
 
@@ -161,7 +187,17 @@ class ExecutionDiagnostics(BaseModel):
             ),
             actual_local_typed_bytes=int(self.actual_local_typed_bytes),
             actual_generic_backend_bytes=int(self.actual_generic_backend_bytes),
+            collective_unique_source_bytes=int(self.collective_unique_source_bytes),
+            collective_peer_transfer_bytes=int(self.collective_peer_transfer_bytes),
+            collective_peak_temporary_bytes=int(self.collective_peak_temporary_bytes),
+            collective_batch_count=int(self.collective_batch_count),
+            collective_dedup_saving_bytes=int(self.collective_dedup_saving_bytes),
+            collective_skip_reason=str(self.collective_skip_reason or ""),
             hash_rounds=int(self.hash_rounds),
+            hash_backend=_HASH_BACKEND_TO_PROTO[self.hash_backend],
+            hash_bytes=int(self.hash_bytes),
+            hash_wall_time_ms=int(self.hash_wall_time_ms),
+            hash_identity_forming=bool(self.hash_identity_forming),
             hash_location=_HASH_LOCATION_TO_PROTO[self.hash_location],
             identity_mint_strategy=_IDENTITY_MINT_STRATEGY_TO_PROTO[
                 self.identity_mint_strategy
@@ -204,7 +240,31 @@ class ExecutionDiagnostics(BaseModel):
             actual_generic_backend_bytes=int(
                 getattr(proto, "actual_generic_backend_bytes", 0)
             ),
+            collective_unique_source_bytes=int(
+                getattr(proto, "collective_unique_source_bytes", 0)
+            ),
+            collective_peer_transfer_bytes=int(
+                getattr(proto, "collective_peer_transfer_bytes", 0)
+            ),
+            collective_peak_temporary_bytes=int(
+                getattr(proto, "collective_peak_temporary_bytes", 0)
+            ),
+            collective_batch_count=int(getattr(proto, "collective_batch_count", 0)),
+            collective_dedup_saving_bytes=int(
+                getattr(proto, "collective_dedup_saving_bytes", 0)
+            ),
+            collective_skip_reason=str(
+                getattr(proto, "collective_skip_reason", "") or ""
+            )
+            or None,
             hash_rounds=int(proto.hash_rounds),
+            hash_backend=_HASH_BACKEND_FROM_PROTO.get(
+                int(getattr(proto, "hash_backend", 0) or 0),
+                HashBackend.NONE,
+            ),
+            hash_bytes=int(getattr(proto, "hash_bytes", 0) or 0),
+            hash_wall_time_ms=int(getattr(proto, "hash_wall_time_ms", 0) or 0),
+            hash_identity_forming=bool(getattr(proto, "hash_identity_forming", False)),
             hash_location=_HASH_LOCATION_FROM_PROTO.get(
                 int(proto.hash_location),
                 HashLocation.NONE,
@@ -2334,6 +2394,7 @@ __all__ = [
     "SourceBoundCapability",
     "CollectivePolicy",
     "CollectiveFailureClass",
+    "HashBackend",
     "HashLocation",
     "IdentityMintStrategy",
     "ExecutionDiagnostics",

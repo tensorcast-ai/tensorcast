@@ -487,6 +487,12 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
     if (absl::IsNotFound(manifest_tensor_or.status()) && !request.require_manifest) {
       return ServingArtifactPreflightResult{};
     }
+    if (absl::IsNotFound(manifest_tensor_or.status())) {
+      return absl::DataLossError(
+          absl::StrCat(
+              "serving artifact is missing manifest tensor referenced by serving_manifest_ref: ",
+              *manifest_tensor_name_or));
+    }
     return manifest_tensor_or.status();
   }
   auto payload_or = read_manifest_tensor_payload(

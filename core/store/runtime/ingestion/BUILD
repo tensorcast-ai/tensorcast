@@ -129,6 +129,21 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "source_bound_strategy_planner",
+    srcs = ["source_bound_strategy_planner.cc"],
+    hdrs = ["source_bound_strategy_planner.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":materialization_strategy_types",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine_options",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
     name = "ingestion_runtime",
     srcs = ["ingestion_runtime.cc"],
     hdrs = ["ingestion_runtime.h"],
@@ -215,5 +230,17 @@ cc_test(
         "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
         "@gsl",
+    ],
+)
+
+cc_test(
+    name = "source_bound_strategy_planner_test",
+    srcs = ["source_bound_strategy_planner_test.cc"],
+    deps = [
+        ":source_bound_strategy_planner",
+        "//core/store:store_engine_options",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
     ],
 )

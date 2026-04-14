@@ -143,9 +143,15 @@ absl::StatusOr<v2::CollectivePolicy> resolve_collective_policy(
   return requested;
 }
 
+v2::CollectivePolicy default_collective_policy_for_mapped_target(const ExecutionTopologyContext& execution_topology) {
+  return execution_topology.collective_load_group.has_value()
+      ? v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST
+      : v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
+}
+
 bool collective_policy_requests_collective(v2::CollectivePolicy policy) {
   return policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE ||
-      policy == v2::CollectivePolicy::COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK;
+      policy == v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST;
 }
 
 OperationTransportContext resolve_operation_transport_context(std::string_view operation_id) {
@@ -324,18 +330,20 @@ v2::ExecutionDiagnostics build_execution_diagnostics(
     const store::loading::MaterializeIntoTargetResult* result,
     v2::CollectivePolicy collective_policy,
     const ExecutionTopologyContext& execution_topology,
-    uint32_t hash_rounds,
-    v2::HashLocation hash_location,
-    v2::IdentityMintStrategy identity_mint_strategy) {
+    const HashExecutionDetails& hash_details) {
   v2::ExecutionDiagnostics diagnostics;
   const bool collective_requested =
       collective_policy_requests_collective(collective_policy) && execution_topology.collective_load_group.has_value();
   diagnostics.set_collective_requested(collective_requested);
   diagnostics.set_collective_acknowledged(collective_requested);
   diagnostics.set_collective_policy(collective_policy);
-  diagnostics.set_hash_rounds(hash_rounds);
-  diagnostics.set_hash_location(hash_location);
-  diagnostics.set_identity_mint_strategy(identity_mint_strategy);
+  diagnostics.set_hash_rounds(hash_details.hash_rounds);
+  diagnostics.set_hash_location(hash_details.hash_location);
+  diagnostics.set_hash_backend(hash_details.hash_backend);
+  diagnostics.set_hash_bytes(hash_details.hash_bytes);
+  diagnostics.set_hash_wall_time_ms(hash_details.hash_wall_time_ms);
+  diagnostics.set_hash_identity_forming(hash_details.hash_identity_forming);
+  diagnostics.set_identity_mint_strategy(hash_details.identity_mint_strategy);
   if (result == nullptr) {
     return diagnostics;
   }
@@ -347,6 +355,12 @@ v2::ExecutionDiagnostics build_execution_diagnostics(
   diagnostics.set_actual_collective_committed_bytes(result->actual_collective_committed_bytes);
   diagnostics.set_actual_local_typed_bytes(result->actual_local_typed_bytes);
   diagnostics.set_actual_generic_backend_bytes(result->actual_generic_backend_bytes);
+  diagnostics.set_collective_unique_source_bytes(result->collective_unique_source_bytes);
+  diagnostics.set_collective_peer_transfer_bytes(result->collective_peer_transfer_bytes);
+  diagnostics.set_collective_peak_temporary_bytes(result->collective_peak_temporary_bytes);
+  diagnostics.set_collective_batch_count(result->collective_batch_count);
+  diagnostics.set_collective_dedup_saving_bytes(result->collective_dedup_saving_bytes);
+  diagnostics.set_collective_skip_reason(result->collective_skip_reason);
   if (collective_requested && !result->collective_handled) {
     diagnostics.set_collective_failure_class(v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);
   }

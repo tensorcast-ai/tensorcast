@@ -15,6 +15,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
+#include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
@@ -908,7 +909,8 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
     absl::Span<const LeaseSegMeta> segments,
     absl::Span<const RegisterStorageMeta> storages,
     absl::Span<const RegisterTensorAliasMeta> aliases,
-    const std::optional<CommitLeaseResult>& identity_override) {
+    const std::optional<CommitLeaseResult>& identity_override,
+    BuildCommitLeaseOptions options) {
   std::string canonical_index_json = index_data;
   if (!storages.empty() && !aliases.empty()) {
     auto rebuilt_or = build_canonical_index_from_metadata(
@@ -1106,15 +1108,52 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
       out.encoding = "json";
     }
   } else if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
-    auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
-    if (!data_mh_or.ok())
+    const absl::Time hash_start = absl::Now();
+    absl::StatusOr<std::string> data_mh_or = absl::UnknownError("uninitialized");
+    CommitLeaseHashBackend hash_backend = CommitLeaseHashBackend::kNone;
+    bool used_direct_gpu_hash = false;
+
+    if (options.direct_gpu_hash_ptr.has_value()) {
+      data_mh_or =
+          store::loader::compute_data_multihash_from_gpu_memory(*options.direct_gpu_hash_ptr, total_size, device_id);
+      if (data_mh_or.ok()) {
+        used_direct_gpu_hash = true;
+        hash_backend = cuda::is_fake() ? CommitLeaseHashBackend::kD2HCpu : CommitLeaseHashBackend::kGpu;
+      } else if (!options.require_gpu_identity_hash || cuda::is_fake()) {
+        data_mh_or = absl::UnknownError("fall back to seekable source hash");
+      }
+    }
+
+    if (!used_direct_gpu_hash) {
+      if (options.require_gpu_identity_hash && !cuda::is_fake()) {
+        if (!options.direct_gpu_hash_ptr.has_value()) {
+          return absl::FailedPreconditionError(
+              "identity-forming GPU hash is required but no direct GPU hash source is available");
+        }
+        return absl::FailedPreconditionError(
+            absl::StrCat("identity-forming GPU hash failed: ", data_mh_or.status().message()));
+      }
+      data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
+      if (!data_mh_or.ok()) {
+        return data_mh_or.status();
+      }
+      hash_backend = CommitLeaseHashBackend::kD2HCpu;
+    }
+    if (!data_mh_or.ok()) {
       return data_mh_or.status();
+    }
     data_multihash = *data_mh_or;
 
     out.index_multihash = index_multihash;
     out.data_multihash = data_multihash;
     out.artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
     out.id_kind = common::ArtifactIdKind::kMi2;
+    out.hash_info = CommitLeaseHashInfo{
+        .backend = hash_backend,
+        .bytes = total_size,
+        .wall_time_ms = static_cast<uint64_t>(absl::ToInt64Milliseconds(absl::Now() - hash_start)),
+        .identity_forming = true,
+    };
   } else {
     out.index_multihash = index_multihash;
     out.data_multihash.clear();
@@ -1128,6 +1167,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
   if (out.encoding.empty()) {
     out.encoding = "json";
   }
+  out.canonical_index_json = canonical_index_json;
   out.total_size = total_size;
 
   // Verification JSON: read three 8-byte values (start/middle/end) if possible.
@@ -1171,7 +1211,8 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     std::vector<LeaseSegMeta>&& segments,
     std::vector<RegisterStorageMeta>&& storages,
     std::vector<RegisterTensorAliasMeta>&& aliases,
-    const std::optional<CommitLeaseResult>& identity_override) {
+    const std::optional<CommitLeaseResult>& identity_override,
+    BuildCommitLeaseOptions options) {
   auto out_or = build_commit_lease_result(
       device_id,
       owner_pid,
@@ -1183,7 +1224,8 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
       absl::MakeSpan(segments),
       absl::MakeSpan(storages),
       absl::MakeSpan(aliases),
-      identity_override);
+      identity_override,
+      options);
   if (!out_or.ok()) {
     return out_or.status();
   }

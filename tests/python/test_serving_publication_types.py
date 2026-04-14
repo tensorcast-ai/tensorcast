@@ -9,7 +9,6 @@ import tensorcast as tc
 from tensorcast.api._config import PlanType
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import (
-    PureTransformPublicationBundle,
     build_binding_finalize_admission_facts,
     build_binding_finalize_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_bundle_from_registered_artifact,
@@ -374,7 +373,7 @@ def test_build_pure_transform_publication_bundle_from_registered_artifact() -> N
         serving_version_key="models/demo/serving/v4",
     )
 
-    assert isinstance(bundle, PureTransformPublicationBundle)
+    assert isinstance(bundle, RepresentationPublishSpec)
     assert bundle.serving_artifact_id == "mi2:test:serving"
     assert bundle.manifest_tensor_name == "__tensorcast_meta__.manifest_json"
     assert bundle.serving_manifest_ref == build_serving_manifest_ref()

@@ -150,9 +150,8 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     `serving_build_digest`.
   - For integrations that already have a transformed serving artifact in hand,
     `build_pure_transform_publication_bundle_from_registered_artifact(...)`
-    assembles a typed `RepresentationPublishSpec`
-    (`PureTransformPublicationBundle` compatibility alias) containing the
-    repo-owned phase-1 serving manifest bytes,
+    assembles a typed `RepresentationPublishSpec` containing the repo-owned
+    phase-1 serving manifest bytes,
     `RepresentationPublishContract`, and
     `AssemblyCloseoutContract(kind="representation_publish", ...)` for
     `PURE_TRANSFORM` publication.
@@ -173,16 +172,16 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     realization protocol and support-level truth.
   - If the builder already has finalized serving tensors in memory for a
     `BINDING_FINALIZE` family, use
-    `Store.register_binding_finalize_publication_bridge(...)` or
-    `Store.complete_binding_finalize_publication_bridge(...)` for the same
+    `Store.register_binding_finalize_publication(...)` or
+    `Store.complete_binding_finalize_publication(...)` for the same
     register + typed `representation_publish` closeout flow that the
     `PURE_TRANSFORM` helpers use.
   - For same-binding serving builds, prefer
     `Store.complete_pure_transform_publication_from_binding(...)` or
     `Store.complete_binding_finalize_publication_from_binding(...)`. These
     paths now emit a binding-value publication subject directly into the typed
-    closeout contract; the older tensor-registration helpers remain legacy
-    bridge surfaces for workflows that still start from in-memory tensors.
+    closeout contract; the tensor-registration helpers remain available only
+    for workflows that still start from in-memory tensors.
   - `Store.complete_representation_publish_attempt(...)` runs the same repo-owned
     spec path through `start -> seal -> wait` and returns the final
     `PublishedModelVersion`.
@@ -208,19 +207,18 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     between canonical and structural lowering without selecting a second helper
     at the call site.
   - If the publication came back through `PlanResult`, use
-    `PlanResult.require_representation_publish_spec(...)` or the compatibility
-    alias `PlanResult.require_pure_transform_publication(...)` to extract the
-    typed publish spec, or call
+    `PlanResult.require_representation_publish_spec(...)` to extract the typed
+    publish spec, or call
     `Store.start_plan_repo_owned_representation_publish_attempt(...)` /
     `Store.complete_plan_repo_owned_representation_publish_attempt(...)`
-    directly to bridge `transform_register_pure_transform(...)` into the same
+    directly to route `transform_register_pure_transform(...)` into the same
     repo-owned publish path without manual `artifact_result` inspection.
   - For offline or pipeline-style `PURE_TRANSFORM` builders that already have
     finalized tensors in memory, use
-    `Store.register_pure_transform_publication_bridge(...)` to inject the reserved
+    `Store.register_pure_transform_publication(...)` to inject the reserved
     manifest tensor and register a durable serving artifact plus typed
     publication bundle, or
-    `Store.complete_pure_transform_publication_bridge(...)` to run the same
+    `Store.complete_pure_transform_publication(...)` to run the same
     repo-owned register + `representation_publish` closeout path in one call.
     When the publish attempt also needs a canonical source contribution, pass
     `source_contribution_device=...` and TensorCast will bind the source
@@ -281,14 +279,16 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
   user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
 - `Store.create_binding(layout, ownership=\"daemon\", device=\"cuda:0\")` creates a
   layout-seeded binding before any artifact is installed. The binding starts with
-  `current_value is None` and becomes mutable via `begin_update(...)`.
+  `current_value is None`.
 - Builder-side serving realization may use that same layout-seeded binding as the
   host of the future serving representation: attach framework tensor views onto
-  the binding-backed storage, perform one builder-owned update into that
-  storage, then `seal_current(...)` and route the sealed value through
-  `representation_publish` closeout. In that shape, the binding is the local
-  realization host and the serving artifact identity still arrives only after
-  closeout.
+  the binding-backed storage, call `binding.realize_from(...)` to execute the
+  source-bound load and open one explicit mutable update window, perform the
+  builder-owned finalize work inside that returned `BindingUpdateEpoch`, then
+  `seal_current(...)` and route the sealed value through `representation_publish`
+  closeout. In that shape, realization is execution-only, the binding remains
+  unsealed until `seal_current(...)`, and the serving artifact identity still
+  arrives only after closeout.
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you
   still want routable replicas after a successful apply.
@@ -301,8 +301,13 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - `binding.current_value` is the authoritative sealed value handle for the local
   binding. `binding.artifact_id` / `binding.selection` are convenience mirrors
   and become `None` when the current value is absent or local-only.
-- `binding.begin_update(...)` retires any published replica, clears the current
-  sealed value, and returns a `BindingUpdateEpoch`.
+- `binding.begin_update(...)` requires the binding to be unpublished, clears the
+  current sealed value, and returns a `BindingUpdateEpoch`. Call
+  `binding.retire(...)` explicitly first if a published replica is still live.
+- `binding.realize_from(...)` on daemon-owned bindings now returns a
+  `BindingUpdateEpoch` instead of a `SealedBindingValue`: it writes bytes into
+  the binding-backed storage and leaves the binding unsealed for subsequent
+  builder-side finalize work.
 - `binding.seal_current(update_epoch=...)` closes the mutable window and produces
   a local-only `SealedBindingValue`. Local seal does not mint a routable
   artifact id; publish/key activation remain valid only for artifact-backed

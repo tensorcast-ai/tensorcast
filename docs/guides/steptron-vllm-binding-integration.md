@@ -73,6 +73,39 @@ Concrete current anchors:
 This means the integration goal is not to redesign vLLM reload semantics. It is
 to make training publish the right versions in the right representation.
 
+## TensorCast-Side Readiness And Diagnostics Contract
+
+The current TensorCast-side source-bound readiness surface for this integration
+has one active cut point:
+
+- `source_bound_contract_version >= 4`
+  - same-binding `Binding.realize_from(...)` /
+    `Store.realize_into_binding(...)` are execution-only ingress points that
+    return `BindingUpdateEpoch` rather than a sealed current value;
+  - typed hash diagnostics on the surviving seal path are part of the stable
+    downstream contract;
+  - downstream builder code must gate on this version before depending on the
+    `update_epoch` response shape.
+
+The public SDK surfaces to consume for those cut points are:
+
+- `binding.last_execution_diagnostics`
+  - actual execution facts such as `actual_collective_committed_bytes`,
+    `actual_local_typed_bytes`, `actual_generic_backend_bytes`,
+    `collective_failure_class`, `dominant_executor`, and
+    `direct_write_supported`
+- `binding.last_source_bound_plan_diagnostics`
+  - planner facts such as `execution_plan_kind`,
+    `planned_collective_candidate_bytes`,
+    `planned_collective_admitted_bytes`,
+    `planned_local_typed_bytes`,
+    `planned_non_admitted_typed_bytes`,
+    `planned_generic_residual_bytes`,
+    `planner_reject_reason_buckets`, `planner_version`, and `plan_hash`
+
+Downstream integration summaries should prefer those typed surfaces rather than
+daemon log parsing or repo-version heuristics.
+
 ## Integration Principle
 
 The binding work should land around one simple separation:

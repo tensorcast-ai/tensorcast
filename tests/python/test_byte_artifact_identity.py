@@ -128,3 +128,14 @@ def test_byte_artifact_selection_rejects_malformed_profile_cgid() -> None:
             view_spec=None,
             tensor_names=None,
         )
+
+
+def test_byte_artifact_legacy_cgid_still_parses() -> None:
+    artifact_id = "cgid:byte_artifact~tenant~engine~b64u.bQ~layout_v1~b64u.azQ"
+    parsed = parse_byte_artifact_cgid(artifact_id)
+    assert parsed.namespace == "tenant"
+    assert parsed.engine == "engine"
+    assert parsed.model_id_enc == "b64u.bQ"
+    assert parsed.model_version_enc == ""
+    assert parsed.layout_id == "layout_v1"
+    assert parsed.engine_key_enc == "b64u.azQ"

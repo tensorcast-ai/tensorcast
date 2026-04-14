@@ -150,7 +150,9 @@ TEST_CASE("CommitRegisteredArtifact degrades when warm local stable cannot be sa
   REQUIRE_FALSE(cresp.local_stable_tier().message().empty());
 }
 
-TEST_CASE("CommitRegisteredArtifact fails when pinned local stable cannot be satisfied", "[daemon][registration]") {
+TEST_CASE(
+    "CommitRegisteredArtifact pinned local stable rejects banned GPU staging before capacity checks",
+    "[daemon][registration]") {
   auto opts = make_opts();
   opts.memory_tier_config = tensorcast::store::MemoryTierConfig{.stable_bytes = 1};
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(std::move(opts));
@@ -178,7 +180,8 @@ TEST_CASE("CommitRegisteredArtifact fails when pinned local stable cannot be sat
   tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE_FALSE(st.ok());
-  REQUIRE(st.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED);
+  REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(st.error_message().find("stage_on_gpu is disabled") != std::string::npos);
 }
 
 TEST_CASE(

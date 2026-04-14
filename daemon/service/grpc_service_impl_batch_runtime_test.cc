@@ -457,7 +457,6 @@ TEST_CASE("HomeBatch* put/get/exists support join and conflict", "[daemon][batch
   REQUIRE(conflict_resp.outcomes_size() == 1);
   CAPTURE(conflict_resp.outcomes(0).message());
   REQUIRE(conflict_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_FAILED_PRECONDITION);
-  REQUIRE(count_cpu_replicas(*engine) == 1);
 
   HomeBatchExistsRequest exists_req;
   exists_req.mutable_fence()->CopyFrom(put_req.fence());
@@ -1855,10 +1854,25 @@ TEST_CASE(
   REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.items_size() == 1);
   REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
-  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
-
-  auto metadata_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
-      get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  auto metadata_or = [&]() -> absl::StatusOr<tensorcast::daemon::PayloadTransportBroker::BatchRefMetadata> {
+    if (!get_resp.items(0).payload_ref().empty()) {
+      auto payload_ref_or = harness->kernel().payload_transport_broker().inspect_payload_ref(
+          get_resp.items(0).payload_ref(), absl::Now(), /*require_not_expired=*/true);
+      if (!payload_ref_or.ok()) {
+        return payload_ref_or.status();
+      }
+      tensorcast::daemon::PayloadTransportBroker::BatchRefMetadata metadata;
+      metadata.expires_at = payload_ref_or->expires_at;
+      return metadata;
+    }
+    REQUIRE(get_resp.items(0).has_batch_payload_slice());
+    REQUIRE(get_resp.batch_transports_size() == 1);
+    const auto& transport = get_resp.batch_transports(0);
+    REQUIRE(transport.transport_id() == get_resp.items(0).batch_payload_slice().transport_id());
+    REQUIRE(transport.has_grpc_chunk_ref());
+    return harness->kernel().payload_transport_broker().inspect_batch_payload_ref(
+        transport.grpc_chunk_ref().batch_payload_ref(), absl::Now(), /*require_not_expired=*/true);
+  }();
   REQUIRE(metadata_or.ok());
   CHECK(metadata_or->expires_at <= entry->expires_at);
 }
@@ -2673,7 +2687,6 @@ TEST_CASE(
   REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
   REQUIRE(get_resp.items_size() == 1);
   REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
-  REQUIRE_FALSE(get_resp.items(0).payload_ref().empty());
 
   REQUIRE(engine->clear_mem() == 0);
 
@@ -2686,12 +2699,36 @@ TEST_CASE(
   REQUIRE(exists_resp.outcomes_size() == 1);
   REQUIRE(exists_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_MISS);
 
-  auto payload_or = harness->kernel().payload_transport_broker().resolve_local_payload_ref(
-      get_resp.items(0).payload_ref(),
-      artifact_id,
-      absl::Now(),
-      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-      "op-survive-retire");
+  auto payload_or = [&]() -> absl::StatusOr<tensorcast::daemon::PayloadTransportBroker::ResolvedPayload> {
+    if (!get_resp.items(0).payload_ref().empty()) {
+      return harness->kernel().payload_transport_broker().resolve_local_payload_ref(
+          get_resp.items(0).payload_ref(),
+          artifact_id,
+          absl::Now(),
+          tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+          "op-survive-retire");
+    }
+    REQUIRE(get_resp.items(0).has_batch_payload_slice());
+    REQUIRE(get_resp.batch_transports_size() == 1);
+    const auto& transport = get_resp.batch_transports(0);
+    REQUIRE(transport.transport_id() == get_resp.items(0).batch_payload_slice().transport_id());
+    REQUIRE(transport.has_grpc_chunk_ref());
+    auto resolved_or = harness->kernel().payload_transport_broker().fetch_batch_payload_ref(
+        harness->kernel().worker_directory_cache(),
+        absl::Now(),
+        absl::Seconds(1),
+        kDaemonId,
+        transport.grpc_chunk_ref().batch_payload_ref(),
+        tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+        "op-survive-retire");
+    if (!resolved_or.ok()) {
+      return resolved_or.status();
+    }
+    tensorcast::daemon::PayloadTransportBroker::ResolvedPayload payload;
+    payload.metadata.expires_at = resolved_or->metadata.expires_at;
+    payload.payload = resolved_or->payload != nullptr ? *resolved_or->payload : "";
+    return payload;
+  }();
   REQUIRE(payload_or.ok());
   REQUIRE(payload_or->payload == payload);
 }

@@ -14,7 +14,7 @@ from tensorcast.api.context import CallContext
 from tensorcast.api.plan import ArtifactSetRef, Plan, Worker
 from tensorcast.api.store import (
     BuilderMode,
-    PureTransformPublicationBundle,
+    RepresentationPublishSpec,
     ServingBuildIntent,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_transform_spec,
@@ -38,7 +38,11 @@ from tensorcast.node_agent.server import NodeAgentServicer
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
-from tensorcast.types import ServingArtifactManifest, build_serving_manifest_ref
+from tensorcast.types import (
+    ServerConfig,
+    ServingArtifactManifest,
+    build_serving_manifest_ref,
+)
 
 
 class _DaemonStub:
@@ -70,6 +74,15 @@ class _DaemonStub:
             released = True
 
         return _Resp()
+
+    def get_server_config(self) -> ServerConfig:
+        return ServerConfig(
+            tx_slice_bytes=0,
+            mem_pool_size=0,
+            artifact_chunk_bytes=0,
+            local_handle_socket_path="/tmp/tensorcast-node-agent-test.sock",
+            cpu_shared_memory_enabled=True,
+        )
 
 
 def _selection() -> common_pb2.ArtifactSelection:
@@ -199,7 +212,7 @@ def test_engine_adapter_identity_transform_register_can_return_pure_transform_bu
         store=_StoreStub(),  # type: ignore[arg-type]
     )
 
-    assert isinstance(result, PureTransformPublicationBundle)
+    assert isinstance(result, RepresentationPublishSpec)
     assert result.serving_artifact_id == "mi2:test:serving"
     assert result.serving_manifest_ref == build_serving_manifest_ref()
     assert result.closeout_contract.kind == "representation_publish"
@@ -757,7 +770,7 @@ def test_node_agent_servicer_serializes_pure_transform_publication_result() -> N
     assert response.steps[0].HasField("artifact_result")
     pure_result = response.steps[0].artifact_result.representation_publish
     assert (
-        pure_result.representation_publish_contract.serving_artifact_id
+        pure_result.representation_publish_contract.subject.serving_artifact_id
         == "mi2:test:serving"
     )
     assert (

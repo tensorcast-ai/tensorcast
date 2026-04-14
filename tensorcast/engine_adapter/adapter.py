@@ -32,7 +32,7 @@ from tensorcast.api.store.serving_builder import (
     PURE_TRANSFORM_SERVING_ARG_REPRESENTATION_CONTRACT_HASH,
     PURE_TRANSFORM_SERVING_ARG_SERVING_VERSION_KEY,
     PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY,
-    PureTransformPublicationBundle,
+    RepresentationPublishSpec,
     build_pure_transform_publication_bundle_from_registered_artifact,
     prepare_pure_transform_serving_registration,
 )
@@ -153,7 +153,7 @@ def _maybe_build_pure_transform_publication_bundle(
     *,
     source_artifact: Artifact,
     build_intent: ServingBuildIntent | None,
-) -> PureTransformPublicationBundle | None:
+) -> RepresentationPublishSpec | None:
     if build_intent is None:
         return None
     if not isinstance(registered_artifact, RegisteredArtifact):

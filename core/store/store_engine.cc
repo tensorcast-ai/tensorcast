@@ -790,18 +790,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_in
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+    const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints,
     std::optional<loading::DiskSource> disk_source) {
   return ingestion_runtime_->materialize_mapped_into_target(
-      target_device, resolved_plan, hints, std::move(disk_source));
+      target_device, prepared_execution, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+    const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints) {
-  return ingestion_runtime_->materialize_mapped_into_target(target_device, resolved_plan, hints);
+  return ingestion_runtime_->materialize_mapped_into_target(target_device, prepared_execution, hints);
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_loader_into_target(

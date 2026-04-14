@@ -10,7 +10,7 @@ from tensorcast.api.plan.artifact_set import (
     ArtifactSetResult,
     selection_identity_to_proto,
 )
-from tensorcast.api.store.serving_builder import PureTransformPublicationBundle
+from tensorcast.api.store.serving_builder import RepresentationPublishSpec
 from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
@@ -87,7 +87,7 @@ def _artifact_result_to_proto(
     | PublishResult
     | HydrateResult
     | BatchResult
-    | PureTransformPublicationBundle,
+    | RepresentationPublishSpec,
 ) -> node_agent_pb2.ArtifactActionResult:
     message = node_agent_pb2.ArtifactActionResult()
     if isinstance(result, ManifestResult):
@@ -111,7 +111,7 @@ def _artifact_result_to_proto(
             str(item) for item in result.missing_artifact_ids
         )
         return message
-    if isinstance(result, PureTransformPublicationBundle):
+    if isinstance(result, RepresentationPublishSpec):
         message.representation_publish.CopyFrom(result.to_proto())
         return message
 

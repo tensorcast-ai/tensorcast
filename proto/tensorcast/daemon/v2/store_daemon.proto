@@ -562,7 +562,7 @@ message SourceExecutionTopology {
 enum CollectivePolicy {
   COLLECTIVE_POLICY_UNSPECIFIED = 0;
   COLLECTIVE_POLICY_REQUIRE_COLLECTIVE = 1;
-  COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK = 2;
+  COLLECTIVE_POLICY_COLLECTIVE_FIRST = 2;
   COLLECTIVE_POLICY_DISABLE_COLLECTIVE = 3;
 }
 
@@ -570,6 +570,14 @@ enum CollectiveFailureClass {
   COLLECTIVE_FAILURE_CLASS_UNSPECIFIED = 0;
   COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE = 1;
   COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED = 2;
+}
+
+enum HashBackend {
+  HASH_BACKEND_UNSPECIFIED = 0;
+  HASH_BACKEND_NONE = 1;
+  HASH_BACKEND_GPU = 2;
+  HASH_BACKEND_D2H_CPU = 3;
+  HASH_BACKEND_CPU = 4;
 }
 
 enum HashLocation {
@@ -603,6 +611,16 @@ message ExecutionDiagnostics {
   uint64 actual_collective_committed_bytes = 13;
   uint64 actual_local_typed_bytes = 14;
   uint64 actual_generic_backend_bytes = 15;
+  string collective_skip_reason = 16;
+  HashBackend hash_backend = 17;
+  uint64 hash_bytes = 18;
+  uint64 hash_wall_time_ms = 19;
+  bool hash_identity_forming = 20;
+  uint64 collective_unique_source_bytes = 21;
+  uint64 collective_peer_transfer_bytes = 22;
+  uint64 collective_peak_temporary_bytes = 23;
+  uint64 collective_batch_count = 24;
+  uint64 collective_dedup_saving_bytes = 25;
 }
 
 message SourceBoundPlanDiagnostics {
@@ -1383,6 +1401,7 @@ message RefillOwnedBindingResponse {
   BindingValue current_value = 6;
   ExecutionDiagnostics execution_diagnostics = 7;
   SourceBoundPlanDiagnostics source_bound_plan_diagnostics = 8;
+  string update_epoch = 9;
 }
 
 message CloseOwnedBindingRequest {

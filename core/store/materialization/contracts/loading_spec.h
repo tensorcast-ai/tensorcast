@@ -46,6 +46,24 @@ enum class SourceLocalityHint : uint8_t { kAuto, kHostLocal, kSharedSource };
 
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
+  uint64_t requested_bytes{0};
+  uint64_t committed_bytes{0};
+  uint64_t fallback_bytes{0};
+  uint64_t residual_bytes{0};
+  uint64_t actual_collective_committed_bytes{0};
+  uint64_t actual_local_typed_bytes{0};
+  uint64_t actual_generic_backend_bytes{0};
+  uint64_t collective_unique_source_bytes{0};
+  uint64_t collective_peer_transfer_bytes{0};
+  uint64_t collective_peak_temporary_bytes{0};
+  uint64_t collective_batch_count{0};
+  uint64_t collective_dedup_saving_bytes{0};
+  std::string collective_skip_reason;
+  bool collective_handled{false};
+  bool direct_write_supported{false};
+  bool source_ordered{false};
+  std::string dominant_executor;
+  std::string selection_reason;
 
   struct DebugStats {
     std::uint64_t produced_chunks{0};
@@ -56,18 +74,6 @@ struct MaterializeIntoTargetResult {
   };
 
   std::optional<DebugStats> debug_stats;
-  uint64_t requested_bytes{0};
-  uint64_t committed_bytes{0};
-  uint64_t fallback_bytes{0};
-  uint64_t residual_bytes{0};
-  uint64_t actual_collective_committed_bytes{0};
-  uint64_t actual_local_typed_bytes{0};
-  uint64_t actual_generic_backend_bytes{0};
-  bool collective_handled{false};
-  bool direct_write_supported{false};
-  bool source_ordered{false};
-  std::string dominant_executor;
-  std::string selection_reason;
 };
 
 struct IntoTargetStorage {
@@ -221,6 +227,7 @@ struct MaterializeHints {
   ExportPolicy export_policy{ExportPolicy::kNever};
   bool need_view_data_hash{true};
   SourceMutationPolicy source_mutation_policy{SourceMutationPolicy::kReadWrite};
+  bool require_collective_execution{false};
 
   std::optional<VariantIdentity> variant;
 
