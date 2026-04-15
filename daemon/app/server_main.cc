@@ -1312,6 +1312,7 @@ int main(int argc, char** argv) {
   daemon::DaemonApp::GrpcOptions grpc_opts;
   grpc_opts.listen_addr = listen_addr;
   grpc_opts.credentials = creds;
+  grpc_opts.sync_server_threads = std::max<int>(1, static_cast<int>(cfg.server().num_threads()));
   grpc_opts.max_concurrent_streams = cfg.server().grpc().max_concurrent_streams();
   auto to_ms = [](const google::protobuf::Duration& d) -> int {
     return static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
