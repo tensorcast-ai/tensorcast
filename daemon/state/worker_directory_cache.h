@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,6 +38,8 @@ class WorkerDirectoryCache {
   };
 
   explicit WorkerDirectoryCache(std::shared_ptr<store::components::IGlobalStoreClient> global_store_client);
+
+  void update_local_entry(Entry entry);
 
   [[nodiscard]] bool is_fresh(std::string_view daemon_id, absl::Time now, absl::Duration staleness_budget) const;
 
@@ -75,16 +78,21 @@ class WorkerDirectoryCache {
   [[nodiscard]] CacheState& state_for(bool include_unavailable) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   [[nodiscard]] const CacheState& state_for(bool include_unavailable) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
+  [[nodiscard]] std::optional<Entry> local_entry_for(std::string_view daemon_id) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void overlay_local_entry(CacheState& state) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void update_from_workers(
       const std::vector<store::components::ActiveWorkerInfo>& workers,
       CacheState& state,
-      absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+      absl::Time now,
+      std::string_view local_default_ip) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
 
   mutable absl::Mutex mu_;
   CacheState active_state_ ABSL_GUARDED_BY(mu_);
   CacheState include_unavailable_state_ ABSL_GUARDED_BY(mu_);
+  std::optional<Entry> local_entry_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon

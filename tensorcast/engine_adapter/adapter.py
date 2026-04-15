@@ -40,6 +40,7 @@ from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
     HydrateResult,
     ManifestResult,
+    PublishManifest,
     PublishResult,
     SealedByteArtifact,
 )
@@ -236,7 +237,9 @@ ManifestFn = Callable[[str, CallContext | None], ManifestResult]
 PublishFn = Callable[
     [str, int | None, tuple[SealedByteArtifact, ...], CallContext | None], PublishResult
 ]
-HydrateFn = Callable[[str, CallContext | None], HydrateResult]
+HydrateFn = Callable[
+    [str | None, PublishManifest | None, CallContext | None], HydrateResult
+]
 EvictLocalFn = Callable[[str | None, CallContext | None], BatchResult]
 
 
@@ -594,13 +597,30 @@ class EngineAdapter:
     def execute_hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None = None,
+        publish_manifest: PublishManifest | None = None,
         ctx: CallContext | None = None,
     ) -> HydrateResult:
-        engine_request_id = str(engine_request_id).strip()
-        if not engine_request_id:
+        normalized_request_id = (
+            str(engine_request_id).strip() if engine_request_id is not None else None
+        )
+        if normalized_request_id == "":
             raise ArtifactError(
-                "engine_request_id is required",
+                "engine_request_id must be non-empty when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if publish_manifest is not None and not isinstance(
+            publish_manifest, PublishManifest
+        ):
+            raise ArtifactError(
+                "publish_manifest must be a PublishManifest when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if (normalized_request_id is None) == (publish_manifest is None):
+            raise ArtifactError(
+                "exactly one of engine_request_id or publish_manifest is required",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
@@ -610,7 +630,7 @@ class EngineAdapter:
                 status_code="UNIMPLEMENTED",
                 retryable=False,
             )
-        return self._hydrate_fn(engine_request_id, ctx)
+        return self._hydrate_fn(normalized_request_id, publish_manifest, ctx)
 
     def execute_evict_local(
         self,

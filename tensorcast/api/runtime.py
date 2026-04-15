@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 from tensorcast.api.context import CallContext
 from tensorcast.api.directory import TensorCastDirectory
+from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan.plan import (
     _PUBLIC_CONTINUATION_REQUIRED_EXECUTION_CLASS,
     _TERMINAL_ONLY_EXECUTION_CLASS,
@@ -17,6 +18,7 @@ from tensorcast.api.plan.plan import (
 )
 from tensorcast.api.signals import TensorCastSignals
 from tensorcast.daemon_ctl import DaemonCtl
+from tensorcast.engine_adapter.artifact_api import PublishManifest, PublishResult
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -31,6 +33,14 @@ _ACTIVE_RUNTIME: "Runtime | None" = None
 class Runtime:
     daemon_address: str
     _client: DaemonCtl
+    _publish_manifest_cache: dict[str, dict[bytes, PublishManifest]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    _publish_manifest_cache_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        repr=False,
+    )
 
     @property
     def client(self) -> DaemonCtl:
@@ -66,15 +76,128 @@ class Runtime:
             raise RuntimeError(
                 "Daemon ingress currently supports terminal_only execution only"
             )
-        response = self._client.execute_plan(
-            plan=plan_spec,
-            execution_class=execution_class,
-            dry_run=dry_run,
-        )
-        return PlanResult.from_node_agent_response(response)
+        resolved_plan_spec = self._rewrite_compat_hydrate_actions(plan_spec)
+        execute_plan_kwargs: dict[str, object] = {
+            "plan": resolved_plan_spec,
+            "execution_class": execution_class,
+            "dry_run": dry_run,
+        }
+        if resolved_plan_spec.context.HasField("deadline_ms"):
+            execute_plan_kwargs["timeout_s"] = max(
+                0.001,
+                float(resolved_plan_spec.context.deadline_ms) / 1000.0,
+            )
+        response = self._client.execute_plan(**execute_plan_kwargs)
+        result = PlanResult.from_node_agent_response(response)
+        self._remember_publish_manifests_from_result(result)
+        return result
+
+    def remember_publish_manifest(self, publish_manifest: PublishManifest) -> None:
+        if not isinstance(publish_manifest, PublishManifest):
+            raise ArtifactError(
+                "publish_manifest must be a PublishManifest",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        engine_request_id = str(
+            publish_manifest.artifact_manifest.engine_request_id
+        ).strip()
+        if not engine_request_id:
+            raise ArtifactError(
+                "publish_manifest.artifact_manifest.engine_request_id is required for compatibility caching",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        serialized = publish_manifest.to_proto().SerializeToString(deterministic=True)
+        with self._publish_manifest_cache_lock:
+            bucket = self._publish_manifest_cache.setdefault(engine_request_id, {})
+            bucket[serialized] = publish_manifest
+
+    def resolve_publish_manifest(self, *, engine_request_id: str) -> PublishManifest:
+        normalized_request_id = str(engine_request_id).strip()
+        if not normalized_request_id:
+            raise ArtifactError(
+                "engine_request_id is required for compatibility hydrate resolution",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        with self._publish_manifest_cache_lock:
+            matches = tuple(
+                self._publish_manifest_cache.get(normalized_request_id, {}).values()
+            )
+        if not matches:
+            raise ArtifactError(
+                "compatibility hydrate(engine_request_id=...) failed closed: no cached PublishManifest found; explicit publish_manifest is required",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if len(matches) > 1:
+            raise ArtifactError(
+                "compatibility hydrate(engine_request_id=...) failed closed: multiple cached PublishManifest generations found; explicit publish_manifest is required",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return matches[0]
+
+    def clear_publish_manifest_cache(
+        self, *, engine_request_id: str | None = None
+    ) -> None:
+        if engine_request_id is None:
+            with self._publish_manifest_cache_lock:
+                self._publish_manifest_cache.clear()
+            return
+        normalized_request_id = str(engine_request_id).strip()
+        if not normalized_request_id:
+            raise ArtifactError(
+                "engine_request_id must be non-empty when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        with self._publish_manifest_cache_lock:
+            self._publish_manifest_cache.pop(normalized_request_id, None)
+
+    def _rewrite_compat_hydrate_actions(
+        self, plan_spec: "plan_pb2.PlanSpec"
+    ) -> "plan_pb2.PlanSpec":
+        needs_rewrite = False
+        for step in plan_spec.steps:
+            if step.action.WhichOneof("kind") != "hydrate":
+                continue
+            if step.action.hydrate.WhichOneof("request_source") != "engine_request_id":
+                continue
+            needs_rewrite = True
+            break
+        if not needs_rewrite:
+            return plan_spec
+
+        rewritten = type(plan_spec)()
+        rewritten.CopyFrom(plan_spec)
+        for step in rewritten.steps:
+            if step.action.WhichOneof("kind") != "hydrate":
+                continue
+            if step.action.hydrate.WhichOneof("request_source") != "engine_request_id":
+                continue
+            publish_manifest = self.resolve_publish_manifest(
+                engine_request_id=str(step.action.hydrate.engine_request_id)
+            )
+            step.action.hydrate.ClearField("engine_request_id")
+            step.action.hydrate.publish_manifest.CopyFrom(publish_manifest.to_proto())
+        return rewritten
+
+    def _remember_publish_manifests_from_result(self, result: PlanResult) -> None:
+        for step in result.steps.values():
+            if step.status.state != "success":
+                continue
+            artifact_result = step.artifact_result
+            if not isinstance(artifact_result, PublishResult):
+                continue
+            if artifact_result.publish_manifest is None:
+                continue
+            self.remember_publish_manifest(artifact_result.publish_manifest)
 
     def close(self) -> None:
         global _ACTIVE_RUNTIME
+        self.clear_publish_manifest_cache()
         with _RUNTIME_LOCK:
             if _ACTIVE_RUNTIME is self:
                 _ACTIVE_RUNTIME = None

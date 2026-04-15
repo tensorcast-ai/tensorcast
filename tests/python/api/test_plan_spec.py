@@ -33,9 +33,11 @@ from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.types import ReplicaInfo
 from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
+    EngineOwnedManifest,
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.proto.common.v1 import common_pb2
@@ -46,6 +48,39 @@ from tensorcast.types import build_serving_manifest_ref
 
 def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
+
+
+def _sample_publish_manifest() -> PublishManifest:
+    artifact_manifest = ManifestResult.from_artifact_selections(
+        engine_request_id="rid-transfer",
+        layout_id="layout-v1",
+        manifest_selection=common_pb2.ArtifactSelection(
+            artifact_id="engine-manifest:rid-transfer",
+            logical_layout_hash=b"manifest-logical",
+            selection_hash=b"manifest-selection",
+        ),
+        artifact_selections=(
+            common_pb2.ArtifactSelection(
+                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+                logical_layout_hash=b"logical-a",
+                selection_hash=b"selection-a",
+            ),
+        ),
+    )
+    return PublishManifest(
+        artifact_manifest=artifact_manifest,
+        engine_owned_manifest=EngineOwnedManifest(
+            engine="sglang",
+            schema="sglang.engine_owned_manifest.v1",
+            version=1,
+            encoding="json",
+            created_at_ms=1774223000123,
+            expires_at_ms=1774223060123,
+            artifact_manifest_digest=artifact_manifest.key_set_digest_hex,
+            payload_sha256="f" * 64,
+            payload=b'{"logical_request_id":"rid-transfer"}',
+        ),
+    )
 
 
 class _StoreStub:
@@ -133,6 +168,49 @@ def test_plan_publish_serializes_canonical_action() -> None:
     assert second_step.action.WhichOneof("kind") == "publish"
     assert first_step.action.publish.engine_request_id == "rid-123"
     assert int(first_step.action.publish.ttl_ms) == 60_000
+
+def test_plan_hydrate_serializes_publish_manifest() -> None:
+    ctx = CallContext(request_id="req-hydrate", idempotency_key="idem-hydrate")
+    plan = Plan(ctx)
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    publish_manifest = _sample_publish_manifest()
+
+    step = plan.on_instance(inst).hydrate(publish_manifest=publish_manifest)
+
+    spec = plan.to_spec()
+    assert len(spec.steps) == 1
+    hydrate_step = spec.steps[0]
+    assert hydrate_step.step_id == step.step_id
+    assert hydrate_step.action.WhichOneof("kind") == "hydrate"
+    assert (
+        hydrate_step.action.hydrate.WhichOneof("request_source") == "publish_manifest"
+    )
+    assert (
+        hydrate_step.action.hydrate.publish_manifest.schema == publish_manifest.schema
+    )
+    assert (
+        hydrate_step.action.hydrate.publish_manifest.engine_owned_manifest.payload
+        == publish_manifest.engine_owned_manifest.payload
+    )
+
+
+def test_plan_hydrate_rejects_ambiguous_request_source() -> None:
+    plan = Plan(CallContext(request_id="req-hydrate-invalid"))
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    publish_manifest = _sample_publish_manifest()
+
+    with pytest.raises(
+        ArtifactError, match="exactly one of engine_request_id or publish_manifest"
+    ):
+        plan.on_instance(inst).hydrate(
+            engine_request_id="rid-123",
+            publish_manifest=publish_manifest,
+        )
+
+    with pytest.raises(
+        ArtifactError, match="exactly one of engine_request_id or publish_manifest"
+    ):
+        plan.on_instance(inst).hydrate()
 
 
 def test_plan_transform_register_pure_transform_builds_repo_owned_spec() -> None:
@@ -470,6 +548,9 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     publish_step.artifact_result.publish.manifest.CopyFrom(
         manifest_step.artifact_result.manifest
     )
+    publish_step.artifact_result.publish.publish_manifest.CopyFrom(
+        _sample_publish_manifest().to_proto()
+    )
     publish_outcome = publish_step.artifact_result.publish.put_outcomes.add()
     publish_outcome.artifact_id = (
         "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
@@ -523,6 +604,8 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     publish_result = result.steps["s2"].artifact_result
     assert isinstance(publish_result, PublishResult)
     assert publish_result.put_outcomes[0].message == "created"
+    assert publish_result.publish_manifest is not None
+    assert publish_result.publish_manifest.engine_owned_manifest.engine == "sglang"
     hydrate_result = result.steps["s3"].artifact_result
     assert isinstance(hydrate_result, HydrateResult)
     assert hydrate_result.missing_artifact_ids == (

@@ -165,11 +165,15 @@ from tensorcast.types import (
     FinalizeClass,
     HashBackend,
     HashLocation,
+    HostSharedRegionAttachment,
+    HostSharedRegionClass,
     IdentityMintStrategy,
+    LocalRegionHandle,
     PartialSealResult,
     PublicDiskSourceHandle,
     PublishedModelVersion,
     RealizationProtocol,
+    RegionMemoryKind,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     SealAssemblyResult,
@@ -3192,6 +3196,74 @@ class Store:
     # ------------------------------------------------------------------
     # Region-backed registration
     # ------------------------------------------------------------------
+    def register_region(
+        self,
+        *,
+        memory_kind: RegionMemoryKind,
+        size_bytes: int,
+        ttl_ms: int,
+        device_id: int | None = None,
+        cuda_ipc_handle: bytes | None = None,
+        host_shared_attach_token: bytes | None = None,
+        daemon_managed: bool = False,
+        host_shared_region_class: HostSharedRegionClass | None = None,
+        session_id: str | None = None,
+        name: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> LocalRegionHandle:
+        client = self._runtime.ensure_client()
+        return client.register_region(
+            memory_kind=memory_kind,
+            size_bytes=int(size_bytes),
+            ttl_ms=int(ttl_ms),
+            device_id=device_id,
+            cuda_ipc_handle=cuda_ipc_handle,
+            host_shared_attach_token=host_shared_attach_token,
+            daemon_managed=bool(daemon_managed),
+            host_shared_region_class=host_shared_region_class,
+            session_id=session_id,
+            region_name=name,
+            timeout_s=float(timeout_s),
+        )
+
+    def unregister_region(
+        self,
+        region_id: str,
+        *,
+        session_id: str | None = None,
+        force: bool | None = None,
+        timeout_s: float = 10.0,
+    ) -> bool:
+        client = self._runtime.ensure_client()
+        released = client.unregister_region(
+            region_id,
+            session_id=session_id,
+            force=force,
+            timeout_s=float(timeout_s),
+        )
+        if released:
+            with contextlib.suppress(Exception):
+                _cache_unregister_region(region_id)
+        return released
+
+    def attach_host_shared_region(
+        self,
+        handle: LocalRegionHandle,
+        *,
+        timeout_s: float = 5.0,
+    ) -> HostSharedRegionAttachment:
+        client = self._runtime.ensure_client()
+        return client.attach_host_shared_region(handle, timeout_s=float(timeout_s))
+
+    def release_host_shared_region(
+        self,
+        handle: LocalRegionHandle,
+        *,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        client = self._runtime.ensure_client()
+        return client.release_host_shared_region(handle, timeout_s=float(timeout_s))
+
     def register_vram_region(
         self,
         *,

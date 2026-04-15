@@ -9,8 +9,11 @@
 
 namespace tensorcast::daemon {
 
+class WorkerDirectoryCache;
+
 struct WorkerLifecyclePorts {
   WorkerIdentityStore& identity_store;
+  WorkerDirectoryCache& worker_directory_cache;
   RetireGates& retire_gates;
   ShutdownSignal& shutdown_signal;
   common::AsyncRuntime& async_runtime;

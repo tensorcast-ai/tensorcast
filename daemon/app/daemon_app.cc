@@ -371,6 +371,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (app->options_.worker_lifecycle.has_value()) {
     WorkerLifecyclePorts ports{
         .identity_store = app->kernel_->worker_identity_store(),
+        .worker_directory_cache = app->kernel_->worker_directory_cache(),
         .retire_gates = app->kernel_->retire_gates(),
         .shutdown_signal = app->kernel_->shutdown_signal(),
         .async_runtime = app->kernel_->async_runtime(),
@@ -479,6 +480,16 @@ absl::Status DaemonApp::build_grpc_server_() {
   grpc::ServerBuilder builder;
   const auto creds = options_.grpc.credentials ? options_.grpc.credentials : grpc::InsecureServerCredentials();
   builder.AddListeningPort(options_.grpc.listen_addr, creds);
+  if (options_.grpc.sync_server_threads > 0) {
+    const int max_pollers = std::min(4, options_.grpc.sync_server_threads);
+    const int min_pollers = 1;
+    const int num_cqs = std::min(2, max_pollers);
+    builder.SetSyncServerOption(grpc::ServerBuilder::SyncServerOption::NUM_CQS, num_cqs);
+    builder.SetSyncServerOption(grpc::ServerBuilder::SyncServerOption::MIN_POLLERS, min_pollers);
+    builder.SetSyncServerOption(grpc::ServerBuilder::SyncServerOption::MAX_POLLERS, max_pollers);
+    LOG(INFO) << "Configuring sync gRPC server"
+              << " num_cqs=" << num_cqs << " min_pollers=" << min_pollers << " max_pollers=" << max_pollers;
+  }
 
   if (options_.grpc.max_concurrent_streams > 0) {
     builder.AddChannelArgument("grpc.max_concurrent_streams", options_.grpc.max_concurrent_streams);

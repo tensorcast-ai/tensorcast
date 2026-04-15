@@ -483,24 +483,10 @@ bool reconcile_visible_entry_locked(AuthorityEntry* entry, ByteArtifactRuntimeSt
     return false;
   }
 
-  auto loader_or = backing.retained_body_handle.make_loader();
-  if (!loader_or.ok()) {
-    set_backing_lifecycle_state_locked(&backing, BackingLifecycleState::kInvalidated, "loader_open_failed");
-    transition_to_invisible_locked(entry, state);
-    return false;
-  }
-  auto init_status = (*loader_or)->initialize();
-  if (!init_status.ok()) {
-    set_backing_lifecycle_state_locked(&backing, BackingLifecycleState::kInvalidated, "loader_init_failed");
-    transition_to_invisible_locked(entry, state);
-    return false;
-  }
-  auto size_or = (*loader_or)->get_artifact_size();
-  if (!size_or.ok() || *size_or != entry->claim_descriptor.size_bytes) {
-    set_backing_lifecycle_state_locked(&backing, BackingLifecycleState::kInvalidated, "size_mismatch");
-    transition_to_invisible_locked(entry, state);
-    return false;
-  }
+  // Hot get/exists paths hit this helper under the global body-store mutex. Avoid
+  // probing the replica loader here; runtime eviction events and downstream read
+  // failures already invalidate stale backings without serializing all lookups on
+  // potentially slow loader open/read calls.
 
   entry->claim_state = AuthorityClaimState::kClaimedVisible;
   entry->visibility_kind = AuthorityVisibilityKind::kReadyBacking;
