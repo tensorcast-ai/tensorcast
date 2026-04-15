@@ -150,9 +150,11 @@ class FakeBindingClient:
             source=store_daemon_pb2.PublicDiskSourceHandle(
                 path=str(kwargs["path"]),
                 canonical_index_bytes=self._index_bytes,
-                artifact_id="",
+                artifact_id="msa1:test-session~trusted_storage_root_test~partitioned~deadbeef",
                 generation=0,
                 verify_checksums=bool(kwargs.get("verify_checksums", True)),
+                policy_id="trusted_storage_root_test",
+                exact_size_bytes=64,
             )
         )
 
@@ -1248,7 +1250,7 @@ def test_binding_realize_from_accepts_public_disk_source_handle(
     disk_source = store_mod.PublicDiskSourceHandle(
         path="/tmp/public-disk-source",
         canonical_index_bytes=_make_index_bytes(),
-        artifact_id=None,
+        artifact_id="msa1:test-session~trusted_storage_root_test~partitioned~deadbeef",
         verify_checksums=False,
     )
 
@@ -1265,7 +1267,10 @@ def test_binding_realize_from_accepts_public_disk_source_handle(
 
     assert isinstance(update_epoch, BindingUpdateEpoch)
     assert len(client.refill_calls) == 1
-    assert client.refill_calls[0]["artifact_id"] == ""
+    assert (
+        client.refill_calls[0]["artifact_id"]
+        == "msa1:test-session~trusted_storage_root_test~partitioned~deadbeef"
+    )
     public_disk_source = client.refill_calls[0]["public_disk_source"]
     assert public_disk_source.path == "/tmp/public-disk-source"
     assert public_disk_source.verify_checksums is False
@@ -1284,8 +1289,23 @@ def test_store_resolve_public_disk_source_returns_public_handle(
     assert isinstance(source, store_mod.PublicDiskSourceHandle)
     assert source.path == "/tmp/public-disk-source"
     assert source.canonical_index_bytes == _make_index_bytes()
+    assert (
+        source.artifact_id
+        == "msa1:test-session~trusted_storage_root_test~partitioned~deadbeef"
+    )
     assert source.verify_checksums is False
     assert client.resolve_public_disk_calls[-1]["path"] == "/tmp/public-disk-source"
+
+
+def test_store_artifact_accepts_msa1_attested_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+
+    source = store.resolve_public_disk_source("/tmp/public-disk-source")
+    artifact = store.artifact(artifact_id=source.artifact_id)
+
+    assert artifact.artifact_id == source.artifact_id
 
 
 def test_binding_begin_update_clears_current_value_and_seal_preserves_ptrs(

@@ -264,6 +264,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::ResolvePublicDiskSourceRequest* req,
       v2::ResolvePublicDiskSourceResponse* resp) override;
 
+  grpc::Status PromoteMountedSourceArtifact(
+      grpc::ServerContext* ctx,
+      const v2::PromoteMountedSourceArtifactRequest* req,
+      v2::PromoteMountedSourceArtifactResponse* resp) override;
+
   grpc::Status ImportArtifactFromPathStream(
       grpc::ServerContext* ctx,
       const v2::ImportArtifactFromPathRequest* req,

@@ -894,7 +894,7 @@ class OwnedBindingSlot:
                 artifact_id=(
                     ""
                     if public_disk_source is None
-                    else str(public_disk_source.artifact_id or "")
+                    else str(public_disk_source.artifact_id)
                 )
                 if resolved is None
                 else resolved._ensure_identified(),

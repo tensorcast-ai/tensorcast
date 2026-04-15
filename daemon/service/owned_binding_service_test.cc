@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -16,6 +17,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/testing/global_store_client_stub.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/rpc_context.h"
 #include "grpcpp/server_context.h"
 
@@ -76,6 +78,30 @@ v2::TargetLayout make_target_layout() {
   offset->set_storage_offset(0);
   offset->set_logical_length(4);
   return layout;
+}
+
+bool write_file(const std::filesystem::path& path, std::string_view payload) {
+  std::ofstream out(path, std::ios::binary);
+  if (!out.is_open()) {
+    return false;
+  }
+  out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+  return out.good();
+}
+
+tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap to_registry_fingerprints(
+    const tensorcast::daemon::materialization_disk_resolve::SourceFingerprintMap& fingerprints) {
+  tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap out;
+  for (const auto& [relative_path, fingerprint] : fingerprints) {
+    out.insert_or_assign(
+        relative_path,
+        tensorcast::daemon::ArtifactSourceRegistry::SourceFileFingerprint{
+            .inode = fingerprint.inode,
+            .size = fingerprint.size,
+            .mtime_ns = fingerprint.mtime_ns,
+        });
+  }
+  return out;
 }
 
 ByteRangeMap make_data_map(uint64_t total_bytes) {
@@ -411,6 +437,125 @@ TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifac
   REQUIRE(record->state == v2::BINDING_STATE_READY_ARTIFACT);
   REQUIRE(record->current_artifact_id == "artifact-old");
   REQUIRE(record->current_binding_value_id == "value-1");
+}
+
+TEST_CASE(
+    "RefillOwnedBinding rejects byte-only mounted sources for tensor-aware realization",
+    "[daemon][binding][byte_only]") {
+  Fixture fix;
+  const auto record = fix.insert_ready_artifact_record();
+
+  const auto artifact_id = "msa1:test-session~policy~partitioned~deadbeef";
+  const auto artifact_dir = test_tmpdir() / "binding_byte_only_source";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCD"));
+
+  auto metadata_or = tensorcast::daemon::materialization_disk_resolve::build_mounted_source_metadata(artifact_dir);
+  REQUIRE(metadata_or.ok());
+  fix.disk_imports.upsert_binding(
+      artifact_id,
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = artifact_dir.string(),
+          .canonical_index_json = metadata_or->index_info.canonical_index_json,
+          .source_index_json = metadata_or->index_info.source_index_json,
+          .source_disk_path = artifact_dir.string(),
+          .tensor_aware_metadata = false,
+          .validate_before_read = true,
+          .file_fingerprints = to_registry_fingerprints(metadata_or->file_fingerprints),
+      });
+
+  v2::RefillOwnedBindingRequest req;
+  req.set_binding_id(record->binding_id);
+  req.mutable_source_policy()->set_preference(v2::SOURCE_PREFERENCE_PREFER_DISK);
+  auto* public_disk_source = req.mutable_public_disk_source();
+  public_disk_source->set_artifact_id(artifact_id);
+  public_disk_source->set_path(artifact_dir.string());
+
+  auto* realization_plan = req.mutable_realization_plan();
+  realization_plan->set_version(1);
+  auto* entry = realization_plan->add_entries();
+  entry->set_op_kind(v2::BINDING_REALIZATION_OP_KIND_COPY);
+  entry->set_source_name("payload");
+  entry->set_dst_name("alpha");
+  auto* source_range = entry->add_source_ranges();
+  source_range->set_dim(0);
+  source_range->set_start(0);
+  source_range->set_end(4);
+  auto* dst_range = entry->add_dst_ranges();
+  dst_range->set_dim(0);
+  dst_range->set_start(0);
+  dst_range->set_end(4);
+
+  v2::RefillOwnedBindingResponse resp;
+  const auto status = run_refill_owned_binding(fix.service, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message().find("tensor-aware mounted-source metadata") != std::string::npos);
+}
+
+TEST_CASE(
+    "RefillOwnedBinding rejects mismatched public disk source canonical index hints",
+    "[daemon][binding][public_disk_source][hints]") {
+  Fixture fix;
+  const auto record = fix.insert_ready_artifact_record();
+
+  const auto artifact_id = "msa1:test-session~policy~partitioned~trusted";
+  const auto artifact_dir = test_tmpdir() / "binding_public_disk_source_hint_mismatch";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCD"));
+  REQUIRE(write_file(artifact_dir / "tensor_index.json", make_target_index_json()));
+
+  auto metadata_or = tensorcast::daemon::materialization_disk_resolve::build_mounted_source_metadata(artifact_dir);
+  REQUIRE(metadata_or.ok());
+  REQUIRE(
+      metadata_or->metadata_capability ==
+      tensorcast::daemon::materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware);
+  fix.disk_imports.upsert_binding(
+      artifact_id,
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = artifact_dir.string(),
+          .canonical_index_json = metadata_or->index_info.canonical_index_json,
+          .source_index_json = metadata_or->index_info.source_index_json,
+          .source_disk_path = artifact_dir.string(),
+          .tensor_aware_metadata = true,
+          .validate_before_read = true,
+          .file_fingerprints = to_registry_fingerprints(metadata_or->file_fingerprints),
+      });
+
+  v2::RefillOwnedBindingRequest req;
+  req.set_binding_id(record->binding_id);
+  req.mutable_source_policy()->set_preference(v2::SOURCE_PREFERENCE_PREFER_DISK);
+  auto* public_disk_source = req.mutable_public_disk_source();
+  public_disk_source->set_artifact_id(artifact_id);
+  public_disk_source->set_path(artifact_dir.string());
+  public_disk_source->set_canonical_index_bytes("bogus-index");
+
+  auto* realization_plan = req.mutable_realization_plan();
+  realization_plan->set_version(1);
+  auto* entry = realization_plan->add_entries();
+  entry->set_op_kind(v2::BINDING_REALIZATION_OP_KIND_COPY);
+  entry->set_source_name("alpha");
+  entry->set_dst_name("alpha");
+  auto* source_range = entry->add_source_ranges();
+  source_range->set_dim(0);
+  source_range->set_start(0);
+  source_range->set_end(1);
+  auto* dst_range = entry->add_dst_ranges();
+  dst_range->set_dim(0);
+  dst_range->set_start(0);
+  dst_range->set_end(1);
+
+  v2::RefillOwnedBindingResponse resp;
+  const auto status = run_refill_owned_binding(fix.service, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_message().find("canonical_index_bytes") != std::string::npos);
 }
 
 TEST_CASE("SourceBoundPlanSummary keeps collective lane eligibility separate from pure blockers", "[daemon][binding]") {

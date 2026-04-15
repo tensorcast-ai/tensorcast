@@ -25,6 +25,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/recording_global_store_client.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/device_resolver.h"
@@ -83,6 +84,21 @@ bool write_file(const std::filesystem::path& path, std::string_view payload) {
   }
   out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
   return out.good();
+}
+
+tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap to_registry_fingerprints(
+    const tensorcast::daemon::materialization_disk_resolve::SourceFingerprintMap& fingerprints) {
+  tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap out;
+  for (const auto& [relative_path, fingerprint] : fingerprints) {
+    out.insert_or_assign(
+        relative_path,
+        tensorcast::daemon::ArtifactSourceRegistry::SourceFileFingerprint{
+            .inode = fingerprint.inode,
+            .size = fingerprint.size,
+            .mtime_ns = fingerprint.mtime_ns,
+        });
+  }
+  return out;
 }
 
 struct ValidationTargetLease {
@@ -1127,4 +1143,86 @@ TEST_CASE(
   auto status = run_request(fix.controller, req, resp);
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() != grpc::StatusCode::UNIMPLEMENTED);
+}
+
+TEST_CASE(
+    "MaterializeIntoMappedTarget rejects stale msa1 after mounted source mutation",
+    "[daemon][materialize][mapped_target][msa1][mutation]") {
+  MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {8});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
+
+  const auto artifact_id = "msa1:test-session~policy~partitioned~mapped";
+  const auto artifact_dir = test_tmpdir() / "artifact_mapped_target_mutated_msa1";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCDEFGH"));
+
+  auto metadata_or = tensorcast::daemon::materialization_disk_resolve::build_mounted_source_metadata(artifact_dir);
+  REQUIRE(metadata_or.ok());
+  fix.disk_imports.upsert_binding(
+      artifact_id,
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = artifact_dir.string(),
+          .canonical_index_json = metadata_or->index_info.canonical_index_json,
+          .source_index_json = metadata_or->index_info.source_index_json,
+          .source_disk_path = artifact_dir.string(),
+          .tensor_aware_metadata = false,
+          .validate_before_read = true,
+          .file_fingerprints = to_registry_fingerprints(metadata_or->file_fingerprints),
+      });
+
+  REQUIRE(std::filesystem::remove(artifact_dir / "tensor.data"));
+
+  MaterializeIntoMappedTargetRequest req;
+  req.mutable_selection()->set_artifact_id(artifact_id);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage0 = layout->add_storages();
+  storage0->set_storage_id("storage-0");
+  storage0->set_device_id(0);
+  storage0->set_storage_length(8);
+  storage0->set_vram_region_id(lease.region_ids[0]);
+  storage0->set_mapping_base_offset(0);
+
+  auto* offset0 = layout->add_offsets();
+  offset0->set_name("payload");
+  offset0->set_storage_id("storage-0");
+  offset0->set_storage_offset(0);
+  offset0->set_logical_length(8);
+
+  auto* spec0 = req.add_dst_tensors();
+  spec0->set_name("payload");
+  spec0->add_shape(8);
+  spec0->add_stride(1);
+  spec0->set_dtype("torch.uint8");
+  spec0->set_storage_offset(0);
+  spec0->set_logical_length(8);
+
+  CopyPlan plan;
+  plan.set_version(1);
+  auto* entry = plan.add_entries();
+  entry->set_ckpt_name("payload");
+  entry->set_dst_name("payload");
+  entry->mutable_ckpt_range()->set_dim(0);
+  entry->mutable_ckpt_range()->set_start(0);
+  entry->mutable_ckpt_range()->set_end(8);
+  entry->mutable_dst_range()->set_dim(0);
+  entry->mutable_dst_range()->set_start(0);
+  entry->mutable_dst_range()->set_end(8);
+  req.mutable_copy_plan()->CopyFrom(plan);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_message().find("SOURCE_MUTATED") != std::string::npos);
 }

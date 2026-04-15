@@ -2944,9 +2944,13 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
         (ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer) ==
             loading::TransformPlacement::kServer;
 
-    std::string representation_reason = "missing_variant_or_source_layout";
-    if (ctx.hints.variant.has_value() && ctx.disk.source_index_json.has_value() &&
-        ctx.verification.canonical_index_json.has_value()) {
+    const bool variant_required_for_representation = ctx.resolved_view_plan.has_value();
+    std::string representation_reason =
+        variant_required_for_representation ? "missing_variant_or_source_layout" : "missing_source_layout";
+    const bool can_build_representation = ctx.disk.source_index_json.has_value() &&
+        ctx.verification.canonical_index_json.has_value() &&
+        (ctx.hints.variant.has_value() || !variant_required_for_representation);
+    if (can_build_representation) {
       const std::string_view target_index_json = ctx.resolved_view_plan.has_value()
           ? std::string_view(ctx.resolved_view_plan->view_index_json)
           : std::string_view(*ctx.verification.canonical_index_json);
@@ -2954,7 +2958,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
         auto representation_or = materialization::contracts::build_index_backed_representation_work(
             *ctx.disk.source_index_json,
             target_index_json,
-            *ctx.hints.variant,
+            ctx.hints.variant,
             canonical_byte_space_ref(),
             "ephemeral_into_target");
         if (representation_or.ok()) {

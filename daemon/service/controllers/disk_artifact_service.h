@@ -18,6 +18,7 @@
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/artifact_source_registry.h"
+#include "daemon/state/daemon_options.h"
 #include "daemon/state/shutdown_signal.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -31,6 +32,7 @@ class DiskArtifactService {
     ShutdownSignal& shutdown_signal;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     std::filesystem::path storage_path;
+    DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
   };
 
   explicit DiskArtifactService(Dep d);
@@ -44,6 +46,11 @@ class DiskArtifactService {
       RpcContext& rctx,
       const v2::ResolvePublicDiskSourceRequest& req,
       v2::ResolvePublicDiskSourceResponse& resp);
+
+  grpc::Status promote_mounted_source_artifact(
+      RpcContext& rctx,
+      const v2::PromoteMountedSourceArtifactRequest& req,
+      v2::PromoteMountedSourceArtifactResponse& resp);
 
   grpc::Status import_artifact_from_path_stream(
       RpcContext& rctx,
@@ -78,6 +85,8 @@ class DiskArtifactService {
       const std::filesystem::path& normalized_path,
       bool verify_checksums) const;
 
+  [[nodiscard]] std::string mounted_source_policy_id() const;
+
   void prune_expired_cache_locked(absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(import_mu_);
   void enforce_cache_capacity_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(import_mu_);
 
@@ -91,6 +100,7 @@ class DiskArtifactService {
 
   Dep d_;
   std::filesystem::path storage_path_;
+  std::string daemon_session_token_;
   const absl::Duration import_cache_ttl_;
   const size_t import_cache_max_entries_;
 

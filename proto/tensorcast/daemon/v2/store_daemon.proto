@@ -96,6 +96,7 @@ service StoreDaemonService {
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc ResolvePublicDiskSource(ResolvePublicDiskSourceRequest) returns (ResolvePublicDiskSourceResponse) {}
+  rpc PromoteMountedSourceArtifact(PromoteMountedSourceArtifactRequest) returns (PromoteMountedSourceArtifactResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
@@ -697,6 +698,37 @@ message PublicDiskSourceHandle {
   string artifact_id = 3;
   uint64 generation = 4;
   bool verify_checksums = 5;
+  string trusted_content_artifact_id = 6;
+  bytes source_index_bytes = 7;
+  DiskSourceFormatKind format_kind = 8;
+  DiskMetadataCapability metadata_capability = 9;
+  DiskResolutionStrategy resolution_strategy = 10;
+  DiskValidationMode validation_mode = 11;
+  string policy_id = 12;
+  uint64 exact_size_bytes = 13;
+}
+
+enum DiskSourceFormatKind {
+  DISK_SOURCE_FORMAT_KIND_UNSPECIFIED = 0;
+  DISK_SOURCE_FORMAT_KIND_PARTITIONED = 1;
+  DISK_SOURCE_FORMAT_KIND_SAFETENSORS = 2;
+}
+
+enum DiskMetadataCapability {
+  DISK_METADATA_CAPABILITY_UNSPECIFIED = 0;
+  DISK_METADATA_CAPABILITY_TENSOR_AWARE = 1;
+  DISK_METADATA_CAPABILITY_BYTE_ONLY = 2;
+}
+
+enum DiskResolutionStrategy {
+  DISK_RESOLUTION_STRATEGY_UNSPECIFIED = 0;
+  DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY = 1;
+  DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT = 2;
+}
+
+enum DiskValidationMode {
+  DISK_VALIDATION_MODE_UNSPECIFIED = 0;
+  DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ = 1;
 }
 
 message BindingRealizationRange {
@@ -2047,6 +2079,19 @@ message ResolvePublicDiskSourceRequest {
 
 message ResolvePublicDiskSourceResponse {
   PublicDiskSourceHandle source = 1;
+}
+
+message PromoteMountedSourceArtifactRequest {
+  string artifact_id = 1;
+  bool verify_checksums = 2;
+}
+
+message PromoteMountedSourceArtifactResponse {
+  string artifact_id = 1;
+  bytes canonical_index_bytes = 2;
+  uint64 generation = 3;
+  ImportArtifactState import_state = 4;
+  string source_artifact_id = 5;
 }
 
 enum ImportArtifactPhase {

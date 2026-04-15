@@ -1049,6 +1049,107 @@ def test_from_disk_function_delegates_to_session(
     assert session.kwargs["verify_checksums"] is True
 
 
+def test_import_from_disk_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def import_from_disk(
+            self,
+            path: str,
+            *,
+            key: str | None = None,
+            verify_checksums: bool = True,
+            show_progress: bool | None = None,
+        ):
+            self.kwargs = {
+                "path": path,
+                "key": key,
+                "verify_checksums": verify_checksums,
+                "show_progress": show_progress,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.import_from_disk("/tmp/data", key="k")
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["path"] == "/tmp/data"
+    assert session.kwargs["key"] == "k"
+    assert session.kwargs["verify_checksums"] is True
+
+
+def test_promote_mounted_source_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def promote_mounted_source(
+            self,
+            artifact: object,
+            *,
+            verify_checksums: bool = True,
+            timeout_s: float | None = None,
+        ):
+            self.kwargs = {
+                "artifact": artifact,
+                "verify_checksums": verify_checksums,
+                "timeout_s": timeout_s,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.promote_mounted_source("msa1:test")
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["artifact"] == "msa1:test"
+    assert session.kwargs["verify_checksums"] is True
+    assert session.kwargs["timeout_s"] is None
+
+
+def test_promote_mounted_source_function_delegates_timeout_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def promote_mounted_source(
+            self,
+            artifact: object,
+            *,
+            verify_checksums: bool = True,
+            timeout_s: float | None = None,
+        ):
+            self.kwargs = {
+                "artifact": artifact,
+                "verify_checksums": verify_checksums,
+                "timeout_s": timeout_s,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.promote_mounted_source("msa1:test", timeout_s=45.0)
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["artifact"] == "msa1:test"
+    assert session.kwargs["verify_checksums"] is True
+    assert session.kwargs["timeout_s"] == 45.0
+
+
 def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
     daemon_ctl._CLIENT_INSTANCE = None
     daemon_ctl._CLIENT_ADDRESS = None
@@ -1203,14 +1304,10 @@ def test_store_force_recreate_and_option_refresh(
 
     store_mod.shutdown_process_store()
 
-    initial_opts = store_mod.StoreOptions(
-        get=GetArtifactOptions(source="auto")
-    )
+    initial_opts = store_mod.StoreOptions(get=GetArtifactOptions(source="auto"))
     first = cast(DummyStore, store_mod.store(opts=initial_opts))
 
-    mismatch_opts = store_mod.StoreOptions(
-        get=GetArtifactOptions(source="disk_only")
-    )
+    mismatch_opts = store_mod.StoreOptions(get=GetArtifactOptions(source="disk_only"))
     with pytest.raises(RuntimeError):
         store_mod.store(opts=mismatch_opts)
 
@@ -1272,7 +1369,9 @@ def test_shutdown_all_contexts_closes_leaked_runtime_contexts(
     live_contexts.add(leaked_a)
     live_contexts.add(leaked_b)
 
-    monkeypatch.setattr(store_runtime_mod.StoreRuntimeContext, "_LIVE_CONTEXTS", live_contexts)
+    monkeypatch.setattr(
+        store_runtime_mod.StoreRuntimeContext, "_LIVE_CONTEXTS", live_contexts
+    )
 
     store_runtime_mod._shutdown_all_contexts()
 

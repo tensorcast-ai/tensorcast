@@ -6,7 +6,6 @@ import atexit
 import contextlib
 import logging
 import os
-import sys
 import threading
 import time
 import weakref
@@ -913,22 +912,19 @@ def _parse_artifact_ref(
     ref_value = str(ref)
     if not ref_value:
         raise ValueError("ref must be non-empty")
-    if ref_value.startswith(("mi2:", "cgid:")):
+    if ref_value.startswith(("mi2:", "cgid:", "msa1:")):
         return ref_value, None
     if ref_value.startswith("disk:"):
         raise ValueError(
-            "disk: ref is no longer supported; use Store.from_disk(...) to import "
-            "and then reference the artifact by id or key."
+            "disk: ref is no longer supported; use Store.from_disk(...) for the "
+            "mounted-source fast path or Store.import_from_disk(...) for explicit "
+            "mi2 import, then reference the artifact by id or key."
         )
     return None, ref_value
 
 
 def _should_show_from_disk_progress(show_progress: bool | None) -> bool:
-    if show_progress is not None:
-        return bool(show_progress)
-    with contextlib.suppress(Exception):
-        return bool(sys.stderr.isatty())
-    return False
+    return bool(show_progress) if show_progress is not None else False
 
 
 _IMPORT_STREAM_ERROR_STATUS: dict[int, ArtifactStatusCode] = {
@@ -2970,7 +2966,75 @@ class Store:
             key=key,
         )
 
-    def from_disk(
+    def _artifact_from_disk_metadata(
+        self,
+        *,
+        disk_path: str,
+        artifact_id: str,
+        canonical_index_bytes: bytes,
+        generation: int | None,
+        key: str | None,
+        event_name: str,
+        resolution_mode: str,
+        trusted_content_artifact_id: str | None = None,
+    ) -> Artifact:
+        if not artifact_id:
+            raise ArtifactError(
+                "disk resolution returned empty artifact_id",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        if not canonical_index_bytes:
+            raise ArtifactError(
+                "disk resolution returned empty canonical index bytes",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+        entry = ArtifactCacheEntry(
+            artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            parsed_index=canonical_index,
+            generation=generation,
+            expires_at=time.monotonic(),
+        )
+        self._runtime.cache_artifact_index(entry)
+        artifact_id_kind = infer_artifact_id_kind(artifact_id)
+        trusted_hint_kind = (
+            infer_artifact_id_kind(trusted_content_artifact_id)
+            if trusted_content_artifact_id
+            else None
+        )
+        emit_tensorcast_profile_event(
+            "tensorcast",
+            event_name,
+            logger=logger,
+            payload={
+                "path": disk_path,
+                "artifact_id": artifact_id,
+                "artifact_id_kind": (
+                    artifact_id_kind.value.lower() if artifact_id_kind else None
+                ),
+                "trusted_content_artifact_id": trusted_content_artifact_id,
+                "trusted_content_hint_kind": (
+                    trusted_hint_kind.value.lower() if trusted_hint_kind else None
+                ),
+                "tensor_count": len(canonical_index.entries),
+                "total_size_bytes": canonical_index.total_size_bytes,
+                "daemon_endpoint": self._runtime.daemon_endpoint,
+                "resolution_mode": resolution_mode,
+            },
+        )
+        return Artifact(
+            store_ref=weakref.ref(self),
+            artifact_id=artifact_id,
+            key=key,
+            canonical_index_bytes=canonical_index_bytes or None,
+            canonical_index=canonical_index,
+            generation=generation,
+        )
+
+    def import_from_disk(
         self,
         path: str,
         *,
@@ -2987,7 +3051,7 @@ class Store:
         deadline = time.monotonic() + 30.0
         with tensorcast_profile_stage(
             "tensorcast",
-            "store.from_disk",
+            "store.import_from_disk",
             logger=logger,
             extra={
                 "path": disk_path,
@@ -3048,6 +3112,7 @@ class Store:
                         profile["processed_bytes"] = processed_bytes
                         profile["total_bytes"] = total_bytes
                         profile["message_samples"] = messages[:20]
+                        profile["resolution_mode"] = "import"
                 except RuntimeError as exc:
                     remaining = deadline - time.monotonic()
                     if not _is_import_startup_in_progress_error(exc) or remaining <= 0:
@@ -3056,7 +3121,7 @@ class Store:
                     if profile is not None:
                         profile["startup_retry_count"] = startup_retry_count
                     logger.info(
-                        "store.from_disk_retry_startup",
+                        "store.import_from_disk_retry_startup",
                         extra={
                             "tc.store.daemon": self._runtime.daemon_endpoint,
                             "path": disk_path,
@@ -3066,42 +3131,19 @@ class Store:
                     )
                     time.sleep(min(1.0, remaining))
         artifact_id = response.artifact_id or ""
-        if not artifact_id:
-            raise ArtifactError(
-                "ImportArtifactFromPath returned empty artifact_id",
-                status_code="DATA_LOSS",
-                retryable=False,
-            )
         canonical_index_bytes = bytes(response.canonical_index_bytes)
-        if not canonical_index_bytes:
-            raise ArtifactError(
-                "ImportArtifactFromPath returned empty canonical index bytes",
-                status_code="DATA_LOSS",
-                retryable=False,
-            )
         canonical_index = canonical_index_from_bytes(canonical_index_bytes)
         generation_value: int | None = (
             int(response.generation) if response.generation else None
         )
-        entry = ArtifactCacheEntry(
+        artifact = self._artifact_from_disk_metadata(
+            disk_path=disk_path,
             artifact_id=artifact_id,
             canonical_index_bytes=canonical_index_bytes,
-            parsed_index=canonical_index,
             generation=generation_value,
-            expires_at=time.monotonic(),
-        )
-        self._runtime.cache_artifact_index(entry)
-        emit_tensorcast_profile_event(
-            "tensorcast",
-            "store.from_disk.summary",
-            logger=logger,
-            payload={
-                "path": disk_path,
-                "artifact_id": artifact_id,
-                "tensor_count": len(canonical_index.entries),
-                "total_size_bytes": canonical_index.total_size_bytes,
-                "daemon_endpoint": self._runtime.daemon_endpoint,
-            },
+            key=key,
+            event_name="store.import_from_disk.summary",
+            resolution_mode="import",
         )
         if key:
             index_multihash, data_multihash = _split_mi2_artifact_id(artifact_id)
@@ -3127,13 +3169,101 @@ class Store:
                     )
                 else:
                     self._runtime.cache_key_mapping(key, artifact_id=artifact_id)
-        return Artifact(
-            store_ref=weakref.ref(self),
-            artifact_id=artifact_id,
-            key=key,
-            canonical_index_bytes=canonical_index_bytes or None,
-            canonical_index=canonical_index,
+        return artifact
+
+    def from_disk(
+        self,
+        path: str,
+        *,
+        key: str | None = None,
+        verify_checksums: bool = True,
+        show_progress: bool | None = None,
+    ) -> Artifact:
+        disk_path = os.fspath(path)
+        if not disk_path:
+            raise ValueError("path is required")
+        use_progress = _should_show_from_disk_progress(show_progress)
+        if key is not None or use_progress:
+            return self.import_from_disk(
+                disk_path,
+                key=key,
+                verify_checksums=verify_checksums,
+                show_progress=show_progress,
+            )
+        client = self._runtime.ensure_client()
+        response = None
+        deadline = time.monotonic() + 30.0
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "store.from_disk",
+            logger=logger,
+            extra={
+                "path": disk_path,
+                "verify_checksums": bool(verify_checksums),
+                "show_progress": use_progress,
+                "daemon_endpoint": self._runtime.daemon_endpoint,
+            },
+        ) as profile:
+            startup_retry_count = 0
+            while response is None:
+                try:
+                    response = client.resolve_public_disk_source(
+                        path=disk_path,
+                        verify_checksums=bool(verify_checksums),
+                    )
+                    if profile is not None:
+                        profile["resolution_mode"] = "attested_mounted_source"
+                except RuntimeError as exc:
+                    remaining = deadline - time.monotonic()
+                    if not _is_import_startup_in_progress_error(exc) or remaining <= 0:
+                        raise
+                    startup_retry_count += 1
+                    if profile is not None:
+                        profile["startup_retry_count"] = startup_retry_count
+                    logger.info(
+                        "store.from_disk_retry_startup",
+                        extra={
+                            "tc.store.daemon": self._runtime.daemon_endpoint,
+                            "path": disk_path,
+                            "remaining_s": round(remaining, 3),
+                        },
+                        exc_info=exc,
+                    )
+                    time.sleep(min(1.0, remaining))
+        has_source = (
+            response.HasField("source")
+            if hasattr(response, "HasField")
+            else getattr(response, "source", None) is not None
+        )
+        if not has_source:
+            raise ArtifactError(
+                "ResolvePublicDiskSource returned empty source",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        source = PublicDiskSourceHandle.from_proto(response.source)
+        if profile is not None:
+            profile["artifact_id"] = source.artifact_id
+            profile["trusted_content_artifact_id"] = (
+                source.trusted_content_artifact_id or ""
+            )
+            profile["metadata_capability"] = (
+                str(source.metadata_capability)
+                if source.metadata_capability is not None
+                else ""
+            )
+        generation_value: int | None = (
+            int(source.generation) if source.generation else None
+        )
+        return self._artifact_from_disk_metadata(
+            disk_path=disk_path,
+            artifact_id=source.artifact_id,
+            canonical_index_bytes=bytes(source.canonical_index_bytes),
             generation=generation_value,
+            key=None,
+            event_name="store.from_disk.summary",
+            resolution_mode="attested_mounted_source",
+            trusted_content_artifact_id=source.trusted_content_artifact_id,
         )
 
     def resolve_public_disk_source(
@@ -3168,6 +3298,54 @@ class Store:
                 retryable=False,
             )
         return PublicDiskSourceHandle.from_proto(response.source)
+
+    def promote_mounted_source(
+        self,
+        artifact: Artifact | str,
+        *,
+        verify_checksums: bool = True,
+        timeout_s: float | None = None,
+    ) -> Artifact:
+        source_artifact_id = (
+            artifact.artifact_id if isinstance(artifact, Artifact) else str(artifact)
+        )
+        if not source_artifact_id:
+            raise ValueError("artifact is required")
+        artifact_kind = infer_artifact_id_kind(source_artifact_id)
+        if artifact_kind is ArtifactIdKind.MI2:
+            return self.artifact(source_artifact_id)
+        if artifact_kind is not ArtifactIdKind.MSA1:
+            raise ValueError("artifact must be an msa1 mounted-source artifact id")
+        try:
+            request_kwargs: dict[str, object] = {
+                "artifact_id": source_artifact_id,
+                "verify_checksums": bool(verify_checksums),
+            }
+            if timeout_s is not None:
+                request_kwargs["timeout_s"] = float(timeout_s)
+            response = self._runtime.ensure_client().promote_mounted_source_artifact(
+                **request_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ArtifactError(
+                f"PromoteMountedSourceArtifact RPC failed for {source_artifact_id}",
+                status_code="UNAVAILABLE",
+                retryable=True,
+            ) from exc
+        promoted_artifact_id = str(response.artifact_id or "")
+        canonical_index_bytes = bytes(response.canonical_index_bytes)
+        generation_value: int | None = (
+            int(response.generation) if response.generation else None
+        )
+        return self._artifact_from_disk_metadata(
+            disk_path=source_artifact_id,
+            artifact_id=promoted_artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            generation=generation_value,
+            key=None,
+            event_name="store.promote_mounted_source.summary",
+            resolution_mode="mounted_source_promotion",
+        )
 
     def realize_into_binding(
         self,
@@ -4207,6 +4385,34 @@ def from_disk(
     )
 
 
+def import_from_disk(
+    path: str,
+    *,
+    key: str | None = None,
+    verify_checksums: bool = True,
+    show_progress: bool | None = None,
+) -> Artifact:
+    return _coerce_store().import_from_disk(
+        path,
+        key=key,
+        verify_checksums=verify_checksums,
+        show_progress=show_progress,
+    )
+
+
+def promote_mounted_source(
+    artifact: Artifact | str,
+    *,
+    verify_checksums: bool = True,
+    timeout_s: float | None = None,
+) -> Artifact:
+    return _coerce_store().promote_mounted_source(
+        artifact,
+        verify_checksums=verify_checksums,
+        timeout_s=timeout_s,
+    )
+
+
 def resolve_public_disk_source(
     path: str,
     *,
@@ -4336,6 +4542,8 @@ __all__ = [
     "artifact_async",
     "create_binding",
     "from_disk",
+    "import_from_disk",
+    "promote_mounted_source",
     "realize_into_binding",
     "resolve_public_disk_source",
     "list_artifact_layouts",

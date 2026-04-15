@@ -7,13 +7,16 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -22,6 +25,7 @@
 #include "nlohmann/json.hpp"
 #include "yaml-cpp/yaml.h"
 
+#include "core/common/artifact_hash.h"
 #include "core/communicator/config_io.h"
 
 namespace tcfg = tensorcast::config::v1;
@@ -31,6 +35,83 @@ namespace tensorcast::common::config {
 namespace {
 
 constexpr uint64_t kDefaultCpuSharedMemoryStableBytes = 64ULL * 1024 * 1024;
+
+bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::path& prefix) {
+  auto path_it = path.begin();
+  for (auto prefix_it = prefix.begin(); prefix_it != prefix.end(); ++prefix_it, ++path_it) {
+    if (path_it == path.end() || *path_it != *prefix_it) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string default_public_disk_source_policy_id(std::string_view root_path) {
+  if (root_path.empty()) {
+    return "trusted_absolute_local_path";
+  }
+  const auto digest = tensorcast::common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(root_path.data()), root_path.size()));
+  const std::string hex =
+      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+  return absl::StrCat("trusted_storage_root_", hex.substr(0, 16));
+}
+
+absl::Status validate_public_disk_source_config(const tcfg::DaemonConfig& cfg) {
+  std::unordered_set<std::string> policy_ids;
+  std::vector<std::filesystem::path> normalized_roots;
+  const auto& public_disk_source = cfg.public_disk_source();
+  normalized_roots.reserve(static_cast<size_t>(public_disk_source.trusted_root_policies_size()));
+
+  for (const auto& trusted_root : public_disk_source.trusted_root_policies()) {
+    if (trusted_root.root_path().empty()) {
+      return absl::InvalidArgumentError("public_disk_source.trusted_root_policies.root_path is required");
+    }
+    const auto normalized_root = std::filesystem::path(trusted_root.root_path()).lexically_normal();
+    if (normalized_root.empty()) {
+      return absl::InvalidArgumentError("public_disk_source.trusted_root_policies.root_path is invalid");
+    }
+    const std::string policy_id = trusted_root.policy_id().empty()
+        ? default_public_disk_source_policy_id(normalized_root.string())
+        : trusted_root.policy_id();
+    if (!policy_ids.insert(policy_id).second) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("public_disk_source.trusted_root_policies.policy_id must be unique: ", policy_id));
+    }
+    for (const auto format : trusted_root.allowed_formats()) {
+      if (format == tcfg::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED) {
+        return absl::InvalidArgumentError(
+            absl::StrCat(
+                "public_disk_source.trusted_root_policies.allowed_formats contains UNSPECIFIED for policy ",
+                policy_id));
+      }
+    }
+    for (const auto capability : trusted_root.allowed_metadata_capabilities()) {
+      if (capability == tcfg::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED) {
+        return absl::InvalidArgumentError(
+            absl::StrCat(
+                "public_disk_source.trusted_root_policies.allowed_metadata_capabilities contains UNSPECIFIED for policy ",
+                policy_id));
+      }
+    }
+    normalized_roots.push_back(normalized_root);
+  }
+
+  for (std::size_t i = 0; i < normalized_roots.size(); ++i) {
+    for (std::size_t j = i + 1; j < normalized_roots.size(); ++j) {
+      if (path_has_prefix(normalized_roots[i], normalized_roots[j]) ||
+          path_has_prefix(normalized_roots[j], normalized_roots[i])) {
+        return absl::InvalidArgumentError(
+            absl::StrCat(
+                "public_disk_source.trusted_root_policies must not overlap: ",
+                normalized_roots[i].string(),
+                " vs ",
+                normalized_roots[j].string()));
+      }
+    }
+  }
+  return absl::OkStatus();
+}
 
 // Convert a YAML::Node tree into nlohmann::json for uniform JsonStringToMessage parsing.
 nlohmann::json yaml_node_to_json(const YAML::Node& node, std::string_view key = {}) {
@@ -532,6 +613,36 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     promo->set_max_concurrency(4);
   }
 
+  auto* public_disk_source = cfg->mutable_public_disk_source();
+  if (public_disk_source->trusted_root_policies_size() == 0 && !cfg->server().storage_path().empty()) {
+    auto* trusted_root = public_disk_source->add_trusted_root_policies();
+    trusted_root->set_root_path(cfg->server().storage_path());
+  }
+  if (public_disk_source->unmatched_path_mode() ==
+      tcfg::DaemonConfig::PublicDiskSource::PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_UNSPECIFIED) {
+    public_disk_source->set_unmatched_path_mode(
+        cfg->server().storage_path().empty()
+            ? tcfg::DaemonConfig::PublicDiskSource::PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
+            : tcfg::DaemonConfig::PublicDiskSource::PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT);
+  }
+  for (int i = 0; i < public_disk_source->trusted_root_policies_size(); ++i) {
+    auto* trusted_root = public_disk_source->mutable_trusted_root_policies(i);
+    if (!trusted_root->root_path().empty() && trusted_root->policy_id().empty()) {
+      trusted_root->set_policy_id(default_public_disk_source_policy_id(trusted_root->root_path()));
+    }
+    if (trusted_root->descriptor_reuse_mode() ==
+        tcfg::DaemonConfig::PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_UNSPECIFIED) {
+      trusted_root->set_descriptor_reuse_mode(
+          tcfg::DaemonConfig::PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY);
+    }
+    if (trusted_root->validation_mode() == tcfg::DaemonConfig::PUBLIC_DISK_SOURCE_VALIDATION_MODE_UNSPECIFIED) {
+      trusted_root->set_validation_mode(tcfg::DaemonConfig::PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ);
+    }
+    if (!trusted_root->has_lightweight_attestation_enabled()) {
+      trusted_root->set_lightweight_attestation_enabled(true);
+    }
+  }
+
   // Lifecycle defaults (durations left at 0s unless specified)
   auto* lf = cfg->mutable_lifecycle();
   if (lf->gpu_memory_limit_fraction() <= 0.0)
@@ -635,6 +746,9 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_file(const std::strin
 
   // Apply numeric/time defaults and communicator defaults
   normalize_defaults(&cfg);
+  if (auto validation_status = validate_public_disk_source_config(cfg); !validation_status.ok()) {
+    return validation_status;
+  }
   return cfg;
 }
 
@@ -679,6 +793,9 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_text(const std::strin
   }
 
   normalize_defaults(&cfg);
+  if (auto validation_status = validate_public_disk_source_config(cfg); !validation_status.ok()) {
+    return validation_status;
+  }
   return cfg;
 }
 

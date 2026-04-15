@@ -4,7 +4,7 @@ title: Unified Artifact Profiles with Shared Dataplane
 status: accepted
 areas: ["core", "daemon", "sdk", "global_store", "proto", "docs"]
 created: 2026-03-08
-last_updated: 2026-03-11
+last_updated: 2026-04-14
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -405,7 +405,7 @@ They must first produce a canonical internal lowering object:
 
 Minimum contents of `ArtifactLoweringPlan`:
 
-- resolved source handle or adapter,
+- resolved source artifact or adapter,
 - canonical payload metadata required by the core executor,
 - byte-range map,
 - target layout or replica target,

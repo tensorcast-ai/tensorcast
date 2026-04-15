@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-04-10
+last_updated: 2026-04-14
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -81,6 +81,9 @@ Execution-policy note:
   same-binding serving-path closure,
 - `0108` now owns the shared strategy and explicit lane-planning rules that the
   source-bound path consumes,
+- `0115` now owns the long-term mounted-source artifact attestation contract,
+  including format-aware mounted-source resolve, `msa1:` identity, and typed
+  trusted policy,
 - and the remaining mounted rollout and delete-gate cleanup now track through
   `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`.
 
@@ -104,6 +107,10 @@ closed end-to-end:
 - public disk ingress now exists through `PublicDiskSourceHandle`,
   `ResolvePublicDiskSource`, `Store.resolve_public_disk_source(...)`, and
   `Store.realize_into_binding(...)`.
+- follow-up direction from `0115`: this ingress should converge from a public
+  source-handle-shaped contract to daemon-attested mounted-source artifacts
+  (`msa1:`), so binding-native flows stay artifact-first without requiring
+  cold-path `mi2:` hashing.
 - same-binding README guidance now points users at the binding-native path
   rather than presenting tensor-publication helpers as the preferred surface.
 - the audited Step3p5 path now reaches `stage=ready` through public disk
@@ -179,7 +186,7 @@ restoring or redesigning fallback behavior.
 
 This repo-local blocker is now closed.
 
-TensorCast now exposes a metadata-first public disk source handle, and
+TensorCast now exposes a metadata-first public disk ingress, and
 `Binding.realize_from(...)` / `Store.realize_into_binding(...)` can consume it
 directly. Integrations no longer need to call `from_disk()` just to re-enter
 the ordinary target materialization path.
@@ -736,25 +743,34 @@ Normative execution rule for the preferred same-binding builder path:
 Bootstrap from checkpoint directories should not require a permanent detour
 through a fully materialized source artifact in Python memory.
 
-Long-term, TensorCast should expose a metadata-first source resolution path:
+Long-term, TensorCast should expose and consume a metadata-first mounted-source
+artifact attestation path, not a permanent public source-handle plane and not
+an import-style artifact minting detour.
 
-- `DiskResolvedSource`
-  or equivalent public handle
+That mounted-source artifact should carry:
 
-That handle should carry:
-
+- primary `artifact_id = msa1:...`,
+- optional `trusted_content_artifact_id = mi2:...` when already known from a
+  trusted descriptor or explicit verification path,
 - canonical index bytes,
-- optional artifact descriptor if available,
-- stable disk-source locator for the daemon,
-- and checksum / mutation policy inputs.
+- format-aware mounted-source facts,
+- explicit metadata capability (`TENSOR_AWARE` or `BYTE_ONLY`),
+- stable daemon-local validation and mutation policy inputs,
+- and enough source provenance to feed the shared lowering truth seam.
 
 `realize_into_binding(...)` can then accept either:
 
 - an artifact-backed source ref,
-- or a disk-resolved source handle.
+- or a mounted-source artifact resolved from a local path.
 
-Until that public handle exists, `Store.from_disk(...)` remains an
-artifact-import bridge, not the intended `0112` ingress model.
+`0115` now defines the detailed mounted-source resolve contract for that
+artifact, including partitioned vs safetensors source semantics, the
+daemon-session-local authority boundary for `msa1:`, strict snapshot
+revalidation before read, and the rule that default mounted resolve stays
+lightweight instead of hashing payload bytes into primary `mi2:` identity.
+
+`Store.from_disk(...)` remains an artifact-import bridge, not the intended
+`0112` ingress model.
 
 ## Reuse current disk loaders
 
@@ -911,8 +927,9 @@ The current helpers should be classified as follows:
    SDK contract.
 2. remove the remaining canonical-full CPU fallback and make missing local
    canonical source fail closed.
-3. add the public metadata-first disk source handle and route
-   `realize_into_binding(...)` through it.
+3. complete the public metadata-first mounted-source artifact semantics from
+   `0115` and route `realize_into_binding(...)` through that artifact-first
+   contract rather than through artifact-id-only assumptions.
 4. switch audited integrations such as `/data/workspace/internal-vllm` to the
    same-binding host-and-publication model end to end.
 5. rename tensor-entry publication helpers to explicit `*_bridge(...)`

@@ -197,6 +197,17 @@ Status StoreDaemonServiceImpl::ResolvePublicDiskSource(
   return materialization_controller_->resolve_public_disk_source(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::PromoteMountedSourceArtifact(
+    grpc::ServerContext* ctx,
+    const v2::PromoteMountedSourceArtifactRequest* req,
+    v2::PromoteMountedSourceArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"PromoteMountedSourceArtifact", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->promote_mounted_source_artifact(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::ImportArtifactFromPathStream(
     grpc::ServerContext* ctx,
     const v2::ImportArtifactFromPathRequest* req,

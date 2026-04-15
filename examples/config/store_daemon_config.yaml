@@ -71,6 +71,25 @@ server:
       # Optional client CA bundle for mTLS; empty disables client cert checks.
       client_ca_file: ""
 
+# Trusted mounted-source resolve policy for ResolvePublicDiskSource / msa1.
+public_disk_source:
+  # When omitted, the daemon derives one trusted root from server.storage_path.
+  # Relative paths resolve under that root; absolute paths outside it are rejected.
+  # unmatched_path_mode:
+  #   PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT
+  trusted_root_policies:
+    - policy_id: trusted_models_root
+      root_path: /data/models
+      allowed_formats:
+        - PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED
+        - PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS
+      allowed_metadata_capabilities:
+        - PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE
+        - PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY
+      descriptor_reuse_mode: PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY
+      lightweight_attestation_enabled: true
+      validation_mode: PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ
+
 # StoreEngine and data-plane memory/transfer tuning.
 engine:
   # UMA chunk granularity; larger chunks reduce metadata but make eviction/leases coarser.

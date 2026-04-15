@@ -3,7 +3,7 @@ slug: binding-unified-model-and-contract
 title: Binding Unified Model and Contract
 status: accepted
 created: 2026-03-12
-last_updated: 2026-03-27
+last_updated: 2026-04-14
 areas: ["sdk", "daemon", "core", "proto"]
 related_code:
   - tensorcast/api/store/artifact.py
@@ -61,6 +61,17 @@ The design therefore separates three planes:
 - **assembly plane**
   - promotion of local sealed values into globally visible artifacts
   - specified in `0085`
+
+Follow-up note:
+
+- `0115` now proposes daemon-attested mounted-source artifacts (`msa1:`) as the
+  long-term mounted ingress,
+- they are admissible ingress for binding-native realization,
+- they are artifact identities in the profile sense,
+- they keep `msa1:` as the primary mounted identity even when a trusted
+  `mi2:` hint is already known,
+- but they are not automatically GS-backed, cross-daemon routable, or final
+  published `mi2:` identities.
 
 This yields one coherent rule set:
 
@@ -190,6 +201,15 @@ The design does not regress current inference flows:
 These continue to produce a current sealed value that is already backed by an
 existing artifact and therefore already has authoritative `artifact_id` and
 `ArtifactSelection`.
+
+This remains intentionally narrower than mounted metadata-first ingress.
+Under the long-term `0115` direction, a daemon-attested mounted-source artifact
+(`msa1:`) may already make the current value artifact-backed in the profile
+sense while still remaining narrower than a GS-backed or published `mi2:`
+artifact. Even when the daemon already knows a trusted `mi2:` hint for the
+mounted source, the mounted artifact remains primarily identified by
+daemon-session-local `msa1:` until an explicit verify/import/seal promotion
+path chooses to adopt `mi2:`.
 
 ## One Local Binding, One Coalesced Weight Byte-Space
 

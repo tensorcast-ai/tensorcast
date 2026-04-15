@@ -51,6 +51,79 @@ class SourceBoundCapability(IntFlag):
     )
 
 
+class MountedSourceFormatKind(str, Enum):
+    PARTITIONED = "partitioned"
+    SAFETENSORS = "safetensors"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceFormatKind | None":
+        if value == store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_PARTITIONED:
+            return cls.PARTITIONED
+        if value == store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_SAFETENSORS:
+            return cls.SAFETENSORS
+        return None
+
+    def to_proto(self) -> int:
+        if self is MountedSourceFormatKind.PARTITIONED:
+            return store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_PARTITIONED
+        return store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_SAFETENSORS
+
+
+class MountedSourceMetadataCapability(str, Enum):
+    TENSOR_AWARE = "tensor_aware"
+    BYTE_ONLY = "byte_only"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceMetadataCapability | None":
+        if value == store_daemon_pb2.DISK_METADATA_CAPABILITY_TENSOR_AWARE:
+            return cls.TENSOR_AWARE
+        if value == store_daemon_pb2.DISK_METADATA_CAPABILITY_BYTE_ONLY:
+            return cls.BYTE_ONLY
+        return None
+
+    def to_proto(self) -> int:
+        if self is MountedSourceMetadataCapability.BYTE_ONLY:
+            return store_daemon_pb2.DISK_METADATA_CAPABILITY_BYTE_ONLY
+        return store_daemon_pb2.DISK_METADATA_CAPABILITY_TENSOR_AWARE
+
+
+class MountedSourceResolutionStrategy(str, Enum):
+    ATTESTED_ONLY = "attested_only"
+    ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT = "attested_with_trusted_descriptor_hint"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceResolutionStrategy | None":
+        if value == store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY:
+            return cls.ATTESTED_ONLY
+        if (
+            value
+            == store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        ):
+            return cls.ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        return None
+
+    def to_proto(self) -> int:
+        if (
+            self
+            is MountedSourceResolutionStrategy.ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        ):
+            return store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        return store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY
+
+
+class MountedSourceValidationMode(str, Enum):
+    VALIDATE_BEFORE_READ = "validate_before_read"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceValidationMode | None":
+        if value == store_daemon_pb2.DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ:
+            return cls.VALIDATE_BEFORE_READ
+        return None
+
+    def to_proto(self) -> int:
+        return store_daemon_pb2.DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ
+
+
 class CollectivePolicy(str, Enum):
     REQUIRE_COLLECTIVE = "require_collective"
     COLLECTIVE_FIRST = "collective_first"
@@ -426,6 +499,8 @@ class ArtifactDescriptor(BaseModel):
                 return ArtifactIdKind.MI2
             if upper == "CGID":
                 return ArtifactIdKind.CGID
+            if upper == "MSA1":
+                return ArtifactIdKind.MSA1
         if isinstance(value, int):
             if value == 1:
                 return ArtifactIdKind.MI2
@@ -2048,9 +2123,17 @@ class PublicDiskSourceHandle(BaseModel):
 
     path: str
     canonical_index_bytes: bytes
-    artifact_id: str | None = None
+    artifact_id: str
     generation: int = 0
     verify_checksums: bool = True
+    trusted_content_artifact_id: str | None = None
+    source_index_bytes: bytes | None = None
+    format_kind: MountedSourceFormatKind | None = None
+    metadata_capability: MountedSourceMetadataCapability | None = None
+    resolution_strategy: MountedSourceResolutionStrategy | None = None
+    validation_mode: MountedSourceValidationMode | None = None
+    policy_id: str | None = None
+    exact_size_bytes: int = 0
 
     @model_validator(mode="after")
     def _validate_handle(self) -> "PublicDiskSourceHandle":
@@ -2058,21 +2141,44 @@ class PublicDiskSourceHandle(BaseModel):
             raise ValueError("path must not be empty")
         if not self.canonical_index_bytes:
             raise ValueError("canonical_index_bytes must not be empty")
-        if self.artifact_id is not None and not self.artifact_id:
+        if not self.artifact_id:
             raise ValueError("artifact_id must not be empty")
         if int(self.generation) < 0:
             raise ValueError("generation must be non-negative")
+        if (
+            self.trusted_content_artifact_id is not None
+            and not self.trusted_content_artifact_id
+        ):
+            raise ValueError("trusted_content_artifact_id must not be empty")
+        if self.policy_id is not None and not self.policy_id:
+            raise ValueError("policy_id must not be empty")
+        if int(self.exact_size_bytes) < 0:
+            raise ValueError("exact_size_bytes must be non-negative")
         return self
 
     def to_proto(self) -> store_daemon_pb2.PublicDiskSourceHandle:
         proto = store_daemon_pb2.PublicDiskSourceHandle(
             path=str(self.path),
             canonical_index_bytes=bytes(self.canonical_index_bytes),
+            artifact_id=str(self.artifact_id),
             generation=int(self.generation),
             verify_checksums=bool(self.verify_checksums),
+            exact_size_bytes=int(self.exact_size_bytes),
         )
-        if self.artifact_id is not None:
-            proto.artifact_id = str(self.artifact_id)
+        if self.trusted_content_artifact_id is not None:
+            proto.trusted_content_artifact_id = str(self.trusted_content_artifact_id)
+        if self.source_index_bytes is not None:
+            proto.source_index_bytes = bytes(self.source_index_bytes)
+        if self.format_kind is not None:
+            proto.format_kind = self.format_kind.to_proto()
+        if self.metadata_capability is not None:
+            proto.metadata_capability = self.metadata_capability.to_proto()
+        if self.resolution_strategy is not None:
+            proto.resolution_strategy = self.resolution_strategy.to_proto()
+        if self.validation_mode is not None:
+            proto.validation_mode = self.validation_mode.to_proto()
+        if self.policy_id is not None:
+            proto.policy_id = str(self.policy_id)
         return proto
 
     @classmethod
@@ -2083,9 +2189,29 @@ class PublicDiskSourceHandle(BaseModel):
         return cls(
             path=str(proto.path),
             canonical_index_bytes=bytes(proto.canonical_index_bytes),
-            artifact_id=str(proto.artifact_id or "") or None,
+            artifact_id=str(proto.artifact_id or ""),
             generation=int(proto.generation),
             verify_checksums=bool(proto.verify_checksums),
+            trusted_content_artifact_id=(
+                str(proto.trusted_content_artifact_id or "") or None
+            ),
+            source_index_bytes=(
+                bytes(proto.source_index_bytes)
+                if bytes(proto.source_index_bytes)
+                else None
+            ),
+            format_kind=MountedSourceFormatKind.from_proto(int(proto.format_kind)),
+            metadata_capability=MountedSourceMetadataCapability.from_proto(
+                int(proto.metadata_capability)
+            ),
+            resolution_strategy=MountedSourceResolutionStrategy.from_proto(
+                int(proto.resolution_strategy)
+            ),
+            validation_mode=MountedSourceValidationMode.from_proto(
+                int(proto.validation_mode)
+            ),
+            policy_id=str(proto.policy_id or "") or None,
+            exact_size_bytes=int(proto.exact_size_bytes),
         )
 
 
@@ -2392,6 +2518,10 @@ class DeregisterArtifactOutcome(BaseModel):
 __all__ = [
     "ServerConfig",
     "SourceBoundCapability",
+    "MountedSourceFormatKind",
+    "MountedSourceMetadataCapability",
+    "MountedSourceResolutionStrategy",
+    "MountedSourceValidationMode",
     "CollectivePolicy",
     "CollectiveFailureClass",
     "HashBackend",

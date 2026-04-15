@@ -9,6 +9,7 @@ from enum import Enum
 
 MI2_PREFIX: str = "mi2:"
 CGID_PREFIX: str = "cgid:"
+MSA1_PREFIX: str = "msa1:"
 _CGID_ALLOWED: re.Pattern[str] = re.compile(r"^[-._~A-Za-z0-9]+$")
 _B64U_ALLOWED: re.Pattern[str] = re.compile(r"^[-_A-Za-z0-9]+$")
 _CGID_MIN_LEN: int = 8
@@ -25,6 +26,7 @@ class ArtifactIdKind(str, Enum):
 
     MI2 = "MI2"
     CGID = "CGID"
+    MSA1 = "MSA1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +50,13 @@ def infer_artifact_id_kind(artifact_id: str) -> ArtifactIdKind | None:
         return ArtifactIdKind.MI2
     if artifact_id.startswith(CGID_PREFIX):
         return ArtifactIdKind.CGID
+    if artifact_id.startswith(MSA1_PREFIX):
+        return ArtifactIdKind.MSA1
     return None
+
+
+def is_msa1_artifact_id(artifact_id: str) -> bool:
+    return artifact_id.startswith(MSA1_PREFIX)
 
 
 def validate_client_generated_id(artifact_id: str) -> None:
@@ -191,7 +199,9 @@ def validate_artifact_id(artifact_id: str) -> ArtifactIdKind:
     if kind is ArtifactIdKind.CGID:
         validate_client_generated_id(artifact_id)
         return kind
-    raise ValueError("artifact_id must start with 'mi2:' or 'cgid:'")
+    if kind is ArtifactIdKind.MSA1:
+        return kind
+    raise ValueError("artifact_id must start with 'mi2:', 'cgid:', or 'msa1:'")
 
 
 __all__ = [
@@ -200,11 +210,13 @@ __all__ = [
     "CGID_PREFIX",
     "ByteArtifactCgidParts",
     "MI2_PREFIX",
+    "MSA1_PREFIX",
     "build_byte_artifact_cgid",
     "decode_cgid_segment",
     "encode_cgid_segment",
     "infer_artifact_id_kind",
     "is_byte_artifact_id",
+    "is_msa1_artifact_id",
     "parse_byte_artifact_cgid",
     "validate_artifact_id",
     "validate_byte_artifact_cgid",

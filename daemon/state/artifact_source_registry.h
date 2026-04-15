@@ -19,6 +19,14 @@ class ArtifactSourceRegistry {
   enum class SourceKind : std::uint8_t {
     kManagedSharedDisk = 0,
     kLocalImport = 1,
+    kMountedSourceArtifact = 2,
+  };
+
+  enum class PromotionOrigin : std::uint8_t {
+    kUnspecified = 0,
+    kImport = 1,
+    kMountedVerify = 2,
+    kBindingSeal = 3,
   };
 
   struct SourceFileFingerprint {
@@ -40,7 +48,14 @@ class ArtifactSourceRegistry {
     bool descriptor_present{false};
     std::optional<std::string> index_multihash;
     std::optional<std::string> data_multihash;
+    std::optional<std::string> trusted_content_artifact_id;
+    std::optional<std::string> promoted_content_artifact_id;
+    std::optional<PromotionOrigin> promoted_content_origin;
+    std::optional<std::string> policy_id;
+    std::optional<std::string> snapshot_digest;
     std::optional<std::uint64_t> generation;
+    bool tensor_aware_metadata{true};
+    bool validate_before_read{false};
     FingerprintMap file_fingerprints;
     absl::Time created_at{absl::Now()};
     absl::Time updated_at{absl::Now()};
@@ -49,6 +64,15 @@ class ArtifactSourceRegistry {
   void upsert_binding(std::string artifact_id, Entry entry);
   [[nodiscard]] std::optional<Entry> lookup_binding(std::string_view artifact_id) const;
   [[nodiscard]] bool erase_binding(std::string_view artifact_id);
+  [[nodiscard]] bool note_promoted_artifact_for_binding(
+      std::string_view artifact_id,
+      std::string_view promoted_artifact_id,
+      PromotionOrigin origin = PromotionOrigin::kBindingSeal);
+  [[nodiscard]] size_t note_promoted_artifact_for_source(
+      std::string_view canonical_source_path,
+      const FingerprintMap& file_fingerprints,
+      std::string_view promoted_artifact_id,
+      PromotionOrigin origin = PromotionOrigin::kImport);
 
  private:
   mutable absl::Mutex mu_;

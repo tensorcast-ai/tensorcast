@@ -30,6 +30,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/store/runtime/ingestion/source_bound_strategy_planner.h"
 #include "daemon/service/controllers/assembly_coordination_utils.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
@@ -194,40 +195,55 @@ std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
   return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
 }
 
+bool selection_requires_tensor_aware_metadata(const tensorcast::common::v1::ArtifactSelection& selection) {
+  return selection.has_view_spec() || !selection.view_id().empty() || selection.tensor_names_size() > 0 ||
+      !selection.view_subset_hash().empty();
+}
+
+bool is_byte_only_disk_metadata(const std::optional<store::loading::DiskMetadata>& disk_metadata) {
+  return disk_metadata.has_value() && disk_metadata->tensor_aware.has_value() && !*disk_metadata->tensor_aware;
+}
+
 absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_binding_disk_metadata(
     const std::optional<std::filesystem::path>& normalized_disk_path,
     std::string_view resolved_artifact_id,
     int device_ordinal,
     ArtifactSourceRegistry& disk_imports) {
+  (void)device_ordinal;
   std::optional<store::loading::DiskMetadata> disk_metadata;
   if (normalized_disk_path.has_value()) {
     auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
     if (!descriptor_or.ok()) {
       return descriptor_or.status();
     }
-    auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
-    if (!index_or.ok()) {
-      return index_or.status();
+    auto mounted_metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
+    if (!mounted_metadata_or.ok()) {
+      return mounted_metadata_or.status();
     }
     store::loading::DiskMetadata metadata;
     metadata.descriptor_present = descriptor_or->found;
     metadata.schema_version = descriptor_or->schema_version;
     metadata.index_multihash = descriptor_or->index_multihash;
     metadata.data_multihash = descriptor_or->data_multihash;
-    metadata.canonical_index_json = index_or->canonical_index_json;
-    if (index_or->source_index_json.has_value()) {
-      metadata.source_index_json = index_or->source_index_json;
+    metadata.canonical_index_json = mounted_metadata_or->index_info.canonical_index_json;
+    if (mounted_metadata_or->index_info.source_index_json.has_value()) {
+      metadata.source_index_json = mounted_metadata_or->index_info.source_index_json;
     }
-    if (!index_or->index_multihash.empty()) {
-      metadata.index_multihash = index_or->index_multihash;
+    if (!mounted_metadata_or->canonical_index_multihash.empty()) {
+      metadata.index_multihash = mounted_metadata_or->canonical_index_multihash;
     }
-    if (index_or->total_size_bytes > 0) {
-      metadata.logical_total_size = index_or->total_size_bytes;
+    if (mounted_metadata_or->exact_size_bytes > 0) {
+      metadata.logical_total_size = mounted_metadata_or->exact_size_bytes;
     }
-    if (index_or->source_total_size_bytes > 0) {
-      metadata.source_total_size_bytes = index_or->source_total_size_bytes;
+    if (mounted_metadata_or->index_info.source_total_size_bytes > 0) {
+      metadata.source_total_size_bytes = mounted_metadata_or->index_info.source_total_size_bytes;
+    } else if (mounted_metadata_or->exact_size_bytes > 0) {
+      metadata.source_total_size_bytes = mounted_metadata_or->exact_size_bytes;
     }
-    metadata.is_safetensors = index_or->is_safetensors;
+    metadata.is_safetensors =
+        mounted_metadata_or->format_kind == materialization_disk_resolve::MountedSourceFormatKind::kSafetensors;
+    metadata.tensor_aware = mounted_metadata_or->metadata_capability ==
+        materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware;
     disk_metadata = std::move(metadata);
   }
   if (auto local_import = disk_imports.lookup_binding(resolved_artifact_id); local_import.has_value()) {
@@ -247,6 +263,9 @@ absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_binding_disk_m
     }
     if (!metadata.data_multihash.has_value() && local_import->data_multihash.has_value()) {
       metadata.data_multihash = *local_import->data_multihash;
+    }
+    if (!metadata.tensor_aware.has_value()) {
+      metadata.tensor_aware = local_import->tensor_aware_metadata;
     }
   }
   return disk_metadata;
@@ -541,6 +560,9 @@ absl::StatusOr<BindingContributionRegistrationPlan> build_binding_contribution_r
     return resolution_or.status();
   }
   auto resolution = std::move(*resolution_or);
+  if (resolution.local_import.has_value() && !resolution.local_import->tensor_aware_metadata) {
+    return absl::InvalidArgumentError("piece contribution view planning requires tensor-aware mounted-source metadata");
+  }
   auto canonical_index_or = load_canonical_index_with_disk_fallback(
       dep.engine,
       resolution.resolved_artifact_id,
@@ -1404,13 +1426,29 @@ std::string resolve_source_artifact_id(
   if (public_disk_source == nullptr) {
     return std::string();
   }
-  std::string payload = public_disk_source->path();
-  payload.push_back('\n');
-  payload.append(
-      public_disk_source->canonical_index_bytes().data(), public_disk_source->canonical_index_bytes().size());
-  const auto digest = common::sha256_digest_bytes(
-      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
-  return absl::StrCat("disksrc:", common::multibase_multihash_sha256(digest));
+  return std::string();
+}
+
+grpc::Status validate_public_disk_source_hints(
+    const v2::PublicDiskSourceHandle& public_disk_source,
+    const materialization_request_common::ArtifactResolution& resolution,
+    std::string_view canonical_index_json) {
+  if (!public_disk_source.artifact_id().empty() &&
+      public_disk_source.artifact_id() != resolution.resolved_artifact_id) {
+    return {StatusCode::FAILED_PRECONDITION, "public_disk_source.artifact_id does not match daemon-resolved artifact"};
+  }
+  if (!public_disk_source.path().empty() && resolution.normalized_disk_path.has_value() &&
+      public_disk_source.path() != resolution.normalized_disk_path->string()) {
+    return {StatusCode::FAILED_PRECONDITION, "public_disk_source.path does not match daemon-resolved disk path"};
+  }
+  if (!public_disk_source.canonical_index_bytes().empty() &&
+      public_disk_source.canonical_index_bytes() != canonical_index_json) {
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        "public_disk_source.canonical_index_bytes does not match daemon-resolved canonical index",
+    };
+  }
+  return grpc::Status::OK;
 }
 
 grpc::Status prepare_source_bound_plan(
@@ -1465,17 +1503,23 @@ grpc::Status prepare_source_bound_plan(
     if (!loopback_peer) {
       return {StatusCode::PERMISSION_DENIED, "public_disk_source is local-only (loopback/UDS)"};
     }
-    auto normalized_or = normalize_disk_import_path(request.public_disk_source->path(), d.storage_path);
-    if (!normalized_or.ok()) {
-      return to_grpc_status(normalized_or.status());
+    const std::string resolved_artifact_id =
+        resolve_source_artifact_id(request.source_selection, request.public_disk_source);
+    if (resolved_artifact_id.empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "public_disk_source.artifact_id is required"};
     }
-    resolution.normalized_disk_path = *normalized_or;
-    resolution.resolved_artifact_id = resolve_source_artifact_id(request.source_selection, request.public_disk_source);
-    resolution.disk_source = store::loading::DiskSource{
-        .path = *normalized_or,
-        .expected_size = std::nullopt,
-        .require_descriptor = true,
-    };
+    auto resolution_or = resolve_artifact_and_disk_source(
+        d.global_store_client,
+        &d.disk_imports,
+        d.storage_path,
+        resolved_artifact_id,
+        out.request_context.retrieval_policy.allow_disk,
+        /*allow_local_import_fallback=*/true,
+        /*loopback_peer=*/true);
+    if (!resolution_or.ok()) {
+      return to_grpc_status(resolution_or.status());
+    }
+    resolution = std::move(*resolution_or);
     effective_source_selection.set_artifact_id(resolution.resolved_artifact_id);
   } else {
     auto resolution_or = resolve_artifact_and_disk_source(
@@ -1494,15 +1538,30 @@ grpc::Status prepare_source_bound_plan(
   }
   out.resolved_artifact_id = resolution.resolved_artifact_id;
   out.disk_source = resolution.disk_source;
+  auto disk_metadata_or = build_binding_disk_metadata(
+      resolution.normalized_disk_path, out.resolved_artifact_id, device.ordinal, d.disk_imports);
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  out.disk_metadata = std::move(*disk_metadata_or);
+  if (is_byte_only_disk_metadata(out.disk_metadata)) {
+    if (request.realization_plan != nullptr) {
+      return {StatusCode::INVALID_ARGUMENT, "binding realization requires tensor-aware mounted-source metadata"};
+    }
+    if (selection_requires_tensor_aware_metadata(effective_source_selection)) {
+      return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
+    }
+  }
 
-  absl::StatusOr<std::string> canonical_json_or = absl::UnknownError("uninitialized");
-  if (request.public_disk_source != nullptr && !request.public_disk_source->canonical_index_bytes().empty()) {
-    canonical_json_or = std::string(request.public_disk_source->canonical_index_bytes());
-  } else {
-    canonical_json_or = load_canonical_index_with_disk_fallback(
-        d.engine, out.resolved_artifact_id, resolution.normalized_disk_path, device.ordinal, resolution.gs_connected);
-    if (!canonical_json_or.ok()) {
-      return to_grpc_status(canonical_json_or.status());
+  auto canonical_json_or = load_canonical_index_with_disk_fallback(
+      d.engine, out.resolved_artifact_id, resolution.normalized_disk_path, device.ordinal, resolution.gs_connected);
+  if (!canonical_json_or.ok()) {
+    return to_grpc_status(canonical_json_or.status());
+  }
+  if (request.public_disk_source != nullptr) {
+    auto hint_status = validate_public_disk_source_hints(*request.public_disk_source, resolution, *canonical_json_or);
+    if (!hint_status.ok()) {
+      return hint_status;
     }
   }
 
@@ -1587,13 +1646,6 @@ grpc::Status prepare_source_bound_plan(
     out.canonical_index_json = unmapped_plan.canonical_index_json;
     out.unmapped_plan = std::move(unmapped_plan);
   }
-
-  auto disk_metadata_or = build_binding_disk_metadata(
-      resolution.normalized_disk_path, out.resolved_artifact_id, device.ordinal, d.disk_imports);
-  if (!disk_metadata_or.ok()) {
-    return to_grpc_status(disk_metadata_or.status());
-  }
-  out.disk_metadata = std::move(*disk_metadata_or);
   return Status::OK;
 }
 
@@ -2575,6 +2627,7 @@ grpc::Status OwnedBindingService::seal_binding(
   int owner_pid = 0;
   v2::TargetLayout target_layout;
   std::string target_index_json;
+  std::string source_artifact_id;
   common::memory::GpuDeviceMemory* allocation = nullptr;
   cuda::IpcHandleBytes handle_bytes;
   {
@@ -2593,6 +2646,7 @@ grpc::Status OwnedBindingService::seal_binding(
     owner_pid = record->owner_pid;
     target_layout = record->target_layout;
     target_index_json = record->target_index_json;
+    source_artifact_id = record->source_selection.artifact_id();
     allocation = record->allocation.get();
     handle_bytes = record->handle_bytes;
   }
@@ -2626,6 +2680,11 @@ grpc::Status OwnedBindingService::seal_binding(
       });
   if (!sealed_commit_or.ok()) {
     return to_grpc_status(sealed_commit_or.status());
+  }
+  if (common::is_msa1_artifact_id(source_artifact_id)) {
+    const bool promotion_noted =
+        d_.disk_imports.note_promoted_artifact_for_binding(source_artifact_id, sealed_commit_or->artifact_id);
+    (void)promotion_noted;
   }
   {
     absl::MutexLock lock(&record->mu);
@@ -2761,6 +2820,11 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
       sealed_commit_result);
   if (!out_or.ok()) {
     return to_grpc_status(out_or.status());
+  }
+  if (common::is_msa1_artifact_id(current_artifact_id)) {
+    const bool promotion_noted =
+        d_.disk_imports.note_promoted_artifact_for_binding(current_artifact_id, out_or->artifact_id);
+    (void)promotion_noted;
   }
 
   const auto selection = build_mapped_bound_selection(out_or->artifact_id, target_layout, target_index_json);

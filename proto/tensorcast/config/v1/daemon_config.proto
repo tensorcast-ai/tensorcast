@@ -272,6 +272,51 @@ message DaemonConfig {
   }
   CapabilityDirectory capability_directory = 24;
 
+  enum PublicDiskSourceFormat {
+    PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED = 1;
+    PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS = 2;
+  }
+
+  enum PublicDiskSourceMetadataCapability {
+    PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE = 1;
+    PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY = 2;
+  }
+
+  enum PublicDiskSourceDescriptorReuseMode {
+    PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_DISABLED = 1;
+    PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY = 2;
+  }
+
+  enum PublicDiskSourceValidationMode {
+    PUBLIC_DISK_SOURCE_VALIDATION_MODE_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ = 1;
+  }
+
+  message PublicDiskSource {
+    enum UnmatchedPathMode {
+      PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_UNSPECIFIED = 0;
+      PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT = 1;
+      PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK = 2;
+    }
+
+    message TrustedRootPolicy {
+      string policy_id = 1;
+      string root_path = 2;
+      repeated PublicDiskSourceFormat allowed_formats = 3;
+      repeated PublicDiskSourceMetadataCapability allowed_metadata_capabilities = 4;
+      PublicDiskSourceDescriptorReuseMode descriptor_reuse_mode = 5;
+      optional bool lightweight_attestation_enabled = 6;
+      PublicDiskSourceValidationMode validation_mode = 7;
+    }
+
+    repeated TrustedRootPolicy trusted_root_policies = 1;
+    UnmatchedPathMode unmatched_path_mode = 2;
+  }
+  PublicDiskSource public_disk_source = 31;
+
   reserved 8;
   reserved "checkpoint";
   PinnedMemory pinned_memory = 20;

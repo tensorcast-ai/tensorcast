@@ -105,3 +105,33 @@ TEST_CASE("disk dir hash supports safetensors payloads", "[disk][hash][safetenso
 
   fs::remove_all(base, ec);
 }
+
+TEST_CASE("disk dir hash falls back to physical partition bytes without index", "[disk][hash][partitioned][no_index]") {
+  const fs::path base = fs::temp_directory_path() / "tensorcast_disk_dir_hash_no_index";
+  std::error_code ec;
+  fs::remove_all(base, ec);
+  fs::create_directories(base, ec);
+  REQUIRE(!ec);
+
+  const std::string payload0 = "abcdef";
+  const std::string payload1 = "ghijkl";
+  {
+    std::ofstream out(base / "tensor.data_10", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out.write(payload1.data(), static_cast<std::streamsize>(payload1.size()));
+  }
+  {
+    std::ofstream out(base / "tensor.data_2", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out.write(payload0.data(), static_cast<std::streamsize>(payload0.size()));
+  }
+
+  const std::string expected = payload0 + payload1;
+  auto expected_hash_or = compute_data_multihash_from_cpu_memory(expected.data(), expected.size());
+  REQUIRE(expected_hash_or.ok());
+  auto disk_hash_or = compute_data_multihash_from_disk_dir(base.string());
+  REQUIRE(disk_hash_or.ok());
+  REQUIRE(*disk_hash_or == *expected_hash_or);
+
+  fs::remove_all(base, ec);
+}

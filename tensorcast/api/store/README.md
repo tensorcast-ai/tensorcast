@@ -9,9 +9,9 @@ managing clients manually.
 
 - `tensorcast.artifact(...)` and `Store.artifact(...)` return a lazy `Artifact`
   bound to the process `Store`. `tc.artifact("my-key")` is shorthand for
-  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`) map to
+  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`/`msa1:`) map to
   explicit identifier kinds. `disk:` is reserved and rejected; use
-  `from_disk(...)` for explicit imports.
+  `from_disk(...)` or `import_from_disk(...)` for local disk-backed sources.
   Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `subset(...).tensor_dict(...)` and `tensor(name, ...)`.
@@ -33,22 +33,25 @@ managing clients manually.
   At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
   `key` while serialization (`to_dict`/`from_dict`) remains identity-only.
-- `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
-  artifacts via daemon `ImportArtifactFromPath` / `ImportArtifactFromPathStream`.
-  The daemon returns `artifact_id`, `canonical_index_bytes`, `generation`, and
-  `import_state=READY`, and the SDK seeds `ArtifactCache` with this metadata.
-  Import is **reference-only registration** for payload bytes: no payload
-  copy/link/reflink. Payload bytes remain the correctness boundary. On first
-  import, the daemon may perform bounded daemon-owned metadata backfill such as
-  `artifact_descriptor.json` (and `tensor_index.json` for safetensors
-  directories) so later imports can reuse trusted metadata and skip full data
-  hashing. This backfill does not change artifact identity and does not create a
-  second retrieval contract beside daemon-owned import authority.
+- `tensorcast.from_disk(path)` / `Store.from_disk(path)` now default to the
+  metadata-first mounted-source path for same-daemon loading. Successful calls
+  return a lazy `Artifact` seeded from `ResolvePublicDiskSource` metadata,
+  usually with primary `artifact_id = msa1:...`, without hashing payload bytes
+  on the cold path. Use `show_progress=True` or call
+  `import_from_disk(...)` explicitly when you need the old stream/import path.
+- `tensorcast.import_from_disk(path)` / `Store.import_from_disk(path)` keep the
+  explicit daemon import contract via `ImportArtifactFromPath` /
+  `ImportArtifactFromPathStream`. This path returns `mi2:` and remains the
+  explicit reference-only registration flow for payload bytes: no payload
+  copy/link/reflink, but the daemon may hash payload bytes and may perform
+  bounded metadata backfill such as `artifact_descriptor.json` (and
+  `tensor_index.json` for safetensors directories) so later explicit imports
+  can reuse trusted metadata and skip full data hashing.
   For one-off backfill on root-owned directories, use
   `bash tools/backfill_from_disk_import.sh`, which starts an isolated temporary
   daemon and can auto-escalate to `sudo`.
-  Stream events are the canonical progress contract (`phase`, bytes, `percent`,
-  terminal `done`, machine-readable `error_code`).
+  Stream events are the canonical explicit-import progress contract (`phase`,
+  bytes, `percent`, terminal `done`, machine-readable `error_code`).
   Same-host collective disk loading is now an explicit per-call contract:
   prefer `GetArtifactOptions(execution_topology=ExecutionTopologyContext(...))`
   as the daemon-owned source-bound contract.
@@ -57,15 +60,31 @@ managing clients manually.
   bindings; keep `ctx` there for timeout/tags only.
   TensorCast no longer auto-enables collective mode from ambient GPU
   environment variables, and `replica_uuid` remains a pure operation/session id.
-  Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
-  checks for local development.
+  Set `verify_checksums=False` on `from_disk(...)` / `import_from_disk(...)` to
+  relax descriptor mismatch checks for local development.
 - `tensorcast.resolve_public_disk_source(path)` /
   `Store.resolve_public_disk_source(path)` expose the metadata-first disk
   ingress needed by binding-native realization. The returned
-  `PublicDiskSourceHandle` carries the normalized disk locator plus
-  `canonical_index_bytes`, and `Binding.realize_from(...)` /
+  `PublicDiskSourceHandle` now carries a non-empty session-local
+  `artifact_id` (`msa1:...`) together with the normalized disk locator,
+  `canonical_index_bytes`, optional `trusted_content_artifact_id`, and
+  mounted-source attestation metadata. `Binding.realize_from(...)` /
   `Store.realize_into_binding(...)` can consume it directly without first
   registering an artifact through `from_disk(...)`.
+- `tensorcast.promote_mounted_source(artifact)` /
+  `Store.promote_mounted_source(artifact)` provide the explicit
+  `msa1 -> mi2` promotion path when callers want a content-verified identity
+  without re-specifying the mounted source path. The daemon revalidates the
+  mounted snapshot, hashes payload bytes through the import path, records the
+  session-local promotion hint, and returns an `Artifact` backed by `mi2:...`.
+  By default the client inherits the same timeout/retry budget as explicit
+  import. Pass `timeout_s=...` when promoting unusually large mounted
+  directories and you want an explicit per-call override.
+- For rollout/evidence collection on real mounted sources, use
+  `python tools/measure_mounted_source_evidence.py --help` to capture JSON
+  timing packets for `from_disk`, `import_from_disk`,
+  `promote_mounted_source`, and optional materialization. The helper now also
+  accepts `--timeout-s` for long-running promotion evidence runs.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
@@ -429,9 +448,9 @@ replica.
   cached indices consistent.
 - Key→artifact-id lookups are cached with TTL (see
   `TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS`) to avoid repeated resolver RPCs.
-- Disk resolution (`ImportArtifactFromPath`) seeds the cache with
-  `canonical_index_bytes` and `generation` so repeated `from_disk` calls avoid
-  extra daemon RPCs and preserve generation metadata.
+- Disk-backed ingress seeds the cache with `canonical_index_bytes` and
+  `generation` so repeated `from_disk` / `import_from_disk` calls can reuse
+  local metadata and preserve generation context.
 - Metadata hydration (`_ensure_metadata`) applies `_set_metadata` while holding
   the artifact’s reentrant lock so concurrent callers never observe partially
   populated canonical metadata.

@@ -77,6 +77,7 @@ MaterializationController::MaterializationController(Dep d)
               .shutdown_signal = d.shutdown_signal,
               .global_store_client = d.global_store_client,
               .storage_path = d.storage_path,
+              .public_disk_source_policy = d.public_disk_source_policy,
           }),
       replica_materialization_service_(
           ReplicaMaterializationService::Dep{
@@ -293,6 +294,13 @@ grpc::Status MaterializationController::resolve_public_disk_source(
     const v2::ResolvePublicDiskSourceRequest& req,
     v2::ResolvePublicDiskSourceResponse& resp) {
   return disk_artifact_service_.resolve_public_disk_source(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::promote_mounted_source_artifact(
+    RpcContext& rctx,
+    const v2::PromoteMountedSourceArtifactRequest& req,
+    v2::PromoteMountedSourceArtifactResponse& resp) {
+  return disk_artifact_service_.promote_mounted_source_artifact(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::import_artifact_from_path_stream(

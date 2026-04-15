@@ -44,6 +44,10 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `high_availability`: `global_store_endpoints`, heartbeat/periodic sync/retry.
   - `communicator`: `tensorcast.communicator.v1.CommunicatorConfig` (reused schema).
   - `engine`: `*_bytes`, streaming and CPU VS sizing, `streaming_buffer_chunks`, and typed materialization-strategy policy including executor budgets, thresholds, and diagnostics controls.
+  - `public_disk_source`: typed trusted-source policies for metadata-first
+    mounted-source resolve, including stable policy ids, root allow-lists,
+    format allow-lists, descriptor-reuse rules, snapshot/fallback behavior, and
+    any explicitly-scoped compatibility switches.
   - `envs`: launcher-only environment variables applied by the CLI/SDK when spawning the daemon binary. `LD_LIBRARY_PATH` is merged deterministically as inherited entries, then `envs.LD_LIBRARY_PATH`, then auto-discovered TensorCast/PyTorch/CUDA library directories.
   - `pinned_memory`: daemon-wide pinned budget, class pools, and allocation timeout.
   - `observability`: OTel (lang‑agnostic), logging (enum level, sinks), tracing; `otel_cxx` holds C++‑specific toggles.
@@ -108,6 +112,10 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 - Distributed namespace profiles (for example byte artifact routing invariants such as shard count/hash version/lease
   staleness policy) must be modeled as typed config fields and remain cluster-consistent; incompatible rolling changes
   must have an explicit cutover strategy instead of mixed semantics.
+- Trusted mounted-source behavior must also be modeled as typed daemon config.
+  Root matching, format allow-lists, descriptor reuse, source-snapshot policy,
+  and unmatched-path behavior must not be hidden in path conventions,
+  environment variables, or call-site-local heuristics.
 
 # Schema Outline & Conventions
 
@@ -157,6 +165,9 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
   - Enum aliases (e.g., `grpc`, `info`) are accepted and canonicalized.
   - Durations use canonical Protobuf strings; C++ additionally accepts `ms/s/m/h` shorthand.
 - Environment variables and ad‑hoc flags that previously affected runtime behavior are removed or ignored in favor of config fields; launcher-only daemon environment is configured explicitly via `DaemonConfig.envs`.
+- Daemon trusted public disk source policy, when enabled, is represented in the
+  config schema with deterministic validation rules (for example rejecting
+  ambiguous overlapping roots and invalid format allow-lists).
 - Example configurations in `examples/config/store_daemon_config.yaml` and `examples/config/global_store_config.yaml` stay in sync with config changes (add/remove fields or default updates).
 - Documentation for daemon, global store, and client reflects the single‑file configuration model.
 

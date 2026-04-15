@@ -19,12 +19,14 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_identity.h"
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/view_utils.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
@@ -45,7 +47,6 @@ using status_utils::to_grpc_status;
 namespace {
 
 using materialization_index_source::DescriptorMetadata;
-using materialization_index_source::ensure_tensor_index_present;
 using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::validate_descriptor_against_index;
 using materialization_payload::populate_materialize_payloads;
@@ -73,6 +74,31 @@ using selection_validation::validate_request_tensor_names;
 using store::loader::ViewSpec;
 
 using store::loading::MaterializationSource;
+
+std::string artifact_id_kind_attr(std::string_view artifact_id) {
+  switch (common::infer_artifact_id_kind(artifact_id)) {
+    case common::ArtifactIdKind::kMi2:
+      return "mi2";
+    case common::ArtifactIdKind::kCgid:
+      return "cgid";
+    case common::ArtifactIdKind::kMsa1:
+      return "msa1";
+    case common::ArtifactIdKind::kUnspecified:
+    default:
+      return "unknown";
+  }
+}
+
+std::string disk_metadata_capability_attr(const std::optional<store::loading::DiskMetadata>& disk_metadata) {
+  if (!disk_metadata.has_value() || !disk_metadata->tensor_aware.has_value()) {
+    return "unspecified";
+  }
+  return *disk_metadata->tensor_aware ? "tensor_aware" : "byte_only";
+}
+
+bool is_byte_only_disk_metadata(const std::optional<store::loading::DiskMetadata>& disk_metadata) {
+  return disk_metadata.has_value() && disk_metadata->tensor_aware.has_value() && !*disk_metadata->tensor_aware;
+}
 
 void record_lease_create_failed() {
   try {
@@ -310,6 +336,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   span->SetAttribute("tc.store.local_import_fallback", local_import.has_value());
 
   span->SetAttribute("tc.artifact.id", resolved_artifact_id);
+  span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_artifact_id));
   resp.set_artifact_id(resolved_artifact_id);
   if (bound_artifact_id.has_value()) {
     span->SetAttribute("tc.artifact.bound", *bound_artifact_id);
@@ -332,62 +359,66 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       return to_grpc_status(descriptor_or.status());
     }
     descriptor_meta = *descriptor_or;
+    auto mounted_metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
+    if (!mounted_metadata_or.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(mounted_metadata_or.status());
+    }
     if (verify_checksums) {
-      auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
-      if (!index_or.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(index_or.status());
-      }
-
-      // Safetensors directories commonly omit artifact_descriptor.json. In that case we cannot
-      // verify checksums, so we warn and continue with verification disabled.
-      if (!descriptor_meta.found && index_or->is_safetensors) {
-        LOG(WARNING) << "verify_checksums requested but artifact_descriptor.json missing for safetensors at "
-                     << normalized_disk_path->string() << "; skipping descriptor validation";
-        verify_checksums = false;
-        span->SetAttribute("tc.store.verify_checksums", verify_checksums);
-      } else {
-        if (!descriptor_meta.found) {
+      if (!descriptor_meta.found) {
+        if (common::is_msa1_artifact_id(resolved_artifact_id)) {
+          LOG(WARNING) << "verify_checksums requested but artifact_descriptor.json missing for mounted-source "
+                       << "artifact_id=" << resolved_artifact_id << " at " << normalized_disk_path->string()
+                       << "; skipping descriptor validation";
+          verify_checksums = false;
+          span->SetAttribute("tc.store.verify_checksums", verify_checksums);
+        } else if (
+            mounted_metadata_or->format_kind == materialization_disk_resolve::MountedSourceFormatKind::kSafetensors) {
+          // Safetensors directories commonly omit artifact_descriptor.json. In that case we cannot
+          // verify checksums, so we warn and continue with verification disabled.
+          LOG(WARNING) << "verify_checksums requested but artifact_descriptor.json missing for safetensors at "
+                       << normalized_disk_path->string() << "; skipping descriptor validation";
+          verify_checksums = false;
+          span->SetAttribute("tc.store.verify_checksums", verify_checksums);
+        } else {
           resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
           return {StatusCode::FAILED_PRECONDITION, "artifact_descriptor.json required when verify_checksums=true"};
         }
-        auto validation_status =
-            validate_descriptor_against_index(descriptor_meta, *index_or, /*verify_checksums=*/true);
+      } else {
+        auto validation_status = validate_descriptor_against_index(
+            descriptor_meta, mounted_metadata_or->index_info, /*verify_checksums=*/true);
         if (!validation_status.ok()) {
           resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
           return to_grpc_status(validation_status);
         }
       }
-      disk_index = std::move(*index_or);
-    } else if (prefer_disk) {
-      auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-      if (!idx_status.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(idx_status);
-      }
     }
+    disk_index = mounted_metadata_or->index_info;
 
     store::loading::DiskMetadata metadata;
     metadata.descriptor_present = descriptor_meta.found;
     metadata.schema_version = descriptor_meta.schema_version;
     metadata.index_multihash = descriptor_meta.index_multihash;
     metadata.data_multihash = descriptor_meta.data_multihash;
-    if (disk_index.has_value()) {
-      metadata.canonical_index_json = disk_index->canonical_index_json;
-      if (disk_index->source_index_json.has_value()) {
-        metadata.source_index_json = disk_index->source_index_json;
-      }
-      if (!disk_index->index_multihash.empty()) {
-        metadata.index_multihash = disk_index->index_multihash;
-      }
-      if (disk_index->total_size_bytes > 0) {
-        metadata.logical_total_size = disk_index->total_size_bytes;
-      }
-      if (disk_index->source_total_size_bytes > 0) {
-        metadata.source_total_size_bytes = disk_index->source_total_size_bytes;
-      }
-      metadata.is_safetensors = disk_index->is_safetensors;
+    metadata.canonical_index_json = mounted_metadata_or->index_info.canonical_index_json;
+    if (mounted_metadata_or->index_info.source_index_json.has_value()) {
+      metadata.source_index_json = mounted_metadata_or->index_info.source_index_json;
     }
+    if (!mounted_metadata_or->canonical_index_multihash.empty()) {
+      metadata.index_multihash = mounted_metadata_or->canonical_index_multihash;
+    }
+    if (mounted_metadata_or->exact_size_bytes > 0) {
+      metadata.logical_total_size = mounted_metadata_or->exact_size_bytes;
+    }
+    if (mounted_metadata_or->index_info.source_total_size_bytes > 0) {
+      metadata.source_total_size_bytes = mounted_metadata_or->index_info.source_total_size_bytes;
+    } else if (mounted_metadata_or->exact_size_bytes > 0) {
+      metadata.source_total_size_bytes = mounted_metadata_or->exact_size_bytes;
+    }
+    metadata.is_safetensors =
+        mounted_metadata_or->format_kind == materialization_disk_resolve::MountedSourceFormatKind::kSafetensors;
+    metadata.tensor_aware = mounted_metadata_or->metadata_capability ==
+        materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware;
     disk_metadata = std::move(metadata);
   }
   if (local_import.has_value()) {
@@ -396,6 +427,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     }
     auto& metadata = *disk_metadata;
     metadata.descriptor_present = metadata.descriptor_present || local_import->descriptor_present;
+    if (!metadata.canonical_index_json.has_value() && !local_import->canonical_index_json.empty()) {
+      metadata.canonical_index_json = local_import->canonical_index_json;
+    }
     if (!metadata.source_index_json.has_value() && local_import->source_index_json.has_value()) {
       metadata.source_index_json = *local_import->source_index_json;
     }
@@ -405,6 +439,14 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (!metadata.data_multihash.has_value() && local_import->data_multihash.has_value()) {
       metadata.data_multihash = *local_import->data_multihash;
     }
+    if (!metadata.tensor_aware.has_value()) {
+      metadata.tensor_aware = local_import->tensor_aware_metadata;
+    }
+  }
+  span->SetAttribute("tc.disk.metadata_capability", disk_metadata_capability_attr(disk_metadata));
+  if (local_import.has_value() && local_import->trusted_content_artifact_id.has_value()) {
+    span->SetAttribute(
+        "tc.artifact.trusted_content_hint_kind", artifact_id_kind_attr(*local_import->trusted_content_artifact_id));
   }
 
   if (normalized_disk_path.has_value()) {
@@ -415,7 +457,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     disk_source = store::loading::DiskSource{
         .path = *normalized_disk_path,
         .expected_size = expected_size,
-        .require_descriptor = true,
+        .require_descriptor = common::is_mi2_artifact_id(resolved_artifact_id),
     };
   }
   std::optional<std::string> disk_source_artifact_id;
@@ -423,7 +465,8 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     disk_source_artifact_id = resolved_artifact_id;
   }
 
-  if (descriptor_meta.artifact_id.has_value() && resolved_artifact_id != *descriptor_meta.artifact_id) {
+  if (descriptor_meta.artifact_id.has_value() && common::is_mi2_artifact_id(resolved_artifact_id) &&
+      resolved_artifact_id != *descriptor_meta.artifact_id) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::FAILED_PRECONDITION, "artifact_id mismatch between request and artifact_descriptor.json"};
   }
@@ -450,6 +493,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   }
   const bool selection_requests_view = selection.has_view_spec() || !selection.view_id().empty();
   const bool selection_requests_subset = !selection_names.empty() || !view_subset_hash.empty();
+  if (has_disk && is_byte_only_disk_metadata(disk_metadata) && (selection_requests_view || selection_requests_subset)) {
+    return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
+  }
   LOG(INFO) << "materialize_replica.selection"
             << " artifact_id=" << resolved_artifact_id << " request_tensor_names=" << selection.tensor_names_size()
             << " parsed_selection_names=" << selection_names.size()
@@ -478,15 +524,11 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (disk_index.has_value() && !disk_index->canonical_index_json.empty()) {
       return disk_index->canonical_index_json;
     }
-    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-    if (!idx_status.ok()) {
-      return idx_status;
+    auto metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
+    if (!metadata_or.ok()) {
+      return metadata_or.status();
     }
-    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
-    if (!local_or.ok()) {
-      return local_or.status();
-    }
-    return local_or->canonical_index_json;
+    return metadata_or->index_info.canonical_index_json;
   };
 
   if (!has_artifact && !has_disk) {
@@ -836,7 +878,8 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
           if (!validation_status.ok()) {
             return validation_status;
           }
-          if (descriptor_meta.artifact_id.has_value() && resolved_artifact_id != *descriptor_meta.artifact_id) {
+          if (descriptor_meta.artifact_id.has_value() && common::is_mi2_artifact_id(resolved_artifact_id) &&
+              resolved_artifact_id != *descriptor_meta.artifact_id) {
             return absl::FailedPreconditionError("artifact_id mismatch between request and artifact_descriptor.json");
           }
 
@@ -878,7 +921,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
           return store::loading::DiskSource{
               .path = ready_disk_path,
               .expected_size = expected_size,
-              .require_descriptor = true,
+              .require_descriptor = common::is_mi2_artifact_id(resolved_artifact_id),
           };
         });
     result = std::move(retry_or);

@@ -64,6 +64,30 @@ using namespace tensorcast;
 
 namespace {
 
+absl::StatusOr<std::filesystem::path> normalize_storage_root_for_config(const std::filesystem::path& storage_root) {
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat storage root: ", storage_root.string()));
+  }
+  if (!exists) {
+    return absl::InvalidArgumentError(absl::StrCat("storage root does not exist: ", storage_root.string()));
+  }
+  const bool is_dir = std::filesystem::is_directory(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat storage root: ", storage_root.string()));
+  }
+  if (!is_dir) {
+    return absl::InvalidArgumentError(absl::StrCat("storage root must be a directory: ", storage_root.string()));
+  }
+  auto normalized = std::filesystem::weakly_canonical(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("Failed to canonicalize storage root: ", storage_root.string()));
+  }
+  return normalized;
+}
+
 absl::Status probe_memfd_shared_mapping() {
   constexpr size_t kProbeBytes = 4096;
   int fd = static_cast<int>(::syscall(SYS_memfd_create, "tensorcast_probe", MFD_CLOEXEC | MFD_ALLOW_SEALING));
@@ -1114,6 +1138,61 @@ int main(int argc, char** argv) {
     daemon_opts.eviction_check_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
   }
   daemon_opts.storage_path = storage_root;
+  const auto& public_disk_source = cfg.public_disk_source();
+  daemon_opts.public_disk_source_policy.unmatched_path_mode = public_disk_source.unmatched_path_mode() ==
+          tensorcast::config::v1::DaemonConfig::PublicDiskSource::
+              PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
+      ? daemon::DaemonOptions::PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback
+      : daemon::DaemonOptions::PublicDiskSourcePolicy::UnmatchedPathMode::kReject;
+  for (const auto& trusted_root : public_disk_source.trusted_root_policies()) {
+    daemon::DaemonOptions::PublicDiskSourcePolicy::TrustedRootPolicy policy;
+    policy.policy_id = trusted_root.policy_id();
+    if (!trusted_root.root_path().empty()) {
+      auto normalized_root_or = normalize_storage_root_for_config(std::filesystem::path(trusted_root.root_path()));
+      if (!normalized_root_or.ok()) {
+        LOG(ERROR) << "INVALID_ARGUMENT: public_disk_source.trusted_root_policies.root_path invalid ("
+                   << trusted_root.root_path() << "): " << normalized_root_or.status();
+        return 2;
+      }
+      policy.root_path = *normalized_root_or;
+    }
+    for (const auto format : trusted_root.allowed_formats()) {
+      switch (format) {
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED:
+          policy.allowed_formats.push_back(daemon::DaemonOptions::PublicDiskSourcePolicy::Format::kPartitioned);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS:
+          policy.allowed_formats.push_back(daemon::DaemonOptions::PublicDiskSourcePolicy::Format::kSafetensors);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED:
+        default:
+          break;
+      }
+    }
+    for (const auto capability : trusted_root.allowed_metadata_capabilities()) {
+      switch (capability) {
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE:
+          policy.allowed_metadata_capabilities.push_back(
+              daemon::DaemonOptions::PublicDiskSourcePolicy::MetadataCapability::kTensorAware);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY:
+          policy.allowed_metadata_capabilities.push_back(
+              daemon::DaemonOptions::PublicDiskSourcePolicy::MetadataCapability::kByteOnly);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED:
+        default:
+          break;
+      }
+    }
+    policy.descriptor_reuse_mode = trusted_root.descriptor_reuse_mode() ==
+            tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_DISABLED
+        ? daemon::DaemonOptions::PublicDiskSourcePolicy::DescriptorReuseMode::kDisabled
+        : daemon::DaemonOptions::PublicDiskSourcePolicy::DescriptorReuseMode::kTrustedHintOnly;
+    policy.validation_mode = daemon::DaemonOptions::PublicDiskSourcePolicy::ValidationMode::kValidateBeforeRead;
+    policy.lightweight_attestation_enabled =
+        !trusted_root.has_lightweight_attestation_enabled() || trusted_root.lightweight_attestation_enabled();
+    daemon_opts.public_disk_source_policy.trusted_root_policies.push_back(std::move(policy));
+  }
   daemon_opts.local_handle_socket_path = cfg.lifecycle().handle_leases().local_handle_socket_path();
   if (cfg.lifecycle().handle_leases().has_ttl()) {
     daemon_opts.handle_lease_ttl = duration_to_millis(cfg.lifecycle().handle_leases().ttl());

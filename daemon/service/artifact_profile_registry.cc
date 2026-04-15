@@ -199,6 +199,48 @@ class OrdinaryArtifactProfileRuntime final : public ArtifactProfileRuntime {
   }
 };
 
+class MountedSourceArtifactProfileRuntime final : public ArtifactProfileRuntime {
+ public:
+  [[nodiscard]] absl::Status validate_artifact_id_for_field(std::string_view artifact_id, std::string_view field_name)
+      const override {
+    if (artifact_id.empty()) {
+      return absl::InvalidArgumentError(absl::StrCat(field_name, " is required"));
+    }
+    if (!common::is_msa1_artifact_id(artifact_id)) {
+      return absl::InvalidArgumentError(absl::StrCat(field_name, " must be an msa1 mounted-source artifact id"));
+    }
+    return absl::OkStatus();
+  }
+
+  [[nodiscard]] absl::Status validate_batch_selection(
+      const tensorcast::common::v1::ArtifactSelection& selection) const override {
+    return validate_artifact_id_for_field(selection.artifact_id(), "selection.artifact_id");
+  }
+
+  [[nodiscard]] absl::StatusOr<tensorcast::common::v1::ArtifactSelection> build_normalized_selection(
+      std::string_view artifact_id) const override {
+    const auto artifact_id_st = validate_artifact_id_for_field(artifact_id, "artifact_id");
+    if (!artifact_id_st.ok()) {
+      return artifact_id_st;
+    }
+    tensorcast::common::v1::ArtifactSelection selection;
+    selection.set_artifact_id(std::string(artifact_id));
+    return selection;
+  }
+
+  [[nodiscard]] absl::StatusOr<std::uint64_t> shard_id_for_artifact(
+      std::string_view /*artifact_id*/,
+      std::uint64_t /*shard_count*/) const override {
+    return absl::FailedPreconditionError("mounted-source artifacts do not use routed shard authority");
+  }
+
+  [[nodiscard]] absl::Status validate_invariant_body_descriptor(
+      const v2::PutIfAbsentInvariant& /*invariant*/,
+      const BodyDescriptor& /*descriptor*/) const override {
+    return absl::FailedPreconditionError("mounted-source artifacts do not use byte-artifact body invariants");
+  }
+};
+
 class UnknownArtifactProfileRuntime final : public ArtifactProfileRuntime {
  public:
   [[nodiscard]] absl::Status validate_artifact_id_for_field(
@@ -242,6 +284,11 @@ const OrdinaryArtifactProfileRuntime& ordinary_artifact_profile_runtime() {
   return *runtime;
 }
 
+const MountedSourceArtifactProfileRuntime& mounted_source_artifact_profile_runtime() {
+  static const auto* runtime = new MountedSourceArtifactProfileRuntime();
+  return *runtime;
+}
+
 const UnknownArtifactProfileRuntime& unknown_artifact_profile_runtime() {
   static const auto* runtime = new UnknownArtifactProfileRuntime();
   return *runtime;
@@ -269,6 +316,17 @@ const ArtifactProfileRegistry::ProfileTraits& byte_artifact_profile_traits() {
   return *traits;
 }
 
+const ArtifactProfileRegistry::ProfileTraits& mounted_source_artifact_profile_traits() {
+  static const auto* traits = new ArtifactProfileRegistry::ProfileTraits{
+      .profile = ArtifactProfileRegistry::Profile::kMountedSourceArtifact,
+      .profile_name = "mounted_source_artifact",
+      .family = ArtifactProfileRegistry::ArtifactFamily::kOrdinary,
+      .authority_model = ArtifactProfileRegistry::AuthorityModel::kDaemonSessionLocal,
+      .fixed_full_selection = false,
+  };
+  return *traits;
+}
+
 const ArtifactProfileRegistry::ProfileTraits& unknown_profile_traits() {
   static const auto* traits = new ArtifactProfileRegistry::ProfileTraits{
       .profile = ArtifactProfileRegistry::Profile::kUnknown,
@@ -288,6 +346,8 @@ const ArtifactProfileRuntime& ArtifactProfileRegistry::runtime_for_profile(Profi
       return ordinary_artifact_profile_runtime();
     case Profile::kByteArtifact:
       return byte_artifact_profile_runtime();
+    case Profile::kMountedSourceArtifact:
+      return mounted_source_artifact_profile_runtime();
     case Profile::kUnknown:
     default:
       return unknown_artifact_profile_runtime();
@@ -304,6 +364,8 @@ const ArtifactProfileRegistry::ProfileTraits& ArtifactProfileRegistry::traits_fo
       return ordinary_profile_traits();
     case Profile::kByteArtifact:
       return byte_artifact_profile_traits();
+    case Profile::kMountedSourceArtifact:
+      return mounted_source_artifact_profile_traits();
     case Profile::kUnknown:
     default:
       return unknown_profile_traits();
@@ -326,6 +388,8 @@ ArtifactProfileRegistry::Profile ArtifactProfileRegistry::classify_artifact_id(s
     case common::ArtifactIdKind::kMi2:
     case common::ArtifactIdKind::kCgid:
       return Profile::kOrdinaryArtifact;
+    case common::ArtifactIdKind::kMsa1:
+      return Profile::kMountedSourceArtifact;
     case common::ArtifactIdKind::kUnspecified:
     default:
       return Profile::kUnknown;

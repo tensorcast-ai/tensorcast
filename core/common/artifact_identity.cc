@@ -115,6 +115,10 @@ bool is_cgid_artifact_id(absl::string_view artifact_id) {
   return absl::StartsWith(artifact_id, kCgidPrefix);
 }
 
+bool is_msa1_artifact_id(absl::string_view artifact_id) {
+  return absl::StartsWith(artifact_id, kMsa1Prefix);
+}
+
 absl::Status validate_client_generated_id(absl::string_view artifact_id) {
   return validate_cgid_grammar(artifact_id);
 }
@@ -196,6 +200,9 @@ ArtifactIdKind infer_artifact_id_kind(absl::string_view artifact_id) {
   if (is_cgid_artifact_id(artifact_id)) {
     return ArtifactIdKind::kCgid;
   }
+  if (is_msa1_artifact_id(artifact_id)) {
+    return ArtifactIdKind::kMsa1;
+  }
   return ArtifactIdKind::kUnspecified;
 }
 
@@ -203,6 +210,7 @@ absl::StatusOr<ArtifactIdKind> validate_and_get_artifact_id_kind(absl::string_vi
   const ArtifactIdKind kind = infer_artifact_id_kind(artifact_id);
   switch (kind) {
     case ArtifactIdKind::kMi2:
+    case ArtifactIdKind::kMsa1:
       return kind;
     case ArtifactIdKind::kCgid: {
       auto st = validate_cgid_grammar(artifact_id);
@@ -213,7 +221,7 @@ absl::StatusOr<ArtifactIdKind> validate_and_get_artifact_id_kind(absl::string_vi
     }
     case ArtifactIdKind::kUnspecified:
     default:
-      return absl::InvalidArgumentError(R"(artifact_id must start with "mi2:" or "cgid:" prefix)");
+      return absl::InvalidArgumentError(R"(artifact_id must start with "mi2:", "cgid:", or "msa1:" prefix)");
   }
 }
 

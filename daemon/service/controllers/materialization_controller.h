@@ -68,6 +68,7 @@ class MaterializationController {
     bool cpu_shared_memory_enabled{true};
     bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
+    DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
   };
 
@@ -162,6 +163,11 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::ResolvePublicDiskSourceRequest& req,
       v2::ResolvePublicDiskSourceResponse& resp);
+
+  grpc::Status promote_mounted_source_artifact(
+      RpcContext& rctx,
+      const v2::PromoteMountedSourceArtifactRequest& req,
+      v2::PromoteMountedSourceArtifactResponse& resp);
 
   grpc::Status import_artifact_from_path_stream(
       RpcContext& rctx,

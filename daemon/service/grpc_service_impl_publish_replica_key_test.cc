@@ -187,6 +187,37 @@ TEST_CASE("PublishReplicaKey retries transient artifact readiness race", "[daemo
   REQUIRE(gs_client->last_artifact_id == "mi2:test-retry");
 }
 
+TEST_CASE("PublishReplicaKey rejects msa1 artifact ids", "[daemon][key-mapping]") {
+  const auto root = test_root();
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  const auto storage_root = root / "storage_root_publish_msa1";
+  std::filesystem::create_directories(storage_root);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_root));
+  auto gs_client = std::make_shared<KeyMappingGlobalStoreClient>();
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::PublishReplicaKeyRequest req;
+  req.set_key("key-msa1");
+  req.mutable_artifact_descriptor()->set_artifact_id("msa1:test-session~policy~partitioned~deadbeef");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::PublishReplicaKeyResponse resp;
+  auto status = svc.PublishReplicaKey(&ctx, &req, &resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+}
+
 TEST_CASE("PublishReplicaKey repairs local import metadata after late Global Store connect", "[daemon][key-mapping]") {
   const auto root = test_root();
   std::filesystem::remove_all(root);
@@ -335,6 +366,37 @@ TEST_CASE("ResolveKeyMapping cache keeps newer generation on stale local mutatio
   REQUIRE(resolve_cached_status.ok());
   REQUIRE(resolve_cached_resp.artifact_id() == "mi2:new");
   REQUIRE(resolve_cached_resp.generation() == 10);
+}
+
+TEST_CASE("SwapKeyMapping rejects msa1 artifact ids", "[daemon][key-mapping]") {
+  const auto root = test_root();
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  const auto storage_root = root / "storage_root_swap_msa1";
+  std::filesystem::create_directories(storage_root);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_root));
+  auto gs_client = std::make_shared<KeyMappingGlobalStoreClient>();
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::SwapKeyMappingRequest req;
+  req.set_key("key-swap-msa1");
+  req.set_new_artifact_id("msa1:test-session~policy~partitioned~deadbeef");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::SwapKeyMappingResponse resp;
+  auto status = svc.SwapKeyMapping(&ctx, &req, &resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
 }
 
 TEST_CASE("ResolveKeyMapping forwards bounded upstream rpc options", "[daemon][key-mapping]") {

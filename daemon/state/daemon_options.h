@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "absl/time/time.h"
 #include "core/common/capability_token.h"
@@ -27,6 +28,45 @@ struct DaemonOptions {
     bool migrate_transpose_only{false};
     bool reuse_views_if_safe{false};
     bool retire_pieces{false};
+  };
+
+  struct PublicDiskSourcePolicy {
+    enum class Format : std::uint8_t {
+      kPartitioned = 1,
+      kSafetensors = 2,
+    };
+
+    enum class MetadataCapability : std::uint8_t {
+      kTensorAware = 1,
+      kByteOnly = 2,
+    };
+
+    enum class DescriptorReuseMode : std::uint8_t {
+      kDisabled = 1,
+      kTrustedHintOnly = 2,
+    };
+
+    enum class ValidationMode : std::uint8_t {
+      kValidateBeforeRead = 1,
+    };
+
+    enum class UnmatchedPathMode : std::uint8_t {
+      kReject = 1,
+      kAllowAbsoluteFallback = 2,
+    };
+
+    struct TrustedRootPolicy {
+      std::string policy_id;
+      std::filesystem::path root_path;
+      std::vector<Format> allowed_formats;
+      std::vector<MetadataCapability> allowed_metadata_capabilities;
+      DescriptorReuseMode descriptor_reuse_mode{DescriptorReuseMode::kTrustedHintOnly};
+      bool lightweight_attestation_enabled{true};
+      ValidationMode validation_mode{ValidationMode::kValidateBeforeRead};
+    };
+
+    std::vector<TrustedRootPolicy> trusted_root_policies;
+    UnmatchedPathMode unmatched_path_mode{UnmatchedPathMode::kReject};
   };
 
   // Sweep/TTL configuration
@@ -57,6 +97,7 @@ struct DaemonOptions {
   std::filesystem::path storage_path;
   // Import metadata root under daemon runtime topology.
   std::filesystem::path import_root;
+  PublicDiskSourcePolicy public_disk_source_policy{};
 
   // Stable daemon identity for control-plane actions (derived from DaemonConfig.daemon_id).
   std::string daemon_id;

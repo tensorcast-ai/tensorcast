@@ -69,6 +69,33 @@ def test_upsert_and_list_artifact_disk_location_round_trip(servicer, test_contex
     assert location.kind == global_store_pb2.DISK_LOCATION_KIND_MANAGED
 
 
+def test_upsert_artifact_disk_location_rejects_msa1(servicer, test_context):
+    response = servicer.UpsertArtifactDiskLocation(
+        global_store_pb2.UpsertArtifactDiskLocationRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            cluster_id=servicer.cluster_id,
+            relative_path="models/msa1",
+            kind=global_store_pb2.DISK_LOCATION_KIND_MANAGED,
+        ),
+        test_context,
+    )
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (test_context.details or "")
+
+
+def test_list_artifact_disk_locations_rejects_msa1(servicer, test_context):
+    response = servicer.ListArtifactDiskLocations(
+        global_store_pb2.ListArtifactDiskLocationsRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef"
+        ),
+        test_context,
+    )
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (test_context.details or "")
+
+
 def test_upsert_artifact_disk_location_rejects_unsafe_relative_path(
     servicer,
     test_context,

@@ -160,6 +160,9 @@ No new disk format is introduced.
 
 Readers MUST order parts by numeric suffix (`tensor.data_0`, `tensor.data_1`, ..., `tensor.data_10`, ...).
 This requires a code fix: today `DiskLoader` and `compute_data_multihash_from_disk_dir` sort filenames lexicographically.
+The same numeric ordering is also required by later metadata-first mounted
+source contracts such as `0115`; public source snapshot evidence must not invent
+its own lexicographic partition ordering.
 
 Writer requirement:
 - Parts must be a contiguous sequence from `0..(part_count-1)` with no gaps.

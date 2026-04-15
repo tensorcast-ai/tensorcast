@@ -115,6 +115,64 @@ pinned_memory:
   REQUIRE_FALSE(cfg.engine().cpu_shared_memory().enabled());
 }
 
+TEST_CASE("DaemonConfig defaults public disk source policy from storage_path", "[config]") {
+  const std::string yaml = R"YAML(
+server:
+  listen: {host: "127.0.0.1", port: 50052}
+  p2p_listen: {host: "127.0.0.1", port: 65090}
+  storage_path: "/tmp"
+  num_threads: 2
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+)YAML";
+
+  auto cfg_or = load_daemon_config_from_text(yaml);
+  REQUIRE(cfg_or.ok());
+  const auto& cfg = *cfg_or;
+
+  REQUIRE(cfg.has_public_disk_source());
+  REQUIRE(cfg.public_disk_source().trusted_root_policies_size() == 1);
+  REQUIRE(cfg.public_disk_source().trusted_root_policies(0).root_path() == "/tmp");
+  REQUIRE(
+      cfg.public_disk_source().trusted_root_policies(0).descriptor_reuse_mode() ==
+      tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY);
+  REQUIRE(
+      cfg.public_disk_source().trusted_root_policies(0).validation_mode() ==
+      tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ);
+  REQUIRE(cfg.public_disk_source().trusted_root_policies(0).lightweight_attestation_enabled());
+  REQUIRE(
+      cfg.public_disk_source().unmatched_path_mode() ==
+      tensorcast::config::v1::DaemonConfig::PublicDiskSource::PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT);
+}
+
+TEST_CASE("DaemonConfig rejects overlapping public disk source roots", "[config]") {
+  const std::string yaml = R"YAML(
+server:
+  listen: {host: "127.0.0.1", port: 50052}
+  p2p_listen: {host: "127.0.0.1", port: 65090}
+  storage_path: "/tmp"
+  num_threads: 2
+public_disk_source:
+  trusted_root_policies:
+    - policy_id: root-a
+      root_path: /tmp/models
+      validation_mode: PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ
+      lightweight_attestation_enabled: true
+    - policy_id: root-b
+      root_path: /tmp/models/subdir
+      validation_mode: PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ
+      lightweight_attestation_enabled: true
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+)YAML";
+
+  auto cfg_or = load_daemon_config_from_text(yaml);
+  REQUIRE_FALSE(cfg_or.ok());
+  REQUIRE(cfg_or.status().message().find("must not overlap") != std::string::npos);
+}
+
 TEST_CASE("DaemonConfig materialization strategy defaults and explicit overrides", "[config]") {
   const std::string yaml = R"YAML(
 server:

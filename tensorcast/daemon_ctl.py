@@ -2264,6 +2264,48 @@ class DaemonCtl:
                 _raise_import_artifact_from_path_rpc_error(self.server_address, e)
             return response
 
+    def promote_mounted_source_artifact(
+        self,
+        *,
+        artifact_id: str,
+        verify_checksums: bool = True,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.PromoteMountedSourceArtifactResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        resolved_timeout_s = (
+            _import_artifact_from_path_timeout_seconds()
+            if timeout_s is None
+            else (None if float(timeout_s) == 0.0 else float(timeout_s))
+        )
+        resolved_retries = (
+            _import_artifact_from_path_retries() if timeout_s is None else 1
+        )
+        with self._client_span("Client/PromoteMountedSourceArtifact") as span:
+            request = store_daemon_pb2.PromoteMountedSourceArtifactRequest(
+                artifact_id=str(artifact_id),
+                verify_checksums=bool(verify_checksums),
+            )
+            try:
+                response: store_daemon_pb2.PromoteMountedSourceArtifactResponse = (
+                    self._unary_call(
+                        self.stub_v2.PromoteMountedSourceArtifact,
+                        request,
+                        timeout=resolved_timeout_s,
+                        span=span,
+                        retries=resolved_retries,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="PromoteMountedSourceArtifact RPC failed",
+                    )
+                ) from e
+            return response
+
     def confirm_replica_loaded(
         self,
         disk_path: str,

@@ -22,6 +22,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
 #include "core/common/selection_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
@@ -65,8 +66,7 @@ using materialization_policy::OperationTransportContext;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_operation_transport_context;
 using materialization_policy::resolve_transform_placement;
-using materialization_request_common::resolve_artifact_binding;
-using materialization_request_common::resolve_managed_disk_path;
+using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_resolved_mapped_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
@@ -82,6 +82,36 @@ std::string mint_publication_id() {
     raw[i] = static_cast<char>(absl::Uniform<uint32_t>(bitgen, 0u, 256u));
   }
   return absl::BytesToHexString(raw);
+}
+
+bool selection_requires_tensor_aware_metadata(const tensorcast::common::v1::ArtifactSelection& selection) {
+  return selection.has_view_spec() || !selection.view_id().empty() || selection.tensor_names_size() > 0 ||
+      !selection.view_subset_hash().empty();
+}
+
+bool is_byte_only_disk_metadata(const std::optional<store::loading::DiskMetadata>& disk_metadata) {
+  return disk_metadata.has_value() && disk_metadata->tensor_aware.has_value() && !*disk_metadata->tensor_aware;
+}
+
+std::string artifact_id_kind_attr(std::string_view artifact_id) {
+  switch (common::infer_artifact_id_kind(artifact_id)) {
+    case common::ArtifactIdKind::kMi2:
+      return "mi2";
+    case common::ArtifactIdKind::kCgid:
+      return "cgid";
+    case common::ArtifactIdKind::kMsa1:
+      return "msa1";
+    case common::ArtifactIdKind::kUnspecified:
+    default:
+      return "unknown";
+  }
+}
+
+std::string disk_metadata_capability_attr(const std::optional<store::loading::DiskMetadata>& disk_metadata) {
+  if (!disk_metadata.has_value() || !disk_metadata->tensor_aware.has_value()) {
+    return "unspecified";
+  }
+  return *disk_metadata->tensor_aware ? "tensor_aware" : "byte_only";
 }
 
 std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
@@ -219,35 +249,41 @@ absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_target_disk_me
     std::string_view resolved_artifact_id,
     int device_ordinal,
     ArtifactSourceRegistry& disk_imports) {
+  (void)device_ordinal;
   std::optional<store::loading::DiskMetadata> disk_metadata;
   if (normalized_disk_path.has_value()) {
     auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
     if (!descriptor_or.ok()) {
       return descriptor_or.status();
     }
-    auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
-    if (!index_or.ok()) {
-      return index_or.status();
+    auto mounted_metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
+    if (!mounted_metadata_or.ok()) {
+      return mounted_metadata_or.status();
     }
     store::loading::DiskMetadata metadata;
     metadata.descriptor_present = descriptor_or->found;
     metadata.schema_version = descriptor_or->schema_version;
     metadata.index_multihash = descriptor_or->index_multihash;
     metadata.data_multihash = descriptor_or->data_multihash;
-    metadata.canonical_index_json = index_or->canonical_index_json;
-    if (index_or->source_index_json.has_value()) {
-      metadata.source_index_json = index_or->source_index_json;
+    metadata.canonical_index_json = mounted_metadata_or->index_info.canonical_index_json;
+    if (mounted_metadata_or->index_info.source_index_json.has_value()) {
+      metadata.source_index_json = mounted_metadata_or->index_info.source_index_json;
     }
-    if (!index_or->index_multihash.empty()) {
-      metadata.index_multihash = index_or->index_multihash;
+    if (!mounted_metadata_or->canonical_index_multihash.empty()) {
+      metadata.index_multihash = mounted_metadata_or->canonical_index_multihash;
     }
-    if (index_or->total_size_bytes > 0) {
-      metadata.logical_total_size = index_or->total_size_bytes;
+    if (mounted_metadata_or->exact_size_bytes > 0) {
+      metadata.logical_total_size = mounted_metadata_or->exact_size_bytes;
     }
-    if (index_or->source_total_size_bytes > 0) {
-      metadata.source_total_size_bytes = index_or->source_total_size_bytes;
+    if (mounted_metadata_or->index_info.source_total_size_bytes > 0) {
+      metadata.source_total_size_bytes = mounted_metadata_or->index_info.source_total_size_bytes;
+    } else if (mounted_metadata_or->exact_size_bytes > 0) {
+      metadata.source_total_size_bytes = mounted_metadata_or->exact_size_bytes;
     }
-    metadata.is_safetensors = index_or->is_safetensors;
+    metadata.is_safetensors =
+        mounted_metadata_or->format_kind == materialization_disk_resolve::MountedSourceFormatKind::kSafetensors;
+    metadata.tensor_aware = mounted_metadata_or->metadata_capability ==
+        materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware;
     disk_metadata = std::move(metadata);
   }
   if (auto local_import = disk_imports.lookup_binding(resolved_artifact_id); local_import.has_value()) {
@@ -267,6 +303,9 @@ absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_target_disk_me
     }
     if (!metadata.data_multihash.has_value() && local_import->data_multihash.has_value()) {
       metadata.data_multihash = *local_import->data_multihash;
+    }
+    if (!metadata.tensor_aware.has_value()) {
+      metadata.tensor_aware = local_import->tensor_aware_metadata;
     }
   }
   return disk_metadata;
@@ -314,46 +353,22 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
     return absl::InvalidArgumentError(std::format("selection.artifact_id is required for {}", rpc_name));
   }
 
-  context.resolved_artifact_id = req.selection().artifact_id();
-  auto binding_or = resolve_artifact_binding(global_store_client, context.resolved_artifact_id);
-  if (!binding_or.ok()) {
+  auto resolution_or = resolve_artifact_and_disk_source(
+      global_store_client,
+      &disk_imports,
+      storage_path,
+      req.selection().artifact_id(),
+      context.request_context.retrieval_policy.allow_disk,
+      /*allow_local_import_fallback=*/true,
+      /*loopback_peer=*/true);
+  if (!resolution_or.ok()) {
     record_materialize_into_target(
         "error", "binding_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return binding_or.status();
+    return resolution_or.status();
   }
-  if (binding_or->has_value()) {
-    context.resolved_artifact_id = binding_or->value();
-  }
-  context.gs_connected = global_store_client && global_store_client->is_connected();
-  context.normalized_disk_path = resolve_managed_disk_path(
-      global_store_client.get(),
-      storage_path,
-      context.resolved_artifact_id,
-      context.request_context.retrieval_policy.allow_disk);
-  if (!context.normalized_disk_path.has_value() && context.request_context.retrieval_policy.allow_disk) {
-    auto entry = disk_imports.lookup_binding(context.resolved_artifact_id);
-    if (entry.has_value()) {
-      if (entry->source_kind == ArtifactSourceRegistry::SourceKind::kLocalImport) {
-        materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
-        expected_fingerprints.reserve(entry->file_fingerprints.size());
-        for (const auto& [relative_path, fp] : entry->file_fingerprints) {
-          expected_fingerprints.insert_or_assign(
-              relative_path,
-              materialization_disk_resolve::SourceFileFingerprint{
-                  .inode = fp.inode,
-                  .size = fp.size,
-                  .mtime_ns = fp.mtime_ns,
-              });
-        }
-        auto fingerprint_status = materialization_disk_resolve::validate_source_fingerprints(
-            std::filesystem::path(entry->canonical_source_path), expected_fingerprints);
-        if (!fingerprint_status.ok()) {
-          return fingerprint_status;
-        }
-      }
-      context.normalized_disk_path = std::filesystem::path(entry->canonical_source_path);
-    }
-  }
+  context.resolved_artifact_id = std::move(resolution_or->resolved_artifact_id);
+  context.gs_connected = resolution_or->gs_connected;
+  context.normalized_disk_path = std::move(resolution_or->normalized_disk_path);
   if (!req.has_target_layout()) {
     record_materialize_into_target(
         "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -435,6 +450,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     RpcContext& rctx,
     const v2::MaterializeIntoTargetRequest& req,
     v2::MaterializeIntoTargetResponse& resp) {
+  auto& span = rctx.span();
   if (d_.shutdown_signal.is_shutting_down()) {
     record_materialize_into_target(
         "error", "unavailable", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -524,6 +540,17 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
   const bool gs_connected = common.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
+  span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_artifact_id));
+  auto disk_metadata_or =
+      build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  auto disk_metadata = std::move(*disk_metadata_or);
+  span->SetAttribute("tc.disk.metadata_capability", disk_metadata_capability_attr(disk_metadata));
+  if (is_byte_only_disk_metadata(disk_metadata) && selection_requires_tensor_aware_metadata(req.selection())) {
+    return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
+  }
 
   auto canonical_json_or = load_canonical_index_with_disk_fallback(
       d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
@@ -614,15 +641,9 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     disk_source = store::loading::DiskSource{
         .path = *normalized_disk_path,
         .expected_size = logical_total_size,
-        .require_descriptor = true,
+        .require_descriptor = common::is_mi2_artifact_id(resolved_artifact_id),
     };
   }
-  auto disk_metadata_or =
-      build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
-  if (!disk_metadata_or.ok()) {
-    return to_grpc_status(disk_metadata_or.status());
-  }
-  auto disk_metadata = std::move(*disk_metadata_or);
 
   store::loading::MaterializeHints hints;
   const std::chrono::milliseconds request_budget = resolve_target_request_budget(rctx.server_context());
@@ -863,6 +884,18 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
   const bool gs_connected = common.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
+  span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_artifact_id));
+  auto disk_metadata_or =
+      build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, /*device_ordinal=*/0, d_.disk_imports);
+  const auto disk_metadata_ready = std::chrono::steady_clock::now();
+  if (!disk_metadata_or.ok()) {
+    return to_grpc_status(disk_metadata_or.status());
+  }
+  auto disk_metadata = std::move(*disk_metadata_or);
+  span->SetAttribute("tc.disk.metadata_capability", disk_metadata_capability_attr(disk_metadata));
+  if (is_byte_only_disk_metadata(disk_metadata) && selection_requires_tensor_aware_metadata(req.selection())) {
+    return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
+  }
 
   if (!req.has_copy_plan() || req.copy_plan().entries_size() == 0) {
     record_materialize_into_target(
@@ -954,16 +987,10 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     disk_source = store::loading::DiskSource{
         .path = *normalized_disk_path,
         .expected_size = logical_total_size,
-        .require_descriptor = true,
+        .require_descriptor = common::is_mi2_artifact_id(resolved_artifact_id),
     };
   }
-  auto disk_metadata_or =
-      build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
-  const auto disk_metadata_done = std::chrono::steady_clock::now();
-  if (!disk_metadata_or.ok()) {
-    return to_grpc_status(disk_metadata_or.status());
-  }
-  auto disk_metadata = std::move(*disk_metadata_or);
+  const auto disk_metadata_done = disk_metadata_ready;
 
   store::loading::MaterializeHints hints;
   const std::chrono::milliseconds request_budget = resolve_target_request_budget(rctx.server_context());
