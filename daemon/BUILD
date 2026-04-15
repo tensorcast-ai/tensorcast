@@ -728,6 +728,7 @@ sc_cc_library(
     hdrs = ["ha/worker_lifecycle_manager.h"],
     deps = [
         ":identity_utils_lib",
+        ":worker_directory_cache_lib",
         ":worker_lifecycle_ports_hdr",
         "//core/communicator:utils_lib",
         "//core/store:store_engine",

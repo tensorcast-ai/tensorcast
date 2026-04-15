@@ -32,6 +32,7 @@
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/state/worker_directory_cache.h"
 #include "daemon/util/identity_utils.h"
 #include "folly/futures/Future.h"
 #include "opentelemetry/metrics/provider.h"
@@ -533,6 +534,17 @@ absl::Status WorkerLifecycleManager::start() {
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
   engine_->set_worker_identity(reg_or->worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  ports_.worker_directory_cache.update_local_entry(
+      WorkerDirectoryCache::Entry{
+          .daemon_id = daemon_id_,
+          .worker_id = reg_or->worker_id,
+          .node_id = node_id_,
+          .node_address = node_addr,
+          .grpc_port = grpc_port,
+          .p2p_port = opts_.p2p_port,
+          .address = absl::StrCat(node_addr, ":", grpc_port),
+          .capability_flags = opts_.capability_flags,
+      });
   const uint64_t epoch_seed = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
   state_sync_epoch_.store(epoch_seed);
   state_sync_request_id_.store(0);
@@ -1508,6 +1520,17 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   last_reconnect_latency_ms_.store(0);
   ports_.identity_store.set_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  ports_.worker_directory_cache.update_local_entry(
+      WorkerDirectoryCache::Entry{
+          .daemon_id = daemon_id_,
+          .worker_id = new_worker_id,
+          .node_id = node_id_,
+          .node_address = node_addr,
+          .grpc_port = grpc_port,
+          .p2p_port = opts_.p2p_port,
+          .address = absl::StrCat(node_addr, ":", grpc_port),
+          .capability_flags = opts_.capability_flags,
+      });
   // Bootstrap reconcile once after re-registration.
   const uint64_t baseline = sync_success_.load();
   request_state_sync();
