@@ -371,6 +371,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (app->options_.worker_lifecycle.has_value()) {
     WorkerLifecyclePorts ports{
         .identity_store = app->kernel_->worker_identity_store(),
+        .lip_manager = app->kernel_->lip_manager(),
         .worker_directory_cache = app->kernel_->worker_directory_cache(),
         .retire_gates = app->kernel_->retire_gates(),
         .shutdown_signal = app->kernel_->shutdown_signal(),
@@ -398,9 +399,29 @@ absl::Status DaemonApp::start() {
     return grpc_st;
   }
 
+  if (options_.startup_coordinator) {
+    if (worker_lifecycle_manager_ && options_.deferred_startup_work) {
+      options_.startup_coordinator->begin_startup(
+          "daemon startup still in progress: registering worker lifecycle and prewarming GPU caches");
+    } else if (worker_lifecycle_manager_) {
+      options_.startup_coordinator->begin_startup("daemon startup still in progress: registering worker lifecycle");
+    } else if (options_.deferred_startup_work) {
+      options_.startup_coordinator->begin_startup(
+          "daemon startup still in progress: registering pinned pools and prewarming GPU caches");
+    }
+  }
+
+  if (worker_lifecycle_manager_) {
+    auto st = worker_lifecycle_manager_->start();
+    if (!st.ok()) {
+      if (options_.startup_coordinator) {
+        options_.startup_coordinator->mark_failed(st);
+      }
+      return st;
+    }
+  }
+
   if (options_.deferred_startup_work) {
-    options_.startup_coordinator->begin_startup(
-        "daemon startup still in progress: registering pinned pools and prewarming GPU caches");
     auto deferred_work = options_.deferred_startup_work;
     auto startup_coordinator = options_.startup_coordinator;
     auto startup_failure_is_fatal = startup_failure_is_fatal_;
@@ -422,13 +443,6 @@ absl::Status DaemonApp::start() {
     }).detach();
   } else if (options_.startup_coordinator) {
     options_.startup_coordinator->mark_ready();
-  }
-
-  if (worker_lifecycle_manager_) {
-    auto st = worker_lifecycle_manager_->start();
-    if (!st.ok()) {
-      LOG(WARNING) << "Worker lifecycle start failed: " << st.message();
-    }
   }
 
   return absl::OkStatus();

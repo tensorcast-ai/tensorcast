@@ -1279,9 +1279,11 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
 
   std::string worker_id = identity != nullptr ? identity->worker_id() : std::string();
   if (worker_id.empty()) {
-    LOG(WARNING) << "worker_id is empty while finalizing binding closeout for artifact_id=" << out_or->artifact_id
-                 << "; using fallback worker_id='local'";
-    worker_id = "local";
+    return absl::UnavailableError(
+        absl::StrCat(
+            "worker identity unavailable while finalizing binding closeout for artifact_id=",
+            out_or->artifact_id,
+            "; routable replicas require completed worker lifecycle registration"));
   }
 
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(snapshot.device_id);

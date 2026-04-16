@@ -10,9 +10,11 @@
 namespace tensorcast::daemon {
 
 class WorkerDirectoryCache;
+class LipManager;
 
 struct WorkerLifecyclePorts {
   WorkerIdentityStore& identity_store;
+  LipManager& lip_manager;
   WorkerDirectoryCache& worker_directory_cache;
   RetireGates& retire_gates;
   ShutdownSignal& shutdown_signal;

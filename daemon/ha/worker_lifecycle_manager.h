@@ -110,6 +110,7 @@ class WorkerLifecycleManager {
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
+  [[nodiscard]] std::vector<store::StoreEngine::ReplicaInventoryEntry> collect_ha_inventory() const;
   void enqueue_retire_keys(std::vector<store::loading::ReplicaKey> keys, std::string_view context);
   void process_retire_queue();
   void schedule_demotion_task(const store::loading::ReplicaKey& key, std::string_view context);

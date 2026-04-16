@@ -924,10 +924,13 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
 
   std::string worker_id = d.identity.worker_id();
   if (worker_id.empty()) {
-    LOG(WARNING) << "worker_id is empty while publishing target replica for artifact_id="
-                 << publish_context.scope.selection().artifact_id() << " view_id=" << view_id
-                 << "; using fallback worker_id='local' (transport eligibility may lag until worker lifecycle sync)";
-    worker_id = "local";
+    return absl::UnavailableError(
+        absl::StrCat(
+            "worker identity unavailable while publishing target replica for artifact_id=",
+            publish_context.scope.selection().artifact_id(),
+            " view_id=",
+            view_id,
+            "; routable replicas require completed worker lifecycle registration"));
   }
 
   auto replica_id_or = d.global_store_client->register_memory_replica(
