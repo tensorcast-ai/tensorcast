@@ -252,13 +252,13 @@ reportUnknownMemberType = "none"
 
 [[tool.uv.index]]
 default = true
-name = "private-index"
-url = "http://mirrors.i.basemind.com/pypi/simple"
+name = "pypi-public"
+url = "https://pypi.org/simple"
 
 [tool.uv.sources]
 torch = { index = "pytorch" }
 
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/simple"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
