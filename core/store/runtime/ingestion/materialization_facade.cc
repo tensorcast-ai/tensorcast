@@ -1138,6 +1138,18 @@ namespace {
 constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
 constexpr uint32_t kViewTransportProbeTimeoutMs = 1000;
 
+size_t resolve_streaming_buffer_chunks_for_transfer(
+    uint64_t transfer_bytes,
+    size_t slice_bytes,
+    size_t configured_chunks) {
+  const size_t max_chunks = std::max<size_t>(1, configured_chunks);
+  if (transfer_bytes == 0 || slice_bytes == 0) {
+    return 1;
+  }
+  const uint64_t required_chunks = (transfer_bytes + static_cast<uint64_t>(slice_bytes) - 1) / slice_bytes;
+  return static_cast<size_t>(std::min<uint64_t>(required_chunks, max_chunks));
+}
+
 bool is_local_identity(const components::WorkerIdentity& local) {
   return !local.node_id.empty() || !local.node_address.empty();
 }
@@ -3586,7 +3598,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_into_target source-ordered execution failed: ", exec_status.message()));
       }
     } else {
-      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      const size_t num_chunks = resolve_streaming_buffer_chunks_for_transfer(
+          effective_map.total_bytes, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
       auto init_spb_status = session_spb->initialize(
@@ -4310,7 +4323,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_mapped_into_target source-ordered execution failed: ", exec_status.message()));
       }
     } else if (effective_map.total_bytes > 0 && !effective_map.segments.empty()) {
-      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      const size_t num_chunks = resolve_streaming_buffer_chunks_for_transfer(
+          effective_map.total_bytes, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
       auto init_spb_status = session_spb->initialize(timeout);
@@ -4763,7 +4777,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
   const int concurrency =
       hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency) : std::max(1, config_.num_threads);
-  const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+  const size_t num_chunks = resolve_streaming_buffer_chunks_for_transfer(
+      total_size, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
   auto init_spb_status = session_spb->initialize(
