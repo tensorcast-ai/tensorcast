@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, SupportsIndex, SupportsInt, cast
 
 from tensorcast.global_store.repositories.base import BaseRepository
 
@@ -291,9 +291,13 @@ class AssemblySlotOccupancyRepository(BaseRepository):
             "coverage_plan_hash": str(row[5]),
             "contributor_daemon_id": str(row[6]),
             "coordinator_operation_id": str(row[7]),
-            "coordinator_generation": int(row[8]),
+            "coordinator_generation": int(
+                cast(SupportsInt | SupportsIndex | str | bytes | bytearray, row[8])
+            ),
             "lease_id": str(row[9]),
-            "lease_generation": int(row[10]),
+            "lease_generation": int(
+                cast(SupportsInt | SupportsIndex | str | bytes | bytearray, row[10])
+            ),
             "lease_expires_at": row[11],
             "state": str(row[12]),
             "created_at": row[13],

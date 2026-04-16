@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from datetime import datetime
+from typing import Callable, cast
 
 import grpc
 from google.protobuf import timestamp_pb2
@@ -24,7 +25,7 @@ class AssemblyReadinessCutRpcHandler:
         *,
         assembly_readiness_cut_repository: AssemblyReadinessCutRepository,
         datetime_to_timestamp: Callable[
-            [object | None], timestamp_pb2.Timestamp | None
+            [datetime | None], timestamp_pb2.Timestamp | None
         ],
         logger,
     ) -> None:
@@ -106,12 +107,16 @@ class AssemblyReadinessCutRpcHandler:
     ) -> global_store_pb2.AssemblyReadinessCut:
         cut = global_store_pb2.AssemblyReadinessCut(
             attempt_id=str(row["attempt_id"]),
-            readiness_cut_proto=bytes(row["readiness_cut_proto"]),
+            readiness_cut_proto=bytes(cast(bytes, row["readiness_cut_proto"])),
         )
-        created_at = self._datetime_to_timestamp(row.get("created_at"))
+        created_at = self._datetime_to_timestamp(
+            cast(datetime | None, row.get("created_at"))
+        )
         if created_at is not None:
             cut.created_at.CopyFrom(created_at)
-        updated_at = self._datetime_to_timestamp(row.get("updated_at"))
+        updated_at = self._datetime_to_timestamp(
+            cast(datetime | None, row.get("updated_at"))
+        )
         if updated_at is not None:
             cut.updated_at.CopyFrom(updated_at)
         return cut

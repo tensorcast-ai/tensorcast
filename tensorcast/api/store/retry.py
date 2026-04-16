@@ -7,11 +7,12 @@ import re
 import threading
 import time
 from concurrent.futures import CancelledError
-from typing import Mapping, NoReturn
+from typing import Mapping, NoReturn, cast
 
 import grpc
 
 from tensorcast.api._errors import DeviceMismatch, TensorCastError
+from tensorcast.api.errors import CollectiveFailureClassName
 from tensorcast.api.store.types import ArtifactError, RetryPolicy
 from tensorcast.error_reporting import debug_errors_enabled, debug_errors_hint
 
@@ -67,12 +68,14 @@ def _append_hint(message: str, hint: str) -> str:
     return _append_debug_hint(f"{message}\nHint: {hint}")
 
 
-def _extract_collective_failure_class(message: str) -> tuple[str, str | None]:
+def _extract_collective_failure_class(
+    message: str,
+) -> tuple[str, CollectiveFailureClassName | None]:
     match = _COLLECTIVE_FAILURE_CLASS_PATTERN.search(message)
     if match is None:
         return message, None
     cleaned = _COLLECTIVE_FAILURE_CLASS_PATTERN.sub(" ", message, count=1)
-    return cleaned.strip(), match.group(1).lower()
+    return cleaned.strip(), cast(CollectiveFailureClassName, match.group(1).lower())
 
 
 def _global_store_not_connected_hint() -> str:

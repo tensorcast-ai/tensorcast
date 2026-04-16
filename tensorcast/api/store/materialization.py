@@ -2000,10 +2000,11 @@ class MaterializationPipeline:
                 }
             state_dict_loader = None
             if base_payload.state_dict_loader is not None:
+                base_state_dict_loader = base_payload.state_dict_loader
                 requested_name_set = set(requested_names)
 
                 def _filtered_state_dict_loader() -> dict[str, torch.Tensor]:
-                    loaded = base_payload.state_dict_loader()
+                    loaded = base_state_dict_loader()
                     return {
                         name: tensor
                         for name, tensor in loaded.items()

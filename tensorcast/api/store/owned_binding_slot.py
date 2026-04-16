@@ -6,7 +6,7 @@ import contextlib
 import uuid
 import weakref
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, Sequence, cast
 
 import torch
 
@@ -78,22 +78,17 @@ def _raise_if_published_for_mutation(
 
 
 def _resolve_server_config(runtime: "StoreRuntimeContext") -> ServerConfig | None:
-    capabilities = getattr(runtime, "capabilities", None)
-    server_config = getattr(capabilities, "server_config", None)
+    server_config = runtime.capabilities.server_config
     if server_config is not None:
         return server_config
-    client = runtime.ensure_client()
-    get_server_config = getattr(client, "get_server_config", None)
-    if callable(get_server_config):
-        return get_server_config()
-    return None
+    return runtime.ensure_client().get_server_config()
 
 
 def _source_bound_capability_names(flags: int) -> list[str]:
     return [
-        capability.name
+        str(capability.name)
         for capability in SourceBoundCapability
-        if flags & int(capability)
+        if capability.name is not None and flags & int(capability)
     ]
 
 
@@ -122,7 +117,8 @@ def _require_execution_only_realize_contract(
 
 def restore_owned_binding_tensors(
     *,
-    response: store_daemon_pb2.CreateOwnedBindingResponse,
+    response: store_daemon_pb2.CreateBindingResponse
+    | store_daemon_pb2.CreateOwnedBindingResponse,
     runtime: "StoreRuntimeContext",
     device_id: int,
 ) -> dict[str, torch.Tensor]:
@@ -846,9 +842,9 @@ class OwnedBindingSlot:
         public_disk_source = (
             artifact if isinstance(artifact, PublicDiskSourceHandle) else None
         )
-        resolved = (
-            None if public_disk_source is not None else self._resolve_artifact(artifact)
-        )
+        resolved = None
+        if public_disk_source is None:
+            resolved = self._resolve_artifact(cast("Artifact | str", artifact))
         if resolved is not None:
             store, _, _ = resolved._require_components()
             if store is not self._store:
@@ -879,11 +875,8 @@ class OwnedBindingSlot:
                     resolved, "_canonical_index_bytes", None
                 )
                 if canonical_index_bytes is not None:
-                    view_spec_proto = (
-                        resolved._view_spec.proto
-                        if getattr(resolved, "_view_spec", None) is not None
-                        else None
-                    )
+                    view_spec = getattr(resolved, "_view_spec", None)
+                    view_spec_proto = view_spec.proto if view_spec is not None else None
                     source_selection = resolved._build_owner_source_selection(
                         packing="byte_space",
                         view_spec_proto=view_spec_proto,
@@ -905,7 +898,7 @@ class OwnedBindingSlot:
                 ),
                 source_selection=source_selection,
                 realization_plan=binding_realization_plan_to_proto(
-                    realization_plan,
+                    cast(Sequence[object], realization_plan),
                     target_index_bytes=self._layout.target_index_bytes,
                 ),
                 source_policy=source_policy,
@@ -997,11 +990,8 @@ class OwnedBindingSlot:
                     resolved, "_canonical_index_bytes", None
                 )
                 if canonical_index_bytes is not None:
-                    view_spec_proto = (
-                        resolved._view_spec.proto
-                        if getattr(resolved, "_view_spec", None) is not None
-                        else None
-                    )
+                    view_spec = getattr(resolved, "_view_spec", None)
+                    view_spec_proto = view_spec.proto if view_spec is not None else None
                     source_selection = resolved._build_owner_source_selection(
                         packing="byte_space",
                         view_spec_proto=view_spec_proto,

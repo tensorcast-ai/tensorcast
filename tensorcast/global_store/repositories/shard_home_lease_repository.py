@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import SupportsIndex, SupportsInt, cast
 
 from tensorcast.global_store.models.shard_home_lease import ShardHomeLease
 from tensorcast.global_store.repositories.base import BaseRepository
@@ -21,13 +22,27 @@ class ShardHomeLeaseRepository(BaseRepository):
         return ts.astimezone(timezone.utc)
 
     def _row_to_model(self, row: object) -> ShardHomeLease:
-        shard_id, holder_daemon_id, lease_token, lease_generation, expires_at = row
+        row_tuple = cast(tuple[object, ...], row)
+        shard_id, holder_daemon_id, lease_token, lease_generation, expires_at = (
+            row_tuple
+        )
         return ShardHomeLease(
-            shard_id=int(shard_id),
+            shard_id=int(
+                cast(SupportsInt | SupportsIndex | str | bytes | bytearray, shard_id)
+            ),
             holder_daemon_id=str(holder_daemon_id or ""),
             lease_token=str(lease_token or ""),
-            lease_generation=int(lease_generation or 0),
-            expires_at=self._coerce_utc(expires_at) if expires_at is not None else None,
+            lease_generation=int(
+                cast(
+                    SupportsInt | SupportsIndex | str | bytes | bytearray,
+                    lease_generation or 0,
+                )
+            ),
+            expires_at=(
+                self._coerce_utc(cast(datetime, expires_at))
+                if expires_at is not None
+                else None
+            ),
         )
 
     def get(self, *, shard_id: int, cursor=None) -> ShardHomeLease | None:

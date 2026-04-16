@@ -2983,18 +2983,18 @@ class DaemonCtl:
         if resp.HasField("expires_at"):
             expires_at = resp.expires_at.ToDatetime(tzinfo=timezone.utc)
         resolved_device_id = int(resp.region.device_id)
-        region_class: HostSharedRegionClass | None = None
+        resolved_region_class: HostSharedRegionClass | None = None
         if resp.HasField("host_shared"):
             if (
                 resp.host_shared.region_class
                 == store_daemon_pb2.HOST_SHARED_REGION_CLASS_ALLOCATOR
             ):
-                region_class = HostSharedRegionClass.ALLOCATOR
+                resolved_region_class = HostSharedRegionClass.ALLOCATOR
             elif (
                 resp.host_shared.region_class
                 == store_daemon_pb2.HOST_SHARED_REGION_CLASS_SCRATCH
             ):
-                region_class = HostSharedRegionClass.SCRATCH
+                resolved_region_class = HostSharedRegionClass.SCRATCH
         return LocalRegionHandle(
             region_id=str(resp.region.region_id),
             memory_kind=(
@@ -3016,7 +3016,7 @@ class DaemonCtl:
                 if resp.HasField("host_shared")
                 else False
             ),
-            host_shared_region_class=region_class,
+            host_shared_region_class=resolved_region_class,
             expires_at=expires_at,
         )
 

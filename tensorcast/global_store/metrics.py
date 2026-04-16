@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from time import monotonic
-from typing import Callable, Iterator
+from typing import Callable, Iterator, SupportsInt, cast
 
 import grpc
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
@@ -808,7 +808,7 @@ def _safe_queue_size(work_queue: object) -> int:
             return max(0, int(work_queue.qsize()))
         qsize_fn = getattr(work_queue, "qsize", None)
         if callable(qsize_fn):
-            return max(0, int(qsize_fn()))
+            return max(0, int(cast(SupportsInt, qsize_fn())))
     except NotImplementedError:
         return 0
     except Exception:  # noqa: BLE001

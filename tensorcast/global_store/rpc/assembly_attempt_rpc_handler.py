@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from datetime import datetime
+from typing import Callable, cast
 
 import grpc
 from google.protobuf import timestamp_pb2
@@ -24,7 +25,7 @@ class AssemblyAttemptRpcHandler:
         *,
         assembly_attempt_repository: AssemblyAttemptRepository,
         datetime_to_timestamp: Callable[
-            [object | None], timestamp_pb2.Timestamp | None
+            [datetime | None], timestamp_pb2.Timestamp | None
         ],
         logger,
     ) -> None:
@@ -140,12 +141,16 @@ class AssemblyAttemptRpcHandler:
             layout_id=str(row["layout_id"]),
             attempt_intent_digest=str(row["attempt_intent_digest"]),
             coordinator_operation_id=str(row["coordinator_operation_id"]),
-            attempt_record_proto=bytes(row["attempt_record_proto"]),
+            attempt_record_proto=bytes(cast(bytes, row["attempt_record_proto"])),
         )
-        created_at = self._datetime_to_timestamp(row.get("created_at"))
+        created_at = self._datetime_to_timestamp(
+            cast(datetime | None, row.get("created_at"))
+        )
         if created_at is not None:
             attempt.created_at.CopyFrom(created_at)
-        updated_at = self._datetime_to_timestamp(row.get("updated_at"))
+        updated_at = self._datetime_to_timestamp(
+            cast(datetime | None, row.get("updated_at"))
+        )
         if updated_at is not None:
             attempt.updated_at.CopyFrom(updated_at)
         return attempt

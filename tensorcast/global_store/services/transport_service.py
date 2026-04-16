@@ -8,7 +8,9 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from typing import TypeVar
 from uuid import UUID
 
 from tensorcast.global_store.config import get_config
@@ -50,6 +52,7 @@ from tensorcast.global_store.repositories.transport_repository import (
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
+T = TypeVar("T")
 
 
 class TransportService:
@@ -69,7 +72,7 @@ class TransportService:
         # Serialize queue-wide dispatch to avoid multi-thread transaction storms.
         self._dispatch_loop_lock = threading.Lock()
 
-    def _retry_transient_db_call(self, *, op_name: str, fn):
+    def _retry_transient_db_call(self, *, op_name: str, fn: Callable[[], T]) -> T:
         max_attempts = 8
         for attempt in range(max_attempts):
             try:
@@ -87,6 +90,7 @@ class TransportService:
                     exc,
                 )
                 time.sleep(backoff_sec)
+        raise RuntimeError(f"{op_name} retry loop exhausted")
 
     def _source_balance_weights(self) -> SourceBalanceWeights:
         policy = self.config.transport_scheduler.source_balance_weights
@@ -495,10 +499,10 @@ class TransportService:
             raise
 
         while True:
-            terminal_pending_state: PendingTransportState | None = None
+            loop_terminal_pending_state: PendingTransportState | None = None
             try:
-                resolved_replica: Replica | None = None
-                resolved_transport_id: UUID | None = None
+                loop_resolved_replica: Replica | None = None
+                loop_resolved_transport_id: UUID | None = None
                 dispatch_owner = self._dispatch_loop_lock.acquire(blocking=False)
                 if dispatch_owner:
                     try:
@@ -512,9 +516,9 @@ class TransportService:
                             )
                             self._dispatch_pending_requests(tx=tx)
                             (
-                                resolved_replica,
-                                resolved_transport_id,
-                                terminal_pending_state,
+                                loop_resolved_replica,
+                                loop_resolved_transport_id,
+                                loop_terminal_pending_state,
                             ) = self._resolve_pending_request_state(
                                 request_id=request_id,
                                 request_fingerprint=request_fingerprint,
@@ -524,18 +528,21 @@ class TransportService:
                         self._dispatch_loop_lock.release()
                 else:
                     (
-                        resolved_replica,
-                        resolved_transport_id,
-                        terminal_pending_state,
+                        loop_resolved_replica,
+                        loop_resolved_transport_id,
+                        loop_terminal_pending_state,
                     ) = self._resolve_pending_request_state(
                         request_id=request_id,
                         request_fingerprint=request_fingerprint,
                     )
 
-                if resolved_replica is not None and resolved_transport_id is not None:
+                if (
+                    loop_resolved_replica is not None
+                    and loop_resolved_transport_id is not None
+                ):
                     inc_transport_request(artifact_id, "success")
                     observe_transport_wait(artifact_id, time.time() - start_time)
-                    return resolved_replica, resolved_transport_id
+                    return loop_resolved_replica, loop_resolved_transport_id
             except (NotFoundError, TimeoutError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -548,12 +555,12 @@ class TransportService:
                 else:
                     raise
 
-            if terminal_pending_state == PendingTransportState.EXPIRED:
+            if loop_terminal_pending_state == PendingTransportState.EXPIRED:
                 inc_transport_dispatch_event("request_terminal_expired")
                 inc_transport_request(artifact_id, "timeout")
                 observe_transport_wait(artifact_id, time.time() - start_time)
                 raise TimeoutError("Queued transport request expired before dispatch")
-            if terminal_pending_state == PendingTransportState.CANCELLED:
+            if loop_terminal_pending_state == PendingTransportState.CANCELLED:
                 inc_transport_dispatch_event("request_terminal_cancelled")
                 inc_transport_request(artifact_id, "timeout")
                 observe_transport_wait(artifact_id, time.time() - start_time)

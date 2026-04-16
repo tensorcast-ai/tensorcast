@@ -16,7 +16,7 @@ import torch
 try:
     import psutil
 except Exception:  # pragma: no cover
-    psutil = None  # type: ignore[assignment]
+    psutil = None
 
 _PROFILE_DIR_ENV = "TENSORCAST_PROFILE_DIR"
 _PROFILE_LOG_ENV = "TENSORCAST_PROFILE_LOG"

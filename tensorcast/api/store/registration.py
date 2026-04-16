@@ -64,6 +64,7 @@ from tensorcast.api.store.views import (
 from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import CanonicalRange
 
 logger = logging.getLogger(__name__)
 
@@ -540,7 +541,7 @@ class RegistrationPipeline:
                 inverse_requires_materialization=False,
                 inverse_tensors=(),
             )
-            canonical_ranges = ()
+            canonical_ranges: tuple[CanonicalRange, ...] = ()
         else:
             plan_metadata = _compute_view_plan_metadata(
                 canonical_index_bytes, build_result

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, SupportsIndex, SupportsInt, cast
 from uuid import UUID
 
 from tensorcast.global_store.models import Transport, TransportCompletionOutcome
@@ -714,7 +714,12 @@ class TransportRepository(BaseRepository):
             or "",
             source_address=self._normalize_optional_text(str(get("source_address", "")))
             or "",
-            source_port=int(get("source_port", 0)),
+            source_port=int(
+                cast(
+                    SupportsInt | SupportsIndex | str | bytes | bytearray,
+                    get("source_port", 0),
+                )
+            ),
             replica_memory_size_bytes=self._normalize_optional_int(
                 get("replica_memory_size_bytes")
             ),

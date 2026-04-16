@@ -5,6 +5,7 @@
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
@@ -600,7 +601,7 @@ class ReplicaRepository(BaseRepository):
         timestamp_fn = getattr(last_assigned_at, "timestamp", None)
         if callable(timestamp_fn):
             try:
-                return float(timestamp_fn())
+                return float(cast(float, timestamp_fn()))
             except Exception:  # noqa: BLE001
                 return 0.0
         return 0.0
@@ -1363,7 +1364,10 @@ class ReplicaRepository(BaseRepository):
         finally:
             cursor.close()
 
-        counts = dict.fromkeys(unique_ids, (0, 0))
+        counts = cast(
+            dict[str, tuple[int, int]],
+            dict.fromkeys(unique_ids, (0, 0)),
+        )
         for row in rows:
             artifact_id = str(row[0])
             replica_count = int(row[1])

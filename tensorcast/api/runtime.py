@@ -77,17 +77,25 @@ class Runtime:
                 "Daemon ingress currently supports terminal_only execution only"
             )
         resolved_plan_spec = self._rewrite_compat_hydrate_actions(plan_spec)
-        execute_plan_kwargs: dict[str, object] = {
-            "plan": resolved_plan_spec,
-            "execution_class": execution_class,
-            "dry_run": dry_run,
-        }
+        timeout_s: float | None = None
         if resolved_plan_spec.context.HasField("deadline_ms"):
-            execute_plan_kwargs["timeout_s"] = max(
+            timeout_s = max(
                 0.001,
                 float(resolved_plan_spec.context.deadline_ms) / 1000.0,
             )
-        response = self._client.execute_plan(**execute_plan_kwargs)
+        if timeout_s is None:
+            response = self._client.execute_plan(
+                plan=resolved_plan_spec,
+                execution_class=execution_class,
+                dry_run=dry_run,
+            )
+        else:
+            response = self._client.execute_plan(
+                plan=resolved_plan_spec,
+                execution_class=execution_class,
+                dry_run=dry_run,
+                timeout_s=timeout_s,
+            )
         result = PlanResult.from_node_agent_response(response)
         self._remember_publish_manifests_from_result(result)
         return result
@@ -122,7 +130,7 @@ class Runtime:
                 retryable=False,
             )
         with self._publish_manifest_cache_lock:
-            matches = tuple(
+            matches: tuple[PublishManifest, ...] = tuple(
                 self._publish_manifest_cache.get(normalized_request_id, {}).values()
             )
         if not matches:
@@ -137,7 +145,7 @@ class Runtime:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        return matches[0]
+        return next(iter(matches))
 
     def clear_publish_manifest_cache(
         self, *, engine_request_id: str | None = None

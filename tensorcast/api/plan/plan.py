@@ -9,7 +9,7 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar, cast
 
 from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID
@@ -19,6 +19,7 @@ from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import (
     Operation,
     OperationError,
+    OperationState,
     OperationStatus,
     OperationTimeoutError,
 )
@@ -54,6 +55,7 @@ from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 from tensorcast.types import (
     AssemblyCloseoutContract,
+    AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
     RepresentationPublishContract,
@@ -327,7 +329,7 @@ def _derive_action_idempotency_key(
     return f"tc.plan.action.v1:{digest.hexdigest()}"
 
 
-_NODE_AGENT_STATE_TO_OP_STATE = {
+_NODE_AGENT_STATE_TO_OP_STATE: dict[int, OperationState] = {
     node_agent_pb2.OPERATION_STATE_PENDING: "pending",
     node_agent_pb2.OPERATION_STATE_RUNNING: "running",
     node_agent_pb2.OPERATION_STATE_SUCCESS: "success",
@@ -425,10 +427,11 @@ def _artifact_result_from_proto(
                 if result.pure_transform_publication.HasField("source_artifact_ref")
                 else None
             ),
-            contract_family=(
+            contract_family=cast(
+                AssemblyContractFamily | None,
                 str(result.pure_transform_publication.contract_family)
                 if result.pure_transform_publication.HasField("contract_family")
-                else None
+                else None,
             ),
             structural_view_ids=tuple(
                 str(item)
@@ -1011,12 +1014,15 @@ class InstanceStepBuilder:
             transform_args=transform_args,
             layout_hash=layout_hash,
         )
-        return self.transform_register(
-            art,
-            spec=spec,
-            out_key=out_key,
-            policy=policy,
-            depends_on=depends_on,
+        return cast(
+            PlanStepRef[RepresentationPublishSpec],
+            self.transform_register(
+                art,
+                spec=spec,
+                out_key=out_key,
+                policy=policy,
+                depends_on=depends_on,
+            ),
         )
 
     def manifest(

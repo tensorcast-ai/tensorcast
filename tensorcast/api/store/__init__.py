@@ -11,7 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import grpc
 import torch
@@ -419,7 +419,7 @@ def _resolve_representation_publish_layout_id(
         and publication.canonical_index is not None
     ):
         return _ensure_canonical_layout_for_index(
-            canonical_index=publication.canonical_index,
+            canonical_index=cast(CanonicalIndex, publication.canonical_index),
         )
     if (
         isinstance(publication, RepresentationPublishSpec)
@@ -1480,7 +1480,7 @@ class Store:
                 for region_id in region_ids:
                     self.unregister_vram_region(region_id)
             raise
-        slot = InplaceSlot(
+        inplace_slot = InplaceSlot(
             store=self,
             runtime=runtime,
             pipeline=self._materialization,
@@ -1500,7 +1500,7 @@ class Store:
             target_publication_token=None,
             copy_plan=normalized_mapping,
         )
-        return Binding(slot)
+        return Binding(inplace_slot)
 
     def query_persistence_status(
         self, *, task_id: str | None = None, artifact_id: str | None = None
@@ -1954,10 +1954,13 @@ class Store:
                 "contribution_artifact_count": len(contribution_artifacts),
             },
         ) as profile:
+            source_contribution_artifact = (
+                source_artifact if isinstance(source_artifact, Artifact) else None
+            )
             attempt = self.start_repo_owned_representation_publish_attempt(
                 publication=publication.publication,
                 contract_family=contract_family,
-                source_artifact=source_artifact,
+                source_artifact=source_contribution_artifact,
                 structural_view_ids=resolved_structural_view_ids or None,
                 layout_id=layout_id,
                 layout_artifact_id=layout_artifact_id,
@@ -2220,8 +2223,9 @@ class Store:
         ctx: CallContext | None = None,
     ) -> tuple[PartialSealResult, ...]:
         results: list[PartialSealResult] = []
+        binding_device = cast(torch.device | str, device)
         for source_artifact in source_artifacts:
-            binding = source_artifact.bind(device=device, packing="byte_space")
+            binding = source_artifact.bind(device=binding_device, packing="byte_space")
             try:
                 sealed = binding.seal_current(
                     update_epoch=binding.begin_update(ctx=ctx),
@@ -2242,9 +2246,13 @@ class Store:
         ctx: CallContext | None = None,
     ) -> tuple[Binding, ...]:
         live_bindings: list[Binding] = []
+        binding_device = cast(torch.device | str, device)
         try:
             for source_artifact in source_artifacts:
-                binding = source_artifact.bind(device=device, packing="byte_space")
+                binding = source_artifact.bind(
+                    device=binding_device,
+                    packing="byte_space",
+                )
                 try:
                     current_value = binding.current_value
                     if current_value is None:
@@ -2412,13 +2420,12 @@ class Store:
                 "AssemblyRequirementSetRef.ep_from_structural_views(...), "
                 "or AssemblyRequirementSetRef.canonical_full()"
             )
-        kwargs: dict[str, object] = {"layout_id": layout_id}
-        kwargs["requirements"] = requirements
-        if readiness_policy is not None:
-            kwargs["readiness_policy"] = readiness_policy
-        if closeout_contract is not None:
-            kwargs["closeout_contract"] = closeout_contract
-        return self._runtime.ensure_client().start_assembly_attempt(**kwargs)
+        return self._runtime.ensure_client().start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=requirements,
+            readiness_policy=readiness_policy,
+            closeout_contract=closeout_contract,
+        )
 
     def list_artifact_layouts(
         self,
@@ -3008,11 +3015,11 @@ class Store:
                         verify_checksums=bool(verify_checksums),
                     )
 
+                    event_count = 0
+                    processed_bytes = 0
+                    total_bytes = 0
+                    messages: list[str] = []
                     if profile is not None:
-                        event_count = 0
-                        processed_bytes = 0
-                        total_bytes = 0
-                        messages: list[str] = []
 
                         def _profiled_stream(
                             *,

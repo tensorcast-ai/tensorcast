@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, cast
 
 import torch
 
@@ -192,7 +192,7 @@ def _canonical_index_bytes_from_index(canonical_index: CanonicalIndex) -> bytes:
 
 def _normalize_contract_family(
     contract_family: AssemblyContractFamily | str | None,
-) -> str | None:
+) -> AssemblyContractFamily | None:
     if contract_family is None:
         return None
     normalized = str(contract_family).strip()
@@ -204,7 +204,7 @@ def _normalize_contract_family(
             status_code="INVALID_ARGUMENT",
             retryable=False,
         )
-    return normalized
+    return cast(AssemblyContractFamily, normalized)
 
 
 def _coerce_serving_support_level(
@@ -394,6 +394,7 @@ def _resolve_publication_subject(
         if isinstance(publication_subject, BindingValueRef):
             return ServingPublicationSubject(binding_value_ref=publication_subject)
         return publication_subject
+    assert serving_artifact is not None
     return ServingPublicationSubject(
         serving_artifact_id=_artifact_id_from_input(serving_artifact)
     )
