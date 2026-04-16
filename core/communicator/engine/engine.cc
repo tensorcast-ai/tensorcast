@@ -2158,15 +2158,23 @@ absl::Status Communicator::handle_rdma_read_request(
   session->window =
       std::make_unique<StagingWindow>(*ledger_ptr, stage_fn, total_bytes, chunk_size, start_offset, window_segments);
 
-  flow_state->rdma_pending_reads.push_back(session);
+  size_t pending_reads = 0;
+  {
+    absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+    flow_state->rdma_pending_reads.push_back(session);
+    pending_reads = flow_state->rdma_pending_reads.size();
+  }
   LOG(INFO) << "[rdma_session] queued request=" << request_key << " zero_copy=" << use_direct
-            << " pending_reads=" << flow_state->rdma_pending_reads.size()
-            << " outstanding_credit=" << ledger_ptr->outstanding_credit() << " window_segments=" << window_segments;
+            << " pending_reads=" << pending_reads << " outstanding_credit=" << ledger_ptr->outstanding_credit()
+            << " window_segments=" << window_segments;
 
   auto status = resume_rdma_reads(channel);
+  {
+    absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+    pending_reads = flow_state->rdma_pending_reads.size();
+  }
   LOG(INFO) << "[rdma_session] resume status request=" << request_key << " status=" << status
-            << " pending_reads=" << flow_state->rdma_pending_reads.size()
-            << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
+            << " pending_reads=" << pending_reads << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
   if (!status.ok()) {
     finish_source_transfer_progress(transfer_id, status);
     return status;
@@ -2183,8 +2191,12 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
   bool expected = false;
   if (!flow_state->rdma_refill_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     flow_state->rdma_refill_requested.store(true, std::memory_order_release);
-    LOG(INFO) << "[rdma_resume] refill already in progress; request another pass pending_reads="
-              << flow_state->rdma_pending_reads.size()
+    size_t pending_reads = 0;
+    {
+      absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+      pending_reads = flow_state->rdma_pending_reads.size();
+    }
+    LOG(INFO) << "[rdma_resume] refill already in progress; request another pass pending_reads=" << pending_reads
               << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
     return absl::OkStatus();
   }
@@ -2192,23 +2204,40 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
   absl::Status first_error = absl::OkStatus();
 
   while (true) {
-    LOG(INFO) << "[rdma_resume] pass begin pending_reads=" << flow_state->rdma_pending_reads.size()
+    size_t pending_reads = 0;
+    {
+      absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+      pending_reads = flow_state->rdma_pending_reads.size();
+    }
+    LOG(INFO) << "[rdma_resume] pass begin pending_reads=" << pending_reads
               << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
     flow_state->rdma_refill_requested.store(false, std::memory_order_release);
 
-    while (!flow_state->rdma_pending_reads.empty()) {
-      auto session = flow_state->rdma_pending_reads.front();
+    while (true) {
+      std::shared_ptr<RdmaReadSession> session;
+      {
+        absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+        if (flow_state->rdma_pending_reads.empty()) {
+          break;
+        }
+        session = flow_state->rdma_pending_reads.front();
+        pending_reads = flow_state->rdma_pending_reads.size();
+      }
       auto result = DriveRdmaSession(*flow_state, *session);
       LOG(INFO) << "[rdma_resume] drove request=" << session->request_key << " status=" << result.status
                 << " completed=" << result.completed << " made_progress=" << result.made_progress
-                << " pending_reads=" << flow_state->rdma_pending_reads.size()
+                << " pending_reads=" << pending_reads
                 << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
 
       if (!result.status.ok()) {
         if (absl::IsResourceExhausted(result.status) || absl::IsUnavailable(result.status)) {
-          if (!result.made_progress && flow_state->rdma_pending_reads.size() > 1) {
-            flow_state->rdma_pending_reads.pop_front();
-            flow_state->rdma_pending_reads.push_back(std::move(session));
+          if (!result.made_progress) {
+            absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+            if (flow_state->rdma_pending_reads.size() > 1 && flow_state->rdma_pending_reads.front() == session) {
+              auto queued = flow_state->rdma_pending_reads.front();
+              flow_state->rdma_pending_reads.pop_front();
+              flow_state->rdma_pending_reads.push_back(std::move(queued));
+            }
           }
           break;
         }
@@ -2226,7 +2255,12 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
           LOG(WARNING) << "Failed to send READ_FAILED after staging failure: " << send_res;
         }
 
-        flow_state->rdma_pending_reads.pop_front();
+        {
+          absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+          if (!flow_state->rdma_pending_reads.empty() && flow_state->rdma_pending_reads.front() == session) {
+            flow_state->rdma_pending_reads.pop_front();
+          }
+        }
         if (!session->transfer_id.empty()) {
           this->finish_source_transfer_progress(session->transfer_id, result.status);
         }
@@ -2237,7 +2271,12 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
       }
 
       if (result.completed) {
-        flow_state->rdma_pending_reads.pop_front();
+        {
+          absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+          if (!flow_state->rdma_pending_reads.empty() && flow_state->rdma_pending_reads.front() == session) {
+            flow_state->rdma_pending_reads.pop_front();
+          }
+        }
         continue;
       }
 
@@ -2250,11 +2289,14 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
     }
 
     flow_state->rdma_refill_in_progress.store(false, std::memory_order_release);
-    LOG(INFO) << "[rdma_resume] pass end pending_reads=" << flow_state->rdma_pending_reads.size()
-              << " requested_again=" << flow_state->rdma_refill_requested.load(std::memory_order_acquire)
+    {
+      absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+      pending_reads = flow_state->rdma_pending_reads.size();
+    }
+    const bool requested_again = flow_state->rdma_refill_requested.load(std::memory_order_acquire);
+    LOG(INFO) << "[rdma_resume] pass end pending_reads=" << pending_reads << " requested_again=" << requested_again
               << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
-    if (!flow_state->rdma_refill_requested.load(std::memory_order_acquire) || flow_state->rdma_pending_reads.empty() ||
-        !first_error.ok()) {
+    if (!requested_again || pending_reads == 0 || !first_error.ok()) {
       break;
     }
 

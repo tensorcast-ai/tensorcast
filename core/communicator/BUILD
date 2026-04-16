@@ -661,6 +661,17 @@ cc_test(
 )
 
 cc_test(
+    name = "channel_test",
+    srcs = ["engine/channel_test.cc"],
+    deps = [
+        ":channel_lib",
+        ":constants_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "rdma_vmm_test",
     srcs = ["engine/rdma_vmm_test.cc"],
     tags = [
@@ -776,8 +787,8 @@ cc_test(
     deps = [
         ":simple_numa_topology_lib",
         ":topology_lib",
-        "//proto/tensorcast/communicator/v1:communicator_cc",
         "//core/testing:catch_main",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
         "@catch2//:catch2_main",
     ],
 )
