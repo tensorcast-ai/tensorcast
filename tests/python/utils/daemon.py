@@ -19,6 +19,7 @@ import yaml
 from tensorcast.cli_utils.proc import build_daemon_process_env
 from tensorcast.proto.daemon.v2 import store_daemon_pb2 as _pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2_grpc as _pb2_grpc
+from tests.python.utils.ports import get_free_port
 
 
 def _detect_visible_gpu_count(*, fake_cuda: bool) -> int:
@@ -93,7 +94,7 @@ def start_daemon_binary(
     daemon_id: str | None = None,
     global_store_addr: str | None = None,
     p2p_host: str = "0.0.0.0",
-    p2p_port: int = 9090,
+    p2p_port: int | None = None,
 ) -> subprocess.Popen:
     """Start the C++ daemon with a unified minimal config for tests.
 
@@ -106,6 +107,10 @@ def start_daemon_binary(
     bin_path = _resolve_daemon_binary(repo_root)
     host, port_s = listen_addr.split(":", 1)
     port = int(port_s)
+    if p2p_port is None:
+        p2p_port = get_free_port()
+        while p2p_port == port:
+            p2p_port = get_free_port()
     storage_path.mkdir(parents=True, exist_ok=True)
     env = build_daemon_process_env(os.environ)
     fake_cuda = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
@@ -177,9 +182,7 @@ def start_daemon_binary(
                 tempfile.mkdtemp(prefix=f"tc_lh_{port}_", dir=tempfile.gettempdir())
             )
             os.chmod(handle_root, 0o700)
-            local_handle_socket_path = str(
-                handle_root / "sock"
-            )
+            local_handle_socket_path = str(handle_root / "sock")
         if stable_bytes is None:
             stable_bytes = 64 * 1024 * 1024
         cfg["engine"]["cpu_shared_memory"] = {"enabled": True}

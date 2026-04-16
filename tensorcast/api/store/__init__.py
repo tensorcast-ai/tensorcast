@@ -2403,8 +2403,29 @@ class Store:
         ctx: CallContext | None = None,
     ) -> AssemblyAttemptRef:
         del ctx
+        client = self._runtime.ensure_client()
         if representation_publish_spec is not None:
-            return self._runtime.ensure_client().start_assembly_attempt(
+            if representation_publish_spec.readiness_policy is None:
+                if representation_publish_spec.closeout_contract is None:
+                    return client.start_assembly_attempt(
+                        layout_id=representation_publish_spec.layout_id,
+                        requirements=representation_publish_spec.requirements,
+                        representation_publish_spec=representation_publish_spec,
+                    )
+                return client.start_assembly_attempt(
+                    layout_id=representation_publish_spec.layout_id,
+                    requirements=representation_publish_spec.requirements,
+                    closeout_contract=representation_publish_spec.closeout_contract,
+                    representation_publish_spec=representation_publish_spec,
+                )
+            if representation_publish_spec.closeout_contract is None:
+                return client.start_assembly_attempt(
+                    layout_id=representation_publish_spec.layout_id,
+                    requirements=representation_publish_spec.requirements,
+                    readiness_policy=representation_publish_spec.readiness_policy,
+                    representation_publish_spec=representation_publish_spec,
+                )
+            return client.start_assembly_attempt(
                 layout_id=representation_publish_spec.layout_id,
                 requirements=representation_publish_spec.requirements,
                 readiness_policy=representation_publish_spec.readiness_policy,
@@ -2420,7 +2441,24 @@ class Store:
                 "AssemblyRequirementSetRef.ep_from_structural_views(...), "
                 "or AssemblyRequirementSetRef.canonical_full()"
             )
-        return self._runtime.ensure_client().start_assembly_attempt(
+        if readiness_policy is None:
+            if closeout_contract is None:
+                return client.start_assembly_attempt(
+                    layout_id=layout_id,
+                    requirements=requirements,
+                )
+            return client.start_assembly_attempt(
+                layout_id=layout_id,
+                requirements=requirements,
+                closeout_contract=closeout_contract,
+            )
+        if closeout_contract is None:
+            return client.start_assembly_attempt(
+                layout_id=layout_id,
+                requirements=requirements,
+                readiness_policy=readiness_policy,
+            )
+        return client.start_assembly_attempt(
             layout_id=layout_id,
             requirements=requirements,
             readiness_policy=readiness_policy,

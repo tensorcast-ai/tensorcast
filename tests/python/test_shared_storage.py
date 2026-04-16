@@ -21,6 +21,7 @@ from tensorcast.global_store.grpc_service import (
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.testing.io_disk import save_dict
 from tests.python.utils.daemon import start_daemon_binary
+from tests.python.utils.hardware import synchronize_cuda
 from tests.python.utils.ports import get_free_port
 
 pytestmark = pytest.mark.requires_cuda_or_fake
@@ -283,7 +284,7 @@ def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
             )
             try:
                 bound = dict(binding.tensors)["weights"]
-                torch.cuda.synchronize()
+                synchronize_cuda()
                 assert torch.equal(bound.cpu(), expected)
                 assert torch.equal(bound, ref)
             finally:
@@ -294,7 +295,7 @@ def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
                 {"weights": target}, packing="byte_space"
             )
             try:
-                torch.cuda.synchronize()
+                synchronize_cuda()
                 assert torch.equal(target.cpu(), expected)
                 assert torch.equal(target, ref)
             finally:
