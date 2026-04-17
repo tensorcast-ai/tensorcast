@@ -3,9 +3,11 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
@@ -48,6 +50,7 @@ class TargetMaterializationService {
     uint32_t max_concurrency{4};
     bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit TargetMaterializationService(Dep d);

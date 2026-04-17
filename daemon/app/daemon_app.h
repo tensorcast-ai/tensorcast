@@ -60,6 +60,7 @@ class DaemonApp {
   static absl::StatusOr<std::unique_ptr<DaemonApp>> create(Options options);
 
   absl::Status start();
+  absl::Status await_worker_state_sync_barrier() const;
   void wait();
   absl::Status stop(absl::Time deadline);
 

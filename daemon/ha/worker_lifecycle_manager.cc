@@ -656,6 +656,16 @@ absl::Status WorkerLifecycleManager::start() {
   return absl::OkStatus();
 }
 
+absl::Status WorkerLifecycleManager::wait_for_state_sync_barrier() {
+  const uint64_t baseline = sync_success_.load();
+  request_state_sync();
+  const auto timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
+  if (!wait_for_state_sync_success(baseline, timeout)) {
+    return absl::DeadlineExceededError("state sync barrier timed out");
+  }
+  return absl::OkStatus();
+}
+
 void WorkerLifecycleManager::stop() {
   // Idempotent stop: return if we've already executed shutdown sequence.
   bool expected = false;

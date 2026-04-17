@@ -389,6 +389,7 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
               .global_store_client = d_.global_store_client,
               .capability_tokens = d_.capability_tokens,
               .max_concurrency = d_.max_concurrency,
+              .await_state_sync_barrier = d_.await_state_sync_barrier,
           }) {
   if (!d_.storage_path.empty()) {
     std::error_code ec;

@@ -43,6 +43,13 @@ constexpr std::string_view kPublishAuthorityScopeKind = "workflow_owner";
 constexpr std::string_view kPublishAttachmentKind = "target_publication";
 constexpr std::string_view kPublishRecoveryClass = "ephemeral_process_local";
 
+absl::Status await_state_sync_barrier(const TargetPublishService::Dep& dep) {
+  if (!dep.await_state_sync_barrier) {
+    return absl::OkStatus();
+  }
+  return dep.await_state_sync_barrier();
+}
+
 class OperationLeaseGuard {
  public:
   OperationLeaseGuard(
@@ -950,12 +957,48 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
   if (!replica_id_or.ok()) {
     return replica_id_or.status();
   }
-  d.lip_manager.attach_replica_id(publish_context.scope.publication_id(), *replica_id_or);
+  const std::string replica_id = *replica_id_or;
+  d.lip_manager.attach_replica_id(publish_context.scope.publication_id(), replica_id);
+
+  struct ReplicaRollback {
+    store::components::IGlobalStoreClient* client{nullptr};
+    std::string artifact_id;
+    std::string replica_id;
+    bool active{true};
+
+    ~ReplicaRollback() {
+      if (!active || client == nullptr || replica_id.empty()) {
+        return;
+      }
+      if (!client->is_connected()) {
+        return;
+      }
+      auto st = client->unregister_replica(artifact_id, replica_id);
+      if (!st.ok()) {
+        LOG(WARNING) << "PublishTargetReplica rollback: unregister_replica failed for artifact_id=" << artifact_id
+                     << " replica_id=" << replica_id << ": " << st;
+      }
+    }
+
+    void release() {
+      active = false;
+    }
+  } replica_rollback{
+      .client = d.global_store_client.get(),
+      .artifact_id = publish_context.scope.selection().artifact_id(),
+      .replica_id = replica_id,
+  };
+
+  auto barrier_status = await_state_sync_barrier(d);
+  if (!barrier_status.ok()) {
+    return barrier_status;
+  }
 
   lip_rollback.release();
+  replica_rollback.release();
   v2::PublishTargetReplicaResponse response;
   response.set_lease_id(publish_context.scope.publication_id());
-  response.set_replica_id(*replica_id_or);
+  response.set_replica_id(replica_id);
   return response;
 }
 

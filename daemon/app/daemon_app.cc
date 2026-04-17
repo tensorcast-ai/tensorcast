@@ -236,6 +236,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .external_target_verification_enabled = app->options_.daemon_options.external_target_verification_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
       .post_seal_policy = app->options_.daemon_options.post_seal_policy,
+      .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };
   app->materialization_controller_ = std::make_unique<MaterializationController>(mdep);
 
@@ -250,6 +251,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .handle_leases = app->kernel_->handle_leases(),
       .regions = app->kernel_->region_registry(),
       .max_concurrency = app->options_.daemon_options.max_concurrency,
+      .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };
   app->registration_controller_ = std::make_unique<RegistrationController>(rdep);
 
@@ -446,6 +448,13 @@ absl::Status DaemonApp::start() {
   }
 
   return absl::OkStatus();
+}
+
+absl::Status DaemonApp::await_worker_state_sync_barrier() const {
+  if (worker_lifecycle_manager_ == nullptr) {
+    return absl::OkStatus();
+  }
+  return worker_lifecycle_manager_->wait_for_state_sync_barrier();
 }
 
 void DaemonApp::wait() {

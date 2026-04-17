@@ -61,6 +61,7 @@ class WorkerLifecycleManager {
   }
 
   absl::Status start();
+  absl::Status wait_for_state_sync_barrier();
   void stop();
 
   // Exposed for deterministic HA synchronization and unit tests.

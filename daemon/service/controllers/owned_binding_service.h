@@ -4,10 +4,12 @@
 
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
@@ -52,6 +54,7 @@ class OwnedBindingService {
     common::CapabilityTokenManager* capability_tokens{nullptr};
     TargetMaterializationService* target_materialization_service{nullptr};
     std::filesystem::path storage_path;
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit OwnedBindingService(Dep d);

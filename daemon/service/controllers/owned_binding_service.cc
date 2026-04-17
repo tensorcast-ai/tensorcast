@@ -721,6 +721,7 @@ grpc::Status commit_binding_contribution_registration(
           .handle_leases = dep.handle_leases,
           .regions = *dep.regions,
           .max_concurrency = dep.max_concurrency,
+          .await_state_sync_barrier = dep.await_state_sync_barrier,
       });
 
   v2::BeginRegisterArtifactResponse begin_resp;
