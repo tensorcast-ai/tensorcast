@@ -405,94 +405,35 @@ class TransportService:
         pending_request.set_scheduling_group(scheduling_group)
 
         try:
-            # Serialize the initial replay reconciliation, queue mutation, and first
-            # dispatch pass under the same gate as complete_transport(). This keeps
-            # the pending queue on a single mutation timeline and avoids malformed
-            # rows under concurrent request storms.
-            with self._dispatch_loop_lock, self.replica_repository.transaction() as tx:
-                self.pending_transport_request_repository.purge_malformed_rows(
-                    cursor=tx
-                )
-                self._reconcile_request_replay_state(request_id=request_id, tx=tx)
-                existing_pending = (
-                    self.pending_transport_request_repository.find_by_request_id(
-                        request_id, cursor=tx
-                    )
-                )
-                if (
-                    existing_pending is not None
-                    and existing_pending.request_fingerprint != request_fingerprint
-                ):
-                    raise ValidationError(
-                        f"request_id={request_id} already used with different payload"
-                    )
-                self._validate_group_contract_with_cursor(
-                    tx=tx,
+            (
+                resolved_replica,
+                resolved_transport_id,
+                terminal_pending_state,
+            ) = self._retry_transient_db_call(
+                op_name="request_transport_initial_dispatch",
+                fn=lambda: self._enqueue_and_attempt_initial_dispatch(
+                    pending_request=pending_request,
                     request_id=request_id,
+                    request_fingerprint=request_fingerprint,
                     artifact_id=artifact_id,
                     view_id=view_id,
                     scheduling_group=scheduling_group,
-                )
-                persisted_pending = self.pending_transport_request_repository.create_if_absent_with_cursor(
-                    pending_request,
-                    tx,
-                )
-                if persisted_pending.request_fingerprint != request_fingerprint:
-                    raise ValidationError(
-                        f"request_id={request_id} already used with different payload"
-                    )
-                existing_transport = self.transport_repository.find_by_request_id(
-                    request_id, cursor=tx
-                )
-                if (
-                    existing_transport is not None
-                    and existing_transport.request_fingerprint is not None
-                    and existing_transport.request_fingerprint != request_fingerprint
-                ):
-                    raise ValidationError(
-                        f"request_id={request_id} already used with different payload"
-                    )
-                if existing_transport is not None:
-                    replica = self.replica_repository.find_by_id(
-                        existing_transport.replica_id,
-                        existing_transport.artifact_id,
-                        cursor=tx,
-                    )
-                    if replica is not None:
-                        return replica, existing_transport.transport_id
-
-                self.pending_transport_request_repository.expire_enqueued_deadlines(
-                    now_utc=datetime.now(timezone.utc),
-                    cursor=tx,
-                )
-                self._dispatch_pending_requests(tx=tx)
-                (
-                    resolved_replica,
-                    resolved_transport_id,
-                    terminal_pending_state,
-                ) = self._resolve_pending_request_state(
-                    request_id=request_id,
-                    request_fingerprint=request_fingerprint,
-                    cursor=tx,
-                )
-                if resolved_replica is not None and resolved_transport_id is not None:
-                    inc_transport_request(artifact_id, "success")
-                    observe_transport_wait(artifact_id, time.time() - start_time)
-                    return resolved_replica, resolved_transport_id
-                if terminal_pending_state == PendingTransportState.EXPIRED:
-                    inc_transport_dispatch_event("request_terminal_expired")
-                    inc_transport_request(artifact_id, "timeout")
-                    observe_transport_wait(artifact_id, time.time() - start_time)
-                    raise TimeoutError(
-                        "Queued transport request expired before dispatch"
-                    )
-                if terminal_pending_state == PendingTransportState.CANCELLED:
-                    inc_transport_dispatch_event("request_terminal_cancelled")
-                    inc_transport_request(artifact_id, "timeout")
-                    observe_transport_wait(artifact_id, time.time() - start_time)
-                    raise TimeoutError(
-                        "Queued transport request cancelled before dispatch"
-                    )
+                ),
+            )
+            if resolved_replica is not None and resolved_transport_id is not None:
+                inc_transport_request(artifact_id, "success")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                return resolved_replica, resolved_transport_id
+            if terminal_pending_state == PendingTransportState.EXPIRED:
+                inc_transport_dispatch_event("request_terminal_expired")
+                inc_transport_request(artifact_id, "timeout")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                raise TimeoutError("Queued transport request expired before dispatch")
+            if terminal_pending_state == PendingTransportState.CANCELLED:
+                inc_transport_dispatch_event("request_terminal_cancelled")
+                inc_transport_request(artifact_id, "timeout")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                raise TimeoutError("Queued transport request cancelled before dispatch")
         except DatabaseError as exc:
             if isinstance(exc.__cause__, ValidationError):
                 raise exc.__cause__ from exc
@@ -576,6 +517,82 @@ class TransportService:
                 )
 
             time.sleep(self.config.transport_wait_retry_interval_ms / 1000)
+
+    def _enqueue_and_attempt_initial_dispatch(
+        self,
+        *,
+        pending_request: PendingTransportRequest,
+        request_id: str,
+        request_fingerprint: str,
+        artifact_id: str,
+        view_id: str | None,
+        scheduling_group: TransportSchedulingGroup | None,
+    ) -> tuple[Replica | None, UUID | None, PendingTransportState | None]:
+        # Keep the first request replay check, queue mutation, and initial dispatch
+        # on a single serialized transaction timeline so competing callers either
+        # observe the same pending row or retry on a fresh snapshot.
+        with self._dispatch_loop_lock, self.replica_repository.transaction() as tx:
+            self.pending_transport_request_repository.purge_malformed_rows(cursor=tx)
+            self._reconcile_request_replay_state(request_id=request_id, tx=tx)
+            existing_pending = (
+                self.pending_transport_request_repository.find_by_request_id(
+                    request_id, cursor=tx
+                )
+            )
+            if (
+                existing_pending is not None
+                and existing_pending.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            self._validate_group_contract_with_cursor(
+                tx=tx,
+                request_id=request_id,
+                artifact_id=artifact_id,
+                view_id=view_id,
+                scheduling_group=scheduling_group,
+            )
+            persisted_pending = (
+                self.pending_transport_request_repository.create_if_absent_with_cursor(
+                    pending_request,
+                    tx,
+                )
+            )
+            if persisted_pending.request_fingerprint != request_fingerprint:
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            existing_transport = self.transport_repository.find_by_request_id(
+                request_id, cursor=tx
+            )
+            if (
+                existing_transport is not None
+                and existing_transport.request_fingerprint is not None
+                and existing_transport.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            if existing_transport is not None:
+                replica = self.replica_repository.find_by_id(
+                    existing_transport.replica_id,
+                    existing_transport.artifact_id,
+                    cursor=tx,
+                )
+                if replica is not None:
+                    return replica, existing_transport.transport_id, None
+
+            self.pending_transport_request_repository.expire_enqueued_deadlines(
+                now_utc=datetime.now(timezone.utc),
+                cursor=tx,
+            )
+            self._dispatch_pending_requests(tx=tx)
+            return self._resolve_pending_request_state(
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                cursor=tx,
+            )
 
     def _resolve_pending_request_state(
         self,
