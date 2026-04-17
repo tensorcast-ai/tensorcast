@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -200,6 +200,32 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     // Verify content from second partition
     for (size_t i = 1024; i < read_size; ++i) {
       REQUIRE(buffer[i] == static_cast<char>('B' + ((i - 1024) % 26)));
+    }
+  }
+
+  SECTION("Logical partition sizes ignore physical tail padding") {
+    auto file1 = fixture.create_aligned_file("part1.bin", /*size=*/16, /*alignment=*/4096);
+    auto file2 = fixture.create_aligned_file("part2.bin", /*size=*/8, /*alignment=*/4096);
+
+    FilePartitionSource::Options options;
+    options.partition_paths = {file1, file2};
+    options.partition_sizes = {16, 8};
+    options.total_size = 24;
+    options.direct_io_mode = DirectIoMode::kBuffered;
+
+    FilePartitionSource source(options);
+
+    std::vector<char> buffer(options.total_size);
+    auto result = source.read_at(/*offset=*/0, buffer.data(), buffer.size());
+
+    REQUIRE(result.ok());
+    REQUIRE(result.value() == buffer.size());
+
+    for (size_t i = 0; i < 16; ++i) {
+      REQUIRE(buffer[i] == static_cast<char>('A' + (i % 26)));
+    }
+    for (size_t i = 0; i < 8; ++i) {
+      REQUIRE(buffer[16 + i] == static_cast<char>('A' + (i % 26)));
     }
   }
 }

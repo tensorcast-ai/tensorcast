@@ -27,6 +27,18 @@ from tests.python.utils.ports import get_free_port
 pytestmark = pytest.mark.requires_cuda_or_fake
 
 
+def _pad_standard_partitions_to_4k(artifact_dir: Path) -> None:
+    for partition in sorted(artifact_dir.glob("tensor.data*")):
+        if not partition.is_file():
+            continue
+        size = partition.stat().st_size
+        padded_size = ((size + 4095) // 4096) * 4096
+        if padded_size == size:
+            continue
+        with partition.open("ab") as handle:
+            handle.write(b"\0" * (padded_size - size))
+
+
 def test_shared_storage_roundtrip(tmp_path):
     """Ensure tensors that share underlying storage round-trip correctly."""
 
@@ -65,6 +77,7 @@ def test_shared_storage_roundtrip(tmp_path):
     save_path = storage_root / "artifact"
     # Save using the unified writer
     descriptor = save_dict(state_dict, str(save_path))
+    _pad_standard_partitions_to_4k(save_path)
 
     listen = f"127.0.0.1:{get_free_port()}"
     cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
@@ -187,6 +200,7 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
     save_path = storage_root / "artifact"
     expected = {"weights": torch.arange(32, dtype=torch.float32)}
     save_dict(expected, str(save_path))
+    _pad_standard_partitions_to_4k(save_path)
 
     listen = f"127.0.0.1:{get_free_port()}"
     cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"

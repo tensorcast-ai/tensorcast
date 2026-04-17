@@ -113,9 +113,12 @@ sc_cc_library(
     deps = [
         ":index_reader",
         ":safetensors_util",
+        "//core/checkpoint:tensor_writer_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@nlohmann_json//:json",
     ],
 )
 
