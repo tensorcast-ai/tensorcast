@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tensorcast import runtime, startup
+import tensorcast.runtime as runtime_module
+from tensorcast import startup
 
 
 class _RecordingLogger:
@@ -65,9 +66,9 @@ def test_create_mode_forwards_port_config_to_runtime_start(
     started: dict[str, object] = {}
     daemon_address = "127.0.0.1:61002"
 
-    def _fake_start(**kwargs: object) -> runtime.RuntimeSession:
+    def _fake_start(**kwargs: object) -> runtime_module.RuntimeSession:
         started.update(kwargs)
-        return runtime.RuntimeSession(
+        return runtime_module.RuntimeSession(
             session_id="sess-port-config",
             daemon_pid=4242,
             daemon_address=daemon_address,
