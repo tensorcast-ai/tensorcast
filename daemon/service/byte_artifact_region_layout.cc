@@ -2,7 +2,9 @@
 
 #include "daemon/service/byte_artifact_region_layout.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -202,6 +204,9 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
             .device_id = storage.device_id(),
         });
     storage_indices.emplace(storage.storage_id(), static_cast<std::size_t>(i));
+    if (storage.storage_length() > std::numeric_limits<std::uint64_t>::max() - logical_cursor) {
+      return absl::InvalidArgumentError("target_layout storage lengths overflow logical layout");
+    }
     logical_cursor += storage.storage_length();
   }
 
@@ -271,8 +276,11 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
       return absl::InvalidArgumentError("target_layout.offset.logical_length does not match expected byte length");
     }
     const std::uint64_t storage_local_offset = entry.storage_offset() - storage.logical_base;
-    if (storage_local_offset + entry.logical_length() > storage.length) {
+    if (storage_local_offset > storage.length || entry.logical_length() > storage.length - storage_local_offset) {
       return absl::InvalidArgumentError("target_layout.offset exceeds storage bounds");
+    }
+    if (storage_local_offset > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+      return absl::InvalidArgumentError("target_layout.offset exceeds pointer arithmetic limits");
     }
     auto [_, inserted] = result.items_.emplace(
         entry.name(),

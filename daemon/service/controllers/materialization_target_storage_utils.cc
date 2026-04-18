@@ -2,7 +2,9 @@
 
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -203,8 +205,8 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
       return absl::FailedPreconditionError("HOST_SHARED storage.device_id must be -1");
     }
 
-    const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
-    if (region_end > region_desc.size_bytes) {
+    if (storage.mapping_base_offset() > region_desc.size_bytes ||
+        storage.storage_length() > region_desc.size_bytes - storage.mapping_base_offset()) {
       if (error != nullptr) {
         *error = AcquireTargetStoragesError::kBounds;
       }
@@ -218,8 +220,14 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
       return absl::FailedPreconditionError("region base pointer is unavailable");
     }
 
-    void* region_base_ptr =
-        static_cast<uint8_t*>(it->second.base_ptr) + static_cast<uint64_t>(storage.mapping_base_offset());
+    if (storage.mapping_base_offset() > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+      if (error != nullptr) {
+        *error = AcquireTargetStoragesError::kBounds;
+      }
+      return absl::FailedPreconditionError("region-backed storage offset exceeds pointer arithmetic limits");
+    }
+
+    void* region_base_ptr = static_cast<uint8_t*>(it->second.base_ptr) + storage.mapping_base_offset();
     lease.storages_.push_back(
         store::loading::IntoTargetStorage{
             .base_ptr = gsl::not_null<void*>{region_base_ptr},

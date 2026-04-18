@@ -1876,22 +1876,11 @@ future_read_result_t Communicator::read_tensor(
       local_tensor->add_dev(net_dev);
     }
     if (!local_tensor->is_registered(net_dev)) {
-      bool cached_mr_installed = false;
-      if (meta_mr_cache_ != nullptr) {
-        constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-        auto ptr = reinterpret_cast<void*>(addr);
-        if (ptr != nullptr) {
-          auto mr_result =
-              meta_mr_cache_->get_or_register(net_dev->get_pd(), gsl::not_null<void*>{ptr}, bytes, kAccess);
-          if (mr_result.mr != nullptr) {
-            local_tensor->set_registered_mr(net_dev, mr_result.mr, /*owns_mr=*/false);
-            cached_mr_installed = true;
-          }
-        }
-      }
-      if (!cached_mr_installed) {
-        net_dev->reg_async(local_tensor);
-      }
+      // Request destination buffers are caller-owned and request-scoped. They
+      // do not have the stable slab lifetime required by meta_mr_cache_, so
+      // each read request must register its own MR and retire it with the
+      // request-local PartitionTensor.
+      net_dev->reg_async(local_tensor);
     }
   }
   local_tensor->set_read_ready();
