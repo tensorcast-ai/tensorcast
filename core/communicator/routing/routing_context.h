@@ -32,6 +32,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   class Communicator {
    public:
     transport::future_read_result_t read_tensor(const ReadRequest& request);
+    transport::future_read_result_t read_plan(const ReadPlan& plan);
     absl::StatusOr<std::shared_ptr<RouteChannel>> primary_channel();
 
     const std::string& src_endpoint_id() const {

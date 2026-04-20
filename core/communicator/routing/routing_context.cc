@@ -174,6 +174,69 @@ transport::future_read_result_t RoutingContext::Communicator::read_tensor(const 
   return channel_or.value()->read_tensor(request);
 }
 
+transport::future_read_result_t RoutingContext::Communicator::read_plan(const ReadPlan& plan) {
+  const absl::Status plan_status = validate_read_plan(plan);
+  if (!plan_status.ok()) {
+    return make_failed_read_future(plan_status, read_plan_tensor_key(plan));
+  }
+
+  const SourceSlice& first_source = plan.source_slices.front();
+  if (first_source.route.local_endpoint_id != src_endpoint_id_ ||
+      first_source.route.remote_endpoint_id != dst_endpoint_id_) {
+    return make_failed_read_future(
+        absl::InvalidArgumentError(
+            std::format(
+                "read plan route context does not match communicator endpoints: plan={} -> {}, communicator={} -> {}",
+                first_source.route.local_endpoint_id,
+                first_source.route.remote_endpoint_id,
+                src_endpoint_id_,
+                dst_endpoint_id_)),
+        read_plan_tensor_key(plan));
+  }
+
+  auto channel_or = primary_channel();
+  if (!channel_or.ok()) {
+    return make_failed_read_future(channel_or.status(), read_plan_tensor_key(plan));
+  }
+
+  const std::shared_ptr<RouteChannel>& channel = channel_or.value();
+  if (channel == nullptr || channel->hops().empty() || channel->hops().front() == nullptr) {
+    return make_failed_read_future(
+        absl::FailedPreconditionError("read plan resolved an empty route channel"), read_plan_tensor_key(plan));
+  }
+
+  const std::shared_ptr<Connection>& hop = channel->hops().front();
+  const ConnectionProtocol selected_protocol = hop->protocol();
+  if (first_source.route.protocol != ConnectionProtocol::kAuto && selected_protocol != ConnectionProtocol::kAuto &&
+      first_source.route.protocol != selected_protocol) {
+    return make_failed_read_future(
+        absl::InvalidArgumentError(
+            std::format(
+                "read plan protocol does not match selected channel: plan={} selected={}",
+                to_string(first_source.route.protocol),
+                to_string(selected_protocol))),
+        read_plan_tensor_key(plan));
+  }
+
+  if (first_source.route.rail_id >= 0) {
+    const int local_rail_id = hop->local_binding().rail_id;
+    const int remote_rail_id = hop->remote_binding().rail_id;
+    if ((local_rail_id >= 0 || remote_rail_id >= 0) && first_source.route.rail_id != local_rail_id &&
+        first_source.route.rail_id != remote_rail_id) {
+      return make_failed_read_future(
+          absl::InvalidArgumentError(
+              std::format(
+                  "read plan rail_id does not match selected channel: plan={} local={} remote={}",
+                  first_source.route.rail_id,
+                  local_rail_id,
+                  remote_rail_id)),
+          read_plan_tensor_key(plan));
+    }
+  }
+
+  return channel->read_plan(plan);
+}
+
 absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::Communicator::primary_channel() {
   absl::MutexLock lock(&mu_);
   const uint64_t generation = context_->topology_generation();

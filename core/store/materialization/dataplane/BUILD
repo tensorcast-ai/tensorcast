@@ -647,6 +647,16 @@ cc_test(
 )
 
 cc_test(
+    name = "byte_range_mapped_source_direct_test",
+    srcs = ["sources/tests/byte_range_mapped_source_direct_test.cc"],
+    deps = [
+        ":byte_range_mapped_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "source_window_scheduler_test",
     srcs = ["sources/tests/source_window_scheduler_test.cc"],
     deps = [

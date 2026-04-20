@@ -119,10 +119,14 @@ misc::result_t RdmaContext::ibv_init() {
 
   misc::wrap_ibv_fork_init();
 
-  struct ibv_device** devices;
+  struct ibv_device** devices = nullptr;
   int num_dev = 0;
   if (misc::SUCCESS != misc::wrap_ibv_get_device_list(&devices, &num_dev)) {
     return misc::SYS_ERROR;
+  }
+  if (devices == nullptr || num_dev <= 0) {
+    LOG(INFO) << "No RDMA devices detected during ibverbs initialization";
+    return misc::SUCCESS;
   }
 
   std::vector<PortScanCandidate> scan_candidates;
@@ -234,7 +238,7 @@ misc::result_t RdmaContext::ibv_init() {
     devs_.push_back(dev);
   }
 
-  if ((misc::SUCCESS != misc::wrap_ibv_free_device_list(devices))) {
+  if (devices != nullptr && (misc::SUCCESS != misc::wrap_ibv_free_device_list(devices))) {
     return misc::INTERNAL_ERROR;
   }
 

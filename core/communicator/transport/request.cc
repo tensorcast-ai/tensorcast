@@ -57,6 +57,7 @@ ReadRequest::ReadRequest(
       remote_offset_(remote_offset),
       request_id_(request_id),
       rail_id_(rail_id),
+      total_bytes_(local_tensor_ ? local_tensor_->get_bytes() : 0),
       rdma_profile_enabled_(rdma_profile_enabled_for_process()) {
   status_.tensor_key = tensor_key_;
   status_.local_rail_id = rail_id_;
@@ -65,6 +66,34 @@ ReadRequest::ReadRequest(
     if (dev != nullptr) {
       status_.local_nic = dev->get_name();
     }
+  }
+}
+
+ReadRequest::ReadRequest(
+    std::string display_key,
+    std::string dst_ip,
+    uint16_t dst_port,
+    std::shared_ptr<PreparedReadPlan> prepared_plan,
+    uint64_t request_id,
+    int rail_id)
+    : prepared_plan_(std::move(prepared_plan)),
+      tensor_key_(std::move(display_key)),
+      request_key_(get_read_plan_request_key(request_id)),
+      dst_ip_(std::move(dst_ip)),
+      dst_port_(dst_port),
+      result_set_(false),
+      timer_(true),
+      created_at_(std::chrono::steady_clock::now()),
+      remote_offset_(0),
+      request_id_(request_id),
+      rail_id_(rail_id),
+      total_bytes_(prepared_plan_ ? prepared_plan_->total_bytes : 0),
+      kind_(Kind::kReadPlan),
+      rdma_profile_enabled_(rdma_profile_enabled_for_process()) {
+  status_.tensor_key = tensor_key_;
+  status_.local_rail_id = rail_id_;
+  if (prepared_plan_ != nullptr) {
+    status_.local_nic = prepared_plan_->local_nic;
   }
 }
 
@@ -78,6 +107,10 @@ remote_tensor_t ReadRequest::get_remote_tensor() const {
 
 void ReadRequest::set_remote_tensor(remote_tensor_t tensor) {
   remote_tensor_ = std::move(tensor);
+}
+
+std::shared_ptr<PreparedReadPlan> ReadRequest::get_prepared_read_plan() const {
+  return prepared_plan_;
 }
 
 future_read_result_t ReadRequest::get_future() {
@@ -129,6 +162,9 @@ std::string ReadRequest::get_dst_url() {
 }
 
 std::string ReadRequest::get_key() {
+  if (!request_key_.empty()) {
+    return request_key_;
+  }
   return get_request_instance_key(tensor_key_, remote_offset_, request_id_);
 }
 
@@ -225,7 +261,7 @@ void ReadRequest::notify_bytes_progress(uint64_t bytes_delta) {
     callback = progress_callback_;
   }
   if (callback) {
-    callback(done, local_tensor_ ? local_tensor_->get_bytes() : 0);
+    callback(done, total_bytes_);
   }
 }
 

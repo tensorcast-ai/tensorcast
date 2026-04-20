@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/hash/hash.h"
+#include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/communicator/base/constants.h"
 
@@ -54,6 +56,52 @@ struct ReadRequest {
   int dev_id = 0;
   uint64_t remote_offset = 0;
 };
+
+struct ReadRouteContext {
+  std::string local_endpoint_id;
+  std::string remote_endpoint_id;
+  ConnectionProtocol protocol = ConnectionProtocol::kAuto;
+  int16_t rail_id = -1;
+
+  bool operator==(const ReadRouteContext& other) const = default;
+};
+
+template <typename H>
+H AbslHashValue(H h, const ReadRouteContext& context) {
+  return H::combine(
+      std::move(h), context.local_endpoint_id, context.remote_endpoint_id, context.protocol, context.rail_id);
+}
+
+struct LocalRegion {
+  uint64_t addr = 0;
+  uint64_t bytes = 0;
+  int dev_type = base::COMMUNICATE_ENGINE_DEV_CPU;
+  int dev_id = 0;
+};
+
+struct SourceSlice {
+  std::string authority_id;
+  ReadRouteContext route;
+  std::string tensor_key;
+  uint64_t remote_offset = 0;
+  uint64_t bytes = 0;
+};
+
+struct ReadPlanSlice {
+  uint32_t source_slice_index = 0;
+  uint32_t local_region_index = 0;
+  uint64_t source_slice_offset = 0;
+  uint64_t local_region_offset = 0;
+  uint64_t bytes = 0;
+};
+
+struct ReadPlan {
+  std::vector<LocalRegion> local_regions;
+  std::vector<SourceSlice> source_slices;
+  std::vector<ReadPlanSlice> slices;
+};
+
+absl::Status validate_read_plan(const ReadPlan& plan);
 
 struct ConnectionKey {
   std::string src_endpoint_id;

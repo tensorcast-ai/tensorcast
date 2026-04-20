@@ -186,6 +186,8 @@ message Engine {
     google.protobuf.Duration owner_file_collective_group_assemble_timeout = 24;
     optional bool owner_file_collective_allow_mixed_residual = 25;
     uint32 owner_file_collective_planner_cache_entries = 26;
+    uint64 direct_write_batch_bytes = 27;
+    uint32 direct_write_batch_ops = 28;
   }
   MaterializationStrategy materialization_strategy = 14;
 }

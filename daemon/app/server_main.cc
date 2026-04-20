@@ -884,6 +884,12 @@ int main(int argc, char** argv) {
         ms.has_enable_mapped_multirange_concat_jobs() ? ms.enable_mapped_multirange_concat_jobs() : true;
     strategy.sync_after_single_range_concat_job = ms.sync_after_single_range_concat_job();
     strategy.use_dedicated_single_range_concat_stream = ms.use_dedicated_single_range_concat_stream();
+    if (ms.direct_write_batch_bytes() > 0) {
+      strategy.direct_write_batch_bytes = ms.direct_write_batch_bytes();
+    }
+    if (ms.direct_write_batch_ops() > 0) {
+      strategy.direct_write_batch_ops = ms.direct_write_batch_ops();
+    }
     if (ms.owner_file_collective_peak_bytes_budget() > 0) {
       strategy.owner_file_collective_peak_bytes_budget = ms.owner_file_collective_peak_bytes_budget();
     }

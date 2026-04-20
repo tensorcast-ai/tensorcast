@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -27,6 +28,7 @@
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
+#include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_context.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context_events.h"
@@ -65,6 +67,25 @@ namespace pipeline_runtime = tensorcast::store::materialization::runtime::pipeli
 namespace view_contracts = tensorcast::store::materialization::view;
 
 namespace loading = tensorcast::store::loading;
+
+namespace tensorcast::store::runtime::ingestion {
+
+class MaterializationFacadeTestPeer {
+ public:
+  static absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
+      MaterializationFacade& facade,
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+      const tensorcast::store::loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind) {
+    return facade.materialize_mapped_sources_into_target(
+        target_device, target_layout, std::move(sources), mapping, hints, source_kind);
+  }
+};
+
+} // namespace tensorcast::store::runtime::ingestion
 
 namespace {
 
@@ -316,6 +337,657 @@ pipeline_runtime::IngestionContext make_strategy_context(
       .publish_to_global_store = false,
   };
   return ctx;
+}
+
+absl::StatusOr<size_t> copy_into_direct_write_grant(
+    absl::Span<const uint8_t> data,
+    uint64_t src_offset,
+    uint64_t dest_va_offset,
+    size_t bytes,
+    const tensorcast::store::DirectWriteGrant& grant) {
+  size_t total = 0;
+  uint64_t src_pos = src_offset;
+  uint64_t dest_pos = dest_va_offset;
+  while (total < bytes) {
+    const tensorcast::store::DirectWriteGrant::Window* window = nullptr;
+    for (const auto& candidate : grant.windows) {
+      if (dest_pos >= candidate.va_offset && dest_pos < candidate.va_offset + candidate.length) {
+        window = &candidate;
+        break;
+      }
+    }
+    if (window == nullptr) {
+      return absl::InvalidArgumentError("no direct-write window for destination offset");
+    }
+    const uint64_t window_offset = dest_pos - window->va_offset;
+    const size_t available = static_cast<size_t>(window->length - window_offset);
+    const size_t step = std::min(bytes - total, available);
+    if (src_pos > data.size() || step > data.size() - src_pos) {
+      return absl::OutOfRangeError("source eof");
+    }
+    std::memcpy(reinterpret_cast<void*>(window->local_addr + window_offset), data.data() + src_pos, step);
+    total += step;
+    src_pos += step;
+    dest_pos += step;
+  }
+  return total;
+}
+
+struct RecordingDirectSourceStats {
+  size_t readv_calls{0};
+  size_t read_into_calls{0};
+  std::vector<size_t> batch_sizes;
+};
+
+class RecordingDirectSeekableSource final : public tensorcast::store::loader::SeekableSource {
+ public:
+  RecordingDirectSeekableSource(
+      std::vector<uint8_t> data,
+      std::shared_ptr<RecordingDirectSourceStats> stats,
+      bool batched_direct_write_supported,
+      std::optional<absl::Status> readv_failure,
+      bool partial_write_before_failure)
+      : data_(std::move(data)),
+        stats_(std::move(stats)),
+        batched_direct_write_supported_(batched_direct_write_supported),
+        readv_failure_(std::move(readv_failure)),
+        partial_write_before_failure_(partial_write_before_failure) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(cursor_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or;
+    }
+    cursor_ += *read_or;
+    return read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= data_.size()) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_read = std::min<size_t>(bytes, data_.size() - static_cast<size_t>(offset));
+    std::memcpy(dst, data_.data() + offset, to_read);
+    return to_read;
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return true;
+  }
+
+  [[nodiscard]] bool supports_batched_direct_write_at() const override {
+    return batched_direct_write_supported_;
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const tensorcast::store::DirectWriteGrant& grant) override {
+    ++stats_->read_into_calls;
+    return copy_into_direct_write_grant(data_, src_offset, dest_va_offset, bytes, grant);
+  }
+
+  absl::StatusOr<size_t> readv_into_at(
+      absl::Span<const tensorcast::store::loader::DirectWriteOp> ops,
+      const tensorcast::store::DirectWriteGrant& grant) override {
+    ++stats_->readv_calls;
+    stats_->batch_sizes.push_back(ops.size());
+    if (readv_failure_.has_value()) {
+      if (partial_write_before_failure_ && !ops.empty()) {
+        auto first_write_or = copy_into_direct_write_grant(
+            data_, ops.front().src_offset, ops.front().dest_va_offset, static_cast<size_t>(ops.front().bytes), grant);
+        if (!first_write_or.ok()) {
+          return first_write_or.status();
+        }
+      }
+      return *readv_failure_;
+    }
+    size_t total = 0;
+    for (const auto& op : ops) {
+      auto wrote_or =
+          copy_into_direct_write_grant(data_, op.src_offset, op.dest_va_offset, static_cast<size_t>(op.bytes), grant);
+      if (!wrote_or.ok()) {
+        return wrote_or.status();
+      }
+      total += *wrote_or;
+    }
+    return total;
+  }
+
+ private:
+  std::vector<uint8_t> data_;
+  std::shared_ptr<RecordingDirectSourceStats> stats_;
+  bool batched_direct_write_supported_{true};
+  uint64_t cursor_{0};
+  std::optional<absl::Status> readv_failure_;
+  bool partial_write_before_failure_{false};
+};
+
+class RecordingDirectLoader final : public tensorcast::store::IArtifactLoader {
+ public:
+  RecordingDirectLoader(
+      std::vector<uint8_t> data,
+      std::shared_ptr<RecordingDirectSourceStats> stats,
+      bool batched_direct_write_supported = true)
+      : data_(std::move(data)),
+        stats_(std::move(stats)),
+        batched_direct_write_supported_(batched_direct_write_supported) {}
+
+  absl::Status initialize() override {
+    initialized_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<uint64_t> get_artifact_size() override {
+    if (!initialized_) {
+      return absl::FailedPreconditionError("loader must be initialized before size lookup");
+    }
+    return data_.size();
+  }
+
+  absl::StatusOr<std::unique_ptr<tensorcast::store::loader::SeekableSource>> open_source() override {
+    if (!initialized_) {
+      return absl::FailedPreconditionError("loader must be initialized before open_source");
+    }
+    return std::make_unique<RecordingDirectSeekableSource>(
+        data_, stats_, batched_direct_write_supported_, readv_failure_, partial_write_before_failure_);
+  }
+
+  void set_readv_failure(absl::Status status, bool partial_write_before_failure = false) {
+    readv_failure_ = std::move(status);
+    partial_write_before_failure_ = partial_write_before_failure;
+  }
+
+ private:
+  std::vector<uint8_t> data_;
+  std::shared_ptr<RecordingDirectSourceStats> stats_;
+  bool batched_direct_write_supported_{true};
+  bool initialized_{false};
+  std::optional<absl::Status> readv_failure_;
+  bool partial_write_before_failure_{false};
+};
+
+TEST_CASE(
+    "MaterializationFacade internal mapped sources helper executes composite CPU sources into one target",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_sources_helper";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  std::array<uint8_t, 4> source0 = {0x10, 0x11, 0x12, 0x13};
+  std::array<uint8_t, 4> source1 = {0x20, 0x21, 0x22, 0x23};
+  std::array<uint8_t, 10> target{};
+  target.fill(0xCC);
+
+  std::vector<std::shared_ptr<tensorcast::store::loader::SeekableSource>> sources;
+  sources.emplace_back(
+      std::make_shared<tensorcast::store::loader::CpuMemorySource>(
+          gsl::not_null<const void*>{static_cast<const void*>(source0.data())}, source0.size()));
+  sources.emplace_back(
+      std::make_shared<tensorcast::store::loader::CpuMemorySource>(
+          gsl::not_null<const void*>{static_cast<const void*>(source1.data())}, source1.size()));
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = target.size();
+  mapping.num_sources = 2;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = source0.size(),
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = source0.size(),
+          .length = source1.size(),
+          .src_offset = 0,
+          .source_index = 1,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kPad,
+          .dst_offset = source0.size() + source1.size(),
+          .length = target.size() - source0.size() - source1.size(),
+          .src_offset = 0,
+          .source_index = 0,
+      },
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())}, .length = target.size()});
+  target_layout.total_size = target.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:composite-mapped-sources";
+
+  auto result_or =
+      tensorcast::store::runtime::ingestion::MaterializationFacadeTestPeer::materialize_mapped_sources_into_target(
+          *harness.facade,
+          DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          target_layout,
+          std::move(sources),
+          mapping,
+          hints,
+          loading::MaterializationSource::kLocalReplica);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kLocalReplica);
+  CHECK(result_or->requested_bytes == target.size());
+  CHECK(result_or->committed_bytes == target.size());
+  CHECK(result_or->dominant_executor == "MappedSourcesTargetExecutor");
+  CHECK(result_or->selection_reason == "mapped_sources_target");
+
+  for (size_t index = 0; index < source0.size(); ++index) {
+    CHECK(target[index] == source0[index]);
+  }
+  for (size_t index = 0; index < source1.size(); ++index) {
+    CHECK(target[source0.size() + index] == source1[index]);
+  }
+  for (size_t index = source0.size() + source1.size(); index < target.size(); ++index) {
+    CHECK(target[index] == 0);
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade mapped loader wrapper routes through shared mapped sources helper",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_wrapper";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  const auto payload =
+      std::make_shared<std::array<uint8_t, 6>>(std::array<uint8_t, 6>{0x31, 0x32, 0x33, 0x34, 0x35, 0x36});
+  std::array<uint8_t, 6> target{};
+  target.fill(0xEE);
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = target.size();
+  mapping.num_sources = 1;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = target.size(),
+          .src_offset = 0,
+          .source_index = 0,
+      },
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())}, .length = target.size()});
+  target_layout.total_size = target.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:mapped-loader-wrapper";
+
+  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::make_unique<tensorcast::store::InlineBufferLoader>(
+          loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+      mapping,
+      hints,
+      loading::MaterializationSource::kDisk);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kDisk);
+  CHECK(result_or->requested_bytes == target.size());
+  CHECK(result_or->committed_bytes == target.size());
+  CHECK(result_or->dominant_executor == "MappedSourcesTargetExecutor");
+  CHECK(result_or->selection_reason == "mapped_sources_target");
+
+  for (size_t index = 0; index < target.size(); ++index) {
+    CHECK(target[index] == (*payload)[index]);
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade mapped loader wrapper integrates batched direct writes", "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_direct_batch";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto stats = std::make_shared<RecordingDirectSourceStats>();
+  std::vector<uint8_t> source_bytes{1, 2, 3, 4, 5, 6, 7, 8, 101, 102, 103, 104, 105, 106, 107, 108};
+  std::array<uint8_t, 8> target{};
+  target.fill(0xEE);
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = target.size();
+  mapping.num_sources = 1;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 4,
+          .length = 4,
+          .src_offset = 8,
+          .source_index = 0,
+      },
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())}, .length = target.size()});
+  target_layout.total_size = target.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:mapped-loader-direct-batch";
+
+  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      mapping,
+      hints,
+      loading::MaterializationSource::kLocalReplica);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->source == loading::MaterializationSource::kLocalReplica);
+  CHECK(result_or->direct_write_supported);
+  CHECK(result_or->dominant_executor == "MappedSourcesTargetExecutor");
+  CHECK(result_or->selection_reason == "mapped_sources_target");
+  REQUIRE(result_or->debug_stats.has_value());
+  CHECK(result_or->debug_stats->produced_chunks == 1);
+  CHECK(result_or->debug_stats->produced_bytes == target.size());
+  CHECK(stats->readv_calls == 1);
+  CHECK(stats->read_into_calls == 0);
+  CHECK(stats->batch_sizes == std::vector<size_t>{2});
+  const std::array<uint8_t, 8> expected_target{1, 2, 3, 4, 101, 102, 103, 104};
+  CHECK(target == expected_target);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade mapped loader wrapper preserves pre-issue direct-write fallback",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_direct_fallback";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto stats = std::make_shared<RecordingDirectSourceStats>();
+  std::vector<uint8_t> source_bytes{11, 12, 13, 14, 15, 16, 17, 18, 201, 202, 203, 204, 205, 206, 207, 208};
+  auto loader = std::make_unique<RecordingDirectLoader>(source_bytes, stats);
+  loader->set_readv_failure(absl::UnimplementedError("vectored direct write unavailable"));
+  std::array<uint8_t, 8> target{};
+  target.fill(0xEE);
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = target.size();
+  mapping.num_sources = 1;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 4,
+          .length = 4,
+          .src_offset = 8,
+          .source_index = 0,
+      },
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())}, .length = target.size()});
+  target_layout.total_size = target.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:mapped-loader-direct-fallback";
+
+  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::move(loader),
+      mapping,
+      hints,
+      loading::MaterializationSource::kLocalReplica);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->direct_write_supported);
+  REQUIRE(result_or->debug_stats.has_value());
+  CHECK(result_or->debug_stats->produced_chunks == 1);
+  CHECK(result_or->debug_stats->produced_bytes == target.size());
+  CHECK(stats->readv_calls == 1);
+  CHECK(stats->read_into_calls == 2);
+  CHECK(stats->batch_sizes == std::vector<size_t>{2});
+  const std::array<uint8_t, 8> expected_target{11, 12, 13, 14, 201, 202, 203, 204};
+  CHECK(target == expected_target);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade mapped loader wrapper keeps single-source public contract",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_single_source";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  std::array<uint8_t, 8> target{};
+  target.fill(0xAB);
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = target.size();
+  mapping.num_sources = 2;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 4,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 1,
+      },
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())}, .length = target.size()});
+  target_layout.total_size = target.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:mapped-loader-single-source";
+
+  const auto payload = std::make_shared<std::array<uint8_t, 8>>(std::array<uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8});
+  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::make_unique<tensorcast::store::InlineBufferLoader>(
+          loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+      mapping,
+      hints,
+      loading::MaterializationSource::kDisk);
+  REQUIRE_FALSE(result_or.ok());
+  CHECK(absl::IsInvalidArgument(result_or.status()));
+  CHECK(result_or.status().message().find("mapping.num_sources == 1") != std::string::npos);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade ingest mapped loader wrapper preserves public id and event semantics",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_ingest_mapped_loader_ids";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+  IngestionEventRecorder recorder(harness.runtime_context());
+
+  const auto payload =
+      std::make_shared<std::array<uint8_t, 6>>(std::array<uint8_t, 6>{0x41, 0x42, 0x43, 0x44, 0x45, 0x46});
+  const std::string logical_artifact_id = "cgid:logical_ingest_mapped_loader";
+  const std::string physical_artifact_id = "__tc_body__:ingest_mapped_loader";
+
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = payload->size();
+  mapping.num_sources = 1;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = payload->size(),
+          .src_offset = 0,
+          .source_index = 0,
+      },
+  };
+
+  loading::MaterializeHints hints;
+
+  static_cast<void>(recorder.drain_started());
+  static_cast<void>(recorder.drain_completed());
+  auto handle_or = harness.facade->ingest_mapped_loader_into_replica(
+      logical_artifact_id,
+      physical_artifact_id,
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target,
+      std::make_unique<tensorcast::store::InlineBufferLoader>(
+          loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+      mapping,
+      hints,
+      loading::MaterializationSource::kDisk);
+  REQUIRE(handle_or.ok());
+  CHECK(handle_or->key().artifact_id == physical_artifact_id);
+  CHECK(handle_or->source == loading::MaterializationSource::kDisk);
+  CHECK(handle_or->cpu_state == tensorcast::store::replica::MemoryState::LOADED);
+  CHECK(handle_or->wait_ready(std::chrono::milliseconds(100)).ok());
+
+  auto replica_or = harness.replica_runtime().registry().find(handle_or->key());
+  REQUIRE(replica_or.ok());
+  CHECK(replica_or.value()->get_memory_state(MemoryLocation::CPU) == tensorcast::store::replica::MemoryState::LOADED);
+  auto cpu_ptrs = replica_or.value()->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<const uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  for (size_t index = 0; index < payload->size(); ++index) {
+    CHECK(cpu_ptr[index] == (*payload)[index]);
+  }
+
+  harness.runtime_context().drain_events();
+  auto started_events = recorder.drain_started();
+  auto completed_events = recorder.drain_completed();
+  REQUIRE(started_events.size() == 1);
+  REQUIRE(completed_events.size() == 1);
+  CHECK(started_events.front().artifact_id == logical_artifact_id);
+  CHECK(completed_events.front().artifact_id == logical_artifact_id);
+  CHECK(completed_events.front().status.ok());
+  REQUIRE(completed_events.front().replica_key.has_value());
+  CHECK(completed_events.front().replica_key->artifact_id == physical_artifact_id);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade ingest mapped loader wrapper keeps single-source public contract",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_ingest_mapped_loader_single_source";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  const auto payload = std::make_shared<std::array<uint8_t, 8>>(std::array<uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8});
+
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = payload->size();
+  mapping.num_sources = 2;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 4,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 1,
+      },
+  };
+
+  loading::MaterializeHints hints;
+
+  auto handle_or = harness.facade->ingest_mapped_loader_into_replica(
+      "cgid:logical_ingest_mapped_loader_single_source",
+      "__tc_body__:ingest_mapped_loader_single_source",
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target,
+      std::make_unique<tensorcast::store::InlineBufferLoader>(
+          loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+      mapping,
+      hints,
+      loading::MaterializationSource::kDisk);
+  REQUIRE_FALSE(handle_or.ok());
+  CHECK(absl::IsInvalidArgument(handle_or.status()));
+  CHECK(handle_or.status().message().find("mapping.num_sources == 1") != std::string::npos);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
 } // namespace
@@ -1316,6 +1988,138 @@ TEST_CASE("MaterializationFacade mapped target respects typed local canonical ov
   for (uint8_t i = 0; i < kCanonicalSize; ++i) {
     CHECK(host_out[i] == static_cast<uint8_t>(kCanonicalSize - i));
   }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade reports composite source-resolution gaps for mapped targets",
+    "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kCanonicalSize = 16;
+  const std::string artifact_id = "cgid:artifact_local_mapped_composite_gap";
+  constexpr std::string_view kCanonicalIndexJson = R"({"tensor":[0,16,[16],[1],"torch.uint8",0]})";
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_local_mapped_composite_gap";
+  std::filesystem::create_directories(temp_root);
+
+  auto opts = MakeOptions(temp_root);
+  opts.materialization_strategy.prefer_local_canonical_for_mapped = true;
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  loading::InlineBufferSource source{.data = nullptr, .size_bytes = kCanonicalSize};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = source,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool = harness.runtime_context().pinned_buffer_pool(),
+      .async_runtime =
+          gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.runtime_context().async_runtime()},
+      .artifact_chunk_bytes = harness.options().artifact_chunk_bytes,
+      .expected_artifact_size = kCanonicalSize,
+      .materialization_strategy = harness.options().materialization_strategy,
+  };
+  auto canonical_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(canonical_or.ok());
+  auto canonical_replica = std::shared_ptr<tensorcast::store::replica::Replica>(std::move(canonical_or.value()));
+
+  CHECK_OK(canonical_replica->get_memory_manager().allocate_memory(MemoryLocation::CPU));
+  auto cpu_ptrs = canonical_replica->get_data_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  auto* cpu_ptr = static_cast<uint8_t*>(cpu_ptrs.front());
+  REQUIRE(cpu_ptr != nullptr);
+  for (uint8_t i = 0; i < kCanonicalSize; ++i) {
+    cpu_ptr[i] = i;
+  }
+  CHECK_OK(canonical_replica->mark_loaded(MemoryLocation::CPU));
+  canonical_replica->set_ready_signal(MemoryLocation::CPU, absl::OkStatus());
+
+  loading::ReplicaKey canonical_key{
+      .artifact_id = artifact_id,
+      .view_id = std::nullopt,
+      .device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  CHECK_OK(harness.replica_runtime().registry().emplace(canonical_key, gsl::not_null{canonical_replica}));
+
+  void* gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(&gpu_buffer, kCanonicalSize);
+  REQUIRE(alloc_status.ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{.base_ptr = gsl::not_null<void*>{gpu_buffer}, .length = kCanonicalSize});
+  target_layout.total_size = kCanonicalSize;
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = kCanonicalSize;
+  mapping.num_sources = 2;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 8,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 8,
+          .length = 8,
+          .src_offset = 0,
+          .source_index = 1,
+      },
+  };
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = artifact_id;
+  hints.allow_disk = false;
+  hints.allow_p2p = false;
+
+  ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = artifact_id;
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json = kCanonicalIndexJson;
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+  resolved_plan.representation_work_plan =
+      tensorcast::store::materialization::contracts::RepresentationWorkPlan{.residual_fallback_map = mapping};
+  auto prepared_execution = make_prepared_source_bound_execution_plan(resolved_plan, mapping);
+  prepared_execution.strategy_plan = make_source_bound_strategy_plan(
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionMode::kGenericOnly,
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundLanePlan{
+          .generic_backend_map = mapping,
+      },
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+          .execution_plan_kind = "generic_only",
+          .planned_generic_residual_bytes = kCanonicalSize,
+      });
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or =
+      harness.facade->materialize_mapped_into_target(target_device, prepared_execution, hints, std::nullopt);
+  REQUIRE_FALSE(result_or.ok());
+  CHECK(absl::IsFailedPrecondition(result_or.status()));
+  CHECK(result_or.status().message().find("resolved 1 source(s) but execution maps require 2") != std::string::npos);
+  CHECK(result_or.status().message().find("mapping.num_sources == 1") == std::string::npos);
 
   harness.shutdown();
   std::error_code cleanup_ec;

@@ -558,6 +558,16 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "communication_manager_test",
+    srcs = ["components/communication_manager_test.cc"],
+    deps = [
+        ":communication_manager",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Aggregate target removed; use fine-grained deps in dependents.
 
 # Concurrency utilities are provided by //core/testing:concurrency_utils

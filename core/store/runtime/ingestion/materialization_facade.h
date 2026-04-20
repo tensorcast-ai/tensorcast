@@ -80,6 +80,8 @@ namespace tensorcast::store::runtime::ingestion {
 namespace metadata = tensorcast::store::runtime::metadata;
 namespace store = tensorcast::store;
 
+class MaterializationFacadeTestPeer;
+
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
   using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
@@ -227,6 +229,18 @@ class MaterializationFacade : public materialization::control::MaterializationBa
 
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_local_canonical(
       const loading::MaterializationRequest& request);
+
+  friend class MaterializationFacadeTestPeer;
+
+  // Internal-only composite helper. Public facade APIs remain single-loader
+  // until request/daemon contracts grow an explicit multi-source shape.
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
 
   template <typename SourceT, typename RunnerFn>
   absl::StatusOr<loading::ReplicaHandle> run_pipeline_ingestion(

@@ -25,6 +25,11 @@ struct PumpDebugStats {
   std::uint64_t gpu_write_bytes_total{0};
 };
 
+struct PumpDirectWriteOptions {
+  size_t direct_write_batch_bytes = 0;
+  size_t direct_write_batch_ops = 0;
+};
+
 absl::Status pump_ranges(
     SeekableSource& src,
     PositionedSink& dst,
@@ -32,6 +37,7 @@ absl::Status pump_ranges(
     absl::Span<const Range> ranges,
     int concurrency,
     folly::Executor::KeepAlive<> executor,
-    PumpDebugStats* debug_stats = nullptr);
+    PumpDebugStats* debug_stats = nullptr,
+    PumpDirectWriteOptions direct_write_options = {});
 
 } // namespace tensorcast::store::loader

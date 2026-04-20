@@ -32,6 +32,10 @@
 #include "core/communicator/engine/store.h"
 #include "tensorcast/communicator/v1/communicator_config.pb.h"
 
+namespace tensorcast::communicator::routing {
+struct ReadPlan;
+}
+
 namespace tensorcast::communicator::engine {
 
 class CommunicatorTestPeer;
@@ -103,6 +107,11 @@ class Communicator {
       int dev_type,
       int dev_id,
       uint64_t remote_offset = 0);
+
+  transport::future_read_result_t read_plan(
+      const routing::ReadPlan& plan,
+      const std::string& dst_ip,
+      uint16_t dst_port);
 
   /**
    * Register a partition tensor

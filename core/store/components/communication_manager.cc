@@ -135,10 +135,15 @@ absl::StatusOr<ExportRegistration> CommunicationManager::register_memory(
   // Register buffers with communication engine
   std::vector<std::string> remote_keys;
   remote_keys.reserve(buffer_addresses.size());
+  const uint64_t registration_id = next_registration_id_.fetch_add(1, std::memory_order_relaxed);
 
   for (size_t i = 0; i < buffer_addresses.size(); ++i) {
-    // Generate a unique key for this buffer
-    std::string key = absl::StrCat("buffer_", i, "_", reinterpret_cast<uintptr_t>(buffer_addresses[i]));
+    // Export keys must be unique per registration, not just per address. Batch
+    // payload pack buffers are intentionally reused, and reusing the same
+    // communicator key can tear down an older live export while remote RDMA
+    // reads are still in flight.
+    std::string key =
+        absl::StrCat("buffer_", registration_id, "_", i, "_", reinterpret_cast<uintptr_t>(buffer_addresses[i]));
 
     // Register the tensor/buffer
     communicator::engine::Communicator::RegisterTensorOptions opts;

@@ -39,11 +39,13 @@ class ByteRangeMappedSource final : public SeekableSource {
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
   [[nodiscard]] bool supports_direct_write_at() const override;
+  [[nodiscard]] bool supports_batched_direct_write_at() const override;
   absl::StatusOr<size_t> read_into_at(
       uint64_t src_offset,
       uint64_t dest_va_offset,
       size_t bytes,
       const DirectWriteGrant& grant) override;
+  absl::StatusOr<size_t> readv_into_at(absl::Span<const DirectWriteOp> ops, const DirectWriteGrant& grant) override;
 
  private:
   struct StridedBlockCache;
@@ -78,6 +80,14 @@ class ByteRangeMappedSource final : public SeekableSource {
       uint64_t* row_copy_us_total,
       size_t* row_copy_bytes_total);
   absl::Status zero_fill_to_grant(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant);
+  absl::StatusOr<size_t> execute_grouped_direct_write(
+      uint32_t source_index,
+      absl::Span<const DirectWriteOp> ops,
+      const DirectWriteGrant& grant);
+  absl::StatusOr<size_t> execute_grouped_direct_write_fallback(
+      uint32_t source_index,
+      absl::Span<const DirectWriteOp> ops,
+      const DirectWriteGrant& grant);
 
   struct Stats {
     std::atomic<uint64_t> base_read_calls{0};

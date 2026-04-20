@@ -35,6 +35,7 @@
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/engine/staging_flow_controller.h"
 #include "core/communicator/misc/utils.h"
+#include "core/communicator/routing/types.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/cuda/cuda_api.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -59,8 +60,28 @@ using transport::RdmaContext;
 using transport::read_request_t;
 using transport::tcp_transport_t;
 
+struct RdmaReadPlanSourceSlice {
+  uint32_t source_slice_index = 0;
+  std::string tensor_key;
+  uint64_t remote_offset = 0;
+  uint64_t bytes = 0;
+  std::shared_ptr<PartitionTensor> tensor;
+  std::shared_ptr<MemoryStager> stager;
+  net_dev_t dev;
+  StagingWindow::StageFn stage_fn;
+  uint64_t chunk_size = 0;
+  bool zero_copy = false;
+};
+
 struct RdmaReadSession {
+  enum class Mode {
+    kLegacyTensor = 0,
+    kReadPlan = 1,
+  };
+
+  Mode mode = Mode::kLegacyTensor;
   ProtoReadRequest request;
+  ProtoReadPlanRequestHeader plan_request;
   std::string tensor_key;
   std::string request_key;
   std::string transfer_id;
@@ -72,6 +93,10 @@ struct RdmaReadSession {
   std::unique_ptr<FlowCreditLedger> direct_ledger;
   std::unique_ptr<StagingWindow> window;
   bool zero_copy = false;
+  std::vector<RdmaReadPlanSourceSlice> plan_source_slices;
+  size_t next_source_slice = 0;
+  uint64_t next_source_slice_offset = 0;
+  uint32_t next_window_seq = 0;
 };
 
 struct Communicator::GpuChannelLease {
@@ -115,6 +140,114 @@ struct Communicator::TransferProgressState {
 };
 
 namespace {
+
+future_read_result_t make_failed_read_future(absl::Status status, std::string tensor_key = {}) {
+  std::promise<transport::read_result_t> promise;
+  auto future = promise.get_future();
+  transport::read_result_t result;
+  result.status = std::move(status);
+  result.tensor_key = std::move(tensor_key);
+  promise.set_value(std::move(result));
+  return future;
+}
+
+bool add_overflows(uint64_t lhs, uint64_t rhs) {
+  return lhs > std::numeric_limits<uint64_t>::max() - rhs;
+}
+
+absl::StatusOr<std::vector<transport::RdmaTransport::RdmaReadSeg>> BuildPreparedPlanRdmaSegments(
+    const transport::PreparedReadPlan& prepared,
+    const ProtoReadPlanResponseExHeader& header,
+    const ProtoReadPlanResponseExSeg* segments) {
+  std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segments;
+  rdma_segments.reserve(header.num_segments);
+  for (uint32_t i = 0; i < header.num_segments; ++i) {
+    const auto& seg = segments[i];
+    if (seg.source_slice_index >= prepared.logical_plan.source_slices.size()) {
+      return absl::InvalidArgumentError("read_plan response references invalid source slice index");
+    }
+    if (seg.source_slice_index >= prepared.placements_by_source_slice.size()) {
+      return absl::InvalidArgumentError("prepared read_plan missing source slice placement");
+    }
+    const auto& placements = prepared.placements_by_source_slice[seg.source_slice_index];
+    if (placements.empty()) {
+      return absl::FailedPreconditionError("prepared read_plan source slice has no placements");
+    }
+    const auto& source_slice = prepared.logical_plan.source_slices[seg.source_slice_index];
+    if (seg.source_slice_offset > source_slice.bytes || seg.bytes > source_slice.bytes - seg.source_slice_offset) {
+      return absl::OutOfRangeError("read_plan response segment exceeds source slice bounds");
+    }
+    const uint64_t segment_begin = seg.source_slice_offset;
+    const uint64_t segment_end = seg.source_slice_offset + seg.bytes;
+    uint64_t covered_until = segment_begin;
+    for (const auto& placement : placements) {
+      if (placement.local_region_index >= prepared.local_regions.size()) {
+        return absl::InvalidArgumentError("prepared read_plan placement references invalid local region");
+      }
+      if (add_overflows(placement.source_slice_offset, placement.bytes)) {
+        return absl::FailedPreconditionError("prepared read_plan placement source range overflows");
+      }
+      const uint64_t placement_begin = placement.source_slice_offset;
+      const uint64_t placement_end = placement.source_slice_offset + placement.bytes;
+      if (placement_end <= segment_begin) {
+        continue;
+      }
+      if (placement_begin >= segment_end) {
+        break;
+      }
+
+      const uint64_t overlap_begin = std::max<uint64_t>(segment_begin, placement_begin);
+      const uint64_t overlap_end = std::min<uint64_t>(segment_end, placement_end);
+      if (overlap_begin >= overlap_end) {
+        continue;
+      }
+      if (overlap_begin != covered_until) {
+        return absl::FailedPreconditionError("read_plan response segment is not fully covered by prepared placements");
+      }
+
+      const auto& region = prepared.local_regions[placement.local_region_index];
+      if (region.tensor == nullptr) {
+        return absl::FailedPreconditionError("prepared read_plan local region missing registered tensor");
+      }
+      auto dev = region.tensor->get_dev_by_rail(region.rail_id);
+      if (dev == nullptr) {
+        dev = region.tensor->get_dev();
+      }
+      if (dev == nullptr) {
+        return absl::FailedPreconditionError("prepared read_plan local region missing RDMA device");
+      }
+      region.tensor->wait_mr_ready(dev);
+      auto* mr = region.tensor->get_mr(dev);
+      if (mr == nullptr) {
+        return absl::FailedPreconditionError("prepared read_plan local region MR not ready");
+      }
+
+      const uint64_t local_offset = overlap_begin - placement_begin;
+      const uint64_t remote_offset = overlap_begin - segment_begin;
+      if (add_overflows(placement.local_region_offset, local_offset) ||
+          add_overflows(region.logical_region.addr, placement.local_region_offset + local_offset) ||
+          add_overflows(seg.addr, remote_offset)) {
+        return absl::FailedPreconditionError("prepared read_plan segment address computation overflow");
+      }
+
+      rdma_segments.push_back(
+          transport::RdmaTransport::RdmaReadSeg{
+              .local_addr = region.logical_region.addr + placement.local_region_offset + local_offset,
+              .local_lkey = mr->lkey,
+              .length = static_cast<uint32_t>(overlap_end - overlap_begin),
+              .remote_addr = seg.addr + remote_offset,
+              .rkey = seg.rkey,
+              .window_seq = header.window_seq,
+              .segment_idx = i,
+          });
+      covered_until = overlap_end;
+    }
+    if (covered_until != segment_end) {
+      return absl::FailedPreconditionError("read_plan response segment exceeds prepared placement coverage");
+    }
+  }
+  return rdma_segments;
+}
 
 struct RdmaDriveResult {
   absl::Status status = absl::OkStatus();
@@ -641,6 +774,169 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     }
 
     if (!staged_window.more_segments) {
+      result.completed = true;
+      result.status = absl::OkStatus();
+      return result;
+    }
+  }
+}
+
+RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
+  struct WindowSegment {
+    StageLease lease;
+    uint32_t source_slice_index = 0;
+    uint64_t source_slice_offset = 0;
+    uint32_t bytes = 0;
+    uint32_t segment_idx = 0;
+  };
+
+  RdmaDriveResult result;
+  while (true) {
+    if (session.next_source_slice >= session.plan_source_slices.size()) {
+      result.completed = true;
+      result.status = absl::OkStatus();
+      return result;
+    }
+
+    const uint32_t requested_segments = std::max<uint32_t>(1, flow_state.max_window_segments);
+    auto credit_or = flow_state.ledger.try_acquire(static_cast<int>(requested_segments));
+    if (!credit_or.ok()) {
+      result.status = credit_or.status();
+      return result;
+    }
+    FlowCreditLedger::Lease credit_lease = std::move(credit_or.value());
+    if (credit_lease.granted_segments() <= 0) {
+      result.status = absl::UnavailableError("ledger granted no segments for read_plan");
+      return result;
+    }
+
+    std::vector<WindowSegment> window_segments;
+    window_segments.reserve(static_cast<size_t>(credit_lease.granted_segments()));
+    bool all_zero_copy = true;
+    bool early_window_exit = false;
+    const uint32_t window_seq = session.next_window_seq++;
+
+    for (uint32_t segment_idx = 0; segment_idx < static_cast<uint32_t>(credit_lease.granted_segments());
+         ++segment_idx) {
+      if (session.next_source_slice >= session.plan_source_slices.size()) {
+        break;
+      }
+      auto& source_slice = session.plan_source_slices[session.next_source_slice];
+      const uint64_t source_slice_offset = session.next_source_slice_offset;
+      const uint64_t remaining_slice_bytes = source_slice.bytes - source_slice_offset;
+      const uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(source_slice.chunk_size, remaining_slice_bytes));
+      auto lease_or = source_slice.stage_fn(source_slice.remote_offset + source_slice_offset, bytes, segment_idx);
+      if (!lease_or.ok()) {
+        const absl::Status status = lease_or.status();
+        credit_lease.release_unused();
+        if ((absl::IsResourceExhausted(status) || absl::IsUnavailable(status)) && !window_segments.empty()) {
+          early_window_exit = true;
+          break;
+        }
+        for (auto& segment : window_segments) {
+          segment.lease.release();
+        }
+        result.status = status;
+        return result;
+      }
+
+      StageLease lease = std::move(lease_or.value());
+      all_zero_copy = all_zero_copy && lease.metadata().zero_copy;
+      credit_lease.mark_consumed();
+      window_segments.push_back(
+          WindowSegment{
+              .lease = std::move(lease),
+              .source_slice_index = source_slice.source_slice_index,
+              .source_slice_offset = source_slice_offset,
+              .bytes = bytes,
+              .segment_idx = segment_idx,
+          });
+
+      session.next_source_slice_offset += bytes;
+      if (session.next_source_slice_offset == source_slice.bytes) {
+        session.next_source_slice += 1;
+        session.next_source_slice_offset = 0;
+      }
+    }
+
+    if (window_segments.empty()) {
+      result.status = absl::UnavailableError("read_plan staging produced no segments");
+      return result;
+    }
+
+    const bool more_segments = early_window_exit || session.next_source_slice < session.plan_source_slices.size();
+    result.made_progress = true;
+    const uint32_t seg_count = static_cast<uint32_t>(window_segments.size());
+    auto rsp = std::make_shared<EngineMessage>(
+        ENGINE_OP_READ_PLAN_RESPONSE_EX,
+        static_cast<uint32_t>(sizeof(ProtoReadPlanResponseExHeader) + seg_count * sizeof(ProtoReadPlanResponseExSeg)));
+    auto* hdr = rsp->get_payload<ProtoReadPlanResponseExHeader>();
+    hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+    hdr->staged = all_zero_copy ? 0 : 1;
+    misc::STRNCPY(hdr->nic_name, session.dev ? session.dev->get_name().c_str() : "", kMaxDevName);
+    hdr->request_id = session.plan_request.request_id;
+    hdr->num_segments = seg_count;
+    hdr->window_seq = window_seq;
+    hdr->credit_granted = static_cast<uint32_t>(window_segments.size());
+    hdr->more_segments = more_segments ? 1 : 0;
+    hdr->zero_copy = all_zero_copy ? 1 : 0;
+    hdr->rail_id = session.dev ? session.dev->get_rail_id() : 0;
+
+    std::vector<StageLeaseKey> inserted_keys;
+    inserted_keys.reserve(seg_count);
+    for (uint32_t i = 0; i < seg_count; ++i) {
+      auto& segment = window_segments[i];
+      auto* seg_pl = reinterpret_cast<ProtoReadPlanResponseExSeg*>(
+          reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadPlanResponseExHeader) +
+          i * sizeof(ProtoReadPlanResponseExSeg));
+      seg_pl->source_slice_index = segment.source_slice_index;
+      seg_pl->source_slice_offset = segment.source_slice_offset;
+      seg_pl->addr = reinterpret_cast<uint64_t>(segment.lease.exposed_ptr());
+      seg_pl->bytes = segment.bytes;
+      seg_pl->rkey = segment.lease.mr() ? segment.lease.mr()->rkey : 0;
+
+      StageLease::Metadata metadata = segment.lease.metadata();
+      metadata.window_seq = window_seq;
+      metadata.segment_idx = segment.segment_idx;
+      metadata.offset = segment.source_slice_offset;
+      metadata.bytes = segment.bytes;
+      segment.lease.set_metadata(metadata);
+
+      StageLeaseKey key{
+          .request_key = metadata.request_key,
+          .window_seq = metadata.window_seq,
+          .segment_idx = metadata.segment_idx,
+      };
+      if (hdr->staged) {
+        flow_state.registry.put(key, segment.lease);
+        inserted_keys.push_back(key);
+      }
+    }
+
+    if (session.control_transport->send(rsp) != misc::SUCCESS) {
+      if (hdr->staged) {
+        for (const auto& key : inserted_keys) {
+          auto lease_or = flow_state.registry.take(key);
+          if (lease_or.ok()) {
+            lease_or->release();
+          }
+        }
+      } else {
+        for (auto& segment : window_segments) {
+          segment.lease.release();
+        }
+      }
+      result.status = absl::InternalError("failed to send read_plan response window");
+      return result;
+    }
+
+    if (!hdr->staged) {
+      for (auto& segment : window_segments) {
+        segment.lease.release();
+      }
+    }
+
+    if (!more_segments) {
       result.completed = true;
       result.status = absl::OkStatus();
       return result;
@@ -1831,6 +2127,185 @@ uint16_t Communicator::listening_port() const {
   return server_context_->listening_port();
 }
 
+future_read_result_t Communicator::read_plan(
+    const routing::ReadPlan& plan,
+    const std::string& dst_ip,
+    uint16_t dst_port) {
+  const std::string tensor_key =
+      plan.source_slices.empty() ? std::string("read_plan") : plan.source_slices.front().tensor_key;
+  if (!inited_.load()) {
+    return make_failed_read_future(
+        absl::FailedPreconditionError("failed to read plan through un-initiated engine"), tensor_key);
+  }
+  if (!enable_rdma_) {
+    return make_failed_read_future(
+        absl::UnimplementedError(
+            std::format("communicator read_plan requires RDMA transport for peer {}:{}", dst_ip, dst_port)),
+        tensor_key);
+  }
+  if (plan.source_slices.empty() || plan.slices.empty() || plan.local_regions.empty()) {
+    return make_failed_read_future(
+        absl::InvalidArgumentError("read_plan requires non-empty sources, slices, and regions"), tensor_key);
+  }
+
+  const routing::ReadRouteContext& route = plan.source_slices.front().route;
+  if (route.protocol != routing::ConnectionProtocol::kRdma) {
+    return make_failed_read_future(
+        absl::UnimplementedError(
+            std::format("communicator read_plan only supports routed RDMA today for peer {}:{}", dst_ip, dst_port)),
+        tensor_key);
+  }
+
+  const uint64_t request_id = next_request_id_.fetch_add(1, std::memory_order_relaxed);
+  auto prepared = std::make_shared<transport::PreparedReadPlan>();
+  prepared->logical_plan = plan;
+  prepared->remote_endpoint_id = route.remote_endpoint_id;
+  prepared->protocol = route.protocol;
+  prepared->rail_id = route.rail_id;
+  prepared->placements_by_source_slice.resize(plan.source_slices.size());
+
+  uint64_t total_bytes = 0;
+  for (const auto& slice : plan.slices) {
+    if (slice.source_slice_index >= plan.source_slices.size()) {
+      return make_failed_read_future(
+          absl::InvalidArgumentError("read_plan slice references invalid source slice index"), tensor_key);
+    }
+    if (slice.local_region_index >= plan.local_regions.size()) {
+      return make_failed_read_future(
+          absl::InvalidArgumentError("read_plan slice references invalid local region index"), tensor_key);
+    }
+    const auto& source_slice = plan.source_slices[slice.source_slice_index];
+    if (slice.bytes == 0 || slice.bytes > source_slice.bytes) {
+      return make_failed_read_future(absl::InvalidArgumentError("read_plan slice has invalid byte count"), tensor_key);
+    }
+    prepared->placements_by_source_slice[slice.source_slice_index].push_back(
+        transport::PreparedSourcePlacement{
+            .local_region_index = slice.local_region_index,
+            .local_region_offset = slice.local_region_offset,
+            .source_slice_offset = slice.source_slice_offset,
+            .bytes = slice.bytes,
+        });
+    if (slice.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
+      return make_failed_read_future(absl::InvalidArgumentError("read_plan total byte count overflow"), tensor_key);
+    }
+    total_bytes += slice.bytes;
+  }
+  for (size_t source_index = 0; source_index < prepared->placements_by_source_slice.size(); ++source_index) {
+    auto& placements = prepared->placements_by_source_slice[source_index];
+    if (placements.empty()) {
+      return make_failed_read_future(
+          absl::FailedPreconditionError("read_plan execution requires each source slice to have prepared placements"),
+          tensor_key);
+    }
+    std::sort(
+        placements.begin(),
+        placements.end(),
+        [](const transport::PreparedSourcePlacement& lhs, const transport::PreparedSourcePlacement& rhs) {
+          if (lhs.source_slice_offset != rhs.source_slice_offset) {
+            return lhs.source_slice_offset < rhs.source_slice_offset;
+          }
+          return lhs.local_region_index < rhs.local_region_index;
+        });
+    uint64_t expected_offset = 0;
+    for (const auto& placement : placements) {
+      if (placement.source_slice_offset != expected_offset) {
+        return make_failed_read_future(
+            absl::FailedPreconditionError(
+                "read_plan placements must exactly cover each source slice without gaps or overlap"),
+            tensor_key);
+      }
+      if (placement.bytes > std::numeric_limits<uint64_t>::max() - expected_offset) {
+        return make_failed_read_future(
+            absl::InvalidArgumentError("read_plan placement coverage overflows source slice range"), tensor_key);
+      }
+      expected_offset += placement.bytes;
+    }
+    if (expected_offset != plan.source_slices[source_index].bytes) {
+      return make_failed_read_future(
+          absl::FailedPreconditionError("read_plan placements must exactly cover the full source slice"), tensor_key);
+    }
+  }
+
+  prepared->local_regions.reserve(plan.local_regions.size());
+  for (size_t region_index = 0; region_index < plan.local_regions.size(); ++region_index) {
+    const auto& region = plan.local_regions[region_index];
+    if (region.addr == 0 || region.bytes == 0) {
+      return make_failed_read_future(
+          absl::InvalidArgumentError("read_plan local region must have non-zero addr and bytes"), tensor_key);
+    }
+    auto net_dev = get_net_dev(region.dev_type, region.dev_id, tensor_key, route.rail_id);
+    if (net_dev == nullptr) {
+      return make_failed_read_future(
+          absl::InternalError("failed to select RDMA device for read_plan local region"), tensor_key);
+    }
+    auto local_tensor = std::make_shared<PartitionTensor>(
+        std::format("read_plan:{}:{}", request_id, region_index), region.addr, region.bytes, region.dev_type, net_dev);
+    local_tensor->set_read_unready();
+    if (region.dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+      local_tensor->set_device_id(region.dev_id);
+    }
+    if (local_tensor->get_dev_by_rail(net_dev->get_rail_id()) == nullptr) {
+      local_tensor->add_dev(net_dev);
+    }
+    if (!local_tensor->is_registered(net_dev)) {
+      net_dev->reg_async(local_tensor);
+      local_tensor->wait_mr_ready(net_dev);
+      if (local_tensor->get_mr(net_dev) == nullptr) {
+        return make_failed_read_future(absl::InternalError("failed to register read_plan local region MR"), tensor_key);
+      }
+    }
+    local_tensor->set_read_ready();
+
+    if (prepared->local_nic.empty()) {
+      prepared->local_nic = net_dev->get_name();
+      prepared->rail_id = net_dev->get_rail_id();
+    } else if (prepared->local_nic != net_dev->get_name() || prepared->rail_id != net_dev->get_rail_id()) {
+      return make_failed_read_future(
+          absl::FailedPreconditionError(
+              "read_plan local regions must resolve to one RDMA device/rail in the first cut"),
+          tensor_key);
+    }
+
+    prepared->local_regions.push_back(
+        transport::PreparedLocalRegion{
+            .logical_region = region,
+            .rail_id = net_dev->get_rail_id(),
+            .nic_name = net_dev->get_name(),
+            .tensor = local_tensor,
+        });
+  }
+  prepared->total_bytes = total_bytes;
+
+  auto req =
+      std::make_shared<transport::ReadRequest>(tensor_key, dst_ip, dst_port, prepared, request_id, prepared->rail_id);
+  req->status_.transport_is_rdma = true;
+  req->status_.local_nic = prepared->local_nic;
+  req->status_.local_rail_id = prepared->rail_id;
+  const std::string peer = std::format("{}:{}", dst_ip, dst_port);
+  auto target_progress = create_transfer_progress_state(
+      make_transfer_id(req->get_key(), peer), req->get_key(), peer, "target", "rdma", req->total_bytes());
+  if (target_progress) {
+    auto last_done = std::make_shared<std::atomic<uint64_t>>(0);
+    req->set_progress_callbacks(
+        [state = target_progress, last_done](uint64_t done, uint64_t /*total*/) {
+          const uint64_t prev = last_done->exchange(done, std::memory_order_relaxed);
+          if (done > prev) {
+            add_transfer_progress_bytes(state, done - prev);
+          }
+        },
+        [this, req_key = req->get_key(), state = std::move(target_progress)](const absl::Status& status) {
+          pending_requests_.erase_if_present(req_key);
+          finish_transfer_progress(state, status);
+        });
+  } else {
+    req->set_progress_callbacks(
+        {}, [this, req_key = req->get_key()](const absl::Status&) { pending_requests_.erase_if_present(req_key); });
+  }
+
+  request_queue_.push(req);
+  return req->get_future();
+}
+
 future_read_result_t Communicator::read_tensor(
     const std::string& key,
     uint64_t addr,
@@ -2212,7 +2687,8 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
         session = flow_state->rdma_pending_reads.front();
         pending_reads = flow_state->rdma_pending_reads.size();
       }
-      auto result = DriveRdmaSession(*flow_state, *session);
+      auto result = session->mode == RdmaReadSession::Mode::kReadPlan ? DriveRdmaPlanSession(*flow_state, *session)
+                                                                      : DriveRdmaSession(*flow_state, *session);
       LOG(INFO) << "[rdma_resume] drove request=" << session->request_key << " status=" << result.status
                 << " completed=" << result.completed << " made_progress=" << result.made_progress
                 << " pending_reads=" << pending_reads
@@ -2233,13 +2709,22 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
 
         LOG(ERROR) << "Failed to service RDMA read request=" << session->request_key << " status=" << result.status;
 
-        auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
-        auto* payload = rsp->get_payload<ProtoReadFailed>();
-        memcpy(payload->tensor_key, session->request.tensor_key, kMaxTensorNameLen);
-        payload->offset = session->request.offset;
-        payload->request_id = session->request.request_id;
-        payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
-        misc::result_t send_res = session->control_transport->send(rsp);
+        misc::result_t send_res = misc::FAILED;
+        if (session->mode == RdmaReadSession::Mode::kReadPlan) {
+          auto rsp = EngineMessage::make_message<ProtoReadPlanFailed>(ENGINE_OP_READ_PLAN_FAILED);
+          auto* payload = rsp->get_payload<ProtoReadPlanFailed>();
+          payload->request_id = session->plan_request.request_id;
+          payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+          send_res = session->control_transport->send(rsp);
+        } else {
+          auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+          auto* payload = rsp->get_payload<ProtoReadFailed>();
+          memcpy(payload->tensor_key, session->request.tensor_key, kMaxTensorNameLen);
+          payload->offset = session->request.offset;
+          payload->request_id = session->request.request_id;
+          payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+          send_res = session->control_transport->send(rsp);
+        }
         if (send_res != misc::SUCCESS) {
           LOG(WARNING) << "Failed to send READ_FAILED after staging failure: " << send_res;
         }
@@ -2600,19 +3085,51 @@ void Communicator::do_read_request_loop() {
       continue;
     }
 
-    auto msg = EngineMessage::make_message<ProtoReadRequest>(ENGINE_OP_READ_REQUEST);
-    auto* request = msg->get_payload<ProtoReadRequest>();
-    misc::STRNCPY(request->tensor_key, req->tensor_key_, kMaxTensorNameLen);
+    std::shared_ptr<EngineMessage> msg;
+    if (req->is_read_plan()) {
+      auto prepared = req->get_prepared_read_plan();
+      if (prepared == nullptr) {
+        req->set_result(absl::InternalError("read_plan request missing prepared plan"));
+        continue;
+      }
+      if (prepared->logical_plan.source_slices.size() > std::numeric_limits<uint32_t>::max()) {
+        req->set_result(absl::InvalidArgumentError("read_plan source slice count exceeds wire limit"));
+        continue;
+      }
+      const uint32_t payload_size = static_cast<uint32_t>(
+          sizeof(ProtoReadPlanRequestHeader) +
+          prepared->logical_plan.source_slices.size() * sizeof(ProtoReadPlanSourceSlice));
+      msg = std::make_shared<EngineMessage>(ENGINE_OP_READ_PLAN_REQUEST, payload_size);
+      auto* header = msg->get_payload<ProtoReadPlanRequestHeader>();
+      header->transport_type = ENGINE_TRANSPORT_RDMA;
+      header->rail_id = req->get_rail_id();
+      header->request_id = req->request_id();
+      header->num_source_slices = static_cast<uint32_t>(prepared->logical_plan.source_slices.size());
+      auto* source_payload = reinterpret_cast<ProtoReadPlanSourceSlice*>(
+          reinterpret_cast<uint8_t*>(header) + sizeof(ProtoReadPlanRequestHeader));
+      for (size_t index = 0; index < prepared->logical_plan.source_slices.size(); ++index) {
+        const auto& source_slice = prepared->logical_plan.source_slices[index];
+        misc::STRNCPY(source_payload[index].tensor_key, source_slice.tensor_key, kMaxTensorNameLen);
+        source_payload[index].source_slice_index = static_cast<uint32_t>(index);
+        source_payload[index].remote_offset = source_slice.remote_offset;
+        source_payload[index].bytes = source_slice.bytes;
+      }
+      VLOG(1) << "[do_read_request_loop] Sending READ_PLAN_REQUEST: key=" << req->get_key() << " to "
+              << req->get_dst_url() << " source_slices=" << prepared->logical_plan.source_slices.size();
+    } else {
+      msg = EngineMessage::make_message<ProtoReadRequest>(ENGINE_OP_READ_REQUEST);
+      auto* request = msg->get_payload<ProtoReadRequest>();
+      misc::STRNCPY(request->tensor_key, req->tensor_key_, kMaxTensorNameLen);
 
-    request->transport_type = enable_rdma_ ? ENGINE_TRANSPORT_RDMA : ENGINE_TRANSPORT_MTCP;
-    request->offset = req->remote_offset_;
-    request->bytes = req->get_local_tensor()->get_bytes();
-    request->request_id = req->request_id();
+      request->transport_type = enable_rdma_ ? ENGINE_TRANSPORT_RDMA : ENGINE_TRANSPORT_MTCP;
+      request->offset = req->remote_offset_;
+      request->bytes = req->get_local_tensor()->get_bytes();
+      request->request_id = req->request_id();
+      request->rail_id = req->get_rail_id();
 
-    request->rail_id = req->get_rail_id();
-
-    VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
-            << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
+      VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
+              << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
+    }
 
     const std::string req_key = req->get_key();
     auto existing = pending_requests_.get(req_key);
@@ -2659,6 +3176,13 @@ misc::result_t Communicator::on_receive_request(
     const tcp_transport_t& t,
     const engine_message_t& msg) {
   static std::atomic<int> server_requests_received(0);
+  auto send_read_plan_failed = [&](uint64_t request_id, uint32_t reason) {
+    auto rsp = EngineMessage::make_message<ProtoReadPlanFailed>(ENGINE_OP_READ_PLAN_FAILED);
+    auto* payload = rsp->get_payload<ProtoReadPlanFailed>();
+    payload->request_id = request_id;
+    payload->reason = reason;
+    return t->send(rsp);
+  };
 
   switch (msg->get_op()) {
     case ENGINE_OP_RDMA_CONNECT_REQUEST: {
@@ -2800,6 +3324,206 @@ misc::result_t Communicator::on_receive_request(
       }
       break;
     }
+    case ENGINE_OP_READ_PLAN_REQUEST: {
+      auto* req = msg->get_payload<ProtoReadPlanRequestHeader>();
+      if (msg->get_payload_size() < sizeof(ProtoReadPlanRequestHeader)) {
+        LOG(WARNING) << "READ_PLAN_REQUEST payload too small";
+        break;
+      }
+      const size_t expected_size = sizeof(ProtoReadPlanRequestHeader) +
+          static_cast<size_t>(req->num_source_slices) * sizeof(ProtoReadPlanSourceSlice);
+      if (msg->get_payload_size() < expected_size) {
+        LOG(WARNING) << "READ_PLAN_REQUEST payload truncated: expected=" << expected_size
+                     << " actual=" << msg->get_payload_size();
+        send_read_plan_failed(req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        break;
+      }
+      if (!enable_rdma_ || req->transport_type != ENGINE_TRANSPORT_RDMA) {
+        send_read_plan_failed(req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        break;
+      }
+      auto flow_state = channel->flow_state();
+      if (!flow_state) {
+        send_read_plan_failed(req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        break;
+      }
+
+      auto* source_payload = reinterpret_cast<ProtoReadPlanSourceSlice*>(
+          reinterpret_cast<uint8_t*>(req) + sizeof(ProtoReadPlanRequestHeader));
+      auto read_guards = std::make_shared<std::vector<std::shared_ptr<void>>>();
+      auto session = std::make_shared<RdmaReadSession>();
+      session->mode = RdmaReadSession::Mode::kReadPlan;
+      session->plan_request = *req;
+      session->request_key = transport::get_read_plan_request_key(req->request_id);
+      session->control_transport = t;
+      uint64_t total_bytes = 0;
+      bool failed = false;
+      absl::Status failure_status = absl::OkStatus();
+
+      for (uint32_t index = 0; index < req->num_source_slices; ++index) {
+        const auto& source = source_payload[index];
+        const std::string tensor_key = reinterpret_cast<const char*>(source.tensor_key);
+        auto tensor = store_.get_tensor(tensor_key);
+        if (tensor == nullptr) {
+          failed = true;
+          failure_status = absl::NotFoundError(absl::StrCat("read_plan tensor not found: ", tensor_key));
+          break;
+        }
+        if (source.remote_offset > tensor->get_bytes() || source.bytes > tensor->get_bytes() - source.remote_offset) {
+          failed = true;
+          failure_status = absl::OutOfRangeError(absl::StrCat("read_plan slice out of range: ", tensor_key));
+          break;
+        }
+        auto read_guard_or = acquire_tensor_read_lease(tensor_key);
+        if (!read_guard_or.ok()) {
+          failed = true;
+          failure_status = read_guard_or.status();
+          break;
+        }
+        read_guards->push_back(*read_guard_or);
+
+        tensor->wait_read_ready();
+        auto dev = req->rail_id >= 0 ? tensor->get_dev_by_rail(req->rail_id) : tensor->get_dev();
+        if (dev == nullptr) {
+          failed = true;
+          failure_status =
+              absl::FailedPreconditionError(absl::StrCat("read_plan tensor missing RDMA device: ", tensor_key));
+          break;
+        }
+        if (session->dev == nullptr) {
+          session->dev = dev;
+        } else if (session->dev->get_name() != dev->get_name() || session->dev->get_rail_id() != dev->get_rail_id()) {
+          failed = true;
+          failure_status =
+              absl::FailedPreconditionError("read_plan source slices must resolve to one RDMA device/rail");
+          break;
+        }
+
+        const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
+        const int device_id = tensor->get_device_id();
+        std::shared_ptr<MemoryStager> stager;
+        if (tensor_on_cpu) {
+          stager = get_cpu_stager_for_nic(dev->get_name());
+        } else if (use_gpu_vram_staging_) {
+          stager = get_gpu_vram_stager_for_id(device_id);
+        } else {
+          stager = get_gpu_mem_stager_for_id(device_id);
+        }
+        if (!stager) {
+          if (tensor_on_cpu) {
+            stager = memory_stager_;
+          } else if (use_gpu_vram_staging_) {
+            stager = get_gpu_mem_stager_for_id(device_id);
+            if (!stager) {
+              stager = gpu_memory_stager_;
+            }
+          } else {
+            stager = gpu_memory_stager_;
+          }
+        }
+
+        const bool direct_requested = tensor->direct_rdma_enabled();
+        bool use_direct = false;
+        ibv_mr* direct_mr = nullptr;
+        DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
+        if (direct_requested) {
+          if (tensor_on_cpu || tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_GPU) {
+            fallback_reason = DirectFallbackReason::kNotGpu;
+          } else if (tensor->needs_staging()) {
+            fallback_reason = DirectFallbackReason::kNeedsStaging;
+          } else {
+            tensor->wait_mr_ready(dev);
+            direct_mr = tensor->get_mr(dev);
+            if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
+              fallback_reason = DirectFallbackReason::kMrUnavailable;
+            } else {
+              use_direct = true;
+            }
+          }
+          if (!use_direct && tensor->direct_rdma_required()) {
+            failed = true;
+            failure_status = absl::FailedPreconditionError(
+                absl::StrCat("read_plan direct RDMA required but unavailable: ", tensor_key));
+            break;
+          }
+          if (!use_direct && fallback_reason != DirectFallbackReason::kNone) {
+            record_direct_fallback_metric(fallback_reason);
+          }
+        }
+        if (!use_direct && !stager) {
+          failed = true;
+          failure_status = absl::FailedPreconditionError("no staging backend available for read_plan source slice");
+          break;
+        }
+
+        const bool using_gpu_vram_stager =
+            !tensor_on_cpu && use_gpu_vram_staging_ && stager && stager == get_gpu_vram_stager_for_id(device_id);
+        const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
+            ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
+            : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+        const uint64_t chunk_size = use_direct
+            ? compute_direct_chunk_bytes(
+                  source.bytes, direct_rdma_chunk_bytes_, flow_state->max_window_segments, config_.rdma().qp_count())
+            : (stager && stager->get_chunk_size() > 0 ? stager->get_chunk_size() : source.bytes);
+        session->plan_source_slices.push_back(
+            RdmaReadPlanSourceSlice{
+                .source_slice_index = source.source_slice_index,
+                .tensor_key = tensor_key,
+                .remote_offset = source.remote_offset,
+                .bytes = source.bytes,
+                .tensor = tensor,
+                .stager = stager,
+                .dev = dev,
+                .stage_fn = MakeStageFunction(
+                    tensor,
+                    &flow_state->ledger,
+                    stager,
+                    dev,
+                    meta_mr_cache_.get(),
+                    tensor_key,
+                    session->request_key,
+                    staged_backend,
+                    use_direct,
+                    direct_mr),
+                .chunk_size = chunk_size,
+                .zero_copy = use_direct,
+            });
+        if (source.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
+          failed = true;
+          failure_status = absl::InvalidArgumentError("read_plan source byte count overflow");
+          break;
+        }
+        total_bytes += source.bytes;
+      }
+
+      if (failed) {
+        send_read_plan_failed(req->request_id, ReadFailedReasonFromStatus(failure_status));
+        LOG(WARNING) << "READ_PLAN_REQUEST rejected: " << failure_status;
+        break;
+      }
+
+      session->read_guard = read_guards;
+      const std::string peer = t ? t->get_remote_url() : std::string();
+      session->transfer_id = make_transfer_id(session->request_key, peer);
+      (void)register_source_transfer_progress(session->request_key, peer, "rdma", total_bytes, session->read_guard);
+
+      size_t pending_reads = 0;
+      {
+        absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+        flow_state->rdma_pending_reads.push_back(session);
+        pending_reads = flow_state->rdma_pending_reads.size();
+      }
+      LOG(INFO) << "[rdma_plan_session] queued request=" << session->request_key
+                << " source_slices=" << session->plan_source_slices.size() << " pending_reads=" << pending_reads;
+
+      auto status = resume_rdma_reads(channel);
+      if (!status.ok()) {
+        finish_source_transfer_progress(session->transfer_id, status);
+        send_read_plan_failed(req->request_id, ReadFailedReasonFromStatus(status));
+        LOG(WARNING) << "READ_PLAN_REQUEST failed to resume session: " << status;
+      }
+      break;
+    }
     case ENGINE_OP_RDMA_READ_DONE_EX: {
       auto* hdr = msg->get_payload<ProtoRdmaReadDoneExHeader>();
       const std::string tensor_key = reinterpret_cast<char*>(hdr->tensor_key);
@@ -2835,6 +3559,44 @@ misc::result_t Communicator::on_receive_request(
       auto resume_status = resume_rdma_reads(channel);
       if (!resume_status.ok()) {
         LOG(WARNING) << "Failed to resume RDMA staging after ACK: " << resume_status;
+      }
+      break;
+    }
+    case ENGINE_OP_RDMA_READ_PLAN_DONE_EX: {
+      auto* hdr = msg->get_payload<ProtoRdmaReadPlanDoneExHeader>();
+      const std::string peer = t ? t->get_remote_url() : std::string();
+      auto flow_state = channel->flow_state();
+      if (!flow_state) {
+        LOG(WARNING) << "RDMA_READ_PLAN_DONE_EX without channel flow state";
+        break;
+      }
+      const std::string request_key = transport::get_read_plan_request_key(hdr->request_id);
+      for (uint32_t i = 0; i < hdr->num_segments; ++i) {
+        StageLeaseKey key{
+            .request_key = request_key,
+            .window_seq = hdr->window_seq,
+            .segment_idx = i,
+        };
+        auto lease_or = flow_state->registry.take(key);
+        if (!lease_or.ok()) {
+          LOG(WARNING) << "RDMA_READ_PLAN_DONE_EX for unknown lease: key=" << key.request_key
+                       << " window=" << hdr->window_seq << " segment=" << i;
+          continue;
+        }
+        const uint64_t bytes = lease_or->bytes();
+        const std::string transfer_id = make_transfer_id(request_key, peer);
+        auto progress = lookup_source_transfer_progress(transfer_id);
+        if (progress && bytes > 0) {
+          const uint64_t done = add_transfer_progress_bytes(progress, bytes);
+          if (done >= progress->total_bytes) {
+            finish_source_transfer_progress(transfer_id, absl::OkStatus());
+          }
+        }
+        lease_or->release();
+      }
+      auto resume_status = resume_rdma_reads(channel);
+      if (!resume_status.ok()) {
+        LOG(WARNING) << "Failed to resume RDMA read_plan staging after ACK: " << resume_status;
       }
       break;
     }
@@ -2892,6 +3654,210 @@ misc::result_t Communicator::on_receive_response(
           endpoint->retry_scheduled = false;
         }
       };
+  auto handle_target_rdma_reads = [&](const std::string& req_key,
+                                      const std::shared_ptr<transport::ReadRequest>& read_request,
+                                      const std::string& peer_dev_name,
+                                      std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segs) {
+    CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
+
+    std::string local_dev_name;
+    if (read_request->is_read_plan()) {
+      auto prepared = read_request->get_prepared_read_plan();
+      if (prepared == nullptr || prepared->local_nic.empty()) {
+        read_request->set_result(absl::FailedPreconditionError("read_plan request missing prepared local nic"));
+        pending_requests_.erase_if_present(req_key);
+        return;
+      }
+      local_dev_name = prepared->local_nic;
+    } else {
+      auto tensor = read_request->get_local_tensor();
+      if (tensor == nullptr || tensor->get_dev() == nullptr) {
+        read_request->set_result(absl::FailedPreconditionError("read request missing local tensor device metadata"));
+        pending_requests_.erase_if_present(req_key);
+        return;
+      }
+      local_dev_name = tensor->get_dev()->get_name();
+    }
+
+    auto endpoint = channel->ensure_rdma_endpoint(local_dev_name, peer_dev_name);
+    auto now = absl::Now();
+    transport::rdma_transport_t transport_to_use;
+    transport::rdma_transport_t prepared_transport;
+    std::shared_ptr<EngineMessage> connect_request_msg;
+    bool issue_now = false;
+    bool handshake_started = false;
+    bool queued_current = false;
+    bool deferred_for_backoff = false;
+    bool schedule_retry = false;
+    absl::Duration backoff_remaining = absl::ZeroDuration();
+    absl::Status immediate_failure = absl::OkStatus();
+    uint64_t generation = 0;
+
+    while (true) {
+      endpoint->mu.Lock();
+      auto state = endpoint->state;
+      if (state == Channel::HandshakeState::kReady) {
+        transport_to_use = endpoint->transport;
+        if (transport_to_use == nullptr || !transport_to_use->ready()) {
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              state,
+              Channel::HandshakeState::kIdle,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kIdle;
+          endpoint->transport.reset();
+          endpoint->mu.Unlock();
+          continue;
+        }
+        generation = endpoint->generation;
+        endpoint->mu.Unlock();
+        issue_now = true;
+        break;
+      }
+
+      if (state == Channel::HandshakeState::kConnectRequested) {
+        generation = endpoint->generation;
+        endpoint->pending_reads.push_back(
+            Channel::PendingRdmaRead{
+                .request = read_request,
+                .segments = std::move(rdma_segs),
+                .enqueued_at = now,
+                .generation = generation,
+            });
+        queued_current = true;
+        endpoint->mu.Unlock();
+        break;
+      }
+
+      if (state == Channel::HandshakeState::kIdle || state == Channel::HandshakeState::kFailed) {
+        const bool can_retry = state == Channel::HandshakeState::kIdle || now >= endpoint->next_retry_at;
+        if (!can_retry) {
+          generation = endpoint->generation;
+          endpoint->pending_reads.push_back(
+              Channel::PendingRdmaRead{
+                  .request = read_request,
+                  .segments = std::move(rdma_segs),
+                  .enqueued_at = now,
+                  .generation = generation,
+              });
+          queued_current = true;
+          deferred_for_backoff = true;
+          backoff_remaining = endpoint->next_retry_at - now;
+          if (!endpoint->retry_scheduled) {
+            endpoint->retry_scheduled = true;
+            schedule_retry = true;
+          }
+          endpoint->mu.Unlock();
+          break;
+        }
+
+        if (prepared_transport == nullptr) {
+          endpoint->mu.Unlock();
+          prepared_transport = rdma_context_->create_transport(local_dev_name);
+          if (prepared_transport == nullptr) {
+            immediate_failure = absl::InternalError("failed to allocate RDMA transport");
+            break;
+          }
+          connect_request_msg = EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
+          auto* payload = connect_request_msg->get_payload<ProtoRdmaConnectRequest>();
+          misc::result_t info_res = prepared_transport->get_local_info(&payload->qp_info);
+          if (info_res != misc::SUCCESS) {
+            immediate_failure = absl::InternalError("failed to prepare RDMA connect info");
+            prepared_transport.reset();
+            connect_request_msg.reset();
+            break;
+          }
+          misc::STRNCPY(payload->src_dev_name, local_dev_name, kMaxDevName);
+          misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
+          continue;
+        }
+
+        Channel::HandshakeState from_state = state;
+        endpoint->transport = prepared_transport;
+        endpoint->generation += 1;
+        generation = endpoint->generation;
+        endpoint->state = Channel::HandshakeState::kConnectRequested;
+        endpoint->failure_count = 0;
+        endpoint->next_retry_at = absl::InfinitePast();
+        endpoint->retry_scheduled = false;
+        endpoint->pending_reads.push_back(
+            Channel::PendingRdmaRead{
+                .request = read_request,
+                .segments = std::move(rdma_segs),
+                .enqueued_at = now,
+                .generation = generation,
+            });
+        queued_current = true;
+        handshake_started = true;
+        const size_t queue_depth = endpoint->pending_reads.size();
+        endpoint->mu.Unlock();
+        log_handshake_transition(
+            local_dev_name,
+            peer_dev_name,
+            from_state,
+            Channel::HandshakeState::kConnectRequested,
+            generation,
+            queue_depth);
+        break;
+      }
+
+      endpoint->mu.Unlock();
+      immediate_failure = absl::InternalError("unexpected RDMA handshake state");
+      break;
+    }
+
+    if (!immediate_failure.ok()) {
+      read_request->set_result(immediate_failure);
+      pending_requests_.erase_if_present(req_key);
+      return;
+    }
+
+    if (issue_now) {
+      auto res = transport_to_use->read_multi(read_request, rdma_segs);
+      if (res != misc::SUCCESS) {
+        read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
+        pending_requests_.erase_if_present(req_key);
+      }
+      return;
+    }
+
+    if (handshake_started) {
+      auto send_res = t->send(connect_request_msg);
+      if (send_res != misc::SUCCESS) {
+        const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+        for (auto& pending : failed_reads) {
+          pending_requests_.erase_if_present(pending.request->get_key());
+          pending.request->set_result(send_error);
+        }
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              Channel::HandshakeState::kConnectRequested,
+              Channel::HandshakeState::kFailed,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->transport.reset();
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+      }
+      return;
+    }
+
+    if (queued_current && deferred_for_backoff && schedule_retry) {
+      if (backoff_remaining <= absl::ZeroDuration()) {
+        backoff_remaining = absl::Milliseconds(1);
+      }
+      schedule_handshake_retry(channel, local_dev_name, peer_dev_name, backoff_remaining);
+    }
+  };
 
   switch (msg->get_op()) {
     case ENGINE_OP_RDMA_CONNECT_RESPONSE: {
@@ -3074,15 +4040,8 @@ misc::result_t Communicator::on_receive_response(
         if (read_request->rdma_profile_enabled()) {
           read_request->note_rdma_response_window(hdr->num_segments);
         }
-        CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
-
         auto tensor = read_request->get_local_tensor();
-        auto dev = tensor->get_dev();
-        CHECK(dev != nullptr) << "local tensor missing device metadata";
-        const std::string local_dev_name = dev->get_name();
-
-        auto endpoint = channel->ensure_rdma_endpoint(local_dev_name, peer_dev_name);
-
+        auto dev = tensor != nullptr ? tensor->get_dev() : nullptr;
         std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segs;
         rdma_segs.reserve(hdr->num_segments);
         std::vector<uint64_t> ack_offsets;
@@ -3110,235 +4069,42 @@ misc::result_t Communicator::on_receive_response(
           const uint64_t request_offset = read_request->remote_offset_;
           const uint64_t request_id = read_request->request_id();
           std::weak_ptr<transport::ReadRequest> weak_read_request(read_request);
-          read_request->set_ack_sender(
-              [ctrl, staged_key, request_offset, request_id, weak_read_request](
-                  uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
-                if (auto ack_request = weak_read_request.lock(); ack_request != nullptr) {
-                  if (ack_request->rdma_profile_enabled()) {
-                    ack_request->note_rdma_ack_window(static_cast<uint32_t>(offsets.size()));
-                  }
-                }
-                auto ack = std::make_shared<EngineMessage>(
-                    ENGINE_OP_RDMA_READ_DONE_EX,
-                    static_cast<uint32_t>(
-                        sizeof(ProtoRdmaReadDoneExHeader) + offsets.size() * sizeof(ProtoRdmaReadDoneExSeg)));
-                auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
-                misc::STRNCPY(h->tensor_key, staged_key, kMaxTensorNameLen);
-                h->request_offset = request_offset;
-                h->request_id = request_id;
-                h->num_segments = static_cast<uint32_t>(offsets.size());
-                h->window_seq = window_seq;
-                h->final_window = final_window ? 1 : 0;
-                for (size_t i = 0; i < offsets.size(); ++i) {
-                  auto* seg_ack = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
-                      reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) +
-                      i * sizeof(ProtoRdmaReadDoneExSeg));
-                  seg_ack->offset = offsets[i];
-                }
-                CHECK_WARN(ctrl->send(ack), "ack send failed");
-              });
+          read_request->set_ack_sender([ctrl, staged_key, request_offset, request_id, weak_read_request](
+                                           const transport::ReadRequest::PendingAckWindow& window) {
+            if (auto ack_request = weak_read_request.lock(); ack_request != nullptr) {
+              if (ack_request->rdma_profile_enabled()) {
+                ack_request->note_rdma_ack_window(window.num_segments);
+              }
+            }
+            auto ack = std::make_shared<EngineMessage>(
+                ENGINE_OP_RDMA_READ_DONE_EX,
+                static_cast<uint32_t>(
+                    sizeof(ProtoRdmaReadDoneExHeader) + window.offsets.size() * sizeof(ProtoRdmaReadDoneExSeg)));
+            auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
+            misc::STRNCPY(h->tensor_key, staged_key, kMaxTensorNameLen);
+            h->request_offset = request_offset;
+            h->request_id = request_id;
+            h->num_segments = static_cast<uint32_t>(window.offsets.size());
+            h->window_seq = window.window_seq;
+            h->final_window = window.final_window ? 1 : 0;
+            for (size_t i = 0; i < window.offsets.size(); ++i) {
+              auto* seg_ack = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
+                  reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) +
+                  i * sizeof(ProtoRdmaReadDoneExSeg));
+              seg_ack->offset = window.offsets[i];
+            }
+            CHECK_WARN(ctrl->send(ack), "ack send failed");
+          });
 
           read_request->enqueue_window_ack(hdr->window_seq, std::move(ack_offsets), hdr->more_segments == 0);
         }
-
-        auto now = absl::Now();
-        transport::rdma_transport_t transport_to_use;
-        transport::rdma_transport_t prepared_transport;
-        std::shared_ptr<EngineMessage> connect_request_msg;
-        bool issue_now = false;
-        bool handshake_started = false;
-        bool queued_current = false;
-        bool deferred_for_backoff = false;
-        bool schedule_retry = false;
-        absl::Duration backoff_remaining = absl::ZeroDuration();
-        absl::Status immediate_failure = absl::OkStatus();
-        uint64_t generation = 0;
-
-        while (true) {
-          endpoint->mu.Lock();
-          auto state = endpoint->state;
-          if (state == Channel::HandshakeState::kReady) {
-            transport_to_use = endpoint->transport;
-            if (transport_to_use == nullptr || !transport_to_use->ready()) {
-              log_handshake_transition(
-                  local_dev_name,
-                  peer_dev_name,
-                  state,
-                  Channel::HandshakeState::kIdle,
-                  endpoint->generation,
-                  endpoint->pending_reads.size());
-              endpoint->state = Channel::HandshakeState::kIdle;
-              endpoint->transport.reset();
-              endpoint->mu.Unlock();
-              continue;
-            }
-            generation = endpoint->generation;
-            endpoint->mu.Unlock();
-            issue_now = true;
-            break;
-          }
-
-          if (state == Channel::HandshakeState::kConnectRequested) {
-            generation = endpoint->generation;
-            endpoint->pending_reads.push_back(
-                Channel::PendingRdmaRead{
-                    .request = read_request,
-                    .segments = std::move(rdma_segs),
-                    .enqueued_at = now,
-                    .generation = generation,
-                });
-            queued_current = true;
-            const size_t queue_depth = endpoint->pending_reads.size();
-            endpoint->mu.Unlock();
-            LOG(INFO) << "[rdma_handshake] queueing read while awaiting connect: request=" << read_request->get_key()
-                      << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
-                      << " queue_depth=" << queue_depth << " rail_id=" << read_request->get_rail_id();
-            break;
-          }
-
-          if (state == Channel::HandshakeState::kIdle || state == Channel::HandshakeState::kFailed) {
-            const bool can_retry = state == Channel::HandshakeState::kIdle || now >= endpoint->next_retry_at;
-            if (!can_retry) {
-              generation = endpoint->generation;
-              endpoint->pending_reads.push_back(
-                  Channel::PendingRdmaRead{
-                      .request = read_request,
-                      .segments = std::move(rdma_segs),
-                      .enqueued_at = now,
-                      .generation = generation,
-                  });
-              queued_current = true;
-              deferred_for_backoff = true;
-              backoff_remaining = endpoint->next_retry_at - now;
-              if (!endpoint->retry_scheduled) {
-                endpoint->retry_scheduled = true;
-                schedule_retry = true;
-              }
-              const size_t queue_depth = endpoint->pending_reads.size();
-              endpoint->mu.Unlock();
-              LOG(WARNING) << "[rdma_handshake] deferring read during backoff: request=" << read_request->get_key()
-                           << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
-                           << " queue_depth=" << queue_depth
-                           << " wait_ms=" << absl::ToInt64Milliseconds(backoff_remaining);
-              break;
-            }
-
-            if (prepared_transport == nullptr) {
-              endpoint->mu.Unlock();
-              prepared_transport = rdma_context_->create_transport(local_dev_name);
-              if (prepared_transport == nullptr) {
-                immediate_failure = absl::InternalError("failed to allocate RDMA transport");
-                break;
-              }
-              connect_request_msg =
-                  EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
-              auto* payload = connect_request_msg->get_payload<ProtoRdmaConnectRequest>();
-              misc::result_t info_res = prepared_transport->get_local_info(&payload->qp_info);
-              if (info_res != misc::SUCCESS) {
-                immediate_failure = absl::InternalError("failed to prepare RDMA connect info");
-                prepared_transport.reset();
-                connect_request_msg.reset();
-                break;
-              }
-              misc::STRNCPY(payload->src_dev_name, local_dev_name, kMaxDevName);
-              misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
-              continue;
-            }
-
-            Channel::HandshakeState from_state = state;
-            endpoint->transport = prepared_transport;
-            endpoint->generation += 1;
-            generation = endpoint->generation;
-            endpoint->state = Channel::HandshakeState::kConnectRequested;
-            endpoint->failure_count = 0;
-            endpoint->next_retry_at = absl::InfinitePast();
-            endpoint->retry_scheduled = false;
-            endpoint->pending_reads.push_back(
-                Channel::PendingRdmaRead{
-                    .request = read_request,
-                    .segments = std::move(rdma_segs),
-                    .enqueued_at = now,
-                    .generation = generation,
-                });
-            queued_current = true;
-            handshake_started = true;
-            const size_t queue_depth = endpoint->pending_reads.size();
-            endpoint->mu.Unlock();
-            log_handshake_transition(
-                local_dev_name,
-                peer_dev_name,
-                from_state,
-                Channel::HandshakeState::kConnectRequested,
-                generation,
-                queue_depth);
-            break;
-          }
-
-          endpoint->mu.Unlock();
-          immediate_failure = absl::InternalError("unexpected RDMA handshake state");
-          break;
-        }
-
-        if (!immediate_failure.ok()) {
-          LOG(WARNING) << "[rdma_handshake] immediate failure handling read: request=" << read_request->get_key()
-                       << " status=" << immediate_failure;
-          read_request->set_result(immediate_failure);
+        if (dev == nullptr) {
+          read_request->set_result(absl::FailedPreconditionError("local tensor missing device metadata"));
           pending_requests_.erase_if_present(req_key);
           break;
         }
-
-        if (issue_now) {
-          auto res = transport_to_use->read_multi(read_request, rdma_segs);
-          if (res != misc::SUCCESS) {
-            read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
-            pending_requests_.erase_if_present(req_key);
-          }
-          break;
-        }
-
-        if (handshake_started) {
-          auto send_res = t->send(connect_request_msg);
-          if (send_res != misc::SUCCESS) {
-            LOG(WARNING) << "[rdma_handshake] failed to send connect request: request=" << read_request->get_key()
-                         << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name << " res=" << send_res;
-            const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
-            auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
-            for (auto& pending : failed_reads) {
-              pending_requests_.erase_if_present(pending.request->get_key());
-              pending.request->set_result(send_error);
-            }
-            {
-              absl::MutexLock lock(&endpoint->mu);
-              log_handshake_transition(
-                  local_dev_name,
-                  peer_dev_name,
-                  Channel::HandshakeState::kConnectRequested,
-                  Channel::HandshakeState::kFailed,
-                  endpoint->generation,
-                  endpoint->pending_reads.size());
-              endpoint->state = Channel::HandshakeState::kFailed;
-              endpoint->transport.reset();
-              endpoint->failure_count += 1;
-              endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
-              endpoint->retry_scheduled = false;
-            }
-          }
-          break;
-        }
-
-        if (queued_current && deferred_for_backoff) {
-          if (schedule_retry) {
-            if (backoff_remaining <= absl::ZeroDuration()) {
-              backoff_remaining = absl::Milliseconds(1);
-            }
-            schedule_handshake_retry(channel, local_dev_name, peer_dev_name, backoff_remaining);
-          }
-          break;
-        }
-
-        break;
-      }
-      if (hdr->transport_type == ENGINE_TRANSPORT_MTCP) {
+        handle_target_rdma_reads(req_key, read_request, peer_dev_name, std::move(rdma_segs));
+      } else if (hdr->transport_type == ENGINE_TRANSPORT_MTCP) {
         // MTCP path using EX header (no segments)
         auto transport = channel->get_mtcp();
         if (transport == nullptr) {
@@ -3366,6 +4132,73 @@ misc::result_t Communicator::on_receive_response(
       } else {
         LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX unsupported transport type";
         read_request->set_result(absl::InternalError("READ_RESPONSE_EX unsupported transport type"));
+        pending_requests_.erase_if_present(req_key);
+      }
+      break;
+    }
+    case ENGINE_OP_READ_PLAN_RESPONSE_EX: {
+      auto* hdr = msg->get_payload<ProtoReadPlanResponseExHeader>();
+      std::string peer_dev_name = reinterpret_cast<char*>(hdr->nic_name);
+      auto req_key = transport::get_read_plan_request_key(hdr->request_id);
+      auto read_request = pending_requests_.get(req_key);
+      if (read_request == nullptr) {
+        LOG(ERROR) << "[on_receive_response] READ_PLAN_RESPONSE_EX: pending request not found for " << req_key;
+        break;
+      }
+      read_request->status_.transport_is_rdma = hdr->transport_type == ENGINE_TRANSPORT_RDMA;
+      read_request->status_.remote_nic = peer_dev_name;
+      read_request->status_.remote_rail_id = hdr->rail_id;
+      read_request->status_.rdma_staged_response = hdr->staged != 0;
+      read_request->status_.rdma_zero_copy_response = hdr->zero_copy != 0;
+      read_request->record_request_response();
+
+      if (enable_rdma_ && hdr->transport_type == ENGINE_TRANSPORT_RDMA) {
+        if (read_request->rdma_profile_enabled()) {
+          read_request->note_rdma_response_window(hdr->num_segments);
+        }
+        auto* segments = reinterpret_cast<ProtoReadPlanResponseExSeg*>(
+            reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadPlanResponseExHeader));
+        auto prepared = read_request->get_prepared_read_plan();
+        if (prepared == nullptr) {
+          read_request->set_result(absl::FailedPreconditionError("read_plan response missing prepared plan"));
+          pending_requests_.erase_if_present(req_key);
+          break;
+        }
+        auto rdma_segs_or = BuildPreparedPlanRdmaSegments(*prepared, *hdr, segments);
+        if (!rdma_segs_or.ok()) {
+          read_request->set_result(rdma_segs_or.status());
+          pending_requests_.erase_if_present(req_key);
+          break;
+        }
+        auto rdma_segs = std::move(rdma_segs_or.value());
+        read_request->note_rdma_window(static_cast<int>(rdma_segs.size()), hdr->more_segments == 0);
+
+        if (hdr->staged) {
+          auto ctrl = channel->get_control();
+          const uint64_t request_id = read_request->request_id();
+          std::weak_ptr<transport::ReadRequest> weak_read_request(read_request);
+          read_request->set_ack_sender(
+              [ctrl, request_id, weak_read_request](const transport::ReadRequest::PendingAckWindow& window) {
+                if (auto ack_request = weak_read_request.lock(); ack_request != nullptr) {
+                  if (ack_request->rdma_profile_enabled()) {
+                    ack_request->note_rdma_ack_window(window.num_segments);
+                  }
+                }
+                auto ack = EngineMessage::make_message<ProtoRdmaReadPlanDoneExHeader>(ENGINE_OP_RDMA_READ_PLAN_DONE_EX);
+                auto* payload = ack->get_payload<ProtoRdmaReadPlanDoneExHeader>();
+                payload->request_id = request_id;
+                payload->num_segments = window.num_segments;
+                payload->window_seq = window.window_seq;
+                payload->final_window = window.final_window ? 1 : 0;
+                CHECK_WARN(ctrl->send(ack), "read_plan ack send failed");
+              });
+          read_request->enqueue_plan_window_ack(
+              hdr->window_seq, hdr->num_segments, static_cast<uint32_t>(rdma_segs.size()), hdr->more_segments == 0);
+        }
+
+        handle_target_rdma_reads(req_key, read_request, peer_dev_name, std::move(rdma_segs));
+      } else {
+        read_request->set_result(absl::InternalError("READ_PLAN_RESPONSE_EX unsupported transport type"));
         pending_requests_.erase_if_present(req_key);
       }
       break;
@@ -3414,6 +4247,37 @@ misc::result_t Communicator::on_receive_response(
           break;
         case TENSORCAST_READ_FAILED_MEM_MISMATCH:
         default:
+          break;
+      }
+      read_request->set_result(failure_status);
+      break;
+    }
+    case ENGINE_OP_READ_PLAN_FAILED: {
+      auto* rsp = msg->get_payload<ProtoReadPlanFailed>();
+      const auto req_key = transport::get_read_plan_request_key(rsp->request_id);
+      auto read_request = pending_requests_.get(req_key);
+      if (read_request == nullptr) {
+        LOG(WARNING) << "failed to get read_plan response for request_id=" << rsp->request_id;
+        break;
+      }
+      pending_requests_.del(req_key);
+      absl::Status failure_status = absl::InternalError("failed to read plan from peer");
+      switch (rsp->reason) {
+        case TENSORCAST_READ_FAILED_NO_TENSOR:
+          failure_status = absl::NotFoundError("read_plan source tensor not found on peer");
+          break;
+        case TENSORCAST_READ_FAILED_OVERFLOW:
+          failure_status = absl::OutOfRangeError("read_plan source slice overflow on peer");
+          break;
+        case TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED:
+          failure_status = absl::ResourceExhaustedError("read_plan source staging capacity exceeded on peer");
+          break;
+        case TENSORCAST_READ_FAILED_DIRECT_RDMA_REQUIRED:
+          failure_status = absl::FailedPreconditionError("read_plan direct RDMA required but unavailable on peer");
+          break;
+        case TENSORCAST_READ_FAILED_MEM_MISMATCH:
+        default:
+          failure_status = absl::InternalError("read_plan request failed on peer");
           break;
       }
       read_request->set_result(failure_status);
@@ -3645,7 +4509,7 @@ net_dev_t Communicator::get_net_dev(int dev_type, int dev_id, const std::string&
   if (enable_rdma_) {
     CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
 
-    net_dev = rdma_context_->get_best_dev(dev_type, dev_id, -1, key);
+    net_dev = rdma_context_->get_best_dev(dev_type, dev_id, rail_id, key);
 
     if (net_dev == nullptr) {
       LOG(WARNING) << "failed to select RDMA device (dev_type=" << dev_type

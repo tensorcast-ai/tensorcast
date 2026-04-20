@@ -12,6 +12,11 @@
 
 namespace tensorcast::communicator::transport {
 
+RdmaTransport::PostSendHook& RdmaTransport::post_send_hook_for_tests() {
+  static PostSendHook hook;
+  return hook;
+}
+
 RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th)
     : context_(context),
       dev_(std::move(dev)),
@@ -317,7 +322,10 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     return misc::INVALID_ARGUMENT;
   }
 
-  auto* mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
+  struct ibv_mr* fallback_mr = nullptr;
+  if (request->get_local_tensor() != nullptr) {
+    fallback_mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
+  }
   request->record_rdma_queue_done();
   std::array<std::vector<size_t>, kMaxQpCount> qp_seg_indices;
   const size_t start_qp = static_cast<size_t>(next_qp_index_.fetch_add(static_cast<int>(segs.size())));
@@ -354,11 +362,20 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
       wr.wr.rdma.rkey = seg.rkey;
       sge.addr = seg.local_addr;
       sge.length = seg.length;
-      sge.lkey = mr->lkey;
+      const uint32_t lkey = seg.local_lkey != 0 ? seg.local_lkey : (fallback_mr != nullptr ? fallback_mr->lkey : 0);
+      if (lkey == 0) {
+        request->set_result(absl::FailedPreconditionError("rdma read_multi missing local lkey"));
+        LOG(WARNING) << "[rdma_transport] request=" << request->get_key()
+                     << " missing local lkey for segment on qp=" << qp_index;
+        return misc::FAILED;
+      }
+      sge.lkey = lkey;
       wr.next = (i + 1 < indices.size()) ? &wrs[i + 1] : nullptr;
     }
 
-    auto res = misc::wrap_ibv_post_send(qps_[qp_index], wrs.data(), &bad_wr);
+    auto& post_send_hook = post_send_hook_for_tests();
+    auto res = post_send_hook ? post_send_hook(qps_[qp_index], wrs.data(), &bad_wr)
+                              : misc::wrap_ibv_post_send(qps_[qp_index], wrs.data(), &bad_wr);
     size_t posted_count = indices.size();
     if (res != misc::SUCCESS) {
       posted_count = (bad_wr != nullptr) ? static_cast<size_t>(bad_wr - wrs.data()) : 0;
@@ -375,6 +392,10 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     total_posted += posted_count;
 
     if (res != misc::SUCCESS) {
+      // Once ibv_post_send has accepted part of the chain we cannot roll those
+      // WRs back. Treat this as a hard request failure: already-posted WRs stay
+      // inflight and may still complete locally, but the request result becomes
+      // terminally failed and no unposted WRs are counted.
       if (posted_count > 0) {
         LOG(WARNING) << "[rdma_transport] partial post on QP " << qp_index << ": " << posted_count << "/"
                      << indices.size() << " WRs posted before failure";

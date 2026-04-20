@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -110,6 +111,7 @@ class CommunicationManager {
   uint16_t listen_port_{0};
   std::shared_ptr<tensorcast::communicator::engine::Communicator> comm_engine_;
   std::shared_ptr<communicator::routing::RoutingContext> routing_context_;
+  std::atomic<uint64_t> next_registration_id_{1};
 };
 
 } // namespace tensorcast::store::components

@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -16,6 +17,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <unistd.h>
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/log_sink.h"
+#include "absl/log/log_sink_registry.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
@@ -30,6 +33,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/global_store_client_stub.h"
+#include "daemon/state/ipc_region_registry.h"
 #include "grpcpp/channel.h"
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/server_credentials.h"
@@ -73,10 +77,14 @@ std::size_t count_cpu_replicas(const tensorcast::store::StoreEngine& engine) {
   return engine.list_device_replicas(cpu_device()).size();
 }
 
-static tensorcast::store::StoreEngineOptions make_engine_opts(const std::filesystem::path& root) {
+static tensorcast::store::StoreEngineOptions make_engine_opts(
+    const std::filesystem::path& root,
+    uint16_t p2p_port = 0) {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (root / "engine").string();
   std::filesystem::create_directories(opts.storage_path);
+  opts.p2p_listen_host = "127.0.0.1";
+  opts.p2p_port = p2p_port;
   opts.memory_pool_size = 64ULL * 1024 * 1024;
   opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
@@ -132,6 +140,27 @@ std::string make_test_byte_artifact_id(std::string_view engine_key, std::string_
   return make_valid_byte_artifact_id("tenant", "engine", "batch-redirect-model", "v1", layout_id, engine_key);
 }
 
+std::string replace_final_b64u_suffix(std::string_view artifact_id, std::string_view suffix) {
+  const std::size_t marker = artifact_id.rfind("~b64u.");
+  REQUIRE(marker != std::string_view::npos);
+  return absl::StrCat(artifact_id.substr(0, marker + 6), suffix);
+}
+
+std::string artifact_on_same_shard(
+    std::string_view base_artifact_id,
+    std::string_view seed,
+    uint64_t shard_count = 4096ULL) {
+  const std::uint64_t target_shard = shard_for_artifact(base_artifact_id, shard_count);
+  for (int attempt = 0; attempt < 10000; ++attempt) {
+    const std::string candidate = replace_final_b64u_suffix(base_artifact_id, absl::StrCat(seed, attempt));
+    if (candidate != base_artifact_id && shard_for_artifact(candidate, shard_count) == target_shard) {
+      return candidate;
+    }
+  }
+  FAIL("failed to find same-shard artifact id");
+  return {};
+}
+
 uint64_t shard_home_hrw_score_for_test(uint64_t shard_id, std::string_view daemon_id) {
   const std::string key = absl::StrCat("byte-artifact-home:", shard_id, ":", daemon_id);
   const auto digest = tensorcast::common::sha256_digest_bytes(
@@ -175,6 +204,13 @@ struct RegisteredRegion {
   std::string region_id;
   std::string device_uuid;
   void* device_ptr{nullptr};
+  int owner_pid{0};
+  std::uint64_t size_bytes{0};
+};
+
+struct RegisteredHostSharedRegion {
+  std::string region_id;
+  void* base_ptr{nullptr};
   int owner_pid{0};
   std::uint64_t size_bytes{0};
 };
@@ -224,6 +260,46 @@ void release_test_region(tensorcast::daemon::DaemonServiceHarness& harness, cons
   REQUIRE(tensorcast::cuda::free(region.device_ptr).ok());
 }
 
+RegisteredHostSharedRegion register_test_host_shared_region(
+    tensorcast::daemon::DaemonServiceHarness& harness,
+    std::uint64_t size_bytes,
+    tensorcast::daemon::IpcRegionRegistry::HostRegionClass host_region_class =
+        tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kScratch) {
+  tensorcast::daemon::IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = tensorcast::daemon::IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = ::getpid();
+  params.size_bytes = size_bytes;
+  params.ttl_ms = 10'000;
+  params.daemon_managed = true;
+  params.host_region_class = host_region_class;
+  auto region_or = harness.kernel().region_registry().register_region(params);
+  REQUIRE(region_or.ok());
+
+  auto mapping_or =
+      harness.kernel().region_registry().acquire_host_shared_local_mapping(region_or->region_id, ::getpid());
+  REQUIRE(mapping_or.ok());
+  void* base_ptr = mapping_or->base_ptr;
+  REQUIRE(harness.kernel().region_registry().release(region_or->region_id).ok());
+
+  return RegisteredHostSharedRegion{
+      .region_id = region_or->region_id,
+      .base_ptr = base_ptr,
+      .owner_pid = ::getpid(),
+      .size_bytes = size_bytes,
+  };
+}
+
+void release_test_host_shared_region(
+    tensorcast::daemon::DaemonServiceHarness& harness,
+    const RegisteredHostSharedRegion& region) {
+  auto unregister_or = harness.kernel().region_registry().unregister_region(
+      region.region_id,
+      region.owner_pid,
+      /*force=*/true);
+  REQUIRE(unregister_or.ok());
+}
+
 void populate_single_region_layout(
     tensorcast::daemon::v2::TargetLayout* layout,
     const RegisteredRegion& region,
@@ -248,6 +324,64 @@ void populate_single_region_layout(
   offset->set_storage_offset(0);
   offset->set_logical_length(byte_length);
 }
+
+void populate_two_item_host_shared_region_layout(
+    tensorcast::daemon::v2::TargetLayout* layout,
+    const RegisteredHostSharedRegion& region,
+    std::string_view artifact_id_a,
+    std::uint64_t byte_length_a,
+    std::string_view artifact_id_b,
+    std::uint64_t byte_length_b) {
+  layout->Clear();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(-1);
+  storage->set_storage_length(byte_length_a + byte_length_b);
+  storage->set_mapping_base_offset(0);
+  auto* region_ref = storage->mutable_region_ref();
+  region_ref->set_region_id(region.region_id);
+  region_ref->set_memory_kind(tensorcast::daemon::v2::REGION_MEMORY_KIND_HOST_SHARED);
+  region_ref->set_device_id(-1);
+  region_ref->set_size_bytes(region.size_bytes);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name(std::string(artifact_id_a));
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(0);
+  offset_a->set_logical_length(byte_length_a);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name(std::string(artifact_id_b));
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(byte_length_a);
+  offset_b->set_logical_length(byte_length_b);
+}
+
+class CollectingLogSink : public absl::LogSink {
+ public:
+  void Send(const absl::LogEntry& entry) override {
+    absl::MutexLock lock(&mu_);
+    messages_.push_back(std::string(entry.text_message()));
+  }
+
+  bool Contains(absl::string_view needle) const {
+    absl::MutexLock lock(&mu_);
+    for (const auto& msg : messages_) {
+      if (msg.find(needle) != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  mutable absl::Mutex mu_;
+  std::vector<std::string> messages_ ABSL_GUARDED_BY(mu_);
+};
 
 std::string sha256_hex(std::string_view payload) {
   const auto digest = tensorcast::common::sha256_digest_bytes(
@@ -279,14 +413,16 @@ class InMemoryShardHomeGlobalStore final : public GlobalStoreClientStub {
       std::string daemon_id,
       std::string node_address,
       uint32_t grpc_port,
-      uint64_t capability_flags = 0) {
+      uint64_t capability_flags = 0,
+      uint32_t p2p_port = 0,
+      std::string node_id = "node-local") {
     absl::MutexLock lock(&mu_);
     ActiveWorkerInfo worker;
     worker.worker_id = "worker-" + daemon_id;
-    worker.node_id = "node-local";
+    worker.node_id = std::move(node_id);
     worker.node_address = std::move(node_address);
     worker.grpc_port = grpc_port;
-    worker.p2p_port = 0;
+    worker.p2p_port = p2p_port;
     worker.accepting_new_requests = true;
     worker.daemon_id = std::move(daemon_id);
     worker.capability_flags = capability_flags;
@@ -1322,6 +1458,121 @@ TEST_CASE(
 
   release_test_region(*front.harness, source_region);
   release_test_region(*front.harness, target_region);
+}
+
+TEST_CASE(
+    "BatchGetIntoRegion prefers single-source composite materialization for remote communicator transports",
+    "[daemon][batch][redirect][transport][communicator][host_shared]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_composite_batch_get");
+  const auto root_home = make_tmp_dir("home_composite_batch_get");
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+  constexpr uint16_t kHomeP2PPort = 47141;
+  constexpr uint16_t kFrontP2PPort = 47142;
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front, kFrontP2PPort));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home, kHomeP2PPort));
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(
+      kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag, kHomeP2PPort);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  gs->upsert_worker(
+      kFrontDaemonId, "127.0.0.1", grpc_port_from_address(front.address), kShardHomeEligibleFlag, kFrontP2PPort);
+
+  const std::vector<std::string> daemon_ids{std::string(kFrontDaemonId), std::string(kHomeDaemonId)};
+  const std::string artifact_id_a = find_artifact_id_for_expected_home(kHomeDaemonId, daemon_ids);
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "composite-batch-get");
+  const std::string payload_a(64, 'a');
+  const std::string payload_b(96, 'b');
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a, /*shard_count=*/4096ULL);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kHomeDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-composite-batch-get");
+  auto* item_a = put_req.add_items();
+  item_a->set_artifact_id(artifact_id_a);
+  item_a->set_inline_payload(payload_a);
+  set_invariant(item_a->mutable_invariant(), "layout_v1", payload_a);
+  auto* item_b = put_req.add_items();
+  item_b->set_artifact_id(artifact_id_b);
+  item_b->set_inline_payload(payload_b);
+  set_invariant(item_b->mutable_invariant(), "layout_v1", payload_b);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(home.harness->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto target_region = register_test_host_shared_region(*front.harness, payload_a.size() + payload_b.size());
+  std::memset(target_region.base_ptr, 0, static_cast<std::size_t>(target_region.size_bytes));
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(artifact_id_a);
+  get_req.add_selections()->set_artifact_id(artifact_id_b);
+  populate_two_item_host_shared_region_layout(
+      get_req.mutable_target_layout(), target_region, artifact_id_a, payload_a.size(), artifact_id_b, payload_b.size());
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_operation_id("op-composite-batch-get");
+
+  CollectingLogSink sink;
+  absl::AddLogSink(&sink);
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  const auto get_st = front.harness->service().BatchGetIntoRegion(&get_ctx, &get_req, &get_resp);
+  absl::RemoveLogSink(&sink);
+
+  REQUIRE(get_st.ok());
+  REQUIRE(get_resp.outcomes_size() == 2);
+  REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(std::string(static_cast<const char*>(target_region.base_ptr), payload_a.size()) == payload_a);
+  REQUIRE(
+      std::string(static_cast<const char*>(target_region.base_ptr) + payload_a.size(), payload_b.size()) == payload_b);
+  if (sink.Contains("byte_artifact.batch_get_into_region_transport_materialize_mode")) {
+    CHECK(sink.Contains("materialize_mode=single_source_composite"));
+    CHECK(sink.Contains("batched_direct_write=true"));
+  } else {
+    CHECK(sink.Contains("byte_artifact.batch_get_into_region_transport_mirror"));
+    CHECK(sink.Contains("read_mode=full_pack_mirror"));
+  }
+
+  release_test_host_shared_region(*front.harness, target_region);
 }
 
 TEST_CASE(
