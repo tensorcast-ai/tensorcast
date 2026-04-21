@@ -21,6 +21,7 @@
 namespace {
 
 using tensorcast::communicator::engine::Communicator;
+using tensorcast::communicator::routing::ConnectionProtocol;
 using tensorcast::communicator::routing::EndpointBinding;
 using tensorcast::communicator::routing::RoutingContext;
 using tensorcast::communicator::topology::Endpoint;
@@ -32,6 +33,7 @@ using tensorcast::communicator::topology::Pool;
 using tensorcast::communicator::topology::PoolType;
 using tensorcast::communicator::topology::Topology;
 using tensorcast::store::DirectWriteGrant;
+using tensorcast::store::loader::normalize_direct_write_read_plan_protocol;
 using tensorcast::store::loader::RemoteKeySource;
 using tensorcast::testing::create_test_pattern;
 using tensorcast::testing::find_available_port;
@@ -429,7 +431,7 @@ TEST_CASE(
           .authority_id = "authority-plan-fallback",
       });
 
-  REQUIRE(source.supports_batched_direct_write_at());
+  CHECK_FALSE(source.supports_batched_direct_write_at());
 
   std::vector<uint8_t> sink_buffer(64, 0);
   DirectWriteGrant grant;
@@ -463,4 +465,80 @@ TEST_CASE(
   std::copy(logical_source.begin() + 8, logical_source.begin() + 32, expected.begin() + 8);
   std::copy(logical_source.begin() + 24, logical_source.begin() + 48, expected.begin() + 32);
   CHECK(sink_buffer == expected);
+}
+
+TEST_CASE(
+    "RemoteKeySource batched direct write capability stays disabled without routed ReadPlan metadata",
+    "[store][p2p][routing][direct]") {
+  constexpr std::size_t kArtifactBytes = 4096;
+  const int dst_port = require_available_port_or_skip(56700);
+
+  auto dst_engine = make_engine_on_port(dst_port, /*enable_rdma=*/true);
+  RemoteKeySource source(
+      RemoteKeySource::Options{
+          .comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{dst_engine},
+          .memory_keys = {"unused"},
+          .buffer_sizes = {kArtifactBytes},
+          .ip = "127.0.0.1",
+          .port = 1,
+          .total_size = kArtifactBytes,
+      });
+
+  REQUIRE(source.supports_direct_write_at());
+  CHECK_FALSE(source.supports_batched_direct_write_at());
+}
+
+TEST_CASE(
+    "RemoteKeySource batched direct write capability rejects direct RDMA without routed metadata",
+    "[store][p2p][routing][direct]") {
+  constexpr std::size_t kArtifactBytes = 1024;
+  const int dst_port = require_available_port_or_skip(56750);
+
+  auto dst_engine = make_engine_on_port(dst_port, /*enable_rdma=*/true);
+
+  RemoteKeySource source(
+      RemoteKeySource::Options{
+          .comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{dst_engine},
+          .memory_keys = {"unused"},
+          .buffer_sizes = {kArtifactBytes},
+          .ip = "127.0.0.1",
+          .port = 1,
+          .local_endpoint_id = "node_local/dev/cpu/0",
+          .remote_endpoint_id = "node_remote/dev/cpu/0",
+          .total_size = kArtifactBytes,
+      });
+
+  REQUIRE(source.supports_direct_write_at());
+  CHECK_FALSE(source.supports_batched_direct_write_at());
+}
+
+TEST_CASE(
+    "RemoteKeySource normalizes cross-node AUTO to RDMA for routed direct-write ReadPlan lowering",
+    "[store][p2p][routing][direct]") {
+  const EndpointBinding local_binding{
+      .endpoint_id = "node0/dev/cpu/0",
+      .node_id = "node0",
+  };
+  const EndpointBinding remote_binding{
+      .endpoint_id = "node1/dev/cpu/0",
+      .node_id = "node1",
+  };
+
+  CHECK(
+      normalize_direct_write_read_plan_protocol(ConnectionProtocol::kAuto, local_binding, remote_binding, true) ==
+      ConnectionProtocol::kRdma);
+  CHECK(
+      normalize_direct_write_read_plan_protocol(ConnectionProtocol::kAuto, local_binding, remote_binding, false) ==
+      ConnectionProtocol::kAuto);
+  CHECK(
+      normalize_direct_write_read_plan_protocol(ConnectionProtocol::kNvlink, local_binding, remote_binding, true) ==
+      ConnectionProtocol::kNvlink);
+
+  const EndpointBinding same_node_remote{
+      .endpoint_id = "node0/dev/cpu/1",
+      .node_id = "node0",
+  };
+  CHECK(
+      normalize_direct_write_read_plan_protocol(ConnectionProtocol::kAuto, local_binding, same_node_remote, true) ==
+      ConnectionProtocol::kAuto);
 }

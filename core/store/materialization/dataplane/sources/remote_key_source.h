@@ -17,6 +17,12 @@
 
 namespace tensorcast::store::loader {
 
+communicator::routing::ConnectionProtocol normalize_direct_write_read_plan_protocol(
+    communicator::routing::ConnectionProtocol protocol,
+    const communicator::routing::EndpointBinding& local_binding,
+    const communicator::routing::EndpointBinding& remote_binding,
+    bool rdma_enabled);
+
 class RemoteKeySource : public SeekableSource {
  public:
   struct Options {

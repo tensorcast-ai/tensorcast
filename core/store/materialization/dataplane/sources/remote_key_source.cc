@@ -17,6 +17,19 @@
 
 namespace tensorcast::store::loader {
 
+communicator::routing::ConnectionProtocol normalize_direct_write_read_plan_protocol(
+    communicator::routing::ConnectionProtocol protocol,
+    const communicator::routing::EndpointBinding& local_binding,
+    const communicator::routing::EndpointBinding& remote_binding,
+    bool rdma_enabled) {
+  const bool cross_node = !local_binding.node_id.empty() && !remote_binding.node_id.empty() &&
+      local_binding.node_id != remote_binding.node_id;
+  if (protocol == communicator::routing::ConnectionProtocol::kAuto && cross_node && rdma_enabled) {
+    return communicator::routing::ConnectionProtocol::kRdma;
+  }
+  return protocol;
+}
+
 namespace {
 
 bool can_use_routed_read(const RemoteKeySource::Options& options, bool routed_path_enabled) {
@@ -124,6 +137,17 @@ void log_routed_fallback(const RemoteKeySource::Options& options, const absl::St
   LOG(WARNING) << "Routed read failed for src_endpoint=" << options.local_endpoint_id
                << " dst_endpoint=" << options.remote_endpoint_id << ", fallback to direct ip/port " << options.ip << ":"
                << options.port << " reason=" << status;
+}
+
+void log_read_plan_direct_write_fallback(
+    const RemoteKeySource::Options& options,
+    communicator::routing::ConnectionProtocol protocol,
+    const absl::Status& status) {
+  LOG(INFO) << "RemoteKeySource routed ReadPlan direct-write fallback to per-op read_tensor"
+            << " authority=" << (options.authority_id.empty() ? "<unset>" : options.authority_id)
+            << " artifact=" << (options.artifact_id.empty() ? "<unset>" : options.artifact_id)
+            << " route=" << options.local_endpoint_id << "->" << options.remote_endpoint_id
+            << " protocol=" << communicator::routing::to_string(protocol) << " status=" << status;
 }
 
 ReadAttempt begin_read_with_strict_fallback(
@@ -244,7 +268,8 @@ absl::StatusOr<RemoteKeySource::FrozenDirectWriteContext> RemoteKeySource::freez
     if (hop == nullptr) {
       return absl::FailedPreconditionError("RemoteKeySource direct-write route freeze returned null hop");
     }
-    const communicator::routing::ConnectionProtocol protocol = hop->protocol();
+    const communicator::routing::ConnectionProtocol protocol = normalize_direct_write_read_plan_protocol(
+        hop->protocol(), hop->local_binding(), hop->remote_binding(), options_.comm_engine->is_rdma_enabled());
     if (!options_.comm_engine->is_rdma_enabled() && !is_local_direct_protocol(protocol)) {
       return absl::UnimplementedError("RemoteKeySource direct write requires RDMA or a same-node local direct route");
     }
@@ -269,6 +294,13 @@ absl::StatusOr<RemoteKeySource::FrozenDirectWriteContext> RemoteKeySource::freez
   return FrozenDirectWriteContext{
       .mode = DirectWriteMode::kDirect,
       .routed_communicator = nullptr,
+      .route_context =
+          communicator::routing::ReadRouteContext{
+              .local_endpoint_id = options_.local_endpoint_id,
+              .remote_endpoint_id = options_.remote_endpoint_id,
+              .protocol = communicator::routing::ConnectionProtocol::kRdma,
+              .rail_id = -1,
+          },
   };
 }
 
@@ -314,8 +346,9 @@ absl::StatusOr<communicator::routing::ReadPlan> RemoteKeySource::build_routed_re
     absl::Span<const DirectWriteOp> ops,
     const DirectWriteGrant& grant,
     const FrozenDirectWriteContext& context) const {
-  if (context.mode != DirectWriteMode::kRouted || context.routed_communicator == nullptr) {
-    return absl::FailedPreconditionError("RemoteKeySource routed ReadPlan requires a frozen routed communicator");
+  if (context.route_context.protocol != communicator::routing::ConnectionProtocol::kRdma ||
+      context.route_context.local_endpoint_id.empty() || context.route_context.remote_endpoint_id.empty()) {
+    return absl::FailedPreconditionError("RemoteKeySource direct-write ReadPlan requires RDMA route metadata");
   }
 
   communicator::routing::ReadPlan plan;
@@ -375,7 +408,7 @@ absl::StatusOr<communicator::routing::ReadPlan> RemoteKeySource::build_routed_re
       const uint64_t step =
           std::min<uint64_t>(op.bytes - bytes_done, std::min(remaining_window_bytes, remaining_key_bytes));
       if (step == 0) {
-        return absl::InternalError("RemoteKeySource routed ReadPlan lowering produced an empty step");
+        return absl::InternalError("RemoteKeySource direct-write ReadPlan lowering produced an empty step");
       }
 
       const uint32_t source_slice_index = static_cast<uint32_t>(plan.source_slices.size());
@@ -725,7 +758,13 @@ bool RemoteKeySource::supports_direct_write_at() const {
 }
 
 bool RemoteKeySource::supports_batched_direct_write_at() const {
-  return supports_direct_write_at();
+  auto frozen_or = freeze_direct_write_context();
+  if (!frozen_or.ok()) {
+    return false;
+  }
+  return frozen_or->mode == DirectWriteMode::kRouted && frozen_or->routed_communicator != nullptr &&
+      frozen_or->route_context.protocol == communicator::routing::ConnectionProtocol::kRdma &&
+      !frozen_or->route_context.local_endpoint_id.empty() && !frozen_or->route_context.remote_endpoint_id.empty();
 }
 
 absl::StatusOr<size_t> RemoteKeySource::execute_direct_write_op(
@@ -845,7 +884,15 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
     return frozen_or.status();
   }
 
-  if (frozen_or->mode != DirectWriteMode::kRouted || frozen_or->routed_communicator == nullptr) {
+  if (frozen_or->route_context.protocol != communicator::routing::ConnectionProtocol::kRdma ||
+      frozen_or->route_context.local_endpoint_id.empty() || frozen_or->route_context.remote_endpoint_id.empty()) {
+    LOG(INFO) << "RemoteKeySource batched direct-write falling back to per-op scalar direct-write"
+              << " authority=" << (options_.authority_id.empty() ? "<unset>" : options_.authority_id)
+              << " artifact=" << (options_.artifact_id.empty() ? "<unset>" : options_.artifact_id)
+              << " route=" << options_.local_endpoint_id << "->" << options_.remote_endpoint_id
+              << " mode=" << (frozen_or->mode == DirectWriteMode::kRouted ? "routed" : "direct")
+              << " protocol=" << communicator::routing::to_string(frozen_or->route_context.protocol)
+              << " routed_communicator=" << (frozen_or->routed_communicator != nullptr) << " op_count=" << ops.size();
     return execute_direct_write_batch_fallback(ops, grant, *frozen_or);
   }
 
@@ -862,9 +909,25 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
     total_bytes += slice.bytes;
   }
 
-  auto future_or = submit_routed_read_plan(frozen_or->routed_communicator, *plan_or);
+  VLOG(2) << "RemoteKeySource direct-write ReadPlan issue"
+          << " authority=" << (options_.authority_id.empty() ? "<unset>" : options_.authority_id)
+          << " artifact=" << (options_.artifact_id.empty() ? "<unset>" : options_.artifact_id)
+          << " route=" << frozen_or->route_context.local_endpoint_id << "->"
+          << frozen_or->route_context.remote_endpoint_id
+          << " mode=" << (frozen_or->mode == DirectWriteMode::kRouted ? "routed" : "direct")
+          << " protocol=" << communicator::routing::to_string(frozen_or->route_context.protocol)
+          << " op_count=" << ops.size() << " source_slices=" << plan_or->source_slices.size()
+          << " read_slices=" << plan_or->slices.size() << " local_regions=" << plan_or->local_regions.size()
+          << " bytes=" << total_bytes;
+
+  absl::StatusOr<communicator::transport::future_read_result_t> future_or =
+      frozen_or->mode == DirectWriteMode::kRouted && frozen_or->routed_communicator != nullptr
+      ? submit_routed_read_plan(frozen_or->routed_communicator, *plan_or)
+      : absl::StatusOr<communicator::transport::future_read_result_t>{
+            options_.comm_engine->read_plan(*plan_or, options_.ip, options_.port)};
   if (!future_or.ok()) {
     if (is_pre_issue_direct_write_capability_miss(future_or.status())) {
+      log_read_plan_direct_write_fallback(options_, frozen_or->route_context.protocol, future_or.status());
       return execute_direct_write_batch_fallback(ops, grant, *frozen_or);
     }
     return future_or.status();
@@ -875,9 +938,7 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
   if (initial_status == std::future_status::ready) {
     auto result = future.get();
     if (is_pre_issue_direct_write_capability_miss(result.status)) {
-      VLOG(1) << "RemoteKeySource routed ReadPlan capability miss before issue"
-              << " authority=" << resolved_authority_id() << " route=" << options_.local_endpoint_id << "->"
-              << options_.remote_endpoint_id << " status=" << result.status;
+      log_read_plan_direct_write_fallback(options_, frozen_or->route_context.protocol, result.status);
       return execute_direct_write_batch_fallback(ops, grant, *frozen_or);
     }
     if (!result.status.ok()) {

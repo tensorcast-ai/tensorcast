@@ -324,7 +324,12 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   struct ibv_mr* fallback_mr = nullptr;
   if (request->get_local_tensor() != nullptr) {
-    fallback_mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
+    auto local_tensor = request->get_local_tensor();
+    auto local_dev = local_tensor->get_dev_by_rail(request->get_rail_id());
+    if (local_dev == nullptr) {
+      local_dev = local_tensor->get_dev();
+    }
+    fallback_mr = local_tensor->get_mr_by_rail(request->get_rail_id());
   }
   request->record_rdma_queue_done();
   std::array<std::vector<size_t>, kMaxQpCount> qp_seg_indices;

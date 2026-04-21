@@ -13,6 +13,7 @@
 
 #include "core/communicator/engine/engine.h"
 
+#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "core/communicator/misc/utils.h"
 #include "core/cuda/cuda_api.h"
@@ -1101,6 +1102,148 @@ TEST_CASE("READ_PLAN_REQUEST missing tensor sends READ_PLAN_FAILED", "[rdma][com
   REQUIRE(response.request_id == 91);
   REQUIRE(response.reason == TENSORCAST_READ_FAILED_NO_TENSOR);
 
+  ::close(sv[1]);
+  CommunicatorTestPeer::stop_workers(server);
+}
+
+TEST_CASE(
+    "READ_PLAN_REQUEST reuses one session rail for CPU source slices with different preferred rails",
+    "[rdma][communicator][read_plan]") {
+  using tensorcast::communicator::base::CHANNEL_RDMA;
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator server(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(server)) {
+    CommunicatorTestPeer::stop_workers(server);
+    SUCCEED("Skipping CPU multi-rail READ_PLAN_REQUEST test: no RDMA net devices available");
+    return;
+  }
+
+  auto& rdma_ctx = CommunicatorTestPeer::rdma_context(server);
+  const auto& devs = rdma_ctx->list_devs();
+  if (devs.size() < 2) {
+    CommunicatorTestPeer::stop_workers(server);
+    SUCCEED("Skipping CPU multi-rail READ_PLAN_REQUEST test: fewer than two RDMA rails available");
+    return;
+  }
+
+  std::string first_key;
+  std::string second_key;
+  tensorcast::communicator::transport::net_dev_t first_dev;
+  tensorcast::communicator::transport::net_dev_t second_dev;
+  for (int index = 0; index < 256 && second_dev == nullptr; ++index) {
+    const std::string key = absl::StrCat("plan-cpu-rail-", index);
+    auto dev = rdma_ctx->get_best_dev(COMMUNICATE_ENGINE_DEV_CPU, -1, -1, key);
+    REQUIRE(dev != nullptr);
+    if (first_dev == nullptr) {
+      first_key = key;
+      first_dev = dev;
+      continue;
+    }
+    if (dev->get_name() != first_dev->get_name() || dev->get_rail_id() != first_dev->get_rail_id()) {
+      second_key = key;
+      second_dev = dev;
+      break;
+    }
+  }
+  if (second_dev == nullptr) {
+    CommunicatorTestPeer::stop_workers(server);
+    SUCCEED("Skipping CPU multi-rail READ_PLAN_REQUEST test: could not find two keys on different RDMA rails");
+    return;
+  }
+
+  std::array<uint8_t, 64> buffer0{};
+  std::array<uint8_t, 64> buffer1{};
+  Communicator::RegisterTensorOptions opts;
+  opts.register_mr = false;
+  opts.needs_staging = false;
+  opts.async = false;
+  REQUIRE(server
+              .register_tensor_ex(
+                  first_key,
+                  reinterpret_cast<uint64_t>(buffer0.data()),
+                  static_cast<uint64_t>(buffer0.size()),
+                  COMMUNICATE_ENGINE_DEV_CPU,
+                  -1,
+                  opts)
+              .ok());
+  REQUIRE(server
+              .register_tensor_ex(
+                  second_key,
+                  reinterpret_cast<uint64_t>(buffer1.data()),
+                  static_cast<uint64_t>(buffer1.size()),
+                  COMMUNICATE_ENGINE_DEV_CPU,
+                  -1,
+                  opts)
+              .ok());
+
+  int sv[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  timeval timeout{};
+  timeout.tv_sec = 2;
+  require_recv_timeout_or_env_restriction(sv[1], timeout);
+
+  auto control_ctx = std::make_shared<tensorcast::communicator::transport::TcpContext>();
+  struct sockaddr_in remote_addr{};
+  remote_addr.sin_family = AF_INET;
+  remote_addr.sin_port = htons(65012);
+  remote_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  auto control_transport =
+      std::make_shared<tensorcast::communicator::transport::TcpTransport>(control_ctx.get(), sv[0], remote_addr);
+  auto channel = std::make_shared<Channel>(
+      control_transport,
+      CHANNEL_RDMA,
+      /*buffers_per_flow=*/2,
+      /*max_window_segments=*/2);
+
+  const uint32_t payload_size = sizeof(ProtoReadPlanRequestHeader) + 2 * sizeof(ProtoReadPlanSourceSlice);
+  auto request = std::make_shared<EngineMessage>(ENGINE_OP_READ_PLAN_REQUEST, payload_size);
+  auto* hdr = request->get_payload<ProtoReadPlanRequestHeader>();
+  hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+  hdr->rail_id = -1;
+  hdr->request_id = 92;
+  hdr->num_source_slices = 2;
+  auto* slices =
+      reinterpret_cast<ProtoReadPlanSourceSlice*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadPlanRequestHeader));
+  communicator::misc::STRNCPY(slices[0].tensor_key, first_key, kMaxTensorNameLen);
+  slices[0].source_slice_index = 0;
+  slices[0].remote_offset = 0;
+  slices[0].bytes = 16;
+  communicator::misc::STRNCPY(slices[1].tensor_key, second_key, kMaxTensorNameLen);
+  slices[1].source_slice_index = 1;
+  slices[1].remote_offset = 0;
+  slices[1].bytes = 16;
+
+  auto status = CommunicatorTestPeer::on_receive_request(server, channel, control_transport, request);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  ProtoHeader response_header{};
+  REQUIRE(
+      ::recv(sv[1], &response_header, sizeof(response_header), MSG_WAITALL) ==
+      static_cast<ssize_t>(sizeof(response_header)));
+  REQUIRE(response_header.op == ENGINE_OP_READ_PLAN_RESPONSE_EX);
+  REQUIRE(response_header.size >= sizeof(ProtoReadPlanResponseExHeader));
+
+  std::vector<char> payload(response_header.size);
+  REQUIRE(::recv(sv[1], payload.data(), payload.size(), MSG_WAITALL) == static_cast<ssize_t>(payload.size()));
+  auto* response = reinterpret_cast<const ProtoReadPlanResponseExHeader*>(payload.data());
+  REQUIRE(response->request_id == 92);
+  REQUIRE(response->rail_id == first_dev->get_rail_id());
+  REQUIRE(response->num_segments == 2);
+  const auto* segs = reinterpret_cast<const ProtoReadPlanResponseExSeg*>(
+      reinterpret_cast<const uint8_t*>(response) + sizeof(ProtoReadPlanResponseExHeader));
+  REQUIRE(segs[0].source_slice_index == 0);
+  REQUIRE(segs[1].source_slice_index == 1);
+
+  (void)server.unregister_tensor(first_key);
+  (void)server.unregister_tensor(second_key);
   ::close(sv[1]);
   CommunicatorTestPeer::stop_workers(server);
 }

@@ -2163,7 +2163,6 @@ future_read_result_t Communicator::read_plan(
   prepared->protocol = route.protocol;
   prepared->rail_id = route.rail_id;
   prepared->placements_by_source_slice.resize(plan.source_slices.size());
-
   uint64_t total_bytes = 0;
   for (const auto& slice : plan.slices) {
     if (slice.source_slice_index >= plan.source_slices.size()) {
@@ -3383,7 +3382,29 @@ misc::result_t Communicator::on_receive_request(
         read_guards->push_back(*read_guard_or);
 
         tensor->wait_read_ready();
-        auto dev = req->rail_id >= 0 ? tensor->get_dev_by_rail(req->rail_id) : tensor->get_dev();
+        auto dev = req->rail_id >= 0 ? tensor->get_dev_by_rail(req->rail_id) : nullptr;
+        if (dev == nullptr) {
+          // The requester encodes its own local rail in READ_PLAN_REQUEST.
+          // Source-side tensors must keep their local preferred NIC; otherwise
+          // routed read-plan becomes stricter than legacy READ_REQUEST and
+          // spuriously falls back to scalar reads when rail ids differ across
+          // hosts.
+          dev = tensor->get_dev();
+          if (dev != nullptr && req->rail_id >= 0) {
+            VLOG(2) << "READ_PLAN_REQUEST rail fallback tensor=" << tensor_key << " requested_rail=" << req->rail_id
+                    << " selected_rail=" << dev->get_rail_id() << " nic=" << dev->get_name();
+          }
+        }
+        const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
+        if (tensor_on_cpu && session->dev != nullptr &&
+            (dev == nullptr || session->dev->get_name() != dev->get_name() ||
+             session->dev->get_rail_id() != dev->get_rail_id())) {
+          VLOG(2) << "READ_PLAN_REQUEST cpu source rebinding tensor=" << tensor_key
+                  << " selected_rail=" << (dev != nullptr ? dev->get_rail_id() : -1)
+                  << " selected_nic=" << (dev != nullptr ? dev->get_name() : "<none>")
+                  << " session_rail=" << session->dev->get_rail_id() << " session_nic=" << session->dev->get_name();
+          dev = session->dev;
+        }
         if (dev == nullptr) {
           failed = true;
           failure_status =
@@ -3399,7 +3420,6 @@ misc::result_t Communicator::on_receive_request(
           break;
         }
 
-        const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
         const int device_id = tensor->get_device_id();
         std::shared_ptr<MemoryStager> stager;
         if (tensor_on_cpu) {
