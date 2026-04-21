@@ -27,8 +27,10 @@
 #include "core/store/testing/recording_global_store_client.h"
 #include "daemon/service/artifact_profile_registry.h"
 #include "daemon/service/body_backing_manager.h"
+#include "daemon/service/byte_artifact_body_handle.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/routed_authority_wire.h"
+#include "daemon/state/worker_directory_cache.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -108,6 +110,20 @@ static std::unique_ptr<DaemonServiceHarness> make_harness(
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
   return harness;
+}
+
+static void install_local_worker_directory_entry(DaemonServiceHarness& harness, std::string_view daemon_id) {
+  harness.kernel().worker_directory_cache().update_local_entry(
+      tensorcast::daemon::WorkerDirectoryCache::Entry{
+          .daemon_id = std::string(daemon_id),
+          .worker_id = "worker-local",
+          .node_id = "node-local",
+          .node_address = "127.0.0.1",
+          .grpc_port = 18080,
+          .p2p_port = 19090,
+          .address = "127.0.0.1:18080",
+          .capability_flags = 0,
+      });
 }
 
 static tensorcast::daemon::PersistenceTaskState advance_persistence_to_terminal(
@@ -1569,6 +1585,174 @@ TEST_CASE("HomeBatchPutIfAbsent accepts batch payload slices", "[daemon][batch][
   REQUIRE(get_resp.items(1).inline_payload() == payload_b);
 }
 
+TEST_CASE(
+    "HomeBatchGet emits segmented communicator transport without staged batch payload slabs",
+    "[daemon][batch][batch_payload_ref][get][communicator]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.max_batch_payload_bytes = 1ULL << 20;
+  options.byte_artifact_routing.payload_transport.max_batch_items = 8;
+  auto harness = make_harness(engine, options);
+  install_local_worker_directory_entry(*harness, kDaemonId);
+  auto& svc = harness->service();
+
+  const std::string artifact_id_a = make_test_byte_artifact_id("batch-get-segmented-a:blk-5b");
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchgetsegmented");
+  const std::string payload_a(64, 'a');
+  const std::string payload_b(96, 'b');
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-home-batch-get-segmented");
+  auto* item_a = put_req.add_items();
+  item_a->set_artifact_id(artifact_id_a);
+  item_a->set_inline_payload(payload_a);
+  set_invariant(item_a->mutable_invariant(), "layout_v1", payload_a);
+  auto* item_b = put_req.add_items();
+  item_b->set_artifact_id(artifact_id_b);
+  item_b->set_inline_payload(payload_b);
+  set_invariant(item_b->mutable_invariant(), "layout_v1", payload_b);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.set_operation_id("op-home-batch-get-segmented");
+  get_req.add_artifact_ids(artifact_id_a);
+  get_req.add_artifact_ids(artifact_id_b);
+
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 2);
+  REQUIRE(get_resp.batch_transports_size() == 1);
+  REQUIRE(get_resp.items(0).has_batch_payload_slice());
+  REQUIRE(get_resp.items(1).has_batch_payload_slice());
+
+  const auto& transport = get_resp.batch_transports(0);
+  REQUIRE(transport.has_communicator_source());
+  REQUIRE_FALSE(transport.has_grpc_chunk_ref());
+  REQUIRE(transport.communicator_source().remote_memory_keys_size() == 2);
+  REQUIRE(transport.communicator_source().buffer_sizes_size() == 2);
+  REQUIRE(transport.communicator_source().buffer_sizes(0) == payload_a.size());
+  REQUIRE(transport.communicator_source().buffer_sizes(1) == payload_b.size());
+  REQUIRE(transport.communicator_source().total_payload_bytes() == payload_a.size() + payload_b.size());
+
+  auto chunk_or = harness->kernel().payload_transport_broker().read_local_batch_payload_ref_chunk(
+      transport.communicator_source().batch_payload_ref(),
+      absl::Now(),
+      /*offset=*/0,
+      /*max_bytes=*/16,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-home-batch-get-segmented");
+  REQUIRE_FALSE(chunk_or.ok());
+  REQUIRE(chunk_or.status().code() == absl::StatusCode::kFailedPrecondition);
+
+  auto source_or = harness->kernel().payload_transport_broker().open_batch_payload_communicator_source(
+      harness->kernel().worker_directory_cache(),
+      absl::Now(),
+      absl::Seconds(1),
+      kDaemonId,
+      transport,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-home-batch-get-segmented");
+  REQUIRE(source_or.ok());
+  REQUIRE_FALSE(source_or->remote);
+  REQUIRE(source_or->source != nullptr);
+
+  std::string joined(payload_a.size() + payload_b.size(), '\0');
+  auto read_or = source_or->source->read_at(/*offset=*/0, joined.data(), joined.size());
+  REQUIRE(read_or.ok());
+  REQUIRE(*read_or == joined.size());
+  REQUIRE(joined == payload_a + payload_b);
+}
+
+TEST_CASE(
+    "HomeBatchGet falls back to staged communicator transport when segmented policy is disabled",
+    "[daemon][batch][batch_payload_ref][get][communicator]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.max_batch_payload_bytes = 1ULL << 20;
+  options.byte_artifact_routing.payload_transport.max_batch_items = 8;
+  options.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled = false;
+  auto harness = make_harness(engine, options);
+  install_local_worker_directory_entry(*harness, kDaemonId);
+  auto& svc = harness->service();
+
+  const std::string artifact_id_a = make_test_byte_artifact_id("batch-get-staged-a:blk-5c");
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchgetstaged");
+  const std::string payload_a(64, 'c');
+  const std::string payload_b(96, 'd');
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-home-batch-get-staged");
+  auto* item_a = put_req.add_items();
+  item_a->set_artifact_id(artifact_id_a);
+  item_a->set_inline_payload(payload_a);
+  set_invariant(item_a->mutable_invariant(), "layout_v1", payload_a);
+  auto* item_b = put_req.add_items();
+  item_b->set_artifact_id(artifact_id_b);
+  item_b->set_inline_payload(payload_b);
+  set_invariant(item_b->mutable_invariant(), "layout_v1", payload_b);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.set_operation_id("op-home-batch-get-staged");
+  get_req.add_artifact_ids(artifact_id_a);
+  get_req.add_artifact_ids(artifact_id_b);
+
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(svc.HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 2);
+  REQUIRE(get_resp.batch_transports_size() == 1);
+  REQUIRE(get_resp.items(0).has_batch_payload_slice());
+  REQUIRE(get_resp.items(1).has_batch_payload_slice());
+
+  const auto& transport = get_resp.batch_transports(0);
+  REQUIRE(transport.has_communicator_source());
+  REQUIRE_FALSE(transport.has_grpc_chunk_ref());
+  REQUIRE(transport.communicator_source().remote_memory_keys_size() == 1);
+  REQUIRE(transport.communicator_source().buffer_sizes_size() == 1);
+  REQUIRE(transport.communicator_source().total_payload_bytes() == payload_a.size() + payload_b.size());
+
+  auto resolved_or = harness->kernel().payload_transport_broker().fetch_batch_payload_ref(
+      harness->kernel().worker_directory_cache(),
+      absl::Now(),
+      absl::Seconds(1),
+      kDaemonId,
+      transport.communicator_source().batch_payload_ref(),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-home-batch-get-staged");
+  REQUIRE(resolved_or.ok());
+  REQUIRE_FALSE(resolved_or->remote);
+  REQUIRE(resolved_or->payload != nullptr);
+  REQUIRE(*resolved_or->payload == payload_a + payload_b);
+}
+
 TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][batch][payload_ref][reuse]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto options = make_daemon_options();
@@ -1801,6 +1985,163 @@ TEST_CASE(
   REQUIRE(
       capability_or->serving_capability.subject_kind ==
       tensorcast::daemon::ServingCapabilitySubjectKind::kCopiedPayload);
+}
+
+TEST_CASE("BodyHandle export capability reflects runtime export support", "[daemon][batch][body_handle][export]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_test_byte_artifact_id("body-export-capability:blk-0");
+  const std::string payload = "body-export-capability-payload";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-body-export-capability");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  const auto entry = harness->kernel().byte_artifact_body_store().get(
+      artifact_id,
+      shard_id,
+      /*lease_generation=*/1,
+      /*routing_epoch=*/1,
+      absl::Now());
+  REQUIRE(entry.has_value());
+  REQUIRE_FALSE(entry->backing_record.retained_body_handle.empty());
+
+  auto capability_or = entry->backing_record.retained_body_handle.inspect_export_capability();
+  REQUIRE(capability_or.ok());
+  REQUIRE(capability_or->memory_location == tensorcast::common::memory::MemoryLocation::CPU);
+  REQUIRE(capability_or->local_loader_available);
+  REQUIRE(capability_or->remote_source_eligible);
+  REQUIRE(capability_or->supports_segmented_export);
+}
+
+TEST_CASE("BodyHandle acquire_export_view reuses live export lease", "[daemon][batch][body_handle][export]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_test_byte_artifact_id("body-export-view:blk-0");
+  const std::string payload = "body-export-view-payload";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-body-export-view");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  const auto entry = harness->kernel().byte_artifact_body_store().get(
+      artifact_id,
+      shard_id,
+      /*lease_generation=*/1,
+      /*routing_epoch=*/1,
+      absl::Now());
+  REQUIRE(entry.has_value());
+  REQUIRE_FALSE(entry->backing_record.retained_body_handle.empty());
+  REQUIRE(entry->authority_record.retained_backing_identity.has_value());
+
+  const tensorcast::daemon::BodyExportRequest request{
+      .preferred_location = tensorcast::common::memory::MemoryLocation::CPU,
+      .require_remote_source = true,
+      .allow_segmented_export = true,
+  };
+  auto view1_or = entry->backing_record.retained_body_handle.acquire_export_view(request);
+  REQUIRE(view1_or.ok());
+  auto view2_or = entry->backing_record.retained_body_handle.acquire_export_view(request);
+  REQUIRE(view2_or.ok());
+
+  const auto& view1 = *view1_or;
+  const auto& view2 = *view2_or;
+  REQUIRE(view1.backing_identity == *entry->authority_record.retained_backing_identity);
+  REQUIRE(view1.binding_generation == entry->backing_record.retained_body_handle.binding_generation());
+  REQUIRE(view1.memory_location == tensorcast::common::memory::MemoryLocation::CPU);
+  REQUIRE(view1.communicator_export.has_value());
+  REQUIRE(view1.keepalive != nullptr);
+  REQUIRE(view1.communicator_export->buffer_sizes.size() == 1);
+  REQUIRE(view1.communicator_export->buffer_sizes.front() == payload.size());
+  REQUIRE(view1.communicator_export->remote_memory_keys.size() == 1);
+  REQUIRE(view2.communicator_export.has_value());
+  REQUIRE(view2.keepalive != nullptr);
+  REQUIRE_FALSE(view1.keepalive.owner_before(view2.keepalive));
+  REQUIRE_FALSE(view2.keepalive.owner_before(view1.keepalive));
+  REQUIRE(view1.communicator_export->remote_memory_keys == view2.communicator_export->remote_memory_keys);
+
+  auto local_only_view_or = entry->backing_record.retained_body_handle.acquire_export_view(
+      tensorcast::daemon::BodyExportRequest{
+          .preferred_location = tensorcast::common::memory::MemoryLocation::CPU,
+          .require_remote_source = false,
+          .allow_segmented_export = true,
+      });
+  REQUIRE(local_only_view_or.ok());
+  REQUIRE_FALSE(local_only_view_or->communicator_export.has_value());
+  REQUIRE(local_only_view_or->keepalive != nullptr);
+
+  auto rejected_or = entry->backing_record.retained_body_handle.acquire_export_view(
+      tensorcast::daemon::BodyExportRequest{
+          .preferred_location = tensorcast::common::memory::MemoryLocation::CPU,
+          .require_remote_source = true,
+          .allow_segmented_export = false,
+      });
+  REQUIRE_FALSE(rejected_or.ok());
+  REQUIRE(rejected_or.status().code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE("GetServerConfig advertises segmented communicator export policy", "[daemon][batch][transport_config]") {
+  auto enabled_engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto enabled_harness = make_harness(enabled_engine, make_daemon_options());
+
+  tensorcast::daemon::v2::GetServerConfigRequest enabled_req;
+  tensorcast::daemon::v2::GetServerConfigResponse enabled_resp;
+  grpc::ServerContext enabled_ctx;
+  REQUIRE(enabled_harness->service().GetServerConfig(&enabled_ctx, &enabled_req, &enabled_resp).ok());
+  REQUIRE(enabled_resp.batch_payload_communicator_source_enabled());
+  REQUIRE(enabled_resp.batch_payload_host_memory_export_enabled());
+  REQUIRE(enabled_resp.batch_payload_segmented_communicator_export_enabled());
+
+  auto disabled_engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto disabled_options = make_daemon_options();
+  disabled_options.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled = false;
+  auto disabled_harness = make_harness(disabled_engine, disabled_options);
+
+  tensorcast::daemon::v2::GetServerConfigRequest disabled_req;
+  tensorcast::daemon::v2::GetServerConfigResponse disabled_resp;
+  grpc::ServerContext disabled_ctx;
+  REQUIRE(disabled_harness->service().GetServerConfig(&disabled_ctx, &disabled_req, &disabled_resp).ok());
+  REQUIRE(disabled_resp.batch_payload_communicator_source_enabled());
+  REQUIRE(disabled_resp.batch_payload_host_memory_export_enabled());
+  REQUIRE_FALSE(disabled_resp.batch_payload_segmented_communicator_export_enabled());
 }
 
 TEST_CASE(

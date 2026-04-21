@@ -190,6 +190,8 @@ DaemonKernel::DaemonKernel(
               options_.byte_artifact_routing.payload_transport.batch_transport_protocol_version,
           .communicator_source_enabled = options_.byte_artifact_routing.payload_transport.communicator_source_enabled,
           .host_memory_export_enabled = options_.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+          .segmented_communicator_export_enabled =
+              options_.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled,
           .minimum_batch_transport_ttl = options_.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl,
           .transport_release_guard = options_.byte_artifact_routing.payload_transport.transport_release_guard,
           .comm_manager = engine_->get_shared_comm_manager(),

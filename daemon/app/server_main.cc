@@ -1233,6 +1233,10 @@ int main(int argc, char** argv) {
         daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled =
             pt.host_memory_export_enabled();
       }
+      if (pt.has_segmented_communicator_export_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled =
+            pt.segmented_communicator_export_enabled();
+      }
       if (pt.has_minimum_batch_transport_ttl()) {
         daemon_opts.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl =
             duration_to_absl(pt.minimum_batch_transport_ttl());

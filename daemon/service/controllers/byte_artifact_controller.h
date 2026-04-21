@@ -103,6 +103,7 @@ class ByteArtifactController {
     bool grpc_chunk_ref_enabled{false};
     bool communicator_source_enabled{false};
     bool host_memory_export_enabled{false};
+    bool segmented_communicator_export_enabled{false};
 
     [[nodiscard]] bool supports_v1() const {
       return protocol_version >= 1 && grpc_chunk_ref_enabled;
@@ -110,6 +111,10 @@ class ByteArtifactController {
 
     [[nodiscard]] bool supports_v2() const {
       return protocol_version >= 2 && communicator_source_enabled && host_memory_export_enabled;
+    }
+
+    [[nodiscard]] bool supports_segmented_communicator_export() const {
+      return supports_v2() && segmented_communicator_export_enabled;
     }
   };
 

@@ -74,6 +74,7 @@ struct DaemonOptions {
       uint32_t batch_transport_protocol_version{2};
       bool communicator_source_enabled{true};
       bool host_memory_export_enabled{true};
+      bool segmented_communicator_export_enabled{true};
       absl::Duration minimum_batch_transport_ttl{absl::Milliseconds(250)};
       absl::Duration transport_release_guard{absl::Seconds(1)};
     };

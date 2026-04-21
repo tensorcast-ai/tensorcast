@@ -317,6 +317,10 @@ message DaemonConfig {
       optional bool communicator_source_enabled = 9;
       // Enable host-memory export when serving communicator_source packs.
       optional bool host_memory_export_enabled = 10;
+      // Enable producer-side segmented communicator export for batch transport.
+      // This is the producer policy bit used by peers to decide whether
+      // communicator_source should prefer segmented no-pack realization.
+      optional bool segmented_communicator_export_enabled = 13;
       // Optional stricter floor for remaining transport TTL at issue time.
       google.protobuf.Duration minimum_batch_transport_ttl = 11;
       // Optional grace window kept after the nominal expiry before release.

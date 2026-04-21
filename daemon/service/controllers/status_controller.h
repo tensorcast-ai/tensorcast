@@ -46,6 +46,7 @@ class StatusController {
     bool batch_payload_grpc_chunk_ref_enabled{false};
     bool batch_payload_communicator_source_enabled{false};
     bool batch_payload_host_memory_export_enabled{false};
+    bool batch_payload_segmented_communicator_export_enabled{false};
     uint64_t max_batch_payload_bytes{0};
     std::shared_ptr<StartupCoordinator> startup_coordinator;
     WorkerDirectoryCache& worker_directory_cache;
@@ -81,6 +82,8 @@ class StatusController {
     resp.set_batch_payload_grpc_chunk_ref_enabled(d_.batch_payload_grpc_chunk_ref_enabled);
     resp.set_batch_payload_communicator_source_enabled(d_.batch_payload_communicator_source_enabled);
     resp.set_batch_payload_host_memory_export_enabled(d_.batch_payload_host_memory_export_enabled);
+    resp.set_batch_payload_segmented_communicator_export_enabled(
+        d_.batch_payload_segmented_communicator_export_enabled);
     resp.set_max_batch_payload_bytes(d_.max_batch_payload_bytes);
     rctx.mark_success();
     return grpc::Status::OK;

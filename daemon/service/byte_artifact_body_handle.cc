@@ -5,11 +5,13 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/components/communication_manager.h"
 
 namespace tensorcast::daemon {
 
@@ -29,9 +31,30 @@ std::string compute_sha256_hex_from_bytes(std::string_view payload) {
   return hex;
 }
 
+store::runtime::ingestion::BackingIdentity derive_backing_identity(
+    const store::loading::ReplicaHandle& replica_handle) {
+  return store::runtime::ingestion::BackingIdentity{
+      .physical_artifact_id = replica_handle.key().artifact_id,
+      .replica_key = replica_handle.key(),
+  };
+}
+
 } // namespace
 
 BodyHandle::BodyHandle(std::shared_ptr<CoreBacking> backing) : backing_(std::move(backing)) {}
+
+BodyHandle::CoreBacking::ExportLease::~ExportLease() {
+  if (!backing || backing->engine == nullptr || location == common::memory::MemoryLocation::NONE) {
+    return;
+  }
+  const absl::Status disable_status =
+      backing->engine->disable_remote_replica_access(backing->replica_handle.key(), location);
+  if (!disable_status.ok()) {
+    LOG(WARNING) << "BodyHandle export release failed"
+                 << " artifact_id=" << backing->replica_handle.key().artifact_id
+                 << " location=" << static_cast<int>(location) << " error=" << disable_status;
+  }
+}
 
 absl::StatusOr<BodyHandle> BodyHandle::create(
     store::StoreEngine& engine,
@@ -82,6 +105,76 @@ common::memory::MemoryLocation BodyHandle::location() const {
 
 bool BodyHandle::unique_owner() const {
   return backing_ && backing_.use_count() == 1;
+}
+
+absl::StatusOr<BodyExportCapability> BodyHandle::inspect_export_capability() const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  BodyExportCapability capability;
+  capability.memory_location = location();
+  capability.local_loader_available = true;
+  const auto comm_manager = backing_->engine->get_shared_comm_manager();
+  capability.remote_source_eligible = comm_manager->is_enabled();
+  capability.supports_segmented_export = capability.remote_source_eligible;
+  return capability;
+}
+
+absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportRequest& request) const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  const common::memory::MemoryLocation resolved_location = location();
+  if (request.preferred_location != common::memory::MemoryLocation::NONE &&
+      request.preferred_location != resolved_location) {
+    return absl::FailedPreconditionError("BodyHandle preferred export location is unavailable");
+  }
+  auto capability_or = inspect_export_capability();
+  if (!capability_or.ok()) {
+    return capability_or.status();
+  }
+  if (request.require_remote_source && !capability_or->remote_source_eligible) {
+    return absl::FailedPreconditionError("BodyHandle remote source export is unavailable");
+  }
+  if (request.require_remote_source && !request.allow_segmented_export) {
+    return absl::FailedPreconditionError("BodyHandle remote source export requires segmented export");
+  }
+
+  BodyExportView view;
+  view.backing_identity = derive_backing_identity(backing_->replica_handle);
+  view.binding_generation = binding_generation();
+  view.memory_location = resolved_location;
+
+  if (!request.require_remote_source) {
+    view.keepalive = std::shared_ptr<void>(backing_, backing_.get());
+    return view;
+  }
+
+  std::shared_ptr<CoreBacking::ExportLease> lease;
+  {
+    absl::MutexLock lock(&backing_->export_mu);
+    std::weak_ptr<CoreBacking::ExportLease>* export_slot = &backing_->cpu_export;
+    if (resolved_location == common::memory::MemoryLocation::GPU) {
+      export_slot = &backing_->gpu_export;
+    }
+    lease = export_slot->lock();
+    if (!lease) {
+      auto export_or =
+          backing_->engine->enable_remote_replica_access(backing_->replica_handle.key(), resolved_location);
+      if (!export_or.ok()) {
+        return export_or.status();
+      }
+      lease = std::make_shared<CoreBacking::ExportLease>();
+      lease->backing = backing_;
+      lease->location = resolved_location;
+      lease->registration = *export_or;
+      *export_slot = lease;
+    }
+  }
+
+  view.communicator_export = lease->registration;
+  view.keepalive = std::shared_ptr<void>(lease, lease.get());
+  return view;
 }
 
 absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> BodyHandle::make_loader() const {
