@@ -187,8 +187,38 @@ absl::StatusOr<ExportRegistration> CommunicationManager::register_memory(
   return info;
 }
 
+absl::Status CommunicationManager::activate_stable_local_backing(
+    const store::StableLocalBackingRef& backing,
+    std::shared_ptr<void> keepalive) {
+  if (!is_enabled()) {
+    return absl::FailedPreconditionError("Communication engine not initialized");
+  }
+  return comm_engine_->activate_stable_local_backing(backing, std::move(keepalive));
+}
+
+absl::Status CommunicationManager::deactivate_stable_local_backing(std::string_view backing_id) {
+  if (!is_enabled()) {
+    return absl::OkStatus();
+  }
+  return comm_engine_->deactivate_stable_local_backing(backing_id);
+}
+
+bool CommunicationManager::stable_local_backing_supported_for_test() const {
+  return comm_engine_ != nullptr && comm_engine_->stable_local_backing_supported_for_test();
+}
+
+bool CommunicationManager::stable_local_backing_active_for_test(std::string_view backing_id) const {
+  return comm_engine_ != nullptr && comm_engine_->stable_local_backing_active_for_test(backing_id);
+}
+
 void CommunicationManager::set_routing_context(std::shared_ptr<communicator::routing::RoutingContext> routing_context) {
+  absl::MutexLock lock(&routing_context_mu_);
   routing_context_ = std::move(routing_context);
+}
+
+std::shared_ptr<communicator::routing::RoutingContext> CommunicationManager::routing_context() const {
+  absl::MutexLock lock(&routing_context_mu_);
+  return routing_context_;
 }
 
 } // namespace tensorcast::store::components

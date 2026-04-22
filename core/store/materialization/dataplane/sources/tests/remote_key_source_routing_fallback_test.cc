@@ -489,7 +489,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RemoteKeySource batched direct write capability rejects direct RDMA without routed metadata",
+    "RemoteKeySource batched direct write capability allows direct RDMA without routed metadata",
     "[store][p2p][routing][direct]") {
   constexpr std::size_t kArtifactBytes = 1024;
   const int dst_port = require_available_port_or_skip(56750);
@@ -509,7 +509,7 @@ TEST_CASE(
       });
 
   REQUIRE(source.supports_direct_write_at());
-  CHECK_FALSE(source.supports_batched_direct_write_at());
+  CHECK(source.supports_batched_direct_write_at());
 }
 
 TEST_CASE(

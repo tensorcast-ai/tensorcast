@@ -9,6 +9,7 @@
 
 #include "absl/log/log.h"
 #include "absl/time/time.h"
+#include "core/store/components/endpoint_id.h"
 #include "daemon/state/pid_monitor.h"
 #include "daemon/state/sweep_tasks.h"
 #include "daemon/util/grpc_daemon_transport.h"
@@ -195,9 +196,33 @@ DaemonKernel::DaemonKernel(
           .minimum_batch_transport_ttl = options_.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl,
           .transport_release_guard = options_.byte_artifact_routing.payload_transport.transport_release_guard,
           .comm_manager = engine_->get_shared_comm_manager(),
+          .local_cpu_endpoint_id_provider = [identity_store = identity_store_.get()]() -> std::string {
+            if (identity_store == nullptr) {
+              return "";
+            }
+            const std::string node_id = identity_store->node_id();
+            if (node_id.empty()) {
+              return "";
+            }
+            return store::components::derive_endpoint_id(node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0);
+          },
           .inter_daemon_channel_credentials = inter_daemon_channel_credentials_,
           .inter_daemon_grpc_security = options_.inter_daemon_grpc_security,
       });
+  region_registry_->set_pre_cleanup_callback([this](const IpcRegionRegistry::RegionDescriptor& desc) {
+    if (desc.memory_kind != IpcRegionRegistry::MemoryKind::kHostShared || !desc.daemon_managed) {
+      return;
+    }
+    std::shared_ptr<store::components::CommunicationManager> comm_manager = engine_->get_shared_comm_manager();
+    if (!comm_manager->is_enabled()) {
+      return;
+    }
+    auto status = comm_manager->deactivate_stable_local_backing(desc.region_id);
+    if (!status.ok()) {
+      LOG(WARNING) << "stable_local_backing.deactivate_failed"
+                   << " backing_id=" << desc.region_id << " status=" << status;
+    }
+  });
   retire_gates_ = std::make_unique<RetireGates>(refs_, *lifecycle_mgr_, locks_);
 }
 

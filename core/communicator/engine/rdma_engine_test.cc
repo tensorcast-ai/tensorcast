@@ -35,6 +35,15 @@ class CommunicatorTestPeer {
     return communicator.channels_;
   }
 
+  static auto stable_local_backing_state(Communicator& communicator, const std::string& backing_id) {
+    absl::MutexLock lock(&communicator.stable_local_backings_mu_);
+    auto it = communicator.stable_local_backings_.find(backing_id);
+    if (it == communicator.stable_local_backings_.end()) {
+      return std::shared_ptr<Communicator::StableLocalBackingState>{};
+    }
+    return it->second;
+  }
+
   static auto on_receive_response(
       Communicator& communicator,
       const channel_t& channel,
@@ -61,6 +70,25 @@ class CommunicatorTestPeer {
       return false;
     }
     return !communicator.rdma_context_->list_devs().empty();
+  }
+
+  static bool stable_local_backing_active(Communicator& communicator, const std::string& backing_id) {
+    return communicator.stable_local_backing_active_for_test(backing_id);
+  }
+
+  static size_t stable_local_backing_chunk_count(
+      Communicator& communicator,
+      const std::string& backing_id,
+      int16_t rail_id) {
+    return communicator.stable_local_backing_chunk_count_for_test(backing_id, rail_id);
+  }
+
+  static auto prepare_read_plan(
+      Communicator& communicator,
+      const routing::ReadPlan& plan,
+      uint64_t request_id,
+      std::string_view tensor_key) {
+    return communicator.prepare_read_plan(plan, request_id, tensor_key);
   }
 };
 
@@ -1602,6 +1630,270 @@ TEST_CASE("READ_PLAN_RESPONSE_EX zero-copy windows skip staged plan ACK queueing
     absl::MutexLock lock(&read_request->ack_mu_);
     CHECK(read_request->pending_ack_windows_.empty());
     CHECK(read_request->segment_window_queue_.empty());
+  }
+
+  CommunicatorTestPeer::pending_requests(client).erase_if_present(read_request->get_key());
+  if (CommunicatorTestPeer::channels(client).exist(read_request->get_dst_url())) {
+    CommunicatorTestPeer::channels(client).del(read_request->get_dst_url());
+  }
+  ::close(sv[1]);
+  CommunicatorTestPeer::stop_workers(client);
+}
+
+TEST_CASE(
+    "Communicator stable local backing lazily registers slot-aligned chunks on RDMA rails",
+    "[rdma][communicator][stable_backing]") {
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  cfg.mutable_rdma()->set_enable_stable_local_mr_reuse(true);
+  cfg.mutable_rdma()->set_stable_local_mr_reuse_chunk_slots(2);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(client)) {
+    CommunicatorTestPeer::stop_workers(client);
+    SUCCEED("Skipping stable backing preregistration test: no RDMA net devices available");
+    return;
+  }
+
+  auto net_dev = CommunicatorTestPeer::rdma_context(client)->get_best_dev(COMMUNICATE_ENGINE_DEV_CPU, -1, -1, "mr");
+  REQUIRE(net_dev != nullptr);
+
+  std::array<uint8_t, 128> local_buffer{};
+  tensorcast::store::StableLocalBackingRef backing{
+      .kind = tensorcast::store::StableLocalBackingKind::kHostSharedRegion,
+      .backing_id = "region:test-stable-backing",
+      .backing_base_addr = reinterpret_cast<uint64_t>(local_buffer.data()),
+      .backing_bytes = static_cast<uint64_t>(local_buffer.size()),
+      .slot_bytes = 32,
+      .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+      .dev_id = 0,
+  };
+
+  REQUIRE(client.activate_stable_local_backing(backing, std::make_shared<int>(1)).ok());
+  auto state = CommunicatorTestPeer::stable_local_backing_state(client, backing.backing_id);
+  REQUIRE(state != nullptr);
+  CHECK(CommunicatorTestPeer::stable_local_backing_active(client, backing.backing_id));
+  CHECK(
+      CommunicatorTestPeer::stable_local_backing_chunk_count(client, backing.backing_id, net_dev->get_rail_id()) == 0);
+
+  tensorcast::communicator::routing::ReadPlan plan;
+  plan.local_regions = {
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()),
+          .bytes = 32,
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+          .stable_backing = backing,
+      },
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()) + 32,
+          .bytes = 32,
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+          .stable_backing = backing,
+      },
+  };
+  plan.source_slices = {
+      tensorcast::communicator::routing::SourceSlice{
+          .authority_id = "authority-0",
+          .route =
+              tensorcast::communicator::routing::ReadRouteContext{
+                  .local_endpoint_id = "cpu://local",
+                  .remote_endpoint_id = "cpu://remote",
+                  .protocol = tensorcast::communicator::routing::ConnectionProtocol::kRdma,
+                  .rail_id = net_dev->get_rail_id(),
+              },
+          .tensor_key = "source-tensor",
+          .remote_offset = 0,
+          .bytes = 64,
+      },
+  };
+  plan.slices = {
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 0,
+          .source_slice_offset = 0,
+          .local_region_offset = 0,
+          .bytes = 32,
+      },
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 1,
+          .source_slice_offset = 32,
+          .local_region_offset = 0,
+          .bytes = 32,
+      },
+  };
+
+  auto prepared_or = CommunicatorTestPeer::prepare_read_plan(client, plan, /*request_id=*/95, "source-tensor");
+  REQUIRE(prepared_or.ok());
+  auto prepared = *prepared_or;
+  REQUIRE(prepared != nullptr);
+  CHECK(prepared->local_registration_mode == "stable_backing_reuse");
+  CHECK(prepared->stable_backing_id == backing.backing_id);
+  CHECK(prepared->stable_backing_chunk_bytes == 64);
+  CHECK(prepared->stable_backing_chunk_count == 1);
+  CHECK(prepared->stable_backing_chunk_cache_hits == 1);
+  CHECK(prepared->stable_backing_chunk_cache_misses == 1);
+  REQUIRE(prepared->local_regions.size() == 2);
+  REQUIRE(prepared->local_regions[0].mr != nullptr);
+  REQUIRE(prepared->local_regions[1].mr != nullptr);
+  CHECK(prepared->local_regions[0].mr == prepared->local_regions[1].mr);
+  CHECK(
+      CommunicatorTestPeer::stable_local_backing_chunk_count(client, backing.backing_id, net_dev->get_rail_id()) == 1);
+
+  REQUIRE(client.deactivate_stable_local_backing(backing.backing_id).ok());
+  CHECK(CommunicatorTestPeer::stable_local_backing_state(client, backing.backing_id) == nullptr);
+  CommunicatorTestPeer::stop_workers(client);
+}
+
+TEST_CASE("READ_PLAN_RESPONSE_EX uses prepared direct MRs without request tensors", "[rdma][communicator][read_plan]") {
+  using tensorcast::communicator::base::CHANNEL_RDMA;
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(client)) {
+    CommunicatorTestPeer::stop_workers(client);
+    SUCCEED("Skipping direct-MR READ_PLAN_RESPONSE_EX test: no RDMA net devices available");
+    return;
+  }
+
+  auto net_dev = CommunicatorTestPeer::rdma_context(client)->get_best_dev(COMMUNICATE_ENGINE_DEV_CPU, -1, -1, "mr");
+  REQUIRE(net_dev != nullptr);
+  const std::string local_dev_name = net_dev->get_name();
+  const std::string remote_dev_name = "peer.plan.direct.mr.nic";
+
+  std::array<uint8_t, 64> local_buffer{};
+  auto local_tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "read_plan_region_direct_mr",
+      reinterpret_cast<uint64_t>(local_buffer.data()),
+      static_cast<uint64_t>(local_buffer.size()),
+      COMMUNICATE_ENGINE_DEV_CPU,
+      net_dev);
+  local_tensor->register_mr(net_dev.get());
+  local_tensor->set_read_ready();
+  auto* mr = local_tensor->get_mr(net_dev);
+  REQUIRE(mr != nullptr);
+
+  auto prepared = std::make_shared<tensorcast::communicator::transport::PreparedReadPlan>();
+  prepared->logical_plan.local_regions.push_back(
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()),
+          .bytes = static_cast<uint64_t>(local_buffer.size()),
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+      });
+  prepared->logical_plan.source_slices.push_back(
+      tensorcast::communicator::routing::SourceSlice{
+          .authority_id = "authority",
+          .route =
+              tensorcast::communicator::routing::ReadRouteContext{
+                  .local_endpoint_id = "local",
+                  .remote_endpoint_id = "remote",
+                  .protocol = tensorcast::communicator::routing::ConnectionProtocol::kRdma,
+                  .rail_id = net_dev->get_rail_id(),
+              },
+          .tensor_key = "plan-source-direct-mr",
+          .remote_offset = 0,
+          .bytes = static_cast<uint64_t>(local_buffer.size()),
+      });
+  prepared->logical_plan.slices.push_back(
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 0,
+          .local_region_offset = 0,
+          .bytes = static_cast<uint64_t>(local_buffer.size()),
+      });
+  prepared->placements_by_source_slice = {
+      {{.local_region_index = 0,
+        .local_region_offset = 0,
+        .source_slice_offset = 0,
+        .bytes = static_cast<uint64_t>(local_buffer.size())}}};
+  prepared->local_regions.push_back(
+      tensorcast::communicator::transport::PreparedLocalRegion{
+          .logical_region = prepared->logical_plan.local_regions.front(),
+          .rail_id = net_dev->get_rail_id(),
+          .nic_name = net_dev->get_name(),
+          .tensor = nullptr,
+          .mr = mr,
+          .keepalive = std::make_shared<int>(1),
+      });
+  prepared->total_bytes = static_cast<uint64_t>(local_buffer.size());
+  prepared->local_nic = net_dev->get_name();
+  prepared->rail_id = net_dev->get_rail_id();
+
+  auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
+      "plan_display_direct_mr",
+      "127.0.0.1",
+      65016,
+      prepared,
+      /*request_id=*/96,
+      net_dev->get_rail_id());
+  CommunicatorTestPeer::pending_requests(client).put(read_request->get_key(), read_request);
+
+  int sv[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  auto control_ctx = std::make_shared<tensorcast::communicator::transport::TcpContext>();
+  struct sockaddr_in remote_addr{};
+  remote_addr.sin_family = AF_INET;
+  remote_addr.sin_port = htons(65016);
+  remote_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  auto control_transport =
+      std::make_shared<tensorcast::communicator::transport::TcpTransport>(control_ctx.get(), sv[0], remote_addr);
+  auto channel = std::make_shared<Channel>(
+      control_transport,
+      CHANNEL_RDMA,
+      /*buffers_per_flow=*/4,
+      /*max_window_segments=*/4);
+  CommunicatorTestPeer::channels(client).put(read_request->get_dst_url(), channel);
+
+  const uint32_t payload_size = sizeof(ProtoReadPlanResponseExHeader) + sizeof(ProtoReadPlanResponseExSeg);
+  auto response = std::make_shared<EngineMessage>(ENGINE_OP_READ_PLAN_RESPONSE_EX, payload_size);
+  auto* hdr = response->get_payload<ProtoReadPlanResponseExHeader>();
+  hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+  hdr->staged = 1;
+  communicator::misc::STRNCPY(hdr->nic_name, remote_dev_name, kMaxDevName);
+  hdr->request_id = 96;
+  hdr->num_segments = 1;
+  hdr->window_seq = 9;
+  hdr->credit_granted = 1;
+  hdr->more_segments = 0;
+  hdr->zero_copy = 0;
+  hdr->rail_id = net_dev->get_rail_id();
+  auto* seg = reinterpret_cast<ProtoReadPlanResponseExSeg*>(
+      reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadPlanResponseExHeader));
+  seg->source_slice_index = 0;
+  seg->source_slice_offset = 0;
+  seg->addr = 0xCAFE0000;
+  seg->bytes = static_cast<uint32_t>(local_buffer.size());
+  seg->rkey = 0x3456;
+
+  auto status = CommunicatorTestPeer::on_receive_response(client, channel, control_transport, response);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  auto endpoint = channel->get_rdma_endpoint(local_dev_name, remote_dev_name);
+  REQUIRE(endpoint != nullptr);
+  {
+    absl::MutexLock lock(&endpoint->mu);
+    REQUIRE(endpoint->pending_reads.size() == 1);
+    REQUIRE(endpoint->pending_reads.front().segments.size() == 1);
+    const auto& rdma_seg = endpoint->pending_reads.front().segments[0];
+    REQUIRE(rdma_seg.local_addr == reinterpret_cast<uint64_t>(local_buffer.data()));
+    REQUIRE(rdma_seg.local_lkey == mr->lkey);
+    REQUIRE(rdma_seg.length == local_buffer.size());
   }
 
   CommunicatorTestPeer::pending_requests(client).erase_if_present(read_request->get_key());

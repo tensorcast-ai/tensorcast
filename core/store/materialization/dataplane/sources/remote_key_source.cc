@@ -363,6 +363,7 @@ absl::StatusOr<communicator::routing::ReadPlan> RemoteKeySource::build_routed_re
             .bytes = window.length,
             .dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
             .dev_id = 0,
+            .stable_backing = window.stable_backing,
         });
   }
 
@@ -762,8 +763,9 @@ bool RemoteKeySource::supports_batched_direct_write_at() const {
   if (!frozen_or.ok()) {
     return false;
   }
-  return frozen_or->mode == DirectWriteMode::kRouted && frozen_or->routed_communicator != nullptr &&
-      frozen_or->route_context.protocol == communicator::routing::ConnectionProtocol::kRdma &&
+  // Routed metadata is preferred, but direct RDMA sources can still issue a
+  // batched engine.read_plan(ip, port) when the source/target endpoints are known.
+  return frozen_or->route_context.protocol == communicator::routing::ConnectionProtocol::kRdma &&
       !frozen_or->route_context.local_endpoint_id.empty() && !frozen_or->route_context.remote_endpoint_id.empty();
 }
 
@@ -875,11 +877,14 @@ absl::StatusOr<size_t> RemoteKeySource::read_into_at(
 absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
     absl::Span<const DirectWriteOp> ops,
     const DirectWriteGrant& grant) {
+  const auto total_started_at = std::chrono::steady_clock::now();
   if (ops.empty()) {
     return static_cast<size_t>(0);
   }
 
+  const auto freeze_started_at = std::chrono::steady_clock::now();
   auto frozen_or = freeze_direct_write_context();
+  const auto freeze_finished_at = std::chrono::steady_clock::now();
   if (!frozen_or.ok()) {
     return frozen_or.status();
   }
@@ -896,7 +901,9 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
     return execute_direct_write_batch_fallback(ops, grant, *frozen_or);
   }
 
+  const auto plan_started_at = std::chrono::steady_clock::now();
   auto plan_or = build_routed_read_plan(ops, grant, *frozen_or);
+  const auto plan_finished_at = std::chrono::steady_clock::now();
   if (!plan_or.ok()) {
     return plan_or.status();
   }
@@ -920,11 +927,13 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
           << " read_slices=" << plan_or->slices.size() << " local_regions=" << plan_or->local_regions.size()
           << " bytes=" << total_bytes;
 
+  const auto submit_started_at = std::chrono::steady_clock::now();
   absl::StatusOr<communicator::transport::future_read_result_t> future_or =
       frozen_or->mode == DirectWriteMode::kRouted && frozen_or->routed_communicator != nullptr
       ? submit_routed_read_plan(frozen_or->routed_communicator, *plan_or)
       : absl::StatusOr<communicator::transport::future_read_result_t>{
             options_.comm_engine->read_plan(*plan_or, options_.ip, options_.port)};
+  const auto submit_finished_at = std::chrono::steady_clock::now();
   if (!future_or.ok()) {
     if (is_pre_issue_direct_write_capability_miss(future_or.status())) {
       log_read_plan_direct_write_fallback(options_, frozen_or->route_context.protocol, future_or.status());
@@ -934,7 +943,9 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
   }
 
   communicator::transport::future_read_result_t future = std::move(*future_or);
+  const auto initial_poll_started_at = std::chrono::steady_clock::now();
   const std::future_status initial_status = future.wait_for(std::chrono::milliseconds(0));
+  const auto initial_poll_finished_at = std::chrono::steady_clock::now();
   if (initial_status == std::future_status::ready) {
     auto result = future.get();
     if (is_pre_issue_direct_write_capability_miss(result.status)) {
@@ -944,17 +955,73 @@ absl::StatusOr<size_t> RemoteKeySource::readv_into_at(
     if (!result.status.ok()) {
       return result.status;
     }
+    VLOG(2)
+        << "remote_key_source.readv_direct_write_summary"
+        << " authority=" << (options_.authority_id.empty() ? "<unset>" : options_.authority_id)
+        << " artifact=" << (options_.artifact_id.empty() ? "<unset>" : options_.artifact_id)
+        << " op_count=" << ops.size() << " source_slices=" << plan_or->source_slices.size()
+        << " read_slices=" << plan_or->slices.size() << " local_regions=" << plan_or->local_regions.size()
+        << " bytes=" << total_bytes
+        << " protocol=" << communicator::routing::to_string(frozen_or->route_context.protocol)
+        << " ready_immediately=true"
+        << " freeze_ms="
+        << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(freeze_finished_at - freeze_started_at)
+               .count()
+        << " build_plan_ms="
+        << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(plan_finished_at - plan_started_at)
+               .count()
+        << " submit_ms="
+        << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(submit_finished_at - submit_started_at)
+               .count()
+        << " initial_poll_ms="
+        << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+               initial_poll_finished_at - initial_poll_started_at)
+               .count()
+        << " await_ms=0"
+        << " total_ms="
+        << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+               std::chrono::steady_clock::now() - total_started_at)
+               .count();
     return total_bytes;
   }
 
+  const auto await_started_at = std::chrono::steady_clock::now();
   auto result_or = await_read_result(
       future, plan_or->source_slices.front().tensor_key, plan_or->source_slices.front().remote_offset, total_bytes);
+  const auto await_finished_at = std::chrono::steady_clock::now();
   if (!result_or.ok()) {
     return result_or.status();
   }
   if (!result_or->status.ok()) {
     return result_or->status;
   }
+  VLOG(2)
+      << "remote_key_source.readv_direct_write_summary"
+      << " authority=" << (options_.authority_id.empty() ? "<unset>" : options_.authority_id)
+      << " artifact=" << (options_.artifact_id.empty() ? "<unset>" : options_.artifact_id) << " op_count=" << ops.size()
+      << " source_slices=" << plan_or->source_slices.size() << " read_slices=" << plan_or->slices.size()
+      << " local_regions=" << plan_or->local_regions.size() << " bytes=" << total_bytes
+      << " protocol=" << communicator::routing::to_string(frozen_or->route_context.protocol)
+      << " ready_immediately=false"
+      << " freeze_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(freeze_finished_at - freeze_started_at)
+             .count()
+      << " build_plan_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(plan_finished_at - plan_started_at)
+             .count()
+      << " submit_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(submit_finished_at - submit_started_at)
+             .count()
+      << " initial_poll_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+             initial_poll_finished_at - initial_poll_started_at)
+             .count()
+      << " await_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(await_finished_at - await_started_at)
+             .count()
+      << " total_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(await_finished_at - total_started_at)
+             .count();
   return total_bytes;
 }
 

@@ -9,6 +9,7 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/routing/types.h"
 #include "core/communicator/transport/partition_tensor.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 
 namespace tensorcast::communicator::transport {
 
@@ -79,10 +81,19 @@ struct PreparedSourcePlacement {
 };
 
 struct PreparedLocalRegion {
+  struct ChunkPlacement {
+    uint64_t local_region_offset = 0;
+    uint64_t bytes = 0;
+    struct ibv_mr* mr = nullptr;
+  };
+
   routing::LocalRegion logical_region;
   int16_t rail_id = -1;
   std::string nic_name;
   tensor_t tensor;
+  struct ibv_mr* mr = nullptr;
+  std::shared_ptr<void> keepalive;
+  std::vector<ChunkPlacement> chunk_placements;
 };
 
 struct PreparedReadPlan {
@@ -92,6 +103,13 @@ struct PreparedReadPlan {
   int16_t rail_id = -1;
   std::string local_nic;
   uint64_t total_bytes = 0;
+  std::string local_registration_mode = "request_scoped";
+  std::string local_registration_fallback_reason;
+  std::string stable_backing_id;
+  uint64_t stable_backing_chunk_bytes = 0;
+  uint32_t stable_backing_chunk_count = 0;
+  uint32_t stable_backing_chunk_cache_hits = 0;
+  uint32_t stable_backing_chunk_cache_misses = 0;
   std::vector<PreparedLocalRegion> local_regions;
   std::vector<std::vector<PreparedSourcePlacement>> placements_by_source_slice;
 };

@@ -410,6 +410,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":sink",
+        "//core/store/materialization/contracts:stable_local_backing",
         "@abseil-cpp//absl/types:span",
         "@gsl",
     ],

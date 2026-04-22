@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,6 +56,7 @@ class PayloadTransportBroker {
     absl::Duration minimum_batch_transport_ttl{absl::Milliseconds(250)};
     absl::Duration transport_release_guard{absl::Seconds(1)};
     std::shared_ptr<store::components::CommunicationManager> comm_manager;
+    std::function<std::string()> local_cpu_endpoint_id_provider;
     std::shared_ptr<grpc::ChannelCredentials> inter_daemon_channel_credentials;
     DaemonOptions::InterDaemonGrpcSecurity inter_daemon_grpc_security{};
   };

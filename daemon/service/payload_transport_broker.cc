@@ -3003,6 +3003,13 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
   }
 
   std::string local_endpoint_id = source.local_endpoint_id_hint();
+  std::string local_endpoint_id_mode = local_endpoint_id.empty() ? "missing" : "transport_hint";
+  if (local_endpoint_id.empty() && options_.local_cpu_endpoint_id_provider) {
+    local_endpoint_id = options_.local_cpu_endpoint_id_provider();
+    if (!local_endpoint_id.empty()) {
+      local_endpoint_id_mode = "local_provider";
+    }
+  }
   if (local_endpoint_id.empty()) {
     const absl::Time resolve_started_at = absl::Now();
     auto local_entry_or =
@@ -3011,6 +3018,7 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
     if (local_entry_or.ok() && !local_entry_or->node_id.empty()) {
       local_endpoint_id = store::components::derive_endpoint_id(
           local_entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0);
+      local_endpoint_id_mode = "worker_directory";
     }
   }
 
@@ -3044,6 +3052,9 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
           << " transport_id=" << metadata_or->transport_id << " remote=true"
           << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
           << " producer_host=" << producer_host << " producer_port=" << producer_port
+          << " local_endpoint_id_mode=" << local_endpoint_id_mode
+          << " local_endpoint_id_present=" << !local_endpoint_id.empty()
+          << " remote_endpoint_id_present=" << !remote_endpoint_id.empty()
           << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size()
           << " endpoint_resolve_ms=" << absl::ToDoubleMilliseconds(endpoint_resolve_elapsed)
           << " total_open_ms=" << absl::ToDoubleMilliseconds(absl::Now() - open_started_at);

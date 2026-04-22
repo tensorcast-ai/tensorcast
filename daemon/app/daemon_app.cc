@@ -166,10 +166,13 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       app->options_.async_runtime,
       app->options_.daemon_options,
       app->options_.global_store_client);
+  std::shared_ptr<store::components::CommunicationManager> comm_manager =
+      app->kernel_->engine().get_shared_comm_manager();
 
   app->external_target_access_service_ = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
+      .comm_manager = comm_manager.get(),
   });
   app->byte_artifact_controller_ = std::make_unique<ByteArtifactController>(
       ByteArtifactController::Dep{

@@ -31,6 +31,8 @@ message RdmaConfig {
   StagedRdmaBackend staging_backend = 8;
   uint64 vram_pool_bytes_per_gpu = 9;
   uint64 vram_slice_bytes = 10;
+  optional bool enable_stable_local_mr_reuse = 11; // default: true
+  uint32 stable_local_mr_reuse_chunk_slots = 12; // default: 1
 }
 
 message TransportConfig {

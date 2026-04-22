@@ -61,11 +61,18 @@ sc_header_only_library(
 )
 
 sc_header_only_library(
+    name = "stable_local_backing",
+    hdrs = ["stable_local_backing.h"],
+    visibility = ["//visibility:public"],
+)
+
+sc_header_only_library(
     name = "loading_spec",
     hdrs = ["loading_spec.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":byte_range_map",
+        ":stable_local_backing",
         ":view_id",
         "//core/common:ready_signal_lib",
         "//core/store:communication_types",

@@ -1,6 +1,8 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
+#include <chrono>
+#include <limits>
 #include <utility>
 
 #include "absl/log/log.h"
@@ -332,6 +334,28 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     fallback_mr = local_tensor->get_mr_by_rail(request->get_rail_id());
   }
   request->record_rdma_queue_done();
+  uint64_t total_bytes = 0;
+  uint64_t local_addr_min = std::numeric_limits<uint64_t>::max();
+  uint64_t local_addr_max_end = 0;
+  uint64_t remote_addr_min = std::numeric_limits<uint64_t>::max();
+  uint64_t remote_addr_max_end = 0;
+  std::vector<uint32_t> local_lkeys;
+  local_lkeys.reserve(segs.size());
+  for (const auto& seg : segs) {
+    const uint64_t length = seg.length;
+    total_bytes += length;
+    local_addr_min = std::min(local_addr_min, seg.local_addr);
+    local_addr_max_end = std::max(local_addr_max_end, seg.local_addr + length);
+    remote_addr_min = std::min(remote_addr_min, seg.remote_addr);
+    remote_addr_max_end = std::max(remote_addr_max_end, seg.remote_addr + length);
+    if (seg.local_lkey != 0) {
+      local_lkeys.push_back(seg.local_lkey);
+    }
+  }
+  std::sort(local_lkeys.begin(), local_lkeys.end());
+  local_lkeys.erase(std::unique(local_lkeys.begin(), local_lkeys.end()), local_lkeys.end());
+
+  const auto post_send_started_at = std::chrono::steady_clock::now();
   std::array<std::vector<size_t>, kMaxQpCount> qp_seg_indices;
   const size_t start_qp = static_cast<size_t>(next_qp_index_.fetch_add(static_cast<int>(segs.size())));
   for (size_t i = 0; i < segs.size(); ++i) {
@@ -412,8 +436,29 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     }
   }
 
+  const auto post_send_finished_at = std::chrono::steady_clock::now();
+  size_t max_qp_segments = 0;
+  size_t min_qp_segments = std::numeric_limits<size_t>::max();
+  for (int qp_index = 0; qp_index < qp_count_; ++qp_index) {
+    const size_t qp_segments = qp_seg_indices[qp_index].size();
+    if (qp_segments == 0) {
+      continue;
+    }
+    max_qp_segments = std::max(max_qp_segments, qp_segments);
+    min_qp_segments = std::min(min_qp_segments, qp_segments);
+  }
   LOG(INFO) << "[rdma_transport] Posted " << total_posted << " RDMA READ WRs across " << qp_used
             << " QPs for request=" << request->get_key();
+  VLOG(2)
+      << "rdma_transport.read_multi_summary"
+      << " request=" << request->get_key() << " request_id=" << request->request_id()
+      << " is_read_plan=" << request->is_read_plan() << " window_seq=" << segs.front().window_seq
+      << " segs=" << segs.size() << " total_bytes=" << total_bytes
+      << " local_span_bytes=" << (local_addr_max_end - local_addr_min)
+      << " remote_span_bytes=" << (remote_addr_max_end - remote_addr_min) << " unique_lkeys=" << local_lkeys.size()
+      << " qp_used=" << qp_used << " qp_segments_min=" << (qp_used == 0 ? 0 : min_qp_segments)
+      << " qp_segments_max=" << max_qp_segments << " posted_wr=" << total_posted << " post_send_us="
+      << std::chrono::duration_cast<std::chrono::microseconds>(post_send_finished_at - post_send_started_at).count();
   return misc::SUCCESS;
 }
 

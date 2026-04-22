@@ -4,7 +4,7 @@ title: Composite Materialization and Vectored Direct-Write
 status: implemented
 areas: ["core", "daemon", "docs", "benchmarks", "integrations"]
 created: 2026-04-19
-last_updated: 2026-04-20
+last_updated: 2026-04-22
 related_code:
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
@@ -175,11 +175,16 @@ is one producer of compatible sources, not the owner of transport behavior.
 
 ## Current `DirectWriteGrant` shape
 
-Keep and narrow.
+Keep transport-neutral, but widen enough to name stable local backing.
 
-`DirectWriteGrant` remains transport-neutral. It must continue to carry only
-target windows plus keepalive state. It must not grow RDMA-specific `lkey`,
-communicator session ids, or destination publication keys in the first cut.
+`DirectWriteGrant` remains transport-neutral. It must not grow RDMA-specific
+`lkey`, communicator session ids, or destination publication keys in the first
+cut.
+
+However, the target authority may attach additive stable local backing metadata
+to a direct-write window when that window is carved from one long-lived local
+backing object such as a daemon-managed `HOST_SHARED` slab. This metadata is
+still local placement and lifetime information, not transport state.
 
 # Architecture & Interfaces
 
@@ -202,8 +207,9 @@ Normative rules:
 3. One `ReadPlan` targets one resolved remote endpoint and one selected routed
    channel. Multi-hop or multi-endpoint striping remains higher-level planner
    work.
-4. Destination memory remains initiator-local and request-scoped. It is not
-   published as a new global key family.
+4. Destination memory remains initiator-local. The issued destination window is
+   request-scoped even when it is carved from one longer-lived stable local
+   backing. Destination memory is not published as a new global key family.
 5. Generic execution semantics remain strict. Narrower profile-specific retry
    or overwrite policies may only layer above this seam; they do not relax the
    generic communicator or materialization contract.
@@ -249,13 +255,21 @@ Semantics:
 6. `TargetLayoutHostSink::plan_direct_write(...)` remains the target authority
    seam. The sink already supports multiple windows, so no target abstraction
    split is needed.
-7. `supports_direct_write_at()` is only a coarse, context-free hint. It must
+7. A target authority may attach transport-neutral stable local backing
+   metadata to a direct-write window when it can prove that the window is a
+   slice of one long-lived local backing object with quiesced teardown
+   semantics.
+8. Stable local backing metadata is local placement state only. It is not part
+   of artifact identity, routed truth, remote source capability, or request
+   semantics.
+9. `supports_direct_write_at()` is only a coarse, context-free hint. It must
    not be treated as the final fast-path eligibility decision.
-8. Final fast-path eligibility is decided during pre-issue prepare and lowering
-   when route, protocol, source shape, and fallback topology are known.
-9. Route-dependent capability must not be permanently cached during source
-   construction. Construction-time helpers may cache only context-free facts.
-10. A source that advertises `supports_batched_direct_write_at()` must reject
+10. Final fast-path eligibility is decided during pre-issue prepare and
+    lowering when route, protocol, source shape, target backing, and fallback
+    topology are known.
+11. Route-dependent capability must not be permanently cached during source
+    construction. Construction-time helpers may cache only context-free facts.
+12. A source that advertises `supports_batched_direct_write_at()` must reject
     deterministic batch validation errors before issuing any target writes.
     Partial target mutation is only permitted after the batch has crossed the
     issue boundary and a real execution failure occurs.
@@ -371,11 +385,26 @@ struct ReadRouteContext {
   int16_t rail_id = -1;
 };
 
+enum class StableLocalBackingKind {
+  kNone = 0,
+  kHostSharedRegion = 1,
+};
+
+struct StableLocalBackingRef {
+  StableLocalBackingKind kind = StableLocalBackingKind::kNone;
+  std::string backing_id;
+  uint64_t backing_base_addr = 0;
+  uint64_t backing_bytes = 0;
+  int dev_type = base::COMMUNICATE_ENGINE_DEV_CPU;
+  int dev_id = 0;
+};
+
 struct LocalRegion {
   uint64_t addr = 0;
   uint64_t bytes = 0;
   int dev_type = base::COMMUNICATE_ENGINE_DEV_CPU;
   int dev_id = 0;
+  std::optional<StableLocalBackingRef> stable_backing;
 };
 
 struct SourceSlice {
@@ -422,26 +451,35 @@ Rules:
 5. `local_regions` are the correct abstraction for destination memory.
    `local_memory_keys[]` is explicitly rejected because destination memory is
    not a globally published source capability.
-6. The `LocalRegion` API remains extensible enough for future CPU, GPU, or
+6. `LocalRegion` may optionally carry one transport-neutral stable local
+   backing reference. This names the longer-lived local placement object that
+   owns the requested `[addr, bytes)` window.
+7. Stable local backing references are daemon-local and additive. They do not
+   change request semantics if absent, and they must not be serialized into a
+   remote destination capability.
+8. The first concrete `StableLocalBackingKind` is `kHostSharedRegion`,
+   intended for long-lived daemon-managed `HOST_SHARED` slabs whose local
+   mapping, bounds, and teardown are already owned by the daemon.
+9. The `LocalRegion` API remains extensible enough for future CPU, GPU, or
    mixed-region implementations.
-7. The first cut only accepts CPU `local_regions`, and all accepted regions
-   must share one local registration / memory domain and one selected rail.
-8. Routing owns `read_plan(...)` selection just as it owns `read_tensor(...)`
-   selection today.
-9. MTCP may initially return a pre-issue capability miss such as
+10. The first cut only accepts CPU `local_regions`, and all accepted regions
+    must share one local registration / memory domain and one selected rail.
+11. Routing owns `read_plan(...)` selection just as it owns `read_tensor(...)`
+    selection today.
+12. MTCP may initially return a pre-issue capability miss such as
    `Unimplemented` for `read_plan(...)`. Callers may then fall back to the
    existing staged path.
-10. MTCP's first-cut capability miss is not a permanent semantic limit. A
+13. MTCP's first-cut capability miss is not a permanent semantic limit. A
     future MTCP implementation may realize native vectored direct-write under
     the same contract.
-11. Unsupported transports must not hide a many-single-read emulation inside
+14. Unsupported transports must not hide a many-single-read emulation inside
     communicator `read_plan(...)`; unsupported fast paths must fail before
     issue.
-12. `ReadPlan` construction and validation are still pre-issue. Mixed
+15. `ReadPlan` construction and validation are still pre-issue. Mixed
     authority, mixed route context, overlapping destination spans, invalid
     `LocalRegion` coverage, and unsupported transport or region types must be
     rejected before the plan crosses the issue boundary.
-13. The issue boundary is not `ReadPlan` creation. The issue boundary is when a
+16. The issue boundary is not `ReadPlan` creation. The issue boundary is when a
     validated logical plan has been prepared into a transport-ready,
     request-scoped prepared object and the routed request is handed to
     communicator / engine for execution.
@@ -488,8 +526,8 @@ Rules:
 2. `PreparedReadPlan` is the intended replacement seam for vectored requests
    that do not fit the single `(addr, bytes)` ownership model of
    `PartitionTensor`.
-3. Engine owns preparation, local-region registration, transport-specific
-   lowering, and cleanup for this object.
+3. Engine owns preparation, local-region registration or stable-backing lookup,
+   transport-specific lowering, and cleanup for this object.
 4. `PartitionTensor` may remain the owner of the legacy single-region path, but
    it is not the long-term abstraction for vectored plan execution.
 5. `PreparedReadPlan` is the first object that may cross from pre-issue setup
@@ -501,6 +539,80 @@ Rules:
 7. The current first cut also requires all accepted local regions to resolve to
    one selected RDMA NIC / rail so the request owns one transport-local memory
    domain.
+8. When `logical_region.stable_backing` is present and resolved, preparation
+   may reuse one or more preregistered registration chunks that belong to that
+   backing object rather than registering a request-scoped destination tensor
+   for the narrower window.
+
+### Stable Local Backing and Chunked MR Reuse
+
+The request-local `LocalRegion` window and the longer-lived placement object
+behind it are different semantic layers and should stay separate.
+
+The accepted widening is:
+
+- `TargetLayoutHostSink::plan_direct_write(...)` may report that a requested
+  window belongs to one stable local backing object,
+- `ReadPlan::LocalRegion` threads that transport-neutral backing reference to
+  communicator,
+- and communicator may then realize request-local writes with MR reuse over the
+  selected registration chunks inside that backing object instead of
+  request-scoped `reg_mr` on each window.
+
+For long-lived KV `HOST_SHARED` slabs, stable local backing remains
+slab-scoped semantically, but RDMA MR reuse must be registration-chunk-scoped
+operationally. The first landed whole-slab eager-preregistration geometry is
+now explicitly rejected for this workload because large backing-wide MRs
+regressed small-window completion latency on RDMA batch-get.
+
+Normative rules:
+
+1. Stable local backing describes local placement only. It does not make the
+   backing object a routed capability and it does not let remote daemons write
+   directly into caller-visible memory.
+2. The requested destination window remains `[addr, bytes)` on one issued
+   request. Stable backing only widens the registration envelope available to
+   the local engine.
+3. First cut support is only for daemon-managed long-lived `HOST_SHARED`
+   backing with one daemon-local stable identity and one daemon-local mapping.
+4. For that first cut, the accepted optimization policy is
+   slab-scoped stable backing plus a lazy rail-local registration-chunk MR
+   cache. The runtime must not preregister the full slab as one MR for KV
+   sink-side direct-write reuse.
+5. Registration chunks are an execution detail, not a new semantic identity.
+   Correctness remains owned by slab lifetime plus allocator slot and
+   generation rules above communicator.
+6. First-cut registration chunks must be fixed-width and slot-aligned inside
+   one backing. The accepted daemon YAML surface is:
+
+   ```yaml
+   communicator:
+     enable_rdma: true
+     rdma:
+       enable_stable_local_mr_reuse: true
+       stable_local_mr_reuse_chunk_slots: 1  # default: 1
+   ```
+
+   `stable_local_mr_reuse_chunk_slots` is the number of allocator slots per
+   registration chunk. `chunk_bytes = chunk_slots * slot_bytes`.
+7. Chunk sizing must be driven by slot/page working-set locality rather than by
+   total slab size. The default is `1` slot per chunk; any larger value must
+   remain slot-aligned and bounded.
+8. Preparation on one selected rail may ensure and cache only the registration
+   chunks overlapped by the accepted `LocalRegion`s. Reuse on one selected rail
+   must not depend on every other candidate rail already being prepared.
+9. If chunk registration or lookup fails on the selected rail, the
+   `HOST_SHARED` slab remains a valid local placement object, but the request
+   must fall back before issue to request-scoped destination registration.
+10. Teardown must quiesce in-flight requests that reference the backing before
+    deregistering any live chunk MRs on rails where they were activated and
+    before releasing the local mapping.
+11. Request-scoped registration remains the required fallback for local
+    regions that do not carry stable backing or whose chunk-cache path is
+    unavailable.
+12. Stable backing does not weaken allocator slot or generation semantics.
+    `slot_index`, `slot_generation`, stale-completion filtering, and
+    visibility rules remain owned above communicator.
 
 ### Minimal wire schema
 
@@ -605,8 +717,8 @@ struct RdmaReadSeg {
 
 Rules:
 
-1. engine owns request-scoped registration of `local_regions` on the selected
-   rail,
+1. engine owns preparation of `local_regions` on the selected rail, either by
+   request-scoped registration or by stable-backing chunk reuse,
 2. transport consumes resolved `local_addr + local_lkey` pairs,
 3. one RDMA request may post many WRs whose SGEs use different `lkey` values,
 4. request progress, completion, and profiling remain aggregated at the engine
@@ -621,6 +733,13 @@ Rules:
 7. Partial `ibv_post_send` failure is a hard request failure: already-posted
    WRs remain inflight and may still complete locally, but the request result
    becomes terminally failed and unposted WRs are not counted.
+8. When a prepared local region resolves through stable-backing MR reuse,
+   `local_lkey` is derived from the selected registration chunk MR that covers
+   the overlap while `local_addr` still points at the narrower request-local
+   window inside that backing object.
+9. The first-cut stable-backing reuse path is CPU-only and `HOST_SHARED`-only.
+   GPU or mixed-region backing may reuse the same abstraction later, but is not
+   implied by this design.
 
 `PartitionTensor` is not the long-term owner of this path because it is a
 single `(addr, bytes)` abstraction. The vectored path should use a separate
@@ -712,6 +831,14 @@ Required direction:
    - registration_failure
    - routing_failure
    - pre_issue_setup_failure
+5. read-plan preparation must expose whether each accepted `LocalRegion` used:
+   - `local_registration_mode=request_scoped`
+   - `local_registration_mode=stable_backing_reuse`
+6. stable-backing logs and metrics must identify the backing kind, selected
+   rail, chunk geometry, and whether the request hit the registration-chunk
+   cache or had to register chunks lazily.
+7. the accepted first-cut daemon YAML surface for chunk sizing is
+   `communicator.rdma.stable_local_mr_reuse_chunk_slots`, default `1`.
 
 Recommended metrics:
 
@@ -720,13 +847,18 @@ Recommended metrics:
 - `tc_comm_read_plan_requests_total`
 - `tc_comm_read_plan_segments_total`
 - `tc_comm_read_plan_fallback_total`
+- `tc_comm_read_plan_local_region_registrations_total{mode,backing_kind}`
+- `tc_comm_read_plan_local_region_prereg_failures_total{backing_kind}`
+- `tc_comm_stable_backing_chunk_cache_events_total{event,backing_kind}`
+- `tc_comm_stable_backing_chunk_cache_bytes{backing_kind}`
 
 ## 10. Naming Compliance
 
 The proposed interface family follows repository naming rules.
 
-- `DirectWriteOp`, `LocalRegion`, `SourceSlice`, `ReadPlanSlice`, `ReadPlan`,
-  and `RdmaReadSegEx` are `PascalCase` types.
+- `DirectWriteOp`, `StableLocalBackingKind`, `StableLocalBackingRef`,
+  `LocalRegion`, `SourceSlice`, `ReadPlanSlice`, `ReadPlan`, and `RdmaReadSeg`
+  are `PascalCase` types.
 - `readv_into_at(...)`, `materialize_mapped_sources_into_target(...)`, and
   `read_plan(...)` are `snake_case` functions or methods.
 - future config fields such as `direct_write_batch_bytes` and
@@ -737,8 +869,17 @@ The proposed interface family follows repository naming rules.
 
 - This design adds one more internal contract family and a new communicator
   wire path.
-- Request-scoped destination registration may add overhead until coalescing and
-  caching rules are tuned.
+- Request-scoped destination registration may add overhead until stable-backing
+  reuse or other coalescing rules are tuned.
+- Stable-backing chunk reuse replaces per-request `reg_mr` with rail-local
+  chunk activation and cache management. This adds one more cache policy
+  surface and more MR objects per backing than the rejected whole-slab design.
+- Chunk sizes that are too small raise MR cardinality and first-touch
+  activation churn; chunk sizes that are too large recreate the address
+  translation locality problems observed with whole-slab preregistration.
+- Quiesced teardown is stricter when one stable backing may hold chunk MRs on
+  multiple rails because all in-flight users of that backing must drain before
+  deregistration.
 - Strict "no in-place fallback after issue" semantics make failures louder, but
   that is preferable to silent target corruption.
 - MTCP may lag behind RDMA in immediate benefit because the first optimized
@@ -756,6 +897,8 @@ Compatibility rules:
    redefine it.
 6. Stronger profile-level retry policy, if ever added, must layer above this
    contract rather than weaken the generic failure model.
+7. Stable local backing metadata remains local placement state and must not be
+   promoted into routed identity or remote destination capability.
 
 Acceptance criteria:
 
@@ -766,14 +909,17 @@ Acceptance criteria:
 3. communicator can execute one vectored pull plan against one remote
    authority, one endpoint, and one selected route context,
 4. RDMA can post many WRs across a request-scoped prepared local region set,
-5. the `LocalRegion` interface remains extensible while the first cut accepts
+5. long-lived daemon-managed `HOST_SHARED` target backing can be represented as
+   additive stable local backing and may reuse one or more slot-aligned
+   registration-chunk MRs on the selected rail,
+6. the `LocalRegion` interface remains extensible while the first cut accepts
    CPU regions only,
-6. pre-issue fallback works,
-7. post-issue failure never silently falls back in place,
-8. source-side staged ACK and lease release remain keyed by request-local
+7. pre-issue fallback works,
+8. post-issue failure never silently falls back in place,
+9. source-side staged ACK and lease release remain keyed by request-local
    `window_seq + segment_idx`,
-9. MTCP behavior remains functionally unchanged when the fast path is
-   unavailable.
+10. MTCP behavior remains functionally unchanged when the fast path is
+    unavailable.
 
 # References
 

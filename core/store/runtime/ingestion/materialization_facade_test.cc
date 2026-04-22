@@ -377,6 +377,9 @@ struct RecordingDirectSourceStats {
   size_t readv_calls{0};
   size_t read_into_calls{0};
   std::vector<size_t> batch_sizes;
+  std::vector<bool> readv_window_has_stable_backing;
+  std::vector<bool> read_into_window_has_stable_backing;
+  std::vector<std::string> stable_backing_ids;
 };
 
 class RecordingDirectSeekableSource final : public tensorcast::store::loader::SeekableSource {
@@ -429,6 +432,14 @@ class RecordingDirectSeekableSource final : public tensorcast::store::loader::Se
       size_t bytes,
       const tensorcast::store::DirectWriteGrant& grant) override {
     ++stats_->read_into_calls;
+    bool has_stable_backing = false;
+    for (const auto& window : grant.windows) {
+      if (window.stable_backing.has_value()) {
+        has_stable_backing = true;
+        stats_->stable_backing_ids.push_back(window.stable_backing->backing_id);
+      }
+    }
+    stats_->read_into_window_has_stable_backing.push_back(has_stable_backing);
     return copy_into_direct_write_grant(data_, src_offset, dest_va_offset, bytes, grant);
   }
 
@@ -437,6 +448,14 @@ class RecordingDirectSeekableSource final : public tensorcast::store::loader::Se
       const tensorcast::store::DirectWriteGrant& grant) override {
     ++stats_->readv_calls;
     stats_->batch_sizes.push_back(ops.size());
+    bool has_stable_backing = false;
+    for (const auto& window : grant.windows) {
+      if (window.stable_backing.has_value()) {
+        has_stable_backing = true;
+        stats_->stable_backing_ids.push_back(window.stable_backing->backing_id);
+      }
+    }
+    stats_->readv_window_has_stable_backing.push_back(has_stable_backing);
     if (readv_failure_.has_value()) {
       if (partial_write_before_failure_ && !ops.empty()) {
         auto first_write_or = copy_into_direct_write_grant(
@@ -696,7 +715,18 @@ TEST_CASE("MaterializationFacade mapped loader wrapper integrates batched direct
   loading::IntoTargetLayout target_layout;
   target_layout.storages.push_back(
       loading::IntoTargetStorage{
-          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())}, .length = target.size()});
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())},
+          .length = target.size(),
+          .stable_backing =
+              tensorcast::store::StableLocalBackingRef{
+                  .kind = tensorcast::store::StableLocalBackingKind::kHostSharedRegion,
+                  .backing_id = "region:test-batched-direct-write",
+                  .backing_base_addr = reinterpret_cast<uint64_t>(target.data()),
+                  .backing_bytes = target.size(),
+                  .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+                  .dev_id = 0,
+              },
+      });
   target_layout.total_size = target.size();
 
   loading::MaterializeHints hints;
@@ -720,6 +750,8 @@ TEST_CASE("MaterializationFacade mapped loader wrapper integrates batched direct
   CHECK(stats->readv_calls == 1);
   CHECK(stats->read_into_calls == 0);
   CHECK(stats->batch_sizes == std::vector<size_t>{2});
+  CHECK(stats->readv_window_has_stable_backing == std::vector<bool>{true});
+  CHECK(stats->stable_backing_ids == std::vector<std::string>{"region:test-batched-direct-write"});
   const std::array<uint8_t, 8> expected_target{1, 2, 3, 4, 101, 102, 103, 104};
   CHECK(target == expected_target);
 

@@ -4,6 +4,7 @@
 #define CORE_COMMUNICATOR_ROUTING_TYPES_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/communicator/base/constants.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 
 namespace tensorcast::communicator::routing {
 
@@ -77,6 +79,7 @@ struct LocalRegion {
   uint64_t bytes = 0;
   int dev_type = base::COMMUNICATE_ENGINE_DEV_CPU;
   int dev_id = 0;
+  std::optional<tensorcast::store::StableLocalBackingRef> stable_backing;
 };
 
 struct SourceSlice {

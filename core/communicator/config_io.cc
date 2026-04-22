@@ -99,6 +99,10 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
     rd->set_qp_timeout(20);
   if (rd->qp_retry() <= 0)
     rd->set_qp_retry(7);
+  if (!rd->has_enable_stable_local_mr_reuse())
+    rd->set_enable_stable_local_mr_reuse(true);
+  if (rd->stable_local_mr_reuse_chunk_slots() == 0)
+    rd->set_stable_local_mr_reuse_chunk_slots(1);
 
   // Transport defaults
   auto* tr = cfg->mutable_transport();

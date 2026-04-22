@@ -611,6 +611,11 @@ absl::Status pump_ranges(
       const size_t window_bytes = pool.chunk_size();
       const size_t batch_bytes_limit = resolve_direct_write_batch_bytes(window_bytes, direct_write_options);
       const size_t batch_ops_limit = resolve_direct_write_batch_ops(direct_write_options);
+      std::size_t direct_batch_count = 0;
+      std::size_t fallback_batch_count = 0;
+      absl::Duration plan_direct_write_elapsed = absl::ZeroDuration();
+      absl::Duration source_readv_elapsed = absl::ZeroDuration();
+      absl::Duration staged_fallback_elapsed = absl::ZeroDuration();
       LOG(INFO) << "pump_ranges using direct-write path"
                 << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
                 << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit;
@@ -650,12 +655,17 @@ absl::Status pump_ranges(
           return absl::OkStatus();
         }
         const size_t expected_bytes = batch_bytes;
+        const absl::Time plan_direct_write_started_at = absl::Now();
         auto grant_or = cap->plan_direct_write(batch_ranges);
+        plan_direct_write_elapsed += absl::Now() - plan_direct_write_started_at;
         if (!grant_or.ok()) {
           record_direct_failure("pre_issue_plan");
           record_direct_fallback("pre_issue_plan");
+          ++fallback_batch_count;
+          const absl::Time staged_fallback_started_at = absl::Now();
           auto staged_status =
               staged_copy_direct_write_batch(src, dst, absl::MakeConstSpan(batch_ops), window_bytes, staging_buf);
+          staged_fallback_elapsed += absl::Now() - staged_fallback_started_at;
           if (staged_status.ok()) {
             total_direct_path_bytes += expected_bytes;
             total_direct_path_chunks += batch_ops.size();
@@ -664,8 +674,10 @@ absl::Status pump_ranges(
           return staged_status;
         }
 
+        ++direct_batch_count;
         const absl::Time direct_started_at = absl::Now();
         auto got_or = src.readv_into_at(absl::MakeConstSpan(batch_ops), *grant_or);
+        source_readv_elapsed += absl::Now() - direct_started_at;
         if (!got_or.ok()) {
           record_direct_failure("post_issue_readv");
           return got_or.status();
@@ -719,6 +731,14 @@ absl::Status pump_ranges(
         debug_stats->produced_chunks = total_direct_path_chunks;
         debug_stats->produced_bytes = total_direct_path_bytes;
       }
+      VLOG(2) << "pump_ranges.direct_write_summary"
+              << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
+              << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit
+              << " direct_batches=" << direct_batch_count << " fallback_batches=" << fallback_batch_count
+              << " total_chunks=" << total_direct_path_chunks << " total_bytes=" << total_direct_path_bytes
+              << " plan_direct_write_ms=" << absl::ToDoubleMilliseconds(plan_direct_write_elapsed)
+              << " source_readv_ms=" << absl::ToDoubleMilliseconds(source_readv_elapsed)
+              << " staged_fallback_ms=" << absl::ToDoubleMilliseconds(staged_fallback_elapsed);
       if (auto* base_sink = dynamic_cast<Sink*>(&dst)) {
         return base_sink->close();
       }

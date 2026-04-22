@@ -41,6 +41,9 @@ sc_header_only_library(
     name = "direct_write",
     hdrs = ["types/direct_write_grant.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/materialization/contracts:stable_local_backing",
+    ],
 )
 
 ## Unified Memory Authority (canonical UMA target)

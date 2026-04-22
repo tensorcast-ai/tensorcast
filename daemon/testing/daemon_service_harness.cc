@@ -136,10 +136,12 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
     }
     kernel->lip_manager().set_global_store_client(global_store_client);
   }
+  std::shared_ptr<store::components::CommunicationManager> comm_manager = kernel->engine().get_shared_comm_manager();
 
   auto external_target_access_service = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
+      .comm_manager = comm_manager.get(),
   });
 
   auto byte_artifact_controller = std::make_unique<ByteArtifactController>(

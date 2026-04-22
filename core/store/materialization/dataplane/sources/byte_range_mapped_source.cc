@@ -1132,6 +1132,7 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read_into_at(
 absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
     absl::Span<const DirectWriteOp> ops,
     const DirectWriteGrant& grant) {
+  const auto total_started_at = std::chrono::steady_clock::now();
   if (!supports_direct_write_at()) {
     stats_.direct_write_fallback_calls.fetch_add(1, std::memory_order_relaxed);
     return absl::UnimplementedError("direct write not supported for byte range program");
@@ -1142,6 +1143,7 @@ absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
 
   stats_.direct_write_calls.fetch_add(1, std::memory_order_relaxed);
 
+  const auto lowering_started_at = std::chrono::steady_clock::now();
   size_t expected_output_bytes = 0;
   std::vector<LoweredDirectWriteStep> lowered_steps;
   lowered_steps.reserve(ops.size());
@@ -1248,12 +1250,17 @@ absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
   }
 
   flush_pending_group();
+  const auto lowering_finished_at = std::chrono::steady_clock::now();
 
   size_t source_output_bytes = 0;
   size_t pad_output_bytes = 0;
+  std::size_t source_group_count = 0;
+  std::size_t pad_step_count = 0;
+  const auto execute_started_at = std::chrono::steady_clock::now();
   for (const auto& step : lowered_steps) {
     switch (step.kind) {
       case LoweredDirectWriteStep::Kind::kPad: {
+        ++pad_step_count;
         auto zero_status = zero_fill_to_grant(step.dest_va_offset, step.bytes, grant);
         if (!zero_status.ok()) {
           return zero_status;
@@ -1263,6 +1270,7 @@ absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
         break;
       }
       case LoweredDirectWriteStep::Kind::kSourceGroup: {
+        ++source_group_count;
         auto wrote_or = execute_grouped_direct_write(step.source_index, step.ops, grant);
         if (!wrote_or.ok()) {
           return wrote_or.status();
@@ -1272,6 +1280,7 @@ absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
       }
     }
   }
+  const auto execute_finished_at = std::chrono::steady_clock::now();
 
   if (source_output_bytes + pad_output_bytes != expected_output_bytes) {
     return absl::InternalError("byte range direct-write batch accounting mismatch");
@@ -1279,6 +1288,19 @@ absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
 
   stats_.direct_write_bytes.fetch_add(expected_output_bytes, std::memory_order_relaxed);
   stats_.output_bytes.fetch_add(expected_output_bytes, std::memory_order_relaxed);
+  VLOG(2)
+      << "byte_range_mapped_source.readv_direct_write_summary"
+      << " ops=" << ops.size() << " lowered_steps=" << lowered_steps.size() << " source_groups=" << source_group_count
+      << " pad_steps=" << pad_step_count << " expected_output_bytes=" << expected_output_bytes << " lowering_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+             lowering_finished_at - lowering_started_at)
+             .count()
+      << " execute_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(execute_finished_at - execute_started_at)
+             .count()
+      << " total_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(execute_finished_at - total_started_at)
+             .count();
   return expected_output_bytes;
 }
 

@@ -21,10 +21,13 @@
 #include "core/common/artifact_identity.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
+#include "core/store/components/endpoint_id.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/store_engine.h"
+#include "core/store/testing/global_store_client_stub.h"
 #include "core/store/testing/recording_global_store_client.h"
+#include "core/testing/test_helpers.h"
 #include "daemon/service/artifact_profile_registry.h"
 #include "daemon/service/body_backing_manager.h"
 #include "daemon/service/byte_artifact_body_handle.h"
@@ -104,26 +107,85 @@ static tensorcast::daemon::v2::StorePolicy make_shared_disk_policy() {
 
 static std::unique_ptr<DaemonServiceHarness> make_harness(
     const std::shared_ptr<tensorcast::store::StoreEngine>& engine,
-    const DaemonOptions& options) {
-  auto harness_or = DaemonServiceHarness::create(engine, options);
+    const DaemonOptions& options,
+    std::shared_ptr<tensorcast::store::components::IGlobalStoreClient> global_store_client = nullptr) {
+  auto harness_or = DaemonServiceHarness::create(engine, options, nullptr, std::move(global_store_client));
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
   return harness;
 }
 
-static void install_local_worker_directory_entry(DaemonServiceHarness& harness, std::string_view daemon_id) {
+class WorkerDirectoryTestGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
+ public:
+  std::vector<tensorcast::store::components::ActiveWorkerInfo> active_workers;
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ActiveWorkerInfo>> list_active_workers(
+      bool,
+      uint64_t required_capability_flags,
+      const tensorcast::store::components::RpcOptions&) override {
+    std::vector<tensorcast::store::components::ActiveWorkerInfo> filtered;
+    for (const auto& worker : active_workers) {
+      if ((worker.capability_flags & required_capability_flags) != required_capability_flags) {
+        continue;
+      }
+      filtered.push_back(worker);
+    }
+    return filtered;
+  }
+};
+
+static tensorcast::communicator::v1::CommunicatorConfig make_single_node_communicator_config(
+    int node_index,
+    std::string_view nic_name) {
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
+  auto* simple = cfg.mutable_simple_numa();
+  simple->set_enable(true);
+  auto* node = simple->add_nodes();
+  node->set_id(node_index);
+  node->add_nics(std::string(nic_name));
+  node->add_gpus(node_index);
+  return cfg;
+}
+
+static std::shared_ptr<tensorcast::store::components::CommunicationManager> make_comm_manager_with_config(
+    const tensorcast::communicator::v1::CommunicatorConfig& config) {
+  auto comm_manager = std::make_shared<tensorcast::store::components::CommunicationManager>();
+  auto status = comm_manager->initialize_with_config("127.0.0.1", /*listen_port=*/0, config);
+  REQUIRE(status.ok());
+  return comm_manager;
+}
+
+static void install_worker_directory_entry(
+    DaemonServiceHarness& harness,
+    std::string_view daemon_id,
+    std::string_view worker_id,
+    std::string_view node_id,
+    std::string_view node_address,
+    uint32_t grpc_port,
+    uint32_t p2p_port) {
   harness.kernel().worker_directory_cache().update_local_entry(
       tensorcast::daemon::WorkerDirectoryCache::Entry{
           .daemon_id = std::string(daemon_id),
-          .worker_id = "worker-local",
-          .node_id = "node-local",
-          .node_address = "127.0.0.1",
-          .grpc_port = 18080,
-          .p2p_port = 19090,
-          .address = "127.0.0.1:18080",
+          .worker_id = std::string(worker_id),
+          .node_id = std::string(node_id),
+          .node_address = std::string(node_address),
+          .grpc_port = grpc_port,
+          .p2p_port = p2p_port,
+          .address = absl::StrCat(node_address, ":", grpc_port),
           .capability_flags = 0,
       });
+}
+
+static void install_local_worker_directory_entry(DaemonServiceHarness& harness, std::string_view daemon_id) {
+  install_worker_directory_entry(
+      harness,
+      daemon_id,
+      /*worker_id=*/"worker-local",
+      /*node_id=*/"node-local",
+      /*node_address=*/"127.0.0.1",
+      /*grpc_port=*/18080,
+      /*p2p_port=*/19090);
 }
 
 static tensorcast::daemon::PersistenceTaskState advance_persistence_to_terminal(
@@ -903,6 +965,18 @@ TEST_CASE("BatchGetIntoRegion supports HOST_SHARED target layouts", "[daemon][ba
   REQUIRE(get_resp.outcomes_size() == 1);
   REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
   REQUIRE(std::memcmp(target_region.base_ptr, payload.data(), payload.size()) == 0);
+  auto comm_manager = engine->get_shared_comm_manager();
+  if (comm_manager->stable_local_backing_supported_for_test()) {
+    bool active = false;
+    for (int i = 0; i < 200; ++i) {
+      if (comm_manager->stable_local_backing_active_for_test(target_region.region_id)) {
+        active = true;
+        break;
+      }
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+    CHECK(active);
+  }
 
   release_test_host_shared_region(*harness, target_region);
 }
@@ -1628,6 +1702,7 @@ TEST_CASE(
   HomeBatchGetRequest get_req;
   get_req.mutable_fence()->CopyFrom(put_req.fence());
   get_req.set_operation_id("op-home-batch-get-segmented");
+  get_req.set_requester_daemon_id(kDaemonId);
   get_req.add_artifact_ids(artifact_id_a);
   get_req.add_artifact_ids(artifact_id_b);
 
@@ -1647,6 +1722,10 @@ TEST_CASE(
   REQUIRE(transport.communicator_source().buffer_sizes(0) == payload_a.size());
   REQUIRE(transport.communicator_source().buffer_sizes(1) == payload_b.size());
   REQUIRE(transport.communicator_source().total_payload_bytes() == payload_a.size() + payload_b.size());
+  const std::string expected_cpu_endpoint = tensorcast::store::components::derive_endpoint_id(
+      "node-local", tensorcast::common::memory::MemoryLocation::CPU, /*device_id=*/0);
+  CHECK(transport.communicator_source().remote_endpoint_id() == expected_cpu_endpoint);
+  CHECK(transport.communicator_source().local_endpoint_id_hint().empty());
 
   auto chunk_or = harness->kernel().payload_transport_broker().read_local_batch_payload_ref_chunk(
       transport.communicator_source().batch_payload_ref(),
@@ -1751,6 +1830,142 @@ TEST_CASE(
   REQUIRE_FALSE(resolved_or->remote);
   REQUIRE(resolved_or->payload != nullptr);
   REQUIRE(*resolved_or->payload == payload_a + payload_b);
+}
+
+TEST_CASE(
+    "OpenBatchPayloadCommunicatorSource leaves routing context unset for remote communicator sources",
+    "[daemon][batch][batch_payload_ref][get][communicator][routing]") {
+  constexpr std::string_view kHolderDaemonId = "daemon-holder";
+  constexpr std::string_view kRequesterDaemonId = "daemon-requester";
+  constexpr std::string_view kHolderNodeId = "node1";
+  constexpr std::string_view kRequesterNodeId = "node0";
+  constexpr std::string_view kHolderHost = "127.0.0.1";
+  constexpr std::string_view kRequesterHost = "127.0.0.1";
+  constexpr uint32_t kHolderGrpcPort = 18181;
+  constexpr uint32_t kRequesterGrpcPort = 18182;
+
+  auto holder_opts = make_opts_basic();
+  holder_opts.comm_manager =
+      make_comm_manager_with_config(make_single_node_communicator_config(/*node_index=*/1, /*nic_name=*/"eth1"));
+  auto holder_engine = std::make_shared<tensorcast::store::StoreEngine>(holder_opts);
+
+  auto requester_opts = make_opts_basic();
+  requester_opts.comm_manager =
+      make_comm_manager_with_config(make_single_node_communicator_config(/*node_index=*/0, /*nic_name=*/"eth0"));
+  auto requester_engine = std::make_shared<tensorcast::store::StoreEngine>(requester_opts);
+
+  auto global_store_client = std::make_shared<WorkerDirectoryTestGlobalStoreClient>();
+  global_store_client->active_workers = {
+      tensorcast::store::components::ActiveWorkerInfo{
+          .worker_id = "worker-holder",
+          .node_id = std::string(kHolderNodeId),
+          .node_address = std::string(kHolderHost),
+          .grpc_port = kHolderGrpcPort,
+          .p2p_port = holder_opts.comm_manager->listen_port(),
+          .accepting_new_requests = true,
+          .daemon_id = std::string(kHolderDaemonId),
+          .capability_flags = 0,
+      },
+      tensorcast::store::components::ActiveWorkerInfo{
+          .worker_id = "worker-requester",
+          .node_id = std::string(kRequesterNodeId),
+          .node_address = std::string(kRequesterHost),
+          .grpc_port = kRequesterGrpcPort,
+          .p2p_port = requester_opts.comm_manager->listen_port(),
+          .accepting_new_requests = true,
+          .daemon_id = std::string(kRequesterDaemonId),
+          .capability_flags = 0,
+      },
+  };
+
+  auto holder_daemon_options = make_daemon_options();
+  holder_daemon_options.daemon_id = std::string(kHolderDaemonId);
+  holder_daemon_options.storage_path = make_test_storage_root("batch-runtime-routing-holder");
+  auto holder = make_harness(holder_engine, holder_daemon_options, global_store_client);
+  install_worker_directory_entry(
+      *holder,
+      kHolderDaemonId,
+      /*worker_id=*/"worker-holder",
+      kHolderNodeId,
+      kHolderHost,
+      kHolderGrpcPort,
+      holder_opts.comm_manager->listen_port());
+
+  auto requester_daemon_options = make_daemon_options();
+  requester_daemon_options.daemon_id = std::string(kRequesterDaemonId);
+  requester_daemon_options.storage_path = make_test_storage_root("batch-runtime-routing-requester");
+  auto requester = make_harness(requester_engine, requester_daemon_options, global_store_client);
+  install_worker_directory_entry(
+      *requester,
+      kRequesterDaemonId,
+      /*worker_id=*/"worker-requester",
+      kRequesterNodeId,
+      kRequesterHost,
+      kRequesterGrpcPort,
+      requester_opts.comm_manager->listen_port());
+
+  const std::string payload = "remote-communicator-source-payload";
+  tensorcast::daemon::v2::BatchPayloadManifest manifest;
+  manifest.set_total_size(payload.size());
+  auto* entry = manifest.add_entries();
+  entry->set_artifact_id("artifact-routing");
+  entry->set_offset(0);
+  entry->set_length(payload.size());
+
+  auto export_or = holder->kernel().payload_transport_broker().issue_batch_payload_communicator_export(
+      manifest,
+      std::make_shared<const std::string>(payload),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      /*operation_id=*/"op-remote-routing",
+      absl::Now() + absl::Minutes(1),
+      kRequesterDaemonId);
+  REQUIRE(export_or.ok());
+
+  tensorcast::daemon::v2::BatchPayloadTransport transport;
+  transport.set_transport_id("transport-routing");
+  transport.mutable_manifest()->CopyFrom(manifest);
+  auto* communicator_source = transport.mutable_communicator_source();
+  communicator_source->set_batch_payload_ref(export_or->batch_payload_ref);
+  communicator_source->set_protocol_version(2);
+  communicator_source->set_producer_daemon_id(std::string(kHolderDaemonId));
+  communicator_source->set_consumer_daemon_id(std::string(kRequesterDaemonId));
+  communicator_source->set_producer_host(std::string(kHolderHost));
+  communicator_source->set_producer_port(holder_opts.comm_manager->listen_port());
+  communicator_source->set_remote_endpoint_id(
+      tensorcast::store::components::derive_endpoint_id(
+          kHolderNodeId, tensorcast::common::memory::MemoryLocation::CPU, /*device_id=*/0));
+  communicator_source->set_local_endpoint_id_hint(
+      tensorcast::store::components::derive_endpoint_id(
+          kRequesterNodeId, tensorcast::common::memory::MemoryLocation::CPU, /*device_id=*/0));
+  communicator_source->set_memory_location(tensorcast::daemon::v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+  communicator_source->set_total_payload_bytes(payload.size());
+  for (const auto& memory_key : export_or->export_registration.remote_memory_keys) {
+    communicator_source->add_remote_memory_keys(memory_key);
+  }
+  for (const auto buffer_size : export_or->export_registration.buffer_sizes) {
+    communicator_source->add_buffer_sizes(buffer_size);
+  }
+
+  auto source_or = requester->kernel().payload_transport_broker().open_batch_payload_communicator_source(
+      requester->kernel().worker_directory_cache(),
+      absl::Now(),
+      absl::Seconds(2),
+      kRequesterDaemonId,
+      transport,
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+      "op-remote-routing");
+  REQUIRE(source_or.ok());
+  REQUIRE(source_or->remote);
+  REQUIRE(source_or->source != nullptr);
+
+  auto routing_context = requester->kernel().engine().get_shared_comm_manager()->routing_context();
+  CHECK(routing_context == nullptr);
+
+  std::string received(payload.size(), '\0');
+  auto read_or = source_or->source->read_at(/*offset=*/0, received.data(), received.size());
+  REQUIRE(read_or.ok());
+  CHECK(*read_or == received.size());
+  CHECK(received == payload);
 }
 
 TEST_CASE("Local payload_ref resolves to reusable body capability", "[daemon][batch][payload_ref][reuse]") {

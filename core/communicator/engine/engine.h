@@ -22,6 +22,7 @@
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/request.h"
 #include "core/communicator/transport/tcp_context.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/engine/channel.h"
@@ -43,6 +44,11 @@ class GpuVramStagingPool;
 
 class Communicator {
  public:
+  struct VisibleRdmaDeviceInfo {
+    std::string name;
+    int16_t rail_id = -1;
+  };
+
   struct PinnedStagingPools {
     // Host-pinned pool backing GPU-side staging (MTCP and staged RDMA).
     std::shared_ptr<common::memory::PinnedBufferPool> gpu_pool;
@@ -113,6 +119,17 @@ class Communicator {
       const std::string& dst_ip,
       uint16_t dst_port);
 
+  absl::Status activate_stable_local_backing(
+      const tensorcast::store::StableLocalBackingRef& backing,
+      std::shared_ptr<void> keepalive = nullptr);
+
+  absl::Status deactivate_stable_local_backing(std::string_view backing_id);
+
+  // Test-only stable-backing introspection.
+  bool stable_local_backing_supported_for_test() const;
+  bool stable_local_backing_active_for_test(std::string_view backing_id) const;
+  size_t stable_local_backing_chunk_count_for_test(std::string_view backing_id, int16_t rail_id) const;
+
   /**
    * Register a partition tensor
    * @param tensor_key the unique tensor key
@@ -177,6 +194,12 @@ class Communicator {
   bool is_rdma_enabled() const {
     return enable_rdma_;
   }
+
+  const v1::CommunicatorConfig& config() const {
+    return config_;
+  }
+
+  std::vector<VisibleRdmaDeviceInfo> visible_rdma_devices() const;
 
   uint16_t listening_port() const;
 
@@ -249,8 +272,13 @@ class Communicator {
       std::shared_ptr<void> read_guard = nullptr);
   std::shared_ptr<TransferProgressState> lookup_source_transfer_progress(const std::string& transfer_id) const;
   void finish_source_transfer_progress(const std::string& transfer_id, const absl::Status& status);
+  absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> prepare_read_plan(
+      const routing::ReadPlan& plan,
+      uint64_t request_id,
+      std::string_view tensor_key);
 
   struct TensorReadLease;
+  struct StableLocalBackingState;
 
   struct TensorReadState {
     int inflight = 0;
@@ -315,6 +343,7 @@ class Communicator {
   int buffers_per_flow_ = 4;
   uint32_t max_window_segments_ = 0;
   uint64_t direct_rdma_chunk_bytes_ = 0;
+  uint32_t stable_local_mr_reuse_chunk_slots_ = 1;
 
   // Host-pinned GPU staging uses unified GPU MemoryStager only.
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
@@ -337,6 +366,9 @@ class Communicator {
 
   // MR cache for meta data on CPU
   std::unique_ptr<MrCache> meta_mr_cache_;
+  mutable absl::Mutex stable_local_backings_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<StableLocalBackingState>> stable_local_backings_
+      ABSL_GUARDED_BY(stable_local_backings_mu_);
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;

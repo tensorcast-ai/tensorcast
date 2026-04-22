@@ -128,6 +128,7 @@ sc_cc_library(
         ":metric_lib",
         ":partition_tensor_lib",
         ":routing_types_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
     ],
 )
 
@@ -450,6 +451,7 @@ sc_cc_library(
         "//core/cuda:cuda_api_lib",
         "//core/cuda:device_guard_lib",
         "//core/cuda:error_handling_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
@@ -575,6 +577,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":constants_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
         "@abseil-cpp//absl/hash:hash",
         "@abseil-cpp//absl/time:time",
     ],
