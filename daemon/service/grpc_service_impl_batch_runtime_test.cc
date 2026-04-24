@@ -24,6 +24,7 @@
 #include "core/store/components/endpoint_id.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/replica/types/direct_write_grant.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/global_store_client_stub.h"
 #include "core/store/testing/recording_global_store_client.h"
@@ -1754,6 +1755,27 @@ TEST_CASE(
   REQUIRE(read_or.ok());
   REQUIRE(*read_or == joined.size());
   REQUIRE(joined == payload_a + payload_b);
+  REQUIRE(source_or->source->supports_direct_write_at());
+
+  std::vector<std::uint8_t> direct_write_buffer(joined.size() + 16, 0);
+  tensorcast::store::DirectWriteGrant grant;
+  grant.windows.push_back(
+      tensorcast::store::DirectWriteGrant::Window{
+          .va_offset = 11,
+          .local_addr = reinterpret_cast<std::uint64_t>(direct_write_buffer.data()),
+          .length = static_cast<std::uint64_t>(direct_write_buffer.size()),
+      });
+  const auto direct_expected = joined.substr(payload_a.size() - 4, 8);
+  auto wrote_direct_or = source_or->source->read_into_at(
+      /*src_offset=*/payload_a.size() - 4,
+      /*dest_va_offset=*/13,
+      /*bytes=*/direct_expected.size(),
+      grant);
+  REQUIRE(wrote_direct_or.ok());
+  REQUIRE(*wrote_direct_or == direct_expected.size());
+  REQUIRE(
+      std::string(reinterpret_cast<const char*>(direct_write_buffer.data() + 2), direct_expected.size()) ==
+      direct_expected);
 }
 
 TEST_CASE(

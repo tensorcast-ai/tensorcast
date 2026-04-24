@@ -687,31 +687,92 @@ class SharedSegmentedMemorySource final : public store::loader::SeekableSource {
     if (bytes == 0 || offset >= total_bytes_) {
       return static_cast<size_t>(0);
     }
-    auto* out = static_cast<std::uint8_t*>(dst);
-    std::uint64_t remaining = std::min<std::uint64_t>(bytes, total_bytes_ - offset);
+    const size_t to_copy = static_cast<size_t>(std::min<std::uint64_t>(bytes, total_bytes_ - offset));
+    return copy_range_into(offset, static_cast<std::uint8_t*>(dst), to_copy);
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return true;
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const store::DirectWriteGrant& grant) override {
+    if (bytes == 0 || src_offset >= total_bytes_) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_copy = static_cast<size_t>(std::min<std::uint64_t>(bytes, total_bytes_ - src_offset));
+    const auto target_end_or = checked_add_u64(dest_va_offset, static_cast<uint64_t>(to_copy));
+    if (!target_end_or.ok()) {
+      return target_end_or.status();
+    }
+    const store::DirectWriteGrant::Window* target = nullptr;
+    for (const auto& window : grant.windows) {
+      const auto window_end_or = checked_add_u64(window.va_offset, window.length);
+      if (!window_end_or.ok()) {
+        return window_end_or.status();
+      }
+      if (dest_va_offset >= window.va_offset && *target_end_or <= *window_end_or) {
+        target = &window;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      return absl::InvalidArgumentError("No direct-write window covers requested segmented payload range");
+    }
+    const uint64_t window_offset = dest_va_offset - target->va_offset;
+    const auto target_addr_or = checked_add_u64(target->local_addr, window_offset);
+    if (!target_addr_or.ok()) {
+      return target_addr_or.status();
+    }
+    auto* dst = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(*target_addr_or));
+    return copy_range_into(src_offset, dst, to_copy);
+  }
+
+ private:
+  static absl::StatusOr<uint64_t> checked_add_u64(uint64_t lhs, uint64_t rhs) {
+    if (lhs > std::numeric_limits<uint64_t>::max() - rhs) {
+      return absl::OutOfRangeError("segmented payload offset overflow");
+    }
+    return lhs + rhs;
+  }
+
+  absl::StatusOr<size_t> copy_range_into(uint64_t offset, std::uint8_t* dst, size_t bytes) const {
+    if (bytes == 0) {
+      return static_cast<size_t>(0);
+    }
+    if (dst == nullptr) {
+      return absl::InvalidArgumentError("segmented payload copy requires destination buffer");
+    }
+    std::uint64_t remaining = bytes;
     std::uint64_t segment_base = 0;
     size_t copied = 0;
     for (const auto& segment : segments_) {
       if (remaining == 0) {
         break;
       }
-      if (offset >= segment_base + segment.size_bytes) {
-        segment_base += segment.size_bytes;
+      const auto segment_end_or = checked_add_u64(segment_base, segment.size_bytes);
+      if (!segment_end_or.ok()) {
+        return segment_end_or.status();
+      }
+      if (offset >= *segment_end_or) {
+        segment_base = *segment_end_or;
         continue;
       }
       const std::uint64_t segment_offset = offset > segment_base ? offset - segment_base : 0;
       const std::uint64_t available = segment.size_bytes - segment_offset;
       const size_t to_copy = static_cast<size_t>(std::min<std::uint64_t>(remaining, available));
-      std::memcpy(out + copied, segment.data + segment_offset, to_copy);
+      std::memcpy(dst + copied, segment.data + segment_offset, to_copy);
       copied += to_copy;
       remaining -= to_copy;
       offset += to_copy;
-      segment_base += segment.size_bytes;
+      segment_base = *segment_end_or;
     }
     return copied;
   }
 
- private:
   std::vector<Segment> segments_;
   std::vector<std::shared_ptr<void>> keepalives_;
   std::uint64_t total_bytes_{0};
