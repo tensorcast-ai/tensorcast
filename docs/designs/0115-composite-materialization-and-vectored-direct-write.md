@@ -607,28 +607,183 @@ Normative rules:
      rdma:
        enable_stable_local_mr_reuse: true
        stable_local_mr_reuse_chunk_slots: 1  # default: 1
+       stable_local_mr_reuse_prewarm_workers: 0  # default: disabled; >0 enables async prewarm
    ```
 
    `stable_local_mr_reuse_chunk_slots` is the number of allocator slots per
    registration chunk. `chunk_bytes = chunk_slots * slot_bytes`.
+   `stable_local_mr_reuse_prewarm_workers` bounds communicator-local
+   background preregistration concurrency and is also the canonical enable
+   switch: unset or `0` disables async prewarm, while values `>0` enable one
+   prewarm job per visible rail on a bounded worker pool.
+   The deprecated legacy alias
+   `stable_local_mr_reuse_eager_prereg_all_rails` is accepted only for
+   backward compatibility and maps to `prewarm_workers=1` when true if the
+   canonical field is unset.
 7. Chunk sizing must be driven by slot/page working-set locality rather than by
    total slab size. The default is `1` slot per chunk; any larger value must
    remain slot-aligned and bounded.
 8. Preparation on one selected rail may ensure and cache only the registration
    chunks overlapped by the accepted `LocalRegion`s. Reuse on one selected rail
    must not depend on every other candidate rail already being prepared.
-9. If chunk registration or lookup fails on the selected rail, the
-   `HOST_SHARED` slab remains a valid local placement object, but the request
-   must fall back before issue to request-scoped destination registration.
-10. Teardown must quiesce in-flight requests that reference the backing before
-    deregistering any live chunk MRs on rails where they were activated and
-    before releasing the local mapping.
-11. Request-scoped registration remains the required fallback for local
+9. Activation may publish backing eligibility before all chunk MRs exist.
+   First-cut serveability is not gated on full preregistration completion.
+   Background prewarm is best-effort latency optimization only; requests may
+   still lazily register selected chunks on cache miss.
+10. First-cut background prewarm is rail-local. Activation may enqueue at most
+    one prewarm walk per visible rail, and each walk may scan chunk indices for
+    that rail. There is no mandatory orchestrator or request-path readiness
+    barrier for full prewarm completion.
+11. The backing registry lock is a short publish/remove lock only. It must not
+    cover preregistration loops or request-time chunk activation.
+12. `reg_mr` must not execute while holding a backing-scoped mutex shared by
+    unrelated rails or chunks. The maximum serialization scope is one
+    `(stable_backing_id, rail_id, chunk_index)` entry.
+13. Request and prewarm must share one entry-level registration state machine.
+    At most one registrar may own one `(rail, chunk)` at a time; other
+    contenders must reuse or wait for that entry's outcome rather than issuing
+    duplicate `reg_mr`.
+14. A request may wait only for an in-flight registrar of the same
+    `(rail, chunk)` entry. Unrelated rails, chunks, and remote shards must
+    remain independent.
+15. If chunk registration or lookup fails on the selected rail, the
+    `HOST_SHARED` slab remains a valid local placement object, but the request
+    must fall back before issue to request-scoped destination registration.
+    Incomplete background prewarm alone is not a failure.
+16. Teardown must quiesce in-flight requests and background prewarm tasks that
+    reference the backing before deregistering any live chunk MRs on rails
+    where they were activated and before releasing the local mapping.
+17. Request-scoped registration remains the required fallback for local
     regions that do not carry stable backing or whose chunk-cache path is
     unavailable.
-12. Stable backing does not weaken allocator slot or generation semantics.
+18. Stable backing does not weaken allocator slot or generation semantics.
     `slot_index`, `slot_generation`, stale-completion filtering, and
     visibility rules remain owned above communicator.
+
+### Accepted Async Prewarm Concurrency Model
+
+The accepted production direction for sink-side stable local MR reuse is:
+
+- keep stable backing slab-scoped semantically,
+- keep MR reuse rail-local and chunk-scoped operationally,
+- allow activation to enqueue best-effort background prewarm,
+- and remove request/prewarm interference by narrowing registration
+  synchronization to one `(backing, rail, chunk)` entry.
+
+The intended state split is:
+
+- `backing registry`
+  - one short-lived lock guards publish/remove of
+    `stable_backing_id -> StableLocalBackingState`.
+  - this lock is not part of the hot preregistration path.
+- `backing lifecycle`
+  - one backing-scoped lifecycle state owns `retiring`, `inflight_uses`, and
+    `activation_keepalive`.
+  - both request-path users and prewarm workers acquire a use token so
+    deactivate can drain them uniformly.
+- `rail registration table`
+  - one rail-scoped map resolves `rail_id -> RailState`.
+  - each `RailState` owns its chunk-entry map.
+- `chunk entry`
+  - one entry is keyed by `(stable_backing_id, rail_id, chunk_index)`.
+  - one entry owns the only synchronization that may guard one actual
+    `reg_mr()` call.
+
+The accepted execution rule is:
+
+- request path and prewarm path call the same entry-level
+  `get_or_register_chunk(...)` routine,
+- that routine may decide who is the registrar under the entry lock,
+- but the actual `reg_mr()` must happen after releasing every coarse
+  backing-scoped lock,
+- and the registrar later publishes `Ready` or `Failed` back into the same
+  entry before waking any waiters.
+
+This means:
+
+- unrelated rails can preregister in parallel,
+- unrelated chunks on the same rail can preregister in parallel,
+- a request only waits when it collides with the same `(rail, chunk)` already
+  being registered by another request or a prewarm worker,
+- and background prewarm never needs to block request service for the whole
+  backing.
+
+The accepted first-cut activation/prefetch policy is:
+
+- activation publishes the stable backing immediately once local geometry and
+  keepalive are valid,
+- communicator then enqueues one best-effort prewarm job per visible rail onto
+  a bounded worker pool,
+- worker concurrency is controlled by
+  `communicator.rdma.stable_local_mr_reuse_prewarm_workers`,
+- the canonical configuration is unset or `0` for disabled, and `>0` for
+  enabled; the common first-cut value is `1`, which keeps behavior simple and
+  avoids adding more thread contention on top of existing remote-shard fanout,
+- and requests remain correct even if no prewarm job has yet reached a needed
+  chunk because lazy chunk registration remains valid on miss.
+
+### Chunk Entry State Machine
+
+The accepted first-cut chunk entry lifecycle is:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty
+    Empty --> Registering: request/prewarm claims registrar
+    Failed --> Registering: retry claims registrar
+    Registering --> Ready: reg_mr succeeds
+    Registering --> Failed: reg_mr fails or backing retires
+    Ready --> Ready: cache hit / reuse
+    Ready --> [*]: backing retire then dereg_mr
+    Failed --> [*]: backing retire
+```
+
+Operational notes:
+
+- `Empty`
+  - no MR exists yet for this `(rail, chunk)`.
+- `Registering`
+  - exactly one registrar owns the in-flight `reg_mr()`.
+  - other contenders for the same entry may wait for completion, but unrelated
+    entries do not participate.
+- `Ready`
+  - the entry has a reusable MR and may satisfy request-path preparation
+    without request-scoped `reg_mr`.
+- `Failed`
+  - the last registration attempt failed or the backing retired before the
+    result could be published.
+  - request path may still choose deterministic fallback before issue.
+
+### Activation, Request, and Retire Flow
+
+```mermaid
+sequenceDiagram
+    participant Store as Store / SGLang
+    participant Comm as Communicator
+    participant Pool as Prewarm Worker Pool
+    participant Req as Request Path
+    participant Entry as Chunk Entry
+
+    Store->>Comm: activate_stable_local_backing(backing)
+    Comm->>Comm: publish backing state
+    Comm->>Pool: enqueue one prewarm job per visible rail
+
+    Req->>Comm: prepare_read_plan(...)
+    Comm->>Entry: lookup (rail, chunk)
+    alt entry Ready
+        Entry-->>Comm: reusable MR
+    else entry Registering
+        Entry-->>Comm: wait same entry only
+    else entry Empty / Failed
+        Comm->>Entry: claim registrar
+        Comm->>Comm: reg_mr() outside coarse backing lock
+        Comm->>Entry: publish Ready / Failed
+    end
+
+    Comm->>Comm: deactivate_stable_local_backing(backing)
+    Comm->>Comm: stop new users and drain request + prewarm uses
+    Comm->>Entry: dereg_mr for ready entries
+```
 
 ### Minimal wire schema
 
@@ -851,10 +1006,15 @@ Required direction:
    - `local_registration_mode=request_scoped`
    - `local_registration_mode=stable_backing_reuse`
 6. stable-backing logs and metrics must identify the backing kind, selected
-   rail, chunk geometry, and whether the request hit the registration-chunk
-   cache or had to register chunks lazily.
-7. the accepted first-cut daemon YAML surface for chunk sizing is
-   `communicator.rdma.stable_local_mr_reuse_chunk_slots`, default `1`.
+   rail, chunk geometry, whether the request hit the registration-chunk
+   cache, had to wait on an in-flight registrar, or had to register chunks
+   lazily.
+7. the accepted first-cut daemon YAML surfaces are:
+   - `communicator.rdma.stable_local_mr_reuse_chunk_slots`, default `1`
+   - `communicator.rdma.stable_local_mr_reuse_prewarm_workers`, default disabled
+8. stable-backing prewarm observability must expose whether a backing was
+   activated lazily or with background prewarm, how many rail jobs were
+   enqueued, and whether completion lagged request service.
 
 Recommended metrics:
 
@@ -867,6 +1027,9 @@ Recommended metrics:
 - `tc_comm_read_plan_local_region_prereg_failures_total{backing_kind}`
 - `tc_comm_stable_backing_chunk_cache_events_total{event,backing_kind}`
 - `tc_comm_stable_backing_chunk_cache_bytes{backing_kind}`
+- `tc_comm_stable_backing_chunk_wait_ms_total{reason,backing_kind}`
+- `tc_comm_stable_backing_chunk_registrars_total{result,backing_kind}`
+- `tc_comm_stable_backing_prewarm_jobs_total{state,backing_kind}`
 
 ## 10. Naming Compliance
 

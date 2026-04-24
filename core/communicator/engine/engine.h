@@ -129,6 +129,8 @@ class Communicator {
   bool stable_local_backing_supported_for_test() const;
   bool stable_local_backing_active_for_test(std::string_view backing_id) const;
   size_t stable_local_backing_chunk_count_for_test(std::string_view backing_id, int16_t rail_id) const;
+  bool stable_local_backing_prewarm_complete_for_test(std::string_view backing_id) const;
+  bool wait_for_stable_local_backing_prewarm_for_test(std::string_view backing_id, absl::Duration timeout) const;
 
   /**
    * Register a partition tensor
@@ -304,6 +306,21 @@ class Communicator {
   void process_mtcp_read_task(MtcpReadTask task);
   void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
 
+  struct StableLocalPrewarmTask {
+    std::weak_ptr<StableLocalBackingState> backing_state;
+    std::string backing_id;
+    transport::net_dev_t dev;
+    int16_t rail_id = -1;
+    uint64_t slot_bytes = 0;
+    uint32_t chunk_slots = 0;
+    uint64_t chunk_count = 0;
+  };
+
+  void stable_local_prewarm_loop();
+  void process_stable_local_prewarm_task(StableLocalPrewarmTask task);
+  absl::Status schedule_stable_local_backing_prewarm(const std::shared_ptr<StableLocalBackingState>& state);
+  std::vector<transport::net_dev_t> collect_primary_visible_rdma_rail_devs() const;
+
   struct GpuChannelLease;
   absl::StatusOr<std::shared_ptr<void>> acquire_gpu_channel_slot();
   void release_gpu_channel_slot();
@@ -344,6 +361,8 @@ class Communicator {
   uint32_t max_window_segments_ = 0;
   uint64_t direct_rdma_chunk_bytes_ = 0;
   uint32_t stable_local_mr_reuse_chunk_slots_ = 1;
+  uint32_t stable_local_mr_reuse_prewarm_workers_ = 0;
+  bool stable_local_mr_reuse_async_prewarm_enabled_ = false;
 
   // Host-pinned GPU staging uses unified GPU MemoryStager only.
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
@@ -403,6 +422,8 @@ class Communicator {
 
   misc::Queue<MtcpReadTask> mtcp_staging_queue_;
   std::thread mtcp_staging_thread_;
+  misc::Queue<StableLocalPrewarmTask> stable_local_prewarm_queue_;
+  std::vector<std::thread> stable_local_prewarm_threads_;
   std::atomic<int> active_gpu_channels_{0};
   int max_gpu_channels_ = 0;
   bool enforce_gpu_channel_limit_ = false;

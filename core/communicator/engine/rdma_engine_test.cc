@@ -11,6 +11,8 @@
 #include <functional>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/time/time.h"
 #include "core/communicator/engine/engine.h"
 
 #include "absl/strings/str_cat.h"
@@ -63,6 +65,7 @@ class CommunicatorTestPeer {
   static void stop_workers(Communicator& communicator) {
     communicator.stop_.store(true);
     communicator.request_queue_.stop();
+    communicator.stable_local_prewarm_queue_.stop();
   }
 
   static bool has_rdma_device(Communicator& communicator) {
@@ -81,6 +84,17 @@ class CommunicatorTestPeer {
       const std::string& backing_id,
       int16_t rail_id) {
     return communicator.stable_local_backing_chunk_count_for_test(backing_id, rail_id);
+  }
+
+  static bool stable_local_backing_prewarm_complete(Communicator& communicator, const std::string& backing_id) {
+    return communicator.stable_local_backing_prewarm_complete_for_test(backing_id);
+  }
+
+  static bool wait_for_stable_local_backing_prewarm(
+      Communicator& communicator,
+      const std::string& backing_id,
+      absl::Duration timeout) {
+    return communicator.wait_for_stable_local_backing_prewarm_for_test(backing_id, timeout);
   }
 
   static auto prepare_read_plan(
@@ -2039,12 +2053,165 @@ TEST_CASE(
   CHECK(prepared->stable_backing_chunk_count == 1);
   CHECK(prepared->stable_backing_chunk_cache_hits == 1);
   CHECK(prepared->stable_backing_chunk_cache_misses == 1);
+  CHECK(prepared->stable_backing_chunk_waits == 0);
+  CHECK(prepared->stable_backing_chunk_lazy_registrations == 1);
+  CHECK_FALSE(prepared->stable_backing_prewarm_requested);
+  CHECK_FALSE(prepared->stable_backing_prewarm_complete);
   REQUIRE(prepared->local_regions.size() == 2);
   REQUIRE(prepared->local_regions[0].mr != nullptr);
   REQUIRE(prepared->local_regions[1].mr != nullptr);
   CHECK(prepared->local_regions[0].mr == prepared->local_regions[1].mr);
   CHECK(
       CommunicatorTestPeer::stable_local_backing_chunk_count(client, backing.backing_id, net_dev->get_rail_id()) == 1);
+
+  REQUIRE(client.deactivate_stable_local_backing(backing.backing_id).ok());
+  CHECK(CommunicatorTestPeer::stable_local_backing_state(client, backing.backing_id) == nullptr);
+  CommunicatorTestPeer::stop_workers(client);
+}
+
+TEST_CASE(
+    "Communicator stable local backing asynchronously prewarms slot-aligned chunks on all RDMA rails",
+    "[rdma][communicator][stable_backing]") {
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  cfg.mutable_rdma()->set_enable_stable_local_mr_reuse(true);
+  cfg.mutable_rdma()->set_stable_local_mr_reuse_chunk_slots(2);
+  cfg.mutable_rdma()->set_stable_local_mr_reuse_prewarm_workers(1);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(client)) {
+    CommunicatorTestPeer::stop_workers(client);
+    SUCCEED("Skipping stable backing async prewarm test: no RDMA net devices available");
+    return;
+  }
+
+  std::array<uint8_t, 128> local_buffer{};
+  tensorcast::store::StableLocalBackingRef backing{
+      .kind = tensorcast::store::StableLocalBackingKind::kHostSharedRegion,
+      .backing_id = "region:test-stable-backing-eager",
+      .backing_base_addr = reinterpret_cast<uint64_t>(local_buffer.data()),
+      .backing_bytes = static_cast<uint64_t>(local_buffer.size()),
+      .slot_bytes = 32,
+      .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+      .dev_id = 0,
+  };
+
+  REQUIRE(client.activate_stable_local_backing(backing, std::make_shared<int>(1)).ok());
+  auto state = CommunicatorTestPeer::stable_local_backing_state(client, backing.backing_id);
+  REQUIRE(state != nullptr);
+  CHECK(CommunicatorTestPeer::wait_for_stable_local_backing_prewarm(client, backing.backing_id, absl::Seconds(5)));
+  CHECK(CommunicatorTestPeer::stable_local_backing_prewarm_complete(client, backing.backing_id));
+
+  absl::flat_hash_set<int16_t> seen_rails;
+  for (const auto& dev : CommunicatorTestPeer::rdma_context(client)->list_devs()) {
+    if (dev == nullptr) {
+      continue;
+    }
+    if (!seen_rails.insert(dev->get_rail_id()).second) {
+      continue;
+    }
+    CHECK(CommunicatorTestPeer::stable_local_backing_chunk_count(client, backing.backing_id, dev->get_rail_id()) == 2);
+  }
+
+  auto net_dev = CommunicatorTestPeer::rdma_context(client)->get_best_dev(COMMUNICATE_ENGINE_DEV_CPU, -1, -1, "mr");
+  REQUIRE(net_dev != nullptr);
+  tensorcast::communicator::routing::ReadPlan plan;
+  plan.local_regions = {
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()),
+          .bytes = 32,
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+          .stable_backing = backing,
+      },
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()) + 32,
+          .bytes = 32,
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+          .stable_backing = backing,
+      },
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()) + 64,
+          .bytes = 32,
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+          .stable_backing = backing,
+      },
+      tensorcast::communicator::routing::LocalRegion{
+          .addr = reinterpret_cast<uint64_t>(local_buffer.data()) + 96,
+          .bytes = 32,
+          .dev_type = COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+          .stable_backing = backing,
+      },
+  };
+  plan.source_slices = {
+      tensorcast::communicator::routing::SourceSlice{
+          .authority_id = "authority-0",
+          .route =
+              tensorcast::communicator::routing::ReadRouteContext{
+                  .local_endpoint_id = "cpu://local",
+                  .remote_endpoint_id = "cpu://remote",
+                  .protocol = tensorcast::communicator::routing::ConnectionProtocol::kRdma,
+                  .rail_id = net_dev->get_rail_id(),
+              },
+          .tensor_key = "source-tensor",
+          .remote_offset = 0,
+          .bytes = 128,
+      },
+  };
+  plan.slices = {
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 0,
+          .source_slice_offset = 0,
+          .local_region_offset = 0,
+          .bytes = 32,
+      },
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 1,
+          .source_slice_offset = 32,
+          .local_region_offset = 0,
+          .bytes = 32,
+      },
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 2,
+          .source_slice_offset = 64,
+          .local_region_offset = 0,
+          .bytes = 32,
+      },
+      tensorcast::communicator::routing::ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 3,
+          .source_slice_offset = 96,
+          .local_region_offset = 0,
+          .bytes = 32,
+      },
+  };
+
+  auto prepared_or = CommunicatorTestPeer::prepare_read_plan(client, plan, /*request_id=*/96, "source-tensor");
+  REQUIRE(prepared_or.ok());
+  auto prepared = *prepared_or;
+  REQUIRE(prepared != nullptr);
+  CHECK(prepared->local_registration_mode == "stable_backing_reuse");
+  CHECK(prepared->stable_backing_id == backing.backing_id);
+  CHECK(prepared->stable_backing_chunk_bytes == 64);
+  CHECK(prepared->stable_backing_chunk_count == 2);
+  CHECK(prepared->stable_backing_chunk_cache_hits == 4);
+  CHECK(prepared->stable_backing_chunk_cache_misses == 0);
+  CHECK(prepared->stable_backing_prewarm_requested);
+  CHECK(prepared->stable_backing_prewarm_complete);
+  CHECK(prepared->stable_backing_chunk_waits == 0);
+  CHECK(prepared->stable_backing_chunk_lazy_registrations == 0);
 
   REQUIRE(client.deactivate_stable_local_backing(backing.backing_id).ok());
   CHECK(CommunicatorTestPeer::stable_local_backing_state(client, backing.backing_id) == nullptr);

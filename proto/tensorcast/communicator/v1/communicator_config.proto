@@ -33,6 +33,8 @@ message RdmaConfig {
   uint64 vram_slice_bytes = 10;
   optional bool enable_stable_local_mr_reuse = 11; // default: true
   uint32 stable_local_mr_reuse_chunk_slots = 12; // default: 1
+  optional bool stable_local_mr_reuse_eager_prereg_all_rails = 13; // deprecated compatibility alias; when workers is unset, true maps to 1 and false maps to 0
+  optional uint32 stable_local_mr_reuse_prewarm_workers = 14; // canonical async prewarm control; unset/0 disables, >0 enables one job per visible rail on a bounded worker pool
 }
 
 message TransportConfig {

@@ -17,7 +17,9 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
+#include "core/communicator/base/constants.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 #include "daemon/service/artifact_retire_utils.h"
 #include "daemon/util/status_utils.h"
 
@@ -48,6 +50,71 @@ struct ActiveLeaseResolution {
   ArtifactDeviceKey key;
   LipLeaseEntry lease;
 };
+
+struct RegionMappingKeepalive {
+  IpcRegionRegistry* registry = nullptr;
+  std::string region_id;
+
+  ~RegionMappingKeepalive() {
+    if (registry == nullptr || region_id.empty()) {
+      return;
+    }
+    auto status = registry->release(region_id);
+    if (!status.ok()) {
+      LOG(WARNING) << "stable_local_backing.keepalive_release_failed"
+                   << " region_id=" << region_id << " status=" << status;
+    }
+  }
+};
+
+absl::Status activate_stable_local_backing_for_region(
+    store::StoreEngine& engine,
+    IpcRegionRegistry& region_registry,
+    const v2::ActivateStableLocalBackingRequest& req) {
+  if (req.region_id().empty()) {
+    return absl::InvalidArgumentError("region_id is required");
+  }
+  if (req.owner_pid() <= 0) {
+    return absl::InvalidArgumentError("owner_pid must be > 0");
+  }
+  if (req.slot_bytes() == 0) {
+    return absl::InvalidArgumentError("slot_bytes must be > 0");
+  }
+
+  auto comm_manager = engine.get_shared_comm_manager();
+  if (!comm_manager->is_enabled()) {
+    return absl::OkStatus();
+  }
+
+  auto mapping_or = region_registry.acquire_host_shared_local_mapping(req.region_id(), req.owner_pid());
+  if (!mapping_or.ok()) {
+    return mapping_or.status();
+  }
+  if (mapping_or->base_ptr == nullptr || mapping_or->size_bytes == 0) {
+    return absl::FailedPreconditionError("HOST_SHARED region local mapping is unavailable");
+  }
+  if (req.slot_bytes() > mapping_or->size_bytes) {
+    return absl::InvalidArgumentError("slot_bytes must not exceed region size");
+  }
+  if (mapping_or->region.memory_kind != IpcRegionRegistry::MemoryKind::kHostShared ||
+      !mapping_or->region.daemon_managed) {
+    return absl::FailedPreconditionError("stable local backing activation requires daemon-managed HOST_SHARED region");
+  }
+
+  auto keepalive = std::shared_ptr<void>(std::make_shared<RegionMappingKeepalive>(
+      RegionMappingKeepalive{.registry = &region_registry, .region_id = req.region_id()}));
+  return comm_manager->activate_stable_local_backing(
+      store::StableLocalBackingRef{
+          .kind = store::StableLocalBackingKind::kHostSharedRegion,
+          .backing_id = mapping_or->region.region_id,
+          .backing_base_addr = reinterpret_cast<uint64_t>(mapping_or->base_ptr),
+          .backing_bytes = mapping_or->size_bytes,
+          .slot_bytes = req.slot_bytes(),
+          .dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+      },
+      std::move(keepalive));
+}
 
 absl::StatusOr<ActiveLeaseResolution> resolve_active_lease_by_artifact(
     LipManager* lip_manager,
@@ -576,6 +643,24 @@ Status StoreDaemonServiceImpl::UnregisterRegion(
   if (*released_or && lifecycle_manager_ != nullptr) {
     lifecycle_manager_->unwatch_pid(static_cast<pid_t>(req->owner_pid()));
   }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::ActivateStableLocalBacking(
+    grpc::ServerContext* ctx,
+    const v2::ActivateStableLocalBackingRequest* req,
+    v2::ActivateStableLocalBackingResponse* resp) {
+  RpcContext rctx{"ActivateStableLocalBacking", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.region.id", req->region_id());
+  span->SetAttribute("tc.region.slot_bytes", static_cast<int64_t>(req->slot_bytes()));
+
+  auto status = activate_stable_local_backing_for_region(*engine_, *region_registry_, *req);
+  if (!status.ok()) {
+    return to_grpc_status(status);
+  }
+  (void)resp;
   rctx.mark_success();
   return Status::OK;
 }

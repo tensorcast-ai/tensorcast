@@ -3096,6 +3096,53 @@ class DaemonCtl:
 
         return bool(resp.released)
 
+    def activate_stable_local_backing(
+        self,
+        region_id: str,
+        *,
+        slot_bytes: int,
+        session_id: str | None = None,
+        timeout_s: float = 180.0,
+    ) -> None:
+        if not region_id:
+            raise ValueError("region_id is required")
+        if slot_bytes <= 0:
+            raise ValueError("slot_bytes must be positive")
+        req = store_daemon_pb2.ActivateStableLocalBackingRequest(
+            region_id=region_id,
+            owner_pid=int(self._get_effective_pid()),
+            slot_bytes=int(slot_bytes),
+        )
+        if session_id:
+            req.session_id = session_id
+
+        with self._client_span("Client/ActivateStableLocalBacking") as span:
+            set_span_attributes(
+                {
+                    "tc.region.id": region_id,
+                    "tc.region.slot_bytes": int(slot_bytes),
+                }
+            )
+            try:
+                self._unary_call(
+                    self.stub.ActivateStableLocalBacking,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    "ActivateStableLocalBacking failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
+
     def unregister_vram_region(
         self,
         region_id: str,

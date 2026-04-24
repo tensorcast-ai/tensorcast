@@ -203,11 +203,27 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
     struct ibv_mr* mr = nullptr;
   };
 
+  struct ChunkEntry {
+    enum class State {
+      kEmpty,
+      kRegistering,
+      kReady,
+      kFailed,
+    };
+
+    absl::Mutex mu;
+    absl::CondVar cv;
+    State state ABSL_GUARDED_BY(mu) = State::kEmpty;
+    ChunkRegistration registration ABSL_GUARDED_BY(mu);
+    absl::Status last_error ABSL_GUARDED_BY(mu) = absl::OkStatus();
+  };
+
   struct RailRegistration {
     int16_t rail_id = -1;
     std::string nic_name;
     net_dev_t dev;
-    absl::flat_hash_map<uint64_t, ChunkRegistration> chunks;
+    absl::Mutex mu;
+    absl::flat_hash_map<uint64_t, std::shared_ptr<ChunkEntry>> chunks ABSL_GUARDED_BY(mu);
   };
 
   struct ChunkHandle {
@@ -216,6 +232,15 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
     struct ibv_mr* mr = nullptr;
     uint64_t chunk_index = 0;
     bool cache_hit = false;
+    bool waited_on_inflight = false;
+    bool registered_now = false;
+  };
+
+  struct ResolvedChunk {
+    uint64_t chunk_index = 0;
+    uint64_t chunk_base_addr = 0;
+    uint64_t chunk_bytes = 0;
+    uint64_t requested_chunk_bytes = 0;
   };
 
   struct Use {
@@ -225,7 +250,7 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
       if (owner == nullptr) {
         return;
       }
-      absl::MutexLock lock(&owner->mu);
+      absl::MutexLock lock(&owner->lifecycle_mu);
       CHECK(owner->inflight_uses > 0);
       --owner->inflight_uses;
       if (owner->retiring && owner->inflight_uses == 0) {
@@ -237,23 +262,55 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
   };
 
   ~StableLocalBackingState() {
-    for (const auto& [rail_id, registration] : rails) {
-      for (const auto& [chunk_index, chunk] : registration.chunks) {
-        if (chunk.mr == nullptr) {
+    std::vector<std::shared_ptr<RailRegistration>> rail_states;
+    {
+      absl::MutexLock lock(&rails_mu);
+      rail_states.reserve(rails.size());
+      for (const auto& [rail_id, registration] : rails) {
+        (void)rail_id;
+        rail_states.push_back(registration);
+      }
+    }
+    for (const auto& rail : rail_states) {
+      if (rail == nullptr) {
+        continue;
+      }
+      std::vector<std::pair<uint64_t, std::shared_ptr<ChunkEntry>>> entries;
+      {
+        absl::MutexLock lock(&rail->mu);
+        entries.reserve(rail->chunks.size());
+        for (const auto& [chunk_index, entry] : rail->chunks) {
+          entries.emplace_back(chunk_index, entry);
+        }
+      }
+      for (const auto& [chunk_index, entry] : entries) {
+        if (entry == nullptr) {
           continue;
         }
-        const int rc = misc::wrap_ibv_dereg_mr(chunk.mr);
+
+        struct ibv_mr* mr = nullptr;
+        {
+          absl::MutexLock entry_lock(&entry->mu);
+          if (entry->state == ChunkEntry::State::kReady) {
+            mr = entry->registration.mr;
+          }
+        }
+
+        if (mr == nullptr) {
+          continue;
+        }
+        const int rc = misc::wrap_ibv_dereg_mr(mr);
         if (rc != misc::SUCCESS) {
           LOG(WARNING) << "stable_local_backing.dereg_failed"
-                       << " backing_id=" << backing.backing_id << " rail_id=" << rail_id
-                       << " nic=" << registration.nic_name << " chunk_index=" << chunk_index;
+                       << " backing_id=" << backing.backing_id << " rail_id=" << rail->rail_id
+                       << " nic=" << rail->nic_name << " chunk_index=" << chunk_index;
         }
       }
     }
   }
 
   std::shared_ptr<void> acquire_use() {
-    absl::MutexLock lock(&mu);
+    absl::MutexLock lock(&lifecycle_mu);
     if (retiring) {
       return nullptr;
     }
@@ -262,15 +319,15 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
   }
 
   void begin_retire_and_wait() {
-    absl::MutexLock lock(&mu);
+    absl::MutexLock lock(&lifecycle_mu);
     retiring = true;
     while (inflight_uses > 0) {
-      drained_cv.Wait(&mu);
+      drained_cv.Wait(&lifecycle_mu);
     }
   }
 
   absl::Status merge_activation_backing(const StableLocalBackingRef& candidate, std::shared_ptr<void> keepalive) {
-    absl::MutexLock lock(&mu);
+    absl::MutexLock lock(&lifecycle_mu);
     if (candidate.kind != backing.kind || candidate.backing_id != backing.backing_id ||
         candidate.backing_base_addr != backing.backing_base_addr || candidate.backing_bytes != backing.backing_bytes ||
         candidate.dev_type != backing.dev_type || candidate.dev_id != backing.dev_id) {
@@ -287,22 +344,47 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
     return absl::OkStatus();
   }
 
-  absl::StatusOr<ChunkHandle> ensure_chunk(
-      net_dev_t dev,
-      int16_t rail_id,
-      uint64_t requested_slot_bytes,
-      uint32_t requested_chunk_slots,
-      uint64_t local_addr,
-      uint64_t local_bytes) {
-    if (dev == nullptr) {
-      return absl::InvalidArgumentError("stable local backing chunk registration requires a net_dev");
-    }
+  absl::StatusOr<uint64_t> compute_requested_chunk_bytes(uint64_t requested_slot_bytes, uint32_t requested_chunk_slots)
+      const {
     if (requested_slot_bytes == 0 || requested_chunk_slots == 0) {
       return absl::InvalidArgumentError("stable local backing chunk registration requires slot geometry");
     }
+    if (requested_slot_bytes > std::numeric_limits<uint64_t>::max() / requested_chunk_slots) {
+      return absl::OutOfRangeError("stable local backing chunk geometry overflows");
+    }
+    return requested_slot_bytes * requested_chunk_slots;
+  }
+
+  absl::Status validate_geometry_locked(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t requested_chunk_bytes) ABSL_EXCLUSIVE_LOCKS_REQUIRED(lifecycle_mu) {
+    if (registration_slot_bytes == 0) {
+      registration_slot_bytes = requested_slot_bytes;
+      registration_chunk_slots = requested_chunk_slots;
+      registration_chunk_bytes = requested_chunk_bytes;
+      return absl::OkStatus();
+    }
+    if (registration_slot_bytes != requested_slot_bytes || registration_chunk_slots != requested_chunk_slots ||
+        registration_chunk_bytes != requested_chunk_bytes) {
+      return absl::FailedPreconditionError("stable local backing chunk geometry mismatch");
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<ResolvedChunk> resolve_chunk_for_region(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t local_addr,
+      uint64_t local_bytes) const {
     if (local_addr < backing.backing_base_addr) {
       return absl::InvalidArgumentError("stable local backing local_addr precedes backing base");
     }
+    const auto requested_chunk_bytes_or = compute_requested_chunk_bytes(requested_slot_bytes, requested_chunk_slots);
+    if (!requested_chunk_bytes_or.ok()) {
+      return requested_chunk_bytes_or.status();
+    }
+    const uint64_t requested_chunk_bytes = *requested_chunk_bytes_or;
     const uint64_t region_offset = local_addr - backing.backing_base_addr;
     if (region_offset > std::numeric_limits<uint64_t>::max() - local_bytes ||
         region_offset + local_bytes > backing.backing_bytes) {
@@ -314,10 +396,6 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
     if (local_bytes == 0 || local_bytes > requested_slot_bytes) {
       return absl::InvalidArgumentError("stable local backing local region size is incompatible with slot_bytes");
     }
-    if (requested_slot_bytes > std::numeric_limits<uint64_t>::max() / requested_chunk_slots) {
-      return absl::OutOfRangeError("stable local backing chunk geometry overflows");
-    }
-    const uint64_t requested_chunk_bytes = requested_slot_bytes * requested_chunk_slots;
     const uint64_t slot_index = region_offset / requested_slot_bytes;
     const uint64_t chunk_index = slot_index / requested_chunk_slots;
     if (chunk_index > std::numeric_limits<uint64_t>::max() / requested_chunk_bytes) {
@@ -332,85 +410,341 @@ struct Communicator::StableLocalBackingState : public std::enable_shared_from_th
     if (region_offset + local_bytes > chunk_base_offset + chunk_bytes) {
       return absl::InvalidArgumentError("stable local backing local region crosses chunk boundary");
     }
-
-    absl::MutexLock lock(&mu);
-    if (retiring) {
-      return absl::FailedPreconditionError("stable local backing is retiring");
-    }
-    if (registration_slot_bytes == 0) {
-      registration_slot_bytes = requested_slot_bytes;
-      registration_chunk_slots = requested_chunk_slots;
-      registration_chunk_bytes = requested_chunk_bytes;
-    } else if (
-        registration_slot_bytes != requested_slot_bytes || registration_chunk_slots != requested_chunk_slots ||
-        registration_chunk_bytes != requested_chunk_bytes) {
-      return absl::FailedPreconditionError("stable local backing chunk geometry mismatch");
-    }
-    auto [rail_it, inserted] = rails.try_emplace(
-        rail_id,
-        RailRegistration{
-            .rail_id = rail_id,
-            .nic_name = dev->get_name(),
-            .dev = dev,
-        });
-    auto& rail = rail_it->second;
-    if (inserted) {
-      rail.nic_name = dev->get_name();
-      rail.dev = dev;
-    }
-    auto chunk_it = rail.chunks.find(chunk_index);
-    if (chunk_it != rail.chunks.end()) {
-      return ChunkHandle{
-          .rail_id = rail.rail_id,
-          .nic_name = rail.nic_name,
-          .mr = chunk_it->second.mr,
-          .chunk_index = chunk_index,
-          .cache_hit = true,
-      };
-    }
-
-    constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-    struct ibv_mr* mr = nullptr;
-    auto status = dev->reg_mr(&mr, reinterpret_cast<void*>(chunk_base_addr), static_cast<size_t>(chunk_bytes), kAccess);
-    if (status != SUCCESS || mr == nullptr) {
-      return absl::InternalError("failed to register stable local backing chunk MR");
-    }
-    rail.chunks.emplace(
-        chunk_index,
-        ChunkRegistration{
-            .chunk_index = chunk_index,
-            .base_addr = chunk_base_addr,
-            .bytes = chunk_bytes,
-            .mr = mr,
-        });
-    return ChunkHandle{
-        .rail_id = rail.rail_id,
-        .nic_name = rail.nic_name,
-        .mr = mr,
+    return ResolvedChunk{
         .chunk_index = chunk_index,
-        .cache_hit = false,
+        .chunk_base_addr = chunk_base_addr,
+        .chunk_bytes = chunk_bytes,
+        .requested_chunk_bytes = requested_chunk_bytes,
     };
   }
 
-  size_t chunk_count_for_rail(int16_t rail_id) const {
-    absl::MutexLock lock(&mu);
+  absl::StatusOr<ResolvedChunk> resolve_chunk_by_index(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t chunk_index) const {
+    const auto requested_chunk_bytes_or = compute_requested_chunk_bytes(requested_slot_bytes, requested_chunk_slots);
+    if (!requested_chunk_bytes_or.ok()) {
+      return requested_chunk_bytes_or.status();
+    }
+    const uint64_t requested_chunk_bytes = *requested_chunk_bytes_or;
+    if (backing.backing_bytes == 0) {
+      return absl::InvalidArgumentError("stable local backing requires non-zero backing_bytes");
+    }
+    if (chunk_index > std::numeric_limits<uint64_t>::max() / requested_chunk_bytes) {
+      return absl::OutOfRangeError("stable local backing chunk offset overflows");
+    }
+    const uint64_t chunk_base_offset = chunk_index * requested_chunk_bytes;
+    if (chunk_base_offset >= backing.backing_bytes) {
+      return absl::OutOfRangeError("stable local backing chunk base exceeds backing bytes");
+    }
+    return ResolvedChunk{
+        .chunk_index = chunk_index,
+        .chunk_base_addr = backing.backing_base_addr + chunk_base_offset,
+        .chunk_bytes = std::min<uint64_t>(requested_chunk_bytes, backing.backing_bytes - chunk_base_offset),
+        .requested_chunk_bytes = requested_chunk_bytes,
+    };
+  }
+
+  absl::Status ensure_geometry(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t requested_chunk_bytes) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (retiring) {
+      return absl::FailedPreconditionError("stable local backing is retiring");
+    }
+    return validate_geometry_locked(requested_slot_bytes, requested_chunk_slots, requested_chunk_bytes);
+  }
+
+  std::shared_ptr<RailRegistration> get_or_create_rail(net_dev_t dev, int16_t rail_id) {
+    absl::MutexLock lock(&rails_mu);
     auto it = rails.find(rail_id);
-    if (it == rails.end()) {
+    if (it != rails.end()) {
+      return it->second;
+    }
+    auto rail = std::make_shared<RailRegistration>();
+    rail->rail_id = rail_id;
+    rail->nic_name = dev->get_name();
+    rail->dev = dev;
+    rails.emplace(rail_id, rail);
+    return rail;
+  }
+
+  std::shared_ptr<ChunkEntry> get_or_create_chunk_entry(
+      const std::shared_ptr<RailRegistration>& rail,
+      uint64_t chunk_index) {
+    absl::MutexLock lock(&rail->mu);
+    auto it = rail->chunks.find(chunk_index);
+    if (it != rail->chunks.end()) {
+      return it->second;
+    }
+    auto entry = std::make_shared<ChunkEntry>();
+    rail->chunks.emplace(chunk_index, entry);
+    return entry;
+  }
+
+  absl::StatusOr<ChunkHandle> ensure_resolved_chunk(
+      net_dev_t dev,
+      int16_t rail_id,
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      const ResolvedChunk& resolved_chunk) {
+    if (dev == nullptr) {
+      return absl::InvalidArgumentError("stable local backing chunk registration requires a net_dev");
+    }
+
+    auto geometry_status =
+        ensure_geometry(requested_slot_bytes, requested_chunk_slots, resolved_chunk.requested_chunk_bytes);
+    if (!geometry_status.ok()) {
+      return geometry_status;
+    }
+    auto rail = get_or_create_rail(dev, rail_id);
+    auto entry = get_or_create_chunk_entry(rail, resolved_chunk.chunk_index);
+
+    bool waited_on_inflight = false;
+    while (true) {
+      {
+        absl::MutexLock entry_lock(&entry->mu);
+        if (entry->state == ChunkEntry::State::kReady) {
+          return ChunkHandle{
+              .rail_id = rail->rail_id,
+              .nic_name = rail->nic_name,
+              .mr = entry->registration.mr,
+              .chunk_index = resolved_chunk.chunk_index,
+              .cache_hit = !waited_on_inflight,
+              .waited_on_inflight = waited_on_inflight,
+              .registered_now = false,
+          };
+        }
+        if (entry->state == ChunkEntry::State::kRegistering) {
+          waited_on_inflight = true;
+          entry->cv.Wait(&entry->mu);
+          continue;
+        }
+        entry->state = ChunkEntry::State::kRegistering;
+        entry->last_error = absl::OkStatus();
+      }
+
+      constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+      struct ibv_mr* mr = nullptr;
+      auto status = dev->reg_mr(
+          &mr,
+          reinterpret_cast<void*>(resolved_chunk.chunk_base_addr),
+          static_cast<size_t>(resolved_chunk.chunk_bytes),
+          kAccess);
+
+      absl::Status register_status = absl::OkStatus();
+      if (status != SUCCESS || mr == nullptr) {
+        register_status = absl::InternalError("failed to register stable local backing chunk MR");
+      }
+
+      {
+        absl::MutexLock entry_lock(&entry->mu);
+        if (register_status.ok()) {
+          entry->registration = ChunkRegistration{
+              .chunk_index = resolved_chunk.chunk_index,
+              .base_addr = resolved_chunk.chunk_base_addr,
+              .bytes = resolved_chunk.chunk_bytes,
+              .mr = mr,
+          };
+          entry->state = ChunkEntry::State::kReady;
+        } else {
+          if (mr != nullptr) {
+            const int rc = misc::wrap_ibv_dereg_mr(mr);
+            if (rc != misc::SUCCESS) {
+              LOG(WARNING) << "stable_local_backing.chunk_reg_cleanup_failed"
+                           << " backing_id=" << backing.backing_id << " rail_id=" << rail_id
+                           << " nic=" << rail->nic_name << " chunk_index=" << resolved_chunk.chunk_index;
+            }
+          }
+          entry->last_error = register_status;
+          entry->state = ChunkEntry::State::kFailed;
+        }
+        entry->cv.SignalAll();
+        if (!register_status.ok()) {
+          return register_status;
+        }
+        return ChunkHandle{
+            .rail_id = rail->rail_id,
+            .nic_name = rail->nic_name,
+            .mr = entry->registration.mr,
+            .chunk_index = resolved_chunk.chunk_index,
+            .cache_hit = false,
+            .waited_on_inflight = waited_on_inflight,
+            .registered_now = true,
+        };
+      }
+    }
+  }
+
+  absl::StatusOr<ChunkHandle> ensure_chunk(
+      net_dev_t dev,
+      int16_t rail_id,
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t local_addr,
+      uint64_t local_bytes) {
+    auto resolved_chunk_or =
+        resolve_chunk_for_region(requested_slot_bytes, requested_chunk_slots, local_addr, local_bytes);
+    if (!resolved_chunk_or.ok()) {
+      return resolved_chunk_or.status();
+    }
+    return ensure_resolved_chunk(dev, rail_id, requested_slot_bytes, requested_chunk_slots, *resolved_chunk_or);
+  }
+
+  bool try_mark_prewarm_requested(size_t rail_count, uint64_t chunk_count_per_rail) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (retiring || prewarm_requested) {
+      return false;
+    }
+    prewarm_requested = true;
+    prewarm_complete = rail_count == 0;
+    prewarm_rail_count = rail_count;
+    prewarm_chunk_count_per_rail = chunk_count_per_rail;
+    prewarm_jobs_total = rail_count;
+    prewarm_jobs_completed = 0;
+    prewarm_jobs_failed = 0;
+    if (prewarm_complete) {
+      prewarm_cv.SignalAll();
+    }
+    return true;
+  }
+
+  void note_prewarm_job_finished(bool success) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (!prewarm_requested) {
+      return;
+    }
+    if (success) {
+      ++prewarm_jobs_completed;
+    } else {
+      ++prewarm_jobs_failed;
+    }
+    if (!prewarm_complete && prewarm_jobs_completed + prewarm_jobs_failed >= prewarm_jobs_total) {
+      prewarm_complete = true;
+      prewarm_cv.SignalAll();
+    }
+  }
+
+  bool prewarm_requested_enabled() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_requested;
+  }
+
+  bool prewarm_complete_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_complete;
+  }
+
+  bool wait_for_prewarm_completion(absl::Duration timeout) const {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (!prewarm_requested || prewarm_complete) {
+      return true;
+    }
+    const absl::Time deadline = absl::Now() + timeout;
+    while (!prewarm_complete) {
+      if (absl::Now() >= deadline) {
+        break;
+      }
+      prewarm_cv.WaitWithDeadline(&lifecycle_mu, deadline);
+    }
+    return prewarm_complete;
+  }
+
+  std::string rail_chunk_counts_debug_string() const {
+    std::vector<std::shared_ptr<RailRegistration>> rail_states;
+    {
+      absl::MutexLock lock(&rails_mu);
+      rail_states.reserve(rails.size());
+      for (const auto& [rail_id, registration] : rails) {
+        (void)rail_id;
+        rail_states.push_back(registration);
+      }
+    }
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& registration : rail_states) {
+      if (registration == nullptr) {
+        continue;
+      }
+      if (!first) {
+        oss << ",";
+      }
+      first = false;
+      oss << registration->rail_id << ":" << chunk_count_for_rail(registration->rail_id);
+    }
+    return oss.str();
+  }
+
+  size_t chunk_count_for_rail(int16_t rail_id) const {
+    std::shared_ptr<RailRegistration> rail;
+    {
+      absl::MutexLock lock(&rails_mu);
+      auto it = rails.find(rail_id);
+      if (it == rails.end()) {
+        return 0;
+      }
+      rail = it->second;
+    }
+    if (rail == nullptr) {
       return 0;
     }
-    return it->second.chunks.size();
+    std::vector<std::shared_ptr<ChunkEntry>> entries;
+    {
+      absl::MutexLock lock(&rail->mu);
+      entries.reserve(rail->chunks.size());
+      for (const auto& [chunk_index, entry] : rail->chunks) {
+        (void)chunk_index;
+        entries.push_back(entry);
+      }
+    }
+    size_t ready = 0;
+    for (const auto& entry : entries) {
+      if (entry == nullptr) {
+        continue;
+      }
+      absl::MutexLock entry_lock(&entry->mu);
+      if (entry->state == ChunkEntry::State::kReady) {
+        ++ready;
+      }
+    }
+    return ready;
+  }
+
+  size_t prewarm_rail_count_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_rail_count;
+  }
+
+  uint64_t prewarm_chunk_count_per_rail_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_chunk_count_per_rail;
+  }
+
+  std::pair<size_t, size_t> prewarm_job_counters_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return {prewarm_jobs_completed, prewarm_jobs_failed};
   }
 
   StableLocalBackingRef backing;
   std::shared_ptr<void> activation_keepalive;
-  absl::flat_hash_map<int16_t, RailRegistration> rails;
-  mutable absl::Mutex mu;
-  uint64_t registration_slot_bytes ABSL_GUARDED_BY(mu) = 0;
-  uint32_t registration_chunk_slots ABSL_GUARDED_BY(mu) = 0;
-  uint64_t registration_chunk_bytes ABSL_GUARDED_BY(mu) = 0;
-  int inflight_uses ABSL_GUARDED_BY(mu) = 0;
-  bool retiring ABSL_GUARDED_BY(mu) = false;
+  mutable absl::Mutex lifecycle_mu;
+  mutable absl::Mutex rails_mu;
+  absl::flat_hash_map<int16_t, std::shared_ptr<RailRegistration>> rails ABSL_GUARDED_BY(rails_mu);
+  uint64_t registration_slot_bytes ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  uint32_t registration_chunk_slots ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  uint64_t registration_chunk_bytes ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  int inflight_uses ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  bool retiring ABSL_GUARDED_BY(lifecycle_mu) = false;
+  bool prewarm_requested ABSL_GUARDED_BY(lifecycle_mu) = false;
+  bool prewarm_complete ABSL_GUARDED_BY(lifecycle_mu) = false;
+  size_t prewarm_rail_count ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  uint64_t prewarm_chunk_count_per_rail ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  size_t prewarm_jobs_total ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  size_t prewarm_jobs_completed ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  size_t prewarm_jobs_failed ABSL_GUARDED_BY(lifecycle_mu) = 0;
   absl::CondVar drained_cv;
+  mutable absl::CondVar prewarm_cv;
 };
 
 struct Communicator::TransferProgressState {
@@ -1983,6 +2317,24 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
   configured_conn = std::max(2, configured_conn);
   mtcp_conn_count_ = configured_conn;
   stable_local_mr_reuse_chunk_slots_ = std::max<uint32_t>(1, config_.rdma().stable_local_mr_reuse_chunk_slots());
+  stable_local_mr_reuse_async_prewarm_enabled_ = false;
+  stable_local_mr_reuse_prewarm_workers_ = 0;
+  if (config_.rdma().has_stable_local_mr_reuse_prewarm_workers()) {
+    stable_local_mr_reuse_prewarm_workers_ = config_.rdma().stable_local_mr_reuse_prewarm_workers();
+    stable_local_mr_reuse_async_prewarm_enabled_ = stable_local_mr_reuse_prewarm_workers_ > 0;
+  } else if (config_.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails()) {
+    stable_local_mr_reuse_async_prewarm_enabled_ = config_.rdma().stable_local_mr_reuse_eager_prereg_all_rails();
+    stable_local_mr_reuse_prewarm_workers_ = stable_local_mr_reuse_async_prewarm_enabled_ ? 1 : 0;
+  }
+  if (config_.rdma().has_stable_local_mr_reuse_prewarm_workers() &&
+      config_.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails()) {
+    const bool alias_enabled = config_.rdma().stable_local_mr_reuse_eager_prereg_all_rails();
+    const bool workers_enabled = config_.rdma().stable_local_mr_reuse_prewarm_workers() > 0;
+    if (alias_enabled != workers_enabled) {
+      LOG(WARNING) << "communicator.rdma.stable_local_mr_reuse_eager_prereg_all_rails is deprecated and ignored "
+                   << "because communicator.rdma.stable_local_mr_reuse_prewarm_workers is set";
+    }
+  }
   const auto mtcp_conn_budget = static_cast<size_t>(configured_conn);
   const size_t recv_num_buffers = num_buffers * mtcp_conn_budget;
   const size_t computed_pool_buffers = num_buffers + recv_num_buffers;
@@ -2182,6 +2534,10 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
 
     handshake_retry_thread_ = std::thread([this]() { this->handshake_retry_loop(); });
     handshake_retry_thread_started_ = true;
+
+    for (uint32_t worker_index = 0; worker_index < stable_local_mr_reuse_prewarm_workers_; ++worker_index) {
+      stable_local_prewarm_threads_.emplace_back([this]() { this->stable_local_prewarm_loop(); });
+    }
   }
 
   mtcp_staging_thread_ = std::thread([this]() { this->mtcp_staging_loop(); });
@@ -2193,9 +2549,15 @@ Communicator::~Communicator() {
   request_queue_.stop();
   handshake_retry_stop_.store(true);
   handshake_retry_cv_.SignalAll();
+  stable_local_prewarm_queue_.stop();
   mtcp_staging_queue_.notify();
   if (handshake_retry_thread_started_ && handshake_retry_thread_.joinable()) {
     handshake_retry_thread_.join();
+  }
+  for (auto& thread : stable_local_prewarm_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
   }
   if (mtcp_staging_thread_.joinable()) {
     mtcp_staging_thread_.join();
@@ -2235,29 +2597,50 @@ absl::Status Communicator::activate_stable_local_backing(
     return absl::InvalidArgumentError("stable local backing activation only supports CPU backing in the first cut");
   }
 
-  absl::MutexLock lock(&stable_local_backings_mu_);
-  auto it = stable_local_backings_.find(backing.backing_id);
-  if (it != stable_local_backings_.end()) {
-    if (it->second == nullptr) {
-      return absl::FailedPreconditionError("stable local backing exists with null state");
+  std::shared_ptr<StableLocalBackingState> state;
+  bool created = false;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(backing.backing_id);
+    if (it != stable_local_backings_.end()) {
+      if (it->second == nullptr) {
+        return absl::FailedPreconditionError("stable local backing exists with null state");
+      }
+      state = it->second;
+    } else {
+      state = std::make_shared<StableLocalBackingState>();
+      state->backing = backing;
+      state->activation_keepalive = std::move(keepalive);
+      stable_local_backings_.emplace(backing.backing_id, state);
+      created = true;
     }
-    auto status = it->second->merge_activation_backing(backing, std::move(keepalive));
+  }
+
+  if (!created) {
+    auto status = state->merge_activation_backing(backing, std::move(keepalive));
     if (!status.ok()) {
       return status;
     }
     VLOG(2) << "stable_local_backing.activate_merge"
             << " backing_id=" << backing.backing_id << " backing_bytes=" << backing.backing_bytes
             << " slot_bytes=" << backing.slot_bytes;
-    return absl::OkStatus();
+  } else {
+    VLOG(2) << "stable_local_backing.activate"
+            << " backing_id=" << backing.backing_id << " backing_base_addr=0x" << std::hex << backing.backing_base_addr
+            << std::dec << " backing_bytes=" << backing.backing_bytes << " slot_bytes=" << backing.slot_bytes;
   }
 
-  auto state = std::make_shared<StableLocalBackingState>();
-  state->backing = backing;
-  state->activation_keepalive = std::move(keepalive);
-  stable_local_backings_.emplace(backing.backing_id, state);
-  VLOG(2) << "stable_local_backing.activate"
-          << " backing_id=" << backing.backing_id << " backing_base_addr=0x" << std::hex << backing.backing_base_addr
-          << std::dec << " backing_bytes=" << backing.backing_bytes << " slot_bytes=" << backing.slot_bytes;
+  auto prewarm_status = schedule_stable_local_backing_prewarm(state);
+  if (!prewarm_status.ok()) {
+    if (created) {
+      absl::MutexLock lock(&stable_local_backings_mu_);
+      auto it = stable_local_backings_.find(backing.backing_id);
+      if (it != stable_local_backings_.end() && it->second == state) {
+        stable_local_backings_.erase(it);
+      }
+    }
+    return prewarm_status;
+  }
   return absl::OkStatus();
 }
 
@@ -2299,6 +2682,181 @@ size_t Communicator::stable_local_backing_chunk_count_for_test(std::string_view 
     return 0;
   }
   return it->second->chunk_count_for_rail(rail_id);
+}
+
+bool Communicator::stable_local_backing_prewarm_complete_for_test(std::string_view backing_id) const {
+  absl::MutexLock lock(&stable_local_backings_mu_);
+  auto it = stable_local_backings_.find(std::string(backing_id));
+  if (it == stable_local_backings_.end() || it->second == nullptr) {
+    return false;
+  }
+  return it->second->prewarm_complete_for_test();
+}
+
+bool Communicator::wait_for_stable_local_backing_prewarm_for_test(std::string_view backing_id, absl::Duration timeout)
+    const {
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(std::string(backing_id));
+    if (it == stable_local_backings_.end() || it->second == nullptr) {
+      return false;
+    }
+    state = it->second;
+  }
+  return state->wait_for_prewarm_completion(timeout);
+}
+
+std::vector<net_dev_t> Communicator::collect_primary_visible_rdma_rail_devs() const {
+  std::vector<net_dev_t> rail_devs;
+  if (!enable_rdma_ || rdma_context_ == nullptr) {
+    return rail_devs;
+  }
+  absl::flat_hash_set<int16_t> seen_rails;
+  rail_devs.reserve(rdma_context_->list_devs().size());
+  for (const auto& dev : rdma_context_->list_devs()) {
+    if (dev == nullptr) {
+      continue;
+    }
+    if (!seen_rails.insert(dev->get_rail_id()).second) {
+      continue;
+    }
+    auto primary = rdma_context_->get_dev_by_rail(dev->get_rail_id());
+    if (primary != nullptr) {
+      rail_devs.push_back(primary);
+    }
+  }
+  return rail_devs;
+}
+
+absl::Status Communicator::schedule_stable_local_backing_prewarm(
+    const std::shared_ptr<StableLocalBackingState>& state) {
+  if (state == nullptr || !stable_local_mr_reuse_async_prewarm_enabled_ ||
+      stable_local_mr_reuse_prewarm_workers_ == 0) {
+    return absl::OkStatus();
+  }
+  if (state->backing.slot_bytes == 0) {
+    LOG(WARNING) << "stable_local_backing.activate_prewarm_skipped"
+                 << " backing_id=" << state->backing.backing_id << " reason=missing_slot_bytes";
+    return absl::OkStatus();
+  }
+  const auto rail_devs = collect_primary_visible_rdma_rail_devs();
+  if (rail_devs.empty()) {
+    VLOG(2) << "stable_local_backing.activate_prewarm_skipped"
+            << " backing_id=" << state->backing.backing_id << " reason=no_visible_rdma_rails";
+    return absl::OkStatus();
+  }
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  const auto chunk_bytes_or = state->compute_requested_chunk_bytes(state->backing.slot_bytes, chunk_slots);
+  if (!chunk_bytes_or.ok()) {
+    return chunk_bytes_or.status();
+  }
+  const uint64_t chunk_bytes = *chunk_bytes_or;
+  const uint64_t chunk_count = 1 + ((state->backing.backing_bytes - 1) / chunk_bytes);
+  if (!state->try_mark_prewarm_requested(rail_devs.size(), chunk_count)) {
+    return absl::OkStatus();
+  }
+
+  LOG(INFO) << "stable_local_backing.activate_prewarm_enqueued"
+            << " backing_id=" << state->backing.backing_id << " backing_bytes=" << state->backing.backing_bytes
+            << " slot_bytes=" << state->backing.slot_bytes << " chunk_slots=" << chunk_slots
+            << " chunk_bytes=" << chunk_bytes << " chunk_count_per_rail=" << chunk_count
+            << " visible_rail_count=" << rail_devs.size()
+            << " prewarm_workers=" << stable_local_mr_reuse_prewarm_workers_;
+  for (const auto& dev : rail_devs) {
+    StableLocalPrewarmTask task;
+    task.backing_state = state;
+    task.backing_id = state->backing.backing_id;
+    task.dev = dev;
+    task.rail_id = dev->get_rail_id();
+    task.slot_bytes = state->backing.slot_bytes;
+    task.chunk_slots = chunk_slots;
+    task.chunk_count = chunk_count;
+    if (stable_local_prewarm_queue_.push(task) != misc::SUCCESS) {
+      state->note_prewarm_job_finished(false);
+      LOG(WARNING) << "stable_local_backing.activate_prewarm_enqueue_failed"
+                   << " backing_id=" << state->backing.backing_id << " rail_id=" << task.rail_id;
+    }
+  }
+  return absl::OkStatus();
+}
+
+void Communicator::stable_local_prewarm_loop() {
+  while (!stop_.load()) {
+    StableLocalPrewarmTask task = stable_local_prewarm_queue_.pop(true, 1000);
+    if (task.backing_id.empty() && task.backing_state.expired()) {
+      continue;
+    }
+    if (task.backing_state.expired()) {
+      continue;
+    }
+    process_stable_local_prewarm_task(std::move(task));
+  }
+
+  while (true) {
+    StableLocalPrewarmTask task = stable_local_prewarm_queue_.pop(false);
+    if (task.backing_id.empty() && task.backing_state.expired()) {
+      break;
+    }
+    if (task.backing_state.expired()) {
+      continue;
+    }
+    process_stable_local_prewarm_task(std::move(task));
+  }
+}
+
+void Communicator::process_stable_local_prewarm_task(StableLocalPrewarmTask task) {
+  auto state = task.backing_state.lock();
+  if (state == nullptr) {
+    return;
+  }
+
+  auto use = state->acquire_use();
+  if (use == nullptr) {
+    state->note_prewarm_job_finished(false);
+    return;
+  }
+
+  const absl::Time started_at = absl::Now();
+  bool success = true;
+  uint64_t cache_hits = 0;
+  uint64_t lazy_regs = 0;
+  for (uint64_t chunk_index = 0; chunk_index < task.chunk_count; ++chunk_index) {
+    if (stop_.load(std::memory_order_relaxed)) {
+      success = false;
+      break;
+    }
+    auto resolved_chunk_or = state->resolve_chunk_by_index(task.slot_bytes, task.chunk_slots, chunk_index);
+    if (!resolved_chunk_or.ok()) {
+      success = false;
+      LOG(WARNING) << "stable_local_backing.prewarm_chunk_resolve_failed"
+                   << " backing_id=" << task.backing_id << " rail_id=" << task.rail_id << " chunk_index=" << chunk_index
+                   << " status=" << resolved_chunk_or.status();
+      break;
+    }
+    auto chunk_or =
+        state->ensure_resolved_chunk(task.dev, task.rail_id, task.slot_bytes, task.chunk_slots, *resolved_chunk_or);
+    if (!chunk_or.ok()) {
+      success = false;
+      LOG(WARNING) << "stable_local_backing.prewarm_chunk_register_failed"
+                   << " backing_id=" << task.backing_id << " rail_id=" << task.rail_id << " chunk_index=" << chunk_index
+                   << " status=" << chunk_or.status();
+      break;
+    }
+    if (chunk_or->cache_hit) {
+      ++cache_hits;
+    }
+    if (chunk_or->registered_now) {
+      ++lazy_regs;
+    }
+  }
+
+  state->note_prewarm_job_finished(success);
+  VLOG(2) << "stable_local_backing.prewarm_job_done"
+          << " backing_id=" << task.backing_id << " rail_id=" << task.rail_id << " chunk_count=" << task.chunk_count
+          << " ready_chunks=" << state->chunk_count_for_rail(task.rail_id) << " cache_hits=" << cache_hits
+          << " lazy_regs=" << lazy_regs << " success=" << success
+          << " prewarm_ms=" << absl::ToDoubleMilliseconds(absl::Now() - started_at);
 }
 
 void Communicator::mtcp_staging_loop() {
@@ -2838,6 +3396,10 @@ future_read_result_t Communicator::read_plan(
               << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
               << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
               << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+              << " stable_backing_chunk_waits=" << prepared->stable_backing_chunk_waits
+              << " stable_backing_chunk_lazy_registrations=" << prepared->stable_backing_chunk_lazy_registrations
+              << " stable_backing_prewarm_requested=" << prepared->stable_backing_prewarm_requested
+              << " stable_backing_prewarm_complete=" << prepared->stable_backing_prewarm_complete
               << " rail_id=" << prepared->rail_id << " local_nic=" << prepared->local_nic;
   }
 
@@ -2986,6 +3548,8 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
   const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
   std::shared_ptr<StableLocalBackingState> stable_backing_state;
   std::shared_ptr<void> stable_backing_use;
+  bool stable_backing_prewarm_requested = false;
+  bool stable_backing_prewarm_complete = false;
   const absl::Time stable_backing_prepare_started_at = absl::Now();
   if (!plan.local_regions.empty()) {
     if (!stable_local_mr_reuse_enabled) {
@@ -3019,6 +3583,8 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
         if (stable_backing_state == nullptr) {
           prepared->local_registration_fallback_reason = "stable_backing_missing";
         } else {
+          stable_backing_prewarm_requested = stable_backing_state->prewarm_requested_enabled();
+          stable_backing_prewarm_complete = stable_backing_state->prewarm_complete_for_test();
           const absl::Time stable_backing_acquire_started_at = absl::Now();
           stable_backing_use = stable_backing_state->acquire_use();
           stable_backing_acquire_elapsed += absl::Now() - stable_backing_acquire_started_at;
@@ -3033,6 +3599,8 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
             stable_regions.reserve(plan.local_regions.size());
             uint32_t chunk_cache_hits = 0;
             uint32_t chunk_cache_misses = 0;
+            uint32_t chunk_waits = 0;
+            uint32_t chunk_lazy_registrations = 0;
             for (const auto& region : plan.local_regions) {
               auto chunk_or = stable_backing_state->ensure_chunk(
                   selected_net_dev,
@@ -3055,6 +3623,8 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
                 chunk_indices.clear();
                 chunk_cache_hits = 0;
                 chunk_cache_misses = 0;
+                chunk_waits = 0;
+                chunk_lazy_registrations = 0;
                 break;
               }
               const auto& chunk = *chunk_or;
@@ -3063,6 +3633,12 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
                 ++chunk_cache_hits;
               } else {
                 ++chunk_cache_misses;
+              }
+              if (chunk.waited_on_inflight) {
+                ++chunk_waits;
+              }
+              if (chunk.registered_now) {
+                ++chunk_lazy_registrations;
               }
               stable_regions.push_back(
                   transport::PreparedLocalRegion{
@@ -3081,6 +3657,10 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
               prepared->stable_backing_chunk_count = static_cast<uint32_t>(chunk_indices.size());
               prepared->stable_backing_chunk_cache_hits = chunk_cache_hits;
               prepared->stable_backing_chunk_cache_misses = chunk_cache_misses;
+              prepared->stable_backing_chunk_waits = chunk_waits;
+              prepared->stable_backing_chunk_lazy_registrations = chunk_lazy_registrations;
+              prepared->stable_backing_prewarm_requested = stable_backing_prewarm_requested;
+              prepared->stable_backing_prewarm_complete = stable_backing_prewarm_complete;
               local_regions_reused = prepared->local_regions.size();
             }
           }
@@ -3097,10 +3677,14 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
         << " local_registration_mode=" << prepared->local_registration_mode
         << " fallback_reason=" << prepared->local_registration_fallback_reason
         << " stable_backing_id=" << prepared->stable_backing_id
+        << " stable_backing_prewarm_requested=" << stable_backing_prewarm_requested
+        << " stable_backing_prewarm_complete=" << stable_backing_prewarm_complete
         << " stable_backing_chunk_bytes=" << prepared->stable_backing_chunk_bytes
         << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
         << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
         << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+        << " stable_backing_chunk_waits=" << prepared->stable_backing_chunk_waits
+        << " stable_backing_chunk_lazy_registrations=" << prepared->stable_backing_chunk_lazy_registrations
         << " rail_id=" << prepared->rail_id << " local_regions=" << plan.local_regions.size()
         << " stable_local_mr_reuse_enabled=" << stable_local_mr_reuse_enabled
         << " device_resolve_ms=" << absl::ToDoubleMilliseconds(local_region_device_resolve_elapsed)
@@ -3172,6 +3756,10 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
         << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
         << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
         << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+        << " stable_backing_chunk_waits=" << prepared->stable_backing_chunk_waits
+        << " stable_backing_chunk_lazy_registrations=" << prepared->stable_backing_chunk_lazy_registrations
+        << " stable_backing_prewarm_requested=" << prepared->stable_backing_prewarm_requested
+        << " stable_backing_prewarm_complete=" << prepared->stable_backing_prewarm_complete
         << " rail_resolve_ms=" << absl::ToDoubleMilliseconds(rail_resolve_elapsed)
         << " local_region_prepare_ms=" << absl::ToDoubleMilliseconds(local_region_prepare_elapsed)
         << " local_region_reg_ms=" << absl::ToDoubleMilliseconds(local_region_reg_elapsed)

@@ -3291,6 +3291,22 @@ class Store:
                 _cache_unregister_region(region_id)
         return released
 
+    def activate_stable_local_backing(
+        self,
+        region_id: str,
+        *,
+        slot_bytes: int,
+        session_id: str | None = None,
+        timeout_s: float = 180.0,
+    ) -> None:
+        client = self._runtime.ensure_client()
+        client.activate_stable_local_backing(
+            region_id,
+            slot_bytes=int(slot_bytes),
+            session_id=session_id,
+            timeout_s=float(timeout_s),
+        )
+
     def attach_host_shared_region(
         self,
         handle: LocalRegionHandle,

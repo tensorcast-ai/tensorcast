@@ -110,6 +110,10 @@ struct PreparedReadPlan {
   uint32_t stable_backing_chunk_count = 0;
   uint32_t stable_backing_chunk_cache_hits = 0;
   uint32_t stable_backing_chunk_cache_misses = 0;
+  uint32_t stable_backing_chunk_waits = 0;
+  uint32_t stable_backing_chunk_lazy_registrations = 0;
+  bool stable_backing_prewarm_requested = false;
+  bool stable_backing_prewarm_complete = false;
   std::vector<PreparedLocalRegion> local_regions;
   std::vector<std::vector<PreparedSourcePlacement>> placements_by_source_slice;
 };

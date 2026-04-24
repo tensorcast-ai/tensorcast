@@ -72,10 +72,11 @@ service StoreDaemonService {
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
   rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
   rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
-  rpc RegisterRegion(RegisterRegionRequest) returns (RegisterRegionResponse) {}
-  rpc UnregisterRegion(UnregisterRegionRequest) returns (UnregisterRegionResponse) {}
-  rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
-  rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
+rpc RegisterRegion(RegisterRegionRequest) returns (RegisterRegionResponse) {}
+rpc UnregisterRegion(UnregisterRegionRequest) returns (UnregisterRegionResponse) {}
+rpc ActivateStableLocalBacking(ActivateStableLocalBackingRequest) returns (ActivateStableLocalBackingResponse) {}
+rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
+rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
   rpc StartPublishTargetReplica(PublishTargetReplicaRequest) returns (StartPublishTargetReplicaResponse) {}
   rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
@@ -1933,6 +1934,15 @@ message UnregisterRegionRequest {
 message UnregisterRegionResponse {
   bool released = 1;
 }
+
+message ActivateStableLocalBackingRequest {
+  optional string session_id = 1;
+  string region_id = 2;
+  int32 owner_pid = 3;
+  uint64 slot_bytes = 4;
+}
+
+message ActivateStableLocalBackingResponse {}
 
 message RegisterVramRegionRequest {
   // Client session identifier (best-effort) used for diagnostics and ownership.
