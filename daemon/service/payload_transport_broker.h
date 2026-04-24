@@ -46,8 +46,8 @@ class PayloadTransportBroker {
     std::uint64_t max_chunk_bytes{1ULL << 20};
     absl::Duration fetch_deadline{absl::Seconds(5)};
     absl::Duration cleanup_interval{absl::Minutes(1)};
-    std::uint64_t max_batch_payload_bytes{16ULL << 20};
-    std::uint32_t max_batch_items{256};
+    std::uint64_t max_batch_payload_bytes{0};
+    std::uint32_t max_batch_items{0};
     std::uint64_t max_batch_stage_bytes_per_peer{128ULL << 20};
     std::uint32_t batch_transport_protocol_version{2};
     bool communicator_source_enabled{true};
