@@ -17,6 +17,7 @@ service StoreDaemonService {
   rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc CreateBinding(CreateBindingRequest) returns (CreateBindingResponse) {}
   rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
@@ -72,12 +73,13 @@ service StoreDaemonService {
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
   rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
   rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
-rpc RegisterRegion(RegisterRegionRequest) returns (RegisterRegionResponse) {}
-rpc UnregisterRegion(UnregisterRegionRequest) returns (UnregisterRegionResponse) {}
-rpc ActivateStableLocalBacking(ActivateStableLocalBackingRequest) returns (ActivateStableLocalBackingResponse) {}
-rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
-rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
+  rpc RegisterRegion(RegisterRegionRequest) returns (RegisterRegionResponse) {}
+  rpc UnregisterRegion(UnregisterRegionRequest) returns (UnregisterRegionResponse) {}
+  rpc ActivateStableLocalBacking(ActivateStableLocalBackingRequest) returns (ActivateStableLocalBackingResponse) {}
+  rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
+  rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
   rpc StartPublishTargetReplica(PublishTargetReplicaRequest) returns (StartPublishTargetReplicaResponse) {}
   rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
   rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
@@ -95,6 +97,8 @@ rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramReg
 
   // ========== Key mapping and publish ==========
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc ResolvePublicDiskSource(ResolvePublicDiskSourceRequest) returns (ResolvePublicDiskSourceResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
