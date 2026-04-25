@@ -2818,24 +2818,6 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
           if (!ensure_result_or.ok()) {
             fallback_reason = DirectFallbackReason::kMrUnavailable;
           } else {
-            const auto& ensure_result = *ensure_result_or;
-            if (ensure_result.fast_path_hit) {
-              ++source_mr_fast_path_count;
-            }
-            if (ensure_result.owner) {
-              ++source_mr_owner_count;
-            }
-            if (ensure_result.waiter) {
-              ++source_mr_waiter_count;
-            }
-            if (ensure_result.add_dev_fallback) {
-              ++source_mr_add_dev_fallback_count;
-            }
-            if (ensure_result.reg_async_issued) {
-              ++source_mr_reg_async_count;
-            }
-            source_mr_gate_wait_ms += ensure_result.gate_wait_ms;
-            max_source_mr_gate_wait_ms = std::max(max_source_mr_gate_wait_ms, ensure_result.gate_wait_ms);
             direct_mr = tensor->get_mr(dev);
             direct_eligible = direct_mr != nullptr && tensor->has_registered_mr(dev);
             if (!direct_eligible) {

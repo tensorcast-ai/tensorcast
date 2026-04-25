@@ -6,11 +6,13 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/log/log.h"
 #include "absl/strings/ascii.h"
+#include "absl/time/clock.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
@@ -1019,50 +1021,53 @@ ByteArtifactBodyStore::PutResult ByteArtifactBodyStore::put_if_absent(
   }
 
   absl::MutexLock lock(&state_.mu);
-  auto entry_it = state_.authority_entries.find(std::string(artifact_id));
-  if (entry_it != state_.authority_entries.end() &&
-      claim_matches_context_locked(
-          artifact_id, entry_it->second, shard_id, lease_generation, routing_epoch, now, &state_)) {
-    auto& entry = entry_it->second;
-    const BodyDescriptor normalized_descriptor = normalized_body_descriptor(descriptor);
-    if (!invariant_matches_descriptor(invariant, entry.claim_descriptor) ||
-        !content_matches_claim_descriptor(normalized_descriptor, entry.claim_descriptor) ||
-        !verified_content_matches_descriptor(verified_content_descriptor, entry.claim_descriptor)) {
-      maybe_retire_backing_handle(body_handle, "conflict");
-      return PutResult{.outcome = PutOutcome::kConflict};
-    }
-    if (ttl_ms.has_value() && *ttl_ms > 0) {
-      const absl::Time new_expiry = now + absl::Milliseconds(*ttl_ms);
-      extend_expiry_monotonic(new_expiry, &entry.expires_at);
-    }
 
-    bool should_rebind = entry.visibility_kind != AuthorityVisibilityKind::kReadyBacking ||
-        entry.claim_state != AuthorityClaimState::kClaimedVisible || !entry.retained_backing_identity.has_value();
-    if (!should_rebind) {
-      auto backing_it = state_.backing_entries.find(*entry.retained_backing_identity);
-      should_rebind = backing_it == state_.backing_entries.end() ||
-          backing_it->second.lifecycle_state != BackingLifecycleState::kActive;
-    }
-    if (should_rebind) {
-      install_or_rebind_backing_locked(
-          artifact_id,
-          &entry,
-          descriptor,
-          verified_content_descriptor,
-          verification_record,
-          backing_identity,
-          observation,
-          body_handle,
-          &state_);
+  auto entry_it = state_.authority_entries.find(std::string(artifact_id));
+  if (entry_it != state_.authority_entries.end()) {
+    const bool claim_matches = claim_matches_context_locked(
+        artifact_id, entry_it->second, shard_id, lease_generation, routing_epoch, now, &state_);
+    if (claim_matches) {
+      auto& entry = entry_it->second;
+      const BodyDescriptor normalized_descriptor = normalized_body_descriptor(descriptor);
+      if (!invariant_matches_descriptor(invariant, entry.claim_descriptor) ||
+          !content_matches_claim_descriptor(normalized_descriptor, entry.claim_descriptor) ||
+          !verified_content_matches_descriptor(verified_content_descriptor, entry.claim_descriptor)) {
+        maybe_retire_backing_handle(body_handle, "conflict");
+        return PutResult{.outcome = PutOutcome::kConflict};
+      }
+      if (ttl_ms.has_value() && *ttl_ms > 0) {
+        const absl::Time new_expiry = now + absl::Milliseconds(*ttl_ms);
+        extend_expiry_monotonic(new_expiry, &entry.expires_at);
+      }
+
+      bool should_rebind = entry.visibility_kind != AuthorityVisibilityKind::kReadyBacking ||
+          entry.claim_state != AuthorityClaimState::kClaimedVisible || !entry.retained_backing_identity.has_value();
+      if (!should_rebind) {
+        auto backing_it = state_.backing_entries.find(*entry.retained_backing_identity);
+        should_rebind = backing_it == state_.backing_entries.end() ||
+            backing_it->second.lifecycle_state != BackingLifecycleState::kActive;
+      }
+      if (should_rebind) {
+        install_or_rebind_backing_locked(
+            artifact_id,
+            &entry,
+            descriptor,
+            verified_content_descriptor,
+            verification_record,
+            backing_identity,
+            observation,
+            body_handle,
+            &state_);
+        return PutResult{.outcome = PutOutcome::kJoined};
+      }
+
+      const bool shares_existing_backing =
+          entry.retained_backing_identity.has_value() && *entry.retained_backing_identity == backing_identity;
+      if (!shares_existing_backing) {
+        maybe_retire_backing_handle(body_handle, "join_duplicate");
+      }
       return PutResult{.outcome = PutOutcome::kJoined};
     }
-
-    const bool shares_existing_backing =
-        entry.retained_backing_identity.has_value() && *entry.retained_backing_identity == backing_identity;
-    if (!shares_existing_backing) {
-      maybe_retire_backing_handle(body_handle, "join_duplicate");
-    }
-    return PutResult{.outcome = PutOutcome::kJoined};
   }
 
   auto entry = make_authority_entry(

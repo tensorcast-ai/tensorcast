@@ -153,9 +153,6 @@ absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportR
   }
 
   std::shared_ptr<CoreBacking::ExportLease> lease;
-  bool lease_cache_hit = false;
-  bool publish_prereg_pin_active = false;
-  absl::Duration enable_remote_replica_access_elapsed = absl::ZeroDuration();
   {
     absl::MutexLock lock(&backing_->export_mu);
     std::weak_ptr<CoreBacking::ExportLease>* export_slot = &backing_->cpu_export;
@@ -171,14 +168,10 @@ absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportR
       publish_prereg_pin_slot->reset();
       *publish_prereg_pin_expires_at = absl::InfinitePast();
     }
-    publish_prereg_pin_active = publish_prereg_pin_slot != nullptr && *publish_prereg_pin_slot != nullptr;
     lease = export_slot->lock();
-    lease_cache_hit = static_cast<bool>(lease);
     if (!lease) {
-      const absl::Time enable_started_at = absl::Now();
       auto export_or =
           backing_->engine->enable_remote_replica_access(backing_->replica_handle.key(), resolved_location);
-      enable_remote_replica_access_elapsed = absl::Now() - enable_started_at;
       if (!export_or.ok()) {
         return export_or.status();
       }
@@ -193,21 +186,6 @@ absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportR
 
   view.communicator_export = lease->registration;
   view.keepalive = std::shared_ptr<void>(lease, lease.get());
-  std::uint64_t exported_bytes = 0;
-  for (const auto buffer_size : lease->registration.buffer_sizes) {
-    if (buffer_size > static_cast<size_t>(std::numeric_limits<std::uint64_t>::max() - exported_bytes)) {
-      exported_bytes = std::numeric_limits<std::uint64_t>::max();
-      break;
-    }
-    exported_bytes += static_cast<std::uint64_t>(buffer_size);
-  }
-  VLOG(2) << "body_handle.acquire_export_view"
-          << " artifact_id=" << backing_->replica_handle.key().artifact_id
-          << " location=" << static_cast<int>(resolved_location) << " lease_cache_hit=" << lease_cache_hit
-          << " publish_prereg_pin_active=" << publish_prereg_pin_active
-          << " enable_remote_replica_access_ms=" << absl::ToDoubleMilliseconds(enable_remote_replica_access_elapsed)
-          << " export_key_count=" << lease->registration.remote_memory_keys.size()
-          << " export_buffer_count=" << lease->registration.buffer_sizes.size() << " export_bytes=" << exported_bytes;
   return view;
 }
 
